@@ -37,15 +37,16 @@ export function describeHandoff(h: Handoff): string {
 }
 
 export interface HandoffEnd {
-  readonly outcome: "done" | "items_gone" | "not_taken" | "failed" | "dropped";
+  readonly outcome: "done" | "items_gone" | "not_taken" | "busy" | "failed" | "dropped";
   readonly detail: string;
 }
 
-/** The controller's reading of a hand-off's result: stopped is dropped (the trade stays due), items gone and not taken are told apart by the result's reason. */
+/** The controller's reading of a hand-off's result: stopped is dropped (the trade stays due), items gone, not taken and a busy recipient are told apart by the result's reason. */
 export function handoffOutcome(result: SkillResult): HandoffEnd {
   if (result.status === "stopped") return { outcome: "dropped", detail: "stopped" };
   if (result.status === "done") return { outcome: "done", detail: result.detail };
   if (result.reason === "items_gone" || result.reason === "not_taken") return { outcome: result.reason, detail: result.detail };
+  if (result.reason === "recipient_busy") return { outcome: "busy", detail: result.detail };
   return { outcome: "failed", detail: result.detail };
 }
 

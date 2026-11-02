@@ -52,6 +52,8 @@ export class TradeController implements BoardPeer {
   private readonly pending = new Map<string, "give" | "collect">();
   private readonly giveFailures = new Map<string, number>();
   private readonly droppedAt = new Map<string, number>();
+  /** Trades whose last give found the recipient moving: retaken after the wait only with the partner near, whatever the failures. */
+  private readonly busyGives = new Set<string>();
   /** Trade id -> when its give was handed to the agent: a give pending longer than the pay-back time is stuck (queued behind an order), and no longer holds the deadline back. */
   private readonly giveTakenAt = new Map<string, number>();
   /** Trades whose wait for their side was taken and not dropped (a wait that ended is not taken again). */
@@ -413,11 +415,12 @@ export class TradeController implements BoardPeer {
   /** How many ticks ran with a baseline (counting gains); a tick after `forgetSeen` does not raise it. */
   countedTicks(): number { return this.ticksCounted; }
 
-  /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait). */
+  /** A hand-off ended: a give is counted given, or failed (items gone at once; otherwise tried once more with the partner near, a not-taken one also after a wait), or waits on a busy recipient (no failure counted; retaken after a wait with the partner near). */
   handoffEnded(tradeId: string, outcome: Exclude<HandoffEnd["outcome"], "dropped">, detail: string): Promise<void> {
     return this.exclusive(async () => {
       const kind = this.pending.get(tradeId) ?? "give";
       this.pending.delete(tradeId);
+      if (kind === "give" && outcome !== "busy") this.busyGives.delete(tradeId);
       const trade = this.find(tradeId);
       if (trade === undefined || !isOpen(trade)) return;
       const now = this.deps.now();
@@ -429,6 +432,10 @@ export class TradeController implements BoardPeer {
         await this.recordStep(gave, "gave", detail);
       } else if (outcome === "items_gone") {
         await this.record(failTrade(trade, now, detail), "broken");
+      } else if (outcome === "busy") {
+        this.busyGives.add(tradeId);
+        this.droppedAt.set(tradeId, now);
+        this.deps.log(`trade: the give for ${tradeId} waits: ${detail}; it stays due`);
       } else {
         const failures = (this.giveFailures.get(tradeId) ?? 0) + 1;
         this.giveFailures.set(tradeId, failures);
@@ -528,7 +535,7 @@ export class TradeController implements BoardPeer {
     if (!ended) return;
     // A proposal that ended unagreed gives the ledger's gives it took back (the window restarts now: the original time is not kept).
     if (trade.state === "cancelled" && trade.agreedAt === null) for (const e of this.fromLedger.get(trade.id) ?? []) this.earlier.gave(trade.partner, e.item, e.count, this.deps.now());
-    for (const held of [this.nobodyGave, this.givenOutside, this.giveTakenAt, this.fromLedger]) held.delete(trade.id);
+    for (const held of [this.nobodyGave, this.givenOutside, this.giveTakenAt, this.fromLedger, this.busyGives]) held.delete(trade.id);
     this.collects.forget(trade.id);
   }
 
@@ -612,10 +619,15 @@ export class TradeController implements BoardPeer {
     if (!mineToGive || this.pending.has(t.id)) return false;
     const dropped = this.droppedAt.get(t.id);
     if (dropped !== undefined && now - dropped < RETAKE_AFTER_MS) return false;
-    return (this.giveFailures.get(t.id) ?? 0) === 0 || this.partnerNear(t, at);
+    return !this.retakeNeedsPartner(t.id) || this.partnerNear(t, at);
   }
 
-  /** The partner stands within opening distance of `at` (a failed give is retried only then). */
+  /** A give that failed or found the recipient moving is retaken only with the partner near. */
+  private retakeNeedsPartner(tradeId: string): boolean {
+    return (this.giveFailures.get(tradeId) ?? 0) > 0 || this.busyGives.has(tradeId);
+  }
+
+  /** The partner stands within opening distance of `at` (a failed or busy give is retried only then). */
   private partnerNear(t: Trade, at: Position | null): boolean {
     const there = partnerPosition(this.partners, t.partner);
     return at !== null && there !== null && manhattan(at, there) <= this.deps.persona.settings.conversation.openingDistance;
@@ -628,7 +640,7 @@ export class TradeController implements BoardPeer {
     const given = [...(this.givenOutside.get(tradeId) ?? [])].filter(([, count]) => count > 0).map(([item, count]) => ({ item, count }));
     const idle = this.pending.get(tradeId) !== "give"; // a give that runs is handed over: nothing waits
     const retake = idle && this.deps.now() - (this.droppedAt.get(tradeId) ?? -Infinity) < RETAKE_AFTER_MS;
-    const away = idle && (this.giveFailures.get(tradeId) ?? 0) > 0 && !this.partnerNear(trade, this.position);
+    const away = idle && this.retakeNeedsPartner(tradeId) && !this.partnerNear(trade, this.position);
     return { given, waits: away ? "partner_away" : retake ? "retake" : null, nearWithin: this.deps.persona.settings.conversation.openingDistance };
   }
 

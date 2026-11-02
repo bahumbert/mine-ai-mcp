@@ -1793,3 +1793,75 @@ test("B1: countedTicks is not raised by the tick after forgetSeen, raised by the
   await h.c.tick(snapshot(), new Set(), signal);
   assert.equal(h.c.countedTicks(), 2);
 });
+
+test("D1b: a busy give counts no failure; it is retaken after 30 s, only with the partner near", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  await h.c.handoffEnded(id, "busy", "[DROP_RECIPIENT_MOVING] Theo did not stand still");
+  assert.equal(theirTrade(h).state, "agreed");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 1, "not at once");
+  h.state.now += 31_000;
+  await h.c.tick(snapshot({ theo: { x: 100, y: 64, z: 0 } }), new Set(), signal);
+  assert.equal(h.handoffs.length, 1, "30 s passed but the partner is far: the giver keeps its own work");
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.handoffs.length, 2, "30 s passed and the partner is near");
+});
+
+test("D1b: busy twice does not break the trade", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  for (let i = 0; i < 3; i += 1) {
+    await h.c.handoffEnded(id, "busy", "[DROP_RECIPIENT_MOVING] Theo did not stand still");
+    h.state.now += 31_000;
+    await h.c.tick(s, new Set(), signal);
+  }
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.equal(h.handoffs.length, 4);
+});
+
+test("D1b: a busy give after one not_taken leaves the count at 1: the next not_taken still breaks", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  await h.c.handoffEnded(id, "not_taken", "Theo did not take 5 bread");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  await h.c.handoffEnded(id, "busy", "[DROP_RECIPIENT_MOVING] Theo did not stand still");
+  assert.equal(theirTrade(h).state, "agreed");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  await h.c.handoffEnded(id, "not_taken", "Theo did not take 5 bread");
+  assert.equal(theirTrade(h).state, "broken", "1 not_taken + busy + 1 not_taken = 2 failures");
+});
+
+test("D1b: busy until the pay-back time ends: the trade settles as for a give never made", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  await h.c.handoffEnded(id, "busy", "[DROP_RECIPIENT_MOVING] Theo did not stand still");
+  h.state.now += 10 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled", "the pay-back clock ended it");
+  assert.match(theirTrade(h).note, /nobody gave/u);
+});
+
+test("D1b: a give that is busy says it waits for the partner when they are far, and says nothing once it is given", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "me" }), "Theo", s);
+  const id = theirTrade(h).id;
+  const far = snapshot({ theo: { x: 100, y: 64, z: 0 } });
+  await h.c.handoffEnded(id, "busy", "[DROP_RECIPIENT_MOVING] Theo did not stand still");
+  h.state.now += 31_000;
+  await h.c.tick(far, new Set(), signal);
+  assert.equal(h.c.giveProgress(id)?.waits, "partner_away");
+  await h.c.handoffEnded(id, "done", "gave 5 bread");
+  assert.equal(h.c.giveProgress(id)?.waits, null, "the busy mark does not outlive the give");
+});

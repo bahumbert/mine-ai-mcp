@@ -111,8 +111,11 @@ export interface UnfinishedHouse {
   readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
 }
 
+/** The code `drop_item` answers with when the recipient never stood still: nothing was tossed. */
+const RECIPIENT_MOVING_CODE = "[DROP_RECIPIENT_MOVING]";
+
 /** Why a skill failed, for the code that must tell failures apart (the detail is for the model and the journal only). */
-export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come";
+export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come" | "recipient_busy";
 
 export type SkillResult =
   /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */
@@ -425,7 +428,7 @@ export async function giveTo(context: SkillContext, player: string, item: string
   if (approach.status !== "done") return { result: approach, taken: null, settled: true, droppedAt: null };
   const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
   if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true, droppedAt: null };
-  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}` }, taken: null, settled: true, droppedAt: null };
+  if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}`, ...(outcome.error?.startsWith(RECIPIENT_MOVING_CODE) ? { reason: "recipient_busy" as const } : {}) }, taken: null, settled: true, droppedAt: null };
   const detail = handedOver(outcome.result) === false ? `left ${count} ${item} at ${player}'s feet (not picked up yet)` : `gave ${count} ${item} to ${player}`;
   return { result: { status: "done", detail }, taken: recipientTook(outcome.result), settled: recipientSettled(outcome.result), droppedAt: tossSpot(outcome.result) };
 }

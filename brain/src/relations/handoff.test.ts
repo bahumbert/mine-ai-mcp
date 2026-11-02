@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Body } from "../body.ts";
-import type { SkillContext } from "../skills.ts";
+import { runStep, type SkillContext } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import type { ItemCount } from "./types.ts";
@@ -575,4 +575,23 @@ test("T3: a status read that fails mid-wait does not end the wait", async () => 
   runtime.status = () => (++reads === 2 ? Promise.reject(new Error("runtime restarting")) : status());
   const w = waiting(runtime, 5);
   assert.deepEqual(await w.run(), { status: "done", detail: "they gave" });
+});
+
+test("a drop refused because the recipient is moving ends busy, not failed", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  runtime.failures.drop_item = "[DROP_RECIPIENT_MOVING] Theo did not stand still within 2 blocks for 10 s; nothing was tossed. Hand over again once they stop.";
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Theo", items: [{ item: "bread", count: 1 }] }));
+  assert.equal(ended.outcome, "busy");
+  assert.match(ended.detail, /DROP_RECIPIENT_MOVING/u);
+});
+
+test("a plain give_item step to a moving recipient returns the failed detail unchanged", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const error = "[DROP_RECIPIENT_MOVING] Theo did not stand still within 2 blocks for 10 s; nothing was tossed. Hand over again once they stop.";
+  runtime.failures.drop_item = error;
+  const result = await runStep({ skill: "give_item", player: "Theo", item: "bread", count: 1 }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" ? result.detail : "", error);
 });
