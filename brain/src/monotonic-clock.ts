@@ -14,3 +14,11 @@ export function monotonicNow(): number {
 export function elapsedSince(startedAt: number): number {
   return Math.round(monotonicNow() - startedAt);
 }
+
+/**
+ * The wall time of a `monotonicNow()` reading, for a record kept on wall time (the relations book, the trade board):
+ * now's wall time less the monotonic time since the reading, so the reading itself never leaves the process.
+ */
+export function wallTimeOf(reading: number): number {
+  return Date.now() - elapsedSince(reading);
+}

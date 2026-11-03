@@ -17,7 +17,7 @@ import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy, withMaterialsKept } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
-import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
+import { elapsedSince, monotonicNow, wallTimeOf } from "./monotonic-clock.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ConversationFacts, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
 import { orderRefusal } from "./relations/order-refusal.ts";
@@ -275,7 +275,7 @@ export class Agent {
   /** What an own objective could not get and who refused to trade it, for ten minutes (relations/trading.ts). */
   private readonly asks = new TradeAsks();
   /** When conversations were last looked at, and whether that look is still running. */
-  private talksCheckedAt = 0;
+  private talksCheckedAt = -Infinity;
   /** The conversation (its id, null for none) the last look was made for: a different one is looked at on the next pass. */
   private talksLookedAt: string | null = null;
   private talksLooking = false;
@@ -441,7 +441,7 @@ export class Agent {
     if (chat === null) return;
     // `snapshot` is the chat call's start (the payment baseline of a trade it makes); `checked` is the world after the model call.
     const { decision, snapshot, checked, conversation, seenOfferId } = chat;
-    const seen = { heardAt, ...(seenOfferId !== undefined && { seenOfferId }) };
+    const seen = { heardAt: wallTimeOf(heardAt), ...(seenOfferId !== undefined && { seenOfferId }) };
     // What they said of my requests counts even if the reply below is dropped: it was said.
     await this.relations?.answered(decision, message.username);
     const { route } = decision;
@@ -637,7 +637,7 @@ export class Agent {
       // Marked before the release below: the waiting hold must not end before the mark, or the request expires unheard.
       // A tier that could not read the line gives the speaker the benefit of the doubt; a line refused above marks nothing.
       const markAt = markHeardAt(chat, { aborted: this.runSignal.aborted, readAt: heard?.readAt ?? heardAt, justTalkedToAnother: talkedTo !== undefined, self: this.options.persona.username.toLowerCase() });
-      if (markAt !== null) this.relations?.heardFrom(message.username, markAt);
+      if (markAt !== null) this.relations?.heardFrom(message.username, wallTimeOf(markAt));
       return chat;
     } finally {
       release();
@@ -656,13 +656,13 @@ export class Agent {
       try {
         const snapshot = await this.options.runtime.status();
         this.onlineNames = snapshot.players.map((player) => player.username);
-        noteNoPosition(this.noPositionSince, snapshot.players, Date.now());
+        noteNoPosition(this.noPositionSince, snapshot.players, monotonicNow());
         const conversation = this.talks?.facts();
         const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
         // A shout with no server distance is as far as the speaker stands in this snapshot: the model is told how far it came (a whisper carries any distance, so it is not).
         const distance = lineDistance(message, snapshot);
         const heardMessage = message.channel === "chat" && message.distance === undefined && distance !== undefined ? { ...message, distance } : message;
-        const farAway = message.channel === "chat" && heardFarAway(message, snapshot, this.noPositionSince, Date.now());
+        const farAway = message.channel === "chat" && heardFarAway(message, snapshot, this.noPositionSince, monotonicNow());
         const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
         let decision = await mind.chat(input, this.runSignal);
         let checked: BotSnapshot | undefined;
@@ -695,15 +695,15 @@ export class Agent {
     if (talks === null || this.talksLooking || this.runSignal.aborted) return;
     const talkId = talks.current?.id ?? null;
     const every = talkId === null ? this.options.persona.settings.conversation.checkEverySeconds * 1_000 : this.options.talkLookMs ?? TALK_LOOK_MS;
-    if (talkId === this.talksLookedAt && Date.now() - this.talksCheckedAt < every) return;
-    this.talksCheckedAt = Date.now();
+    if (talkId === this.talksLookedAt && elapsedSince(this.talksCheckedAt) < every) return;
+    this.talksCheckedAt = monotonicNow();
     this.talksLookedAt = talkId;
     this.talksLooking = true;
     void (async () => {
       const snapshot = await this.options.runtime.status();
       this.talksUnreadable = false;
       this.onlineNames = snapshot.players.map((player) => player.username);
-      noteNoPosition(this.noPositionSince, snapshot.players, Date.now());
+      noteNoPosition(this.noPositionSince, snapshot.players, monotonicNow());
       this.lastLook = snapshot;
       await talks.tick(snapshot, this.runSignal);
       // An order, a night shelter or a socialising objective on its way (it opens its own conversation) is busy enough.
@@ -1185,7 +1185,7 @@ export class Agent {
     work.step = controller;
     log(`${activity}: ${label}`);
     this.journalState(label);
-    const started = Date.now();
+    const started = monotonicNow();
     const signal = AbortSignal.any([controller.signal, this.runSignal]);
     const talkRange = this.options.localizedChat?.range ?? persona.settings.conversation.stayingDistance;
     let result: SkillResult;
@@ -1203,11 +1203,10 @@ export class Agent {
     } finally {
       work.step = null;
     }
-    const ended = Date.now();
-    const ms = ended - started;
+    const ms = elapsedSince(started);
     const outcome = result.status === "stopped" ? "interrupted" : result.status;
     const detail = result.status === "stopped" ? "an order came first" : result.detail;
-    this.spent({ activity, purpose: activity, ended: new Date(ended).toISOString(), minutes: ms / 60_000 }, ms >= MIN_RECORDED_MS);
+    this.spent({ activity, purpose: activity, ended: new Date().toISOString(), minutes: ms / 60_000 }, ms >= MIN_RECORDED_MS);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: null, step: label, input, thought: "", outcome, detail, ms, activity, purpose: activity });
     this.journalState(null);
     log(`  -> ${label}: ${outcome}: ${detail}`);

@@ -370,7 +370,7 @@ test("the damage listener is removed with the observer", (t) => {
 
 /** A bot observed with command lines on (`commands`), or off; `events()` is what `read_recent_events` would give. */
 function commandBot(t: TestContext, commands: boolean) {
-  const { bot } = playerBot();
+  const { bot, chat } = playerBot();
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "player-events-commands-test", scope: { kind: "bot", botId: bot.username } },
@@ -383,6 +383,7 @@ function commandBot(t: TestContext, commands: boolean) {
   });
   return {
     bot,
+    chat,
     data,
     ring,
     events: () => readRecentEvents(data, bot.username, 50).events.map(({ summary }) => summary),
@@ -412,6 +413,16 @@ test("a line that only holds or resembles a command is ordinary chat", (t) => {
 
   assert.deepEqual(ringed(), []);
   assert.deepEqual(events(), ["Tom: hello !bots", "Tom: !botany"]);
+});
+
+test("a command line heard through Localized Chat goes to the ring too, and other localized talk is recorded", (t) => {
+  const { chat, events, ringed } = commandBot(t, true);
+
+  chat.hearSystem("[From 12.0 blocks away] <Tom> !bots");
+  chat.hearSystem("[From 12.0 blocks away] <Tom> hello there");
+
+  assert.deepEqual(ringed(), ["chat:Tom:!bots"]);
+  assert.deepEqual(events(), ["Tom: hello there"]);
 });
 
 test("without command lines on, !bots is recorded as it always was", (t) => {
