@@ -49,8 +49,10 @@ dropTest("a recipient who walks off while waited for: the giver walks up again, 
   assert.ok(bot.entity.position.distanceTo(bot.entities[DEV]!.position) <= 2);
 });
 
-dropTest("a chase cut by the deadline is [DROP_RECIPIENT_MOVING], not [DROP_PLAYER_UNREACHABLE]", async ({ clock, run }) => {
+dropTest("a chase of a recipient who kept moving, cut by the deadline, is [DROP_RECIPIENT_MOVING], not [DROP_PLAYER_UNREACHABLE]", async ({ clock, run }) => {
   const { bot } = dropBot({ carried, players: recipientAt(6), position: giverAt }, clock);
+  clock.after(300, () => bot.entities[DEV]!.position.set(7, 64, 0));
+  clock.after(600, () => bot.entities[DEV]!.position.set(6, 64, 0));
   const chase = (async ({ signal }: { signal: AbortSignal }) => {
     await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
   }) as never;
@@ -111,4 +113,72 @@ dropTest("a recipient who steps away as the route completes is walked up to agai
   const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate, recipientWaitMs: 2_000 }), createDiscardedItems()));
   assert.doesNotMatch(errorOf(result), /DROP_PLAYER_UNREACHABLE/);
   assert.ok(walks >= 2, `${walks} walks`);
+});
+
+/** A recipient on a ledge `rise` blocks above the giver, 1 block across. */
+const onLedge = (rise: number) => ({ Dev: { id: DEV, position: { x: 1, y: 64 + rise, z: 0 } } });
+/** A route that finds no way to a cell beside the ledge. */
+const noWayUp = (async () => ({ status: "stopped", elapsedMs: 5, reason: "no path" })) as never;
+
+dropTest("a giver below a ledge, in 3-D reach of a recipient on it, walks up to the ledge's floor before tossing", async ({ clock, run }) => {
+  const { bot, items } = dropBot({ carried, players: onLedge(1.5), position: giverAt }, clock);
+  let walks = 0;
+  const navigate = (async () => {
+    // The first walk climbs to the ledge's floor; the next is the walk off the toss.
+    if (++walks === 1) bot.entity.position.set(0, 65.5, 0);
+    else bot.entity.position.x -= 6;
+    return { status: "completed", elapsedMs: 5 };
+  }) as never;
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate }), createDiscardedItems()));
+  assert.equal(result.status, "succeeded", errorOf(result));
+  assert.equal(result.drop.droppedAt.y, 65.5, "1.8 blocks from them in 3-D, but a toss from y 64 rests under the ledge: tossed from its floor");
+  assert.equal(items().length, 0);
+});
+
+dropTest("a still recipient on a ledge with no way up: [DROP_RECIPIENT_OUT_OF_REACH] naming the height, nothing tossed", async ({ clock, run }) => {
+  const { bot, items } = dropBot({ carried, players: onLedge(2), position: giverAt }, clock);
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: noWayUp, recipientWaitMs: 2_000 }), createDiscardedItems()));
+  assert.equal(result.status, "failed");
+  assert.match(errorOf(result), /^\[DROP_RECIPIENT_OUT_OF_REACH\] Dev stands still 2 blocks above me/);
+  assert.match(errorOf(result), /nothing was tossed/);
+  assert.equal(items()[0]?.count, 3);
+});
+
+dropTest("a route that never ends toward a still recipient on a pillar: out of reach at the wait's bound, not moving", async ({ clock, run }) => {
+  const { bot } = dropBot({ carried, players: onLedge(2), position: giverAt }, clock);
+  const search = (async ({ signal }: { signal: AbortSignal }) => {
+    await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  }) as never;
+  const started = performance.now();
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: search, recipientWaitMs: 1_000 }), createDiscardedItems()));
+  assert.match(errorOf(result), /^\[DROP_RECIPIENT_OUT_OF_REACH\]/);
+  assert.ok(performance.now() - started <= 1_500, "ends with the wait, not the trade's clock");
+});
+
+dropTest("a recipient who moved while the route found no stance is not out of reach: the walk ends as it does today", async ({ clock, run }) => {
+  const { bot } = dropBot({ carried, players: onLedge(2), position: giverAt }, clock);
+  const wander = (async () => {
+    bot.entities[DEV]!.position.set(1.8, 66, 0);
+    return { status: "stopped", elapsedMs: 5, reason: "no path" };
+  }) as never;
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: wander, recipientWaitMs: 2_000 }), createDiscardedItems()));
+  assert.doesNotMatch(errorOf(result), /DROP_RECIPIENT_OUT_OF_REACH/);
+  assert.match(errorOf(result), /^\[DROP_PLAYER_UNREACHABLE\]/);
+});
+
+dropTest("a recipient on a slab, half a block above, is handed to without a walk", async ({ clock, run }) => {
+  const { bot, items } = dropBot({ carried, players: onLedge(0.5), position: giverAt }, clock);
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: walkOffAfterToss(bot) }), createDiscardedItems()));
+  assert.equal(result.status, "succeeded", errorOf(result));
+  assert.equal(items().length, 0);
+});
+
+dropTest("a recipient who stepped once and then stood still on a ledge is out of reach at the bound, not a moving recipient", async ({ clock, run }) => {
+  const { bot } = dropBot({ carried, players: onLedge(2), position: giverAt }, clock);
+  clock.after(100, () => bot.entities[DEV]!.position.set(1.4, 66, 0));
+  const search = (async ({ signal }: { signal: AbortSignal }) => {
+    await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  }) as never;
+  const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: search, recipientWaitMs: 6_000 }), createDiscardedItems()));
+  assert.match(errorOf(result), /^\[DROP_RECIPIENT_OUT_OF_REACH\] Dev stands still 2 blocks above me.*Ask them to come down to my floor/);
 });

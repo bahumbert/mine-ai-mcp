@@ -1,0 +1,28 @@
+# Shared setup of the toss-to-ledge scenarios (drop/): flat world, a giver and a receiver on a floor of their own, the
+# receiver's feet higher or lower than the giver's. Each scenario sets its ground (`geometry`), its `players` and its `params`.
+spectator:
+  mods:
+    - { id: blockhighlighter, path: ../../../.mine-labs/mods/blockhighlighter.jar }
+  systemProperties:
+    blockhighlighter.serverPortOffset: "10000"
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: peaceful
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  # Back to the flat world's grass floor (y -61) under a clear volume, with no item left from a run before.
+  - "fill -16 -61 -16 20 -61 16 grass_block"
+  - "fill -16 -60 -16 20 -40 16 air"
+  - "kill @e[type=item]"
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/toss-to-ledge-measure.ts]
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

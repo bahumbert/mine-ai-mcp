@@ -288,8 +288,48 @@ function entityRevision(entity: Pick<EntityObservation, "id" | "position">): str
   return `entity:${entity.id}:${cell}`;
 }
 
-/** Reach an actual body position within range of a live entity, planning other cells at their centres. */
-export function nearEntityGoal(entity: EntityReference, range: number): Goal {
+/** How far a body may stand from an entity in the plane and in height: a cylinder around it with its own floor and ceiling. */
+export interface EntityStance {
+  /** The most, in the plane, between the stander's feet and the target's. */
+  readonly reach: number;
+  /** The most the target's feet may be above the stander's. */
+  readonly targetAbove: number;
+  /** The most the target's feet may be below the stander's. */
+  readonly targetBelow: number;
+}
+
+/** Slack on a stance's edges: a slab's top is 0.5 above a floor, which a position sum may miss by a hair. */
+const STANCE_SLACK = 1e-6;
+
+/** Whether a body with these feet is in `stance` toward a target with those. */
+export function inEntityStance(stance: EntityStance, feet: BlockPosition, target: BlockPosition): boolean {
+  const rise = target.y - feet.y;
+  return (
+    Math.hypot(target.x - feet.x, target.z - feet.z) <= stance.reach + STANCE_SLACK &&
+    rise <= stance.targetAbove + STANCE_SLACK &&
+    -rise <= stance.targetBelow + STANCE_SLACK
+  );
+}
+
+/** Ticks to the nearest stance: the plane's shortfall, the climb to the stance's floor or the descent to its ceiling. Zero inside it. */
+function ticksToStance(stance: EntityStance, feet: BlockPosition, target: BlockPosition): number {
+  const shortfall = Math.max(0, Math.hypot(target.x - feet.x, target.z - feet.z) - stance.reach);
+  const climb = Math.max(0, target.y - stance.targetAbove - feet.y);
+  const drop = Math.max(0, feet.y - (target.y + stance.targetBelow));
+  return shortfall * HORIZONTAL_TICKS_PER_BLOCK + climb * ASCENT_TICKS_PER_BLOCK + drop * DESCENT_TICKS_PER_BLOCK;
+}
+
+/**
+ * A goal toward a live entity: `within` says whether a body with these feet is where it should be, `ticksTo` how far it is
+ * from there. Other cells are planned at their centres; the current cell is judged at the actual body position, so an
+ * already satisfied coarse cell cannot repeatedly return outside the requested range.
+ */
+function followEntityGoal(
+  entity: EntityReference,
+  kind: string,
+  within: (feet: BlockPosition, target: BlockPosition) => boolean,
+  ticksTo: (feet: BlockPosition, target: BlockPosition) => number,
+): Goal {
   return {
     resolve(observation) {
       const target = observation.entities.get(entity.id);
@@ -297,27 +337,42 @@ export function nearEntityGoal(entity: EntityReference, range: number): Goal {
       const current = navigationFeet(observation.position, observation.stance === "supported");
       const positionAt = (feet: BlockPosition) =>
         samePosition(feet, current) ? observation.position : { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 };
-      const distanceAt = (feet: BlockPosition) => {
-        const position = positionAt(feet);
-        return Math.hypot(
-          position.x - target.position.x,
-          position.y - target.position.y,
-          position.z - target.position.z,
-        );
-      };
+      const withinAt = (feet: BlockPosition) => within(positionAt(feet), target.position);
       return {
         kind: "active",
-        // The current cell is judged at the actual body position, so an already
-        // satisfied coarse cell cannot repeatedly return outside the requested range.
-        revision: `near:${range}:entity:${entity.id}:${target.position.x},${target.position.y},${target.position.z}:${current.x},${current.y},${current.z}:${distanceAt(current) <= range}`,
-        isSatisfied: (node) => distanceAt(node.feet) <= range,
-        // Contact is three-dimensional; its estimate must credit climbing too.
-        // A horizontal-only estimate is zero beneath a surface mob in a cave,
-        // so even a useful ascent cannot qualify as partial-route progress.
-        heuristic: (node) => ticksToReach(positionAt(node.feet), target.position, range),
+        revision: `${kind}:entity:${entity.id}:${target.position.x},${target.position.y},${target.position.z}:${current.x},${current.y},${current.z}:${withinAt(current)}`,
+        isSatisfied: (node) => withinAt(node.feet),
+        heuristic: (node) => (withinAt(node.feet) ? 0 : ticksTo(positionAt(node.feet), target.position)),
       };
     },
   };
+}
+
+/**
+ * Reach a body position in `stance` toward a live entity: within `reach` in the plane and in its height band, so a cell
+ * beneath a ledge is no stance for a target on it however near it is in 3-D (a hand-over, `drop-item/hand-over-stance.ts`).
+ */
+export function stanceBesideEntityGoal(entity: EntityReference, stance: EntityStance): Goal {
+  const kind = `stance:${stance.reach}:${stance.targetAbove}:${stance.targetBelow}`;
+  return followEntityGoal(
+    entity,
+    kind,
+    (feet, target) => inEntityStance(stance, feet, target),
+    (feet, target) => ticksToStance(stance, feet, target),
+  );
+}
+
+/** Reach an actual body position within range of a live entity, planning other cells at their centres. */
+export function nearEntityGoal(entity: EntityReference, range: number): Goal {
+  // Contact is three-dimensional; its estimate must credit climbing too.
+  // A horizontal-only estimate is zero beneath a surface mob in a cave,
+  // so even a useful ascent cannot qualify as partial-route progress.
+  return followEntityGoal(
+    entity,
+    `near:${range}`,
+    (feet, target) => spatialDistance(feet, target) <= range,
+    (feet, target) => ticksToReach(feet, target, range),
+  );
 }
 
 /**

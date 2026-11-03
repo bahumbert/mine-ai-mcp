@@ -13,6 +13,7 @@ import {
   exactBlockGoal,
   itemPickupGoal,
   nearEntityGoal,
+  stanceBesideEntityGoal,
   nearGoal,
 } from "./index.js";
 
@@ -230,4 +231,31 @@ test("a resolved goal names the entities it can still see, and one that needs a 
   // longer observed. Reporting `active` would leave the route chasing a goal
   // that can never be satisfied until its deadline expires.
   assert.equal(nearEntityGoal({ id: 7 }, 1.5).resolve(observation()).kind, "invalid");
+});
+
+/** A stance like a hand-over's: within 2 blocks in the plane, the target's feet at most half a block above the stander's, 2 below. */
+const handOverLike = { reach: 2, targetAbove: 0.5, targetBelow: 2 };
+
+test("a stance beside an entity on a ledge is a cell on the ledge's floor, not the cell under it", () => {
+  const ledge = watching({ x: 0.5, y: 63, z: 0.5 }, { position: { x: 2.5, y: 65, z: 0.5 }, width: 0.6, height: 1.8 });
+  const goal = active(stanceBesideEntityGoal({ id: 7 }, handOverLike).resolve(ledge));
+  const below = node({ x: 1, y: 63, z: 0 });
+  const onLedge = node({ x: 1, y: 65, z: 0 });
+  // The cell below is 1.6 blocks from the target in 3-D, inside the old range of 2, and not a stance.
+  assert.equal(goal.isSatisfied(below, goalTestWorld), false);
+  assert.equal(goal.isSatisfied(onLedge, goalTestWorld), true);
+  assert.equal(goal.heuristic(onLedge), 0, "a node that answers the goal estimates zero");
+  assert.ok(goal.heuristic(below) > 0 && goal.heuristic(node({ x: 1, y: 64, z: 0 })) < goal.heuristic(below), "climbing is credited");
+});
+
+test("a node that satisfies a stance estimates zero, whichever side of the target it stands on", () => {
+  const ledge = watching({ x: 0.5, y: 63, z: 0.5 }, { position: { x: 2.5, y: 61, z: 0.5 }, width: 0.6, height: 1.8 });
+  const goal = active(stanceBesideEntityGoal({ id: 7 }, handOverLike).resolve(ledge));
+  const above = node({ x: 1, y: 63, z: 0 });
+  assert.equal(goal.isSatisfied(above, goalTestWorld), true);
+  assert.equal(goal.heuristic(above), 0);
+});
+
+test("a stance goal on an entity that is not observed is invalid, like near", () => {
+  assert.equal(stanceBesideEntityGoal({ id: 9 }, handOverLike).resolve(observation()).kind, "invalid");
 });

@@ -11,8 +11,10 @@ export const RECIPIENT_STILL_EPSILON = 0.1;
 export const RECIPIENT_WAIT_MS = 10_000;
 
 export interface StillWait {
-  /** Beyond this 3-D distance from the bot the recipient is `away`. */
+  /** Beyond this 3-D distance from the bot the recipient is `away`, unless `inStance` judges reach. */
   readonly range: number;
+  /** Reach judged by the caller (the bot's feet, the recipient's feet): a hand-over weighs height, which a 3-D range does not. */
+  readonly inStance?: (bot: Vec3, recipient: Vec3) => boolean;
   readonly stillTicks: number;
   readonly epsilon: number;
   readonly maxWallMs: number;
@@ -44,7 +46,8 @@ export function awaitStillRecipient(bot: Bot, name: string, wait: StillWait): Pr
     const onTick = () => {
       const entity = bot.players[name]?.entity;
       if (!entity) return finish(() => resolve("left"));
-      if (bot.entity.position.distanceTo(entity.position) > wait.range) return finish(() => resolve("away"));
+      const inReach = wait.inStance ? wait.inStance(bot.entity.position, entity.position) : bot.entity.position.distanceTo(entity.position) <= wait.range;
+      if (!inReach) return finish(() => resolve("away"));
       const age = bot.time.age;
       if (age === null || age === undefined) return; // no time packet yet: nothing counts as time passed
       if (window === null || window.position.distanceTo(entity.position) > wait.epsilon) {
@@ -56,4 +59,35 @@ export function awaitStillRecipient(bot: Bot, name: string, wait: StillWait): Pr
     bot.on("physicsTick", onTick);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/** How long after a move the recipient still counts as moving: one who stepped and then stood still for longer is a still one. */
+export const RECIPIENT_MOVED_RECENTLY_MS = 2_000;
+
+/**
+ * Whether the named player moved more than `epsilon` within the last `RECIPIENT_MOVED_RECENTLY_MS`, sampled each physics
+ * tick and at the asking: a recipient who paces is moving even when back where they began, one who jitters, or who stepped
+ * once and then stood still, is not. Released with `using`.
+ */
+export function trackRecipientMoves(bot: Bot, name: string, epsilon: number): { readonly moved: boolean } & Disposable {
+  let origin: Vec3 | null = null;
+  let lastMoveAt: number | null = null;
+  const sample = () => {
+    const entity = bot.players[name]?.entity;
+    if (!entity) return;
+    if (origin === null) origin = entity.position.clone();
+    else if (origin.distanceTo(entity.position) > epsilon) {
+      origin = entity.position.clone();
+      lastMoveAt = performance.now();
+    }
+  };
+  sample();
+  bot.on("physicsTick", sample);
+  return {
+    get moved() {
+      sample();
+      return lastMoveAt !== null && performance.now() - lastMoveAt < RECIPIENT_MOVED_RECENTLY_MS;
+    },
+    [Symbol.dispose]: () => void bot.off("physicsTick", sample),
+  };
 }

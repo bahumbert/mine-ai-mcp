@@ -1,0 +1,39 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-ledge-climb
+tags: [regression]
+description: >-
+  Live s3o (2026-11-03): the receiver stood still on a ledge and the giver tossed from the floor below, where the toss rests
+  under the ledge, out of the receiver's reach, twice. The receiver stands still on a 1-block-high wall a block wide with the floor beside it, 1 block from where the giver can stand below; the
+  giver must climb onto the ledge's floor, toss from there and report all three logs taken.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -61 -16 20 -61 16 grass_block"
+  - "fill -16 -60 -16 20 -40 16 air"
+  - "kill @e[type=item]"
+geometry:
+  - { fill: { block: stone, from: [1, -60, 0], to: [8, -60, 0] } }
+players:
+  - name: Giver
+    pos: [0.5, -60, -1.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [4.97, -59, 0.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3 }
+
+goal:
+  kind: all
+  timeout: 45
+  goals:
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

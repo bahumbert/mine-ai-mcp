@@ -1,0 +1,39 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-ledge-below
+tags: [regression]
+description: >-
+  Live s3o (2026-11-03): the stance test must not refuse a giver standing above the recipient. The giver stands on a
+  2-block platform and the receiver below it on the floor, 1.5 blocks away: the toss is thrown down to their feet and
+  taken, with no walk to a lower floor.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -61 -16 20 -61 16 grass_block"
+  - "fill -16 -60 -16 20 -40 16 air"
+  - "kill @e[type=item]"
+geometry:
+  - { fill: { block: stone, from: [-6, -60, -1], to: [0, -59, 1] } }
+players:
+  - name: Giver
+    pos: [0.5, -58, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [1.97, -60, 0.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3 }
+
+goal:
+  kind: all
+  timeout: 45
+  goals:
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

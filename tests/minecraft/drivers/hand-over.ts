@@ -6,8 +6,8 @@ import type { ArenaFrame } from "../arena/frame.ts";
 import { handOverRolesSchema, handOverRun, type HandOverRoles } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
 
-/** The refusal's code (`dropItemOutcomes.recipientMoving`): a giver that never gets a still recipient tosses nothing. */
-const MOVING_CODE = "[DROP_RECIPIENT_MOVING]";
+/** The refusal's codes: a giver that never gets a still recipient (`dropItemOutcomes.recipientMoving`), or one on a floor it cannot toss from (`recipientOutOfReach`), tosses nothing. */
+const REFUSAL_CODES = { moving: "[DROP_RECIPIENT_MOVING]", out_of_reach: "[DROP_RECIPIENT_OUT_OF_REACH]" } as const;
 
 const paramsIn = (arena: ArenaFrame) => z.strictObject({
   /** Places in the scenario's `players` list. */
@@ -26,8 +26,8 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
    * a walk with no pause for the giver to catch it in: a navigate call ends with the bot standing still for a moment.
    */
   receiver_walk: z.strictObject({ legs: z.array(arenaCell(arena)).min(1), then: z.enum(["stand", "end"]) }).optional(),
-  /** `moving`: the giver must be refused with `[DROP_RECIPIENT_MOVING]` and toss nothing (the receiver never stands still). */
-  giver_expects: z.enum(["taken", "moving"]).default("taken"),
+  /** `moving`: the giver must be refused with `[DROP_RECIPIENT_MOVING]` and toss nothing (the receiver never stands still); `out_of_reach`: with `[DROP_RECIPIENT_OUT_OF_REACH]` (the receiver stands still on a floor the giver cannot toss from). */
+  giver_expects: z.enum(["taken", "moving", "out_of_reach"]).default("taken"),
 });
 
 type Params = z.output<ReturnType<typeof paramsIn>>;
@@ -42,9 +42,10 @@ export const run: ScenarioRun = handOverRun(paramsIn, give, receive);
 async function give(context: ScenarioContext, params: Params, roles: HandOverRoles): Promise<ClientCompletion> {
   // The first inventory item is in the hand; the toss is the point of the scenario, not the hand check.
   const output = await context.call("drop_item", { items: [{ item_name: params.item_name, count: params.count }], to_player: roles.receiver, allow_equipped: true });
-  if (params.giver_expects === "moving") {
-    const refused = output.result.status === "failed" && output.summary.includes(MOVING_CODE);
-    return { status: refused ? "succeeded" : "failed", detail: refused ? `Refused, nothing tossed; ${output.summary}` : `Expected ${MOVING_CODE}; ${output.summary}` };
+  if (params.giver_expects !== "taken") {
+    const code = REFUSAL_CODES[params.giver_expects];
+    const refused = output.result.status === "failed" && output.summary.includes(code);
+    return { status: refused ? "succeeded" : "failed", detail: refused ? `Refused, nothing tossed; ${output.summary}` : `Expected ${code}; ${output.summary}` };
   }
   const result = dropItemResultSchema.parse(output.result);
   if (result.status !== "succeeded") return { status: "failed", detail: output.summary };
@@ -86,6 +87,12 @@ async function receive(context: ScenarioContext, params: Params): Promise<Client
       const { held } = await seeHeld(context, params.item_name);
       return held === 0 ? { status: "succeeded", detail: "Walked, holds none." } : { status: "failed", detail: `The receiver holds ${held} ${params.item_name}; nothing was to be tossed.` };
     }
+  }
+  if (params.giver_expects === "out_of_reach") {
+    // The giver is refused and tosses nothing: this receiver stays still on its floor through the giver's whole wait, then holds none.
+    await context.waitForTicks(params.receiver_wait_ticks);
+    const { held } = await seeHeld(context, params.item_name);
+    return held === 0 ? { status: "succeeded", detail: "Stood still, holds none." } : { status: "failed", detail: `The receiver holds ${held} ${params.item_name}; nothing was to be tossed.` };
   }
   let lastSeen = "";
   for (let waited = 0; waited < params.receiver_wait_ticks; waited += 10) {

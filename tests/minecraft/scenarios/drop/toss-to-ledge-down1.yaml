@@ -1,0 +1,18 @@
+template: ../../templates/toss-to-ledge.yaml
+
+name: toss-to-ledge-down1
+tags: [reliability]
+description: >-
+  Measurement for the hand-over stance (plan 2026-11-03-handover-ledge-and-unconfirmed-toss F1): the giver stands
+  still 1.47 blocks from the receiver and tosses one oak log aimed as a hand-over aims; the receiver's feet are 1 block below the
+  giver's. The receiver's line LEDGE_TOSS says whether it took the log or where it rests.
+geometry:
+  - { fill: { block: stone, from: [-6, -60, -1], to: [0, -60, 1] } }
+players:
+  - name: Giver
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [1.97, -60, 0.5]
+params: { giver: 0, receiver: 1, item_name: oak_log, aim_height: -0.83 }

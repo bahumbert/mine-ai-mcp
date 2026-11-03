@@ -2196,6 +2196,19 @@ test("a crop that is its own seed: get_items names where a first one comes from,
   assert.deepEqual(runtime.submitted, []);
 });
 
+test("a hand-over to a recipient on a ledge out of reach is a failed give with reason recipient_unreachable, not recipient_busy", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
+  const ledge = new FakeRuntime();
+  ledge.walkOnNavigate = true;
+  ledge.snapshot = { ...ledge.snapshot, players: [{ username: "Steve", position: { x: 3, y: 64, z: 0 } }] };
+  const error = "[DROP_RECIPIENT_OUT_OF_REACH] Steve stands still 2 blocks above me, where I found no floor to toss from that lets an item rest at their feet; nothing was tossed. Ask them to come down to me, or walk to where they are.";
+  ledge.dropOutcomes.push({ status: "failed", error, dropped: [{ item: "oak_log", dropped: 0 }] });
+  const result = await runStep(step, contextFor(ledge));
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" ? result.reason : "", "recipient_unreachable");
+  assert.equal(result.status === "failed" ? result.detail : "", error);
+});
+
 test("give says the recipient took the items, or that they were left at their feet (B2, live 2026-10-19: reported gave, never arrived)", async () => {
   const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
   const taken = new FakeRuntime();

@@ -53,6 +53,7 @@ export { RELAXED_DIG_STRAIGHT_DOWN, RELAXED_FLOWING_WATER } from "./orchestratio
 
 // Goals: what a route is asked to satisfy.
 export type { Goal } from "./goals/goal.js";
+export type { EntityStance } from "./goals/index.js";
 export {
   ASCENT_TICKS_PER_BLOCK,
   DESCENT_TICKS_PER_BLOCK,
@@ -67,6 +68,8 @@ export {
   nearXzGoal,
   occupyGoal,
   safeFromEntitiesGoal,
+  inEntityStance,
+  stanceBesideEntityGoal,
 } from "./goals/index.js";
 export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
 

@@ -160,6 +160,9 @@ export const dropItemAnnotations = {
   openWorldHint: false,
 } satisfies ToolAnnotations;
 
+/** The code `drop_item` answers with when the recipient stands still where no floor in reach lets a toss rest at their feet (a ledge): nothing was tossed. */
+export const RECIPIENT_OUT_OF_REACH_CODE = "[DROP_RECIPIENT_OUT_OF_REACH]";
+
 export const dropItemOutcomes = {
   notCarried: (item: string) => `[DROP_NOT_CARRIED] No ${item} is carried.`,
   worn: (item: string, slot: string) =>
@@ -178,6 +181,8 @@ export const dropItemOutcomes = {
   playerLeft: (name: string) => `[DROP_PLAYER_LEFT] ${name} stopped being observed before the items were tossed.`,
   recipientMoving: (name: string, seconds: number) =>
     `[DROP_RECIPIENT_MOVING] ${name} did not stand still within 2 blocks for ${seconds} s; nothing was tossed. Hand over again once they stop.`,
+  recipientOutOfReach: (name: string, height: string, recipientIsAbove: boolean) =>
+    `${RECIPIENT_OUT_OF_REACH_CODE} ${name} stands still ${height}, where I found no floor to toss from that lets an item rest at their feet; nothing was tossed. ${recipientIsAbove ? "Ask them to come down to my floor" : "Walk down to their floor first"}, then hand over again.`,
   groundUnavailable: (): string =>
     "[DROP_GROUND_UNAVAILABLE] The bot is neither standing on the ground nor in water, so it cannot walk off after a toss at its feet and would pick the items straight back up. Nothing was dropped. Get onto solid ground first (navigate), or drop in_a_hole once it can stand beside a pit.",
   incomplete: (failed: number, total: number, reasons: readonly string[] = []) =>

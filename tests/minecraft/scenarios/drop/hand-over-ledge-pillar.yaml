@@ -1,0 +1,39 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-ledge-pillar
+tags: [regression]
+description: >-
+  Live s3o (2026-11-03): a giver that cannot get onto the recipient's floor must say so instead of tossing from below or
+  waiting for a recipient to move. The receiver stands still on a 2-block pillar nothing climbs; the giver must be
+  refused with [DROP_RECIPIENT_OUT_OF_REACH] within the wait's bound, toss nothing, and still hold all three logs.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -61 -16 20 -61 16 grass_block"
+  - "fill -16 -60 -16 20 -40 16 air"
+  - "kill @e[type=item]"
+geometry:
+  - { fill: { block: stone, from: [2, -60, 0], to: [2, -59, 0] } }
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [2.5, -58, 0.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 3, giver_expects: out_of_reach, receiver_wait_ticks: 360 }
+
+goal:
+  kind: all
+  timeout: 45
+  goals:
+    - { kind: hasItem, who: Giver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

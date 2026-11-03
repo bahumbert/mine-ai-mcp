@@ -165,6 +165,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
   "hand-over-walks-off.ts": "BLIND: its receiver walks off only once view_status shows the toss on the ground, which the stand-in never shows; the walk_to cell is read by the lane run of the scenario",
   "idle-then-breathe.ts": "no action, reads the air",
+  "toss-to-ledge-measure.ts": "BLIND: the giver ends at once without a receiver in the stand-in; its walk-off cell is the bot's own cell shifted, read from the bot, never from params",
   "toss-rest-distance.ts": "drop_item to a player and pick_up_items around the spot the toss reported: the cells it asks for are the server's answer",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
 };

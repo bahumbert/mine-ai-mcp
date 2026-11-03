@@ -12,6 +12,7 @@ import {
   RECIPIENT_WAIT_MS,
   type StillWait,
 } from "./recipient-still.js";
+import { inHandOverStance } from "./hand-over-stance.js";
 
 const RANGE = 2;
 const wait = (harness: FakeHarness, overrides: Partial<StillWait> = {}) =>
@@ -129,4 +130,20 @@ test("an abort rejects with its reason and leaves no listener or timer", async (
   assert.equal(added("physicsTick"), 0);
   assert.equal(harness.clock.pendingTimers(), timersBefore);
   await assert.rejects(wait(harness, { signal: AbortSignal.abort(new Error("cancelled")) }), /cancelled/, "already aborted: rejects at once");
+});
+
+test("with a stance, reach is the stance's: a recipient 1 block across and 1 up is away although 1.41 blocks off", async () => {
+  const { harness, recipient } = withRecipient();
+  using _timers = harness.clock.install();
+  recipient.moveTo(beside(harness, 1, 1));
+  await harness.clock.advance(100);
+  assert.equal(await harness.clock.settle(wait(harness, { inStance: inHandOverStance }), 5_000), "away");
+});
+
+test("with a stance, a recipient 1.5 across and 1.5 below is still, though 2.1 blocks off in 3-D", async () => {
+  const { harness, recipient } = withRecipient();
+  using _timers = harness.clock.install();
+  recipient.moveTo(beside(harness, 1.5, -1.5));
+  await harness.clock.advance(100);
+  assert.equal(await harness.clock.settle(wait(harness, { inStance: inHandOverStance }), 5_000), "still");
 });
