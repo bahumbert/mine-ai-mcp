@@ -1,0 +1,43 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-giver-gains-same-item
+tags: [regression]
+description: >-
+  Live s3l 2026-11-01 (trade Ayla-Lena): the receiver took both tossed beef, then the giver walked off the toss over
+  three more of the same item and the bag recount reported the hand-over picked up again. The server's answer that the
+  receiver took the whole toss must stand whatever the giver's bag holds after: the toss counts as given. The giver walks
+  off along a one-block corridor over 3 logs lying on its path, so it ends holding them.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+setup:
+  # A one-block corridor along z from -8 to 4, stone on every side: the giver walks off the toss along it (away from the receiver).
+  - "fill -1 -60 -9 1 -58 4 stone"
+  - "fill 0 -60 -8 0 -59 3 air"
+  # Lying on the walk-off path, ready to be picked up at once.
+  - 'summon item 0.5 -60 -2.5 {Item:{id:"oak_log",count:3},PickupDelay:0s}'
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 2 }
+  - name: Receiver
+    pos: [0.5, -60, 1.97]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: oak_log, count: 2, receiver_holds: 2 }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Receiver, item: oak_log, count: 2 }
+    - { kind: hasItem, who: Giver, item: oak_log, count: 3 }
+    - { kind: completion, who: Giver }
+    - { kind: completion, who: Receiver }

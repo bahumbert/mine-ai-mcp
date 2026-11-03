@@ -1,0 +1,48 @@
+template: ../../templates/spectator.yaml
+
+name: walk-away-bounded
+tags: [regression]
+description: >-
+  Live s3l 2026-11-01: the walk off a toss had no bound and went 106 and 167 blocks underground to find a cell 4 blocks
+  clear. The Actor stands in a pocket of obsidian whose only way 4 blocks clear of the toss is an 18-block winding tunnel;
+  the walk off a ground toss must stop at 12 blocks of path (5 s), and the next action (a navigate back to the start)
+  must run and finish. The driver measures the path walked during drop_item (12 plus the glide of the tick that crosses the bound: 13.1 measured, limit 14); the base walks all 18.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+setup:
+  # A pocket of obsidian, two blocks high, with a winding one-block tunnel from the Actor's cell (0,0) to (4,-2): the only
+  # cell 4 blocks from the toss along an axis. The tunnel turns three times around the start, 18 cells in all.
+  - "fill -3 -60 -3 5 -58 3 obsidian"
+  - "fill 0 -60 0 2 -59 0 air"
+  - "fill 2 -60 0 2 -59 2 air"
+  - "fill -2 -60 2 2 -59 2 air"
+  - "fill -2 -60 0 -2 -59 2 air"
+  - "fill -2 -60 -2 -2 -59 0 air"
+  - "fill -2 -60 -2 2 -59 -2 air"
+  - "fill 2 -60 -2 4 -59 -2 air"
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/walk-away-bounded.ts]
+params:
+  item_name: oak_log
+  count: 3
+  max_path_blocks: 14
+  max_step_ms: 8000
+  back: { x: 0, y: -60, z: 0 }
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }

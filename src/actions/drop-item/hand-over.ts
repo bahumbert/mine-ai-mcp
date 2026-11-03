@@ -37,6 +37,11 @@ export interface HandoverWatch {
   readonly tossedIds: ReadonlySet<number>;
   /** Items the toss put on the ground in all: the wait ends early once this many were taken. */
   readonly expectedItems: number;
+  /**
+   * What the toss put down per item name. The recipient's take counts by name against it: an entity of another name that
+   * landed near the toss is no take of it, and one whose name is lost counts only when a single name was tossed.
+   */
+  readonly tossedCounts?: ReadonlyMap<string, number>;
   readonly wallMs: number;
   readonly signal?: AbortSignal;
 }
@@ -44,6 +49,8 @@ export interface HandoverWatch {
 export interface HandoverOutcome {
   /** Items the recipient picked up, from the `pickupItemCount` of the server's `collect` packets; 0 when none was seen. */
   readonly recipientCount: number;
+  /** The recipient's take per item name: `collect` packets it sent for an entity of the toss, never the giver's own. */
+  readonly recipientTookOf: ReadonlyMap<string, number>;
   /** True when the recipient took every tossed item. */
   readonly recipientTookAll: boolean;
   /** True when the server answered: all taken, or the world age moved `HANDOVER_SETTLE_TICKS`. False: the wall bound ended it. */
@@ -70,6 +77,16 @@ function pickedUpCount(packet: CollectPacket, entity: Entity | undefined): numbe
   return typeof announced === "number" && Number.isInteger(announced) && announced > 0 ? announced : stackCount(entity);
 }
 
+/** Add the recipient's take of `name` (a lost name: the lone name tossed) to `tookOf`, capped by what the toss put down of it. */
+function creditTake(tookOf: Map<string, number>, tossedCounts: ReadonlyMap<string, number> | undefined, name: string | null, count: number): void {
+  const credited = name ?? (tossedCounts?.size === 1 ? [...tossedCounts.keys()][0]! : null);
+  if (credited === null) return;
+  const taken = tookOf.get(credited) ?? 0;
+  const room = tossedCounts?.get(credited);
+  const added = room === undefined ? count : Math.min(count, room - taken);
+  if (added > 0) tookOf.set(credited, taken + added);
+}
+
 /**
  * Wait for the server to say who picked the tossed items up, and how many.
  *
@@ -84,28 +101,45 @@ export function awaitHandover(bot: Bot, watch: HandoverWatch): Promise<HandoverO
     const client = bot._client;
     const ageAtToss = bot.time?.age;
     let takenByAnyone = 0;
-    let takenByRecipient = 0;
+    const recipientTookOf = new Map<string, number>();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // The client lowers a stack by the packet's count before this listener runs, so a fully taken stack has lost its name.
+    const namesSeen = new Map<number, string>();
+    const rememberName = (entity: Entity) => {
+      const name = droppedItemName(entity);
+      if (name !== null) namesSeen.set(entity.id, name);
+    };
+    Object.values(bot.entities).filter(isItemEntity).forEach(rememberName);
 
+    const recipientCount = () => [...recipientTookOf.values()].reduce((sum, count) => sum + count, 0);
     const outcome = (settled: boolean): HandoverOutcome => ({
-      recipientCount: takenByRecipient,
-      recipientTookAll: takenByRecipient >= watch.expectedItems,
+      recipientCount: recipientCount(),
+      recipientTookOf,
+      recipientTookAll: watch.tossedCounts
+        ? [...watch.tossedCounts].every(([name, count]) => (recipientTookOf.get(name) ?? 0) >= count)
+        : recipientCount() >= watch.expectedItems,
       settled,
     });
     const finish = (settle: () => void) => {
       clearTimeout(timer);
       client.off("collect", collected);
+      bot.off("itemDrop", rememberName);
       bot.off("time", ticked);
       watch.signal?.removeEventListener("abort", aborted);
       settle();
     };
     const aborted = () => finish(() => reject(watch.signal?.reason));
     const collected = (packet: CollectPacket) => {
+      // The giver picking up its own toss, or another item of the same name, is no one's take (live s3l 2026-11-01).
+      if (packet.collectorEntityId === bot.entity?.id) return;
       const entity: Entity | undefined = bot.entities[packet.collectedEntityId];
       if (!(watch.tossedIds.has(packet.collectedEntityId) || (entity && watch.isTossed(entity)))) return;
+      const name = namesSeen.get(packet.collectedEntityId) ?? (entity ? droppedItemName(entity) : null);
+      // `rememberDiscards` claims any item that landed beside the toss: one of another name is not part of it either.
+      if (name !== null && watch.tossedCounts && !watch.tossedCounts.has(name)) return;
       const count = Math.min(pickedUpCount(packet, entity), watch.expectedItems - takenByAnyone);
       takenByAnyone += count;
-      if (bot.entities[packet.collectorEntityId]?.username === watch.recipientName) takenByRecipient += count;
+      if (bot.entities[packet.collectorEntityId]?.username === watch.recipientName) creditTake(recipientTookOf, watch.tossedCounts, name, count);
       if (takenByAnyone >= watch.expectedItems) finish(() => resolve(outcome(true)));
     };
     const ticked = () => {
@@ -115,6 +149,7 @@ export function awaitHandover(bot: Bot, watch: HandoverWatch): Promise<HandoverO
 
     if (watch.signal?.aborted) return reject(watch.signal.reason);
     client.on("collect", collected);
+    bot.on("itemDrop", rememberName);
     bot.on("time", ticked);
     watch.signal?.addEventListener("abort", aborted, { once: true });
     timer = setTimeout(() => finish(() => resolve(outcome(false))), watch.wallMs);
@@ -126,14 +161,24 @@ export function awaitHandover(bot: Bot, watch: HandoverWatch): Promise<HandoverO
  *
  * Tossed items the bot stands near come straight back (live 2026-10-10 run 7: coal dropped and picked up again, six
  * times over). `dropped` is updated in place.
+ *
+ * `takenByRecipient` is what the server announced the recipient took, per item name: a floor under the net drop, since a
+ * bag that grew afterwards may hold the giver's own pickups of other items of that name (live s3l 2026-11-01: 2 tossed,
+ * 2 taken, 3 picked up elsewhere, reported picked up again).
  */
-export function recountAfterToss(bot: Bot, dropped: DroppedItem[], hole: Vec3 | null): void {
+export function recountAfterToss(
+  bot: Bot,
+  dropped: DroppedItem[],
+  hole: Vec3 | null,
+  takenByRecipient: ReadonlyMap<string, number> = new Map(),
+): void {
   for (const [index, entry] of dropped.entries()) {
     if (entry.dropped <= 0 || entry.error) continue;
     const now = carriedCount(bot, entry.item);
     if (now <= entry.carriedAfter) continue;
     // What came back since the toss, not the carried count against the start: a reflex may have used some between attempts.
-    const net = Math.max(0, entry.dropped - (now - entry.carriedAfter));
+    const cameBack = now - entry.carriedAfter;
+    const net = Math.max(Math.min(takenByRecipient.get(entry.item) ?? 0, entry.dropped), entry.dropped - cameBack);
     dropped[index] = {
       ...entry,
       carriedAfter: now,
@@ -168,11 +213,16 @@ export async function handOverAndRecount(bot: Bot, args: HandOverAndRecount): Pr
   const { recipient, dropped, tossedIds, entityBaseline, droppedAt, discarded, dependencies, context } = args;
   // Counted before the recount below, which takes off what the giver picks back up.
   const tossedCount = dropped.reduce((sum, entry) => sum + (entry.error ? 0 : entry.dropped), 0);
+  const tossedCounts = new Map<string, number>();
+  for (const entry of dropped) {
+    if (!entry.error && entry.dropped > 0) tossedCounts.set(entry.item, (tossedCounts.get(entry.item) ?? 0) + entry.dropped);
+  }
   const handoverWatch = awaitHandover(bot, {
     recipientName: recipient.name,
     tossedIds,
     isTossed: (entity) => cameFromToss(entity, entityBaseline, droppedAt),
     expectedItems: tossedCount,
+    tossedCounts,
     wallMs: dependencies.handoverWallMs ?? HANDOVER_WALL_MS,
     signal: context.signal,
   });
@@ -181,7 +231,8 @@ export async function handOverAndRecount(bot: Bot, args: HandOverAndRecount): Pr
   const handover = await handoverWatch;
   // What the recipient left lying was a hand-over that failed, not a deliberate discard: its owner may pick it up again.
   if (!handover.recipientTookAll) discarded.forget(tossedIds);
-  recountAfterToss(bot, dropped, null);
+  // Always recounted, with the recipient's name-matched take as a floor: the bag alone can hold the giver's own pickups.
+  recountAfterToss(bot, dropped, null, handover.recipientTookOf);
   return { ...recipient, collected: handover.recipientTookAll, collectedCount: handover.recipientCount, tossedCount, settled: handover.settled };
 }
 

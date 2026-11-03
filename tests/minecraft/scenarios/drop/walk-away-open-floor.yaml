@@ -1,0 +1,36 @@
+template: ../../templates/spectator.yaml
+
+name: walk-away-open-floor
+tags: [regression]
+description: >-
+  Measures the plain walk off a ground toss on open floor against the 12-block bound of walk-away-bounded: the Actor
+  tosses three logs, walks off the 4 blocks of clearance, and the driver fails the scenario if the path it walked
+  during drop_item passes 14 blocks. The path is logged in the result detail (WALK_AWAY).
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/walk-away-bounded.ts]
+params:
+  item_name: oak_log
+  count: 3
+  max_path_blocks: 14
+  max_step_ms: 8000
+  back: { x: 0, y: -60, z: 0 }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: completion, who: Actor }

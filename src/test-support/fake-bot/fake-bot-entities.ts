@@ -171,13 +171,13 @@ export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEnti
     if (all) remove(entity.id);
   };
 
-  /** Mineflayer's `collect` handler: `playerCollect`, then the dropped item's metadata lowered by the packet's count. */
+  /** Mineflayer's `collect` handler (`entities.js:159-170`, the first listener): `playerCollect`, the stack lowered; then the raw packet reaches later listeners. */
   const collect = (entity: Entity, pickupItemCount: number) => {
     bot.emit("playerCollect", bot.entity, entity);
     const dropped = entity.getDroppedItem();
-    if (dropped === null) return;
-    dropped.count = Math.max(0, dropped.count - pickupItemCount);
-    entity.metadata[itemSlot] = Items.toNotch(dropped.count > 0 ? dropped : null);
+    if (dropped !== null) dropped.count = Math.max(0, dropped.count - pickupItemCount);
+    if (dropped !== null) entity.metadata[itemSlot] = Items.toNotch(dropped.count > 0 ? dropped : null);
+    bot._client.emit("collect", { collectedEntityId: entity.id, collectorEntityId: bot.entity.id, pickupItemCount });
   };
 
   onServerTick(server, () => {

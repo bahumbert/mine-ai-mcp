@@ -11,6 +11,7 @@ import { dropItemOutcomes, type DropRecipient, type HoleClosure } from "./contra
 import { pluggedCellCount, sealDisposalHole } from "./disposal-hole.js";
 import type { DropItemDependencies } from "./drop-item.js";
 import { tossAimHeight } from "./hand-over.js";
+import { startWalkBound, WALK_AWAY_MAX_BLOCKS, WALK_AWAY_MAX_MS } from "./walk-bound.js";
 import { awaitStillRecipient, RECIPIENT_STILL_EPSILON, RECIPIENT_STILL_TICKS, RECIPIENT_WAIT_MS } from "./recipient-still.js";
 
 /** How close the bot gets before handing items over. Within this, a toss lands at their feet. */
@@ -174,6 +175,9 @@ export async function walkToStance(
 /** How far from where the items landed a ground drop walks before the pickup check. */
 const GROUND_CLEARANCE = 4;
 
+/** What a walk off a toss or a hole may cost in all its sides: a route that does not get clear by then is cut. */
+const WALK_BOUND = { maxBlocks: WALK_AWAY_MAX_BLOCKS, maxMs: WALK_AWAY_MAX_MS };
+
 /**
  * Walk at least `GROUND_CLEARANCE` blocks from a ground toss: first the way opposite to where the bot faced when
  * tossing, then the sides, then ahead. A route that does not get there is not an error here: the check that follows
@@ -194,7 +198,9 @@ export async function walkAwayFromToss(
     { x: ahead.z, z: -ahead.x },
     ahead,
   ];
+  using bound = startWalkBound(bot, WALK_BOUND);
   for (const [index, side] of sides.entries()) {
+    if (bound.signal.aborted) return;
     const reach = (node: { feet: { x: number; z: number } }) => {
       const centre = cellCentre(node.feet);
       return (centre.x - from.x) * side.x + (centre.z - from.z) * side.z;
@@ -205,7 +211,7 @@ export async function walkAwayFromToss(
       (node) => Math.max(0, GROUND_CLEARANCE - reach(node)) * HORIZONTAL_TICKS_PER_BLOCK,
     );
     try {
-      await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal });
+      await dependencies.navigate({ movements: dependencies.createMovements(bot), goal, signal: context.signal, stopSignal: bound.signal });
     } catch {
       context.signal?.throwIfAborted();
     }
@@ -229,11 +235,13 @@ async function stepAwayFromHole(
     (node) => distanceFrom(cellCentre(node.feet)) >= HOLE_CLEARANCE,
     (node) => Math.max(0, HOLE_CLEARANCE - distanceFrom(cellCentre(node.feet))) * HORIZONTAL_TICKS_PER_BLOCK,
   );
+  using bound = startWalkBound(bot, WALK_BOUND);
   try {
     const route = await dependencies.navigate({
       movements: dependencies.createMovements(bot),
       goal,
       signal: context.signal,
+      stopSignal: bound.signal,
     });
     const distance = Number(distanceFrom(feetCellCentre(bot)).toFixed(2));
     return distance >= HOLE_CLEARANCE

@@ -882,6 +882,10 @@ a player who walks beyond 2 blocks is walked up to again. The walks and the wait
 does not stand still in that time fails the call with `[DROP_RECIPIENT_MOVING]`, nothing tossed, and the next call can
 hand over again once they stop. The other codes of a hand-over are `[DROP_PLAYER_NOT_FOUND]`, `[DROP_PLAYER_UNREACHABLE]`
 and `[DROP_PLAYER_LEFT]`.
+After a toss on the ground or to a player, the bot walks a few blocks off so it does not pick the items back up: at most
+12 blocks of path or 5 s of wall clock for all its sides (the step back from a hole shares the same limit); a toss
+cut short may lie within reach and read `[DROP_PICKED_UP]`. A hand-over the server reports as fully taken by the
+named player counts as given whatever the bag shows after: the bag recount cannot lower it below what the player took.
 Set `in_a_hole: true` to create a dry, enclosed disposal pit below pickup height
 beside the bot. Underground, this can excavate an opening into a tunnel wall
 before digging the pit. Existing suitable pits can be reused. The bot stays on

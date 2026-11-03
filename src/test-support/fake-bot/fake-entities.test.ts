@@ -85,6 +85,24 @@ test("an item in reach is picked up once its delay is over: playerCollect, the s
   assert.equal(drop.getDroppedItem(), null, "Mineflayer's collect handler emptied the dropped item's metadata");
 });
 
+// Mineflayer derives playerCollect from the raw collect packet (entities.js:159-163), so a full pickup sends it first.
+test("a pickup that takes it all sends the raw collect packet (ids and count) after playerCollect; a partial one sends none", async () => {
+  const harness = pickupHarness({ carried: ALL_BUT(2) });
+  const order: string[] = [];
+  const packets: unknown[] = [];
+  harness.bot._client.on("collect", (packet: unknown) => void (order.push("collect"), packets.push(packet)));
+  harness.bot.on("playerCollect", () => void order.push("playerCollect"));
+  const partial = harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 8 }, pickupDelayTicks: 0 });
+  await harness.clock.advance(500);
+  assert.deepEqual(order, [], "a partial pickup is packet-less (measured)");
+  assert.ok(harness.bot.entities[partial.id]);
+  harness.entities.remove(partial.id);
+  const whole = harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "dirt", count: 1 }, pickupDelayTicks: 0 });
+  await harness.clock.advance(500); // dirt tops up the one it is carried in: it fits whole
+  assert.deepEqual(order, ["playerCollect", "collect"], "Mineflayer's handler, the first listener, runs before later ones");
+  assert.deepEqual(packets, [{ collectedEntityId: whole.id, collectorEntityId: harness.bot.entity.id, pickupItemCount: 1 }]);
+});
+
 test("a pickup fills a partial stack first, then the first empty slot, hotbar before main", async () => {
   const harness = createFakeBot({ slots: { 36: { name: "cobblestone", count: 62 }, 9: { name: "dirt", count: 1 } } });
   harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "cobblestone", count: 5 }, pickupDelayTicks: 0 });
