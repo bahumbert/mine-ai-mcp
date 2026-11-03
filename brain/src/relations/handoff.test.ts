@@ -114,7 +114,7 @@ function waiting(runtime: FakeRuntime, paidAfter: number | null, over: Partial<A
   let now = 0;
   const state = { polls: 0, paid: false };
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; state.polls += 1; if (state.polls === paidAfter) state.paid = true; } };
-  const options: AwaitOptions = { stillAwaiting: () => !state.paid, clock, maxMs: 3 * MIN, openingDistance: 16, ...over };
+  const options: AwaitOptions = { stillAwaiting: () => !state.paid, endedAs: () => null, clock, maxMs: 3 * MIN, openingDistance: 16, ...over };
   return { state, options, now: () => now, run: (context = contextFor(runtime)) => awaitTheirSide(context, "Theo", options) };
 }
 
@@ -594,4 +594,35 @@ test("a plain give_item step to a moving recipient returns the failed detail unc
   const result = await runStep({ skill: "give_item", player: "Theo", item: "bread", count: 1 }, contextFor(runtime));
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" ? result.detail : "", error);
+});
+
+test("B2: a give whose trade ended after its first item tosses no second item", async () => {
+  const runtime = tableGone();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "bread", count: 3 }] };
+  const credited: unknown[] = [];
+  const items = [{ item: "crafting_table", count: 1 }, { item: "bread", count: 3 }];
+  const back = { getBackMs: 60 * MIN, stillDue: () => drops(runtime).length < 1 };
+  const ended = handoffOutcome(await runHandoff(contextFor(runtime), { kind: "give", tradeId: "t", partner: "Ayla", items }, (c) => credited.push(c), back));
+  assert.equal(ended.outcome, "failed");
+  assert.match(ended.detail, /the trade is over: nothing more given/u);
+  assert.equal(drops(runtime).length, 1, "only the first item was tossed");
+  assert.deepEqual(credited, [{ item: "crafting_table", count: 1 }], "what was taken is still reported");
+});
+
+test("B3: a wait that ends because the trade ended says how, failed; one that ends on the payment is done", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const ended = waiting(runtime, null, { stillAwaiting: () => false, endedAs: () => "cancelled: Finn cancelled" });
+  assert.deepEqual(await ended.run(), { status: "failed", detail: "the trade ended (cancelled: Finn cancelled) before Theo gave" });
+  const paid = waiting(runtime, 3);
+  assert.deepEqual(await paid.run(), { status: "done", detail: "they gave" });
+});
+
+test("B3: an abort during the wait is stopped even when the trade has ended", async () => {
+  const runtime = new FakeRuntime();
+  near(runtime);
+  const abort = new AbortController();
+  abort.abort();
+  const w = waiting(runtime, null, { endedAs: () => "cancelled: x" });
+  assert.deepEqual(await w.run({ ...contextFor(runtime), signal: abort.signal }), { status: "stopped" });
 });

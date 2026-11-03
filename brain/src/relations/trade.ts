@@ -18,7 +18,7 @@ function newTrade(a: DealArgs, state: "proposed" | "agreed"): Trade {
   return {
     id: `${a.self}-${a.partner}-${a.now}`, partner: a.partner, give: a.give, get: a.get, first: a.first, state,
     createdAt: a.now, agreedAt: state === "agreed" ? a.now : null, receivedAt: null, gaveAt: null, received: [], endedAt: null,
-    brokenBy: null, late: false, note: "",
+    brokenBy: null, late: false, note: "", handedBack: [], gaveSome: [],
   };
 }
 
@@ -122,6 +122,45 @@ export function creditTrade(t: Trade, gains: readonly ItemCount[], now: number):
   return { trade: advance({ ...t, received: mergeCounts(t.received, used), receivedAt: now }, now), used };
 }
 
+/** How long, as of when, a payment held for an ended trade still counts (the end of the window is exclusive). */
+export interface HeldWindow { readonly now: number; readonly ms: number }
+
+/**
+ * What the partner handed over for a trade that ended with my side not given, less what I gave back: the payment I hold
+ * (nothing for an open trade, a done one, one whose side is out, or - when `within` is given - one that ended before the window).
+ */
+export function heldPayment(t: Trade, within?: HeldWindow): ItemCount[] {
+  if (isOpen(t) || t.state === "done" || t.gaveAt !== null) return [];
+  if (within !== undefined && within.now - (t.endedAt ?? within.now) >= within.ms) return [];
+  return t.received.map((r) => ({ item: r.item, count: r.count - (t.handedBack.find((h) => h.item === r.item)?.count ?? 0) })).filter((c) => c.count > 0);
+}
+
+/** Their payment given back: `count` of `item` goes into `handedBack`, never more than is held; `used` is what was taken. */
+export function giveBack(t: Trade, item: string, count: number): { trade: Trade; used: number } {
+  const used = Math.min(Math.max(0, count), heldPayment(t).find((h) => h.item === item)?.count ?? 0);
+  return used === 0 ? { trade: t, used } : { trade: { ...t, handedBack: mergeCounts(t.handedBack, [{ item, count: used }]) }, used };
+}
+
+/** Items of my side handed over without a hand-off to report them (or after the trade ended): added to `gaveSome`, never more than the side; the whole side out sets `gaveAt` to `now` (null: it stays). `used` is what was taken. */
+export function giveLate(t: Trade, add: readonly ItemCount[], now: number | null): { trade: Trade; used: ItemCount[] } {
+  const room = (item: string): number => (t.give.find((g) => g.item === item)?.count ?? 0) - (t.gaveSome.find((g) => g.item === item)?.count ?? 0);
+  const used = add.map(({ item, count }) => ({ item, count: Math.min(Math.max(0, count), Math.max(0, room(item))) })).filter((c) => c.count > 0);
+  if (used.length === 0) return { trade: t, used };
+  const gaveSome = mergeCounts(t.gaveSome, used);
+  const whole = t.give.every((g) => (gaveSome.find((s) => s.item === g.item)?.count ?? 0) >= g.count);
+  return { trade: { ...t, gaveSome, gaveAt: whole && now !== null ? now : t.gaveAt }, used };
+}
+
+/**
+ * The trade as it stands once `by` (the partner) says it is over: cancelled when nothing of mine was given, broken by them when I gave
+ * (the state the clock would set later, so a late payment still closes it). Null for a trade that is not open or is only a proposal.
+ */
+export function endedByPartner(t: Trade, now: number, by: string, why: string): Trade | null {
+  if (t.state === "agreed" || t.state === "they_gave") return cancelTrade(t, now, `${by} ${why}`);
+  if (t.state === "i_gave") return { ...t, state: "broken", brokenBy: "them", endedAt: now, note: `${by} ${why}; they paid ${describePaid(t)}` };
+  return null;
+}
+
 /** My give failed: the trade is broken by me. */
 export function failTrade(t: Trade, now: number, why: string): Trade {
   return { ...t, state: "broken", brokenBy: "me", endedAt: now, note: why };
@@ -200,7 +239,8 @@ function nearDistance(o: { partners: ReadonlyMap<string, Position | null>; previ
 /**
  * Splits this tick's inventory gains between trades: a gain of X goes to a trade expecting X whose partner is within
  * hand-off distance now or at the previous tick, or was lately (`recentlyNear`: lower-case names; a payment picked up
- * after the partner turned away), never while my own running step yields X; nearest partner first (a recently near
+ * after the partner turned away), never while my own running step yields X; an open trade before one broken by them
+ * (a trade agreed again after a tell takes the new payment), then the nearest partner (a recently near
  * one ranks at hand-off distance), then the oldest trade; each trade takes at most what it is owed. Returns trade id -> credited.
  */
 export function attributeGains(o: {
@@ -219,7 +259,7 @@ export function attributeGains(o: {
     return d === null ? [] : [[t.id, d]];
   }));
   const ranked = o.trades.filter((t) => near.has(t.id))
-    .sort((a, b) => near.get(a.id)! - near.get(b.id)! || (a.agreedAt ?? a.createdAt) - (b.agreedAt ?? b.createdAt));
+    .sort((a, b) => Number(!isOpen(a)) - Number(!isOpen(b)) || near.get(a.id)! - near.get(b.id)! || (a.agreedAt ?? a.createdAt) - (b.agreedAt ?? b.createdAt));
   for (const gain of o.gains) {
     if (o.ownStepYields.has(gain.item)) continue;
     let left = gain.count;

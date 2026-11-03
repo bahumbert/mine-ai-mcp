@@ -364,3 +364,148 @@ test("T3.2 an offer the model read counters even when it was stamped after the l
   assert.equal(board.offerFrom("Ayla", "Finn")?.id, countered);
   state.now = t0;
 });
+
+// B2: the end of an agreed trade reaches the partner bot (plan 2026-11-02 trade-payment-and-owed-items).
+const cancelDecision: TradeDecision = { action: "cancel", give: [], get: [], first: "me" };
+const noSignal = new AbortController().signal;
+const heldLineOf = (b: ReturnType<typeof bot>, partner: string): string => b.book.summaries([partner])[0] ?? "";
+
+/** Finn proposes (he gives 8 bread, Ayla gives 8 oak_log), Ayla accepts; `firstFinn` says who gives first. */
+async function agreed(board: TradeBoard, firstFinn: boolean) {
+  const finn = bot("Finn", board);
+  const ayla = bot("Ayla", board);
+  const id = (await finn.c.onDecision(propose(bread(8), logs(8), firstFinn ? "me" : "them"), "Ayla", finn.snapshot()))!;
+  await ayla.c.onDecision(accept(logs(8), bread(8), firstFinn ? "them" : "me"), "Finn", ayla.snapshot());
+  await finn.c.settled();
+  return { finn, ayla, id };
+}
+
+/** Finn gave first and Ayla saw the payment: her trade is `they_gave`, her give is taken. */
+async function finnPaidAylaSawIt(board: TradeBoard) {
+  const t = await agreed(board, true);
+  await t.finn.c.handoffEnded(t.id, "done", "gave 8 bread");
+  await t.ayla.c.tick(t.ayla.snapshot(), new Set(), noSignal);
+  state.now += 1_000;
+  await t.ayla.c.tick(t.ayla.snapshot([{ name: "bread", count: 18 }, { name: "oak_log", count: 10 }]), new Set(), noSignal);
+  return t;
+}
+
+test("B2 s3l: Finn paid, Ayla saw it, Finn cancels: Ayla's trade is cancelled, no give is taken after, her block says she holds the payment", async () => {
+  const board = new TradeBoard();
+  const { finn, ayla, id } = await finnPaidAylaSawIt(board);
+  assert.equal(ayla.latest("Finn")!.state, "they_gave");
+  assert.equal(ayla.handoffs.length, 1);
+  await finn.c.onDecision(cancelDecision, "Ayla", finn.snapshot());
+  await ayla.c.settled();
+  assert.deepEqual([ayla.latest("Finn")!.state, ayla.latest("Finn")!.note], ["cancelled", "Finn cancelled"]);
+  assert.match(heldLineOf(ayla, "Finn"), /Finn handed over 8 bread for a trade that ended 0 min ago \(cancelled: Finn cancelled\); you handed over none of your 8 oak_log/u);
+  state.now += 60_000;
+  await ayla.c.tick(ayla.snapshot(), new Set(), noSignal);
+  assert.equal(ayla.handoffs.length, 1, "no give is taken for the ended trade");
+  assert.equal(ayla.c.checkDecision(propose(logs(2), bread(2)), "Finn", ayla.snapshot()), null, "a new proposal to the partner is allowed");
+  assert.equal(finn.latest("Ayla")!.id, id);
+});
+
+test("B2: Finn paid first and Ayla gave nothing yet: Finn cancels, Ayla's i_gave trade is broken by him, and a late payment closes it done late", async () => {
+  const board = new TradeBoard();
+  const { finn, ayla, id } = await agreed(board, false);
+  await ayla.c.handoffEnded(id, "done", "gave 8 oak_log");
+  assert.equal(ayla.latest("Finn")!.state, "i_gave");
+  await finn.c.onDecision(cancelDecision, "Ayla", finn.snapshot());
+  await ayla.c.settled();
+  const broken = ayla.latest("Finn")!;
+  assert.deepEqual([broken.state, broken.brokenBy, broken.note], ["broken", "them", "Finn cancelled; they paid 0 of 8 bread"]);
+  assert.equal(ayla.book.get("Finn")!.facts.promisesBroken, 1);
+  await ayla.c.tick(ayla.snapshot(), new Set(), noSignal);
+  state.now += 1_000;
+  await ayla.c.tick(ayla.snapshot([{ name: "bread", count: 18 }, { name: "oak_log", count: 10 }]), new Set(), noSignal);
+  assert.deepEqual([ayla.latest("Finn")!.state, ayla.latest("Finn")!.late], ["done", true]);
+  assert.deepEqual([ayla.book.get("Finn")!.facts.promisesBroken, ayla.book.get("Finn")!.facts.keptLate], [0, 1]);
+});
+
+test("B2: both sides cancel at once: both stay cancelled by their own word and neither tells the other back", async () => {
+  const told: string[] = [];
+  const board = new (class extends TradeBoard { override tradeEnded(...args: Parameters<TradeBoard["tradeEnded"]>): void { told.push(`${args[1]}>${args[2]}`); super.tradeEnded(...args); } })();
+  const { finn, ayla } = await agreed(board, true);
+  await Promise.all([finn.c.onDecision(cancelDecision, "Ayla", finn.snapshot()), ayla.c.onDecision(cancelDecision, "Finn", ayla.snapshot())]);
+  await Promise.all([finn.c.settled(), ayla.c.settled()]);
+  assert.deepEqual([finn.latest("Ayla")!.note, ayla.latest("Finn")!.note], ["I cancelled", "I cancelled"]);
+  assert.deepEqual(told.sort(), ["Ayla>Finn", "Finn>Ayla"], "one tell each, none back");
+});
+
+test("B2: a toss taken after the partner cancelled sets gaveAt on the ended trade: no held-payment line", async () => {
+  const board = new TradeBoard();
+  const { finn, ayla, id } = await finnPaidAylaSawIt(board);
+  await finn.c.onDecision(cancelDecision, "Ayla", finn.snapshot());
+  await ayla.c.settled();
+  await ayla.c.handoffEnded(id, "done", "gave 8 oak_log to Finn");
+  const ended = ayla.latest("Finn")!;
+  assert.deepEqual([ended.state, ended.gaveAt, ended.gaveSome], ["cancelled", state.now, logs(8)]);
+  assert.doesNotMatch(heldLineOf(ayla, "Finn"), /handed over 8 bread/u);
+});
+
+test("B2: a book write that throws in the receiver is logged by the board, and the trade stays as it was", async () => {
+  const boardLines: string[] = [];
+  const board = new TradeBoard((l) => boardLines.push(l));
+  const { finn, ayla } = await finnPaidAylaSawIt(board);
+  ayla.book.update = () => Promise.reject(new Error("disk full"));
+  await finn.c.onDecision(cancelDecision, "Ayla", finn.snapshot());
+  await ayla.c.settled().catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(boardLines.some((l) => /could not tell Ayla.*disk full/u.test(l)), boardLines.join("\n"));
+  assert.equal(ayla.latest("Finn")!.state, "they_gave");
+});
+
+test("B2: a tell for another id, from a stranger, or to a player outside the brain changes nothing and says why", async () => {
+  const board = new TradeBoard();
+  const { ayla, id } = await agreed(board, true);
+  board.tradeEnded("Finn-Ayla-0", "Finn", "Ayla", "cancelled");
+  board.tradeEnded(id, "Theo", "Ayla", "cancelled");
+  board.tradeEnded(id, "Finn", "Zed", "cancelled");
+  await ayla.c.settled();
+  assert.equal(ayla.latest("Finn")!.state, "agreed");
+  assert.ok(ayla.lines.some((l) => l.includes("Finn-Ayla-0") && /no trade/u.test(l)), ayla.lines.join("\n"));
+  assert.ok(ayla.lines.some((l) => /Theo/u.test(l) && /not my partner/u.test(l)), ayla.lines.join("\n"));
+});
+
+test("B2: Ayla's give breaks after its tries: Finn's i_gave trade is broken by her at once, with her word as the note", async () => {
+  const board = new TradeBoard();
+  const { finn, ayla, id } = await finnPaidAylaSawIt(board);
+  await finn.c.settled();
+  assert.equal(finn.latest("Ayla")!.state, "i_gave");
+  await ayla.c.handoffEnded(id, "not_taken", "Finn did not take 8 oak_log");
+  await ayla.c.handoffEnded(id, "not_taken", "Finn did not take 8 oak_log");
+  await finn.c.settled();
+  const broken = finn.latest("Ayla")!;
+  assert.deepEqual([broken.state, broken.brokenBy, broken.note], ["broken", "them", "Ayla broke it; they paid 0 of 8 oak_log"]);
+  assert.equal(finn.book.get("Ayla")!.facts.promisesBroken, 1);
+});
+
+test("B2: re-agreed after a tell, the new payment credits the new trade; the old one stays broken by them", async () => {
+  const board = new TradeBoard();
+  const { finn, ayla, id } = await finnPaidAylaSawIt(board);
+  await ayla.c.handoffEnded(id, "items_gone", "I no longer carry 8 oak_log");
+  await finn.c.settled();
+  assert.equal(finn.latest("Ayla")!.state, "broken");
+  const again = (await finn.c.onDecision(propose(bread(8), logs(8), "them"), "Ayla", finn.snapshot()))!;
+  await ayla.c.onDecision(accept(logs(8), bread(8), "me"), "Finn", ayla.snapshot());
+  await finn.c.settled();
+  await finn.c.tick(finn.snapshot(), new Set(), noSignal);
+  state.now += 1_000;
+  await finn.c.tick(finn.snapshot([{ name: "bread", count: 10 }, { name: "oak_log", count: 18 }]), new Set(), noSignal);
+  const trades = finn.book.get("Ayla")!.trades;
+  assert.deepEqual(trades.find((t) => t.id === again)!.received, logs(8), "the new trade took the payment");
+  assert.deepEqual(trades.find((t) => t.id === id)!.received, [], "the broken one did not");
+});
+
+test("B2 review: a tell for a real trade of mine with another partner ends nothing", async () => {
+  const board = new TradeBoard();
+  const { ayla } = await agreed(board, true);
+  const theo = bot("Theo", board);
+  const other = (await theo.c.onDecision(propose(bread(1), logs(1)), "Ayla", theo.snapshot()))!;
+  await ayla.c.onDecision(accept(logs(1), bread(1), "them"), "Theo", ayla.snapshot());
+  board.tradeEnded(other, "Finn", "Ayla", "cancelled");
+  await ayla.c.settled();
+  assert.equal(ayla.latest("Theo")!.state, "agreed");
+  assert.ok(ayla.lines.some((l) => /Finn says .* not my partner/u.test(l)), ayla.lines.join("\n"));
+});

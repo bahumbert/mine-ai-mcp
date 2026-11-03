@@ -3,7 +3,7 @@ import test from "node:test";
 import { testScoring } from "../testing.ts";
 import { withScoreEvent } from "./score.ts";
 import { describeRelation, forgetOldSaid, newRelation, parseRelationNote, relationNote, withEndedTrade, withSaid, withTrade } from "./record.ts";
-import { agreeTrade, creditTrade, failTrade, markGave, settleTrade } from "./trade.ts";
+import { agreeTrade, cancelTrade, creditTrade, failTrade, markGave, settleTrade } from "./trade.ts";
 import { type GiveProgress, type ItemCount, type Relation, SCORE_KINDS, type Trade, type TradeSettings } from "./types.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
@@ -233,4 +233,52 @@ test("every score kind round-trips through relationSchema", () => {
   const ledger = SCORE_KINDS.map((kind, i) => ({ kind, delta: i, why: `why ${kind}`, at: t0 + i }));
   const r: Relation = { ...fresh(), ledger };
   assert.deepEqual(parseRelationNote(relationNote(r).note)?.ledger, ledger);
+});
+
+const heldFixture = (over: Partial<Trade> = {}): Trade => ({
+  ...failTrade(creditTrade(deal("them"), ingots, t0 + MIN).trade, t0 + 2 * MIN, "could not hand over 5 bread within 10 min"), ...over,
+});
+
+test("B1: an old note without handedBack and gaveSome parses with both empty, and a note round trip keeps them", () => {
+  const old = { id: "a", partner: "Theo", give: [], get: [], first: "me", state: "cancelled", createdAt: 1, agreedAt: 1, receivedAt: null, gaveAt: null, received: [{ item: "iron_ingot", count: 2 }], endedAt: 5, brokenBy: null, late: false, note: "x" };
+  const parsed = parseRelationNote(JSON.stringify({ v: 2, ...newRelation("Theo", 1, 0), trades: [old] }));
+  assert.deepEqual([parsed?.trades[0]?.handedBack, parsed?.trades[0]?.gaveSome], [[], []]);
+  const kept = withTrade(fresh(), heldFixture({ handedBack: [{ item: "iron_ingot", count: 2 }], gaveSome: [{ item: "bread", count: 1 }] }));
+  assert.deepEqual(parseRelationNote(relationNote(kept).note), kept);
+});
+
+test("B1: a trade that ended with their payment held says so, after Open, for 60 min and not after", () => {
+  const r = withTrade(fresh(), heldFixture());
+  const text = describeRelation(r, "Theo", t0 + 12 * MIN, scoring);
+  assert.match(text, /Theo handed over 5 iron_ingot for a trade that ended 10 min ago \(your give failed: could not hand over 5 bread within 10 min\); you handed over none of your 5 bread, and you have not given their 5 iron_ingot back\./u);
+  assert.doesNotMatch(describeRelation(r, "Theo", t0 + 2 * MIN + 60 * MIN, scoring), /handed over 5 iron_ingot/u, "the window is over");
+  const part = withTrade(fresh(), heldFixture({ gaveSome: [{ item: "bread", count: 2 }], handedBack: [{ item: "iron_ingot", count: 2 }] }));
+  assert.match(describeRelation(part, "Theo", t0 + 3 * MIN, scoring), /Theo handed over 3 iron_ingot .*you handed over 2 bread of your 5 bread, and you have not given their 3 iron_ingot back\./u);
+  const cancelled = withTrade(fresh(), cancelTrade(creditTrade(deal("them"), [{ item: "iron_ingot", count: 3 }], t0 + MIN).trade, t0 + 2 * MIN, "Theo cancelled"));
+  assert.match(describeRelation(cancelled, "Theo", t0 + 3 * MIN, scoring), /Theo handed over 3 iron_ingot for a trade that ended 1 min ago \(cancelled: Theo cancelled\); you handed over none of your 5 bread/u);
+});
+
+test("B1: a trade I gave on, one given back, and a done one show no held-payment line", () => {
+  const gave = withTrade(fresh(), { ...heldFixture(), gaveAt: t0 + 3 * MIN });
+  assert.doesNotMatch(describeRelation(gave, "Theo", t0 + 4 * MIN, scoring), /handed over 5 iron_ingot/u);
+  const back = withTrade(fresh(), heldFixture({ handedBack: ingots }));
+  assert.doesNotMatch(describeRelation(back, "Theo", t0 + 4 * MIN, scoring), /not given their/u);
+});
+
+test("B1: four newer ended trades do not prune a held one inside the window, and do after it", () => {
+  const newer = (n: number): Trade => ({ ...cancelTrade(deal("me", { now: t0 + n * MIN }), t0 + (10 + n) * MIN, "no answer"), id: `n${n}` });
+  const window = (now: number) => ({ now, ms: 60 * MIN });
+  let r = withTrade(fresh(), heldFixture(), window(t0 + 2 * MIN));
+  for (const n of [1, 2, 3, 4]) r = withTrade(r, newer(n), window(t0 + (10 + n) * MIN));
+  assert.ok(r.trades.some((t) => t.state === "broken"), "the held trade is kept");
+  assert.equal(r.trades.length, 4, "the held one and the last three ended ones");
+  r = withTrade(r, newer(5), window(t0 + 2 * MIN + 61 * MIN));
+  assert.ok(!r.trades.some((t) => t.state === "broken"), "pruned as any ended trade once the window is over");
+});
+
+test("B2 review: a trade the partner ended after I paid reads as ended with their note, not as a missed deadline", () => {
+  const ended = withTrade(fresh(), { ...markGave(deal("me"), t0), state: "broken", brokenBy: "them", endedAt: t0 + MIN, note: "Theo cancelled; they paid 0 of 5 iron_ingot" });
+  const text = describeRelation(ended, "Theo", t0 + 2 * MIN, scoring);
+  assert.match(text, /the trade with Theo ended \(Theo cancelled; they paid 0 of 5 iron_ingot\); Theo still owes 5 iron_ingot/u);
+  assert.doesNotMatch(text, /in time/u);
 });

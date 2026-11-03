@@ -7,7 +7,7 @@ import { FakeRuntime, scriptedMind, testPersona, testScoring } from "../testing.
 import { RelationBook } from "./book.ts";
 import { TradeController } from "./controller.ts";
 import type { Handoff } from "./handoff.ts";
-import { newRelation, withTrade } from "./record.ts";
+import { newRelation, parseRelationNote, relationNote, withTrade } from "./record.ts";
 import { cancelTrade, proposeTrade, sameDealTerms } from "./trade.ts";
 import type { ItemCount, RelationEvent, Trade, TradeEvent, TradeSettings } from "./types.ts";
 
@@ -1864,4 +1864,180 @@ test("D1b: a give that is busy says it waits for the partner when they are far, 
   assert.equal(h.c.giveProgress(id)?.waits, "partner_away");
   await h.c.handoffEnded(id, "done", "gave 5 bread");
   assert.equal(h.c.giveProgress(id)?.waits, null, "the busy mark does not outlive the give");
+});
+
+/** Theo paid in full (first them), then my give broke: the trade ended with their payment in my bag. Returns its id. */
+async function brokenWithPayment(h: Harness, over: Partial<TradeDecision> = {}, paid = 5): Promise<string> {
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them", ...over }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: paid }] }), new Set(), signal);
+  const id = theirTrade(h).id;
+  await h.c.handoffEnded(id, "items_gone", "I no longer carry 5 bread; getting it back failed: nothing found");
+  return id;
+}
+const lineOf = (h: Harness): string => h.book.summaries(["Theo"])[0] ?? "";
+const heldLine = /Theo handed over (\d+) iron_ingot for a trade that ended/u;
+const tradeById = (h: Harness, id: string): Trade => h.book.trades().find((t) => t.id === id)!;
+
+test("B1: a give that broke after their payment is told to the model as a payment held", async () => {
+  const h = harness();
+  await brokenWithPayment(h);
+  assert.equal(theirTrade(h).state, "broken");
+  assert.match(lineOf(h), /Theo handed over 5 iron_ingot for a trade that ended 0 min ago \(your give failed: I no longer carry 5 bread.*\); you handed over none of your 5 bread, and you have not given their 5 iron_ingot back\./u);
+  assert.equal(h.c.block(["Theo"], []).includes("handed over 5 iron_ingot"), true, "the chat block carries it");
+  assert.equal(h.book.get("Theo")!.facts.iFailedToPay, 1, "facts and score are as before: display only");
+});
+
+test("B1: a part payment that ended 'they gave only' is shown as held; a trade I paid first and they did not is not", async () => {
+  const h = harness();
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 3 }] }), new Set(), signal);
+  h.state.now += 10 * MIN;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 3 }] }), new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.match(lineOf(h), /Theo handed over 3 iron_ingot for a trade that ended 0 min ago \(cancelled: they gave only 3 of 5 iron_ingot\)/u);
+  const g = harness();
+  const s = snapshot();
+  await g.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await g.c.handoffEnded(theirTrade(g).id, "done", "gave 5 bread");
+  g.state.now += 11 * MIN;
+  await g.c.tick(s, new Set(), signal);
+  assert.equal(theirTrade(g).state, "broken");
+  assert.doesNotMatch(lineOf(g), heldLine);
+});
+
+test("B1: my own cancel of a trade they paid on holds it", async () => {
+  const h = harness();
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 2 }] }), new Set(), signal);
+  await h.c.onDecision(decision({ action: "cancel", give: [], get: [] }), "Theo", before);
+  assert.match(lineOf(h), /Theo handed over 2 iron_ingot .*\(cancelled: I cancelled\)/u);
+});
+
+test("B1: giving back less than held leaves the rest shown; more sends the extra to the earlier ledger", async () => {
+  const h = harness();
+  const id = await brokenWithPayment(h);
+  await h.c.gaveOutside("Theo", "iron_ingot", 2);
+  assert.deepEqual(tradeById(h, id).handedBack, [{ item: "iron_ingot", count: 2 }]);
+  assert.match(lineOf(h), /Theo handed over 3 iron_ingot .*you have not given their 3 iron_ingot back\./u);
+  assert.ok(h.logs.some((l) => l.includes(`2 iron_ingot given back to Theo for ${id}`)), h.logs.join("\n"));
+  await h.c.gaveOutside("Theo", "iron_ingot", 5);
+  assert.deepEqual(tradeById(h, id).handedBack, [{ item: "iron_ingot", count: 5 }]);
+  assert.doesNotMatch(lineOf(h), heldLine);
+  assert.ok(h.logs.some((l) => l.includes("2 iron_ingot given to Theo outside a hand-off matches no open trade")), "the extra 2 go to the ledger");
+});
+
+test("B1: two held trades with one partner are given back oldest first", async () => {
+  const h = harness();
+  const first = await brokenWithPayment(h);
+  h.state.now += MIN;
+  const second = await brokenWithPayment(h, {}, 4);
+  await h.c.gaveOutside("Theo", "iron_ingot", 7);
+  assert.deepEqual(tradeById(h, first).handedBack, [{ item: "iron_ingot", count: 5 }]);
+  assert.deepEqual(tradeById(h, second).handedBack, [{ item: "iron_ingot", count: 2 }]);
+  assert.match(lineOf(h), /Theo handed over 2 iron_ingot/u);
+});
+
+test("B1: a give stopped after part of it was taken says how much was handed over", async () => {
+  const h = harness();
+  const before = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", before);
+  await h.c.tick(before, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...before.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  const id = theirTrade(h).id;
+  await h.c.tookInHandoff(id, [{ item: "bread", count: 2 }]);
+  await h.c.handoffEnded(id, "items_gone", "I no longer carry 3 bread");
+  assert.deepEqual(tradeById(h, id).gaveSome, [{ item: "bread", count: 2 }]);
+  assert.match(lineOf(h), /you handed over 2 bread of your 5 bread, and you have not given their 5 iron_ingot back/u);
+});
+
+test("B1: a toss taken after the trade ended counts as handed over, and a whole side closes the line", async () => {
+  const h = harness();
+  const id = await brokenWithPayment(h);
+  await h.c.tookInHandoff(id, [{ item: "bread", count: 2 }]);
+  assert.deepEqual(tradeById(h, id).gaveSome, [{ item: "bread", count: 2 }]);
+  assert.equal(tradeById(h, id).gaveAt, null);
+  await h.c.tookInHandoff(id, [{ item: "bread", count: 3 }]);
+  assert.equal(tradeById(h, id).gaveAt, h.state.now, "the whole side is out: given, late");
+  assert.doesNotMatch(lineOf(h), heldLine);
+  assert.equal(tradeById(h, id).state, "broken", "the state does not change");
+});
+
+test("B1: a later give_item of my own side closes the line (paying late)", async () => {
+  const h = harness();
+  const id = await brokenWithPayment(h);
+  await h.c.gaveOutside("Theo", "bread", 5);
+  assert.equal(tradeById(h, id).gaveAt, h.state.now);
+  assert.deepEqual(tradeById(h, id).gaveSome, [{ item: "bread", count: 5 }]);
+  assert.doesNotMatch(lineOf(h), heldLine);
+  assert.ok(h.logs.some((l) => l.includes(`5 bread given late to Theo for ${id}`)), h.logs.join("\n"));
+});
+
+test("B1: a held payment is in owed() for 60 min, then not; the held trade does not make the controller busy", async () => {
+  const h = harness();
+  const id = await brokenWithPayment(h);
+  assert.deepEqual(h.c.owed(), [{ item: "iron_ingot", count: 5, partner: "Theo", tradeId: id }]);
+  assert.equal(h.c.busy(), false);
+  h.state.now += 59 * MIN;
+  assert.equal(h.c.owed().length, 1);
+  h.state.now += 2 * MIN;
+  assert.deepEqual(h.c.owed(), []);
+  assert.doesNotMatch(lineOf(h), heldLine);
+});
+
+test("B1 next action: after the held payment is given back a new proposal to the partner passes the checks", async () => {
+  const h = harness();
+  await brokenWithPayment(h);
+  const s = snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "iron_ingot", count: 5 }] });
+  await h.c.gaveOutside("Theo", "iron_ingot", 5);
+  assert.deepEqual(h.c.owed(), []);
+  assert.equal(h.c.busy(), false);
+  assert.equal(h.c.checkDecision(decision({ action: "propose" }), "Theo", s), null);
+});
+
+test("B1: a restart reads the held trade from its note and shows the same line", async () => {
+  const h = harness();
+  const id = await brokenWithPayment(h);
+  await h.c.gaveOutside("Theo", "iron_ingot", 2);
+  const note = relationNote(h.book.get("Theo")!).note;
+  const again = harness();
+  again.book.load([parseRelationNote(note)!]);
+  assert.deepEqual(again.book.get("Theo")!.trades.find((t) => t.id === id)!.handedBack, [{ item: "iron_ingot", count: 2 }]);
+  assert.match(again.book.summaries(["Theo"])[0] ?? "", /Theo handed over 3 iron_ingot/u);
+});
+
+test("B3: awaitOver says how a trade ended, gone, or null while it is open or paid", async () => {
+  const h = harness();
+  assert.equal(h.c.awaitOver("nope"), "gone");
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  const id = theirTrade(h).id;
+  assert.equal(h.c.awaitOver(id), null, "open");
+  await h.c.onDecision(decision({ action: "cancel" }), "Theo", s);
+  assert.equal(h.c.awaitOver(id), "cancelled: I cancelled");
+  const g = harness();
+  await brokenWithPayment(g);
+  assert.match(g.c.awaitOver(theirTrade(g).id) ?? "", /^broken: I no longer carry 5 bread/u);
+  const d = harness();
+  await d.c.onDecision(decision({ first: "me" }), "Theo", s);
+  await d.c.gaveOutside("Theo", "bread", 5);
+  await d.c.tick(snapshot({ inventory: [...s.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.equal(d.c.awaitOver(theirTrade(d).id), null, "done: they gave");
+});
+
+test("B1 review: a payment held for an ended trade is not promised to another partner, but may go back to the one it came from", async () => {
+  const h = harness();
+  await brokenWithPayment(h);
+  const s = snapshot({ inventory: [{ name: "iron_ingot", count: 5 }, { name: "bread", count: 10 }] });
+  assert.match(h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Bruno", s) ?? "", /5 of them promised in other trades/u);
+  assert.equal(h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Theo", s), null);
 });

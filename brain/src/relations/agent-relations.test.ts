@@ -614,3 +614,15 @@ test("a get-back keeps a minute of the trade's clock for the give: with less lef
   assert.match(end.detail, /clock ran out/u);
   assert.equal(h.runtime.submitted.some((call) => call.tool === "drop_item"), false);
 });
+
+test("B3: a wait for the partner's side whose trade I cancelled ends failed and says how it ended", async (t) => {
+  const h = relationsOverTime(t);
+  const theirs = { action: "accept" as const, give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "them" as const };
+  await h.relations.trades.onDecision(theirs, "Theo", h.runtime.snapshot);
+  const id = h.trade()!.id;
+  await h.relations.trades.onDecision({ ...theirs, action: "cancel" }, "Theo", h.runtime.snapshot);
+  const context = { runtime: h.runtime, body: new Body(h.runtime, () => undefined), signal: new AbortController().signal };
+  const end = await h.relations.runHandoff({ kind: "await", tradeId: id, partner: "Theo" }, context);
+  assert.equal(end.outcome, "failed");
+  assert.match(end.detail, /the trade ended \(cancelled: I cancelled\) before Theo gave/u);
+});

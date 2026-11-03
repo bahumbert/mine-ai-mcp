@@ -14,7 +14,7 @@ const AMOUNT_OF: Record<Exclude<ScoreKind, "nudge" | "earlier">, keyof ScoreSett
 
 /** The score amounts and temperament of a character, from its relations settings. */
 export function scoringOf(settings: Persona["settings"]["relations"]): Scoring {
-  return { score: settings.score, temperament: settings.temperament };
+  return { score: settings.score, temperament: settings.temperament, heldMinutes: settings.offersForgetMinutes };
 }
 
 /** No negative zero in a stored or shown number. */

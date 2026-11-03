@@ -3,7 +3,7 @@ import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { BoardOffer } from "./board.ts";
 import { DEFAULT_STACK, stackSizeOf } from "./item-ids.ts";
-import { carriedOf } from "./items.ts";
+import { carriedOf, type OwedItem } from "./items.ts";
 import { isOpen } from "./trade.ts";
 import { reachOf } from "./trading.ts";
 import type { ItemCount, Trade } from "./types.ts";
@@ -21,18 +21,21 @@ export interface CheckInput {
   readonly reach: number;
   /** Items of my side the partner already took (a give outside a hand-off), per item: they count as carried. */
   readonly givenOutside?: ReadonlyMap<string, number>;
+  /** Payments held for ended trades (`heldOwed`): kept from every partner but the one they came from, as the give itself keeps them. */
+  readonly held?: readonly OwedItem[];
 }
 
 /** What other trades I already promised and have not handed over, per item. */
-function promisedOf(trades: readonly Trade[], item: string, except: string | undefined): number {
-  return trades.filter((t) => t.id !== except && (t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null)
+function promisedOf(trades: readonly Trade[], item: string, except: string | undefined, held: readonly OwedItem[] = [], speaker = ""): number {
+  const heldBack = held.filter((h) => h.item === item && h.partner.toLowerCase() !== speaker.toLowerCase()).reduce((sum, h) => sum + h.count, 0);
+  return heldBack + trades.filter((t) => t.id !== except && (t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null)
     .flatMap((t) => t.give).filter((g) => g.item === item).reduce((sum, g) => sum + g.count, 0);
 }
 
 function whatIsWrongWithMySide(i: CheckInput, answered: Trade | undefined): string | null {
   for (const { item, count } of i.decision.give) {
     const carried = carriedOf(i.snapshot.inventory, item) + (i.givenOutside?.get(item) ?? 0);
-    const promised = promisedOf(i.trades, item, answered?.id);
+    const promised = promisedOf(i.trades, item, answered?.id, i.held, i.speaker);
     if (carried - promised < count) {
       const free = carried - promised;
       // An accept cannot change the offer's terms, so the model is told what it may propose instead (a counter-offer).

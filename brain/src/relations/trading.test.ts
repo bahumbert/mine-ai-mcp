@@ -74,7 +74,7 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
   const give: ItemCount[] = [{ item: "oak_log", count: 4 }];
   const get: ItemCount[] = [{ item: "iron_ingot", count: 3 }];
   const setTrade = (state: TradeState | null) => {
-    found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "" } as Trade);
+    found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "", handedBack: [], gaveSome: [] } as Trade);
   };
   // The fake clock jumps instead of waiting: only for the runs that wait on a partner who never comes (a fake sleep in the follow loop would never yield).
   const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number; want?: string[]; offer?: string[] } = {}) => tradeRoutine({
@@ -609,7 +609,7 @@ test("heardNeeds leaves out a partner who refused that offer lately, and partner
 
 test("heardNeeds leaves out a need a trade done after it already met", () => {
   const now = 10 * MIN;
-  const done = (endedAt: number): Trade => ({ id: "t", partner: "Theo", give: [{ item: "bread", count: 3 }], get: [], first: "me", state: "done", createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: null, received: [], endedAt, brokenBy: null, late: false, note: "" } as Trade);
+  const done = (endedAt: number): Trade => ({ id: "t", partner: "Theo", give: [{ item: "bread", count: 3 }], get: [], first: "me", state: "done", createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: null, received: [], endedAt, brokenBy: null, late: false, note: "", handedBack: [], gaveSome: [] } as Trade);
   const said = theoNeeds(["bread"], now, 5 * MIN);
   assert.deepEqual(heardNeeds([{ ...said, trades: [done(now - MIN)] }], BAG, now, 60), [], "given after he said it");
   assert.equal(heardNeeds([{ ...said, trades: [done(now - 6 * MIN)] }], BAG, now, 60).length, 1, "given before he said it: a new need");

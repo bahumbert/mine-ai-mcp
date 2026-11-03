@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Position } from "../runtime-client.ts";
 import type { ItemCount, Trade, TradeSettings } from "./types.ts";
-import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, inventoryGains, isOpen, markGave, proposeTrade, settleTrade } from "./trade.ts";
+import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, heldPayment, inventoryGains, isOpen, markGave, proposeTrade, settleTrade } from "./trade.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
@@ -235,4 +235,28 @@ test("a payment is credited in every state that awaits it and in no other", () =
   assert.deepEqual((["proposed", "agreed", "i_gave", "they_gave", "done", "cancelled"] as const).map((state) => credited(state)), [false, true, true, true, false, false]);
   assert.equal(credited("broken", "them"), true, "a trade they left unpaid takes a late payment");
   assert.equal(credited("broken", "me"), false, "a trade I broke does not");
+});
+
+test("heldPayment: what they handed over for a trade that ended with my side not given, less what went back", () => {
+  const paid = creditTrade(deal("them"), ingots, t0 + MIN).trade;
+  assert.deepEqual(heldPayment(paid), [], "an open trade holds nothing yet: it is still to be given");
+  const brokenByMe = failTrade(paid, t0 + 2 * MIN, "could not hand over");
+  assert.deepEqual(heldPayment(brokenByMe), ingots);
+  assert.deepEqual(heldPayment({ ...brokenByMe, handedBack: [{ item: "iron_ingot", count: 2 }] }), [{ item: "iron_ingot", count: 3 }]);
+  assert.deepEqual(heldPayment({ ...brokenByMe, handedBack: ingots }), []);
+  assert.deepEqual(heldPayment({ ...brokenByMe, gaveAt: t0 + 3 * MIN }), [], "my side was given late: nothing is held");
+  const part = creditTrade(deal("them"), [{ item: "iron_ingot", count: 3 }], t0 + MIN).trade;
+  assert.deepEqual(heldPayment(cancelTrade(part, t0 + 2 * MIN, "they gave only 3 of 5 iron_ingot")), [{ item: "iron_ingot", count: 3 }], "a part payment on a cancelled trade");
+});
+
+test("heldPayment: nothing for a trade I gave, a done one, one nothing was paid on, or one outside the window", () => {
+  const gave = markGave(deal("me"), t0);
+  assert.deepEqual(heldPayment({ ...gave, state: "broken", brokenBy: "them", endedAt: t0 + 10 * MIN }), [], "I paid first and they did not: they hold mine");
+  const done = markGave(creditTrade(deal("them"), ingots, t0 + MIN).trade, t0 + 2 * MIN);
+  assert.equal(done.state, "done");
+  assert.deepEqual(heldPayment(done), []);
+  assert.deepEqual(heldPayment(cancelTrade(deal("them"), t0 + MIN, "nobody gave")), []);
+  const held = failTrade(creditTrade(deal("them"), ingots, t0 + MIN).trade, t0 + 2 * MIN, "x");
+  assert.deepEqual(heldPayment(held, { now: t0 + 2 * MIN + 59 * MIN, ms: 60 * MIN }), ingots);
+  assert.deepEqual(heldPayment(held, { now: t0 + 2 * MIN + 60 * MIN, ms: 60 * MIN }), [], "gone at the end of the window");
 });

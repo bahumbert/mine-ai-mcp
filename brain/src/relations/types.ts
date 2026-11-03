@@ -33,6 +33,10 @@ export interface Trade {
   readonly late: boolean;
   /** Why it ended, for the model ("they paid 3 of 5 iron_ingot"). */
   readonly note: string;
+  /** Their payment I gave back after the trade ended without my side given. */
+  readonly handedBack: readonly ItemCount[];
+  /** What of my side I had handed over when the trade ended (or since, late), while `gaveAt` is null. */
+  readonly gaveSome: readonly ItemCount[];
 }
 
 export interface RelationFacts {
@@ -83,6 +87,8 @@ export type ScoreSettings = Persona["settings"]["relations"]["score"];
 export interface Scoring {
   readonly score: ScoreSettings;
   readonly temperament: Temperament;
+  /** How long a payment held for an ended trade is shown and kept from automatic work (the persona's offers-forget time). */
+  readonly heldMinutes: number;
 }
 
 /** An event to score; `nudge` is the model's value for kind "nudge". */

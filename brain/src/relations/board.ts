@@ -14,10 +14,14 @@ export interface BoardOffer {
   readonly postedAt: number;
 }
 
-/** What a character's trade controller answers to the board: the partner's answer to a proposal it posted. */
+/** How an agreed trade ended on the side that tells the other: cancelled or declined by that side, or its give broke. */
+export type TradeEndWhy = "cancelled" | "declined" | "broke it";
+
+/** What a character's trade controller answers to the board: the partner's answer to a proposal it posted, and the end of an agreed trade. */
 export interface BoardPeer {
   offerAccepted(id: string, by: string): Promise<void>;
   offerDeclined(id: string, by: string, why: string): Promise<void>;
+  partnerEnded(id: string, by: string, why: TradeEndWhy): Promise<void>;
 }
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -60,6 +64,13 @@ export class TradeBoard {
   /** `by` declines or cancels the proposal: it leaves the board and its proposer cancels its record. */
   decline(id: string, by: string, why: string): void {
     this.answer(id, (peer, offer) => peer.offerDeclined(offer.id, by, why), `${by} ${why}`);
+  }
+
+  /** An agreed trade ended on `by`'s side: `partner` (a character of this brain) is told in the background, so its record ends the same trade. Nothing for a partner outside the brain. */
+  tradeEnded(id: string, by: string, partner: string, why: TradeEndWhy): void {
+    const peer = this.peers.get(partner.toLowerCase());
+    if (peer === undefined) return;
+    peer.partnerEnded(id, by, why).catch((error: unknown) => this.log(`trade board: could not tell ${partner} that ${by} ${why} ${id}: ${String(error)}`));
   }
 
   private answer(id: string, tell: (peer: BoardPeer, offer: BoardOffer) => Promise<void>, what: string): void {

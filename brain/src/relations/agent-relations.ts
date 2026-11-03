@@ -306,7 +306,7 @@ export class AgentRelations {
     let end: HandoffEnd;
     try {
       end = handoffOutcome(await awaitTheirSide(context, partner, {
-        stillAwaiting: () => this.trades.awaits(tradeId), clock, maxMs: Math.min(persona.settings.relations.startMinutes * 60_000, this.trades.payBackLeftMs(tradeId)), openingDistance: persona.settings.conversation.openingDistance,
+        stillAwaiting: () => this.trades.awaits(tradeId), endedAs: () => this.trades.awaitOver(tradeId), clock, maxMs: Math.min(persona.settings.relations.startMinutes * 60_000, this.trades.payBackLeftMs(tradeId)), openingDistance: persona.settings.conversation.openingDistance,
       }));
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };

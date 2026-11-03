@@ -11,7 +11,7 @@ const t0 = 10_000_000;
 
 function scoringOf(temperament: Partial<Scoring["temperament"]> = {}, score: Partial<Scoring["score"]> = {}): Scoring {
   const { relations } = testPersona().settings;
-  return { score: { ...relations.score, ...score }, temperament: { ...relations.temperament, ...temperament } };
+  return { score: { ...relations.score, ...score }, temperament: { ...relations.temperament, ...temperament }, heldMinutes: relations.offersForgetMinutes };
 }
 
 const at = (score: number, firstImpression = 0): Relation => ({ ...newRelation("Theo", t0, firstImpression), score });

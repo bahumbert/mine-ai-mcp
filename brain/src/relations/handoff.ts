@@ -96,11 +96,12 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
     const lacking = back === undefined ? `I no longer carry ${sideText(short)}` : await getBackShort(context, partner, short, back.getBackMs);
     if (context.signal.aborted) return { status: "stopped" };
     if (lacking !== null) return { status: "failed", detail: lacking, reason: "items_gone" };
-    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: "the trade is over: nothing given" };
   }
   const unconfirmed: ItemCount[] = [];
   let sure = true;
   for (const { item, count } of items) {
+    // The partner may end the trade while an item is on its way: the next item stays in the bag.
+    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: `the trade is over: nothing ${items[0]?.item === item ? "" : "more "}given` };
     const { result, taken, settled, droppedAt } = await giveTo(context, partner, item, count);
     if (result.status !== "done") return result;
     if (Math.min(count, taken ?? count) >= count) {
@@ -112,9 +113,9 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
     if (context.signal.aborted || "interrupted" in pickBack) return { status: "stopped" };
     // A pick-back that did not look properly says nothing about what the partner took: no credit, the give stays due.
     if ("unknown" in pickBack) return { status: "failed", detail: `could not pick back the ${item} ${partner} may not have taken (${pickBack.unknown})` };
-    const { back } = pickBack;
-    if (count - back > 0) credit?.({ item, count: count - back });
-    if (back > 0) return notTaken(partner, { item, count: back });
+    const { back: pickedBack } = pickBack;
+    if (count - pickedBack > 0) credit?.({ item, count: count - pickedBack });
+    if (pickedBack > 0) return notTaken(partner, { item, count: pickedBack });
     unconfirmed.push({ item, count });
     sure &&= settled;
   }
@@ -178,6 +179,8 @@ async function collectTheirSide(context: SkillContext, items: readonly ItemCount
 export interface AwaitOptions {
   /** Whether the partner's payment is still to come (the trade controller's reading). */
   readonly stillAwaiting: () => boolean;
+  /** How the trade ended when the wait is over (`cancelled: Finn cancelled`), null while it stands or once it is paid. */
+  readonly endedAs: () => string | null;
   readonly clock: Clock;
   /** The wait ends failed after this long on the clock, whatever else happens. */
   readonly maxMs: number;
@@ -200,7 +203,9 @@ export async function awaitTheirSide(context: SkillContext, partner: string, o: 
     walkedTo = await walkIfFarOrMoved(context, partner, o.openingDistance, walkedTo);
     if (!context.signal.aborted) await o.clock.sleep(AWAIT_POLL_MS, context.signal);
   }
-  return context.signal.aborted ? stopped : { status: "done", detail: "they gave" };
+  if (context.signal.aborted) return stopped;
+  const over = o.endedAs();
+  return over === null ? { status: "done", detail: "they gave" } : { status: "failed", detail: `the trade ended (${over}) before ${partner} gave` };
 }
 
 /** Walks to the partner when they are farther than `openingDistance` and stand somewhere other than the spot of the last walk (`undefined`: no walk yet). Returns the spot walked to. */

@@ -1,7 +1,7 @@
 // What an ended trade does to the partner's score: the event it makes, and the record change that stores the end and scores it as one.
 import type { RelationBook } from "./book.ts";
 import { sideText } from "./items.ts";
-import { withEndedTrade } from "./record.ts";
+import { heldWindow, withEndedTrade } from "./record.ts";
 import { newScoredRows, withScoreEvent } from "./score.ts";
 import type { Relation, RelationEvent, ScoreInput, Scoring, Trade } from "./types.ts";
 
@@ -30,7 +30,7 @@ export function tradeEndScore(before: Trade | undefined, trade: Trade): ScoreInp
 /** Stores the ended trade (counting its facts) and scores it, from the entry the record held: one pure change for one `book.update`. */
 export function withTradeEnd(r: Relation, trade: Trade, now: number, s: Scoring): Relation {
   const input = tradeEndScore(r.trades.find((t) => t.id === trade.id), trade);
-  const ended = withEndedTrade(r, trade);
+  const ended = withEndedTrade(r, trade, heldWindow(now, s));
   return input === null ? ended : withScoreEvent(ended, input, now, s);
 }
 

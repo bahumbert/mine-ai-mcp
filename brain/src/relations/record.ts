@@ -2,7 +2,7 @@
 import { z } from "zod";
 import { sideText } from "./items.ts";
 import { band, drifted } from "./score.ts";
-import { isOpen } from "./trade.ts";
+import { type HeldWindow, heldPayment, isOpen } from "./trade.ts";
 import { type Band, type GiveProgress, type ItemCount, MINUTE_MS, type Relation, type RelationFacts, type SaidItem, SCORE_KINDS, type ScoreEvent, type Scoring, type Trade } from "./types.ts";
 
 const KEPT_ENDED_TRADES = 3;
@@ -14,22 +14,26 @@ export function newRelation(partner: string, now: number, firstImpression: numbe
   return { partner, score: firstImpression, scoredAt: now, ledger: [], requests: [], lastHurt: null, facts: NO_FACTS, trades: [], saidHas: [], saidNeeds: [], lastDealt: now };
 }
 
-/** Open trades plus the last few ended ones (by end time); the facts already count the rest. */
-function keepRecentTrades(r: Relation): Relation {
-  const ended = r.trades.filter((t) => !isOpen(t)).sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+/** The window a payment held for an ended trade counts in, at `now`. */
+export const heldWindow = (now: number, s: Scoring): HeldWindow => ({ now, ms: s.heldMinutes * MINUTE_MS });
+
+/** Open trades, those still holding a payment inside `held`'s window, plus the last few other ended ones (by end time); the facts already count the rest. */
+function keepRecentTrades(r: Relation, held?: HeldWindow): Relation {
+  const holding = (t: Trade) => held !== undefined && heldPayment(t, held).length > 0;
+  const ended = r.trades.filter((t) => !isOpen(t) && !holding(t)).sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
   const kept = new Set(ended.slice(-KEPT_ENDED_TRADES).map((t) => t.id));
-  return { ...r, trades: r.trades.filter((t) => isOpen(t) || kept.has(t.id)) };
+  return { ...r, trades: r.trades.filter((t) => isOpen(t) || holding(t) || kept.has(t.id)) };
 }
 
-function replaceTrade(r: Relation, trade: Trade): Relation {
+function replaceTrade(r: Relation, trade: Trade, held?: HeldWindow): Relation {
   const known = r.trades.some((t) => t.id === trade.id);
   const trades = known ? r.trades.map((t) => (t.id === trade.id ? trade : t)) : [...r.trades, trade];
-  return keepRecentTrades({ ...r, trades, lastDealt: Math.max(r.lastDealt, trade.endedAt ?? trade.agreedAt ?? trade.createdAt) });
+  return keepRecentTrades({ ...r, trades, lastDealt: Math.max(r.lastDealt, trade.endedAt ?? trade.agreedAt ?? trade.createdAt) }, held);
 }
 
-/** Replaces the trade with the same id, or adds it. */
-export function withTrade(r: Relation, trade: Trade): Relation {
-  return replaceTrade(r, trade);
+/** Replaces the trade with the same id, or adds it. `held`: a trade still holding a payment inside the window is kept as an open one is. */
+export function withTrade(r: Relation, trade: Trade, held?: HeldWindow): Relation {
+  return replaceTrade(r, trade, held);
 }
 
 /** The facts an end state adds, given the entry the record already held for the trade (a late payment takes a broken promise back). */
@@ -51,11 +55,11 @@ function factsOfEnd(facts: RelationFacts, trade: Trade, before: Trade | undefine
 }
 
 /** Records an ended trade in the history and counts it into the facts by end state; an already counted end counts once. */
-export function withEndedTrade(r: Relation, trade: Trade): Relation {
+export function withEndedTrade(r: Relation, trade: Trade, held?: HeldWindow): Relation {
   const before = r.trades.find((t) => t.id === trade.id);
   const counted = before !== undefined && before.state === trade.state && before.brokenBy === trade.brokenBy;
   const facts = counted ? r.facts : factsOfEnd(r.facts, trade, before);
-  return replaceTrade({ ...r, facts }, trade);
+  return replaceTrade({ ...r, facts }, trade, held);
 }
 
 function mergeSaid(old: readonly SaidItem[], said: readonly (ItemCount | string)[], now: number): SaidItem[] {
@@ -112,7 +116,14 @@ function describeTrade(t: Trade, partner: string, now: number, progress?: (trade
   if (t.state === "agreed") return `agreed ${ago} min ago: you give ${sideText(t.give) || "nothing"}, ${partner} gives ${sideText(t.get) || "nothing"}, ${t.first === "me" ? "you" : partner} first; ${agreedHandOver(t, partner, mine)}`;
   if (t.state === "i_gave") return `you gave ${sideText(t.give)} ${ago} min ago, ${partner} owes ${owedText(t)}`;
   if (t.state === "they_gave") return `${partner} gave ${sideText(t.get)}; ${partGiven(t, mine) ?? `you have not given your ${sideText(t.give)} yet`}${giveWait(partner, mine)}`;
-  return `${partner} did not pay in time (${t.note}), still owes ${owedText(t)}`;
+  return `the trade with ${partner} ended (${t.note}); ${partner} still owes ${owedText(t)}`;
+}
+
+/** One trade that ended with their payment in my bag: what they handed over, how it ended, how much of my side went, and that nothing went back. */
+function describeHeld(t: Trade, held: readonly ItemCount[], partner: string, now: number): string {
+  const end = t.brokenBy === "me" ? `your give failed: ${t.note}` : `cancelled: ${t.note}`;
+  const gave = t.gaveSome.length === 0 ? "none" : sideText(t.gaveSome);
+  return `${partner} handed over ${sideText(held)} for a trade that ended ${agoText(t.endedAt ?? now, now)} (${end}); you handed over ${gave} of your ${sideText(t.give)}, and you have not given their ${sideText(held)} back.`;
 }
 
 function describeSaid(partner: string, has: readonly SaidItem[], needs: readonly SaidItem[], now: number): string[] {
@@ -161,7 +172,8 @@ export function describeRelation(r: Relation | null, partner: string, now: numbe
     `${f.iFailedToPay > 0 ? `, you failed to pay ${f.iFailedToPay}` : ""}${f.giftsGiven + f.giftsReceived > 0 ? `, gifts: ${f.giftsGiven} given, ${f.giftsReceived} received` : ""}.`;
   const pending = r.trades.filter((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && owedText(t) !== ""));
   const open = pending.length > 0 ? [`Open: ${pending.map((t) => describeTrade(t, partner, now, progress)).join("; ")}.`] : [];
-  return [head, counts, ...open, ...describeSaid(partner, r.saidHas, r.saidNeeds, now)].join(" ");
+  const holding = r.trades.flatMap((t) => { const held = heldPayment(t, heldWindow(now, scoring)); return held.length > 0 ? [describeHeld(t, held, partner, now)] : []; });
+  return [head, counts, ...open, ...holding, ...describeSaid(partner, r.saidHas, r.saidNeeds, now)].join(" ");
 }
 
 const itemCount = z.object({ item: z.string(), count: z.number() });
@@ -170,6 +182,7 @@ const tradeSchema = z.object({
   state: z.enum(["proposed", "agreed", "i_gave", "they_gave", "done", "broken", "cancelled"]),
   createdAt: z.number(), agreedAt: z.number().nullable(), receivedAt: z.number().nullable().default(null), gaveAt: z.number().nullable(), received: z.array(itemCount),
   endedAt: z.number().nullable(), brokenBy: z.enum(["me", "them"]).nullable(), late: z.boolean(), note: z.string(),
+  handedBack: z.array(itemCount).default([]), gaveSome: z.array(itemCount).default([]),
 });
 const said = z.object({ item: z.string(), count: z.number().nullable(), at: z.number() });
 const scoreEvent = z.object({
