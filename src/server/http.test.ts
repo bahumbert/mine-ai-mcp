@@ -5,11 +5,13 @@ import { test, type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createFakeClock, flush } from "../test-support/fake-bot/index.js";
 import { closeIdleClientSessions, createMinecraftMcpHttpApplication } from "./http.js";
 
-async function host(t: TestContext, health = () => ({ connected: true })) {
+async function host(t: TestContext, health = () => ({ connected: true }), clientIdleTimeoutMs?: number) {
   const application = createMinecraftMcpHttpApplication({
     health,
+    clientIdleTimeoutMs,
     createServer: () => {
       const server = new McpServer({ name: "http-contract-test", version: "1" });
       server.registerTool("observe", { description: "Observe a shared runtime" }, async () => ({
@@ -96,3 +98,24 @@ test("an expiring client session whose close rejects does not reject the reaper"
     `each failed close is logged once: ${log.join(" | ")}`,
   );
 });
+
+// WSL steps its wall clock: the idle reaper's cutoff and each session's last activity are both monotonic readings, so a
+// step reaps a live session (forward) or keeps a dead one (back) only if one of them reads `Date.now()`.
+for (const [direction, stepMs, survives] of [["forward", 600_000, true], ["back", -600_000, false]] as const) {
+  test(`a client session idle for ${survives ? "under" : "over"} its timeout is ${survives ? "kept" : "reaped"} across a wall clock step ${direction}`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    const { application, url } = await host(t, undefined, 60_000);
+    const client = new Client({ name: "idle", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`)));
+    // A request after connect, and the client's own follow-ups drained: the session's last activity is before the step.
+    await client.listTools();
+    await flush();
+    assert.equal(application.clientSessionCount, 1);
+    clock.stepWallClock(stepMs);
+    // The reaper ticks every 60 s: at 60 s the session has been idle exactly the timeout, at 120 s twice it.
+    await clock.advance(survives ? 60_000 : 120_000, 1000);
+    assert.equal(application.clientSessionCount, survives ? 1 : 0);
+    await client.close().catch(() => undefined);
+  });
+}

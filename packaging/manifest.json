@@ -1,0 +1,52 @@
+{
+  "version": "0.1.0",
+  "minecraft": {
+    "version": "1.21.4",
+    "jar": {
+      "url": "https://piston-data.mojang.com/v1/objects/4707d00eb834b446575d89a61a11b5d548d8c001/server.jar",
+      "sha1": "4707d00eb834b446575d89a61a11b5d548d8c001"
+    },
+    "memoryMb": { "min": 2048, "perRamGb": 256, "max": 6144 }
+  },
+  "java": {
+    "url": "https://api.adoptium.net/v3/binary/version/jdk-21.0.13%2B9/windows/x64/jre/hotspot/normal/eclipse",
+    "sha256": "2332c0b4cff6bed722da3567c91d5e47568bcba863fa4945d0a8d6fc76158628"
+  },
+  "ollama": {
+    "url": "https://github.com/ollama/ollama/releases/download/v0.35.0/OllamaSetup.exe",
+    "sha256": "92e45c3518daf7d4ea60480896ee7bdb1bed71381593cfc9f2d7c1ceb941efde",
+    "minVersion": "0.35.0",
+    "port": 11435,
+    "env": {
+      "OLLAMA_CONTEXT_LENGTH": "16384",
+      "OLLAMA_NUM_PARALLEL": "3",
+      "OLLAMA_KV_CACHE_TYPE": "q8_0",
+      "OLLAMA_FLASH_ATTENTION": "1",
+      "OLLAMA_KEEP_ALIVE": "60m"
+    },
+    "model": "gemma4:12b",
+    "minVramGiB": 10,
+    "minRamGiB": 16
+  },
+  "brainEnv": {
+    "MINE_AI_LLM_REASONING_EFFORT": "none",
+    "MINE_AI_LLM_JSON_MODE": "true",
+    "MINE_AI_LLM_TIMEOUT_MS": "90000"
+  },
+  "brainModelSlots": 3,
+  "bun": {
+    "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-windows-x64.zip",
+    "sha256": "ce4c17497b2f29712a99d3d53f028de28cd42e3bacb8589599e7f000e49b6405"
+  },
+  "defaultBots": ["ayla"],
+  "waits": {
+    "ollamaUpMs": 30000,
+    "warmUpMs": 120000,
+    "serverDoneMs": 180000,
+    "hostHealthMs": 90000,
+    "serverStopMs": 30000,
+    "modelPullIdleMs": 300000
+  },
+  "release": { "latestUrl": "https://api.github.com/repos/bahumbert/mine-ai-mcp/releases/latest" },
+  "commands": { "cooldownMs": 2000, "refusalEveryMs": 600000, "pollMs": 1000, "maxAgeMs": 60000, "listenerAfterMs": 10000, "answerWaitMs": 20000 }
+}

@@ -3,16 +3,18 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { compileScenario, loadScenario } from "mine-labs";
 import { parse } from "yaml";
 import { CONTRACT_CHECKS, contractCheckNamed } from "./checks.ts";
 import { contractClientArgs, contractTags, setupCommands } from "./setup-commands.ts";
 
-// check-reads: tests/minecraft/contract/scenarios/**/*.yaml
+// check-reads: tests/minecraft/contract/scenarios/**/*.yaml, tests/minecraft/templates/flat-single-action.yaml
 const SCENARIOS = path.join(path.dirname(fileURLToPath(import.meta.url)), "scenarios");
 
 interface ContractYaml {
   readonly params: { readonly check: string };
   readonly setup: readonly string[];
+  readonly reset?: readonly string[];
   readonly entities?: readonly unknown[];
   readonly players: readonly { readonly pos: unknown; readonly op: boolean; readonly inventory?: readonly unknown[] }[];
   readonly tags: readonly string[];
@@ -36,6 +38,7 @@ test("every contract YAML arranges its check's fixture: setup lines, the op play
     const expected = setupCommands(check.fixture);
     assert.deepEqual(scenario.client.args, contractClientArgs(check), `${file}: client args`);
     assert.deepEqual(scenario.setup, expected.setup, `${file}: setup differs from setupCommands(fixture)`);
+    assert.deepEqual(scenario.reset, expected.reset, `${file}: reset`);
     assert.deepEqual(scenario.entities ?? [], expected.entities, `${file}: entities`);
     assert.equal(scenario.players.length, 1, `${file}: one player`);
     const [player] = scenario.players;
@@ -44,6 +47,30 @@ test("every contract YAML arranges its check's fixture: setup lines, the op play
     // The real subject sends op commands (`setblock`, `execute ... on vehicle`).
     assert.equal(player!.op, true, `${file}: the player is op`);
     assert.deepEqual(scenario.tags, contractTags(check), `${file}: tags`);
+  }
+});
+
+/** The arena floor and air lines `setupCommands` opens with: the whole arena, whatever the fixture holds. */
+const ARENA_FILL_LINES = 2;
+
+/** Fixtures with an entity past the arena's edge: Mine Labs widens the box by its own rule around the entity, so their expected box keeps it. */
+const ENTITY_PAST_ARENA_EDGE: Readonly<Record<string, string>> = {
+  "boat-mount-refused.yaml": "an oak_boat at z -6.5 stands on block z -7, one past ARENA.radius 6",
+};
+
+test("every contract YAML's snapshot box is its own arena's: the template's reset does not widen it", { timeout: 60_000 }, async () => {
+  for (const file of readdirSync(SCENARIOS)) {
+    const loaded = await loadScenario(path.join(SCENARIOS, file));
+    const { region } = compileScenario(loaded);
+    const arena = setupCommands(contractCheckNamed(loaded.params!.check as string).fixture).setup.slice(0, ARENA_FILL_LINES);
+    // The bare arena: the same world, player and template, with nothing but the arena's two fills (no reset), and only the entities past the arena's edge.
+    const entities = file in ENTITY_PAST_ARENA_EDGE ? loaded.entities : [];
+    const { region: bare } = compileScenario({ ...loaded, setup: arena, reset: [], entities });
+    assert.deepEqual(region, bare, `${file}: the snapshot box is wider than the arena's`);
+    if (file in ENTITY_PAST_ARENA_EDGE) {
+      const { region: withoutEntities } = compileScenario({ ...loaded, setup: arena, reset: [], entities: [] });
+      assert.notDeepEqual(region, withoutEntities, `${file}: listed as widened by an entity (${ENTITY_PAST_ARENA_EDGE[file]}) but its box is the arena's: drop it from the list`);
+    }
   }
 });
 

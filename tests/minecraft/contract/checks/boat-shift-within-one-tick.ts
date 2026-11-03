@@ -26,13 +26,20 @@ export const boatShiftWithinOneTick: ContractCheck = {
   withoutRuntime: true,
   async run(subject) {
     const { bot } = subject;
-    const boat = await mountBoat(subject);
+    const { boat } = await mountBoat(subject);
+    const pressesStartedAt = subject.now();
     for (let press = 0; press < QUICK_PRESSES; press += 1) {
       writeShiftKey(bot, true);
       writeShiftKey(bot, false);
     }
+    // Written in one go the client takes ~0 ms: a red that reads 0 is not a client stalled between two writes, so the server's tick fell between its reads of them.
+    const writtenInMs = subject.now() - pressesStartedAt;
     const heard = await listenWhileSeated(subject, boat);
-    assert.equal(await subject.seatedOnServer(boat), true, "the server let her off a shift pressed and released with no tick between");
+    assert.equal(
+      await subject.seatedOnServer(boat),
+      true,
+      `the server let her off a shift pressed and released with no tick between (the ${QUICK_PRESSES} presses were written over ${writtenInMs} ms)`,
+    );
     assert.deepEqual(heard, { positions: 0, listsWithoutHer: 0, physicsTicks: 0 }, `the client heard of a get-off: ${JSON.stringify(heard)}`);
     assert.equal(bot.vehicle?.id, boat.id);
     const listeningAfterHold = listenWhileSeated(subject, boat);

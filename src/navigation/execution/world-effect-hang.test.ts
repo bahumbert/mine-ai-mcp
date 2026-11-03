@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld } from "../../test-support/navigation.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { airMatcher, stateMatcher } from "../movements/movement.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { executeWorldEffect } from "./world-effect.js";
@@ -16,7 +17,7 @@ test("a world effect whose completion never settles still returns after its canc
   const position = { x: 0, y: 64, z: 0 };
   world.load(position, { stateId: 1 });
   const ledger = new ExpectedMutationLedger();
-  const unsubscribe = world.subscribe((change) => ledger.classify(change, new Set(), Date.now()));
+  const unsubscribe = world.subscribe((change) => ledger.classify(change, new Set(), monotonicNow()));
   const bot = new FakeNavigationBot();
   bot.startEffect = () => ({ issued: true, completion: new Promise(() => {}), cancel: () => {} });
   const abort = new AbortController();
@@ -29,7 +30,7 @@ test("a world effect whose completion never settles still returns after its canc
       token: { runId: "run", planId: "plan", stepId: "break", attempt: 1 },
       operation: { kind: "break", position, expectedStateId: 1, toolType: null, brings: [] },
       targets: [{ position, before: stateMatcher(1), after: airMatcher }],
-      deadlineMs: Date.now() + 60_000,
+      deadlineMs: monotonicNow() + 60_000,
     });
     let settled: Awaited<typeof pending> | undefined;
     void pending.then((outcome) => (settled = outcome));

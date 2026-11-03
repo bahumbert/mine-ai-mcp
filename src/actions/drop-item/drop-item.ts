@@ -1,3 +1,4 @@
+import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
 import { sleepMs } from "../../utils/wall-timers.js";
 import { dropCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
@@ -288,7 +289,7 @@ async function settleAfterTosses(
     ? rememberDiscards(bot, progress.entityBaseline, discarded)
     : new Set<number>();
 
-  const tossedAt = Date.now();
+  const tossedAt = monotonicNow();
   const droppedAt = progress.droppedAt ?? { ...bot.entity.position };
   progress.droppedAt = droppedAt;
   const anyDropped = dropped.some((entry) => entry.dropped > 0 && !entry.error);
@@ -305,7 +306,7 @@ async function settleAfterTosses(
   // items landed, and only then wait out the check.
   if (anyDropped && request.destination.kind === "ground") await walkAwayFromToss(bot, droppedAt, dependencies, context);
   if (request.destination.kind !== "player" && anyDropped) {
-    const waitMs = Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - (Date.now() - tossedAt));
+    const waitMs = Math.max(0, (dependencies.pickupWaitMs ?? PICKUP_WAIT_MS) - elapsedSince(tossedAt));
     await netOfPickedUp(bot, dropped, progress.hole, waitMs, context);
   }
 }

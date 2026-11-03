@@ -7,6 +7,7 @@ import { decideBreathResponse, needsBreathResponse } from "../policy/environment
 import { swimmingRoof } from "../positioning/swim-escape.js";
 import { surface } from "../responses/breath.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 
 /** What the runner reports as the body's owner while the bot surfaces for air. */
 export const BREATH_REFLEX = "breath_reflex" as const;
@@ -41,7 +42,7 @@ function surfacingProgress(bot: Bot, mark: (reason: string) => void): () => void
 }
 
 /** The breathing response owns only its registration; runtime attaches idle buoyancy separately. */
-export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop: () => number | null = () => null, now: () => number = Date.now): AsyncDisposable {
+export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop: () => number | null = () => null, now: () => number = monotonicNow): AsyncDisposable {
   // Where and when the reflex recently finished a surfacing that resumed the action (live 2026-10-10 run 7: one navigate
   // dived again from the same x/z for 40 minutes, 120 times).
   let firings: { x: number; z: number; at: number }[] = [];

@@ -13,6 +13,7 @@ import {
 } from "../../../navigation/index.js";
 import { CLIMBABLES } from "../../../navigation/mineflayer/world.js";
 import type { MovementPolicy } from "../../../navigation/movements/policy.js";
+import { monotonicNow } from "../../../utils/index.js";
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import {
   cloudExposure,
@@ -133,7 +134,7 @@ export class EndCombat {
     let shelterFailure: string | null = null;
     if (this.canShelter()) {
       const origin = bot.entity.position.floored();
-      const deadline = Date.now() + this.policy().combat.evade_timeout_ms;
+      const deadline = monotonicNow() + this.policy().combat.evade_timeout_ms;
       const unsafe = () => {
         const floor = bot.blockAt(origin.offset(0, -1, 0));
         if (!fullProtectionBlock(floor) || !DRAGON_PROTECTION_BLOCKS.includes(floor!.name) ||
@@ -141,7 +142,7 @@ export class EndCombat {
           return "Dragon shelter lost its supported cell.";
         if (dragonExposure(bot, bot.entity.position) > 0 || incomingDragonFireballs(bot).length || perchedDragonContact(bot, bot.entity.position))
           return "Dragon breath, projectile or perched contact makes the shelter unsafe.";
-        if (Date.now() >= deadline && !enclosedInPlace(bot, DRAGON_PROTECTION_BLOCKS))
+        if (monotonicNow() >= deadline && !enclosedInPlace(bot, DRAGON_PROTECTION_BLOCKS))
           return "Dragon shelter construction exhausted the escape window.";
         return null;
       };
@@ -173,7 +174,7 @@ export class EndCombat {
       name: "dragon_evade",
       scope: `cell:${bot.entity.position.floored()}`,
       unit: "milliseconds",
-      measure: Date.now,
+      measure: monotonicNow,
       limit: maximumMs,
       exhaustion: "Return exhausted End escape; changed clouds and interrupted routes do not renew the attempt.",
     });
@@ -1217,12 +1218,11 @@ export class EndCombat {
     let reportedReason: string | null = null, reportedAt = 0;
     const point = (p: Vec3) => ({ x: p.x, y: p.y, z: p.z });
     const emitDiagnostic = () => {
-      const now = Date.now();
+      const now = monotonicNow();
       if (reportedReason === diagnostic.reason && now - reportedAt < 2000) return;
-      reportedReason = diagnostic.reason;
-      reportedAt = now;
+      [reportedReason, reportedAt] = [diagnostic.reason, now];
       const head = perchedDragonHead(bot, dragon);
-      this.recordDecision({ boundary: "dragon_perch", targetId, atMs: now,
+      this.recordDecision({ boundary: "dragon_perch", targetId, atMs: Date.now(),
         ...diagnostic, stage: observation.stage, lastBlockerText: observation.blockedBy,
         feet: point(bot.entity.position), grounded: bot.entity.onGround, health: bot.health,
         nativePhase: dragonPhase(bot, dragon), dragonHealth: entityHealth(bot, dragon), dragonPosition: point(dragon.position),
@@ -1471,12 +1471,12 @@ export class EndCombat {
   /** A takeoff packet starts withdrawal; a supported, hazard-free interval ends it. */
   private async withdrawPerch(observation: PerchObservation, signal: AbortSignal): Promise<string | null> {
     observation.stage = "withdrawing";
-    const deadline = Date.now() + this.policy().combat.evade_timeout_ms;
+    const deadline = monotonicNow() + this.policy().combat.evade_timeout_ms;
     let clearTicks = 0;
     let triedPreparedDescent = false;
     while (clearTicks < 10) {
       signal.throwIfAborted();
-      if (Date.now() >= deadline) return "[PERCH_RETREAT_INCOMPLETE] Takeoff did not reach stable clear footing within the escape budget.";
+      if (monotonicNow() >= deadline) return "[PERCH_RETREAT_INCOMPLETE] Takeoff did not reach stable clear footing within the escape budget.";
       if (this.danger) {
         clearTicks = 0;
         const notch = observation.preparationTarget;
@@ -1488,7 +1488,7 @@ export class EndCombat {
             const moved = await this.move(exactBlockGoal(notch), signal,
               () => this.cloudedPassage(notch) !== null,
               { ...this.perchMovements(clouds), allowDigging: false, allowPlacing: false, scaffold: null },
-              Math.min(4000, deadline - Date.now()));
+              Math.min(4000, deadline - monotonicNow()));
             if (moved.kind === "arrived" && !this.danger) continue;
           }
         }

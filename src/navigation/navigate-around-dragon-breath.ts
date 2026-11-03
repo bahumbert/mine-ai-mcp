@@ -4,6 +4,7 @@
  */
 import type { Bot } from "mineflayer";
 import { ExecutionScope } from "../execution/execution-scope.js";
+import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { cloudExposure, readDragonCloudHazards, type DragonCloud } from "../world/dragon-hazards.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import { runNavigation, type Navigate, type NavigationResult } from "./navigate.js";
@@ -95,7 +96,7 @@ export const navigateAroundDragonBreath = async (context: DragonBreathRouteConte
   const reportProgress = (event: NavigationEvent) => reportNavigationProgress(execution, event);
   context.listeners.add(reportProgress);
   observations.defer(() => context.listeners.delete(reportProgress));
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   for (;;) {
     await execution.checkpoint(options.signal);
     context.requireOpen();
@@ -106,7 +107,7 @@ export const navigateAroundDragonBreath = async (context: DragonBreathRouteConte
       runNavigation(navigator, {
         ...options,
         timeoutMs:
-          options.timeoutMs === undefined ? undefined : Math.max(0, options.timeoutMs - (Date.now() - startedAt)),
+          options.timeoutMs === undefined ? undefined : Math.max(0, options.timeoutMs - elapsedSince(startedAt)),
         movements: movementsAvoidingDragonBreath(options.movements, clouds, start),
         stopSignal: AbortSignal.any([breath.signal, ...(options.stopSignal ? [options.stopSignal] : [])]),
       }),
@@ -122,7 +123,7 @@ export const navigateAroundDragonBreath = async (context: DragonBreathRouteConte
         !options.stopSignal?.aborted
       )
         continue;
-      return { ...result, elapsedMs: Date.now() - startedAt };
+      return { ...result, elapsedMs: elapsedSince(startedAt) };
     } finally {
       breath.stop();
       if (activeRoute.current === route) activeRoute.current = null;

@@ -23,6 +23,9 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/projectile-hit-bot.yaml", /exclusive/u],
   ["contract/scenarios/item-pickup-after-delay.yaml", /exclusive/u],
   ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
+  // A contract check that sleeps: the sleeping share and the night skip are the whole server's (a second sleeper, or a `time set` at another's trial, changes them).
+  ["contract/scenarios/bed-sleep-and-wake.yaml", /exclusive/u],
+  ["contract/scenarios/bed-refused-monster-near.yaml", /exclusive/u],
   // A contract check that measures server ticks from the wall clock: another lane's clone would stall the server thread under it.
   ["contract/scenarios/bow-draw-and-release.yaml", /exclusive/u],
   // A contract check that sets the server's tick rate while it runs.

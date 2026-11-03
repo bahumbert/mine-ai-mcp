@@ -4,7 +4,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
-import { build, BuildProgress, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
+import { createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { build, BuildProgress, BuildTargeting, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -535,4 +536,22 @@ test("a dig that came out just before the abort threw is counted in the progress
   const resumed = await build(bot, { ...physics, cells: cells([[2, 64, 0]]), removeWrongBlocks: true }, false, progress);
   assert.equal(resumed.status, "complete");
   assert.equal(resumed.dug, 1, "the resumed attempt reports the whole request's dig, once");
+});
+
+// Plan 2026-10-27-p1-monotonic-clock T4: the 250 ms cache of cell states is a window, so it counts monotonic time.
+test("the cell-state cache is refreshed 1 s later though the wall clock stepped back 0.8 s, and held for 100 ms though it stepped forward 1.2 s", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot, harness } = structureWorld({ clock });
+  using _timers = clock.install();
+  const targeting = new BuildTargeting(bot, { ...({} as BuildRequest), cells: cells([[2, 64, 0]]), removeWrongBlocks: false });
+  const kindOfCell = () => targeting.states().get(packKey(2, 64, 0))?.kind;
+  assert.notEqual(kindOfCell(), "correct");
+  harness.world.setCell(new Vec3(2, 64, 0), "cobblestone");
+  await clock.advance(1_000);
+  clock.stepWallClock(-800);
+  assert.equal(kindOfCell(), "correct", "a second of clock passed: the cache is stale");
+  harness.world.setCell(new Vec3(2, 64, 0), "air");
+  await clock.advance(100);
+  clock.stepWallClock(1_200);
+  assert.equal(kindOfCell(), "correct", "100 ms of clock: the cache still holds");
 });

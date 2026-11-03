@@ -12,12 +12,18 @@ import type { ScenarioContext } from "../scenario.ts";
 
 const paramsSchema = z.strictObject({ check: z.string().min(1) });
 
+/** The completion detail of a passing check: what it measured (its returned note) goes after "holds", so a batch's results can be read for it. */
+export function holdsDetail(name: string, note: string | void): string {
+  return note ? `${name} holds; ${note}` : `${name} holds`;
+}
+
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const check = contractCheckNamed(paramsSchema.parse(context.scenario.params).check);
+  let note: string | void;
   try {
-    await check.run(serverContractSubject(context.bot, context.arena));
+    note = await check.run(serverContractSubject(context.bot, context.arena));
   } catch (cause) {
     return { status: "failed", detail: `${check.name}: ${cause instanceof Error ? cause.message : String(cause)}` };
   }
-  return { status: "succeeded", detail: `${check.name} holds` };
+  return { status: "succeeded", detail: holdsDetail(check.name, note) };
 }

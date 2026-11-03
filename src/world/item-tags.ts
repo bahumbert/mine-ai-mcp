@@ -15,3 +15,11 @@ const lookup = tagLookup(SHIPPED);
 export function itemTagsOf(item: string, version: string): readonly string[] {
   return lookup(item, version);
 }
+
+/** The game's tag of what a bow or crossbow shoots (`arrow`, `spectral_arrow`, `tipped_arrow`). */
+const ARROWS_TAG = "arrows";
+
+/** Whether `item` is something a bow shoots in `version`; false where no tags are shipped for it. */
+export function isArrowItem(item: string, version: string): boolean {
+  return itemTagsOf(item, version).includes(ARROWS_TAG);
+}

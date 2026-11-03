@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import type { FakeServerOptions } from "../../../src/test-support/fake-bot/fake-server.ts";
 import { ZERO_ARENA, arenaFrame } from "../arena/frame.ts";
@@ -44,11 +45,28 @@ test("serverTicks gives up at the wall bound on a frozen server, whatever the ti
   assert.ok(waited >= 2_000 && waited < 2_100, `waited ${waited} ms for a 2000 ms bound`);
 });
 
-test("serverTicks on a server behind its schedule is bound by the wall: 5 ticks a second never reach 40 in 3 s", async () => {
+test("serverTicks on a server behind its schedule is bound by the stall: 5 ticks a second move the age every 4 s, which a 3 s stall bound does not hold and a 10 s one does", async () => {
   const { harness, subject } = subjectOn({ ticksPerSecond: 5 });
   using _installed = harness.clock.install();
   assert.equal(await subject.serverTicks(40, 3_000), false);
   assert.equal(await subject.serverTicks(40, 10_000), true);
+});
+
+test("serverTicks keeps waiting while the age keeps moving: 100 ticks at 8 a second take 12.5 s, past a 3 s stall bound", async () => {
+  const { harness, subject } = subjectOn({ ticksPerSecond: 8 });
+  using _installed = harness.clock.install();
+  const calledAt = subject.now();
+  assert.equal(await subject.serverTicks(100, 3_000), true);
+  assert.ok(subject.now() - calledAt > 10_000, `${subject.now() - calledAt} ms`);
+});
+
+test("serverTicks counts its waits as well as the clock: a clock that stops with a frozen server still ends it", async () => {
+  const { harness, subject } = subjectOn();
+  using _installed = harness.clock.install();
+  await subject.wait(1_500);
+  harness.server.stop();
+  const frozen = fakeContractSubject({ ...harness, clock: { ...harness.clock, now: () => 0 } }, arenaFrame(ZERO_ARENA));
+  assert.equal(await frozen.serverTicks(20, 2_000), false);
 });
 
 test("serverTicks before the first time packet counts from the first age the client holds", async () => {
@@ -64,6 +82,48 @@ test("serverTicks of zero ticks resolves true at once", async () => {
   const calledAt = subject.now();
   assert.equal(await subject.serverTicks(0, 1_000), true);
   assert.equal(subject.now(), calledAt);
+});
+
+test("summonItem, summonMob and launchFireball on the fake resolve with the entity once the server answered, whatever its lag or a stall of 1 s; clearFireballs once the client lost the ball", async () => {
+  const lagged = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), lagMs: 450 });
+  const stalled = createFakeBot({ clock: createFakeClock({ mode: "mocked" }) });
+  for (const harness of [lagged, stalled]) {
+    using _installed = harness.clock.install();
+    if (harness === stalled) {
+      harness.server.stop();
+      harness.clock.after(1_000, () => harness.server.resume());
+    }
+    const subject = fakeContractSubject(harness, arenaFrame(ZERO_ARENA));
+    const at = subject.world([0.5, -60, 0.5]);
+    const item = await subject.summonItem({ name: "cobblestone", count: 1 }, at, 0);
+    const mob = await subject.summonMob("zombie", at);
+    assert.equal(harness.bot.entities[item.id], item);
+    assert.equal(harness.bot.entities[mob.id], mob);
+    const ball = await subject.launchFireball(at.offset(4, 0.9, 0), new Vec3(-0.2, 0, 0));
+    assert.equal(harness.bot.entities[ball.id], ball, "launchFireball returned before the client had the ball");
+    await subject.clearFireballs();
+    assert.equal(harness.bot.entities[ball.id], undefined, "clearFireballs returned before the client lost the ball");
+  }
+});
+
+test("setBlock and hurtBot on the fake resolve once the client has the change, at a 450 ms answer lag", async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), lagMs: 450 });
+  using _installed = harness.clock.install();
+  const subject = fakeContractSubject(harness, arenaFrame(ZERO_ARENA));
+  const cell = subject.world([2, -60, 2]);
+  await subject.setBlock(cell, "gold_block");
+  assert.equal(harness.bot.blockAt(cell)?.name, "gold_block", "setBlock returned before the client had the block");
+  let hurt = false;
+  harness.bot.on("entityHurt", (entity) => void (entity === harness.bot.entity && (hurt = true)));
+  await subject.hurtBot(1, null);
+  assert.ok(hurt, "hurtBot returned before the client heard the hurt");
+});
+
+test("a server call on the fake rejects, saying the server did not answer, when the server stays stopped past the wall bound", async () => {
+  const { harness, subject } = subjectOn();
+  using _installed = harness.clock.install();
+  harness.server.stop();
+  await assert.rejects(subject.summonItem({ name: "cobblestone", count: 1 }, subject.world([0.5, -60, 0.5]), 0), /summonItem: the fake server had not answered after 3000 ms/);
 });
 
 test("serverGameTime on the fake leaves the clock to the caller: two calls 50 ms of the caller's wait apart read 1 tick apart", async () => {

@@ -9,6 +9,8 @@ export interface ServerReading {
   readonly shared: boolean;
   /** Can still grow into its heap: starting, a trial running on it, or its arrangement mutex queue holding an arrangement or a restore. An idle warm server stays where it is. */
   readonly busy: boolean;
+  /** Trials leased on the server now, those admitted in this pass included. */
+  readonly lanes: number;
   /** Null: no `tick query` answer yet. */
   readonly msptP95: number | null;
   readonly heapMb: number;
@@ -33,6 +35,8 @@ export interface AdmissionSample {
    * ahead reserves only its difference to a logged-in client, and a client booted ahead for a queued trial reserves its booted size.
    */
   readonly youngClientsMb?: number;
+  /** The template build's server while one runs (spec D11: counted as one more busy server, though it is not in the pool); absent otherwise. */
+  readonly templateBuild?: { readonly heapMb: number; readonly residentMb: number };
 }
 
 /** What has been admitted since the sample was read (the sample itself does not know). */
@@ -84,7 +88,7 @@ export interface AdmissionRequest {
   readonly timingRunning?: number;
 }
 
-export type AdmissionBound = "memory" | "cpu" | "target" | "server" | "new-server-per-sample";
+export type AdmissionBound = "memory" | "cpu" | "target" | "server" | "new-server-per-sample" | "fresh-server";
 
 export type AdmissionDecision =
   | { readonly admit: true; readonly server: string | "new"; readonly reserveMb: number; readonly spread?: true }
@@ -95,7 +99,7 @@ export function initialAdmissionState(config: ScenarioServerConfig): AdmissionSt
 }
 
 /** What a server will take from MemAvailable before it is full: its heap and overhead less what it already holds. */
-function growthMb(server: ServerReading, config: ScenarioServerConfig): number {
+function growthMb(server: Pick<ServerReading, "heapMb" | "residentMb">, config: ScenarioServerConfig): number {
   return Math.max(0, server.heapMb + config.serverOverheadMb - server.residentMb);
 }
 
@@ -106,7 +110,8 @@ function growthMb(server: ServerReading, config: ScenarioServerConfig): number {
  * next reading, so the ledger holds the growth from there and the tally keeps only the client.
  */
 export function ledgerMb(sample: AdmissionSample, tally: AdmissionTally, config: ScenarioServerConfig): number {
-  const serversStillGrowing = sample.servers.reduce((sum, server) => sum + (server.busy ? growthMb(server, config) : 0), 0);
+  const poolGrowing = sample.servers.reduce((sum, server) => sum + (server.busy ? growthMb(server, config) : 0), 0);
+  const serversStillGrowing = poolGrowing + (sample.templateBuild ? growthMb(sample.templateBuild, config) : 0);
   return sample.memAvailableMb - serversStillGrowing - (sample.youngClientsMb ?? sample.youngClients * config.clientMemMb) - tally.reservedMb;
 }
 
@@ -135,6 +140,15 @@ function serverRefusal(reading: ServerReading | undefined, id: string, state: Ad
   const limit = Math.floor(config.rssFull * (reading.heapMb + config.serverOverheadMb));
   if (reading.residentMb >= limit) return `${id} resident ${reading.residentMb} MB reached ${limit} MB, it takes no more lanes`;
   return null;
+}
+
+/**
+ * Why a shared server with no tick sample yet takes no more lanes, or null: `msptAdmitMs` cannot hold back a server it has not read, so its
+ * lanes are bounded until a sample shows its P95 (the trial waits for that sample; a new server would only add a second burst).
+ */
+function freshServerRefusal(reading: ServerReading, config: ScenarioServerConfig): string | null {
+  if (!reading.shared || reading.msptP95 !== null || reading.lanes < config.freshServerLanes) return null;
+  return `${reading.id} has no tick sample yet and ${reading.lanes} lanes, it takes ${config.freshServerLanes} lanes until a sample shows its tick time P95 under ${config.msptAdmitMs} ms`;
 }
 
 /** What the next trial of a shared server would wait for its arrangement turn: every queued trial's mutex time, and its own. */
@@ -204,11 +218,18 @@ export function decideAdmission(input: {
   const queueFull: ServerOffer[] = [];
   /** With servers spread, every candidate that fits competes on queue length; with 1 the first that fits takes the trial. */
   const fitting: ServerOffer[] = [];
+  /** Fresh servers at their lane bound: the trial waits for their first sample. */
+  const freshHeld: string[] = [];
   for (const id of request.candidates) {
     const reading = sample.servers.find(server => server.id === id);
     const refusal = serverRefusal(reading, id, state, config);
     if (refusal || !reading) {
       if (refusal) refusals.push(refusal);
+      continue;
+    }
+    const freshRefusal = freshServerRefusal(reading, config);
+    if (freshRefusal) {
+      freshHeld.push(freshRefusal);
       continue;
     }
     const reserveMb = reserveOn(reading, clientMb, config);
@@ -223,6 +244,8 @@ export function decideAdmission(input: {
     else fitting.push(offer);
   }
   if (fitting.length > 0) return shortestQueue(fitting);
+  // A warm server refused only for its arrangement queue still takes the trial below, as before T10; without one the trial waits for the sample.
+  if (freshHeld.length > 0 && queueFull.length === 0) return refusal("fresh-server", [...refusals, ...unaffordable, ...freshHeld].join("; "));
   if (tally.newServers >= 1) {
     if (queueFull.length > 0) return shortestQueue(queueFull);
     if (unaffordable.length > 0 && refusals.length === 0) return refusal("memory", unaffordable.join("; "), true);

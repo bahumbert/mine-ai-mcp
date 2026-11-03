@@ -9,7 +9,7 @@ import { REFLEX_PRIORITY } from "./priority.js";
 import { ReflexRegistration, type RegisteredReflex } from "./reflex-registration.js";
 
 export interface ReflexDriverOptions {
-  /** The wall clock the answered scopes and their expiries read; a test steps it. */
+  /** The monotonic clock the answered scopes' expiries are counted on (default `monotonicNow`); a test drives it. */
   readonly now?: () => number;
 }
 
@@ -19,7 +19,6 @@ export class ReflexDriver implements AsyncDisposable {
   readonly budgets = new Budgets();
   readonly #registrations = new Map<ReflexName, RegisteredReflex>();
   readonly #observers = new Set<(transition: SurvivalTransition) => void>();
-  readonly #now: () => number;
   #closed = false;
   #stopListening: (() => void) | null = null;
   #world = 0;
@@ -30,8 +29,7 @@ export class ReflexDriver implements AsyncDisposable {
     readonly runner: ActionRunner,
     options: ReflexDriverOptions = {},
   ) {
-    this.#now = options.now ?? Date.now;
-    this.answered = new Answered(this.#now);
+    this.answered = new Answered(options.now);
     this.#dimension = bot.game?.dimension;
     bot.on("death", this.#death);
     bot.on("game", this.#game);
@@ -96,7 +94,6 @@ export class ReflexDriver implements AsyncDisposable {
       answered: this.answered,
       publish: (transition) => this.#publish(transition),
       world: () => this.#world,
-      now: this.#now,
     });
     this.#registrations.set(definition.name, registration);
     // Register after shared packet/physics observers, so decisions use this tick's attribution.

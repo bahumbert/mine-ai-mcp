@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
-import { createFakeBot, entityBodyOf } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, entityBodyOf } from "../../../test-support/fake-bot/index.js";
 import { PerchObservation } from "./perch.js";
 import { PerchPreparation } from "./perch-preparation.js";
 
@@ -254,4 +254,22 @@ test("preparation reports breath inside its intended passage before attempting a
   assert.equal(result.attacks, 0);
   assert.match(result.reason!, /^\[PERCH_PASSAGE_CLOUDED\].*#43.*wait for cloud clearance/);
   assert.equal(result.perch?.blockedBy, result.reason);
+});
+
+test("perch timing counts monotonic time: a 0.8 s wall step back inside a 3 s perch leaves 3000, 1000 and 1000", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({ clock, dimension: "the_end", position: new Vec3(30, 64, 30) });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const health = bot.registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("health");
+  dragonAt(bot, new Vec3(0, 65, 0), 5, 200); // perched from the first observation
+  using observation = new PerchObservation(bot, 42);
+  await clock.advance(1_000);
+  clock.stepWallClock(-800);
+  (bot.entities[42]!.metadata as unknown[])[health] = 190;
+  bot.emit("physicsTick");
+  await clock.advance(2_000);
+  const timing = observation.timing;
+  assert.deepEqual([timing.elapsedMs, timing.firstDamageMs, timing.firstDamageInPerchMs], [3_000, 1_000, 1_000]);
 });

@@ -7,7 +7,6 @@
  * placed; a held off-hand item makes it `unavailable` rather than swapped away from the bot. The same ask repairs a break
  * the server dropped: the client wrote air, the server kept the block.
  */
-import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import type { WorldAgeOptions } from "../../world/world-age.js";
@@ -18,7 +17,8 @@ import { setSneaking } from "./sneak.js";
 const TOP_FACE = 1;
 const OFF_HAND = 1;
 /** Mineflayer's one counter of interaction sequences: a second counter would collide with its pending placements. */
-const { nextInteractionSequence } = createRequire(import.meta.url)("mineflayer/lib/interaction_sequence.js") as {
+// A literal `require`: the setup's bundle follows it (see `src/world/crafting.ts`).
+const { nextInteractionSequence } = require("mineflayer/lib/interaction_sequence.js") as {
   nextInteractionSequence(bot: object): number | undefined;
 };
 

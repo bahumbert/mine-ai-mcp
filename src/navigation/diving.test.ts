@@ -443,3 +443,50 @@ test("the breathing stop ends once the server's clock has moved the refill time 
   assert.match(result.status === "stopped" ? result.reason : "", /Full air was not observed at the breathing stop/u);
   assert.equal(calls, 2);
 });
+
+// ── Durations read the monotonic clock: WSL steps its wall clock back about 2 s every 30 s (plan 2026-10-27-p1-monotonic-clock T4) ──
+test("a dive cancelled 200 ms in, after the wall clock stepped back 0.8 s, reports 200 ms and never a negative duration", async () => {
+  const { world, bot, clock } = fixture({ mocked: true });
+  using _timers = clock.install();
+  const diving = new Diving(bot, world);
+  const startedAt = clock.now();
+  let cancelledAt = 0;
+  const run = diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async () => {
+    await clock.advance(200);
+    clock.stepWallClock(-800);
+    cancelledAt = clock.now();
+    diving.cancel("takeover");
+    throw new Error("engine fault");
+  });
+  const result = await clock.settle(run, 1_000);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.elapsedMs, cancelledAt - startedAt);
+});
+
+test("the time left of a dive's timeout counts monotonic time across a wall-clock step in either direction", async () => {
+  for (const step of [-800, 1_200]) {
+    const { world, bot, breath, clock } = fixture({ mocked: true });
+    using _timers = clock.install();
+    const diving = new Diving(bot, world);
+    let calls = 0;
+    let resumedTimeout: number | undefined;
+    const run = diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }), timeoutMs: 3_000 }, async (request) => {
+      calls++;
+      if (calls === 1) {
+        await clock.advance(1_000);
+        clock.stepWallClock(step);
+        breath.setAirSupply(60);
+        bot.emit("physicsTick");
+        return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+      }
+      if (calls === 2) {
+        bot.entity.position.y = 63.5;
+        breath.setAirSupply(300);
+      } else resumedTimeout = request.timeoutMs;
+      return { status: "completed", elapsedMs: 0 };
+    });
+    await clock.settle(run, 30_000);
+    assert.equal(calls, 3, `step ${step}`);
+    assert.ok(resumedTimeout !== undefined && resumedTimeout <= 2_000 && resumedTimeout > 1_000, `step ${step}: ${resumedTimeout} ms left, wanted 2000 less the breathing stop`);
+  }
+});

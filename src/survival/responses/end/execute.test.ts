@@ -10,6 +10,8 @@ import {
   createFakeClock,
 } from "../../../test-support/fake-bot/index.js";
 import type { FootingRecovery } from "../footing.js";
+import { enclosedInPlace } from "../hide.js";
+import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
 
 import { PerchObservation } from "../../perception/combat/perch.js";
 
@@ -203,6 +205,133 @@ test("an ordinary scaffold blocking a resistant shelter sends retreat directly t
     .evade(new AbortController().signal), SETTLE_LIMIT_MS);
   assert.equal(result.outcome, "evaded");
   assert.equal(moved, true);
+});
+
+/**
+ * A dragon escape from a fireball that never arrives: every route takes 1000 ms of the installed clock, and the
+ * first steps the wall clock by `wallStepMs`. Returns what the escape budget lost between the first two routes
+ * (the `timeoutMs` they were given) and what the clock ran between them: equal when the budget counts clock time.
+ */
+async function escapeBudgetAcrossWallStep(wallStepMs: number): Promise<{ budgetLostMs: number; clockRunMs: number }> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({
+    dimension: "the_end", clock, position: new Vec3(0.5, 64, 0.5),
+    entities: { 7: { name: "dragon_fireball", position: new Vec3(0.5, 65, 30), velocity: new Vec3(0, 0, -1) } },
+  });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a budget started on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const routes: { timeoutMs: number; at: number }[] = [];
+  const navigation = { navigate: async ({ timeoutMs }: { timeoutMs?: number }) => {
+    routes.push({ timeoutMs: timeoutMs ?? NaN, at: clock.now() });
+    if (routes.length === 1) clock.stepWallClock(wallStepMs);
+    await clock.sleep(1_000);
+    return { status: "completed", elapsedMs: 1_000 };
+  } } as unknown as NavigationRuntime;
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .evade(new AbortController().signal), 60_000);
+  assert.equal(result.outcome, "stopped");
+  assert.match(result.reason!, /exhausted its 15000-millisecond/);
+  return { budgetLostMs: routes[0]!.timeoutMs - routes[1]!.timeoutMs, clockRunMs: routes[1]!.at - routes[0]!.at };
+}
+
+for (const wallStepMs of [-800, 1_200]) {
+  test(`the dragon escape budget counts monotonic time: a ${wallStepMs} ms wall step during a route changes none of its remaining time`, async () => {
+    const { budgetLostMs, clockRunMs } = await escapeBudgetAcrossWallStep(wallStepMs);
+    assert.ok(Math.abs(budgetLostMs - clockRunMs) <= 100, `the budget lost ${budgetLostMs} ms while the clock ran ${clockRunMs} ms`);
+  });
+}
+
+/** A perch retreat on a body that never lands, the wall clock stepped by `wallStepMs` after 1 s; how long the clock ran before it gave up. */
+async function perchRetreatDurationAcrossWallStep(wallStepMs: number): Promise<number> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({
+    dimension: "the_end", clock, position: new Vec3(100.5, 64, 0.5), // far from the dragon: no danger, so no escape route is asked for
+    entities: { 42: dragonAt(new Vec3(0, 68, 0), 6, { yaw: Math.PI / 2 }) },
+  });
+  using _installed = clock.install();
+  clock.stepWallClock(5_000);
+  const dragon = bot.entities[42]!;
+  using observation = new PerchObservation(bot, 42);
+  observation.swung(13);
+  Object.assign(dragon.metadata, { 9: 193, 16: 4 });
+  await clock.advance(50);
+  // The body leaves the ground once the retreat has begun and never lands: only the deadline ends it.
+  clock.after(100, () => { bot.entity.onGround = false; });
+  clock.after(1_000, () => clock.stepWallClock(wallStepMs));
+  const started = clock.now();
+  const navigation = { navigate: async () => ({ status: "failed", reason: "no route" }) } as unknown as NavigationRuntime;
+  // The request releases the body once the retreat has given up; it then waits for a landing, which comes late.
+  let gaveUpAt: number | null = null;
+  clock.after(20_000, () => { bot.entity.onGround = true; });
+  const result = await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, (facts) => {
+    if ((facts as { reason?: string }).reason === "request_releasing") gaveUpAt ??= clock.now();
+  }).perch(42, new AbortController().signal, observation), 60_000);
+  assert.match(result.reason!, /PERCH_RETREAT_INCOMPLETE.*within the escape budget/);
+  return gaveUpAt! - started;
+}
+
+for (const wallStepMs of [-800, 1_200]) {
+  test(`the perch retreat deadline counts monotonic time: a ${wallStepMs} ms wall step leaves it at 15 s`, async () => {
+    const tookMs = await perchRetreatDurationAcrossWallStep(wallStepMs);
+    assert.ok(tookMs >= 15_000 && tookMs < 15_200, `the retreat gave up after ${tookMs} ms of clock, not at its 15000 ms deadline`);
+  });
+}
+
+/**
+ * The shelter window is 15 s of the clock. The wall clock steps 20 s back before the build (a deadline taken on it
+ * lands before the monotonic now) and 40 s forward 200 ms in (a check read on it lands past the monotonic deadline);
+ * the build takes 550 ms of clock, so the second step must land with the shelter still open.
+ */
+test("the dragon shelter window counts monotonic time: wall steps of -20 s then +40 s do not end the build", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({ dimension: "the_end", clock, position: new Vec3(6.5, 63, 1.5),
+    cells: { "6,62,1": "end_stone" }, carried: { end_stone: 20 },
+    entities: { 42: dragonAt(new Vec3(0, 67, 0), 4) } });
+  using _installed = clock.install();
+  clock.stepWallClock(-20_000);
+  let openAtSecondStep: boolean | null = null;
+  clock.after(200, () => {
+    openAtSecondStep = !enclosedInPlace(bot, DRAGON_PROTECTION_BLOCKS);
+    clock.stepWallClock(40_000);
+  });
+  const navigation = { navigate: async () => ({ status: "failed", reason: "no route" }) } as unknown as NavigationRuntime;
+  let ended: { state?: unknown; error?: unknown } = {};
+  await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+    const record = facts as { response?: string; state?: unknown };
+    if (record.response === "dragon_shelter" && record.state !== "started") ended = record;
+  }).evade(new AbortController().signal), 120_000);
+  assert.equal(openAtSecondStep, true, "the build finished before the second wall step: move the step earlier");
+  assert.equal(ended.state, "held", `the shelter ended as ${String(ended.state)}: ${String(ended.error)}`);
+});
+
+/** A perch retreat that tries the prepared descent with the wall clock stepped by `wallStepMs`: the `timeoutMs` that route was given. */
+async function preparedDescentTimeoutAcrossWallStep(wallStepMs: number): Promise<number | undefined> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({
+    dimension: "the_end", clock, position: new Vec3(6.5, 64, 0.5),
+    entities: { 42: dragonAt(new Vec3(0, 68, 0), 6, { yaw: Math.PI / 2 }) },
+  });
+  using _installed = clock.install();
+  clock.stepWallClock(wallStepMs);
+  using observation = new PerchObservation(bot, 42);
+  observation.swung(13);
+  observation.preparationTarget = new Vec3(30, 64, 0);
+  observation.preparedPosition = new Vec3(30.5, 64, 0.5);
+  Object.assign(bot.entities[42]!.metadata, { 9: 193, 16: 4 });
+  await clock.advance(50);
+  const timeouts: (number | undefined)[] = [];
+  const navigation = { navigate: async ({ timeoutMs }: { timeoutMs?: number }) => {
+    timeouts.push(timeoutMs);
+    return { status: "failed", reason: "no route" };
+  } } as unknown as NavigationRuntime;
+  await clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+    .perch(42, new AbortController().signal, observation), SETTLE_LIMIT_MS);
+  return timeouts[0];
+}
+
+test("the prepared descent is given 4 s of the retreat budget though the wall clock is 20 s ahead of it", async () => {
+  assert.equal(await preparedDescentTimeoutAcrossWallStep(20_000), 4_000);
 });
 
 test("takeoff observed during suspension still owes retreat, and failed retreat retains damage", async () => {

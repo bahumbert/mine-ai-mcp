@@ -16,11 +16,17 @@ const HOSTILE_CATEGORY = "Hostile mobs";
 export interface ContractArrangement {
   /** The YAML's `setup` lines, in order. */
   readonly setup: readonly string[];
+  /**
+   * Empty: a `reset` line widens Mine Labs' snapshot box (`setupRegion` reads it), so the template's 37 x 20 x 33 reset
+   * made each lane trial clone 106 477 blocks twice instead of the arena's 21 866. The restore clone puts the arena's
+   * blocks back.
+   */
+  readonly reset: readonly string[];
   readonly player: { readonly pos: readonly [number, number, number]; readonly inventory: readonly { item: string; count: number }[] };
   readonly entities: readonly { readonly type: string; readonly pos: readonly [number, number, number]; readonly nbt?: string }[];
 }
 
-/** Throws when a cell or the feet leave the arena: outside it the reset and the snapshot do not reach. */
+/** Throws when a cell or the feet leave the arena: outside it the arena's two fills do not reach. */
 function assertInArena(label: string, [x, y, z]: readonly number[]): void {
   const inside = Math.abs(x!) <= ARENA.radius && Math.abs(z!) <= ARENA.radius && y! >= ARENA.floorY && y! <= ARENA.airTopY;
   if (!inside) throw new Error(`${label} ${x},${y},${z} is outside the contract arena (radius ${ARENA.radius}, y ${ARENA.floorY}..${ARENA.airTopY})`);
@@ -65,6 +71,7 @@ export function setupCommands(fixture: ContractFixture): ContractArrangement {
       ...containerLines(fixture),
       ...worldLines,
     ],
+    reset: [],
     player: { pos: fixture.position, inventory: Object.entries(fixture.carried).map(([item, count]) => ({ item, count })) },
     entities: (fixture.entities ?? []).map((entity) => {
       const nbt = entityNbt(entity);

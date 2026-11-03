@@ -29,9 +29,18 @@ const RELEASE_SHIFT = 1;
 /** The server moves a seated rider's client to the boat, this far below its feet (-60.4125 for a boat at -60: contract check `boat-broken-by-attack`). */
 const SEAT_BELOW_BOAT = -0.4125;
 
-/** The client's side of a confirmed mount: Mineflayer's `set_passengers` handler (`entities.js:794-811`), and the rider's own entity at the seat. */
-function seatOnClient(bot: FakeBot, vehicle: Entity): void {
-  bot.entity.position.set(vehicle.position.x, vehicle.position.y + SEAT_BELOW_BOAT, vehicle.position.z);
+/** The seat of `vehicle`: where the server puts her, below its feet. */
+function seatOf(vehicle: Entity): Vec3 {
+  return vehicle.position.offset(0, SEAT_BELOW_BOAT, 0);
+}
+
+/**
+ * The client's side of a confirmed mount: Mineflayer's `set_passengers` handler (`entities.js:794-811`). The rider's own entity is put at the
+ * seat unless a `position` packet did it before (`atSeat`): the handler does not move her, so what the physics did since stays.
+ */
+function seatOnClient(bot: FakeBot, vehicle: Entity, atSeat: boolean): void {
+  const seat = seatOf(vehicle);
+  if (!atSeat) bot.entity.position.set(seat.x, seat.y, seat.z);
   bot.entity.vehicle = vehicle;
   vehicle.passengers.push(bot.entity);
   bot.vehicle = vehicle;
@@ -73,15 +82,30 @@ function answerVehicleMove(bot: FakeBot, server: FakeServer, move: VehicleMove, 
   bot.emit("entityMoved", boat);
 }
 
-/** The server seats the rider on a use of a vehicle in reach with a seat free, and tells her with the passenger list. */
-function answerMount(bot: FakeBot, server: FakeServer, target: number): void {
+/**
+ * The server seats the rider on a use of a vehicle in reach with a seat free, and tells her with the passenger list. With a seat lead
+ * (`FakeServerOptions.seatPositionLeadTicks`) it first sends her the seat as a `position` packet, which restarts her physics, and the list
+ * comes that many server ticks later.
+ */
+function answerMount(bot: FakeBot, server: FakeServer, target: number, seatPositionLeadTicks: number): void {
   const vehicle = bot.entities[target];
   if (vehicle === undefined || server.ridersOf(target).length >= BOAT_SEATS || server.ridersOf(target).includes(bot.entity.id) || !inEntityReach(bot, server, vehicle)) return;
   server.seatRider(target, bot.entity.id);
-  // Mineflayer's handler for the list runs before any other listener of the packet: the client is seated when the list is heard.
-  const list = listAfterSeating(server, vehicle, bot.entity.id);
-  seatOnClient(bot, vehicle);
-  bot._client.emit("set_passengers", list);
+  const sendList = () => {
+    // Mineflayer's handler for the list runs before any other listener of the packet: the client is seated when the list is heard.
+    const list = listAfterSeating(server, vehicle, bot.entity.id);
+    seatOnClient(bot, vehicle, seatPositionLeadTicks > 0);
+    bot._client.emit("set_passengers", list);
+  };
+  if (seatPositionLeadTicks <= 0) return sendList();
+  server.sendPosition(seatOf(vehicle));
+  let ticksLeft = seatPositionLeadTicks;
+  const stopCounting = onServerTick(server, () => {
+    ticksLeft -= 1;
+    if (ticksLeft > 0) return;
+    stopCounting();
+    sendList();
+  });
 }
 
 /**
@@ -110,15 +134,15 @@ export function seatStartingPassengers(bot: FakeBot, server: FakeServer, vehicle
 }
 
 /** Give `bot` `mount`, `dismount` and the server's answer to the shift and to the rider's `vehicle_move`. */
-export function attachFakeVehicle(bot: FakeBot, parts: { server: FakeServer }): void {
-  const { server } = parts;
+export function attachFakeVehicle(bot: FakeBot, parts: { server: FakeServer; seatPositionLeadTicks: number }): void {
+  const { server, seatPositionLeadTicks } = parts;
   const yaws = new Map<number, number>();
   server.onPacket("vehicle_move", (data) => server.answer(() => answerVehicleMove(bot, server, data as VehicleMove, yaws)));
   bot.vehicle = null; // the entity's own `vehicle` starts null (prismarine-entity)
   bot.mount = (target) => bot._client.write("use_entity", { target: target.id, mouse: 0, sneaking: false });
   server.onPacket("use_entity", (data) => {
     const { target, mouse } = data as { target: number; mouse: number };
-    if (mouse === 0) server.answer(() => answerMount(bot, server, target));
+    if (mouse === 0) server.answer(() => answerMount(bot, server, target, seatPositionLeadTicks));
   });
   // The shift key is a state the server reads at its ticks: only a press still down at one lets her off.
   let shiftDown = false;

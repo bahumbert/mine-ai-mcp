@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { laneOf } from "../arena/lanes.ts";
 import { loadAllScenarios } from "../arena/all-scenarios.ts";
 import { FRESH_SERVER_GAMERULES } from "../arena/gamerule-defaults.ts";
 import { settingsOf } from "../arena/settings.ts";
+import { CLIENT_HOST_PROTOCOL } from "../client-boot-marker.ts";
 import { shiftScenario } from "../arena/shift-scenario.ts";
 import { changesWorldDuringTrial, gameruleNamesOf, isTimingTrial, parseGameruleAnswer, placeScenario, reservePlacement, runsOurClientHost, type ArenaPorts } from "./placement.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
@@ -41,7 +42,7 @@ test("the probe shift uses lane 1 and a refusal becomes a server of its own with
   const refusing: ArenaPorts = { ...accepting, shiftScenario: (_scenario, lane) => { probed = lane.index; return { ok: false, reason: "world.type is default" }; } };
   const placement = placeScenario(fixtureScenario(10, "nat"), {}, refusing);
   assert.equal(probed, laneOf(1).index);
-  assert.deepEqual(placement, { kind: "own", key: "own:world-of-nat", reason: "world.type is default", reusable: true });
+  assert.deepEqual(placement, { kind: "own", key: "own:world-of-nat|key-of-nat", reason: "world.type is default", reusable: true });
 });
 
 test("a refused scenario that cannot be reset is not reusable", () => {
@@ -65,20 +66,47 @@ test("changesWorldDuringTrial finds a settings verb at the head of a command or 
   assert.equal(changesWorldDuringTrial(withCommands(base, "reset", ["fill 0 -60 0 1 -60 1 air"])), false);
 });
 
-test("a scenario whose settings cannot be read is placed on a server of its own", () => {
-  const broken: ArenaPorts = { ...accepting, settingsOf: () => { throw new Error("odd rule"); } };
-  const placement = placeScenario(fixtureScenario(10), {}, broken);
+// One world, real settings: only the server-wide values in `setup` tell two refused scenarios apart.
+const sameWorldRefusing: ArenaPorts = { ...accepting, settingsOf, worldCompatibilityKey: () => "one-world", shiftScenario: () => ({ ok: false, reason: "tagged 'exclusive'" }) };
+
+function withSetup(scenario: Scenario, setup: string[]): Scenario {
+  return { ...scenario, setup: [...scenario.setup, ...setup] };
+}
+
+function ownOf(placement: ReturnType<typeof placeScenario>): Extract<ReturnType<typeof placeScenario>, { kind: "own" }> {
   assert.equal(placement.kind, "own");
-  assert.match(placement.kind === "own" ? placement.reason : "", /odd rule/u);
-});
+  return placement as Extract<ReturnType<typeof placeScenario>, { kind: "own" }>;
+}
+
+// The two ways a scenario gets a server of its own: the shift refuses it, or its client cannot use a lane.
+const OWN_PATHS: readonly { readonly what: string; readonly shape: (scenario: Scenario) => Scenario }[] = [
+  { what: "refused by the shift", shape: scenario => scenario },
+  { what: "with a client that cannot use a lane", shape: scenario => withClient(scenario, { command: "node" }) },
+];
+const brokenSettings: ArenaPorts = { ...accepting, settingsOf: () => { throw new Error("odd rule"); } };
+
+for (const { what, shape } of OWN_PATHS) {
+  test(`scenarios of one world ${what}: another tick rate in setup (8, 8.5, none) gives another own key, the same settings share a reusable one`, () => {
+    const keyOf = (name: string, setup: string[]): string => ownOf(placeScenario(shape(withSetup(fixtureScenario(10, name), setup)), FRESH_SERVER_GAMERULES, sameWorldRefusing)).key;
+    assert.equal(new Set([keyOf("a", ["tick rate 8"]), keyOf("a", ["tick rate 8.5"]), keyOf("a", [])]).size, 3, "the next trial of the plain key must not inherit a slow server");
+    assert.equal(keyOf("a", ["tick rate 8"]), keyOf("b", ["tick rate 8"]));
+    assert.equal(ownOf(placeScenario(shape(fixtureScenario(10)), FRESH_SERVER_GAMERULES, sameWorldRefusing)).reusable, true);
+  });
+
+  test(`a scenario ${what} whose settings cannot be read gets a server of its own that is not reusable, with the reason`, () => {
+    const placement = ownOf(placeScenario(shape(fixtureScenario(10)), {}, brokenSettings));
+    assert.equal(placement.reusable, false);
+    assert.equal(placement.key, "own:world-of-demo", "no settings to key by, and a server that stops after its trial needs no match");
+    assert.match(placement.reason, /odd rule|arena frame/u);
+  });
+}
 
 function withClient(scenario: Scenario, client: Partial<Scenario["client"]>): Scenario {
   return { ...scenario, client: { ...scenario.client, ...client } };
 }
 
 function ownReason(placement: ReturnType<typeof placeScenario>): string {
-  assert.equal(placement.kind, "own");
-  return placement.kind === "own" ? placement.reason : "";
+  return ownOf(placement).reason;
 }
 
 test("a legacy scenario whose client never reads the arena frame gets a server of its own with the reason, whether or not the shift would accept it", async () => {
@@ -172,3 +200,53 @@ test("only our client host is booted ahead: it is the one that says when it boot
   assert.equal(runsOurClientHost({ ...scenario, client: { ...scenario.client, command: "node" } }), false, "another runner never writes the booted line");
   assert.equal(runsOurClientHost({ ...scenario, client: { ...scenario.client, args: [] } }), false, "no entry file to check");
 });
+
+// A second source root: another worktree, or a snapshot of one (plan 2026-10-30-scenario-clients-ext4 T1, spec D8).
+function inSecondRoot(files: Record<string, string>, body: (root: string) => void): void {
+  const folder = mkdtempSync(path.join(tmpdir(), "placement-root2-"));
+  try {
+    const root = path.join(folder, "root2");
+    for (const [relative, text] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+      writeFileSync(path.join(root, relative), text);
+    }
+    body(root);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+const OTHER_ROOT_HOST = {
+  "bun.lock": "",
+  "tests/minecraft/client-host.ts": "",
+  "tests/minecraft/client-boot-marker.ts": `export const CLIENT_HOST_PROTOCOL = ${CLIENT_HOST_PROTOCOL};\n`,
+};
+
+test("our client host in another source root is our client host: the scenario gets a lane", () => {
+  inSecondRoot(OTHER_ROOT_HOST, root => {
+    const scenario = withClient(fixtureScenario(10), { cwd: path.join(root, "tests/minecraft"), args: ["client-host.ts", "drivers/bot-contract.ts"] });
+    assert.equal(runsOurClientHost(scenario), true);
+    assert.equal(placeScenario(scenario, {}, accepting).kind, "lane");
+  });
+});
+
+const MARKER = "tests/minecraft/client-boot-marker.ts";
+const HOST_FILE = "tests/minecraft/client-host.ts";
+const REFUSED_OTHER_ROOT_HOSTS: readonly { readonly what: string; readonly files: Record<string, string>; readonly cwd: string; readonly entry: string; readonly reason: RegExp }[] = [
+  { what: "the legacy client host", files: { ...OTHER_ROOT_HOST, "scenarios/src/client-host.ts": "" }, cwd: "scenarios", entry: "src/client-host.ts", reason: /does not read the arena frame \(MINE_AI_ARENA\)/u },
+  { what: "a client host with no bun.lock above it", files: { [HOST_FILE]: "" }, cwd: "tests/minecraft", entry: "client-host.ts", reason: /no bun\.lock in any parent directory/u },
+  { what: "a host that speaks another protocol", files: { ...OTHER_ROOT_HOST, [MARKER]: "export const CLIENT_HOST_PROTOCOL = 999;\n" }, cwd: "tests/minecraft", entry: "client-host.ts", reason: new RegExp(`its client host speaks protocol 999, the daemon ${CLIENT_HOST_PROTOCOL}; update that worktree`, "u") },
+  { what: "a host with no marker file", files: { "bun.lock": "", [HOST_FILE]: "" }, cwd: "tests/minecraft", entry: "client-host.ts", reason: /no CLIENT_HOST_PROTOCOL stamp.*client-boot-marker\.ts.*is missing or holds none.*update that worktree/u },
+  { what: "a host whose marker holds no stamp", files: { "bun.lock": "", [HOST_FILE]: "", [MARKER]: "export const CLIENT_BOOTED_MESSAGE = 'x';\n" }, cwd: "tests/minecraft", entry: "client-host.ts", reason: /no CLIENT_HOST_PROTOCOL stamp/u },
+  { what: "a host whose marker mentions the stamp only in a comment", files: { ...OTHER_ROOT_HOST, [MARKER]: `// was CLIENT_HOST_PROTOCOL = ${CLIENT_HOST_PROTOCOL}\nexport const CLIENT_HOST_PROTOCOL = 999;\n` }, cwd: "tests/minecraft", entry: "client-host.ts", reason: /speaks protocol 999/u },
+];
+
+for (const { what, files, cwd, entry, reason } of REFUSED_OTHER_ROOT_HOSTS) {
+  test(`${what} of another source root gets a server of its own, with the reason`, () => {
+    inSecondRoot(files, root => {
+      const scenario = withClient(fixtureScenario(10), { cwd: path.join(root, cwd), args: [entry] });
+      assert.equal(runsOurClientHost(scenario), false);
+      assert.match(ownReason(placeScenario(scenario, {}, accepting)), reason);
+    });
+  });
+}

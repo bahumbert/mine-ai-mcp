@@ -2,6 +2,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { BlockPosition } from "../navigation/world/world.js";
+import { monotonicNow } from "../utils/monotonic-clock.js";
 import { droppedItemName, isItemEntity } from "./item-pickup.js";
 
 /** Pits remembered per bot; the oldest is forgotten past it. */
@@ -31,7 +32,7 @@ const samePit = (pit: SealedPit, bottom: BlockPosition, dimension: string) =>
 const pitsHere = (bot: Bot): SealedPit[] => (pitsOf.get(bot) ?? []).filter((pit) => pit.dimension === dimensionOf(bot));
 
 /** Remember a pit plugged in both cells; the 33rd forgets the oldest. */
-export function rememberSealedPit(bot: Bot, bottom: BlockPosition, now = Date.now()): void {
+export function rememberSealedPit(bot: Bot, bottom: BlockPosition, now = monotonicNow()): void {
   forgetEmptySealedPits(bot, now);
   const pits = pitsOf.get(bot) ?? [];
   const dimension = dimensionOf(bot);
@@ -71,7 +72,7 @@ function itemsInPits(bot: Bot, pits: readonly SealedPit[]): Map<SealedPit, numbe
  * Forget the pits seen empty: past their settle time, their cell loaded, the bot within the watch distance and no
  * dropped item in their column (the items despawned or were taken). A pit out of sight is kept.
  */
-export function forgetEmptySealedPits(bot: Bot, now = Date.now()): void {
+export function forgetEmptySealedPits(bot: Bot, now = monotonicNow()): void {
   const pits = pitsOf.get(bot);
   if (!pits?.length) return;
   const here = pitsHere(bot);
@@ -87,7 +88,7 @@ export function forgetEmptySealedPits(bot: Bot, now = Date.now()): void {
 }
 
 /** The dropped items lying in this bot's sealed pits: its own burials, never to be collected or swept again. */
-export function sealedPitItemIds(bot: Bot, now = Date.now()): ReadonlySet<number> {
+export function sealedPitItemIds(bot: Bot, now = monotonicNow()): ReadonlySet<number> {
   forgetEmptySealedPits(bot, now);
   return new Set([...itemsInPits(bot, pitsHere(bot)).values()].flat());
 }

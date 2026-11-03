@@ -1,6 +1,7 @@
 /** The boat checks' shared steps: a seat the server confirms, what each side hears for 40 server ticks, and the get-off after. */
 import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
+import type { Vec3 } from "vec3";
 import { getOff } from "../../../../src/actions/navigate/boat-get-off.ts";
 import type { ContractFixture } from "../checks.ts";
 import { answerArrives, afterClientTicks, serverQuiet } from "../server-answer.ts";
@@ -31,16 +32,28 @@ export function boatSummonedAt(subject: ContractSubject, summonedAtLocal: LocalP
   return boats.sort((a, b) => a.position.distanceTo(summonedAt) - b.position.distanceTo(summonedAt))[0];
 }
 
-/** Find the boat summoned at `summonedAt` (the seat fixture's by default), mount it, and check both sides have her seated. */
-export async function mountBoat(subject: ContractSubject, summonedAt: LocalPoint = BOAT_SUMMONED_AT): Promise<Entity> {
+/**
+ * Find the boat summoned at `summonedAt` (the seat fixture's by default), mount it, and check both sides have her seated; the boat and the seat
+ * the server moved her to (the position it sent, null if it sent none). The server sends the seat as a `position` before the passenger list, and
+ * Mineflayer's physics run from the one to the other (`physics.js:448`, `entities.js:817`: three steps, 0.23 blocks lower), so `bot.entity.position`
+ * after the mount is not the seat.
+ */
+export async function mountBoat(subject: ContractSubject, summonedAt: LocalPoint = BOAT_SUMMONED_AT): Promise<{ readonly boat: Entity; readonly seat: Vec3 | null }> {
   const { bot } = subject;
   const boatOf = () => boatSummonedAt(subject, summonedAt);
   await answerArrives(subject, () => boatOf() !== undefined, "no oak_boat entity in view");
   const boat = boatOf()!;
-  bot.mount(boat);
-  await answerArrives(subject, () => bot.vehicle?.id === boat.id, "the mount was not confirmed (no passenger list)");
+  let seat: Vec3 | null = null;
+  const onForcedMove = () => void (seat = bot.entity.position.clone());
+  bot.on("forcedMove", onForcedMove);
+  try {
+    bot.mount(boat);
+    await answerArrives(subject, () => bot.vehicle?.id === boat.id, "the mount was not confirmed (no passenger list)");
+  } finally {
+    bot.off("forcedMove", onForcedMove);
+  }
   assert.equal(await subject.seatedOnServer(boat), true, "the server does not have her seated after the mount");
-  return boat;
+  return { boat, seat };
 }
 
 /** What the client heard while `LISTEN_TICKS` of world age passed. */

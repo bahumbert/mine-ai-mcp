@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ExecutionScope } from "../../../execution/execution-scope.js";
+import { createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { monotonicNow } from "../../../utils/index.js";
 import { outranksReflex } from "../priority.js";
 import { CombatExecution } from "./execution.js";
 import { CombatProgress } from "./progress.js";
@@ -40,7 +42,7 @@ test("a protected hold reports one phase and its full elapsed time across decisi
 test("phase cycling and completed swings cannot hide an idle engagement", async () => {
   using trace = new ExecutionScope({ bot: "CombatTest", operation: "combat", targetId: 42 });
   const execution = new CombatExecution(trace);
-  const start = execution.progress.snapshot().startedAt;
+  const start = monotonicNow();
   execution.progress.observe(20, start);
   for (let tick = 0; tick < 300; tick++) {
     await execution.run(tick % 2 ? "guard" : "hold", async () => execution.tick());
@@ -49,6 +51,34 @@ test("phase cycling and completed swings cannot hide an idle engagement", async 
   assert.equal(execution.snapshot(300).completedEffects, 300);
   assert.equal(execution.snapshot(300).progress.confirmedTargetHits, 0);
   assert.deepEqual(execution.snapshot(300).phaseHistory, { hold: 150, guard: 150 });
+});
+
+/** A `CombatProgress` started on an installed clock whose two readings are far apart, as live (uptime vs epoch). */
+function progressOnSteppedClock() {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const installed = clock.install();
+  clock.stepWallClock(5_000);
+  return { clock, installed, progress: new CombatProgress() };
+}
+
+test("CombatProgress counts monotonic time: a 0.8 s wall step back inside 3 s leaves elapsedMs and inactiveMs 3000", async () => {
+  const { clock, installed, progress } = progressOnSteppedClock();
+  using _installed = installed;
+  await clock.advance(3_000);
+  clock.stepWallClock(-800);
+  const snapshot = progress.snapshot();
+  assert.deepEqual([snapshot.elapsedMs, snapshot.inactiveMs], [3_000, 3_000]);
+  assert.equal(snapshot.startedAt, 1_005_000, "the published start stays the wall-clock time of day");
+});
+
+test("a healthy wait is noticed after 15 s of monotonic time though the wall clock stepped back 0.8 s", async () => {
+  const { clock, installed, progress } = progressOnSteppedClock();
+  using _installed = installed;
+  progress.observe(20);
+  await clock.advance(7_000);
+  clock.stepWallClock(-800);
+  await clock.advance(8_000);
+  assert.equal(progress.observe(20), "waiting");
 });
 
 test("replans, cell oscillation, guard refresh and healing do not reset objective inactivity", () => {

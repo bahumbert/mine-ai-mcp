@@ -18,7 +18,7 @@ import {
 } from "../../survival/index.js";
 import { Budgets } from "../../survival/state/budgets.js";
 import { readCombatItems } from "../../survival/weapons/equipment.js";
-import { waitForSignal, type Position3 } from "../../utils/index.js";
+import { clockStart, monotonicNow, waitForSignal, type ClockStart, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
 import { mobNotItemAnswer, mobSourcesOf } from "../../world/mob-drops.js";
@@ -655,7 +655,7 @@ function beginHuntMob(
   let phase: { kind: "collecting" | "observing" } | { kind: "finishing"; result: HuntAttemptResult } = {
     kind: "collecting",
   };
-  let observationStartedAt: number | null = null;
+  let observationStart: ClockStart | null = null; // `at` shows in the checkpoint, `began` times the budget
   let handedOff = false;
   observe(() => {
     const current = drop ? bot.inventory.count(drop.id, null) : 0;
@@ -669,8 +669,8 @@ function beginHuntMob(
         inventory: current,
         gained: current - inventoryBefore,
         requested: request.count,
-        observationStartedAt,
-        observationUntil: observationStartedAt === null ? null : observationStartedAt + request.observeForMs,
+        observationStartedAt: observationStart?.at ?? null,
+        observationUntil: observationStart === null ? null : observationStart.at + request.observeForMs,
         camp: camp?.snapshot ?? null,
       },
       completion: {
@@ -778,15 +778,15 @@ function beginHuntMob(
           break;
         }
         if (result.termination === "no_loaded_targets" && request.observeForMs > 0) {
-          observationStartedAt ??= Date.now();
+          observationStart ??= clockStart();
           phase = { kind: "observing" };
           using window = budgets.attempt({
             name: "quarry_observation",
-            scope: `request:${request.mobName}:${observationStartedAt}`,
+            scope: `request:${request.mobName}:${observationStart.at}`,
             unit: "milliseconds",
             limit: request.observeForMs,
-            measure: Date.now,
-            startedAt: observationStartedAt,
+            measure: monotonicNow,
+            startedAt: observationStart.began,
             exhaustion:
               "Return partial inventory and observation_exhausted after a final observation and safe handoff.",
           });

@@ -13,6 +13,7 @@ import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
 import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
+import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
@@ -107,7 +108,7 @@ test("completed combat decisions are retained without a physics sample and unsub
     );
     using trace = new ExecutionScope({ bot: "RuntimeBot", operation: "combat", targetId: 7 });
     const execution = new CombatExecution(trace);
-    const start = execution.progress.snapshot().startedAt;
+    const start = monotonicNow();
     execution.progress.observe(20, start);
     for (const state of ["started", "waiting", "ended"] as const) {
       if (state === "waiting") execution.progress.observe(20, start + 15_000);
@@ -641,4 +642,18 @@ test("recent calls keep the newest first and stay bounded", async (t) => {
     calls.map((call) => call.action),
     ["navigate_11", "navigate_10", "navigate_9", "navigate_8", "navigate_7", "navigate_6", "navigate_5", "navigate_4"],
   );
+});
+
+test("with a chat command prefix the runtime keeps command lines in its ring and out of read_recent_events", async (t) => {
+  const botData = { storage: { kind: "temporary" }, identity: { worldId: "chat-commands", scope: { kind: "bot", botId: "RuntimeBot" } } } as const;
+  const harness = runtimeHarness();
+  const runtime = await createMinecraftRuntime(harness.bot, { createCombatController: () => combatController, botData, chatCommandPrefix: "!" });
+  t.after(() => runtime.close());
+  harness.bot.emit("chat", "Tom", "!bots", null, {} as never, null);
+  harness.bot.emit("chat", "Tom", "hello", null, {} as never, null);
+
+  assert.deepEqual(runtime.chatCommands?.after(undefined).commands.map(({ message }) => message), ["!bots"]);
+  const read = runtime.actions.find((action) => action.name === "read_recent_events")!;
+  const history = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
+  assert.deepEqual(history.events.map(({ summary }) => summary), ["Tom: hello"]);
 });

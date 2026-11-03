@@ -1,6 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
-import { createRequire } from "node:module";
 import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { isChatCommandLine, type ChatCommandRing } from "./chat-commands.js";
 import { damageSourceEntity } from "./damage-source.js";
 
 type PlayerMessageListener = BotEvents["chat"];
@@ -9,7 +9,8 @@ type ChatMessageLoader = (registry: unknown) => { fromNotch(message: unknown): {
 
 // prismarine-chat is the CommonJS loader Mineflayer itself renders chat with;
 // its typings declare a default export the module does not actually make.
-const loadChatMessage = createRequire(import.meta.url)("prismarine-chat") as ChatMessageLoader;
+// A literal `require`: the setup's bundle follows it (see `src/world/crafting.ts`).
+const loadChatMessage = require("prismarine-chat") as ChatMessageLoader;
 
 /**
  * The server names what killed the player in the combat-death packet, which
@@ -34,14 +35,22 @@ const LOCAL_CHAT_EVENT = `chat:${LOCAL_CHAT_PATTERN_NAME}` as keyof BotEvents;
 type CancelForegroundAction = (reason: string) => unknown;
 type GuardedWrite = ReturnType<typeof guardObservedWrite>;
 
-/** Persist queryable player events for the lifetime of one connected runtime. */
+/** The launcher's command lines: their prefix and the ring the host serves them from. */
+type ChatCommands = { readonly prefix: string; readonly ring: ChatCommandRing };
+
+/**
+ * Persist queryable player events for the lifetime of one connected runtime. With `commands`, an incoming chat,
+ * whisper or Localized Chat line that is a command line goes to its ring instead and is never recorded, so no brain
+ * reads it as chat.
+ */
 export function observePlayerEvents(
   bot: Bot,
   data: SqlBotData,
   cancelForegroundAction: CancelForegroundAction,
+  commands?: ChatCommands,
 ): () => void {
   const guarded = guardObservedWrite("player-events");
-  const stopObservingChat = observeChat(bot, data, guarded);
+  const stopObservingChat = observeChat(bot, data, guarded, commands);
   const stopObservingHurts = observeHurts(bot, data, guarded);
   let lastDeathMessage: string | null = null;
   const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
@@ -86,9 +95,13 @@ export function observePlayerEvents(
 }
 
 /** Records public talk and whispers, the bot's own included, heard by vanilla chat or Localized Chat; returns the stop. */
-function observeChat(bot: Bot, data: SqlBotData, guarded: GuardedWrite): () => void {
+function observeChat(bot: Bot, data: SqlBotData, guarded: GuardedWrite, commands: ChatCommands | undefined): () => void {
   const recordMessage = (channel: "chat" | "whisper", username: string, message: string, distance?: number) => {
     const direction = username.toLowerCase() === bot.username.toLowerCase() ? "outgoing" : "incoming";
+    if (direction === "incoming" && commands && isChatCommandLine(message, commands.prefix)) {
+      commands.ring.push({ username, channel, message });
+      return;
+    }
     guarded(() =>
       recordEvent(data, bot.username, {
         type: "player_message",

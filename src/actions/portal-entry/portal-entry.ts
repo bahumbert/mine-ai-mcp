@@ -13,7 +13,7 @@ import { bucketDropTotals } from "../../navigation/mineflayer/water-landing.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
-import { armSignal, asVec3, timeoutSignal, type Position3 } from "../../utils/index.js";
+import { armSignal, asVec3, elapsedSince, monotonicNow, timeoutSignal, type Position3 } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { navigateCheckpointSchema } from "../checkpoint-schemas.js";
 import { formatNavigateResult } from "../navigate/navigate.js";
@@ -155,7 +155,7 @@ export function beginPortalEntry(
     if (problem) return { status: "failed", error: problem, navigation: receipt() };
     if (bot.blockAt(bot.entity.position.floored())?.name === block) return { status: "failed", error: `[PORTAL_ALREADY_INSIDE] The bot already occupies this ${block} after a recent arrival. Leave the portal opening and retry after the native portal cooldown; waiting inside can keep refreshing the cooldown.`, navigation: receipt() };
 
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     const elapsedBefore = elapsedMs;
     try {
       let route = await dependencies.navigate({ movements: dependencies.createMovements(bot), goal: portalApproachGoal(bot, cell, block), signal: context.signal, stopSignal: toolLoss.signal, onToolSelected: toolLoss.select });
@@ -179,7 +179,7 @@ export function beginPortalEntry(
       if (!died && bot.game.dimension === destination && positionedDimension === destination) return { status: "succeeded", navigation: finalReceipt };
       return { status: "failed", error: died ? "[PORTAL_DIED] The bot died during portal entry." : route.status === "stopped" ? `[PORTAL_STOPPED] Portal entry stopped: ${route.reason}.` : `[PORTAL_NOT_ENTERED] No positioned arrival in ${destination} was observed.`, navigation: finalReceipt };
     } catch (cause) {
-      elapsedMs = elapsedBefore + (Date.now() - startedAt);
+      elapsedMs = elapsedBefore + elapsedSince(startedAt);
       if (context.signal?.aborted) throw cause;
       const timedOut = cause instanceof DOMException && cause.name === "TimeoutError";
       return { status: "failed", error: timedOut ? "[PORTAL_ENTRY_TIMEOUT] No positioned portal arrival was observed within 30 seconds." : `[PORTAL_FAILED] Portal entry threw: ${cause instanceof Error ? cause.message : String(cause)}`, navigation: receipt() };

@@ -5,6 +5,7 @@ import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.j
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
 import type { ToolSnapshot } from "../world/tool-tiers.js";
 import { MONOTONIC_CLOCK, type StallClock } from "../actions/stall-watch.js";
+import { monotonicNow } from "../utils/index.js";
 import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 import { measured, message, outcomes, refusal } from "./runner-outcomes.js";
@@ -211,6 +212,7 @@ export class ActionRunner {
   readonly #connection = new AbortController();
   #state: PhysicalSessionState = { kind: "idle" };
   #admittedRequest: AdmittedRequest | null = null;
+  /** `completedAtMs` is a `monotonicNow()` reading: it never leaves this process. */
   #precedingRequest: { requestId: number; completedAtMs: number } | null = null;
   readonly #ownershipListeners = new Set<() => void>();
   #baseline: { readonly name: string; readonly release: () => void } | null = null;
@@ -287,12 +289,13 @@ export class ActionRunner {
     requestId?: number,
     actionId?: string,
   ): Promise<ActionOutput<Name, Result>> => {
-    const startedAt = Date.now();
+    // Two readings: the wall time is a record (shown as an ISO time), the monotonic one times the duration.
+    const startedAt = monotonicNow();
     const invocation: AdmittedRequest = {
       id: actionId ?? randomUUID(),
       requestId: requestId ?? null,
       action: definition.name,
-      admittedAt: startedAt,
+      admittedAt: Date.now(),
       lifetime: new AbortController(),
       objective: null,
       state: { kind: "admitted" },
@@ -325,7 +328,7 @@ export class ActionRunner {
       if (this.#admittedRequest === invocation) {
         this.#admittedRequest = null;
         if (invocation.requestId !== null) {
-          this.#precedingRequest = { requestId: invocation.requestId, completedAtMs: Date.now() };
+          this.#precedingRequest = { requestId: invocation.requestId, completedAtMs: monotonicNow() };
         }
       }
     }
@@ -359,11 +362,7 @@ export class ActionRunner {
         definition.execution.kind === "concurrent")
     ) {
       const execute = definition.execute;
-      return measured(
-        definition.name,
-        Date.now(),
-        await this.#execute(definition.execution, (context) => execute(request, context), signal),
-      );
+      return measured(definition.name, monotonicNow(), await this.#execute(definition.execution, (context) => execute(request, context), signal));
     }
 
     signal?.throwIfAborted();
@@ -389,7 +388,7 @@ export class ActionRunner {
     };
     this.#admittedRequest = invocation;
     for (const state of this.#reflexStates.values()) invocation.progress.reflexActivity({ kind: "active", state });
-    const startedAtMs = Date.now();
+    const startedAtMs = monotonicNow();
     const resumable = definition.execution.kind === "resumable_task";
     let execute: RequestExecution<Result> | null = null;
     const interruptions: string[] = [];

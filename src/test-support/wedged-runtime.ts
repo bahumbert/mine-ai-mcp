@@ -1,12 +1,27 @@
 import { createServer } from "node:http";
+import { INCIDENT_HISTORY_MS } from "../diagnostics/incident-recorder.js";
 import { reportRuntimeLiveness } from "../server/runtime-liveness.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
+import { blockThread } from "./block-thread.js";
 
 /** A child-side wait: `--<name>=<ms>` on the command line, else its default; the supervisor tests pass short ones. */
 const waitMs = (name: string, fallback: number): number =>
   Number(process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback);
 const slowMs = waitMs("slow-ms", 6000);
 const pauseMs = waitMs("pause-ms", 7000);
+/** The incident ring's age the supervisor under test was given (`incidentHistoryMs`); the `/background` wedge waits it out. */
+const historyMs = waitMs("history-ms", INCIDENT_HISTORY_MS);
+
+/**
+ * Waits `ms` on the wall clock, which is the clock the incident ring ages its entries by. A `setTimeout` runs on the
+ * monotonic clock and undershoots it when the machine steps its clock back (WSL's time sync did ~2 s, 2026-10-30).
+ */
+async function untilWallClock(ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) await new Promise<void>((resolve) => setTimeout(resolve, 50));
+}
+/** On top of the ring's age: covers a clock step back during the ~1 s the supervisor needs to declare the hang (steps measured: 1.95 s). */
+const RING_MARGIN_MS = 2_000;
 
 reportRuntimeLiveness();
 process.once("disconnect", () => process.exit(0));
@@ -24,7 +39,7 @@ const server = createServer(async (request, response) => {
     void execution.run("route", async () => {
       await execution.run("brief_nested_phase", async () => {});
       response.end("accepted");
-      await new Promise<void>((resolve) => setTimeout(resolve, 21_000));
+      await untilWallClock(historyMs + RING_MARGIN_MS);
       while (true) {}
     });
     return;
@@ -39,7 +54,7 @@ const server = createServer(async (request, response) => {
   }
   if (request.url === "/pause") {
     response.end("accepted");
-    setTimeout(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pauseMs), 100);
+    setTimeout(() => blockThread(pauseMs), 100);
     return;
   }
   if (request.url === "/crash") {

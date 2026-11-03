@@ -8,6 +8,29 @@ const HEALTH_TOLERANCE = 1;
 export interface PlayerPreparationObservation {
   wait(): Promise<void>;
   close(): void;
+  /** What the wait still lacks: each declared update seen or never seen with the last event heard for it, and each state that differs. */
+  describePending(): string;
+}
+
+/** How often one client event came since the wait was armed, and when the last one did. */
+interface EventHeard {
+  readonly count: number;
+  readonly afterMs: number;
+}
+
+/** One kind of server update the preparation waits for, named by what it proves, with the client events that carry it. */
+interface AwaitedUpdate {
+  readonly name: string;
+  readonly declared: boolean;
+  readonly observed: () => boolean;
+  readonly events: readonly string[];
+}
+
+/** One state the arranged player must show once its updates arrived. */
+interface ExpectedState {
+  readonly name: string;
+  readonly matches: () => boolean;
+  readonly detail: () => string;
 }
 
 /**
@@ -37,52 +60,35 @@ export function observeScenarioPlayerPreparation(
   const expectedPosition = Array.isArray(player.pos) ? player.pos : undefined;
   const expectedDimension = scenario.world.dimension;
   const expectedHealth = player.health;
-  let inventoryUpdateObserved = expectedInventory.size === 0 && expectedEquipment.length === 0;
-  let positionUpdateObserved = expectedPosition === undefined;
-  let healthUpdateObserved = expectedHealth === undefined;
+  const observed = {
+    inventory: expectedInventory.size === 0 && expectedEquipment.length === 0,
+    position: expectedPosition === undefined,
+    health: expectedHealth === undefined,
+  };
   let settle: (() => void) | undefined;
 
+  const armedAt = performance.now();
+  const lastHeard = new Map<string, EventHeard>();
+  const hear = (event: string) => {
+    lastHeard.set(event, { count: (lastHeard.get(event)?.count ?? 0) + 1, afterMs: performance.now() - armedAt });
+  };
+  const awaitedUpdates: readonly AwaitedUpdate[] = [
+    { name: "inventory update", declared: expectedInventory.size > 0 || expectedEquipment.length > 0, observed: () => observed.inventory, events: ["updateSlot"] },
+    { name: "position update", declared: expectedPosition !== undefined, observed: () => observed.position, events: ["move", "forcedMove", "spawn"] },
+    { name: "health update", declared: expectedHealth !== undefined, observed: () => observed.health, events: ["health"] },
+  ];
+  const expectedStates = expectedPlayerStates(bot, { inventory: expectedInventory, equipment: expectedEquipment, dimension: expectedDimension, position: expectedPosition, health: expectedHealth });
+
   const preparationMatches = () =>
-    inventoryUpdateObserved &&
-    positionUpdateObserved &&
-    healthUpdateObserved &&
-    inventoryMatches(bot, expectedInventory) &&
-    expectedEquipment.every(({ slot, type }) => bot.inventory.slots[slot]?.type === type) &&
-    bot.game.dimension === expectedDimension &&
-    positionMatches(bot, expectedPosition) &&
-    healthMatches(bot, expectedHealth);
+    awaitedUpdates.every(({ observed }) => observed()) && expectedStates.every(({ matches }) => matches());
   const check = () => {
     if (preparationMatches()) settle?.();
   };
-  const onInventoryUpdate = () => {
-    inventoryUpdateObserved = true;
+  const close = listenForUpdates(bot, (update, event) => {
+    hear(event);
+    observed[update] = true;
     check();
-  };
-  const onMove = () => {
-    positionUpdateObserved = true;
-    check();
-  };
-  const onHealth = () => {
-    healthUpdateObserved = true;
-    check();
-  };
-
-  bot.inventory.on("updateSlot", onInventoryUpdate);
-  bot.on("move", onMove);
-  // A teleport is a server-set position, which arrives as a forced move — and
-  // as a fresh spawn when it crosses into another dimension. Neither is a
-  // physics step, so neither reaches `move` while the client is standing still.
-  bot.on("forcedMove", onMove);
-  bot.on("spawn", onMove);
-  bot.on("health", onHealth);
-
-  const close = () => {
-    bot.inventory.removeListener("updateSlot", onInventoryUpdate);
-    bot.removeListener("move", onMove);
-    bot.removeListener("forcedMove", onMove);
-    bot.removeListener("spawn", onMove);
-    bot.removeListener("health", onHealth);
-  };
+  });
 
   return {
     async wait(): Promise<void> {
@@ -103,7 +109,89 @@ export function observeScenarioPlayerPreparation(
       });
     },
     close,
+    describePending: () => describePendingPreparation(awaitedUpdates, expectedStates, lastHeard),
   };
+}
+
+/** What the wait still lacks: each declared update seen (with the last event heard for it) or never seen, then each state that differs. */
+function describePendingPreparation(
+  awaitedUpdates: readonly AwaitedUpdate[],
+  expectedStates: readonly ExpectedState[],
+  lastHeard: ReadonlyMap<string, EventHeard>,
+): string {
+  const updates = awaitedUpdates.filter(({ declared }) => declared).map(({ name, observed, events }) => {
+    if (!observed()) return `${name}: never seen`;
+    const heardOf = events.flatMap((kind) => (lastHeard.has(kind) ? [{ kind, ...lastHeard.get(kind)! }] : []));
+    // An update is observed only through a listener that heard it first, so the list is never empty here.
+    const last = heardOf.sort((a, b) => b.afterMs - a.afterMs)[0]!;
+    return `${name}: seen, last ${last.kind} (${last.count} heard) ${(last.afterMs / 1000).toFixed(1)} s after arming`;
+  });
+  const differing = expectedStates.filter(({ matches }) => !matches()).map(({ name, detail }) => `differs: ${name} ${detail()}`);
+  return [...updates, ...differing].join("; ") || "every update seen and every state matching";
+}
+
+/** Report each client event that carries one of the updates the wait needs; the returned function removes every listener. */
+function listenForUpdates(bot: Bot, heard: (update: "inventory" | "position" | "health", event: string) => void): () => void {
+  const inventory = () => heard("inventory", "updateSlot");
+  const position = (event: string) => () => heard("position", event);
+  const move = position("move");
+  const forcedMove = position("forcedMove");
+  const spawn = position("spawn");
+  const health = () => heard("health", "health");
+  bot.inventory.on("updateSlot", inventory);
+  bot.on("move", move);
+  // A teleport is a server-set position, which arrives as a forced move — and
+  // as a fresh spawn when it crosses into another dimension. Neither is a
+  // physics step, so neither reaches `move` while the client is standing still.
+  bot.on("forcedMove", forcedMove);
+  bot.on("spawn", spawn);
+  bot.on("health", health);
+  return () => {
+    bot.inventory.removeListener("updateSlot", inventory);
+    bot.removeListener("move", move);
+    bot.removeListener("forcedMove", forcedMove);
+    bot.removeListener("spawn", spawn);
+    bot.removeListener("health", health);
+  };
+}
+
+/** The player state the scenario declared, one entry per thing the preparation compares with the client's own view. */
+function expectedPlayerStates(
+  bot: Bot,
+  expected: {
+    readonly inventory: ReadonlyMap<number, number>;
+    readonly equipment: readonly { readonly slot: number; readonly type: number }[];
+    readonly dimension: string;
+    readonly position: readonly [number, number, number] | undefined;
+    readonly health: number | undefined;
+  },
+): readonly ExpectedState[] {
+  const wanted = [...expected.inventory].map(([type, count]) => `${count} ${itemName(bot, type)}`).join(", ") || "nothing";
+  return [
+    { name: "inventory", matches: () => inventoryMatches(bot, expected.inventory), detail: () => `holds ${inventoryText(bot)}, expected ${wanted}` },
+    { name: "equipment", matches: () => expected.equipment.every(({ slot, type }) => bot.inventory.slots[slot]?.type === type), detail: () => `slots ${expected.equipment.map(({ slot, type }) => `${slot}=${itemNameIn(bot, slot)} (expected ${itemName(bot, type)})`).join(", ")}` },
+    { name: "dimension", matches: () => bot.game.dimension === expected.dimension, detail: () => `is ${bot.game.dimension}, expected ${expected.dimension}` },
+    { name: "position", matches: () => positionMatches(bot, expected.position), detail: () => `is ${vectorText(bot.entity.position)}, expected ${expected.position ? vectorText(expected.position) : "anywhere"}` },
+    { name: "health", matches: () => healthMatches(bot, expected.health), detail: () => `is ${bot.health}, expected ${expected.health}` },
+  ];
+}
+
+function vectorText(point: { readonly x: number; readonly y: number; readonly z: number } | readonly [number, number, number]): string {
+  const [x, y, z] = "x" in point ? [point.x, point.y, point.z] : point;
+  return `(${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`;
+}
+
+function inventoryText(bot: Bot): string {
+  return bot.inventory.items().map((item) => `${item.count} ${itemName(bot, item.type)}`).join(", ") || "nothing";
+}
+
+function itemName(bot: Bot, type: number): string {
+  return bot.registry.items[type]?.name ?? `item ${type}`;
+}
+
+function itemNameIn(bot: Bot, slot: number): string {
+  const held = bot.inventory.slots[slot];
+  return held ? itemName(bot, held.type) : "empty";
 }
 
 function expectedInventoryCounts(

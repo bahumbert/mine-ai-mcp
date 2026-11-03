@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BodyAbort } from "./abort.js";
+import { monotonicNow } from "../utils/index.js";
 import { ActionRunner } from "./action-runner.js";
 import { stubAction, StubResult, started, untilOwner } from "./action-runner-fixtures.test.js";
 
@@ -47,7 +48,7 @@ for (const resumeInterrupted of [true, false]) {
     assert.match(busy.result.error, /ACTION_BUSY/);
     await runner.run(action, {}, undefined, 1239);
     assert.deepEqual(runner.requestContext(), { requestId: 1236, preceding: null });
-    const settledAfter = Date.now();
+    const settledAfter = monotonicNow();
     release();
     const output = await pending;
     assert.equal(output.result.status, resumeInterrupted ? "succeeded" : "cancelled");

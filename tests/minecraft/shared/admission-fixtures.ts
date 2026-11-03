@@ -10,7 +10,7 @@ export const MARGIN_MB = config.serverMemMarginMb;
 
 /** A ready, busy shared server reading, as the sampler would give it. */
 export function server(overrides: Partial<ServerReading> = {}): ServerReading {
-  return { id: "s1", key: "k", status: "ready", shared: true, busy: true, msptP95: 5, heapMb: 3_072, residentMb: 1_500, ...overrides };
+  return { id: "s1", key: "k", status: "ready", shared: true, busy: true, lanes: 3, msptP95: 5, heapMb: 3_072, residentMb: 1_500, ...overrides };
 }
 
 /** A machine sample with one server and three of our trials running. */

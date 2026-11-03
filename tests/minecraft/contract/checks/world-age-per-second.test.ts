@@ -33,13 +33,20 @@ test("world-age-per-second fails when the regular packets step by more than 20 t
   await assert.rejects(runCheck({}, (subject) => withSteppingAges(subject, 20)), /ages step by 20/);
 });
 
-test("world-age-per-second fails when the regular packets come faster than one a second (a server at 40 ticks a second sends one per 0.5 s)", async () => {
-  await assert.rejects(runCheck({ ticksPerSecond: 40 }), /regular time packets in 3000 ms: 2 to 4/);
+test("world-age-per-second judges the packets by the server's ticks, not the wall: at 8, 14 and 40 ticks a second there is still one regular packet per 20 ticks", async () => {
+  for (const ticksPerSecond of [8, 14, 40]) await runCheck({ ticksPerSecond });
 });
 
-test("world-age-per-second fails, saying so, when the server sends no time packet at all", async () => {
+test("world-age-per-second fails, saying the server answered no game time, when the server does not tick at all", async () => {
   await assert.rejects(runCheck({}, (subject, harness) => {
     harness.server.stop();
     return subject;
-  }), /no time packet/);
+  }), /the server answered no game time/);
+});
+
+test("world-age-per-second fails, saying so, when the server stops ticking inside the watch", async () => {
+  await assert.rejects(runCheck({}, (subject, harness) => {
+    harness.clock.after(500, () => harness.server.stop());
+    return subject;
+  }), /rested \d+ of \d+ server ticks read, and no read moved for \d+ ms \(the bound is 10000\): the server is stalled/);
 });

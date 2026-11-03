@@ -72,3 +72,10 @@ test("the clients get the submitter's MINE_AI_* variables, never the daemon's se
     { MINE_AI_DIG_TRACE: "/tmp/t", MINE_AI_SCENARIO_EVIDENCE: "1" },
   );
 });
+
+test("a relative MINE_AI_DIG_TRACE is made absolute against the submitter's directory, so it names the same file whatever cwd the client starts in", () => {
+  assert.equal(forwardedEnv({ MINE_AI_DIG_TRACE: "traces/dig.jsonl" }, "/work/tree").MINE_AI_DIG_TRACE, "/work/tree/traces/dig.jsonl");
+  assert.equal(forwardedEnv({ MINE_AI_DIG_TRACE: "/tmp/t" }, "/work/tree").MINE_AI_DIG_TRACE, "/tmp/t");
+  assert.equal(forwardedEnv({ MINE_AI_DIG_TRACE: "traces/dig.jsonl" }).MINE_AI_DIG_TRACE, "traces/dig.jsonl", "without a directory the value is forwarded as it is");
+  assert.equal(forwardedEnv({ MINE_AI_SCENARIO_EVIDENCE: "rel/x" }, "/work/tree").MINE_AI_SCENARIO_EVIDENCE, "rel/x", "only the dig trace is a path");
+});

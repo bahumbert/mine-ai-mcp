@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
 import type { ActionRunnerOptions } from "../../session/action-runner.js";
-import { type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { waterFixture } from "../../test-support/water.js";
 import { type SurvivalTransition } from "../control/contract.js";
 import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
@@ -27,8 +27,7 @@ function setAirTicks(bot: Bot, ticks: number): void {
 const setAir = (bot: Bot, points: number) => setAirTicks(bot, points * AIR_TICKS_PER_POINT);
 
 /** A bot at (0, 64, 0) in the shared fake with a reflex driver, its clock and the controls it set in order. */
-function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}) {
-  const clock = createFakeClock({ mode: "manual" });
+function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}, clock: FakeClock = createFakeClock({ mode: "manual" })) {
   const fixture = waterFixture(t, {}, runnerOptions, { clock });
   return { ...fixture, clock };
 }
@@ -231,11 +230,12 @@ test("a dry bot under the same roof is left alone by the breath reflex", async (
 });
 
 /** The reflex's continuation after a full-air surfacing, driven at chosen positions and times. */
-function breathContinuations(t: TestContext) {
-  const fixture = diver(t);
+function breathContinuations(t: TestContext, installedClock?: FakeClock) {
+  const fixture = diver(t, {}, installedClock);
   let definition: { continuation: (outcome: unknown) => { kind: string; reason?: string } } | undefined;
   const driver = { register: (captured: typeof definition) => { definition = captured; return { [Symbol.asyncDispose]: async () => {} }; } };
-  attachBreathReflex(fixture.bot, driver as never, () => null, fixture.clock.now);
+  // An installed mocked clock drives the global monotonic clock the reflex reads by default: production passes no `now`.
+  attachBreathReflex(fixture.bot, driver as never, () => null, installedClock ? undefined : fixture.clock.now);
   return {
     surfaceAt: async (x: number, atMs: number, ownedDive = false, kind = "air_full") => {
       const gap = atMs - fixture.clock.now();
@@ -301,6 +301,30 @@ test("a third breath reflex after three minutes starts the count again and resum
   assert.equal((await surfaceAt(0, 19_000)).kind, "resume");
   assert.equal((await surfaceAt(0, 3 * MINUTE + 1)).kind, "resume");
 });
+
+/** The third rescue at one place, `thirdAfterMs` of monotonic time after the first, with the wall clock stepped by `wallStepMs` between the second and the third. */
+async function thirdRescueAcrossWallStep(t: TestContext, wallStepMs: number, thirdAfterMs: number) {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the wall clock and the monotonic one read unrelated values (epoch vs uptime): a window on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const { surfaceAt } = breathContinuations(t, clock);
+  const first = clock.now();
+  assert.equal((await surfaceAt(0, first)).kind, "resume");
+  assert.equal((await surfaceAt(1, first + 85_000)).kind, "resume");
+  clock.stepWallClock(wallStepMs);
+  // Awaited here: returning the promise would dispose the installed clock before the rescue reads it.
+  return await surfaceAt(2, first + thirdAfterMs);
+}
+
+const REPEAT_WINDOW_ROWS: ReadonlyArray<readonly [wallStepMs: number, thirdAfterMs: number, kind: string, why: string]> = [
+  [20_000, 170_000, "return", "three rescues in 170 s of play, 190 s on the wall clock"],
+  [-20_000, 190_000, "resume", "190 s of play is outside the window, 170 s on the wall clock"],
+];
+for (const [wallStepMs, thirdAfterMs, kind, why] of REPEAT_WINDOW_ROWS)
+  test(`the repeat window counts monotonic time: wall step ${wallStepMs} ms, third rescue ${thirdAfterMs} ms after the first ${kind}s (${why})`, async (t) => {
+    assert.equal((await thirdRescueAcrossWallStep(t, wallStepMs, thirdAfterMs)).kind, kind);
+  });
 
 /** "takeover" when the breath reflex fired within 10 ticks, else "idle": an owned dive whose backstop asks `floor` ticks, `air` ticks on the server's meter. */
 async function reflexOutcome(t: TestContext, floor: number | null, air: number) {

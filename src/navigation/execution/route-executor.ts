@@ -34,6 +34,7 @@ import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
 import type { OpenedPassages } from "./opened-passages.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { armNoTickCancel } from "./no-tick-cancel.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
 
@@ -408,7 +409,7 @@ export class RouteExecutor {
       // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
       // it plans, so a body in water over a solid cell is priced as standing, and one that has not landed when its swing
       // starts digs 25 times slower), and the falling column.
-      deadlineMs: Date.now() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
+      deadlineMs: monotonicNow() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);
@@ -515,7 +516,7 @@ export class RouteExecutor {
     // `confirming` until something outside cancelled it. This tick is the
     // clock, and it has to run in every state — the wait we are guarding is
     // precisely the one where nothing is moving.
-    this.request.context.ledger.expire(Date.now());
+    this.request.context.ledger.expire(monotonicNow());
     const snapshot = this.request.context.bot.movementSnapshot();
     this.#latestMovementSnapshot = snapshot;
     if (this.#state.kind !== "moving") return;

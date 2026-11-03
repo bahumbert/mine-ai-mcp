@@ -1,8 +1,8 @@
 /**
  * The checks of a use, a placement, a seat and a pickup judge what the server did by its ticks and its answers (`server-answer.ts`), never by
  * a wall time that stands for ticks: they hold on a server behind its schedule and on one that stalls and catches up, and a server that does
- * not tick or does not answer fails them naming the wait (plan 2026-10-25-review-fixes R8). `item-pickup-after-delay` measures the pickup delay in
- * wall milliseconds on a server of its own (tag `exclusive`), so a server behind its schedule or a stall is not asked of it.
+ * not tick or does not answer fails them naming the wait (plan 2026-10-25-review-fixes R8). `item-pickup-after-delay` judges the pickup delay by
+ * the server's ticks since 2026-10-30 (its own test file runs it at 20, 14 and 8 ticks a second).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -31,13 +31,19 @@ for (const check of CHECKS_ON_ANY_SERVER) {
   });
 }
 
-test("item-pickup-after-delay holds when the server stalls for 1 s in its first absence and catches up", async () => {
-  await runOnFake(itemPickupAfterDelay, {}, undefined, [{ atMs: 120, ms: 1_000 }]);
-});
+/** A seat is confirmed by the passenger list 2 server ticks after the position (the fake's lead, `fake-harness.ts`): the stall of a seated check starts after it. */
+const STALL_AFTER_SEAT_MS = 400;
+const CHECKS_STALLED_IN_THEIR_FIRST_ABSENCE: readonly (readonly [ContractCheck, number])[] = [
+  [boatDismountIgnored, STALL_AFTER_SEAT_MS],
+  [boatMountRefused, 60],
+  [boatPlacedByUse, 60],
+  [bucketPourAndFill, 60],
+  [itemPickupAfterDelay, 60],
+];
 
-for (const check of [boatDismountIgnored, boatMountRefused, boatPlacedByUse, bucketPourAndFill, itemPickupAfterDelay]) {
+for (const [check, stallAtMs] of CHECKS_STALLED_IN_THEIR_FIRST_ABSENCE) {
   test(`${check.name} fails on a server that stops ticking in its first absence: a silence of wall time proves nothing`, async () => {
-    await assert.rejects(runOnFake(check, {}, undefined, [{ atMs: 60, ms: 60_000 }]), /the server is stalled/);
+    await assert.rejects(runOnFake(check, {}, undefined, [{ atMs: stallAtMs, ms: 60_000 }]), /the server is stalled/);
   });
 }
 

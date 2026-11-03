@@ -34,9 +34,47 @@ async function hitAfterTicks(harness: FakeHarness, launchAt: Vec3, motion: Vec3,
 
 test("a ball in reach on the server and out of reach on the client is deflected: the server judges the hit", async () => {
   const harness = watcher();
-  const ball = await hitAfterTicks(harness, FAR_EAST, FLIES_WEST, 7);
+  const ball = harness.combat.launchFireball(FAR_EAST, FLIES_WEST);
+  await harness.clock.advance(7 * TICK_MS);
   assert.ok(ball.position.x > 7.5, `the client was told of it at tick 2 only: ${ball.position.x}`);
+  harness.bot.attack(ball);
+  await harness.clock.advance(TICK_MS);
   assert.ok(ball.velocity.x > 0, `the ball flies along the look: ${ball.velocity.x}; the server has it at ${harness.server.serverPositionOf(ball.id)?.x}`);
+});
+
+/** The position packets a ball's deflection sent with its new velocity: the velocity (+x) and the first position packet that follows it, as the real server's `deflect-fireball` log reads. */
+function listenForDeflection(harness: FakeHarness, ballId: number) {
+  const heard: { name: string; dX: number; dY: number; dZ: number }[] = [];
+  let deflected = false;
+  harness.bot._client.on("entity_velocity", (packet: { entityId: number; velocity: { x: number } }) => void (deflected ||= packet.entityId === ballId && packet.velocity.x > 0));
+  for (const name of ["rel_entity_move", "entity_move_look"]) {
+    harness.bot._client.on(name, (packet: { entityId: number; dX: number; dY: number; dZ: number }) => void (deflected && packet.entityId === ballId && heard.push({ name, dX: packet.dX, dY: packet.dY, dZ: packet.dZ })));
+  }
+  return heard;
+}
+
+test("a ball hit in the tick its position was told is told with a move of zero: the client holds the position the server has, to the 1/4096 the packet counts in", async () => {
+  const harness = watcher();
+  const ball = harness.combat.launchFireball(FAR_EAST, FLIES_WEST);
+  const heard = listenForDeflection(harness, ball.id);
+  await harness.clock.advance(TICK_MS * 10);
+  harness.bot.attack(ball);
+  await harness.clock.advance(TICK_MS * 2);
+  assert.deepEqual(heard[0], { name: "rel_entity_move", dX: 0, dY: 0, dZ: 0 });
+});
+
+test("a ball hit after flying on untold is told with the old flight's move since the last position the client heard, backwards along its way (measured 2026-10-30, `entity_move_look -856 0` in 2 of 24 runs)", async () => {
+  const harness = watcher();
+  const ball = harness.combat.launchFireball(FAR_EAST, FLIES_WEST);
+  const heard = listenForDeflection(harness, ball.id);
+  await harness.clock.advance(TICK_MS * 7);
+  const clientHolds = ball.position.x;
+  harness.bot.attack(ball);
+  await harness.clock.advance(TICK_MS * 2);
+  const [first] = heard;
+  assert.equal(first?.name, "entity_move_look", "a move, not the zero");
+  assert.ok(first!.dX < 0 && first!.dY === 0 && first!.dZ === 0, `back along x only: ${JSON.stringify(first)}`);
+  assert.ok(Math.abs(ball.position.x - (clientHolds + first!.dX / 4_096)) < 0.001, `the client's ball moved by that packet: was ${clientHolds}, is ${ball.position.x}`);
 });
 
 test("a ball in reach on the client only is not touched: the server has flown it away", async () => {

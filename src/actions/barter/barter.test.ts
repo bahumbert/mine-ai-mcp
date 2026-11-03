@@ -98,7 +98,7 @@ function fixture(t: TestContext, clock?: FakeClock) {
       if (!harness.inventory.slots[slot]) harness.inventory.updateSlot(slot, itemOf(bot.registry, "dirt", 64));
   };
   return {
-    lifetime, events: bot, bot, navigation, gold, pearl, target, metadata, equipment, entities,
+    lifetime, events: bot, bot, harness, navigation, gold, pearl, target, metadata, equipment, entities,
     spawn, dropOther, complete, fillFreeSlots, idleSlotListeners, offers: () => offers,
   };
 }
@@ -139,19 +139,19 @@ test("a consumed offer survives cancellation and resumption without spending twi
 });
 
 test("a gone recipient settles an accepted exchange without inventing completion", async (t) => {
-  const f = fixture(t);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(t, clock);
   const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
-  await new Promise((resolve) => setImmediate(resolve));
-  // Kept: Mineflayer emits `entityGone` while the piglin is still listed and valid (`entities.js:313-318`), and `harness.entities.remove`
-  // does the same; barter's wait reads `isValid` at that event and never settles (a code bug, reported to the master). The
-  // test keeps the order its wait can see: the piglin invalid and unlisted, then the event.
-  f.target.isValid = false;
-  delete f.entities[7];
-  f.events.emit("entityGone", f.target);
-  const result = await pending;
+  await turn();
+  f.harness.entities.remove(PIGLIN_ID);
+  const result = await clock.settle(pending, 1_000);
   assert.equal(result.status, "partial");
   assert.equal(result.barter.goldSpent, 1);
   assert.equal(f.offers(), 1);
+  assert.equal(result.error, "The selected piglin disappeared before exchange completion was observed.");
+  assert.equal(f.bot.listenerCount("entityGone"), 0);
+  assert.equal(f.bot.listenerCount("entityEquip"), 0);
 });
 
 test("invalid and baby recipients cannot consume a gold offer", async (t) => {
@@ -173,6 +173,38 @@ function runnerAction(f: ReturnType<typeof fixture>) {
   return { ...createBarterAction(f.bot, f.navigation), execution: { kind: "resumable_task" as const } };
 }
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("a recipient removed before it accepts settles the offer wait at the removal, not at its bound", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(t, clock);
+  f.bot.activateEntity = async () => {};
+  const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
+  await turn();
+  f.harness.entities.remove(PIGLIN_ID);
+  const result = await clock.settle(pending, 1_000);
+  assert.equal(result.status, "partial");
+  assert.equal(result.barter.goldOffers, 1);
+  assert.equal(result.barter.goldSpent, 0);
+  assert.match(result.error!, /acceptance was not observed/);
+  assert.equal(f.bot.listenerCount("entityGone"), 0);
+});
+
+test("another entity's removal during the exchange is not the recipient's", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = fixture(t, clock);
+  const pending = beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({});
+  await turn();
+  const zombie = f.harness.entities.spawn({ name: "zombie", position: new Vec3(6, 64, 0) });
+  f.harness.entities.remove(zombie.id);
+  await turn();
+  f.complete();
+  const result = await clock.settle(pending, 1_000);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.barter.gained, 2);
+  assert.equal(result.barter.goldSpent, 1);
+});
 
 test("runner takeover preserves a pending offer and accepts desired gains during the reflex", async (t) => {
   const f = fixture(t);

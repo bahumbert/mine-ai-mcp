@@ -1,12 +1,12 @@
 // What a click between two stacks of one item waits for: the server's answer to it, which is the world age moving on 40 ticks.
-import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import { waitForServerAnswer } from "../../world/world-age.js";
 
 type ContainerWindow = Awaited<ReturnType<Bot["openContainer"]>>;
 type ItemLoader = (registry: Bot["registry"]) => typeof Item & { fromNotch(notch: unknown): Item | null };
-const loadItem = createRequire(import.meta.url)("prismarine-item") as ItemLoader;
+// A literal `require`: the setup's bundle follows it (see `src/world/crafting.ts`).
+const loadItem = require("prismarine-item") as ItemLoader;
 
 /**
  * Longest the world age may stand still while a click waits for its answer, on the monotonic wall clock. A server sends

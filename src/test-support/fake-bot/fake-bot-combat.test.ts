@@ -567,3 +567,27 @@ test("a sprinting hit with a rested swing pushes along the look as well, and cle
   await harness.clock.advance(100);
   assert.deepEqual([other[0]!.x, other[0]!.z], [-3_200, 0], "the key is still down but the server cleared the sprint: a plain 0.4 away");
 });
+
+test("a held item changed on a server that answers late starts the swing over when the server reads the change: a hit 100 ms after it weighs 2 ticks of swing, not the lag's 11", async () => {
+  const harness = fight({ lagMs: 450, slots: { 36: { name: "iron_sword" }, 37: { name: "iron_axe" } } });
+  harness.bot.setQuickBarSlot(1);
+  await harness.clock.advance(100);
+  harness.bot.attack(harness.bot.entities[ZOMBIE_ID]!);
+  await harness.clock.advance(1_000);
+  // The axe's 9 x (0.2 + 0.8 x (2.5 / 22.2)^2) = 1.89 (contract check `attack-cooldown-damage`: "2 after a swap cost 1.89").
+  assert.ok(Math.abs(20 - healthOf(harness, ZOMBIE_ID) - 1.89) < 0.05, `the hit cost ${20 - healthOf(harness, ZOMBIE_ID)}`);
+});
+
+test("a use of the hand ends when the server reads the change of the held item, not when the client makes it: on a server that answers 450 ms late the bit stays up until then (`LivingEntity.updatingUsingItem` compares the item at the server's tick)", async () => {
+  const harness = fight({ lagMs: 450, slots: { 36: { name: "bow" }, 37: { name: "iron_sword" }, 38: { name: "arrow", count: 8 } } });
+  const flagsKey = harness.bot.registry.entitiesByName.player!.metadataKeys!.indexOf("living_entity_flags");
+  const drawing = () => Number(harness.bot.entity.metadata[flagsKey] ?? 0) & 1;
+  harness.bot.activateItem();
+  await harness.clock.advance(500);
+  assert.equal(drawing(), 1, "the server read the use at 450 ms");
+  harness.bot.setQuickBarSlot(1);
+  await harness.clock.advance(100);
+  assert.equal(drawing(), 1, "the server has not read the new slot yet: 100 ms after it was sent");
+  await harness.clock.advance(450);
+  assert.equal(drawing(), 0, "the server read the new slot and ended the use");
+});

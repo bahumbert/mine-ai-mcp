@@ -9,7 +9,7 @@ import type { IncidentReference } from "../bot-data/incident-log.js";
 import type { NavigationEvent } from "../navigation/index.js";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
 import { CombatProgress } from "../survival/control/combat/progress.js";
-import { createFakeBot, listenerCounts } from "../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenerCounts } from "../test-support/fake-bot/index.js";
 import { observeDamageRegistry } from "../world/damage-registry.js";
 import { observeIncidents } from "./incident-observer.js";
 
@@ -266,4 +266,42 @@ test("a reflex that hit its limit is captured with the reflex and the limit", as
 function playerMetadata(bot: Bot, flags: Readonly<Record<string, number>>): object[] {
   const keys = bot.registry.entitiesByName.player?.metadataKeys ?? [];
   return Object.assign([], Object.fromEntries(Object.entries(flags).map(([key, value]) => [keys.indexOf(key), value])));
+}
+
+// A health loss is blamed on the last hit only within 250 ms of it. WSL steps its wall clock (back ~2 s every 30 s), so a
+// window read on `Date.now()` blames a stale hit after a step back and drops a fresh one after a step forward.
+for (const { name, stepMs, passedMs, source } of [
+  { name: "a hit 100 ms before the health loss still gets the blame across a wall clock step forward", stepMs: 1200, passedMs: 100, source: "damage_type:2" },
+  { name: "a hit 300 ms before the health loss gets no blame across a wall clock step back", stepMs: -2000, passedMs: 300, source: "unattributed" },
+]) {
+  test(name, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    const { bot, combat: scene } = createFakeBot({ position: new Vec3(0.5, 62.96, 0.5) });
+    const references: IncidentReference[] = [];
+    const observer = observeIncidents(bot, { world: new MemoryWorld(), onEvent: () => () => undefined }, {
+      directory,
+      identity: { worldId: "test" },
+      published: (reference) => references.push(reference),
+      owner: () => ({
+        requestId: 3,
+        precedingRequestId: null,
+        session: { owner: "foreground", busy: true, activeAction: { action: "navigate", startedAt: "test" } },
+        combat: { targetId: null, position: null },
+      }),
+    });
+    // A cause id is an entity's: a hit with none is a "non_entity_damage" trigger that captures at once.
+    bot._client.emit("damage_event", { entityId: bot.entity.id, sourceTypeId: 2, sourceCauseId: 7, sourceDirectId: 7, sourcePosition: null });
+    clock.stepWallClock(stepMs);
+    await clock.advance(passedMs);
+    scene.setHealth(18);
+    observer.physicsStalled("navigate");
+    await observer.recorder.flush();
+    const artifact = references[0]!.artifact;
+    if (artifact.kind !== "written") return assert.fail("not written");
+    assert.match(await readFile(artifact.path, "utf8"), new RegExp(String.raw`"healthLossFollowingSource":\{"${source}":2\}`));
+    await observer.close();
+  });
 }

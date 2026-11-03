@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import type { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Vec3 } from "vec3";
+import { monotonicNow } from "../utils/monotonic-clock.js";
 import { findLoadedBlockPositions } from "../world/loaded-block-scan.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
@@ -114,7 +115,7 @@ export const SEEN_MOVED = 8;
 export function seenInWorld(
   bot: Bot,
   frontier: Pick<SessionFrontier, "chunksWithMaterial">,
-  now: () => number = Date.now,
+  now: () => number = monotonicNow,
 ): (item: string) => number {
   let byBlock = new Map<string, number>();
   let askedAt = Number.NEGATIVE_INFINITY;

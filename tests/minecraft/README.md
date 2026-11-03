@@ -224,7 +224,9 @@ read the arena frame, so its coordinates would stay at offset zero) also gets a 
 names the reason (`placement.ts`, T7e4). The next scenario on a reusable server of its own logs in under another player
 name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or hotbar slot is saved from its predecessor.
 
-- **Admission is detected, never a fixed count.** Every 5 s the daemon reads each server's tick time P95 (`tick query`),
+- **Admission is detected; the one fixed count is for a server not read yet.** A shared server with no tick sample yet
+  takes at most `FRESH_SERVER_LANES` (10) lanes; the next trial waits for its first sample (`held=fresh-server`).
+  Every 5 s the daemon reads each server's tick time P95 (`tick query`),
   the CPU busy share (`/proc/stat`) and `MemAvailable`, and starts a trial (and a new server for it, at most one per
   sample) only while every bound holds: P95 under 25 ms, CPU under 85 %, the memory ledger (what busy servers and young
   clients still have to grow into; idle warm servers are not counted, a trial admitted onto one needs its growth
@@ -244,7 +246,7 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
   while its restore is queued or running. A server whose queue would make the next trial wait over 5 s
   (`ARRANGE_QUEUE_MS`; the median mutex time of its last 20 trials, 800 ms until 3 trials settled) is passed over, so
   the next server of the key (a new one, when memory allows) takes the trial; when no new server can start, the trial
-  takes the server with the shortest queue rather than wait. `MINE_AI_SCENARIO_SERVERS_PER_KEY` (default 1) above 1 starts that many
+  takes the server with the shortest queue rather than wait (a fresh server at its `FRESH_SERVER_LANES` bound is waited for instead). `MINE_AI_SCENARIO_SERVERS_PER_KEY` (default 1) above 1 starts that many
   servers of a key at once when it has `SERVERS_PER_KEY x (MAX_PLAYERS - 2) / 2` trials queued, each trial on the shortest queue.
 - **The daemon boots a submission's clients before their trials** (`CLIENTS_AHEAD` per submission, `CLIENTS_AHEAD_MAX` in all): a
   client host (`bun client-host.ts <driver>`) loads its driver and waits for `init`, so a lane's `join` is only the login. Never

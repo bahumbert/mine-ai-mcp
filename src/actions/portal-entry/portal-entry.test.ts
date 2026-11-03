@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
-import { type FakeHarness, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { parseNavigateRequest } from "../navigate/contract.js";
 import { parseEndPortalRequest, parseNetherPortalRequest } from "./contract.js";
 import { personalRespawnObservation, recordPersonalRespawn } from "./respawn-knowledge.js";
@@ -229,3 +229,40 @@ test("personal respawn knowledge is confirmed separately from world spawn and in
   bot.emit("spawnReset");
   assert.equal(personalRespawnObservation(bot), null);
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: the entry's elapsedMs is a duration, so it counts monotonic time.
+for (const row of [
+  { name: "a wall step back of 0.8 s in a 200 ms approach reports 200, never negative", legMs: 200, wallStepMs: -800 },
+  { name: "a wall step forward of 1.2 s in a 3 s approach reports 3000", legMs: 3_000, wallStepMs: 1_200 },
+]) {
+  test(`a portal approach that throws reports its elapsedMs on monotonic time: ${row.name}`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+    clock.stepWallClock(5_000);
+    const { bot } = crossingBot({ clock });
+    const lifetime = new AbortController();
+    const result = await clock.settle(
+      enterPortalAction(
+        bot,
+        parseEndPortalRequest({ x: 0, y: 64, z: 0, allow_distant_respawn: true, allow_low_supplies: true }),
+        {} as never,
+        {
+          createMovements: () => ({}) as never,
+          navigate: async () => {
+            await clock.sleep(row.legMs / 2);
+            clock.stepWallClock(row.wallStepMs);
+            await clock.sleep(row.legMs / 2);
+            throw new Error("engine fault");
+          },
+        },
+        lifetime.signal,
+      ),
+      row.legMs + 1_000,
+    );
+    lifetime.abort();
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /engine fault/);
+    assert.equal(result.navigation.elapsedMs, row.legMs);
+  });
+}

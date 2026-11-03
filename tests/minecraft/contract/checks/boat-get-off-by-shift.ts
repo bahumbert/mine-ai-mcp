@@ -15,7 +15,7 @@ export const boatGetOffByShift: ContractCheck = {
   withoutRuntime: true,
   async run(subject) {
     const { bot } = subject;
-    const boat = await mountBoat(subject);
+    const { boat } = await mountBoat(subject);
     writeShiftKey(bot, true);
     let heard: Awaited<ReturnType<typeof listenWhileSeated>>;
     try {

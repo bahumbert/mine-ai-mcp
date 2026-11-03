@@ -118,6 +118,7 @@ test("a server of its own is a candidate for the next scenario of its key only w
   pool.finishTrial(throwaway.id, null, end({ restored: false }), 10, { reusable: false });
   assert.deepEqual(pool.reusableSingles("own:a"), [reusable.id]);
   assert.deepEqual(pool.reusableSingles("own:b"), []);
+  assert.deepEqual(pool.reusableSingles("own:a|other-settings"), [], "a reusable server of one key is no candidate for the same world with other settings");
   await pool.reap(11, new Set());
   assert.equal(factory.created[1]?.stopped, true, "a scenario that changes the world is stopped after its trial, never reused");
 });
@@ -135,7 +136,18 @@ test("health readings reach the admission sample", async () => {
   const managed = pool.startServer(spec(), 0);
   await managed.ready;
   pool.setHealth(managed.id, { msptP95: 7.5, residentMb: 1_200 });
-  assert.deepEqual(pool.readings()[0], { id: managed.id, key: "k1", status: "ready", shared: true, busy: false, msptP95: 7.5, heapMb: 3_072, residentMb: 1_200 });
+  assert.deepEqual(pool.readings()[0], { id: managed.id, key: "k1", status: "ready", shared: true, busy: false, lanes: 0, msptP95: 7.5, heapMb: 3_072, residentMb: 1_200 });
+});
+
+test("a reading counts the lanes leased on the server, and gives them back when the trial ends", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec(), 0);
+  await managed.ready;
+  const first = pool.leaseLane(managed.id)!;
+  pool.leaseLane(managed.id);
+  assert.equal(pool.readings()[0]?.lanes, 2);
+  pool.finishTrial(managed.id, first, end(), 10);
+  assert.equal(pool.readings()[0]?.lanes, 1);
 });
 
 test("stopAll stops servers that are ready and those still starting", async () => {

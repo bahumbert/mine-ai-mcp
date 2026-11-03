@@ -17,6 +17,7 @@ import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy, withMaterialsKept } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ConversationFacts, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
 import { orderRefusal } from "./relations/order-refusal.ts";
@@ -38,6 +39,7 @@ import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type Unfini
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
+import { WhoWasNamed } from "./who-was-named.ts";
 
 /** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
 const BODY_RESTARTED = "[BODY_RESTARTED]";
@@ -86,9 +88,10 @@ export interface AgentOptions {
   /**
    * Usernames of the other agents. Their lines are answered only inside a conversation (a member of it, or a line
    * naming this character or a member), so two bots cannot talk each other into an endless chatter; with
-   * {@link AgentOptions.conversations} absent they are never answered.
+   * {@link AgentOptions.conversations} absent they are never answered. `OtherAgents` (fixed names, and the launcher's
+   * file when there is one) is asked on every line: a bot started from game chat joins the list while this one runs.
    */
-  readonly otherAgents: readonly string[];
+  readonly otherAgents: { names(): readonly string[] };
   /** Conversations (spec 2026-10-18-conversations-design); absent: the character holds none. */
   readonly conversations?: { readonly budget: ConversationBudget; readonly modelFree: () => boolean; readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean> };
   /**
@@ -180,7 +183,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, startedAt: Date.now(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: Date.now(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+  return { objective, startedAt: Date.now(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -195,8 +198,8 @@ export class Agent {
   /** What it hears, before the chat tier reads it: quick lines of one player are one message. */
   private readonly inbox: Inbox;
   private readonly history: ChatLine[] = [];
-  /** Per speaker (lower case), the latest character (this one or another agent) a line of theirs named, and when. */
-  private readonly lastNamed = new Map<string, { readonly name: string; readonly at: number }>();
+  /** Whom each player's lines named last: a line naming nobody is read as following the one that did. */
+  private readonly whoWasNamed: WhoWasNamed;
   private readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
   private readonly farms: KnownFarm[] = [];
@@ -225,7 +228,7 @@ export class Agent {
   /** When this agent started (wall clock): the window of trading's share of the time begins here, so a restart starts it again. */
   private readonly startedAt = Date.now();
   /** When old activity notes were last deleted. */
-  private rotatedAt = 0;
+  private rotatedAt = Number.NEGATIVE_INFINITY;
   /** When each player (lower case) last said anything: a follow they asked for ends after a long silence. */
   private readonly lastHeard = new Map<string, number>();
   /** Game facts learnt from the runtime, kept for the session: block tags by name, foods seen, how items are got. */
@@ -251,7 +254,7 @@ export class Agent {
   /** No shelter tried before then: the last one could not be dug here. */
   private shelterRetryAt = 0;
   /** When the sky was last looked at for nightfall during a step of its own. */
-  private nightCheckedAt = 0;
+  private nightCheckedAt = Number.NEGATIVE_INFINITY;
   /** Calls of any tier in a row that found the model server away (reset by any answer): sets how long the next wait is. */
   private modelFailures = 0;
   /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
@@ -313,6 +316,7 @@ export class Agent {
       history: () => this.history,
       ...(this.relations !== null && { relations: this.relations.forConversations() }),
     });
+    this.whoWasNamed = new WhoWasNamed(options.persona.username, () => options.otherAgents.names());
   }
 
   /** The conversation it is in now, if any. */
@@ -391,7 +395,7 @@ export class Agent {
     const { persona, everyone } = this.options;
     // Its own line coming back is never a member's: it must not reset a silence or wake its own chat.
     if (message.username.toLowerCase() === persona.username.toLowerCase()) return;
-    this.lastHeard.set(message.username.toLowerCase(), Date.now());
+    this.lastHeard.set(message.username.toLowerCase(), monotonicNow());
     this.relations?.trades.heardLine(message.username, Date.now(), message.distance ?? null);
     // Only a line spoken to me answers an ask (owner 2026-10-29); the ones the code cannot tell are read by the chat tier (decideHeard).
     if (lineIsToMe(message, { self: persona.username.toLowerCase(), isMember: this.talks?.isMember(message.username) === true, named: this.namedIn(message) })) this.relations?.heardFrom(message.username);
@@ -427,11 +431,11 @@ export class Agent {
    * (a "stop" still stops: only its line is dropped).
    */
   async handle(message: PlayerMessage, heard?: Heard): Promise<void> {
-    const heardAt = Date.now();
+    const heardAt = monotonicNow();
     this.lastHeard.set(message.username.toLowerCase(), heardAt);
     const { persona, log } = this.options;
     const line = this.remember(message.username, message.message);
-    const talkedTo = this.noteNamed(message, heardAt);
+    const talkedTo = this.whoWasNamed.note(message, heardAt);
     const named = this.namedIn(message);
     const chat = await this.decideHeard(message, heard, heardAt, talkedTo, named);
     if (chat === null) return;
@@ -548,7 +552,7 @@ export class Agent {
 
   /** Whether the name is another agent of the project (not a player). */
   private isOtherAgent(name: string): boolean {
-    return this.options.otherAgents.some((other) => other.toLowerCase() === name.toLowerCase());
+    return this.options.otherAgents.names().some((other) => other.toLowerCase() === name.toLowerCase());
   }
 
   /**
@@ -589,7 +593,7 @@ export class Agent {
   /** The characters and players a line holds as words (not its speaker), as spelled in the game. */
   private namedIn(message: PlayerMessage): string[] {
     const { persona, otherAgents, knownNames } = this.options;
-    const candidates = [persona.username, ...otherAgents, ...(knownNames ?? []), ...this.onlineNames, ...(this.talks?.current?.members ?? [])];
+    const candidates = [persona.username, ...otherAgents.names(), ...(knownNames ?? []), ...this.onlineNames, ...(this.talks?.current?.members ?? [])];
     const seen = new Set<string>([message.username.toLowerCase()]);
     return candidates.filter((name) => {
       if (seen.has(name.toLowerCase()) || !namesWord(message.message, name)) return false;
@@ -673,7 +677,7 @@ export class Agent {
         }
         const delay = this.modelFailed(error);
         const superseded = heard !== undefined && this.inbox.superseded(message.username, heard.seq);
-        if (superseded || Date.now() - heardAt >= CHAT_RETRY_MS) {
+        if (superseded || monotonicNow() - heardAt >= CHAT_RETRY_MS) {
           log(`chat tier unavailable, "${message.message}" dropped (${superseded ? "its speaker said something since" : "no answer in time"}): ${error.message}`);
           return null;
         }
@@ -833,10 +837,10 @@ export class Agent {
    * stays on the stack and resumes in the morning). Looked at every {@link NIGHT_CHECK_MS}.
    */
   private async stopOwnStepAtNightfall(): Promise<void> {
-    if (!this.options.persona.settings.shelterAtNight || Date.now() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
+    if (!this.options.persona.settings.shelterAtNight || monotonicNow() - this.nightCheckedAt < NIGHT_CHECK_MS) return;
     const top = this.stack.at(-1);
-    if (top?.step == null || top.objective.requester !== null || Date.now() < this.shelterRetryAt) return;
-    this.nightCheckedAt = Date.now();
+    if (top?.step == null || top.objective.requester !== null || monotonicNow() < this.shelterRetryAt) return;
+    this.nightCheckedAt = monotonicNow();
     if (!(await this.outInTheNight())) return;
     this.options.log("night fell: setting the step aside to dig in");
     top.step.abort();
@@ -856,7 +860,7 @@ export class Agent {
    */
   private async shelterIfNight(work: Work | undefined): Promise<boolean> {
     const { persona, runtime, log } = this.options;
-    if (!persona.settings.shelterAtNight || Date.now() < this.shelterRetryAt) return false;
+    if (!persona.settings.shelterAtNight || monotonicNow() < this.shelterRetryAt) return false;
     if (work !== undefined && work.objective.requester !== null) return false;
     if (!(await this.outInTheNight())) return false;
     this.talks?.end("taken_over", this.runSignal);
@@ -866,7 +870,7 @@ export class Agent {
     const label = "shelter for the night";
     log(`night: ${label}`);
     this.journalState(label);
-    const started = Date.now();
+    const started = monotonicNow();
     let result: SkillResult;
     try {
       result = await shelterForNight({
@@ -882,11 +886,11 @@ export class Agent {
     } finally {
       this.sheltering = null;
     }
-    if (result.status === "failed") this.shelterRetryAt = Date.now() + SHELTER_RETRY_MS;
+    if (result.status === "failed") this.shelterRetryAt = monotonicNow() + SHELTER_RETRY_MS;
     const outcome = result.status === "stopped" ? "interrupted" : result.status;
     const detail = result.status === "stopped" ? "left for an order, or stopped" : result.detail;
     log(`  -> ${label}: ${outcome}: ${detail}`);
-    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: Date.now() - started, activity: null });
+    this.options.journal?.({ kind: "step", objective, requester: null, step: label, input: { skill: "shelter_for_night" }, thought: "", outcome, detail, ms: elapsedSince(started), activity: null });
     this.journalState(null);
     if (result.status === "done") {
       this.lately.push(`${label}: ${detail}`);
@@ -898,7 +902,7 @@ export class Agent {
   /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */
   private async pickOwnObjective(): Promise<boolean> {
     const { persona, mind, runtime, log } = this.options;
-    if (persona.goal === undefined || Date.now() < this.restUntil) return false;
+    if (persona.goal === undefined || monotonicNow() < this.restUntil) return false;
     if (!(await this.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
     const hour = lastOfPlay(this.times);
@@ -924,7 +928,7 @@ export class Agent {
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     this.modelFailures = 0;
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
-    if (this.stack.length > 0 || Date.now() < this.restUntil) return true;
+    if (this.stack.length > 0 || monotonicNow() < this.restUntil) return true;
     log(`own objective: ${JSON.stringify(text)}${purpose === null ? " (no kind of work named for it)" : ` (for ${purpose})`}`);
     this.stack.push(newWork({ text, requester: null, purpose }));
     this.options.journal?.({ kind: "objective", event: "own", text, requester: null, opportunities, time, purpose, drawn, chances: chances.slice(0, TOP_CHANCES) });
@@ -997,7 +1001,7 @@ export class Agent {
     const controller = new AbortController();
     this.startStep(work, controller, decision.step);
     this.journalState(label);
-    const started = Date.now();
+    const started = monotonicNow();
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
     // travelling; a skill's phases (the house's site preparation) change the activity from then on.
     const actions: ActionTime[] = [];
@@ -1008,7 +1012,7 @@ export class Agent {
     const gain = watchGain(decision.step, snapshot, controller, { runtime: this.options.runtime, log: this.options.log, ...(this.options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }) });
     this.body.onAction = (tool, input, ms) => {
       gain.alive();
-      if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: Date.now() });
+      if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: monotonicNow() });
     };
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
@@ -1050,7 +1054,7 @@ export class Agent {
       ...(requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
       phase: (activity) => {
         gain.alive();
-        phases.push({ activity, at: Date.now() });
+        phases.push({ activity, at: monotonicNow() });
       },
       heading: gain.heading,
       alive: gain.alive,
@@ -1070,15 +1074,16 @@ export class Agent {
    */
   private async recordStep(work: Work, decision: StepDecision, run: StepRun, snapshot: BotSnapshot): Promise<StepRecord | null> {
     const { label, result, started, stalled } = run;
-    const ended = Date.now();
-    const ms = ended - started;
+    const ended = monotonicNow();
+    const endedAt = new Date().toISOString();
+    const ms = Math.round(ended - started);
     const { activity, spans, carried, position, room } = await this.activityOf(decision.step, run.actions, snapshot, started, ended, run.phases);
     // A house or a farm is what the objective turned out to be for, whatever its label said (the end decides).
     const endPurpose = ENDS.get(decision.step.skill);
     if (endPurpose !== undefined) work.purpose = endPurpose;
     const { purpose } = work;
-    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: new Date(ended).toISOString(), minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
-    if (Date.now() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
+    for (const span of spans) this.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: endedAt, minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
+    if (monotonicNow() - this.rotatedAt >= ROTATE_EVERY_MS) await this.rotateActivityNotes();
     // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
     let record: StepRecord = stalled !== null && result.status !== "done"
       ? { step: label, outcome: "failed", detail: stalled }
@@ -1116,9 +1121,9 @@ export class Agent {
   private partners(): string[] {
     if (this.talks === null) return [];
     const self = this.options.persona.username.toLowerCase();
-    const heard = [...this.lastHeard].filter(([, at]) => Date.now() - at <= PARTNER_HEARD_MS).map(([name]) => this.onlineNames.find((online) => online.toLowerCase() === name) ?? name);
+    const heard = [...this.lastHeard].filter(([, at]) => elapsedSince(at) <= PARTNER_HEARD_MS).map(([name]) => this.onlineNames.find((online) => online.toLowerCase() === name) ?? name);
     const seen = new Set<string>([self]);
-    return [...this.options.otherAgents, ...heard].filter((name) => {
+    return [...this.options.otherAgents.names(), ...heard].filter((name) => {
       if (seen.has(name.toLowerCase())) return false;
       seen.add(name.toLowerCase());
       return true;
@@ -1221,7 +1226,7 @@ export class Agent {
 
   /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
   private rememberFailedStep(objective: Objective, step: string, key: string, detail: string, carried: string | null, position: Position | null): void {
-    const now = Date.now();
+    const now = monotonicNow();
     const before = this.failedSteps.find((failure) => failure.key === key)?.failures ?? [];
     const kept = this.failedSteps.filter((failure) => failure.key !== key);
     kept.push({ objective, step, key, detail, at: now, failures: [...before.filter((at) => now - at <= FAILED_STEP_MINUTES * 60_000), now], carried, position });
@@ -1234,7 +1239,7 @@ export class Agent {
    */
   private earlierFailures(snapshot: BotSnapshot): EarlierFailure[] {
     const carried = carriedOf(snapshot);
-    const now = Date.now();
+    const now = monotonicNow();
     return this.failedSteps
       .filter((failure) => now - failure.at <= FAILED_STEP_MINUTES * 60_000)
       .reverse()
@@ -1274,12 +1279,12 @@ export class Agent {
   private async waitForGoalBudget(): Promise<boolean> {
     const interval = 60_000 / this.options.persona.settings.goalCallsPerMinute;
     const orderOnTop = () => (this.stack.at(-1)?.objective.requester ?? null) !== null;
-    while (Date.now() < this.nextGoalCall) {
+    while (monotonicNow() < this.nextGoalCall) {
       if (this.runSignal.aborted || orderOnTop()) return false;
-      await this.idle(Math.min(this.nextGoalCall - Date.now(), this.options.pollMs ?? DEFAULT_POLL_MS));
+      await this.idle(Math.min(this.nextGoalCall - monotonicNow(), this.options.pollMs ?? DEFAULT_POLL_MS));
     }
     if (orderOnTop()) return false;
-    this.nextGoalCall = Date.now() + interval;
+    this.nextGoalCall = monotonicNow() + interval;
     return true;
   }
 
@@ -1496,7 +1501,7 @@ export class Agent {
    * terraforming: only the last hour is kept), at start and then every {@link ROTATE_EVERY_MS}.
    */
   private async rotateActivityNotes(): Promise<void> {
-    this.rotatedAt = Date.now();
+    this.rotatedAt = monotonicNow();
     try {
       const rows = await this.options.runtime.queryBotData(activityNotesQuery(this.options.persona.username));
       const stale = staleActivityNotes(rows, RECENT_MINUTES);
@@ -1531,10 +1536,10 @@ export class Agent {
     if (!this.stack.includes(work) || fact === work.lastFact) return;
     work.lastFact = fact;
     this.options.log(`  now: ${fact}`);
-    const asked = Date.now() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
+    const asked = monotonicNow() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
     this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
     if (!asked) return;
-    work.spokenAt = Date.now();
+    work.spokenAt = monotonicNow();
     void this.narrate(work.objective.text, "progress", fact, work.whisperTo, () => this.stack.includes(work));
   }
 
@@ -1592,25 +1597,7 @@ export class Agent {
     this.talks?.end("taken_over", this.runSignal);
     if (speaker === undefined) this.stopAll();
     else this.stopWorkOf(speaker);
-    this.restUntil = Date.now() + this.options.persona.settings.restAfterStopSeconds * 1_000;
-  }
-
-  /**
-   * Remembers which character (this one or another agent) the line names; for a line naming none, who its speaker named
-   * last when that was within {@link TALKED_TO_MS} (live 2026-10-11: "thanks, no rush" after a line to Vex was answered by
-   * Ayla too). Names as words only, never what the line says.
-   */
-  private noteNamed(message: PlayerMessage, at: number): { name: string; secondsAgo: number } | undefined {
-    const speaker = message.username.toLowerCase();
-    const characters = [this.options.persona.username, ...this.options.otherAgents];
-    const named = characters.filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
-    if (this.options.otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
-    if (named.length > 0) {
-      this.lastNamed.set(speaker, { name: named[0]!, at });
-      return undefined;
-    }
-    const last = this.lastNamed.get(speaker);
-    return last !== undefined && last.name.toLowerCase() !== this.options.persona.username.toLowerCase() && at - last.at <= TALKED_TO_MS ? { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } : undefined;
+    this.restUntil = monotonicNow() + this.options.persona.settings.restAfterStopSeconds * 1_000;
   }
 
   /** The ask in the reply becomes an open request when its line is sent, not when decided (typing runs seconds behind earlier speech: a line heard before that is no answer to it); a say that failed opens none. */
@@ -1621,7 +1608,7 @@ export class Agent {
   }
 
   /** `since`: when the message being answered was heard (thinking time counts as typing time). Resolves once the line is sent; rejects (after logging) when the runtime threw. A refusal the runtime reports without throwing still resolves (`Body.say` only logs it). */
-  private speak(text: string, since = Date.now(), to?: readonly string[], whisperTo: string | null = null, shout = false): Promise<void> {
+  private speak(text: string, since = monotonicNow(), to?: readonly string[], whisperTo: string | null = null, shout = false): Promise<void> {
     if (text.trim() === "") return Promise.resolve();
     const said = this.remember(this.options.persona.username, text);
     if (to !== undefined) this.annotate(said, to);
@@ -1645,9 +1632,6 @@ export class Agent {
 
 /** A player heard this recently (ms) can be gone and chat with. */
 const PARTNER_HEARD_MS = 10 * 60_000;
-
-/** How long after a line naming a character a line naming nobody is still shown as following it. */
-const TALKED_TO_MS = 60_000;
 
 /** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
 function minutesAgo(iso: string): string {

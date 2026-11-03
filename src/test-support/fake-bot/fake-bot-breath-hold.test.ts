@@ -6,7 +6,7 @@ import { type FakeBotOptions, createFakeBot } from "./fake-bot.js";
 /** The feet in a 2-deep pool: the eye (1.62 up) is in the upper cell. */
 const POOL: FakeBotOptions["cells"] = { "0,64,0": "water", "0,65,0": "water" };
 const POOL_FEET = new Vec3(0.5, 64, 0.5);
-/** A server answer reaches the client one slice after the tick that made it (`FakeServer.answer`). */
+/** The held air is a server answer to the test's scene call: it reaches the client one slice after the call (`FakeServer.answer`); the packets of the ticks after a release are heard in their tick. */
 const DELIVERY_MS = 50;
 
 /** The player's `air_supply` metadata index in the version's registry (`entities.js:478-479` reads it by key). */
@@ -46,7 +46,7 @@ test("a release out of the water resumes the refill at 4 a tick up to the full 3
   await clock.advance(1_000);
   breath.release();
   assert.equal(breath.held, false);
-  await clock.advance(500 + DELIVERY_MS);
+  await clock.advance(500);
   assert.equal(bot.entity.metadata[airIndex(bot)], 120 + 4 * 10);
   await clock.advance(2_000);
   assert.equal(bot.entity.metadata[airIndex(bot)], 300);
@@ -57,7 +57,7 @@ test("a release under water resumes the fall at 1 a tick", async () => {
   breath.hold(120);
   await clock.advance(1_000);
   breath.release();
-  await clock.advance(1_000 + DELIVERY_MS);
+  await clock.advance(1_000);
   assert.equal(bot.entity.metadata[airIndex(bot)], 120 - 20);
 });
 

@@ -172,3 +172,44 @@ test("a declared main hand is expected in slot 0, where the server fills it afte
   assert.equal(reported(), true);
   assert.equal(bot.heldItem?.name, "stone");
 });
+
+test("a preparation stuck waiting for the arranged player fails inside the bound, naming the step and what the wait lacks", async () => {
+  const { bot, session, ready, arranged } = await fixture();
+  const prepared = prepareScenarioBot(bot, session, { arrangedWallMs: 80 });
+  await hearJoin(bot);
+  await ready.promise;
+  arranged.resolve(); // Mine Labs says arranged; the player's position never arrives.
+
+  await assert.rejects(prepared, /Bot 'Actor' was not prepared within 0\.08 s of the arrangement, stuck at 'arranged player': position update: never seen/u);
+  assert.equal(bot.physicsEnabled, true);
+});
+
+test("a preparation stuck waiting to land fails inside the bound with the body's height, and leaves no listener behind", async () => {
+  const { bot, session, ready, arranged, added } = await fixture();
+  bot.entity.onGround = false;
+  const prepared = prepareScenarioBot(bot, session, { arrangedWallMs: 80 });
+  await hearJoin(bot);
+  await ready.promise;
+  bot.emit("forcedMove");
+  arranged.resolve();
+
+  await assert.rejects(prepared, /stuck at 'landing': onGround false, y -?\d/u); // No physics tick comes: only the wall clock can end it.
+  for (const event of ["spawn", "health", "forcedMove", "physicsTick"] as const) assert.equal(added(event), 0, `${event} setup listener leaked`);
+});
+
+test("the bound starts when Mine Labs says arranged: an arrangement that takes longer than the bound is not a failure", async () => {
+  const { bot, session, ready, arranged } = await fixture();
+  const prepared = prepareScenarioBot(bot, session, { arrangedWallMs: 80 });
+  await hearJoin(bot);
+  await ready.promise;
+  await delay(150); // Mine Labs is still arranging the world: it times that phase itself.
+  bot.emit("forcedMove");
+  arranged.resolve();
+  await setImmediate();
+  for (let tick = 0; tick < 10; tick++) {
+    bot.emit("physicsTick");
+    await setImmediate();
+  }
+
+  await prepared;
+});

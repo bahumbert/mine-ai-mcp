@@ -1,5 +1,5 @@
 diff --git a/src/client/node.ts b/src/client/node.ts
-index 43f1573..4444d28 100644
+index 43f15733adeb8a84289eedaa0763355829b27173..4444d28082dc899a59e402ee399776ecd1283707 100644
 --- a/src/client/node.ts
 +++ b/src/client/node.ts
 @@ -29,6 +29,8 @@ export interface NodeClientSession {
@@ -20,7 +20,7 @@ index 43f1573..4444d28 100644
      start: started.promise,
      signal: cancellation.signal,
 diff --git a/src/client/process.ts b/src/client/process.ts
-index b35d721..5f331ba 100644
+index b35d72148c0810f13b8bc591c190b50dfbffbefb..5f331bada829f97cdce37ddc415b7e0cd2d3be98 100644
 --- a/src/client/process.ts
 +++ b/src/client/process.ts
 @@ -28,6 +28,40 @@ import {
@@ -240,7 +240,7 @@ index b35d721..5f331ba 100644
  
  function send(child: ChildProcessWithoutNullStreams, command: ClientCommand): void {
 diff --git a/src/client/protocol.ts b/src/client/protocol.ts
-index 20fe378..2d6ae6a 100644
+index 20fe378258fced675c6a8d35c541531c9f985d84..2d6ae6a526a8fa913f84a8964894ff2eeade07bc 100644
 --- a/src/client/protocol.ts
 +++ b/src/client/protocol.ts
 @@ -33,6 +33,8 @@ export type ClientCommand =
@@ -261,7 +261,7 @@ index 20fe378..2d6ae6a 100644
    z.object({ type: z.literal("arranged") }),
    z.object({ type: z.literal("start") }),
 diff --git a/src/index.ts b/src/index.ts
-index 7f0cb7e..ec90fa9
+index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1e99b8567 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -22,6 +22,31 @@ export {
@@ -303,7 +303,7 @@ index 7f0cb7e..ec90fa9
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
-index 54fe980..9c2e6e5
+index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609b609f116 100644
 --- a/src/scenario/compile.ts
 +++ b/src/scenario/compile.ts
 @@ -17,7 +17,7 @@ import { join } from "node:path";
@@ -407,7 +407,7 @@ index 54fe980..9c2e6e5
  
    for (const g of s.geometry) {
      if ("fill" in g) {
-@@ -209,15 +261,13 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -209,15 +261,15 @@ export function compileScenario(s: Scenario): CompiledScenario {
  
    // Entities first: the reset clears blocks, and anything the scenario summoned
    // would otherwise be left standing in the cleared space.
@@ -416,7 +416,9 @@ index 54fe980..9c2e6e5
 -      ? [ALLOW_LARGE_FIXTURE_COMMANDS, CLEAR_ENTITIES, ...s.reset.map(arena)]
 -      : [ALLOW_LARGE_FIXTURE_COMMANDS, CLEAR_ENTITIES];
 +  const clearEntities = options.entityBox ? boxedClearEntities(options.entityBox) : CLEAR_ENTITIES;
-+  const teardown = [...blockLimit, clearEntities, ...s.reset.map(arena)];
++  // In a lane the kill runs twice: it drops each mob's loot after choosing its targets, and loot left standing is
++  // saved with the chunks once they are unpinned, then loads back under the next player, who picks it up.
++  const teardown = [...blockLimit, clearEntities, ...(options.entityBox ? [clearEntities] : []), ...s.reset.map(arena)];
  
    const region = setupRegion([...setup, ...activation], s);
    // Authored reset commands cannot account for blocks placed or dug by clients.
@@ -426,7 +428,7 @@ index 54fe980..9c2e6e5
  
    return { setup, activation, teardown, region, snapshot };
  }
-@@ -237,17 +287,17 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -237,17 +289,17 @@ export function compileScenario(s: Scenario): CompiledScenario {
   * setup list, so it cannot rely on the gamerule that list sets, and a 32,768
   * block default would silently truncate the copy of a large arena.
   */
@@ -448,7 +450,7 @@ index 54fe980..9c2e6e5
      pin: [region, scratch],
    };
  }
-@@ -414,3 +464,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
+@@ -414,3 +466,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
      JSON.stringify({ values: [`${ns}:tick`] }, null, 2),
    );
  }
@@ -527,7 +529,7 @@ index 54fe980..9c2e6e5
 +  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 +}
 diff --git a/src/server/rcon.ts b/src/server/rcon.ts
-index 0baaaf1..73400f9
+index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c8e0851bf 100644
 --- a/src/server/rcon.ts
 +++ b/src/server/rcon.ts
 @@ -28,7 +28,7 @@ import RconClientModule from "rcon-srcds";
@@ -549,10 +551,10 @@ index 0baaaf1..73400f9
        if (!succeeded && !options.acceptedNoOp?.test(output)) {
          throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
 diff --git a/src/server/server.ts b/src/server/server.ts
-index 51aeb89..152d0f2
+index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d1e6ba168 100644
 --- a/src/server/server.ts
 +++ b/src/server/server.ts
-@@ -94,6 +94,20 @@ export interface ServerConfig {
+@@ -94,6 +94,42 @@ export interface ServerConfig {
    structures: boolean;
    operators: OperatorProfile[];
    maxPlayers?: number;
@@ -562,6 +564,28 @@ index 51aeb89..152d0f2
 +  enableCommandBlocks?: boolean;
 +  /** Java heap cap, `-Xmx` syntax ("4G"); absent keeps the default heap. */
 +  maxHeap?: string;
++  /** Extra `server.properties` lines: a key the file already holds is replaced in place, any other is appended. */
++  properties?: Readonly<Record<string, string>>;
++}
++
++/** `lines` ("key=value") with `properties` applied: a held key is replaced in place, a new one goes last. */
++export function applyServerProperties(lines: readonly string[], properties: Readonly<Record<string, string>> | undefined): string[] {
++  const merged = [...lines];
++  for (const [key, value] of Object.entries(properties ?? {})) {
++    // The game reads the file with java.util.Properties.load: other characters in a key end it early or make a comment.
++    if (!/^[\w.-]+$/u.test(key)) {
++      throw new Error(`server property key ${JSON.stringify(key)}: a key holds only letters, digits, "_", "." and "-"`);
++    }
++    // A newline starts another line; an odd run of "\" at the end continues the value onto the next fixed line.
++    if (/[\r\n]/u.test(value) || /(?<!\\)(?:\\\\)*\\$/u.test(value)) {
++      throw new Error(`server property value of ${JSON.stringify(key)}: a value holds no newline and does not end in a single "\\" (either would swallow or add a line)`);
++    }
++    const line = `${key}=${value}`;
++    const held = merged.flatMap((existing, index) => (existing.startsWith(`${key}=`) ? [index] : []));
++    if (held.length === 0) merged.push(line);
++    else for (const index of held) merged[index] = line;
++  }
++  return merged;
 +}
 +
 +/** The heap cap a server gets when `maxHeap` is not asked for. */
@@ -573,27 +597,35 @@ index 51aeb89..152d0f2
  }
  
  export class MinecraftServer {
-@@ -135,6 +149,9 @@ export class MinecraftServer {
+@@ -135,10 +171,16 @@ export class MinecraftServer {
      seed?: number | string;
      structures?: boolean;
      maxPlayers?: number;
 +    pauseWhenEmptySeconds?: number;
 +    enableCommandBlocks?: boolean;
 +    maxHeap?: string;
++    /** Written after the fixed `server.properties` list (see `applyServerProperties`). */
++    properties?: Readonly<Record<string, string>>;
      spectatorNames?: string[];
    }): Promise<MinecraftServer> {
      // Validate local configuration before acquiring resources that need release.
-@@ -153,6 +170,9 @@ export class MinecraftServer {
+     const operators = defaultOperatorProfiles();
++    applyServerProperties([], opts.properties);
+     await linkServerRuntime(opts.root, opts.version);
+     const host = opts.host ?? "127.0.0.1";
+     const ports = await reserveFreePortPair(opts.preferPort ?? 25565, host);
+@@ -153,6 +195,10 @@ export class MinecraftServer {
        seed: opts.seed,
        structures: opts.structures ?? false,
        maxPlayers: opts.maxPlayers,
 +      pauseWhenEmptySeconds: opts.pauseWhenEmptySeconds,
 +      enableCommandBlocks: opts.enableCommandBlocks,
 +      maxHeap: opts.maxHeap,
++      properties: opts.properties,
        operators: [...operators, ...(opts.spectatorNames ?? []).map((name): OperatorProfile => ({
          name, uuid: offlinePlayerUuid(name), level: 2, bypassesPlayerLimit: true,
        }))],
-@@ -205,6 +225,8 @@ export class MinecraftServer {
+@@ -205,9 +251,11 @@ export class MinecraftServer {
        "view-distance=8",
        "simulation-distance=8",
        `max-players=${this.cfg.maxPlayers ?? 10}`,
@@ -601,8 +633,12 @@ index 51aeb89..152d0f2
 +      ...(this.cfg.enableCommandBlocks ? ["enable-command-block=true"] : []),
      ];
      const root = join(this.cfg.worldDir, "..");
-     await writeTextFile(join(root, "server.properties"), lines.join("\n"));
-@@ -221,7 +243,7 @@ export class MinecraftServer {
+-    await writeTextFile(join(root, "server.properties"), lines.join("\n"));
++    await writeTextFile(join(root, "server.properties"), applyServerProperties(lines, this.cfg.properties).join("\n"));
+     // The vanilla server gates on eula.txt, not the server.properties key.
+     await writeTextFile(join(root, "eula.txt"), "eula=true\n");
+     await writeTextFile(join(root, "ops.json"), `${JSON.stringify(this.cfg.operators, null, 2)}\n`);
+@@ -221,7 +269,7 @@ export class MinecraftServer {
      const javaName = process.platform === "win32" ? "javaw.exe" : "java";
      const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", javaName) : javaName;
      this.log(`starting ${this.cfg.version} server on ${this.cfg.host}:${this.cfg.gamePort} (rcon :${this.cfg.rconPort})`);
@@ -611,12 +647,12 @@ index 51aeb89..152d0f2
        cwd: root,
        stdio: ["ignore", "pipe", "pipe"],
        windowsHide: true,
-diff --git a/src/trial/arena.ts b/src/trial/arena.ts
+diff --git a/node_modules/mine-labs/src/trial/arena.ts b/src/trial/arena.ts
 new file mode 100644
-index 0000000..d9aa2f5
+index 0000000000000000000000000000000000000000..02bc518048e62b92393e1c15e73b0cd555dc8637
 --- /dev/null
 +++ b/src/trial/arena.ts
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,72 @@
 +/**
 + * What a trial needs to know to share its server with other trials.
 + *
@@ -677,8 +713,20 @@ index 0000000..d9aa2f5
 +export function clearEntitiesOf(lane: LaneContext | undefined): string {
 +  return lane ? boxedClearEntities(lane.arena.entityBox) : CLEAR_ENTITIES;
 +}
++
++/**
++ * The entity clear of a reused trial: the lane's box twice (the first kill drops its mobs' loot after it chose its
++ * targets, the second takes that loot), a server of its own once as before. The kill that finds every entity runs
++ * where they are loaded: a chunk pinned again after it unloaded loads its entities some ticks after the pin, and a kill
++ * straight after the pin misses them. That is `runScenarioTrial` at the end of a trial, while its player keeps the
++ * chunks loaded; the arrangement's clear and the restore's kill are the fallback for a trial that never got there.
++ */
++export async function clearTrialEntities(rcon: { command(command: string): Promise<string> }, lane: LaneContext | undefined): Promise<void> {
++  await rcon.command(clearEntitiesOf(lane));
++  if (lane) await rcon.command(clearEntitiesOf(lane));
++}
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9..b583cff
+index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5b7761a79 100644
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
 @@ -31,16 +31,16 @@ import {
@@ -690,7 +738,7 @@ index 2465cf9..b583cff
    type ArenaSnapshot,
    type SetupRegion,
  } from "../scenario/compile.js";
-+import { assertLaneTrial, clearEntitiesOf, compileOptionsOf, laneContextOf, type ArenaTrialOptions, type LaneContext } from "./arena.js";
++import { assertLaneTrial, clearTrialEntities, compileOptionsOf, laneContextOf, type ArenaTrialOptions, type LaneContext } from "./arena.js";
  import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
  import { preparePlayerForTrial } from "../player/prepare.js";
  import { watchOperatorSpectators } from "../player/operators.js";
@@ -766,7 +814,16 @@ index 2465cf9..b583cff
      try {
        await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
        await connectScenarioClients({ ...opts, clients });
-@@ -214,7 +235,7 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -210,11 +231,16 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+   } finally {
+     result.elapsedMs = Date.now() - startedAt;
+     operatorWatch?.stop();
++    // The mobs die while the player still keeps their chunks loaded: the restore pins the arena again after they
++    // unloaded, and its kill, straight after the pin, misses the entities that load some ticks later (see `clearTrialEntities`).
++    if (opts.reuseServer && server.rcon) {
++      await clearTrialEntities(server.rcon, lane).catch((error: unknown) => log(`entity clear at the end of the trial failed: ${error instanceof Error ? error.message : String(error)}`));
++    }
+     await stopScenarioClients(clients);
      // The session retains the world for inspection and restores it before reuse.
      if (opts.reuseServer && arenaBackup) {
        const backup = arenaBackup;
@@ -775,7 +832,7 @@ index 2465cf9..b583cff
        if (opts.deferReset) opts.deferReset(restore);
        else await restore(log);
      }
-@@ -296,6 +317,7 @@ async function connectScenarioClients(
+@@ -296,6 +322,7 @@ async function connectScenarioClients(
        username: player.name,
        version: scenario.minecraft.version,
        artifactsDirectory,
@@ -783,7 +840,7 @@ index 2465cf9..b583cff
        log,
        onChat: (message) => clients.chat.get(player.name)?.push(message),
        onCompletion: (completion) => recordClientCompletion(player.name, completion, clients, log),
-@@ -443,9 +465,10 @@ async function snapshotArena(
+@@ -443,9 +470,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -795,7 +852,7 @@ index 2465cf9..b583cff
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +478,7 @@ async function snapshotArena(
+@@ -455,7 +483,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -804,7 +861,7 @@ index 2465cf9..b583cff
    }
  }
  
-@@ -465,15 +488,22 @@ async function clearScenario(
+@@ -465,15 +493,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -832,7 +889,7 @@ index 2465cf9..b583cff
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +515,8 @@ async function clearScenario(
+@@ -485,7 +520,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -842,7 +899,7 @@ index 2465cf9..b583cff
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -502,34 +533,85 @@ async function arrangeScenario(
+@@ -502,34 +538,87 @@ async function arrangeScenario(
    log: (message: string) => void,
    reuseServer: boolean,
    holdPreparedWorld = false,
@@ -856,7 +913,9 @@ index 2465cf9..b583cff
 -  await writeDatapack(holdPreparedWorld ? { ...scenario, tick: [] } : scenario, server.worldDir);
 -  await rcon.command("reload");
 -  const { setup, region } = compileScenario(scenario);
-+  if (reuseServer) await rcon.command(clearEntitiesOf(lane));
++  if (reuseServer) {
++    await clearTrialEntities(rcon, lane);
++  }
 +  if (!lane) {
 +    // A standby's tick commands must not run during setup or the selection wait.
 +    await writeDatapack(holdPreparedWorld ? { ...scenario, tick: [] } : scenario, server.worldDir);
@@ -935,7 +994,7 @@ index 2465cf9..b583cff
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +668,8 @@ async function pinRegions(
+@@ -586,8 +675,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */
@@ -947,7 +1006,7 @@ index 2465cf9..b583cff
  
  async function waitForClientPhase(
 diff --git a/src/util/minecraft.ts b/src/util/minecraft.ts
-index 0dfa0ed..e5450d0
+index 0dfa0ed1ec590720a1bdae1e912463958a8da8ce..e5450d022003bb75af1dcf883399704b2abc62fd 100644
 --- a/src/util/minecraft.ts
 +++ b/src/util/minecraft.ts
 @@ -47,3 +47,6 @@ export function withoutDimension(command: string): string {

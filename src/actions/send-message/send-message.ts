@@ -15,13 +15,24 @@ import {
 
 const MESSAGE_ECHO_TIMEOUT_MS = 5_000;
 
-/**
- * The translation key of the line the server sends a whisperer, "You whisper to <name>: <text>" in the client's
- * language. Matching the key, not the wording, makes the echo observable whatever language the server speaks.
- */
+/** The translation key of the line the server sends a whisperer, "You whisper to <name>: <text>" in the client's language. */
 const OUTGOING_WHISPER_KEY = "commands.message.display.outgoing";
 /** The key of the reply to a command the server does not have ("Unknown or incomplete command"). */
 const UNKNOWN_COMMAND_KEY = "command.unknown.command";
+
+/**
+ * What the echo's `translate` holds on the client: the outgoing whisper format as the client registry renders it, or the
+ * key itself when its language table lacks the key. The server sends the echo as a chat-type line, and Mineflayer files
+ * such a line under the chat type's `formatString` (`mineflayer/lib/plugins/chat.js:112-121`, `fromNetwork`), which
+ * prismarine-registry fills with the language's text for the key, not the key (`prismarine-registry/lib/pc/index.js:20`:
+ * `language[translation_key] || translation_key`; contract check `whisper-echo`, run L of the in-game bot commands).
+ * The game's own data gives the text: no wording here. The key is always accepted as well: it is what the line carries
+ * when the table lacks it (a client registry in a language without the key).
+ */
+function outgoingWhisperFormats(bot: Bot): ReadonlySet<string> {
+  const rendered: string | undefined = bot.registry.language[OUTGOING_WHISPER_KEY];
+  return new Set(rendered === undefined ? [OUTGOING_WHISPER_KEY] : [rendered, OUTGOING_WHISPER_KEY]);
+}
 
 type MessageDelivery =
   | { readonly kind: "observed" }
@@ -67,9 +78,7 @@ async function whisper(bot: Bot, message: string, to: string, context: ActionCon
   const self = bot.username.toLowerCase();
   const target = Object.keys(bot.players).find((name) => name.toLowerCase() === to.toLowerCase() && name.toLowerCase() !== self);
   if (target === undefined) return { status: "failed", error: sendMessageOutcomes.playerNotOnline(to), message, to };
-  // Mineflayer hands the echo over with the key already resolved through its own language table ("You whisper to %s:
-  // %s", live 2026-10-18), whatever language the server speaks: accept the key and its resolved format.
-  const echoFormats = new Set([OUTGOING_WHISPER_KEY, bot.registry?.language?.[OUTGOING_WHISPER_KEY]].filter((f) => f !== undefined));
+  const echoFormats = outgoingWhisperFormats(bot);
   const delivery = await observeDelivery(
     context,
     (finish) => {

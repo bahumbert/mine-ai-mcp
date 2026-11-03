@@ -110,3 +110,34 @@ test("two harnesses on one clock move their own boats", async () => {
   assert.equal(first.bot.entities[BOAT_ID]!.position.x, 3.9);
   assert.equal(second.bot.entities[BOAT_ID]!.position.x, 3.5);
 });
+
+// Contract check `boat-broken-by-attack`, plan 2026-10-30-contract-batch-timing T5/T7g: a real server sends the seat as a `position` packet about two
+// ticks before the passenger list; Mineflayer's physics run in between (`physics.js:448`) and the list stops them (`entities.js:817`) without moving her back.
+test("with a seat lead the server sends her the seat as a position first, the list two ticks later, and the physics between move her down", async () => {
+  const { bot, clock } = createFakeBot({
+    position: new Vec3(0.5, 64, 0.5),
+    groundY: 50,
+    simulatePhysics: true,
+    entities: { [BOAT_ID]: { name: "oak_boat", position: new Vec3(3.5, 64, 0.5) } },
+    server: { seatPositionLeadTicks: 2 },
+  });
+  const heard: { what: string; y: number }[] = [];
+  bot.on("forcedMove", () => void heard.push({ what: "position", y: bot.entity.position.y }));
+  bot._client.on("set_passengers", () => void heard.push({ what: "list", y: bot.entity.position.y }));
+  bot.mount(bot.entities[BOAT_ID]!);
+  await clock.advance(500);
+  assert.deepEqual(heard.map(({ what }) => what), ["position", "list"]);
+  assert.equal(heard[0]!.y, 64 - 0.4125, "the position packet is the seat");
+  assert.ok(heard[1]!.y < heard[0]!.y, `the physics ran between the position and the list: ${JSON.stringify(heard)}`);
+  const atList = heard[1]!.y;
+  assert.equal(bot.entity.position.y, atList, "the list does not move her back to the seat, and the physics are off after it");
+  assert.equal(bot.vehicle?.id, BOAT_ID);
+});
+
+test("without a seat lead the seat and the list come together, as before", async () => {
+  const { bot, clock, server } = seatedBoat();
+  bot.mount(bot.entities[BOAT_ID]!);
+  await clock.advance(100);
+  assert.deepEqual(server.sentPositions, []);
+  assert.equal(bot.vehicle?.id, BOAT_ID);
+});

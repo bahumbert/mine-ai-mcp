@@ -1,4 +1,5 @@
 import minecraftData from "minecraft-data";
+import { NEWEST_REGISTRY_VERSION as REGISTRY_VERSION } from "./newest-registry.ts";
 import type { BotRuntime } from "./runtime-client.ts";
 
 /** The recipe data of minecraft-data's newest registry (the server's own version is confirmed by the craft planner). */
@@ -7,8 +8,6 @@ interface Registry {
   readonly itemsByName: Readonly<Record<string, { readonly id: number } | undefined>>;
   readonly recipes: Readonly<Record<string, readonly { readonly ingredients?: readonly (number | null)[]; readonly inShape?: readonly (readonly (number | null)[])[] }[] | undefined>>;
 }
-
-const REGISTRY_VERSION = (minecraftData as unknown as { readonly supportedVersions: { readonly pc: readonly string[] } }).supportedVersions.pc.at(-1) ?? "";
 
 /** A boat of the game and the log its planks are made from (null: its planks come from no single item). */
 interface BoatRecipe {

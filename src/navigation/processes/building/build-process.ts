@@ -29,7 +29,7 @@
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { asVec3 } from "../../../utils/index.js";
+import { asVec3, monotonicNow } from "../../../utils/index.js";
 import {
   findPlacementSupport,
   isAir,
@@ -295,7 +295,7 @@ function carriedCounts(bot: Bot): Map<string, number> {
  * loop and the goal because they ask the same question at different rates,
  * and one cache means they can never disagree about what is workable.
  */
-class BuildTargeting {
+export class BuildTargeting {
   readonly #states = new Map<number, BuildCellState>();
   /** The correct cells as packed keys, handed to the movement policy and kept current. */
   readonly protectedCells = new Set<number>();
@@ -345,7 +345,7 @@ class BuildTargeting {
   }
 
   /** Every cell's state, reclassifying the world at most every `REFRESH_MS`. */
-  states(now = Date.now()): ReadonlyMap<number, BuildCellState> {
+  states(now = monotonicNow()): ReadonlyMap<number, BuildCellState> {
     if (now - this.#refreshedAtMs < REFRESH_MS) return this.#states;
     const bot = this.bot;
     const feet = feetOf(bot);
@@ -362,7 +362,7 @@ class BuildTargeting {
     for (const cell of this.request.cells) {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
     }
-    this.#refreshedAtMs = Date.now();
+    this.#refreshedAtMs = now;
     return this.#states;
   }
 

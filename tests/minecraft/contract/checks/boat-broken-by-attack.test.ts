@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { FakeServerOptions } from "../../../../src/test-support/fake-bot/index.ts";
+import { ZERO_ARENA, arenaFrame } from "../../arena/frame.ts";
+import { fakeHarnessFor } from "../fake-harness.ts";
+import { fakeContractSubject } from "../subject.ts";
 import { boatBrokenByAttack, damageBounds } from "./boat-broken-by-attack.ts";
 import { runOnFake } from "./run-on-fake.ts";
 
 /** Run the check on the fake (`run-on-fake.ts`): `change` rewrites the subject before it runs, `stalls` stop the server. */
 const runCheck = (server: FakeServerOptions, change?: Parameters<typeof runOnFake>[2], stalls?: Parameters<typeof runOnFake>[3]) => runOnFake(boatBrokenByAttack, server, change, stalls);
 
-test("boat-broken-by-attack judges the hits by the server's ticks: a server at 14 ticks a second breaks the boats at the hit the ticks say", async () => {
-  await runCheck({ ticksPerSecond: 14 });
+test("boat-broken-by-attack judges the hits by the server's ticks: a server at 8, 14 and 20 ticks a second breaks the boats at the hit the ticks say (hits 250 ms apart are 2, 3.5 and 5 ticks apart)", async () => {
+  for (const ticksPerSecond of [8, 14, 20]) await runCheck({ ticksPerSecond });
 });
 
 test("boat-broken-by-attack holds when the server stalls for under 2 s between the hits and catches up (at any hit)", async () => {
@@ -38,27 +41,27 @@ test("boat-broken-by-attack fails, naming the ticks read, when the boat broke at
 });
 
 test("boat-broken-by-attack fails, naming the ticks read, when the boat held for more hits than the ticks say", async () => {
-  // Two hits never arrive: the readings, 6 ticks apart, say the boat is broken at hit 11, and the client goes on to hit 13.
+  // Five hits never arrive: the readings, 5 ticks apart, say the boat is broken at hit 12, and the client goes on to hit 15.
   await assert.rejects(
     runCheck({}, (subject) => {
       const hit = subject.bot.attack.bind(subject.bot);
       let sent = 0;
       subject.bot.attack = (target) => {
         sent += 1;
-        if (sent !== 3 && sent !== 4) hit(target);
+        if (sent < 3 || sent > 7) hit(target);
       };
       return subject;
     }),
-    /hit 11 left at least 41\.9 damage, more than the 40 that breaks a boat, yet the client hit 2 more times, up to 12 ticks later, before the boat was gone \(at most 9\): server ticks read before the hits 24000, 24006/,
+    /hit 12 left at least 42\.5 damage, more than the 40 that breaks a boat, yet the client hit 3 more times, up to 15 ticks later, before the boat was gone \(at most 9\): server ticks read before the hits 24001, 24006/,
   );
 });
 
 test("boat-broken-by-attack fails, naming the ticks read, when the ticks say every hit found the damage gone", async () => {
-  // Readings 200 ticks apart (the rests read too): the damage decays to nothing between the hits, so no hit leaves more than 10.
+  // Readings 100 ticks apart (one per hit): the damage decays to nothing between the hits, so no hit leaves more than 10.
   let reading = 0;
   await assert.rejects(
     runCheck({}, (subject) => ({ ...subject, serverGameTime: async () => (reading += 1) * 100 })),
-    /the boat broke by hit 9 though no hit left more than 10\.0 damage, 40 breaks it: server ticks read before the hits 100, 300/,
+    /the boat broke by hit 8 though no hit left more than 10\.0 damage, 40 breaks it: server ticks read before the hits 100, 200/,
   );
 });
 
@@ -83,4 +86,20 @@ test("damageBounds: hits bunched in one tick weigh a fifth of a full hit, hits 5
   const mayBreak = spaced.high.findIndex((held) => held > 40) + 1;
   const mustBreak = spaced.low.findIndex((held) => held > 40) + 1;
   assert.ok(mayBreak >= 7 && mayBreak <= 8 && mustBreak >= mayBreak && mustBreak <= 13, `hits 5 ticks apart: may break at hit ${mayBreak}, must at hit ${mustBreak}`);
+});
+
+test("boat-broken-by-attack reads her seat from the server's move: the physics that ran before the passenger list do not count as the seat", async () => {
+  // The server sends the seat as a position 2 ticks before the list (T5): her body falls in between (`physics.js:448`), the seat the server chose is what the check asserts.
+  const frame = arenaFrame(ZERO_ARENA);
+  const harness = fakeHarnessFor(boatBrokenByAttack.fixture, frame, {}, 0, true);
+  using _installed = harness.clock.install();
+  const subject = fakeContractSubject(harness, frame);
+  // Physics ticks between the seat's position and the list: without them the body is at the seat when the list comes and the test proves nothing.
+  let betweenSeatAndList = 0;
+  let seated = false;
+  harness.bot.on("forcedMove", () => void (seated = true));
+  harness.bot._client.on("set_passengers", () => void (seated = false));
+  harness.bot.on("physicsTick", () => void (seated && (betweenSeatAndList += 1)));
+  await boatBrokenByAttack.run(subject);
+  assert.ok(betweenSeatAndList > 0, "the physics ran between the seat and the list");
 });

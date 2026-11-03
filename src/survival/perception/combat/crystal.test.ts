@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { TestEndCombat as EndCombat, engagingCombat, unexpectedEngage } from "../../../test-support/combat.js";
-import { type FakeBotOptions, createFakeBot, entityBodyOf, itemOf } from "../../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, createFakeClock, entityBodyOf, itemOf } from "../../../test-support/fake-bot/index.js";
 import type { CombatController } from "../../control/combat/contract.js";
 import { CrystalObservation } from "./crystal.js";
 
@@ -375,4 +375,21 @@ test("a crystal destroyed during the resumed draw cancels the draw without firin
   assert.equal(releases, 0);
   assert.equal(result.outcome, "crystal_destroyed");
   assert.equal(result.attacks, 0);
+});
+
+test("crystal request timing counts monotonic time: a 0.8 s wall step back leaves a 3000 ms first swing and a 2000 ms return", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  const { bot } = createFakeBot({ clock, entities: { 42: { name: "end_crystal", position: new Vec3(30, 80, 0) } } });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  using observation = new CrystalObservation(bot, 42);
+  await clock.advance(3_000);
+  clock.stepWallClock(-800);
+  observation.recordSwing(true, 3, { cover: null, exposure: 0, damage: 0 });
+  observation.beginReturn();
+  await clock.advance(2_000);
+  clock.stepWallClock(-800);
+  observation.finishReturn(true);
+  assert.deepEqual([observation.timeToFirstSwingMs, observation.returnTimeMs], [3_000, 2_000]);
 });

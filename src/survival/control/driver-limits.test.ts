@@ -8,18 +8,19 @@ import { forgetVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { type FakeClock, createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import type { ReflexDefinition, ReflexLimits, SurvivalTransition } from "./contract.js";
-import { ReflexDriver } from "./driver.js";
+import { ReflexDriver, type ReflexDriverOptions } from "./driver.js";
 
 const LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 1_000, standDownMs: 3_000 };
 
 /**
  * A driver on the bot's clock: `pass(ms)` moves time in 50 ms ticks with a physics tick at each, as a healthy server
- * would. A boat (#7) floats beside the bot; `clock` is a mocked one for a test of the driver's own interval.
+ * would. A boat (#7) floats beside the bot; `clock` is a mocked one for a test of the driver's own interval, and
+ * `driverOptions: {}` builds the driver as production does, on the global monotonic clock that mocked clock drives.
  */
-function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock) {
+function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock, driverOptions?: ReflexDriverOptions) {
   const { bot, combat, clock: time } = createFakeBot({ clock, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
   const runner = new ActionRunner({ clock: time, cancelGraceMs: 500 });
-  const driver = new ReflexDriver(bot, runner, { now: time.now });
+  const driver = new ReflexDriver(bot, runner, driverOptions ?? { now: time.now });
   const events: SurvivalTransition[] = [];
   driver.onTransition((event) => events.push(event));
   const counts = { claims: 0, aborted: 0 };
@@ -74,6 +75,34 @@ test("a claim with no progress is released, stands down for standDownMs whatever
   await pass(1_000);
   assert.equal(counts.claims, 2, "after the stand-down it claims again");
 });
+
+/** A driver built as production builds it (no `now`) on an installed mocked clock whose wall clock steps after the limit. */
+async function claimsAfterStandDown(wallStepMs: number, passAfterStepMs: number) {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the wall clock and the monotonic one read unrelated values (epoch vs uptime): a stand-down on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const { driver, counts, definition, pass } = scene(LIMITS, clock, {});
+  driver.register(definition());
+  await pass(1_300); // the no-progress limit hits at ~1 s: the 3 s stand-down starts there
+  assert.equal(counts.claims, 1);
+  clock.stepWallClock(wallStepMs);
+  await pass(passAfterStepMs);
+  await driver[Symbol.asyncDispose]();
+  return counts.claims;
+}
+
+// The limit hits ~1.1 s in and the stand-down ends ~4.1 s in; the helper has passed 1.3 s before the wall clock steps.
+const STAND_DOWN_ROWS: ReadonlyArray<readonly [wallStepMs: number, passAfterStepMs: number, claims: number, why: string]> = [
+  [-800, 2_500, 1, "3.8 s in: ~0.3 s are left"],
+  [-800, 3_000, 2, "4.3 s in: over, the wall clock's 0.8 s do not stretch it"],
+  [1_200, 2_000, 1, "3.3 s in: 0.8 s are left, the wall clock alone would call it over"],
+  [1_200, 3_000, 2, "4.3 s in: over"],
+];
+for (const [wallStepMs, passAfterStepMs, claims, why] of STAND_DOWN_ROWS)
+  test(`a 3 s stand-down counts monotonic time: wall step ${wallStepMs} ms, ${passAfterStepMs} ms later it has claimed ${claims} time(s) (${why})`, async () => {
+    assert.equal(await claimsAfterStandDown(wallStepMs, passAfterStepMs), claims);
+  });
 
 test("a limit is not a cancel: no claim on the next tick, and the decision says it stands down", async () => {
   const { driver, events, counts, definition, pass } = scene();

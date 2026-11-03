@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { type FakeBotOptions, createFakeBot } from "../test-support/fake-bot/index.js";
+import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { createDiscardedItems, DISCARD_MEMORY_MS } from "./discarded-items.js";
 import {
   forgetEmptySealedPits,
@@ -103,3 +103,22 @@ test("another dimension's pit guards nothing and lists no item", () => {
   bot.game.dimension = "overworld";
   assert.notEqual(sealedPitGuarding(bot, 10, 62, 10), null);
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T5: the settle time is a duration, so the default reading is monotonic.
+for (const row of [
+  { name: "a wall step forward of 1.2 s does not end it early", advanceMs: SEALED_PIT_SETTLE_MS - 1_000, wallStepMs: 1_200, guarded: true },
+  { name: "a wall step back of 2 s does not stretch it", advanceMs: SEALED_PIT_SETTLE_MS + 500, wallStepMs: -2_000, guarded: false },
+]) {
+  test(`an empty pit is forgotten after its settle time on the default clock: ${row.name}`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _installed = clock.install();
+    // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+    clock.stepWallClock(5_000);
+    const bot = watching([], { clock });
+    rememberSealedPit(bot, BOTTOM);
+    await clock.advance(row.advanceMs);
+    clock.stepWallClock(row.wallStepMs);
+    forgetEmptySealedPits(bot);
+    assert.equal(sealedPitGuarding(bot, 10, 62, 10) !== null, row.guarded);
+  });
+}

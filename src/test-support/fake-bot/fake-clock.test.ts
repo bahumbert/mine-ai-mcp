@@ -173,3 +173,56 @@ test("settle on a mocked clock lets code waiting on the global timers finish", a
   const waited = new Promise<number>((resolve) => setTimeout(() => resolve(performance.now()), 2_000));
   assert.equal(await clock.settle(waited, 5_000, 100), 2_000);
 });
+
+test("stepWallClock moves Date.now only, not performance.now, now() or a timer's due time", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  let fired = 0;
+  setTimeout(() => (fired += 1), 1_500);
+  await clock.advance(1_000);
+  clock.stepWallClock(-800);
+  assert.equal(Date.now(), 1_000_200);
+  assert.equal(performance.now(), 1_001_000);
+  assert.equal(clock.now(), 1_001_000);
+  assert.equal(fired, 0);
+  await clock.advance(500);
+  assert.equal(fired, 1);
+  // The offset survives an advance, and steps add up forward as well as back.
+  assert.equal(Date.now(), 1_000_700);
+  clock.stepWallClock(1_200);
+  assert.equal(Date.now(), 1_001_900);
+  assert.equal(performance.now(), 1_001_500);
+});
+
+test("stepWallClock leaves `new Date()` on the mock's own time (only Date.now is moved)", () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(-800);
+  assert.equal(Date.now(), 999_200);
+  assert.equal(new Date().getTime(), 1_000_000);
+});
+
+test("a manual clock refuses stepWallClock", () => {
+  assert.throws(() => createFakeClock({ mode: "manual" }).stepWallClock(-800), /manual/);
+});
+
+test("a mocked clock not installed refuses stepWallClock", () => {
+  assert.throws(() => createFakeClock({ mode: "mocked" }).stepWallClock(-800), /not installed/);
+});
+
+test("dispose undoes the step: the mock's own Date.now is back and no offset is left for the next install", () => {
+  const first = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  let mockDate!: DateConstructor;
+  let ownNow!: () => number;
+  {
+    using _installed = first.install();
+    mockDate = Date;
+    ownNow = Date.now;
+    first.stepWallClock(-800);
+    assert.notEqual(Date.now, ownNow);
+  }
+  assert.equal(mockDate.now, ownNow);
+  const second = createFakeClock({ mode: "mocked", startMs: 5_000 });
+  using _installed = second.install();
+  assert.equal(Date.now(), 5_000);
+});

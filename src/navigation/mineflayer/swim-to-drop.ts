@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -14,9 +15,9 @@ export async function swimToDrop(bot: Bot, wanted: (item: { readonly name: strin
     const item = (entity as Entity & { getDroppedItem?: () => { readonly name: string } | null }).getDroppedItem?.();
     return item !== null && item !== undefined && wanted(item);
   });
-  const deadline = Date.now() + timeoutMs;
+  const deadline = monotonicNow() + timeoutMs;
   try {
-    for (let item = drop(); item !== undefined && !done() && Date.now() < deadline; item = drop()) {
+    for (let item = drop(); item !== undefined && !done() && monotonicNow() < deadline; item = drop()) {
       await bot.lookAt(item.position, true);
       bot.setControlState("forward", true);
       bot.setControlState("jump", (bot.entity as Entity & { readonly isInWater?: boolean }).isInWater === true || item.position.y > bot.entity.position.y + 0.5);

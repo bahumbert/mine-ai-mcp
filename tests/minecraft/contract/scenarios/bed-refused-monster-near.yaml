@@ -2,6 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-bed-refused-monster-near
 tags:
   - contract
+  - exclusive
 description: "A night bed with a zombie four blocks away: Mineflayer refuses to sleep without sending a packet, and the use sent anyway is answered by the server with the not-safe action-bar message and no sleep. Contract check tests/minecraft/contract/checks/bed-refused-monster-near.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun
@@ -12,6 +13,7 @@ client:
     - --without-runtime
 params:
   check: bed-refused-monster-near
+reset: []
 setup:
   - fill -6 -61 -6 6 -61 6 stone
   - fill -6 -60 -6 6 -55 6 air

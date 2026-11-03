@@ -7,6 +7,7 @@ import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, ope
 import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyFields, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { describePreferences, feelings } from "./preference-feelings.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
@@ -429,11 +430,11 @@ class SendBack extends Error {}
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, priority: number, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
-  const started = Date.now();
+  const started = monotonicNow();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
   let waitMs: number | undefined;
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: Date.now() - started, turns: [...turns], replies, promptTokens, contextTokens, ...(waitMs === undefined ? {} : { waitMs }), ...outcome });
+  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...(waitMs === undefined ? {} : { waitMs }), ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;

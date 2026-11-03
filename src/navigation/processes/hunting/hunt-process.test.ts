@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import type { Bot } from "mineflayer";
-import { type FakeHarness, createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
 import type { Goal } from "../../index.js";
-import { hunt, type EngagementOutcome, type HuntRequest, type HuntResult, type HuntTarget } from "./hunt-process.js";
+import { HuntTargeting, hunt, type EngagementOutcome, type HuntRequest, type HuntResult, type HuntTarget } from "./hunt-process.js";
 
 /**
  * A bot standing at the origin holding named entities. Every way this loop can
@@ -589,3 +589,22 @@ test("one failed approach stops penalizing nearby quarry after it materially mov
   assert.equal(result.status, "satisfied");
   assert.deepEqual(engaged, [7, 7]);
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T4: the 30 s after which a stopped approach is forgotten counts monotonic time.
+for (const row of [
+  { name: "29 s of clock with a wall step forward of 1.2 s: the first stop is still held, so a second one is final", elapsedMs: 29_000, wallStepMs: 1_200, remaining: 0 },
+  { name: "31 s of clock with a wall step back of 2 s: the first stop is forgotten, so a second one is the first again", elapsedMs: 31_000, wallStepMs: -2_000, remaining: 1 },
+]) {
+  test(`a stopped approach is forgotten after 30 s of monotonic time: ${row.name}`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    const { bot } = createFakeBot({ position: new Vec3(0, 64, 0), clock, entities: { 7: { name: "rabbit", position: new Vec3(5, 64, 0) } } });
+    using _timers = clock.install();
+    const targeting = new HuntTargeting(bot, request({ reconsiderApproach: true }));
+    targeting.stop(targeting.scan()[0]!, "first approach failed");
+    await clock.advance(row.elapsedMs);
+    clock.stepWallClock(row.wallStepMs);
+    targeting.scan();
+    targeting.stop({ id: 7, position: { x: 5, y: 64, z: 0 }, distance: 5 }, "second approach failed");
+    assert.equal(targeting.scan().length, row.remaining);
+  });
+}

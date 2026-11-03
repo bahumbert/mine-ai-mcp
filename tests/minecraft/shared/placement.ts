@@ -1,11 +1,13 @@
 // Where a scenario runs: a lane on a server of its settings key, or a server of its own at offset 0.
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canResetScenario, worldCompatibilityKey, type Scenario } from "mine-labs";
 import { laneOf, type Lane } from "../arena/lanes.ts";
 import { settingsOf, type GameruleDefaults, type WorldSettings } from "../arena/settings.ts";
 import { EXCLUSIVE_TAG, shiftScenario, type Shifted } from "../arena/shift-scenario.ts";
+import { CLIENT_HOST_PROTOCOL } from "../client-boot-marker.ts";
+import { sourceRootOf } from "./source-root.ts";
 
 /** `reservedFor`: the id of the locked batch whose servers this placement uses (set by the scheduler, never by placement itself). */
 export type Placement =
@@ -38,9 +40,15 @@ export function changesWorldDuringTrial(scenario: Scenario): boolean {
   return [...scenario.tick, ...scenario.reset].some(command => WORLD_SETTING_VERBS.has(verbOf(command)));
 }
 
-function own(scenario: Scenario, reason: string, ports: ArenaPorts): Placement {
-  const reusable = ports.canResetScenario(scenario) && !changesWorldDuringTrial(scenario);
-  return { kind: "own", key: `own:${ports.worldCompatibilityKey(scenario)}`, reason, reusable, ...(scenario.tags.includes(EXCLUSIVE_TAG) ? { exclusive: true } : {}) };
+/**
+ * A server of its own keeps the server-wide settings its last trial's `setup` set (`tick rate 8`), so its key carries the
+ * settings key as a lane's does: the next trial of the same world but other settings must not inherit them.
+ * `settingsKey` null = the settings could not be read: the server stops after its trial, so no later trial needs a match.
+ */
+function own(scenario: Scenario, reason: string, ports: ArenaPorts, settingsKey: string | null): Placement {
+  const reusable = settingsKey !== null && ports.canResetScenario(scenario) && !changesWorldDuringTrial(scenario);
+  const worldKey = ports.worldCompatibilityKey(scenario);
+  return { kind: "own", key: settingsKey === null ? `own:${worldKey}` : `own:${worldKey}|${settingsKey}`, reason, reusable, ...(scenario.tags.includes(EXCLUSIVE_TAG) ? { exclusive: true } : {}) };
 }
 
 
@@ -54,10 +62,44 @@ export function reservePlacement(placement: Placement, submissionId: number): Pl
   return { ...placement, key: `${placement.key}#batch${submissionId}`, reservedFor: submissionId };
 }
 
-/** Our client host, the only client that reads the arena frame (`MINE_AI_ARENA`); a missing file here means our install is broken, so it throws at load. */
-const OUR_CLIENT_HOST = realpathSync(fileURLToPath(new URL("../client-host.ts", import.meta.url)));
+/**
+ * Our client host, the only client that reads the arena frame (`MINE_AI_ARENA`), as a path inside its source root
+ * (`tests/minecraft/client-host.ts`): a worktree's or a snapshot's copy of it is ours too. A missing file or root here
+ * means our install is broken, so it throws at load.
+ */
+const OUR_CLIENT_HOST_REAL = realpathSync(fileURLToPath(new URL("../client-host.ts", import.meta.url)));
+const OUR_SOURCE_ROOT = sourceRootOf(OUR_CLIENT_HOST_REAL) ?? failOurInstall(OUR_CLIENT_HOST_REAL);
+const OUR_CLIENT_HOST_REL = path.relative(OUR_SOURCE_ROOT, OUR_CLIENT_HOST_REAL);
+
+function failOurInstall(clientHost: string): never {
+  throw new Error(`no bun.lock above the daemon's own client host ${clientHost}: the install is broken`);
+}
 
 const NOT_FRAME_AWARE = "does not read the arena frame (MINE_AI_ARENA): its coordinates would stay at offset zero (only tests/minecraft/client-host.ts gets a lane)";
+const CLIENT_HOST_PROTOCOL_STAMP = /^export const CLIENT_HOST_PROTOCOL = (\d+)/mu;
+const UPDATE_HOST_ADVICE = "update that worktree's tests/minecraft from the daemon's branch to get a lane, or start a daemon of its own (--socket)";
+
+/** Why a host of another source root cannot be trusted with the arena frame (its protocol stamp is missing or differs); null when it speaks the daemon's protocol. */
+function protocolRefusal(root: string): string | null {
+  if (root === OUR_SOURCE_ROOT) return null;
+  const marker = path.join(root, "tests/minecraft/client-boot-marker.ts");
+  let stamp: string | undefined;
+  try {
+    stamp = CLIENT_HOST_PROTOCOL_STAMP.exec(readFileSync(marker, "utf8"))?.[1];
+  } catch {
+    // no readable marker: the stamp is missing, said below
+  }
+  if (stamp === undefined) return `its client host has no CLIENT_HOST_PROTOCOL stamp (${marker} is missing or holds none), so the arena frame it reads is unknown; ${UPDATE_HOST_ADVICE}`;
+  return Number(stamp) === CLIENT_HOST_PROTOCOL ? null : `its client host speaks protocol ${stamp}, the daemon ${CLIENT_HOST_PROTOCOL}; ${UPDATE_HOST_ADVICE}`;
+}
+
+/** Why the entry file is not our client host, judged by its path inside its own source root; null when it is ours. */
+function hostRefusal(real: string, resolved: string): string | null {
+  const root = sourceRootOf(real);
+  if (root === null) return `its client ${resolved} has no bun.lock in any parent directory, so its source root is unknown and it cannot be told from a client that ${NOT_FRAME_AWARE}`;
+  if (path.relative(root, real) !== OUR_CLIENT_HOST_REL) return `its client ${resolved} ${NOT_FRAME_AWARE}`;
+  return protocolRefusal(root);
+}
 
 /** Why the scenario's client cannot run in a lane (it is not our client host, so nothing moves its coordinates into the lane); null when it is our host. */
 function clientRefusal(scenario: Scenario): string | null {
@@ -68,7 +110,7 @@ function clientRefusal(scenario: Scenario): string | null {
   if (entry === undefined) return `its client has no entry file and ${NOT_FRAME_AWARE}`;
   const resolved = path.resolve(cwd ?? process.cwd(), entry);
   try {
-    return realpathSync(resolved) === OUR_CLIENT_HOST ? null : `its client ${resolved} ${NOT_FRAME_AWARE}`;
+    return hostRefusal(realpathSync(resolved), resolved);
   } catch (error) {
     return `its client entry ${resolved} could not be resolved (${(error as NodeJS.ErrnoException).code ?? String(error)}): client.args[0] must be the entry file`;
   }
@@ -76,16 +118,18 @@ function clientRefusal(scenario: Scenario): string | null {
 
 /** Decide where `scenario` runs, once, when it is queued. */
 export function placeScenario(scenario: Scenario, defaults: GameruleDefaults, ports: ArenaPorts = REAL_PORTS): Placement {
-  const clientReason = clientRefusal(scenario);
-  if (clientReason) return own(scenario, clientReason, ports);
-  let lifted;
+  let lifted: ReturnType<ArenaPorts["settingsOf"]> | null = null;
+  let unreadable = "";
   try {
     lifted = ports.settingsOf(scenario, defaults);
   } catch (error) {
-    return own(scenario, `settings could not be read: ${error instanceof Error ? error.message : String(error)}`, ports);
+    unreadable = `settings could not be read: ${error instanceof Error ? error.message : String(error)}`;
   }
+  const clientReason = clientRefusal(scenario);
+  if (clientReason) return own(scenario, clientReason, ports, lifted?.key ?? null);
+  if (lifted === null) return own(scenario, unreadable, ports, null);
   const shifted = ports.shiftScenario(lifted.scenario, PROBE_LANE);
-  if (!shifted.ok) return own(scenario, shifted.reason, ports);
+  if (!shifted.ok) return own(scenario, shifted.reason, ports, lifted.key);
   return { kind: "lane", key: lifted.key, settings: lifted.settings, scenario: lifted.scenario };
 }
 

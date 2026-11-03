@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ReflexDriver } from "../survival/control/driver.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { monotonicNow } from "../utils/index.js";
 import { watch } from "../test-support/pending.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { ActionRunner } from "./action-runner.js";
@@ -350,4 +351,77 @@ test("a waiting claim keeps its interrupted request pending until defence settle
   assert.equal(output.result.status, "succeeded");
   assert.equal(attempts, 2);
   assert.equal(runner.status().owner, "idle");
+});
+
+/**
+ * An action of `kind` that takes `actionMs` of the installed clock and steps the wall clock by `wallStepMs` in the
+ * middle. A task's `durationMs` comes from `RequestProgress` (already `performance.now`); an information action's is
+ * the runner's own `measured` reading, so both kinds are held.
+ */
+async function durationAcrossWallStep(kind: "task" | "information", actionMs: number, wallStepMs: number): Promise<number> {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  // Live the two clocks read unrelated values (uptime vs epoch): a start taken on the wrong one cannot pass.
+  clock.stepWallClock(5_000);
+  const action = stubAction(async () => {
+    await clock.sleep(actionMs / 2);
+    clock.stepWallClock(wallStepMs);
+    await clock.sleep(actionMs / 2);
+    return { status: "succeeded" };
+  }, { kind });
+  const output = await clock.settle(new ActionRunner().run(action, { block_name: "stone" }), actionMs + 1_000);
+  return output.durationMs;
+}
+
+test("durationMs is monotonic: a 3 s task action with a 0.8 s wall step back reports 3000", async () => {
+  assert.equal(await durationAcrossWallStep("task", 3_000, -800), 3_000);
+});
+
+test("durationMs is monotonic: a 3 s information action with a 0.8 s wall step back reports 3000", async () => {
+  assert.equal(await durationAcrossWallStep("information", 3_000, -800), 3_000);
+});
+
+test("a 200 ms information action with a 0.8 s step back reports 200", async () => {
+  assert.equal(await durationAcrossWallStep("information", 200, -800), 200);
+});
+
+test("a 3 s information action with a 1.2 s wall step forward reports 3000", async () => {
+  assert.equal(await durationAcrossWallStep("information", 3_000, 1_200), 3_000);
+});
+
+test("a request aborted before admission reports durationMs 0 across a wall step", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(-800);
+  const action = stubAction(async () => ({ status: "succeeded" }));
+  const output = await new ActionRunner().run(action, { block_name: "stone" }, AbortSignal.abort());
+  assert.equal(output.durationMs, 0);
+});
+
+test("cancelRequest names the admission's wall-clock time, not a monotonic reading", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(-800); // Date.now 999_200, performance.now 1_000_000
+  const runner = new ActionRunner();
+  const pending = runner.run(
+    stubAction((_request, { signal }) => new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason)))),
+    { block_name: "stone" }, undefined, 1, "a1",
+  );
+  await clock.advance(100);
+  const cancelled = runner.cancelRequest("a1", "stop");
+  assert.equal(cancelled.kind === "cancellation_requested" && cancelled.startedAt, "1970-01-01T00:16:39.200Z");
+  await clock.settle(pending, 1_000);
+});
+
+test("requestContext().preceding.completedAtMs is a monotonicNow reading", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(-800);
+  const runner = new ActionRunner();
+  const action = stubAction(async () => ({ status: "succeeded" }));
+  await clock.settle(runner.run(action, { block_name: "stone" }, undefined, 7), 1_000);
+  const preceding = runner.requestContext().preceding;
+  assert.equal(preceding?.requestId, 7);
+  assert.equal(preceding?.completedAtMs, monotonicNow());
+  assert.notEqual(preceding?.completedAtMs, Date.now());
 });

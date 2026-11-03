@@ -7,6 +7,7 @@ import type { ClientsAhead } from "./client-ahead.ts";
 import type { Placement } from "./placement.ts";
 import type { ServerPool } from "./pool.ts";
 import type { RunIo } from "./run-io.ts";
+import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
 
 export interface SubmissionEntry {
@@ -59,4 +60,6 @@ export interface SchedulerDeps {
   readonly shift?: (scenario: Scenario, lane: Lane) => Shifted;
   /** Boots a submission's scenario clients before their trials; absent for a runner that takes none (a test's fake). */
   readonly clientsAhead?: ClientsAhead;
+  /** The daemon's template build: while it runs every trial waits and the ledger counts its server; absent for a scheduler that builds nothing. */
+  readonly templateBuilds?: TemplateBuilds;
 }

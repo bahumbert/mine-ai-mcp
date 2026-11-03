@@ -583,11 +583,14 @@ export function scriptedMind(localizedChat?: LocalizedChat) {
   return { ...models, mind: new LlmMind(models, undefined, localizedChat) };
 }
 
-/** Polls until the condition holds; fails the test after `timeoutMs`. */
+/** The real monotonic clock, bound at load: a test that moves `performance.now` (`steppedClocks`) never drives `until`'s own timeout. */
+const realMonotonicNow = performance.now.bind(performance);
+
+/** Polls until the condition holds; fails the test after `timeoutMs` of real time. */
 export async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = realMonotonicNow() + timeoutMs;
   while (!condition()) {
-    if (Date.now() > deadline) throw new Error("condition not reached in time");
+    if (realMonotonicNow() > deadline) throw new Error("condition not reached in time");
     await sleep(5);
   }
 }
@@ -595,4 +598,32 @@ export async function until(condition: () => boolean, timeoutMs = 2_000): Promis
 /** The default score amounts and temperament, as a persona without overrides has them. */
 export function testScoring(): Scoring {
   return scoringOf(testPersona().settings.relations);
+}
+
+/**
+ * Moves the two clocks a test reads apart, as WSL does when it steps its wall clock: `wall(ms)` shifts `Date.now()` only,
+ * `monotonic(ms)` shifts `performance.now()` only (time that really passed). Both are restored by `restore()` or when
+ * the test ends. One per test at a time: a second call, or one over another mock of these clocks, throws (restoring
+ * the outer mock first would leave the inner one's offset in the next test).
+ */
+export function steppedClocks(t: { mock: { method(object: object, name: "now", implementation: () => number): { mock: { restore(): void } } } }) {
+  if ("mock" in Date.now || "mock" in performance.now) throw new Error("steppedClocks: the clocks are already mocked in this test; restore() the first one");
+  const realDate = Date.now.bind(Date);
+  const realPerformance = performance.now.bind(performance);
+  let wallOffset = 0;
+  let monotonicOffset = 0;
+  const date = t.mock.method(Date, "now", () => realDate() + wallOffset);
+  const clock = t.mock.method(performance, "now", () => realPerformance() + monotonicOffset);
+  return {
+    restore(): void {
+      date.mock.restore();
+      clock.mock.restore();
+    },
+    wall(ms: number): void {
+      wallOffset += ms;
+    },
+    monotonic(ms: number): void {
+      monotonicOffset += ms;
+    },
+  };
 }

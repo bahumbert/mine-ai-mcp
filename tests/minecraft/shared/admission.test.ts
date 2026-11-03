@@ -200,3 +200,11 @@ test("the ledger counts the memory clients booted ahead are still growing into, 
   assert.equal(ledgerMb(base, EMPTY_TALLY, config), 20_000 - 2_084 - 2 * config.clientMemMb - 3 * config.clientBootedMemMb);
   assert.equal(ledgerMb(sample({ youngClients: 2, memAvailableMb: 20_000 }), EMPTY_TALLY, config), 20_000 - 2_084 - 2 * config.clientMemMb, "absent: the young clients are whole ones, as before");
 });
+
+test("the ledger counts a template build as one more busy server: its heap and overhead less what it already holds", () => {
+  const withBuild = (residentMb: number) => ledgerMb(sample({ memAvailableMb: 10_000, servers: [], templateBuild: { heapMb: 3_072, residentMb } }), EMPTY_TALLY, config);
+  assert.equal(withBuild(0), 10_000 - 3_072 - config.serverOverheadMb, "just started");
+  assert.equal(withBuild(2_000), 10_000 - (3_072 + config.serverOverheadMb - 2_000), "growing");
+  assert.equal(withBuild(4_000), 10_000, "past its heap and overhead nothing is left to grow into");
+  assert.equal(ledgerMb(sample({ memAvailableMb: 10_000, servers: [] }), EMPTY_TALLY, config), 10_000, "no build, no change");
+});

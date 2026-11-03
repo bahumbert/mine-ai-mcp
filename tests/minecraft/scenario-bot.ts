@@ -11,29 +11,60 @@ type PreparationSession = Pick<NodeClientSession, "scenario" | "signal" | "ready
 /** The wall-clock bound of the wait for the server to read the slot change: two time packets a second apart, with room for a server running slow. */
 const SLOT_CHANGE_WALL_MS = 5_000;
 
+/**
+ * The wall-clock bound of the preparation once Mine Labs has sent `arranged` (T8, 2026-11-01). Mine Labs gives up on a client
+ * that reports no `prepared` 60 s after that message with "did not observe scenario arrangement" and nothing about where it
+ * stood; this ends first and says where. Before `arranged` the spawn and the slot change have bounds of their own.
+ */
+const ARRANGED_WALL_MS = 45_000;
+
 export interface PreparationOptions {
   /** How long on the wall clock the slot change may wait for its server ticks. */
   readonly slotChangeWallMs?: number;
+  /** How long on the wall clock the preparation may take after `arranged` before it fails naming the step it stands in. */
+  readonly arrangedWallMs?: number;
+}
+
+/** The step the preparation stands in after `arranged`, and what it is still missing, for the failure when the bound passes. */
+interface PreparationStep {
+  name: string;
+  missing: () => string;
 }
 
 /** Physics stays paused until the arranged player and its starting terrain arrive. */
 export async function prepareScenarioBot(bot: Bot, session: PreparationSession, options: PreparationOptions = {}): Promise<void> {
+  const wallMs = options.arrangedWallMs ?? ARRANGED_WALL_MS;
+  const bound = new AbortController();
+  const signal = AbortSignal.any([session.signal, bound.signal]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const step: PreparationStep = { name: "arranged player", missing: () => "" };
   bot.physicsEnabled = false;
   try {
     loadBotPlugins(bot);
     await waitForSpawnAndVitals(bot, session.signal);
     assertBotPluginsLoaded(bot);
     await startOnSlotZero(bot, session.signal, options.slotChangeWallMs ?? SLOT_CHANGE_WALL_MS);
-    await waitForArrangement(bot, session);
-    await waitForStandingColumn(bot, session.signal);
+    await waitForArrangement(bot, session, signal, step, () => {
+      timer = setTimeout(() => bound.abort(new Error("preparation bound")), wallMs);
+    });
+    step.name = "standing column";
+    step.missing = () => `no block at ${bot.entity.position}`;
+    await waitForStandingColumn(bot, signal);
+    // Start grounded by default so actions plan from a settled position.
+    // Add an exception only when a real fixture needs to start off the ground.
+    step.name = "landing";
+    step.missing = () => `onGround ${bot.entity.onGround}, y ${bot.entity.position.y}`;
+    bot.physicsEnabled = true;
+    await waitForGround(bot, signal);
+  } catch (cause) {
+    session.signal.throwIfAborted();
+    if (bound.signal.aborted) throw new Error(`Bot '${bot.username}' was not prepared within ${wallMs / 1000} s of the arrangement, stuck at '${step.name}': ${step.missing()}`);
+    throw cause;
   } finally {
+    clearTimeout(timer);
     // Setup owns this pause. No physics or spawn hooks survive into execution.
     bot.physicsEnabled = true;
   }
-
-  // Start grounded by default so actions plan from a settled position.
-  // Add an exception only when a real fixture needs to start off the ground.
-  await waitForGround(bot, session.signal);
 }
 
 export function createScenarioBot(session: NodeClientSession): Bot {
@@ -91,12 +122,15 @@ async function startOnSlotZero(bot: Bot, signal: AbortSignal, wallMs: number): P
   }
 }
 
-async function waitForArrangement(bot: Bot, session: PreparationSession): Promise<void> {
-  const preparation = observeScenarioPlayerPreparation(bot, session.scenario, session.signal);
+/** Arms the observer, reports ready, and waits for `arranged`, then for the declared player; `startBound` runs when `arranged` arrives. */
+async function waitForArrangement(bot: Bot, session: PreparationSession, signal: AbortSignal, step: PreparationStep, startBound: () => void): Promise<void> {
+  const preparation = observeScenarioPlayerPreparation(bot, session.scenario, signal);
+  step.missing = preparation.describePending;
   try {
     session.ready();
     await session.arranged;
-    session.signal.throwIfAborted();
+    signal.throwIfAborted();
+    startBound();
     await preparation.wait();
   } finally {
     preparation.close();

@@ -1,0 +1,6 @@
+time=2026-10-30T13:29:12.397+01:00 level=INFO source=images.go:930 msg="total unused blobs removed: 0"
+time=2026-10-30T13:29:12.398+01:00 level=INFO source=routes.go:2159 msg="Listening on 127.0.0.1:11435 (version 0.35.0)"
+time=2026-10-30T13:29:12.405+01:00 level=INFO source=runner.go:60 msg="discovering available GPUs..."
+time=2026-10-30T13:29:19.010+01:00 level=WARN source=amd.go:470 msg="dropping ROCm device — no rocblas support for gfx target" device=ROCm1 gfx_target=gfx1036 supported="map[gfx1030:true gfx1100:true gfx1101:true gfx1102:true gfx1150:true gfx1151:true gfx1200:true gfx1201:true gfx906:true]" hint="set HSA_OVERRIDE_GFX_VERSION to map to a supported target"
+time=2026-10-30T13:29:20.655+01:00 level=INFO source=runner.go:405 msg="dropping integrated GPU; to enable, set OLLAMA_IGPU_ENABLE=1" id=1 library=Vulkan compute=0.0 name=Vulkan1 description="AMD Radeon(TM) Graphics" pci_id=""
+time=2026-10-30T13:29:21.903+01:00 level=INFO source=types.go:32 msg="inference compute" id=0 filter_id=0 library=ROCm compute=gfx1100 name=ROCm0 description="AMD Radeon RX 7900 XTX" libdirs=ollama,rocm_v7_1 driver=0.0 pci_id=0000:03:00.0 type=discrete total="24.0 GiB" available="23.8 GiB"

@@ -5,20 +5,20 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { answerArrives } from "../server-answer.ts";
-import { holdsWithin } from "../subject.ts";
+import { answerArrives, answerArrivesWhileMoving } from "../server-answer.ts";
 import { BED_FIXTURE, countWrites, trySleep, useBed } from "./bed-scene.ts";
+import { type Mark, READING_TICKS, markNow, tickOf } from "./server-tick-marks.ts";
 
 /** What the server says to a bed used by day (`Player.BedSleepingProblem.NOT_POSSIBLE_NOW`). */
 const NO_SLEEP = "block.minecraft.bed.no_sleep";
 const NOON = 6_000;
-/** A level moves a hundredth a tick (`ServerLevel.advanceWeatherCycle`): a full ramp is 100 ticks, 4999 to 5000 ms and 100 steps (102 updates) in 3 runs (2026-10-23). */
+/**
+ * A level moves a hundredth a tick (`ServerLevel.advanceWeatherCycle`): a full ramp is 100 ticks. Measured 4999 to 5000 ms from the first
+ * `weatherUpdate` to the full level and 100 steps (102 updates) in 3 runs on a server on time (2026-10-23): the 5000 ms were 100 ticks.
+ */
 const LEVEL_STEP = 0.01;
 const FULL_RAMP_TICKS = 100;
 const FLOAT_SLACK = 1e-5;
-/** The ramp is 100 server ticks, judged on the wall clock because this check is `exclusive` (no other lane's stall moves it): a bound for a ramp, not for one answer. */
-const FULL_RAMP_MS = 5_000;
-const RAMP_SLACK_MS = 3_000;
 
 export const rainAndThunderState: ContractCheck = {
   name: "rain-and-thunder-state",
@@ -27,8 +27,16 @@ export const rainAndThunderState: ContractCheck = {
   fixture: { ...BED_FIXTURE, timeOfDay: NOON, daylightCycle: false, weather: "clear" },
   async run(subject) {
     const { bot } = subject;
-    const levels: { rain: number; thunder: number; atMs: number }[] = [];
-    const onWeather = () => void levels.push({ rain: bot.rainState, thunder: bot.thunderState, atMs: subject.now() });
+    const levels: { rain: number; thunder: number }[] = [];
+    // The rain ramp is judged in server ticks between its first update and its full level: two readings, not one per update.
+    const ramp: { first?: Mark; full?: Mark } = {};
+    const onWeather = () => {
+      levels.push({ rain: bot.rainState, thunder: bot.thunderState });
+      ramp.first ??= markNow(subject);
+      if (bot.rainState === 1) ramp.full ??= markNow(subject);
+    };
+    /** What a ramp shows while it goes on: a wait on a level fails only when no update came for `ANSWER_WALL_MS`, however slowly the server ticks. */
+    const updatesHeard = () => levels.length;
     const messages: string[] = [];
     const onActionBar = (message: { translate?: string; toString(): string }) => void messages.push(message.translate ?? message.toString());
     bot.on("weatherUpdate", onWeather);
@@ -45,14 +53,14 @@ export const rainAndThunderState: ContractCheck = {
 
       await subject.setWeather("rain");
       await answerArrives(subject, () => bot.isRaining, "no rain");
-      assert.ok(await holdsWithin(subject, () => bot.rainState === 1, FULL_RAMP_MS + RAMP_SLACK_MS), `rain level ${bot.rainState}, not full`);
+      await answerArrivesWhileMoving(subject, () => bot.rainState === 1, updatesHeard, "the rain level never reached full");
       const rainRamp = levels.filter((level) => level.thunder === 0);
       const rainSteps = rainRamp.slice(1).map((level, index) => level.rain - rainRamp[index]!.rain);
       // Floats: a step is 0.01 to 6 digits, and an update that repeats the level (the thunder's, with the rain's) is a step of 0.
       assert.ok(rainSteps.every((step) => step >= 0 && step <= LEVEL_STEP + FLOAT_SLACK), `rain steps ${rainSteps.map((step) => step.toFixed(4)).join(", ")}: each up to ${LEVEL_STEP}`);
       assert.ok(rainSteps.filter((step) => step > 0).length >= FULL_RAMP_TICKS - 2, `${rainSteps.length} rain updates: a hundred steps of ${LEVEL_STEP}`);
-      const rainMs = rainRamp.at(-1)!.atMs - rainRamp[0]!.atMs;
-      assert.ok(Math.abs(rainMs - FULL_RAMP_MS) <= RAMP_SLACK_MS, `rain ramp took ${Math.round(rainMs)} ms: ${FULL_RAMP_MS} within ${RAMP_SLACK_MS}`);
+      const rainTicks = (await tickOf(subject, ramp.full!)) - (await tickOf(subject, ramp.first!));
+      assert.ok(Math.abs(rainTicks - FULL_RAMP_TICKS) <= READING_TICKS, `rain ramp took ${rainTicks} server ticks (the readings +-${READING_TICKS}): ${FULL_RAMP_TICKS}`);
       assert.equal(bot.thunderState, 0, "rain alone leaves the thunder at 0");
 
       // Rain by day: Mineflayer refuses, with no packet.
@@ -61,7 +69,7 @@ export const rainAndThunderState: ContractCheck = {
       assert.equal(blockPlaces.count(), 1, "only the first use wrote a block_place");
 
       await subject.setWeather("thunder");
-      assert.ok(await holdsWithin(subject, () => bot.thunderState === 1, FULL_RAMP_MS + RAMP_SLACK_MS), `thunder level ${bot.thunderState}, not full`);
+      await answerArrivesWhileMoving(subject, () => bot.thunderState === 1, updatesHeard, "the thunder level never reached full");
       assert.equal(bot.isRaining, true);
       const storm = await trySleep(subject);
       assert.deepEqual({ slept: storm.slept, error: storm.error }, { slept: true, error: undefined }, "a full thunderstorm lets her sleep at noon");
@@ -69,8 +77,8 @@ export const rainAndThunderState: ContractCheck = {
       await answerArrives(subject, () => !bot.isSleeping, "wake() did not free her");
 
       await subject.setWeather("clear");
-      assert.ok(await holdsWithin(subject, () => !bot.isRaining, FULL_RAMP_MS + RAMP_SLACK_MS), "the rain never stopped");
-      assert.ok(await holdsWithin(subject, () => bot.rainState === 0 && bot.thunderState === 0, FULL_RAMP_MS + RAMP_SLACK_MS), `levels ${bot.rainState}, ${bot.thunderState} after clear`);
+      await answerArrivesWhileMoving(subject, () => !bot.isRaining, updatesHeard, "the rain never stopped");
+      await answerArrivesWhileMoving(subject, () => bot.rainState === 0 && bot.thunderState === 0, updatesHeard, "the rain and thunder levels never returned to 0 after clear");
     } finally {
       bot.off("weatherUpdate", onWeather);
       bot.off("actionBar", onActionBar);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { monotonicNow } from "../../../utils/index.js";
 
 /** Visibility budgets, not combat deadlines. A healthy wait is reported after
  * fifteen seconds (the existing protected-wait diagnostic window); unanswered
@@ -28,7 +29,9 @@ export type CombatProgressChange = "progress" | "waiting" | "stall" | "resumed";
  * Defensive work is counted separately: useful defence can coexist with a blocked hunt. */
 export class CombatProgress {
   readonly #id = randomUUID();
+  /** Durations and inactivity read the monotonic clock; only the published `startedAt` is a time of day. */
   readonly #startedAt: number;
+  readonly #startedAtEpoch = Date.now();
   #lastAdvanceAt: number;
   #lastProgress: string | null = null;
   #state: CombatProgressSnapshot["state"] = "advancing";
@@ -44,18 +47,18 @@ export class CombatProgress {
   // protection checks must not manufacture fresh milestones.
   readonly #milestones = new Set<string>();
 
-  constructor(atMs = Date.now()) {
+  constructor(atMs = monotonicNow()) {
     this.#startedAt = this.#lastAdvanceAt = atMs;
   }
 
-  milestone(kind: "route_step" | "attack_position" | "protection", identity: string, atMs = Date.now()): void {
+  milestone(kind: "route_step" | "attack_position" | "protection", identity: string, atMs = monotonicNow()): void {
     const key = `${kind}:${identity}`;
     if (this.#milestones.has(key)) return;
     this.#milestones.add(key);
     this.#advance(kind, atMs);
   }
 
-  confirmedHit(requestedTarget: boolean, atMs = Date.now()): void {
+  confirmedHit(requestedTarget: boolean, atMs = monotonicNow()): void {
     if (requestedTarget) {
       this.#targetHits++;
       this.#advance("confirmed_target_damage", atMs);
@@ -73,7 +76,7 @@ export class CombatProgress {
     this.#changed = true;
   }
 
-  observe(health: number, atMs = Date.now()): CombatProgressChange | null {
+  observe(health: number, atMs = monotonicNow()): CombatProgressChange | null {
     if (this.#health !== null && health > this.#health) this.#recoveredHealth += health - this.#health;
     this.#health = health;
     this.#healthAtAdvance ??= health;
@@ -102,12 +105,12 @@ export class CombatProgress {
     return state;
   }
 
-  snapshot(atMs = Date.now()): CombatProgressSnapshot {
+  snapshot(atMs = monotonicNow()): CombatProgressSnapshot {
     return {
       engagementId: this.#id,
-      startedAt: this.#startedAt,
-      elapsedMs: atMs - this.#startedAt,
-      inactiveMs: atMs - this.#lastAdvanceAt,
+      startedAt: this.#startedAtEpoch,
+      elapsedMs: Math.round(atMs - this.#startedAt),
+      inactiveMs: Math.round(atMs - this.#lastAdvanceAt),
       state: this.#state,
       lastProgress: this.#lastProgress,
       confirmedTargetHits: this.#targetHits,

@@ -31,6 +31,29 @@ test("bed-sleep-and-wake fails, naming the ticks read, when the sleep ended befo
   assert.equal(bot!.listenerCount("time"), timeListenersAtStart, "the time listener of the second sleep stayed on the bot");
 });
 
+test("bed-sleep-and-wake waits for the wake while the server keeps ticking: at 8 ticks a second the 100 ticks of the sleep take 12.5 s, past a total wall bound of 12 s", async () => {
+  await runOnFake(bedSleepAndWake, { ticksPerSecond: 8 });
+});
+
+test("bed-sleep-and-wake fails, saying the wake never came, when the server stops ticking during the sleep", async () => {
+  await assert.rejects(runOnFake(bedSleepAndWake, {}, undefined, [{ atMs: 2_000, ms: 60_000 }]), /no wake for the sleep left alone: no change for 10000 ms/);
+});
+
+test("bed-sleep-and-wake fails after the latest wake it accepts, not never, when the server ticks and no wake comes", async () => {
+  // The second wake is never heard by the check, as when another player stays awake and the night is not skipped.
+  await assert.rejects(
+    runOnFake(bedSleepAndWake, {}, (subject) => {
+      let wakes = 0;
+      const bot = new Proxy(subject.bot, {
+        get: (target, property) =>
+          property === "on" ? (event: string, listener: (...args: unknown[]) => void) => target.on(event as "wake", event === "wake" ? (...args: unknown[]) => void ((wakes += 1) < 2 && listener(...args)) : (listener as () => void)) : Reflect.get(target, property, target),
+      });
+      return { ...subject, bot };
+    }),
+    /no wake for the sleep left alone within 202 server ticks: sleep,wake,sleep/,
+  );
+});
+
 test("bed-sleep-and-wake passes at 11 ticks a second: the 100 ticks of the sleep take 9.1 s of wall, past what a wall window of 5 s plus 3 s allowed", async () => {
   await runOnFake(bedSleepAndWake, { ticksPerSecond: 11 });
 });

@@ -1,6 +1,7 @@
 // The steps of building a shelter: the shaft, the ring, the cap, one pass at a time.
 import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
+import { monotonicNow } from "../../utils/index.js";
 import { findPlacementSupport } from "../../world/index.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
@@ -216,7 +217,7 @@ function constructionStopped(build: ShelterBuild): StepEnd | null {
     return { kind: "failed", error: "[COMBAT_CONSTRAINED] Hiding is no longer permitted." };
   const liquid = shelterLiquidFailure(bot);
   if (liquid) return liquid;
-  if (Date.now() >= build.constructionDeadline) {
+  if (monotonicNow() >= build.constructionDeadline) {
     return { kind: "failed", error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s` };
   }
   return null;
@@ -269,7 +270,7 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
     (build.walled > 0 || build.capped) &&
     !enclosedInPlace(bot, options.blockNames) &&
     shelterHazard(build) === null &&
-    Date.now() < build.constructionDeadline
+    monotonicNow() < build.constructionDeadline
   ) {
     await waitForShelterTicks(build, 1);
     return "again";

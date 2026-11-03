@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import { nearGoal, type Navigate } from "../../navigation/index.js";
-import { waitForSignal } from "../../utils/index.js";
+import { clockStart, monotonicNow, waitForSignal, type ClockStart } from "../../utils/index.js";
 import { findLoadedBlockPositions } from "../../world/loaded-block-scan.js";
 
 // Stand beside the solid spawner, leaving room for navigation to choose safe footing.
@@ -24,8 +24,9 @@ export type CampFailure = {
 export class SpawnerCamp {
   readonly #dimension: string;
   #phase: "hunting" | "waiting_away" | "returning" | "waiting_at_spawner" = "hunting";
-  #absenceStartedAt: number | null = null;
-  #campWaitStartedAt: number | null = null;
+  // `at` shows in the snapshot, `began` times the deadline.
+  #absenceStartedAt: ClockStart | null = null;
+  #campWaitStartedAt: ClockStart | null = null;
 
   constructor(
     private readonly bot: Bot,
@@ -41,8 +42,8 @@ export class SpawnerCamp {
       position: this.position ? { x: this.position.x, y: this.position.y, z: this.position.z } : null,
       dimension: this.#dimension,
       phase: this.#phase,
-      returnAfter: this.#absenceStartedAt === null ? null : this.#absenceStartedAt + this.waitMs,
-      observationUntil: this.#campWaitStartedAt === null ? null : this.#campWaitStartedAt + this.waitMs,
+      returnAfter: this.#absenceStartedAt === null ? null : this.#absenceStartedAt.at + this.waitMs,
+      observationUntil: this.#campWaitStartedAt === null ? null : this.#campWaitStartedAt.at + this.waitMs,
     };
   }
 
@@ -88,8 +89,8 @@ export class SpawnerCamp {
         return null;
       }
       if (!this.#atCamp()) {
-        this.#absenceStartedAt ??= Date.now();
-        const remaining = this.#absenceStartedAt + this.waitMs - Date.now();
+        this.#absenceStartedAt ??= clockStart();
+        const remaining = this.#absenceStartedAt.began + this.waitMs - monotonicNow();
         if (remaining > 0) {
           this.#phase = "waiting_away";
           await waitForSignal(
@@ -113,8 +114,8 @@ export class SpawnerCamp {
           };
       }
       this.#phase = "waiting_at_spawner";
-      this.#campWaitStartedAt ??= Date.now();
-      const remaining = this.#campWaitStartedAt + this.waitMs - Date.now();
+      this.#campWaitStartedAt ??= clockStart();
+      const remaining = this.#campWaitStartedAt.began + this.waitMs - monotonicNow();
       if (remaining <= 0)
         return {
           termination: "observation_exhausted",

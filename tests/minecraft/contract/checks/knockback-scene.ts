@@ -11,16 +11,17 @@
  * A mob with AI takes the same first push but 0.36 up as well, then walks, falls and turns on its own (a position packet each tick or two):
  * the checks state its first push only, for the fake's mobs have no AI.
  *
- * The trials are split in three checks (`attack-mob-knockback`, `-decay`, `-sprint`) so each stays under the 25 s a contract check may take
+ * The trials are split in three checks (`attack-mob-knockback`, `-decay`, `-sprint`) so each stays under the 25 s a contract check may take on a server on time
  * on a shared server: the decay trial alone follows the mob for 12 s (plan 2026-10-23-shared-scenario-server T7d2 item 3).
  */
 import assert from "node:assert/strict";
 import { isDeepStrictEqual } from "node:util";
 import type { Entity } from "prismarine-entity";
 import type { ContractFixture } from "../checks.ts";
-import { type ContractSubject, holdsWithin } from "../subject.ts";
+import { type ContractSubject, holdsWhileMoving, holdsWithin } from "../subject.ts";
 import { ANSWER_WALL_MS, afterClientTicks, serverQuiet } from "../server-answer.ts";
 import { type Mark, READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
+import { assertTicksApart } from "./ticks-apart.ts";
 import { NIGHT, STILL_MOB_NBT, TICK_MS, holdInHand, mobAt } from "./combat-scene.ts";
 import { type LoggedPacket, logPackets } from "./packet-log.ts";
 
@@ -44,23 +45,23 @@ const MOVING_MOB_PUSH_MARGIN = MOVING_MOB_WALK_HALF + PUSH * 0.1 + PUSH_TOLERANC
 /**
  * The pair of velocities follows the `damage_event`, a tick later on a server of its own (22 to 51 ms, 3 runs). That wall gap is not
  * asserted: on a lane another lane's clone or a late client loop holds the pair back (a 172 ms gap with the pair's next velocities
- * 199 ms on, 1 run of 60, 2026-10-24), and the packets carry no tick count to read it in ticks instead; the order is.
+ * 199 ms on, 1 run of 60, 2026-10-24), so only the order is asserted here. The pair's own gap is judged in server ticks (`assertPairInOneTick`).
  */
 const FIRST_VELOCITY_MIN_MS = 0;
+/** The second velocity of the pair is heard in the hit's tick or the next (the pair is sent in one tick; the readings' error on top). */
+const PAIR_APART_TICKS = 1 + READING_TICKS;
 /** The server holds the swing for its recovery (the sword's 12.5 ticks; the hand's is shorter): the bot rests 13 server ticks after the equip, whatever the wall time they take. */
 const SWING_REST_TICKS = 13;
 /** One client tick of the bot's own physics (50 ms) sends the look before the hit does, so the server pushes along the new look; the server reads the two in the order sent. */
 const LOOK_CLIENT_TICKS = 2;
-/** The mob with no AI rests 12 s of server ticks after the hit; a server behind on a shared host takes longer on the wall clock: the watch waits for the zero velocity this long. */
-const REST_WAIT_MS = 25_000;
 const DECAY_PER_TICK = 0.98;
 /** A component under this is dropped to zero each tick, and the tracker looks every 3 ticks (the fake's own list of what was measured: `fake-bot-mob-knockback.ts`). */
 const REST_BELOW = 0.003;
 const TELL_EVERY_TICKS = 3;
 /** The index of the first velocity after the pair of the push. */
 const FIRST_AFTER_PAIR = 2;
-/** The zero is read when the client hears it: late by its lag, within what the wait's wall bound holds on a server on time. */
-const REST_LATE_TICKS = REST_WAIT_MS / TICK_MS;
+/** The zero is read when the client hears it, late by its lag: 500 ticks of allowance (the 25 s of wall this check always had; the wait itself fails on a stall, not on a total). The mob with no AI rests 12 s of server ticks after the hit, however long they take on the wall clock. */
+const REST_LATE_TICKS = 25_000 / TICK_MS;
 /** A velocity above this (a twentieth of a block a tick) is large enough for its ratio to say the ticks between two of them. */
 const DECAY_CHECKED_ABOVE = 0.05;
 const DECAY_TOLERANCE = 0.02;
@@ -125,7 +126,7 @@ async function hitAndWatch(subject: ContractSubject, mob: Entity, watch: Trial["
   const { bot } = subject;
   const botBefore = bot.entity.position.clone();
   const mobBefore = mob.position.clone();
-  const log = logPackets(subject, ["entity_velocity", ...MOVE_PACKETS, "damage_event", "entity_status", "entity_metadata"]);
+  const log = logPackets(subject, ["entity_velocity", ...MOVE_PACKETS, "damage_event", "entity_status", "entity_metadata"], watch === "push" ? ["entity_velocity"] : []);
   const forMob = ({ name, packet }: LoggedPacket, wanted: string) => name === wanted && packet.entityId === mob.id;
   /** The server's tick right before the hit and when the client heard the mob rest (a decay watch only: the push's watch reads no tick). */
   let restTicks: { hit: Mark; rest: Mark } | undefined;
@@ -133,7 +134,11 @@ async function hitAndWatch(subject: ContractSubject, mob: Entity, watch: Trial["
     const hitMark = markNow(subject);
     bot.attack(mob);
     if (watch === "decay") {
-      await holdsWithin(subject, () => log.packets.some((heard) => forMob(heard, "entity_velocity") && Math.hypot(...Object.values(heard.packet.velocity as Record<string, number>)) === 0), REST_WAIT_MS);
+      const velocitiesOfMob = () => log.packets.filter((heard) => forMob(heard, "entity_velocity"));
+      const rested = () => velocitiesOfMob().some((heard) => Math.hypot(...Object.values(heard.packet.velocity as Record<string, number>)) === 0);
+      // The mob is told every 3 ticks until it rests: wait as long as a new velocity comes, and fail only when none came for `ANSWER_WALL_MS` (a stalled server).
+      await holdsWhileMoving(subject, rested, () => velocitiesOfMob().length, ANSWER_WALL_MS);
+      assert.ok(rested(), `the mob ${mob.id} told no velocity for ${ANSWER_WALL_MS} ms before it rested (${velocitiesOfMob().length} heard)`);
       restTicks = { hit: hitMark, rest: markNow(subject) };
     } else {
       const answered = await holdsWithin(subject, () => log.packets.some((heard) => forMob(heard, "damage_event")) && log.packets.filter((heard) => forMob(heard, "entity_velocity")).length >= 2, ANSWER_WALL_MS);
@@ -148,8 +153,8 @@ async function hitAndWatch(subject: ContractSubject, mob: Entity, watch: Trial["
   return { log, damage, restTicks, velocities: log.packets.filter((heard) => forMob(heard, "entity_velocity")), botMoved: bot.entity.position.distanceTo(botBefore), mobMoved: mob.position.distanceTo(mobBefore) };
 }
 
-/** The first push of a hit: two equal velocities a tick after the `damage_event`, the push as expected. */
-export function assertFirstPush(label: string, damage: LoggedPacket | undefined, velocities: LoggedPacket[], expected: { x: number; z: number }, upDown: "none" | "any"): void {
+/** The first push of a hit: two equal velocities a tick after the `damage_event`, the push as expected; returns the pair, whose server ticks `assertPairInOneTick` judges. */
+export function assertFirstPush(label: string, damage: LoggedPacket | undefined, velocities: LoggedPacket[], expected: { x: number; z: number }, upDown: "none" | "any"): readonly [LoggedPacket, LoggedPacket] {
   const looseDirection = upDown === "any";
   assert.ok(damage !== undefined && velocities.length >= 2, `${label}: no damage_event or no velocity`);
   const heardList = `the first velocities, with ms after the damage_event: ${velocities.slice(0, 4).map((heard) => `${heard.atMs - damage.atMs} ${JSON.stringify(velocityOf(heard))}`).join("; ")}`;
@@ -160,13 +165,26 @@ export function assertFirstPush(label: string, damage: LoggedPacket | undefined,
   const delay = first.atMs - damage.atMs;
   assert.ok(delay >= FIRST_VELOCITY_MIN_MS, `${label}: the first velocity came ${delay} ms after the damage_event, before it (${heardList})`);
   assert.deepEqual(second.packet.velocity, first.packet.velocity, `${label}: the second velocity differs from the first`);
-  assert.ok(second.atMs - first.atMs <= TICK_MS, `${label}: the second velocity came ${second.atMs - first.atMs} ms after the first`);
   const push = velocityOf(first);
   const agrees = looseDirection
     ? Math.hypot(push.x - expected.x, push.z - expected.z) <= MOVING_MOB_PUSH_MARGIN
     : Math.abs(push.x - expected.x) <= PUSH_TOLERANCE && Math.abs(push.z - expected.z) <= PUSH_TOLERANCE;
   assert.ok(agrees, `${label}: the push is ${JSON.stringify(push)}, not ${JSON.stringify(expected)} (${heardList})`);
   if (upDown === "none") assert.equal(push.y, 0, `${label}: a mob with no AI is pushed up`);
+  return [first, second];
+}
+
+/**
+ * The pair of a push is sent in one server tick; the client hears the second in the same tick or the next, each read with `READING_TICKS` of error.
+ * Judged by the ticks read as the two were heard (`heardAt`), not by 50 ms of wall: a server below 20 ticks a second or a client late between the
+ * two packets holds more wall time between them (plan 2026-10-30-contract-batch-timing T2b). Only the push watches call it: the decay watch hears
+ * ~80 velocities and a tick read each would be 80 chat queries, and its mob with no AI is told the pair as two equal velocities (`assertFirstPush`'s
+ * `deepEqual`: a push told a tick apart would have decayed by 0.98 between them, 3200 to 3136 in the notch).
+ */
+export async function assertPairInOneTick(subject: ContractSubject, label: string, [first, second]: readonly [LoggedPacket, LoggedPacket]): Promise<void> {
+  assert.ok(first.heardAt !== undefined && second.heardAt !== undefined, `${label}: the pair of velocities was logged with no server tick (a watch that marks entity_velocity judges it)`);
+  const [firstTick, secondTick] = await Promise.all([tickOf(subject, first.heardAt), tickOf(subject, second.heardAt)]);
+  assertTicksApart(`${label}: the second velocity after the first`, firstTick, secondTick, { min: 0, max: PAIR_APART_TICKS });
 }
 
 /** Server ticks a push whose largest component is `push` takes to fall under the rest threshold: the tick its component is dropped (`0.4 * 0.98 ^ 242` is still 0.003004). */
@@ -219,7 +237,8 @@ export async function runKnockbackTrials(subject: ContractSubject, trials: reado
       await standReadyToHit(subject, trial, mob);
       const expected = expectedPush(subject, mob, trial.sprint === true);
       const { damage, velocities, botMoved, mobMoved, log, restTicks } = await hitAndWatch(subject, mob, trial.watch);
-      assertFirstPush(trial.label, damage, velocities, expected, trial.ai ? "any" : "none");
+      const pair = assertFirstPush(trial.label, damage, velocities, expected, trial.ai ? "any" : "none");
+      if (trial.watch === "push") await assertPairInOneTick(subject, trial.label, pair);
       if (!trial.ai) {
         const moves = log.packets.filter(({ name, packet }) => MOVE_PACKETS.includes(name) && packet.entityId === mob.id);
         assert.ok(moves.every(({ packet }) => ["dX", "dY", "dZ"].every((field) => (packet[field] ?? 0) === 0) && packet.x === undefined), `${trial.label}: a mob with no AI got a move packet that moves it`);
@@ -243,7 +262,8 @@ async function assertSprintSpent(subject: ContractSubject, trial: Trial): Promis
     await standReadyToHit(subject, again, second);
     const expected = expectedPush(subject, second, false);
     const { damage, velocities } = await hitAndWatch(subject, second, again.watch);
-    assertFirstPush(again.label, damage, velocities, expected, "none");
+    await assertPairInOneTick(subject, again.label, assertFirstPush(again.label, damage, velocities, expected, "none"));
+    // `again` keeps the first trial's `push` watch (`hitAndWatch(subject, second, again.watch)`).
   } finally {
     await subject.removeMob(second);
   }

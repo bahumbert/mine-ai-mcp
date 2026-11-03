@@ -38,6 +38,7 @@
     "typecheck:scenarios": "bunx --bun tsc -p scenarios/tsconfig.json --noEmit",
     "typecheck:tests": "bunx --bun tsc -p tests/tsconfig.json --noEmit",
     "typecheck:brain": "bunx --bun tsc -p brain/tsconfig.json --noEmit",
+    "typecheck:launcher": "bunx --bun tsc -p launcher/tsconfig.json --noEmit",
     "typecheck:monitor": "bunx --bun tsc -p monitor/tsconfig.json --noEmit",
     "typecheck:scripts": "bunx --bun tsc -p scripts/tsconfig.json --noEmit",
     "check": "bun scripts/check.ts",

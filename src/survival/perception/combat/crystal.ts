@@ -3,6 +3,7 @@ import type { Bot, BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import type { Facts } from "../../state/answered.js";
+import { elapsedSince, monotonicNow } from "../../../utils/index.js";
 import { damageSourceName } from "../../../world/damage-registry.js";
 
 export type CrystalWeapon = "auto" | "bow" | "melee";
@@ -48,7 +49,7 @@ export class CrystalObservation implements Disposable {
   shot: { flightTicks: number; firstServerAge: number | null; settled: boolean } | null = null;
   phase: CrystalPhase = "selecting";
   usedWeapon: "bow" | "melee" | null = null;
-  readonly startedAt = Date.now();
+  readonly startedAt = monotonicNow();
   readonly startY: number;
   highestFeetY: number;
   scaffoldPlaced = 0;
@@ -210,7 +211,7 @@ export class CrystalObservation implements Disposable {
 
   recordSwing(planned: boolean, distance: number, blast: { cover: Vec3 | null; exposure: number; damage: number }): void {
     this.phase = "aiming";
-    this.timeToFirstSwingMs ??= Date.now() - this.startedAt;
+    this.timeToFirstSwingMs ??= elapsedSince(this.startedAt);
     this.swingFromPlannedStance = planned;
     this.swingDistance = distance;
     this.blastCoverCell = blast.cover?.floored() ?? null;
@@ -225,12 +226,12 @@ export class CrystalObservation implements Disposable {
 
   beginReturn(): void {
     this.phase = "returning";
-    this.returnStartedAt ??= Date.now();
+    this.returnStartedAt ??= monotonicNow();
   }
 
   finishReturn(completed: boolean): void {
     this.returnedToGround = completed;
-    if (this.returnStartedAt !== null) this.returnTimeMs = Date.now() - this.returnStartedAt;
+    if (this.returnStartedAt !== null) this.returnTimeMs = elapsedSince(this.returnStartedAt);
     this.phase = "settled";
     this.pauseMeleeMeasurement();
   }

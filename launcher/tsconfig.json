@@ -1,0 +1,12 @@
+{
+  // The launcher runs under Bun (`bun:ffi` for the job object), so it gets Bun's types besides Node's.
+  "extends": "../tsconfig.build.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun"],
+    "rootDir": "..",
+    "baseUrl": ".."
+  },
+  "include": ["**/*.ts"]
+}

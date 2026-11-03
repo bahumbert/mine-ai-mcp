@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { armSignal } from "../../utils/index.js";
+import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
 import type { Goal } from "../goals/goal.js";
 import { anyGoal, exactBlockGoal } from "../goals/index.js";
 import { observeMineflayerBlock } from "../mineflayer/world.js";
@@ -77,11 +78,11 @@ export async function enterPortal(
   block: PortalBlock,
   signal: AbortSignal,
 ): Promise<NavigationResult> {
-  const started = Date.now();
+  const started = monotonicNow();
   const stopped = (reason: string): NavigationResult => ({
     status: "stopped",
     reason,
-    elapsedMs: Date.now() - started,
+    elapsedMs: elapsedSince(started),
   });
   const feet = navigationFeet(bot.entity.position, bot.entity.onGround);
   const entry = entries(bot, target, block).find(
@@ -149,7 +150,7 @@ export async function enterPortal(
       return stopped(
         `[NAVIGATION_PORTAL_ENTRY_STOPPED] ${outcome.kind === "signalled" ? outcome.value : outcome.kind}`,
       );
-    return { status: "completed", elapsedMs: Date.now() - started };
+    return { status: "completed", elapsedMs: elapsedSince(started) };
   } finally {
     arrival.cancel();
     bot.off("forcedMove", onPosition);

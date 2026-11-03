@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
+import { elapsedSince, monotonicNow } from "../../../utils/index.js";
 import { dragonPhase, entityHealth, isDragonLanding, isDragonPerched } from "../../../world/end-fight.js";
 
 /** One requested perch window, including the ticks spent under a reflex. */
@@ -19,7 +20,7 @@ export class PerchObservation implements Disposable {
   stage: "waiting" | "preparing" | "ready" | "approaching_head" | "attacking" | "withdrawing" = "waiting";
   private blocker: string | null = null;
   private lastAttackBlocker: string | null = null;
-  private readonly startedAt = Date.now();
+  private readonly startedAt = monotonicNow();
   private firstDamageMs: number | null = null;
   private firstDamageInPerchMs: number | null = null;
   private perchStartedAt: number | null = null;
@@ -75,11 +76,11 @@ export class PerchObservation implements Disposable {
     )
       return;
     const phase = dragonPhase(this.bot, this.target);
-    if (isDragonPerched(phase)) this.perchStartedAt ??= Date.now();
+    if (isDragonPerched(phase)) this.perchStartedAt ??= monotonicNow();
     const health = entityHealth(this.bot, this.target);
     if (health !== null && this.#health !== null && health < this.#health) {
-      this.firstDamageMs ??= Date.now() - this.startedAt;
-      if (this.perchStartedAt !== null) this.firstDamageInPerchMs ??= Date.now() - this.perchStartedAt;
+      this.firstDamageMs ??= elapsedSince(this.startedAt);
+      if (this.perchStartedAt !== null) this.firstDamageInPerchMs ??= elapsedSince(this.perchStartedAt);
       this.confirmedDamage += this.#health - health;
     }
     this.#health = health;
@@ -102,7 +103,7 @@ export class PerchObservation implements Disposable {
   }
   get timing() {
     this.refresh();
-    return { elapsedMs: Date.now() - this.startedAt, firstDamageMs: this.firstDamageMs,
+    return { elapsedMs: elapsedSince(this.startedAt), firstDamageMs: this.firstDamageMs,
       firstDamageInPerchMs: this.firstDamageInPerchMs,
       confirmedDamage: this.confirmedDamage, perchedTicks: this.perchedTicks,
       stageTicks: { ...this.stageTicks }, minimumHealth: this.minimumHealth, lastAttackBlocker: this.lastAttackBlocker };

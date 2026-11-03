@@ -12,6 +12,7 @@ client:
     - --without-runtime
 params:
   check: consume-food
+reset: []
 setup:
   - fill -6 -61 -6 6 -61 6 stone
   - fill -6 -60 -6 6 -55 6 air

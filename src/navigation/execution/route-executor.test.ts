@@ -28,6 +28,7 @@ import {
   type MovementExecution,
   type MovementSnapshot,
 } from "./movement-controller.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { OpenedPassages } from "./opened-passages.js";
 import { RouteExecutor, type RouteExecutionRequest } from "./route-executor.js";
@@ -207,7 +208,7 @@ test("movement waits for the effect and its observed world confirmation, and set
     ledger.classify(
       { position, before, after: world.blockAt(position.x, position.y, position.z), worldRevision: world.revision },
       new Set(),
-      Date.now(),
+      monotonicNow(),
     );
     finishEffect();
     assert.equal((await execution).kind, "exhausted", row.name);
@@ -273,7 +274,7 @@ async function leaveClosedDoorway(allowDoors: boolean) {
       ledger.classify(
         { position, before, after: world.blockAt(position.x, position.y, position.z), worldRevision: world.revision },
         new Set(),
-        Date.now(),
+        monotonicNow(),
       );
     }
   };

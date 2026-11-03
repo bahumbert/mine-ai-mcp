@@ -27,7 +27,7 @@ test("serverQuiet fails naming the wait when the server's ticks do not come with
   await subject.wait(1_500);
   harness.server.stop();
   const calledAt = subject.now();
-  await assert.rejects(serverQuiet(subject, "after the click on slot 3"), new RegExp(`after the click on slot 3: the world age did not move 40 ticks within ${ANSWER_WALL_MS} ms: the server is stalled`));
+  await assert.rejects(serverQuiet(subject, "after the click on slot 3"), new RegExp(`after the click on slot 3: the world age stood still for ${ANSWER_WALL_MS} ms before it moved 40 ticks: the server is stalled`));
   assert.ok(subject.now() - calledAt >= ANSWER_WALL_MS, "it waited the wall bound before it gave up");
 });
 
@@ -54,6 +54,20 @@ test("answerArrives resolves as soon as the answer is there and fails naming wha
   await answerSettled(subject, () => true, "the cursor packet");
   assert.ok(harness.bot.time.age - age >= 40, "the ticks came after the answer");
   await assert.rejects(answerArrives(subject, () => false, "the cursor packet"), new RegExp(`the cursor packet: no answer within ${ANSWER_WALL_MS} ms`));
+});
+
+test("answerArrives adds what the caller knows when the answer never comes, read when the wait ends, and nothing when it comes", async () => {
+  const { harness, subject } = subjectOn();
+  using _installed = harness.clock.install();
+  let seenWhenGivingUp = "before";
+  setTimeout(() => void (seenWhenGivingUp = "after the wait"), 300);
+  await assert.rejects(
+    answerArrives(subject, () => false, "the pickup", () => `the item stood ${seenWhenGivingUp}`),
+    new RegExp(`the pickup: no answer within ${ANSWER_WALL_MS} ms \\(the item stood after the wait\\)`),
+  );
+  let detailCalls = 0;
+  await answerArrives(subject, () => true, "the pickup", () => `read ${(detailCalls += 1)}`);
+  assert.equal(detailCalls, 0, "the detail is read only for a failure");
 });
 
 test("afterClientTicks counts the client's own physics ticks and removes its listener", async () => {

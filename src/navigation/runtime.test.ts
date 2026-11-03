@@ -198,3 +198,21 @@ test("an in-place break asked of a closed runtime is refused as closed (review 2
     /closed/,
   );
 });
+
+// Plan 2026-10-27-p1-monotonic-clock T4: the runtime's route-level `elapsedMs` (navigateAroundDragonBreath) was a wall difference.
+test("a route stopped 200 ms after it commits, with the wall clock stepped back 0.8 s, reports 200 ms and never a negative elapsedMs", async () => {
+  const { clock, navigation, committed, movements, goal } = waitingRoute(undefined, createFakeClock({ mode: "mocked" }));
+  using _timers = clock.install();
+  const stop = new AbortController();
+  const startedAt = clock.now();
+  const run = navigation.navigate({ movements, goal, stopSignal: stop.signal });
+  await committed;
+  await clock.advance(200);
+  clock.stepWallClock(-800);
+  stop.abort("test over");
+  const result = await tickUntilSettled(clock, run);
+  assert.equal(result.status, "stopped");
+  const sinceStart = clock.now() - startedAt;
+  assert.ok(result.elapsedMs >= 200 && result.elapsedMs <= sinceStart, `elapsedMs ${result.elapsedMs} ms after ${sinceStart} ms of clock`);
+  await tickUntilSettled(clock, navigation.close());
+});

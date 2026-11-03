@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { z } from "zod";
 import { describeStep, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
+import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { runStep } from "./skills.ts";
 
@@ -35,7 +36,7 @@ process.once("SIGINT", () => controller.abort());
 try {
   const log = (line: string) => console.log(line);
   console.log(`running: ${describeStep(parsed.data)}`);
-  const started = Date.now();
+  const started = monotonicNow();
   const result = await runStep(parsed.data, {
     runtime,
     body: new Body(runtime, log),
@@ -43,7 +44,7 @@ try {
     requester: values.requester,
     style: values.style,
   });
-  console.log(`${result.status} in ${Math.round((Date.now() - started) / 1000)} s${result.status === "stopped" ? "" : `: ${result.detail}`}`);
+  console.log(`${result.status} in ${Math.round(elapsedSince(started) / 1000)} s${result.status === "stopped" ? "" : `: ${result.detail}`}`);
   process.exitCode = result.status === "done" ? 0 : 1;
 } finally {
   await runtime.close();

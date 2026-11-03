@@ -53,6 +53,7 @@ The host accepts configuration flags for connection, storage, and debugging:
 | `--data-root <path>`            | `~/.mine-ai/bot-data` | Directory holding persistent SQLite databases.                            |
 | `--bot-data-persistence <mode>` | `persistent`          | Storage mode: `persistent` SQLite file or `temporary` in-memory database. |
 | `--bot-data-scope <scope>`      | `bot`                 | Database isolation: `bot` for one player UUID or `shared` for the world.  |
+| `--chat-command-prefix <text>`  | off                   | Keeps incoming `<text>bot` / `<text>bots` chat lines out of the event log and serves them at `/chat-commands` (1-3 characters, no whitespace, not `/`). |
 | `--debug-execute-javascript`    | `false`               | Publishes unrestricted debug tools when set.                              |
 
 The host runs until stopped with `SIGINT` or `SIGTERM`. It disconnects cleanly

@@ -7,12 +7,14 @@
  */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
+import { READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
 
-const WATCH_MS = 3_000;
-/** The `/time set` goes out this long into the watch, so regular packets fall on both sides of it. */
-const RESEND_AFTER_MS = 1_000;
 /** A packet every 20 server ticks: on a server on time, one a second. */
 const TICKS_PER_PACKET = 20;
+/** The watch is 3 s on a server on time, counted in the server's ticks so a server at 8 a second is judged on the same 3 packets (plan 2026-10-30-contract-batch-timing T2c). */
+const WATCH_TICKS = 3 * TICKS_PER_PACKET;
+/** The `/time set` goes out this many ticks into the watch, so regular packets fall on both sides of it. */
+const RESEND_AFTER_TICKS = TICKS_PER_PACKET;
 
 /** A time packet the client heard: the age it held and when (the subject's clock). */
 export interface HeardPacket {
@@ -46,26 +48,31 @@ export const worldAgePerSecond: ContractCheck = {
     bot.on("time", onTime);
     const ageBefore = bot.time.age;
     const startedAtMs = subject.now();
+    const started = markNow(subject);
+    let ended = started;
     let heardBeforeResend = 0;
     try {
-      await subject.wait(RESEND_AFTER_MS);
+      await restTicksSince(subject, started, RESEND_AFTER_TICKS, "the watch before the time set");
       heardBeforeResend = heard.length;
       await subject.resendTime();
-      await subject.wait(WATCH_MS - RESEND_AFTER_MS);
+      await restTicksSince(subject, started, WATCH_TICKS, "the watch");
+      ended = markNow(subject);
     } finally {
       bot.off("time", onTime);
     }
-    const seen = `packets heard (age@ms into the watch): ${describePackets(heard, startedAtMs)}; time set sent after ${heardBeforeResend}`;
-    assert.ok(heard.length > 0, `no time packet in ${WATCH_MS} ms; ${seen}`);
+    const ticksRun = (await tickOf(subject, ended)) - (await tickOf(subject, started));
+    const seen = `packets heard (age@ms into the watch): ${describePackets(heard, startedAtMs)}; time set sent after ${heardBeforeResend}; ${ticksRun} server ticks run`;
+    assert.ok(heard.length > 0, `no time packet in ${ticksRun} server ticks; ${seen}`);
     const cadence = cadenceOf(heard, ageBefore);
     const extras = extraPackets(heard, cadence);
     const regularAges = [...new Set(heard.filter((packet) => !extras.includes(packet)).map(({ age }) => age))];
     // The regular packets step 20 whatever the server's speed (one per 20 of its own ticks); the first may repeat the packet read just before the watch.
     assert.ok(regularAges.slice(1).every((age, index) => age - regularAges[index]! === TICKS_PER_PACKET), `the regular packets' ages step by ${TICKS_PER_PACKET}; ${seen}`);
-    // One packet a second, so 3 s hold 2 to 4 regular ones depending on where the watch starts in the second.
-    assert.ok(regularAges.length >= 2 && regularAges.length <= 4, `${regularAges.length} regular time packets in ${WATCH_MS} ms: 2 to 4; ${seen}`);
+    // One packet per 20 ticks, so the ticks run hold their count (floor or ceiling, by where the watch starts in the 20), the two readings' error added.
+    const [fewest, most] = [Math.floor((ticksRun - READING_TICKS) / TICKS_PER_PACKET), Math.ceil((ticksRun + READING_TICKS) / TICKS_PER_PACKET)];
+    assert.ok(regularAges.length >= fewest && regularAges.length <= most, `${regularAges.length} regular time packets in ${ticksRun} server ticks: ${fewest} to ${most}; ${seen}`);
     assert.ok(extras.some((packet) => heard.indexOf(packet) >= heardBeforeResend), `the /time set was not answered with an extra time packet; ${seen}`);
     const moved = bot.time.age - ageBefore;
-    assert.ok(Math.abs(moved - 60) <= TICKS_PER_PACKET, `age moved ${moved} in ${WATCH_MS} ms: 60 within ${TICKS_PER_PACKET}; ${seen}`);
+    assert.ok(Math.abs(moved - ticksRun) <= TICKS_PER_PACKET, `age moved ${moved} in ${ticksRun} server ticks: the same within ${TICKS_PER_PACKET}; ${seen}`);
   },
 };

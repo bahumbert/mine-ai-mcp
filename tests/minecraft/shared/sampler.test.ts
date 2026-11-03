@@ -25,14 +25,15 @@ function depsOf(pool: ServerPool, rig: SchedulerRig, overrides: Partial<SamplerD
   };
 }
 
-test("a sample reads each server's tick time and resident size into the pool", async () => {
+test("a sample reads each server's tick time and resident size into the pool, and the scheduler's report names the tick time by server id", async () => {
   const rig = new SchedulerRig();
   const { managed, fake } = await readyServer(rig.pool, rig.factory);
   fake.replies.set("tick query", TICK_QUERY);
   await sampleOnce(depsOf(rig.pool, rig));
   assert.deepEqual(rig.pool.readings().find(reading => reading.id === managed.id), {
-    id: managed.id, key: "k", status: "ready", shared: true, busy: false, msptP95: 9.5, heapMb: 3_072, residentMb: 1_234,
+    id: managed.id, key: "k", status: "ready", shared: true, busy: false, lanes: 0, msptP95: 9.5, heapMb: 3_072, residentMb: 1_234,
   });
+  assert.deepEqual(rig.scheduler.sampleReport()?.serverTicks, [{ id: managed.id, msptP95: 9.5 }]);
 });
 
 test("a server whose tick query fails is not stalled until STALL_STOP has passed, then it is stopped", async () => {

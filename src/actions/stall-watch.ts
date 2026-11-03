@@ -9,7 +9,7 @@
  * that is what this watches, the way `smelt_item` watches cook progress.
  */
 import { AnchorTravel } from "../session/anchor-travel.js";
-import type { Position3 } from "../utils/index.js";
+import { monotonicNow, type Position3 } from "../utils/index.js";
 
 /** How often the work and the position are sampled when the caller does not say. */
 const SAMPLE_MS = 1_000;
@@ -31,7 +31,7 @@ export interface StallClock {
 
 /** Monotonic: a wall clock that steps (NTP, WSL host sync) must not stretch or cut the stall window. */
 export const MONOTONIC_CLOCK: StallClock = {
-  now: () => performance.now(),
+  now: monotonicNow,
   every: (tick, ms) => {
     const timer = setInterval(tick, ms);
     return () => clearInterval(timer);

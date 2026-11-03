@@ -2,6 +2,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { centerOnCell, steeringPortFor } from "../../navigation/index.js";
+import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import type { ResponseContext } from "../control/combat/context.js";
 import { isInLava, isInWater } from "../perception/body.js";
@@ -39,7 +40,7 @@ export interface ShelterBuild {
   readonly itemUse: CombatItemUse;
   /** The bot was already in a closed cell when the hide began. */
   readonly enclosed: boolean;
-  /** Wall-clock time (`Date.now()`) after which a hide that is still building gives up. */
+  /** Monotonic time (`monotonicNow()`) after which a hide that is still building gives up. */
   readonly constructionDeadline: number;
   dug: number;
   walled: number;
@@ -85,7 +86,7 @@ export function shelterLiquidFailure(bot: Bot): StepFailure | null {
 export async function waitForShelterTicks(build: ShelterBuild, ticks: number): Promise<void> {
   const { bot, options } = build;
   const bound = new AbortController();
-  const timer = setTimeout(() => bound.abort(), Math.max(0, build.constructionDeadline - Date.now()));
+  const timer = setTimeout(() => bound.abort(), Math.max(0, build.constructionDeadline - monotonicNow()));
   try {
     await waitForPhysicsTicks(bot, ticks, AbortSignal.any([options.signal, bound.signal]));
   } catch (cause) {

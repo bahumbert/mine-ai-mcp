@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from
   "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { monotonicNow } from "../utils/index.js";
 
 /** The transport host needs lifecycle operations, not one SDK build's nominal server class. */
 export interface MinecraftMcpHostedServer {
@@ -17,6 +18,7 @@ export interface MinecraftMcpHostedServer {
 }
 
 interface TransportRecord {
+  /** A `monotonicNow()` reading: the idle cutoff is a duration, not a time of day. */
   lastActiveAt: number;
   server: MinecraftMcpHostedServer;
   transport: StreamableHTTPServerTransport;
@@ -73,7 +75,7 @@ export function createMinecraftMcpHttpApplication(
     options.clientIdleTimeoutMs ?? 30 * 60_000,
   );
   const idleReaper = setInterval(
-    () => closeIdleClientSessions(transports, Date.now() - clientIdleTimeoutMs, log),
+    () => closeIdleClientSessions(transports, monotonicNow() - clientIdleTimeoutMs, log),
     Math.min(60_000, clientIdleTimeoutMs),
   );
   idleReaper.unref();
@@ -118,7 +120,7 @@ export function createMinecraftMcpHttpApplication(
     try {
       if (typeof sessionId === "string" && transports.has(sessionId)) {
         const record = transports.get(sessionId)!;
-        record.lastActiveAt = Date.now();
+        record.lastActiveAt = monotonicNow();
         await record.transport.handleRequest(
           request,
           response,
@@ -145,7 +147,7 @@ export function createMinecraftMcpHttpApplication(
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (initializedId) => {
           transports.set(initializedId, {
-            lastActiveAt: Date.now(),
+            lastActiveAt: monotonicNow(),
             server,
             transport,
           });
@@ -189,7 +191,7 @@ export function createMinecraftMcpHttpApplication(
       return;
     }
     const record = transports.get(sessionId)!;
-    record.lastActiveAt = Date.now();
+    record.lastActiveAt = monotonicNow();
     await record.transport.handleRequest(request, response);
   });
 
@@ -200,7 +202,7 @@ export function createMinecraftMcpHttpApplication(
       return;
     }
     const record = transports.get(sessionId)!;
-    record.lastActiveAt = Date.now();
+    record.lastActiveAt = monotonicNow();
     await record.transport.handleRequest(request, response);
   });
 

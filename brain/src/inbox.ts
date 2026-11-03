@@ -1,3 +1,4 @@
+import { monotonicNow } from "./monotonic-clock.ts";
 import type { PlayerMessage } from "./runtime-client.ts";
 
 /** A message taken from the inbox: its lines read as one, and the mark that tells whether its speaker spoke since. */
@@ -31,7 +32,7 @@ export class Inbox {
   /** Speakers (lower case) whose line was taken and is being decided: a count each. */
   private readonly held = new Map<string, number>();
 
-  constructor(private readonly burstMs: number, private readonly now: () => number = Date.now) {}
+  constructor(private readonly burstMs: number, private readonly now: () => number = monotonicNow) {}
 
   push(message: PlayerMessage): void {
     const at = this.now();

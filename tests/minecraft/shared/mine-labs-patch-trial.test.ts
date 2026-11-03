@@ -80,13 +80,14 @@ async function runLaneTrial(
     scenario: ReturnType<typeof scenario>;
     onArranged?: () => void | Promise<void>;
     clientProvider?: mineLabs.ClientProvider;
+    signal?: AbortSignal;
   },
 ) {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-trial-"));
   try {
     return await mineLabs.runScenarioTrial({
       server: neverStartedServer(join(root, "world"), rcon), scenario: options.scenario, runDir: root, log: () => {}, reuseServer: true, arena: options.arena,
-      onArranged: options.onArranged, clientProvider: options.clientProvider,
+      onArranged: options.onArranged, clientProvider: options.clientProvider, signal: options.signal,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -209,4 +210,52 @@ test("a provider that throws ends the trial as an error naming the client", asyn
 
   assert.equal(result.outcome, "error");
   assert.match(result.error ?? "", /client .Walker.: the client provider failed: pool is gone/u);
+});
+
+test("a lane's arrangement clears its box twice before the setup: the second takes the loot the first one dropped", async () => {
+  const rcon = new RecordingRcon();
+  await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["setblock 1281 -59 1281 minecraft:stone"]) });
+
+  const clearsBeforeSetup = rcon.sent.slice(0, rcon.sent.indexOf("setblock 1281 -59 1281 minecraft:stone")).filter((command) => command === BOXED_KILL);
+  assert.equal(clearsBeforeSetup.length, 2);
+});
+
+// 2026-11-01 (plan 2026-10-30-contract-batch-timing T9): the entities of a chunk pinned again after it unloaded load some
+// ticks after the pin (13-25 of 168 gap-run trials: 31 or 40 live zombies in the box after the restore's kills, killed by
+// the next arrangement, their loot picked up by the next player). The kill that finds them all runs while the trial's own
+// player keeps the chunks loaded, before the clients stop and before the restore pins the arena again.
+test("a lane kills its box twice when its trial ends, before the restore starts", async () => {
+  const rcon = new RecordingRcon();
+  await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["setblock 1281 -59 1281 minecraft:stone"]) });
+
+  const restoreStartsAt = rcon.sent.lastIndexOf(HEAD_REMOVAL);
+  const killsBeforeRestore = rcon.sent.slice(0, restoreStartsAt).filter((command) => command === BOXED_KILL);
+  assert.equal(killsBeforeRestore.length, 4, "two before the setup, two when the trial ended");
+  assert.ok(rcon.sent.slice(restoreStartsAt).filter((command) => command === BOXED_KILL).length >= 2, "the restore still kills twice");
+});
+
+test("a lane's end-of-trial kill runs while its client is still running: the client's chunks are what keep the entities loaded", async () => {
+  const rcon = new RecordingRcon();
+  // A client that never says ready and leaves when the trial tells it to stop (the init message before it is ignored).
+  const ahead = mineLabs.spawnClientAhead({ command: process.execPath, args: ["-e", "process.stdin.on('data', (d) => String(d).includes('\"stop\"') && process.exit(0)); setInterval(() => {}, 1e6)"], env: {} });
+  void ahead.closed.then(() => rcon.sent.push("<client closed>"));
+  const abort = new AbortController();
+  // Cancelled once the trial launched the client: it waits for the client's `ready`, ends in its `finally` and stops the client there.
+  const provider = () => (setTimeout(() => abort.abort("test"), 50), ahead);
+  await runLaneTrial(rcon, { arena: ARENA, scenario: scenarioWithClient(), clientProvider: provider, signal: abort.signal });
+  await ahead.closed;
+  await Promise.resolve();
+
+  const closedAt = rcon.sent.indexOf("<client closed>");
+  assert.ok(closedAt >= 0, "the trial stopped its client");
+  assert.equal(rcon.sent.slice(0, closedAt).filter((command) => command === BOXED_KILL).length, 4, "two before the setup, two before the client stopped");
+});
+
+test("a trial on a server of its own kills everywhere when it ends, before its restore starts (the same race, no lane)", async () => {
+  const rcon = new RecordingRcon();
+  await runLaneTrial(rcon, { scenario: scenario() });
+
+  const restoreStartsAt = rcon.sent.lastIndexOf("reload");
+  const killsBeforeRestore = rcon.sent.slice(0, restoreStartsAt).filter((command) => command === "kill @e[type=!minecraft:player]");
+  assert.equal(killsBeforeRestore.length, 2, "one before the setup, one when the trial ended");
 });
