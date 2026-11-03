@@ -9,6 +9,8 @@ import { createCheckpointRunner, startWalCheckpointer, WAL_CHECKPOINT_INTERVAL_M
 
 const BOUND_MS = 5_000;
 const MEGABYTE = 1024 * 1024;
+/** A test that polls `until` up to twice outlives the runner's 5 s default; its own bounds end it first (flaky under load, 2026-11-03). */
+const POLLING_TEST = { timeout: 3 * BOUND_MS };
 
 /** Polls `done` until it holds or the wall-clock bound passes; never an unbounded wait. */
 async function until(done: () => boolean, boundMs = BOUND_MS): Promise<boolean> {
@@ -66,7 +68,7 @@ test("the checkpoint interval and journal limit are the plan's constants", () =>
   assert.equal(WAL_JOURNAL_SIZE_LIMIT_BYTES, 64 * MEGABYTE);
 });
 
-test("frames written by the bot connection are checkpointed within the interval", async (t) => {
+test("frames written by the bot connection are checkpointed within the interval", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   writeMegabytes(writer, 8);
@@ -75,7 +77,7 @@ test("frames written by the bot connection are checkpointed within the interval"
   assert.ok(await until(() => mainFileBytes(file) >= 7 * MEGABYTE), "the worker copied the frames into the main file");
 });
 
-test("the WAL file is truncated to the size limit once it resets", async (t) => {
+test("the WAL file is truncated to the size limit once it resets", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   writer.exec(`PRAGMA journal_size_limit = ${MEGABYTE}`);
@@ -91,7 +93,7 @@ test("the WAL file is truncated to the size limit once it resets", async (t) => 
   assert.ok(reset, `WAL is ${walFileBytes(file)} bytes`);
 });
 
-test("a checkpoint while a reader holds a snapshot is retried, not an error", async (t) => {
+test("a checkpoint while a reader holds a snapshot is retried, not an error", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   writeMegabytes(writer, 1);
@@ -108,7 +110,7 @@ test("a checkpoint while a reader holds a snapshot is retried, not an error", as
   assert.deepEqual(failures, []);
 });
 
-test("a worker that cannot open its connection calls fellBack once with the cause", async (t) => {
+test("a worker that cannot open its connection calls fellBack once with the cause", POLLING_TEST, async (t) => {
   const missing = path.join(tempDatabaseFile(t, "gone"), "no-such-directory", "bot-data.sqlite");
   const causes: string[] = [];
   const checkpointer = startWalCheckpointer(missing, { intervalMs: 50, fellBack: (cause) => causes.push(cause) });
@@ -119,7 +121,7 @@ test("a worker that cannot open its connection calls fellBack once with the caus
   assert.match(causes[0]!, /unable to open|cannot open/i);
 });
 
-test("closing the checkpointer stops the worker without calling fellBack", async (t) => {
+test("closing the checkpointer stops the worker without calling fellBack", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   const causes: string[] = [];
@@ -135,7 +137,7 @@ test("closing the checkpointer stops the worker without calling fellBack", async
   later.close();
 });
 
-test("disposing the checkpointer has released its connection when it returns", async (t) => {
+test("disposing the checkpointer has released its connection when it returns", POLLING_TEST, async (t) => {
   // Closing a store and at once taking the file exclusively (a restart, a journal-mode change) must not meet the worker's connection.
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const file = tempDatabaseFile(t, `release-${attempt}.sqlite`);
@@ -152,7 +154,7 @@ test("disposing the checkpointer has released its connection when it returns", a
   }
 });
 
-test("the bot connection's writes are never refused while the worker checkpoints", async (t) => {
+test("the bot connection's writes are never refused while the worker checkpoints", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   const body = new Uint8Array(20 * 1024).fill(3);
@@ -172,7 +174,7 @@ test("the bot connection's writes are never refused while the worker checkpoints
   assert.deepEqual(refused, []);
 });
 
-test("two stores on two files are each checkpointed", async (t) => {
+test("two stores on two files are each checkpointed", POLLING_TEST, async (t) => {
   const first = tempDatabaseFile(t, "first.sqlite");
   const second = tempDatabaseFile(t, "second.sqlite");
   const firstWriter = writerOn(t, first);
@@ -184,7 +186,7 @@ test("two stores on two files are each checkpointed", async (t) => {
   assert.ok(await until(() => mainFileBytes(first) >= 5 * MEGABYTE && mainFileBytes(second) >= 5 * MEGABYTE));
 });
 
-test("two checkpointers on one file both run and a busy answer is not an error", async (t) => {
+test("two checkpointers on one file both run and a busy answer is not an error", POLLING_TEST, async (t) => {
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   const failures: string[] = [];
@@ -222,7 +224,7 @@ test("a checkpoint error is retried at the next interval and reported once per d
   assert.deepEqual(reports, ["disk I/O error", "database or disk is full", "disk I/O error"], "a recovered error is reported again");
 });
 
-test("a persistent store checkpoints through the worker", async (t) => {
+test("a persistent store checkpoints through the worker", POLLING_TEST, async (t) => {
   // The store-level wiring is tested in sql-bot-data.test.ts; this keeps the helper honest on a real store file.
   const storage = persistentBotData(t);
   const store = storage.open("checkpoint-wiring");
