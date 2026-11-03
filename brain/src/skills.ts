@@ -713,7 +713,7 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await toolLosses.handle(outcome.error, { reserved: options.reserved, inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
+      const lost = await toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
       if (lost.status === "remade") {
         index -= 1;
         continue;
@@ -889,7 +889,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
       const digging = toolsDug(batches.slice(index));
       const lost = await toolLosses.handle(outcome.error, {
-        reserved,
+        reserved, ...(context.owed !== undefined && { owed: context.owed }),
         inventory: async () => (await context.runtime.status()).inventory,
         getItems: (items, purpose) => getItems(context, items, `${purpose}, leveling ${what}`),
         onLost: (toolClass) => context.toolsLost?.add(toolClass),

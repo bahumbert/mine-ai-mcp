@@ -102,3 +102,13 @@ test("a loss is told to the caller, and a tool no work is left for is not made",
   assert.deepEqual((await new ToolLosses().handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context)).status, "remade");
   assert.deepEqual(lost, ["pickaxe", "shovel"]);
 });
+
+test("the cobblestone a trade owes is not spent on a stone tool, as the levelling fill leaves it (plan 2026-11-02 Task H2)", async () => {
+  const owedCobble = (count: number) => () => [{ item: "cobblestone", count, partner: "Ayla", tradeId: "t1" }];
+  const owed = { ...deps([{ name: "cobblestone", count: 5 }]), owed: owedCobble(5) };
+  assert.deepEqual(await new ToolLosses().handle(LOST, owed), { status: "remade", item: "wooden_pickaxe" });
+  const partly = { ...deps([{ name: "cobblestone", count: 5 }]), owed: owedCobble(2) };
+  assert.deepEqual(await new ToolLosses().handle(LOST, partly), { status: "remade", item: "stone_pickaxe" }, "5 carried, 2 owed: the 3 spare make the tool");
+  const reservedToo = { ...deps([{ name: "cobblestone", count: 45 }], [{ item: "cobblestone", count: 40 }]), owed: owedCobble(3) };
+  assert.deepEqual(await new ToolLosses().handle(LOST, reservedToo), { status: "remade", item: "wooden_pickaxe" }, "45 carried, 40 reserved and 3 owed: 2 spare");
+});

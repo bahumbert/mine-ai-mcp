@@ -14,7 +14,7 @@ import { pickPartner, socialise, type SocialiseDeps } from "./conversation/socia
 import { Inbox, type Heard } from "./inbox.ts";
 import { namesWord, type LocalizedChat } from "./llm-mind.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
-import { obtainedBy } from "./gathering.ts";
+import { obtainedBy, withMaterialsKept } from "./gathering.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ConversationFacts, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
@@ -24,6 +24,7 @@ import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
 import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
 import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.ts";
+import { heldKinds, owedUsed } from "./relations/items.ts";
 import { OwnWork } from "./relations/own-work.ts";
 import { agreedDetail, heardNeeds, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
@@ -748,7 +749,9 @@ export class Agent {
     this.journalState(describeHandoff(h));
     let end = { outcome: "dropped", detail: "" };
     try {
-      end = await this.relations!.runHandoff(h, { runtime, body: this.body, signal: AbortSignal.any([controller.signal, this.runSignal]), self: persona.username });
+      // The walk to the partner places no scaffold block a trade owes all of, the handed-over kind included.
+      const held = [...heldKinds(this.relations!.trades.owed(), (await runtime.status()).inventory)];
+      end = await withMaterialsKept(runtime, held, () => this.relations!.runHandoff(h, { runtime, body: this.body, signal: AbortSignal.any([controller.signal, this.runSignal]), self: persona.username }));
     } finally {
       work.step = null;
       this.journalState(null);
@@ -872,6 +875,7 @@ export class Agent {
         signal: AbortSignal.any([controller.signal, this.runSignal]),
         areas: this.areas,
         dayCame: async () => (await runtime.status()).clock?.phase !== "night",
+        ...(this.relations !== null && { owed: () => this.relations!.trades.owed() }),
       });
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
@@ -1009,7 +1013,9 @@ export class Agent {
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
     try {
-      result = await runStep(decision.step, this.stepContext(work, controller, gain, started, phases));
+      // A kind a trade owes all of is no scaffold block while the step runs (a route may place it); get_items does the same for what it fetches.
+      const held = [...heldKinds(this.relations?.trades.owed() ?? [], snapshot.inventory)];
+      result = await withMaterialsKept(this.options.runtime, held, () => runStep(decision.step, this.stepContext(work, controller, gain, started, phases)));
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -1080,7 +1086,11 @@ export class Agent {
         ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
         : { step: label, outcome: result.status, detail: result.detail };
     // A full inventory names what to drop, with whole counts, and spares what the work needs (live 2026-10-10/11).
-    if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, this.neededFor(room, work))}` };
+    const owed = this.relations?.trades.owed() ?? [];
+    if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, new Set([...this.neededFor(room, work), ...heldKinds(owed, room.inventory)]))}` };
+    // A step that left less of an owed item than is owed says so (a give to the trade's own partner is no such step).
+    const used = room === null ? "" : owedUsed(owed, snapshot.inventory, room.inventory, decision.step.skill === "give_item" ? decision.step.player : undefined);
+    if (used !== "") record = { ...record, detail: `${record.detail}; ${used}` };
     work.steps.push(record);
     work.carried.push(carried);
     const restarted = record.outcome === "failed" && record.detail.includes(BODY_RESTARTED);

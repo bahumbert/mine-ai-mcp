@@ -5,6 +5,7 @@ import { boatsOfWood } from "./boats.ts";
 import type { ActOutcome, Body } from "./body.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
+import { freeStacks, heldCounts, heldKinds, type OwedItem } from "./relations/items.ts";
 import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
@@ -48,6 +49,8 @@ export interface GatherContext {
   readonly makeRoom?: (inputs: ReadonlySet<string>) => Promise<boolean>;
   /** See {@link SkillContext.toolsLost}. */
   readonly toolsLost?: Set<string>;
+  /** See {@link SkillContext.owed}: what the gathering and its crafts and smelts never spend. */
+  readonly owed?: () => readonly OwedItem[];
 }
 
 export type GatherResult =
@@ -149,7 +152,7 @@ export async function dropSourcesNote(runtime: BotRuntime, item: string): Promis
  *
  * `keep`: what the character carried before and still wants afterwards. A craft that uses some of it up (the fences
  * asked for eat the planks it carried for the walls) adds it back to what is gathered, so fetching a few items never
- * leaves it short of the others. Not a smelt: carried raw iron is there to be smelted and coal to be burnt (fuel
+ * leaves it short of the others. Not a smelt: carried raw iron is there to be smelted and coal to be burnt (but not what an open trade owes, raw or not: it is kept and left out of the furnace jobs) (fuel
  * burnt from the asked-for items themselves is made again like any shortfall). Food eaten or a tool worn out on the
  * way is not replaced.
  *
@@ -163,8 +166,12 @@ export async function gatherMaterials(
   keep: readonly ItemCount[] = [],
 ): Promise<GatherResult> {
   const knowledge = newKnowledge(context.toolsLost);
-  const kept = await madeItems(context.runtime, keep, knowledge);
-  const items = [...bill, ...kept].map((entry) => entry.item);
+  const owed = context.owed?.() ?? [];
+  const inventory = owed.length === 0 ? [] : (await context.runtime.status()).inventory;
+  const made = await madeItems(context.runtime, keep, knowledge);
+  const kept = keptWithOwed(made, heldCounts(owed, inventory));
+  // Off the scaffold list only a kind with no spare: 64 carried with 2 owed still bridges.
+  const items = [...bill, ...made].map((entry) => entry.item).concat([...heldKinds(owed, inventory)]);
   return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, kept, knowledge));
 }
 
@@ -174,6 +181,7 @@ export async function gatherMaterials(
  * runtime's scaffold list are taken off it, and the list is put back after (owner, 2026-10-07).
  */
 export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly string[], run: () => Promise<T>): Promise<T> {
+  if (items.length === 0) return run();
   const policy = (await runtime.status()).policy;
   const scaffold = policy?.scaffoldBlocks ?? [];
   const kept = scaffold.filter((block) => items.includes(block));
@@ -188,7 +196,7 @@ export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly 
   }
 }
 
-// Raw materials she carries are what crafting uses, as a player's would: only what was made (planks, stairs, glass)
+// Raw materials she carries are what crafting uses, as a player's would (except what an open trade owes: keptWithOwed): only what was made (planks, stairs, glass)
 // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
 // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
 // game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
@@ -199,6 +207,18 @@ async function madeItems(runtime: BotRuntime, keep: readonly ItemCount[], knowle
     return how === null || how === "gather" ? null : entry;
   })))
     .filter((entry): entry is ItemCount => entry !== null);
+}
+
+/** The bag without what open trades owe, read from the live `owed()` each round (a trade may have ended): the furnace burns and smelts only this. */
+function freeBag(context: GatherContext, inventory: Stacks): Stacks {
+  return freeStacks(inventory, heldCounts(context.owed?.() ?? [], inventory));
+}
+
+/** `kept` plus what open trades owe, raw or made (a get-back holds every trade's items, its own included): crafting never spends it, a craft that did is fetched again. */
+function keptWithOwed(kept: readonly ItemCount[], held: ReadonlyMap<string, number>): ItemCount[] {
+  const merged = new Map(kept.map((entry) => [entry.item, entry.count]));
+  for (const [item, count] of held) merged.set(item, Math.max(count, merged.get(item) ?? 0));
+  return [...merged].map(([item, count]) => ({ item, count }));
 }
 
 /** The one step of a round (or why there is none): collect, hunt, make a table or tool, craft or smelt, whichever the plan puts first. */
@@ -220,7 +240,7 @@ async function roundStep(
   if (plan.toolFirst !== null) return craftAtHome(context, [{ item: plan.toolFirst, count: 1 }], purpose, site, spent);
   if (gated.length > 0) return collectAll(context, gated, purpose, knowledge);
   const ready = await readyCrafts(context.runtime, plan.craft);
-  const job = plan.smelt.find((candidate) => smeltReady(candidate, inventory));
+  const job = plan.smelt.find((candidate) => smeltReady(candidate, freeBag(context, inventory)));
   if (ready.length > 0) return craftAtHome(context, ready, purpose, site, spent);
   if (job !== undefined) return smeltAtHome(context, job, purpose, site);
   return `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt`;
@@ -258,7 +278,7 @@ async function gatherRounds(
       actions.push(`filled a bucket with ${liquid}`);
       continue;
     }
-    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, knowledge);
+    const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, freeBag(context, inventory), knowledge);
     if (typeof plan === "string") return { status: "failed", detail: plan };
 
     // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
@@ -575,8 +595,8 @@ async function readyCrafts(runtime: BotRuntime, items: readonly ItemCount[]): Pr
   return ready;
 }
 
-/** What the next rounds need, or why it cannot be done. */
-async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inventory: Stacks, knowledge: Knowledge): Promise<Round | string> {
+/** What the next rounds need, or why it cannot be done. `free`: the bag without what open trades owe, the furnace jobs' input and fuel. */
+async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inventory: Stacks, free: Stacks, knowledge: Knowledge): Promise<Round | string> {
   const collect = new Map<string, number>();
   const hunt = new Map<string, { mob: string; count: number }>();
   /** The gathered leaves of the crafts, worked out again on each pass as the crafts grow. */
@@ -613,11 +633,11 @@ async function planRound(runtime: BotRuntime, missing: readonly ItemCount[], inv
   for (let pass = 0; pass < 8; pass += 1) {
     for (const [output, count] of smelts) {
       if (jobs.has(output)) continue;
-      const input = chooseInput(knowledge.smelted.get(output)!, inventory);
-      const fuel = chooseFuel(count, input, inventory, missing, knowledge.fuels);
+      const input = chooseInput(knowledge.smelted.get(output)!, free);
+      const fuel = chooseFuel(count, input, free, missing, knowledge.fuels);
       jobs.set(output, { output, count, input, ...fuel });
       for (const [item, wantedCount] of [[input, count], [fuel.fuel, fuel.fuelCount], [FURNACE, 1]] as const) {
-        const short = wantedCount - carried(inventory, item);
+        const short = wantedCount - carried(free, item);
         if (short <= 0 || (item === FURNACE && crafted.has(FURNACE))) continue;
         const problem = await need(item, short);
         if (problem !== null) return problem;

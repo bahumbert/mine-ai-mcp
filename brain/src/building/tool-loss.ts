@@ -1,3 +1,4 @@
+import { heldCounts, spareCounter, type OwedItem } from "../relations/items.ts";
 import { errorCode, type ItemCount } from "../runtime-client.ts";
 
 /** Cobblestone a stone tool of each class takes: with that much spare, the tool is made in stone, else in wood. */
@@ -22,6 +23,8 @@ export function toolToMake(toolClass: string, spare: (item: string) => number): 
 export interface ToolLossDeps {
   /** Materials that are not spare (the bill of what is being built): never spent on a tool. */
   readonly reserved: readonly ItemCount[];
+  /** What open trades owe (`SkillContext.owed`): not spare either, so the stone-or-wood choice agrees with the levelling fill. */
+  readonly owed?: () => readonly OwedItem[];
   readonly inventory: () => Promise<readonly { readonly name: string; readonly count: number }[]>;
   /** The `get_items` skill: fetches and crafts what is missing. */
   readonly getItems: (items: readonly ItemCount[], purpose: string) => Promise<{ readonly status: "done" | "failed" | "stopped"; readonly detail?: string }>;
@@ -69,8 +72,7 @@ export class ToolLosses {
     }
     if (deps.stillNeeded?.(toolClass) === false) return { status: "unneeded" };
     const inventory = await deps.inventory();
-    const carried = (item: string) => inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
-    const spare = (item: string) => carried(item) - (deps.reserved.find((entry) => entry.item === item)?.count ?? 0);
+    const spare = spareCounter(deps.reserved, heldCounts(deps.owed?.() ?? [], inventory))(inventory);
     const have = inventory.find((stack) => stack.name.endsWith(`_${toolClass}`));
     const item = have?.name ?? toolToMake(toolClass, spare);
     if (have === undefined) {
