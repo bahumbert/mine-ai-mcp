@@ -3381,14 +3381,18 @@ test("A3: a whisper keeps its text as it was: it carries any distance, so none i
 
 /** Steve is listed (tab list) without a position, as a player beyond the view distance is; the model's request for each line he sends. */
 function farShouts(t: TestContext, lines: { at: number; line: ReturnType<typeof say> | { username: string; channel: "whisper"; message: string; addressed: boolean } }[]) {
-  t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+  // No-position times are on the monotonic clock: the test moves it (and the wall clock with it).
+  const clocks = steppedClocks(t);
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: null }] };
   const { agent, chat } = agentFor(t, runtime);
   chat.reply({ say: "Hi.", route: "talk", request: "" }, { say: "Hi again.", route: "talk", request: "" });
   return { agent, chat, run: async () => {
+    let now = 0;
     for (const { at, line } of lines) {
-      t.mock.timers.setTime(1_000_000 + at);
+      clocks.monotonic(at - now);
+      clocks.wall(at - now);
+      now = at;
       await agent.handle(line);
     }
     return chat.requests.map((request) => request.at(-1)?.content ?? "");
