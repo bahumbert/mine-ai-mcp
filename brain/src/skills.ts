@@ -231,9 +231,21 @@ async function follow(context: SkillContext, player: string, distance: number, m
   return { status: "stopped" };
 }
 
+const cannotSeeText = (player: string): string => `cannot see ${player}`;
+
+/** How far across (blocks) a failed walk to a player may have ended for the hand-over's own approach to take over. */
+const BESIDE_RANGE = 6;
+
+/** Whether the player is seen and within `BESIDE_RANGE` blocks across of where I stand (a height difference does not count). */
+async function endedBeside(context: SkillContext, player: string): Promise<boolean> {
+  const status = await context.runtime.status();
+  const seen = findPlayer(status, player)?.position;
+  return seen != null && Math.hypot(seen.x - status.position.x, seen.z - status.position.z) <= BESIDE_RANGE;
+}
+
 async function come(context: SkillContext, player: string): Promise<SkillResult> {
   const target = findPlayer(await context.runtime.status(), player)?.position ?? null;
-  if (target === null) return { status: "failed", detail: `cannot see ${player}` };
+  if (target === null) return { status: "failed", detail: cannotSeeText(player) };
   const outcome = await context.body.act("navigate", navigateInput(target, COME_RANGE), `Go to ${player} who called me.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return { status: "done", detail: `reached ${player}` };
@@ -443,7 +455,8 @@ function failedGiveReason(error: string | null | undefined): { readonly reason: 
  */
 export async function giveTo(context: SkillContext, player: string, item: string, count: number): Promise<{ readonly result: SkillResult; readonly taken: number | null; readonly settled: boolean; readonly droppedAt: Position | null }> {
   const approach = await come(context, player);
-  if (approach.status !== "done") return { result: approach, taken: null, settled: true, droppedAt: null };
+  // A walk that failed beside the player is not the end: the drop's own approach knows the stance and names a recipient out of reach by height (F3: a pillar made `come` fail with a plain navigation error, hiding recipient_unreachable). A walk that failed far away keeps its own error: the drop would call distance or water a ledge.
+  if (approach.status !== "done" && !(approach.status === "failed" && await endedBeside(context, player))) return { result: approach, taken: null, settled: true, droppedAt: null };
   const outcome = await context.body.act("drop_item", { items: [{ item_name: item, count }], to_player: player, allow_equipped: true }, `${player} asked me for ${item}.`, { signal: context.signal });
   if (context.signal.aborted) return { result: { status: "stopped" }, taken: null, settled: true, droppedAt: null };
   if (outcome.status !== "succeeded") return { result: { status: "failed", detail: outcome.error ?? `drop_item ${outcome.status}`, ...failedGiveReason(outcome.error) }, taken: null, settled: true, droppedAt: null };

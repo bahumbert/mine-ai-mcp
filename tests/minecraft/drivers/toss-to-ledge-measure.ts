@@ -29,19 +29,21 @@ export const run: ScenarioRun = async (context) => {
 
 async function toss(context: ScenarioContext, params: Params): Promise<ClientCompletion> {
   const { bot } = context;
-  const receiver = Object.values(bot.players).find((player) => player.username !== bot.username)?.entity;
+  // `bot.players` also lists the players of the other lanes, which have no entity here: the receiver is the one seen (2 of 3 repeats took another lane's player and failed).
+  const receiver = Object.values(bot.players).find((player) => player.username !== bot.username && player.entity)?.entity;
   if (!receiver) return { status: "failed", detail: "The receiver is not seen." };
   await context.waitForTicks(20);
   await bot.lookAt(receiver.position.offset(0, params.aim_height, 0));
   await context.waitForTicks(3);
   const stack = bot.inventory.items().find((item) => item.name === params.item_name);
   if (!stack) return { status: "failed", detail: `No ${params.item_name} carried.` };
+  const reach = Math.hypot(receiver.position.x - bot.entity.position.x, receiver.position.z - bot.entity.position.z);
   await bot.toss(stack.type, null, 1);
   // As a hand-over does: a giver left standing beside its own toss picks it back up (B2, 2026-10-19).
   const at = bot.entity.position.floored();
   await context.call("navigate", { x: at.x - 4, y: at.y, z: at.z, range: 1, dig: false, scaffold: false });
   await context.waitForTicks(params.receiver_wait_ticks + 20);
-  return { status: "succeeded", detail: `Tossed from (${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}) at the receiver ${receiver.position.x.toFixed(2)}, ${receiver.position.y.toFixed(2)}, ${receiver.position.z.toFixed(2)}.` };
+  return { status: "succeeded", detail: `Tossed at reach ${reach.toFixed(2)} from (${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}) at the receiver ${receiver.position.x.toFixed(2)}, ${receiver.position.y.toFixed(2)}, ${receiver.position.z.toFixed(2)}.` };
 }
 
 async function watch(context: ScenarioContext, params: Params): Promise<ClientCompletion> {

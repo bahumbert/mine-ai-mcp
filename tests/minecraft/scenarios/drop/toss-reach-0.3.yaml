@@ -1,0 +1,18 @@
+template: ../../templates/toss-to-ledge.yaml
+
+name: toss-reach-0.3
+tags: [reliability]
+description: >-
+  Measurement of a toss from too close (plan 2026-11-03-handover-ledge-and-unconfirmed-toss F3 step 2): the giver stands
+  still 0.3 blocks from the receiver and tosses one oak log aimed as a hand-over aims; the receiver's feet are level with the
+  giver's. The receiver's line LEDGE_TOSS says whether it took the log or where it rests.
+geometry:
+  - { fill: { block: grass_block, from: [-2, -61, -2], to: [3, -61, 2] } }
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: oak_log, count: 3 }
+  - name: Receiver
+    pos: [0.8, -60, 0.5]
+params: { giver: 0, receiver: 1, item_name: oak_log, aim_height: -1.097 }

@@ -240,3 +240,21 @@ test("wait walks to a giver that cannot reach, then the give is taken", async ()
   assert.deepEqual(result, { status: "done", detail: "they gave" });
   assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1, "walked to the giver once");
 });
+
+test("a recipient on a pillar the walk cannot reach: the give fails recipient_unreachable and the partner's wait walks down to the giver (F3, end to end)", async () => {
+  const giver = new FakeRuntime();
+  giver.snapshot = { ...giver.snapshot, inventory: BAG, players: [{ username: "Theo", position: { x: 2, y: 66, z: 0 } }] };
+  giver.failures.navigate = "[NO_PATH] no path to Theo";
+  giver.dropOutcomes.push({ status: "failed", error: "[DROP_RECIPIENT_OUT_OF_REACH] Theo stands still 2 blocks above me, where I found no floor to toss from that lets an item rest at their feet; nothing was tossed. Ask them to come down to my floor, then hand over again.", dropped: [{ item: "oak_log", dropped: 0 }] });
+  let asked = false;
+  const witness: PartnerWitness = { unclaimed: () => [], cannotReach: () => { asked = true; }, clock: fakeClock() };
+  const ended = await give(giver, [{ item: "oak_log", count: 4 }], [], witness);
+  assert.equal(ended.status === "failed" ? ended.reason : "", "recipient_unreachable");
+  assert.equal(dropCalls(giver), 1);
+  const partner = new FakeRuntime();
+  near(partner);
+  let polls = 0;
+  const clock: Clock = { now: () => polls * 1_000, sleep: async () => { polls += 1; } };
+  await awaitTheirSide(contextFor(partner), "Theo", { stillAwaiting: () => polls < 3, endedAs: () => null, clock, maxMs: 180_000, openingDistance: 16, askedToCome: () => asked && !(asked = false) });
+  assert.equal(partner.submitted.filter((call) => call.tool === "navigate").length, 1, "the partner walked to the giver");
+});

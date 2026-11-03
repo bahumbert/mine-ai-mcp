@@ -2209,6 +2209,36 @@ test("a hand-over to a recipient on a ledge out of reach is a failed give with r
   assert.equal(result.status === "failed" ? result.detail : "", error);
 });
 
+test("a recipient on a pillar the walk cannot reach still gets the drop's own answer: recipient_unreachable, not the walk's error (F3)", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
+  const pillar = new FakeRuntime();
+  pillar.failures.navigate = "[NO_PATH] no path to Steve";
+  pillar.snapshot = { ...pillar.snapshot, players: [{ username: "Steve", position: { x: 3, y: 66, z: 0 } }] };
+  const error = "[DROP_RECIPIENT_OUT_OF_REACH] Steve stands still 2 blocks above me, where I found no floor to toss from that lets an item rest at their feet; nothing was tossed. Ask them to come down to my floor, then hand over again.";
+  pillar.dropOutcomes.push({ status: "failed", error, dropped: [{ item: "oak_log", dropped: 0 }] });
+  const result = await runStep(step, contextFor(pillar));
+  assert.equal(result.status === "failed" ? result.reason : "", "recipient_unreachable");
+  assert.equal(result.status === "failed" ? result.detail : "", error);
+});
+
+test("a walk that failed far from the recipient keeps its own error and tosses nothing: distance is not a ledge (F3)", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
+  const far = new FakeRuntime();
+  far.failures.navigate = "[NO_PATH] no path to Steve";
+  far.snapshot = { ...far.snapshot, players: [{ username: "Steve", position: { x: 40, y: 66, z: 0 } }] };
+  const result = await runStep(step, contextFor(far));
+  assert.deepEqual(result, { status: "failed", detail: "[NO_PATH] no path to Steve" });
+  assert.equal(far.submitted.filter((call) => call.tool === "drop_item").length, 0);
+});
+
+test("a give to a recipient out of sight still stops at 'cannot see' without a drop (F3)", async () => {
+  const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
+  const unseen = new FakeRuntime();
+  const result = await runStep(step, contextFor(unseen));
+  assert.deepEqual(result, { status: "failed", detail: "cannot see Steve" });
+  assert.equal(unseen.submitted.filter((call) => call.tool === "drop_item").length, 0);
+});
+
 test("give says the recipient took the items, or that they were left at their feet (B2, live 2026-10-19: reported gave, never arrived)", async () => {
   const step = stepSchema.parse({ skill: "give_item", player: "Steve", item: "oak_log", count: 3 });
   const taken = new FakeRuntime();
