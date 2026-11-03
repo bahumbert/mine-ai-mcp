@@ -22,6 +22,10 @@ export interface BoardPeer {
   offerAccepted(id: string, by: string): Promise<void>;
   offerDeclined(id: string, by: string, why: string): Promise<void>;
   partnerEnded(id: string, by: string, why: TradeEndWhy): Promise<void>;
+  /** What this character's record of the trade holds as received (a read, nothing changes); null when it holds no such trade. */
+  receivedFor(id: string): readonly ItemCount[] | null;
+  /** `by` could not reach this character where it stands: its wait for that trade walks to `by` once. */
+  cannotReach(id: string, by: string): Promise<void>;
 }
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -71,6 +75,18 @@ export class TradeBoard {
     const peer = this.peers.get(partner.toLowerCase());
     if (peer === undefined) return;
     peer.partnerEnded(id, by, why).catch((error: unknown) => this.log(`trade board: could not tell ${partner} that ${by} ${why} ${id}: ${String(error)}`));
+  }
+
+  /** What `partner`'s own record holds as received for the trade; null when it is no character of this brain or holds no such trade. */
+  receivedBy(partner: string, id: string): readonly ItemCount[] | null {
+    return this.peers.get(partner.toLowerCase())?.receivedFor(id) ?? null;
+  }
+
+  /** `by` cannot reach `partner` (a character of this brain) for a hand-over of trade `id`: it is told in the background, so its wait walks to `by`. */
+  cannotReach(id: string, by: string, partner: string): void {
+    const peer = this.peers.get(partner.toLowerCase());
+    if (peer === undefined) return;
+    peer.cannotReach(id, by).catch((error: unknown) => this.log(`trade board: could not tell ${partner} that ${by} cannot reach it for ${id}: ${String(error)}`));
   }
 
   private answer(id: string, tell: (peer: BoardPeer, offer: BoardOffer) => Promise<void>, what: string): void {

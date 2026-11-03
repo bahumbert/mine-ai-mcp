@@ -89,8 +89,64 @@ async function getBackShort(context: SkillContext, partner: string, short: reado
   return `I no longer carry ${sideText(still)}; getting it back failed: ${said}`;
 }
 
-async function giveMySide(context: SkillContext, partner: string, items: readonly ItemCount[], credit?: TakenCredit, back?: GetBack): Promise<SkillResult> {
-  const short = await shortOf(context, partner, items);
+/** How long a toss no packet showed taken, with nothing picked back, waits for the partner's own record to show it. */
+export const UNCONFIRMED_WAIT_MS = 5_000;
+
+/** What a give may ask of a partner that is a character of this brain: its own record of the trade, and a call to come down to me. */
+export interface PartnerWitness {
+  /** What the partner's record shows received for this trade beyond what I have credited; null when it holds no such trade (the board lost it). */
+  readonly unclaimed: () => readonly ItemCount[] | null;
+  /** Tells the partner I cannot reach it where it stands. */
+  readonly cannotReach: () => void;
+  /** Told when its record cannot be read (the partner is read as a player then). */
+  readonly log?: (line: string) => void;
+  /** The wall clock the wait for its record runs on. */
+  readonly clock: Clock;
+}
+
+/** The count of an item the partner's record shows beyond my credit (0 when it holds no such trade). */
+const shownOf = (witness: PartnerWitness | undefined, item: string): number => witness?.unclaimed()?.find((r) => r.item === item)?.count ?? 0;
+
+/** The partner could not be reached at its height: a partner of this brain is told once, and walks down to me in its wait. */
+export function tellUnreachable(result: SkillResult, witness: PartnerWitness | undefined): void {
+  if (result.status === "failed" && result.reason === "recipient_unreachable") witness?.cannotReach();
+}
+
+/** Credits what the partner's record already shows received (an earlier toss it took after the wait) and returns what is still to give. */
+function claimShown(items: readonly ItemCount[], witness: PartnerWitness | undefined, credit: TakenCredit | undefined): ItemCount[] {
+  return items.flatMap(({ item, count }) => {
+    const shown = Math.min(count, shownOf(witness, item));
+    if (shown > 0) credit?.({ item, count: shown });
+    return count - shown > 0 ? [{ item, count: count - shown }] : [];
+  });
+}
+
+/** The toss of `unseen` more than the `seen` items a packet showed taken, of which the partner's record showed `before` already. */
+interface Unseen { readonly item: string; readonly seen: number; readonly unseen: number; readonly before: number }
+
+/**
+ * How many of the unseen items the partner's own record shows received, looked at once a second for `UNCONFIRMED_WAIT_MS` on the
+ * clock (its credit comes from its poll tick, 0.4 s after a toss at the best, a throttled 2 s while it only watches). Null when
+ * the partner holds no record to ask (a player, or the board lost it): the caller keeps today's credit.
+ */
+async function partnerShows(context: SkillContext, witness: PartnerWitness | undefined, back: GetBack | undefined, o: Unseen): Promise<number | null> {
+  if (witness === undefined) return null;
+  const { clock } = witness;
+  const deadline = clock.now() + UNCONFIRMED_WAIT_MS;
+  for (;;) {
+    const record = witness.unclaimed();
+    if (record === null) return null;
+    const shown = Math.min(o.unseen, Math.max(0, (record.find((r) => r.item === o.item)?.count ?? 0) - o.before - o.seen));
+    if (shown >= o.unseen || clock.now() >= deadline || context.signal.aborted || back?.stillDue() === false) return shown;
+    await clock.sleep(AWAIT_POLL_MS, context.signal);
+  }
+}
+
+async function giveMySide(context: SkillContext, partner: string, items: readonly ItemCount[], credit?: TakenCredit, back?: GetBack, witness?: PartnerWitness): Promise<SkillResult> {
+  // Before a retake fetches or tosses: what the partner's record shows received since the last give ended is not given twice.
+  const left = claimShown(items, witness, credit);
+  if (left.length === 0) return { status: "done", detail: `gave ${sideText(items)} to ${partner} (their record shows it received)` };
+  const short = await shortOf(context, partner, left);
   if (short.length > 0) {
     // Not before the first look: a give that is not short never fetches. Once only, and only while the trade is open.
     const lacking = back === undefined ? `I no longer carry ${sideText(short)}` : await getBackShort(context, partner, short, back.getBackMs);
@@ -99,12 +155,18 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
   }
   const unconfirmed: ItemCount[] = [];
   let sure = true;
-  for (const { item, count } of items) {
+  for (const { item, count } of left) {
     // The partner may end the trade while an item is on its way: the next item stays in the bag.
-    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: `the trade is over: nothing ${items[0]?.item === item ? "" : "more "}given` };
+    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: `the trade is over: nothing ${left[0]?.item === item ? "" : "more "}given` };
+    const before = shownOf(witness, item);
     const { result, taken, settled, droppedAt } = await giveTo(context, partner, item, count);
-    if (result.status !== "done") return result;
-    if (Math.min(count, taken ?? count) >= count) {
+    if (result.status !== "done") {
+      tellUnreachable(result, witness);
+      return result;
+    }
+    const seen = Math.min(count, taken ?? 0);
+    // A runtime that names no recipient says nothing; for a player that stays a credit, for a partner of this brain it is a toss to confirm.
+    if (seen >= count || (taken === null && witness === undefined)) {
       credit?.({ item, count });
       continue;
     }
@@ -114,10 +176,23 @@ async function giveMySide(context: SkillContext, partner: string, items: readonl
     // A pick-back that did not look properly says nothing about what the partner took: no credit, the give stays due.
     if ("unknown" in pickBack) return { status: "failed", detail: `could not pick back the ${item} ${partner} may not have taken (${pickBack.unknown})` };
     const { back: pickedBack } = pickBack;
-    if (count - pickedBack > 0) credit?.({ item, count: count - pickedBack });
-    if (pickedBack > 0) return notTaken(partner, { item, count: pickedBack });
-    unconfirmed.push({ item, count });
-    sure &&= settled;
+    if (pickedBack > 0) {
+      if (count - pickedBack > 0) credit?.({ item, count: count - pickedBack });
+      return notTaken(partner, { item, count: pickedBack });
+    }
+    // Nothing came back and no packet showed all taken: a partner of this brain says in its own record, a player is believed.
+    const shown = await partnerShows(context, witness, back, { item, seen, unseen: count - seen, before });
+    if (shown === null) {
+      witness?.log?.(`trade: ${partner}'s record of the trade cannot be read; the toss of ${item} counts as for a player`);
+      credit?.({ item, count });
+      unconfirmed.push({ item, count });
+      sure &&= settled;
+      continue;
+    }
+    if (seen + shown > 0) credit?.({ item, count: seen + shown });
+    if (context.signal.aborted) return { status: "stopped" };
+    if (back !== undefined && !back.stillDue()) return { status: "failed", detail: `the trade is over: ${partner}'s record shows ${shown} of the ${count - seen} ${item} not seen taken` };
+    if (seen + shown < count) return notSeenTaken(partner, { item, count: count - seen - shown });
   }
   const doubt = sure ? "none of it came back" : "the server had not said whether they took it";
   return { status: "done", detail: `gave ${sideText(items)} to ${partner}${unconfirmed.length > 0 ? ` (${sideText(unconfirmed)} not confirmed taken: ${doubt})` : ""}` };
@@ -127,7 +202,7 @@ type PickBack = { readonly back: number } | { readonly unknown: string } | { rea
 
 /**
  * How many of the item the pick-up around the toss spot got back after a toss that was not all seen taken (carried
- * after minus carried before). Nothing seen, or every item seen gone before it got there, means taken. Unknown when it
+ * after minus carried before). Nothing seen, or every item seen gone before it got there, means taken (the caller asks the partner's record first when the partner is a character of this brain). Unknown when it
  * could not look (no toss spot, an item it could not reach or had no room for, no evidence); interrupted when the
  * pick-up was refused or cancelled (the body taken by another owner): no give failure.
  */
@@ -151,6 +226,9 @@ function sightingOutcomes(result: Readonly<Record<string, unknown>> | undefined)
   const sightings = (result?.pickup as { sightings?: unknown } | undefined)?.sightings;
   return Array.isArray(sightings) ? sightings.map((s) => String((s as { outcome?: unknown }).outcome)) : null;
 }
+
+const notSeenTaken = (partner: string, left: ItemCount): SkillResult =>
+  ({ status: "failed", detail: `${partner} has not got ${sideText([left])}: the toss was not seen taken`, reason: "not_taken" });
 
 const notTaken = (partner: string, left: ItemCount): SkillResult =>
   ({ status: "failed", detail: `${partner} did not take ${sideText([left])}`, reason: "not_taken" });
@@ -186,6 +264,8 @@ export interface AwaitOptions {
   readonly maxMs: number;
   /** Farther than this from the partner at a look, the wait walks up to them. */
   readonly openingDistance: number;
+  /** True once when the giver said it cannot reach me where I stand (a partner of this brain): the wait walks to the giver, once. */
+  readonly askedToCome?: () => boolean;
 }
 
 /**
@@ -200,6 +280,7 @@ export async function awaitTheirSide(context: SkillContext, partner: string, o: 
   while (o.stillAwaiting()) {
     if (context.signal.aborted) return stopped;
     if (o.clock.now() >= deadline) return { status: "failed", detail: `${partner} did not give within ${Number.isInteger(o.maxMs / MINUTE_MS) ? `${o.maxMs / MINUTE_MS} min` : `${Math.round(o.maxMs / 1000)} s`}` };
+    if (o.askedToCome?.() === true) await runStep({ skill: "go_to_player", player: partner }, context);
     walkedTo = await walkIfFarOrMoved(context, partner, o.openingDistance, walkedTo);
     if (!context.signal.aborted) await o.clock.sleep(AWAIT_POLL_MS, context.signal);
   }
@@ -221,6 +302,6 @@ async function walkIfFarOrMoved(context: SkillContext, partner: string, openingD
 }
 
 /** Runs one hand-off: a hand-over for each entry of my side (`credit` hears what the partner took), or `pick_up_items` around me for each entry of theirs. */
-export function runHandoff(context: SkillContext, h: Exclude<Handoff, { kind: "await" }>, credit?: TakenCredit, back?: GetBack): Promise<SkillResult> {
-  return h.kind === "give" ? giveMySide(context, h.partner, h.items, credit, back) : collectTheirSide(context, h.items);
+export function runHandoff(context: SkillContext, h: Exclude<Handoff, { kind: "await" }>, credit?: TakenCredit, back?: GetBack, witness?: PartnerWitness): Promise<SkillResult> {
+  return h.kind === "give" ? giveMySide(context, h.partner, h.items, credit, back, witness) : collectTheirSide(context, h.items);
 }

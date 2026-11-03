@@ -2443,6 +2443,9 @@ test("two bots of one brain: the trading routine waits for its turn, opens, and 
     { ...words, say: "Deal.", trade: { action: "accept", give: sideOf("iron_ingot", 1), get: sideOf("bread", 1), first: "them" } },
     { gist: "Agreed iron for bread." }, { gist: "Agreed iron for bread." },
   );
+  // The toss Theo takes, as a runtime that names its recipient answers (a toss that names none is unconfirmed for a partner of this brain).
+  ayla.runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 4 }], recipient: { collected: true, collectedCount: 4, settled: true } });
+  theoRuntime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "iron_ingot", dropped: 4 }], recipient: { collected: true, collectedCount: 4, settled: true } });
   await until(() => aylaLog.some((line) => line === "trading: trade with Theo"), 4_000);
   await sleep(150);
   assert.equal(ayla.agent.conversation, null, "the cap is full: the routine waits, no talk yet");

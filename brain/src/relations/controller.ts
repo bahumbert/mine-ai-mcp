@@ -15,6 +15,7 @@ import { awaitKey, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { HandoffQueue } from "./handoff-queue.ts";
 import { type OwedItem, sideText } from "./items.ts";
 import { boardPeerHandlers } from "./peer.ts";
+import { PartnerRecord } from "./partner-record.ts";
 import { relationsBlock } from "./prompts.ts";
 import { countLateToss, giveToHeldTrades, heldOwed } from "./held.ts";
 import { heldWindow, withTrade } from "./record.ts";
@@ -61,6 +62,10 @@ export class TradeController implements BoardPeer {
   /** The collect fallback and what each agreed trade's bag held at agreement (items that arrived unseen are credited from the inventory). */
   private readonly collects = new CollectFallback();
   private readonly nobodyGave = new Set<string>();
+  /** Trades whose giver said it cannot reach me: my wait for that trade walks to it, once. */
+  private readonly cameDown = new Set<string>();
+  /** Gives the agent is running now (from its start to its credit): the tick claims nothing for them, even once a stop cleared their `pending`. */
+  private readonly running_ = new Set<string>();
   /** Agreed trades (oldest agreement first) that had no inventory to claim against when they were agreed: started by the next tick, from its bag. */
   private readonly startAtNextTick = new Set<string>();
   private ticksCounted = 0;
@@ -68,6 +73,7 @@ export class TradeController implements BoardPeer {
   private chain: Promise<unknown> = Promise.resolve();
 
   private readonly peer: BoardPeer;
+  private readonly shown: PartnerRecord;
 
   constructor(private readonly deps: TradeControllerDeps) {
     this.gives = new GiveBook(deps.now, deps.settings.payBackMinutes * MINUTE_MS);
@@ -75,15 +81,17 @@ export class TradeController implements BoardPeer {
     this.peer = boardPeerHandlers({
       self: deps.self, now: deps.now, log: deps.log,
       find: (id) => this.find(id), tracked: (step) => this.tracked(step), record: (t, event) => this.record(t, event), startAgreed: (t, partner, now) => this.startAgreed(t, partner, now),
+      waiting: (id) => this.queue.awaiting.has(id), comeTo: (id) => void this.cameDown.add(id),
     });
+    this.shown = new PartnerRecord({ book: deps.book, board: deps.board, gives: this.gives, log: deps.log, find: (id) => this.find(id), givePending: (id) => this.queue.givePending(id) || this.running_.has(id), heldWindow: () => this.heldWindow(), giveIfCovered: (t, partner) => this.giveIfCovered(t, partner) });
     deps.board?.join(deps.self, this);
   }
 
   offerAccepted(tradeId: string, by: string): Promise<void> { return this.peer.offerAccepted(tradeId, by); }
-
   offerDeclined(tradeId: string, by: string, why: string): Promise<void> { return this.peer.offerDeclined(tradeId, by, why); }
-
   partnerEnded(tradeId: string, by: string, why: TradeEndWhy): Promise<void> { return this.peer.partnerEnded(tradeId, by, why); }
+  receivedFor(tradeId: string): readonly ItemCount[] | null { return this.peer.receivedFor(tradeId); }
+  cannotReach(tradeId: string, by: string): Promise<void> { return this.peer.cannotReach(tradeId, by); }
 
   /** An agreed trade I ended or broke: the partner bot of this brain is told, so its record ends the same trade. A proposal is answered through the board's offer instead. */
   private tellEnd(trade: Trade, why: TradeEndWhy): void {
@@ -299,6 +307,15 @@ export class TradeController implements BoardPeer {
     });
   }
 
+  /** The items of my side the partner's own record shows received that I have not credited; null when the partner is no character of this brain or holds no such trade. */
+  unclaimedByPartner(tradeId: string): ItemCount[] | null { return this.shown.unclaimed(tradeId); }
+
+  /** The agent starts (true) or ends (false) running my give for the trade. */
+  giveRunning(tradeId: string, on: boolean): void { if (on) this.running_.add(tradeId); else this.running_.delete(tradeId); }
+
+  /** The giver said it cannot reach me for this trade: true once, for the wait to walk to it. */
+  askedToCome(tradeId: string): boolean { return this.cameDown.delete(tradeId); }
+
   /** What of my side is still to give for a trade: null when it is not open or my side was given. */
   leftToGive(tradeId: string): ItemCount[] | null {
     const trade = this.find(tradeId);
@@ -355,6 +372,7 @@ export class TradeController implements BoardPeer {
   /** A wait for their side ended: dropped (a stop, a shelter) it is taken again after a while; any other end is final. */
   awaitEnded(tradeId: string, outcome: HandoffEnd["outcome"]): void {
     this.queue.awaitOver(tradeId);
+    this.cameDown.delete(tradeId);
     if (outcome !== "dropped") {
       this.collects.collectEnded(tradeId); // a wait that ended reads the bag once, as a collect does: what reached it unseen is credited
       return;
@@ -385,6 +403,7 @@ export class TradeController implements BoardPeer {
       await this.agreePaidProposals(snapshot.inventory, now);
       await creditArrived(this.creditHost(), snapshot.inventory, ownStepYields, now);
       await this.settleOpen(now);
+      await this.shown.claimAll();
       this.collects.start(this.collectView(), now, this.deps.takeHandoff);
       if (!this.busy()) this.previous = null;
     });
@@ -415,7 +434,17 @@ export class TradeController implements BoardPeer {
       const trade = this.find(tradeId);
       if (trade === undefined) return;
       // A toss that was taken after the trade ended (the partner cancelled meanwhile) is my side given, late.
-      if (!isOpen(trade)) return void (kind === "give" && outcome === "done" && trade.gaveAt === null && await countLateToss(this.deps.book, trade, trade.give, this.heldWindow(), this.deps.log));
+      if (!isOpen(trade)) {
+        if (kind !== "give") return;
+        if (outcome === "done" && trade.gaveAt === null) await countLateToss(this.deps.book, trade, trade.give, this.heldWindow(), this.deps.log);
+        else if (outcome !== "done") await this.shown.claim(tradeId);
+        return;
+      }
+      // A toss the partner took after my wait ran out shows in its record: counted now, so the retry does not give it twice and no failure is counted for it.
+      if (kind === "give" && outcome !== "done" && outcome !== "busy") {
+        await this.shown.claim(tradeId);
+        if (this.find(tradeId)?.gaveAt !== null) return;
+      }
       const now = this.deps.now();
       if (kind === "collect") {
         this.collects.collectEnded(tradeId);

@@ -12,7 +12,7 @@ import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
 import { resendRefusedTrade, type CheckedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
-import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
+import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, type PartnerWitness, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
 import { notObeyingLine, openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
@@ -288,16 +288,26 @@ export class AgentRelations {
         return { outcome: "done", detail: "already handed over" };
       }
       const taken: ItemCount[] = [];
+      if (h.kind === "give") this.trades.giveRunning(h.tradeId, true);
       const back = { getBackMs: Math.max(0, this.trades.payBackLeftMs(h.tradeId) - GIVE_ALLOWANCE_MS), stillDue: () => this.trades.closedAs(h.tradeId) === null };
-      end = handoffOutcome(await runHandoff({ ...context, owed: () => this.trades.owed() }, { ...h, items: left }, (credit) => taken.push(credit), back));
+      end = handoffOutcome(await runHandoff({ ...context, owed: () => this.trades.owed() }, { ...h, items: left }, (credit) => taken.push(credit), back, this.witnessOf(h)));
       // What the partner took counts even when the rest was not taken: the retake gives only what is left.
       if (taken.length > 0) await this.trades.tookInHandoff(h.tradeId, taken);
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      this.trades.giveRunning(h.tradeId, false);
     }
     if (end.outcome === "dropped") this.trades.handoffDropped(h.tradeId);
     else await this.trades.handoffEnded(h.tradeId, end.outcome, end.detail);
     return end;
+  }
+
+  /** What a give to a character of this brain may ask of the partner: its own record of the trade, and a call to come down; undefined for a player. */
+  private witnessOf(h: Exclude<Handoff, { kind: "await" }>): PartnerWitness | undefined {
+    const { board, persona, clock = realClock } = this.deps;
+    if (h.kind !== "give" || board?.isLocal(h.partner) !== true) return undefined;
+    return { unclaimed: () => this.trades.unclaimedByPartner(h.tradeId), cannotReach: () => board.cannotReach(h.tradeId, persona.username, h.partner), clock, log: this.deps.log };
   }
 
   /** The wait for their side: it ends when their payment is credited, at the bound, or when stopped; it never counts as a give. */
@@ -307,6 +317,7 @@ export class AgentRelations {
     try {
       end = handoffOutcome(await awaitTheirSide(context, partner, {
         stillAwaiting: () => this.trades.awaits(tradeId), endedAs: () => this.trades.awaitOver(tradeId), clock, maxMs: Math.min(persona.settings.relations.startMinutes * 60_000, this.trades.payBackLeftMs(tradeId)), openingDistance: persona.settings.conversation.openingDistance,
+        askedToCome: () => this.trades.askedToCome(tradeId),
       }));
     } catch (error) {
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };

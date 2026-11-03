@@ -115,7 +115,7 @@ export interface UnfinishedHouse {
 const RECIPIENT_MOVING_CODE = "[DROP_RECIPIENT_MOVING]";
 
 /** Why a skill failed, for the code that must tell failures apart (the detail is for the model and the journal only). */
-export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come" | "recipient_busy";
+export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come" | "recipient_busy" | "recipient_unreachable";
 
 export type SkillResult =
   /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */

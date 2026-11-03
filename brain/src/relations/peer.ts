@@ -13,9 +13,13 @@ export interface PeerHost {
   tracked(step: () => Promise<void>): Promise<void>;
   record(trade: Trade, event: "agreed" | "cancelled" | "broken"): Promise<void>;
   startAgreed(agreed: Trade, partner: string, now: number): Promise<void>;
+  /** Whether my wait for the partner's side of that trade is on the agent's stack. */
+  waiting(tradeId: string): boolean;
+  /** My wait for that trade walks to the partner, once. */
+  comeTo(tradeId: string): void;
 }
 
-/** The partner accepted or declined a proposal I posted (my record moves to agreed on the terms it already holds, or is cancelled), or ended an agreed trade. */
+/** The partner accepted or declined a proposal I posted (my record moves to agreed on the terms it already holds, or is cancelled), ended an agreed trade, is asked what my record holds, or cannot reach me. */
 export function boardPeerHandlers(host: PeerHost): BoardPeer {
   return {
     offerAccepted: (tradeId, by) => host.tracked(async () => {
@@ -39,6 +43,14 @@ export function boardPeerHandlers(host: PeerHost): BoardPeer {
       const ended = endedByPartner(trade, host.now(), by, why);
       if (ended === null) return void host.log(`trade: ${by} says ${tradeId} ${why}; it is ${trade.state}, nothing to end`);
       await host.record(ended, ended.state === "broken" ? "broken" : "cancelled");
+    }),
+    receivedFor: (tradeId) => host.find(tradeId)?.received ?? null,
+    cannotReach: (tradeId, by) => host.tracked(async () => {
+      const trade = host.find(tradeId);
+      if (trade === undefined) return void host.log(`trade: ${by} cannot reach me for ${tradeId}, which is no trade of mine`);
+      if (trade.partner.toLowerCase() !== by.toLowerCase()) return void host.log(`trade: ${by} cannot reach me for ${tradeId}, but ${by} is not my partner in it`);
+      if (!host.waiting(tradeId)) return void host.log(`trade: ${by} cannot reach me for ${tradeId}, and I am not waiting for it; nothing to do`);
+      host.comeTo(tradeId);
     }),
   };
 }

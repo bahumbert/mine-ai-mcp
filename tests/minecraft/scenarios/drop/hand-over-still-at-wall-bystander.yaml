@@ -1,0 +1,38 @@
+template: ../../templates/spectator.yaml
+
+name: hand-over-still-at-wall-bystander
+tags: [regression]
+description: >-
+  Live s3o 2026-11-03 (Ayla-Finn): a toss of 1 wheat_seeds to a still receiver 1.4 blocks away with its back to a wall
+  ended its watch in 3.7 s, shorter than the 100-tick settle. A third player stands 1 block from the toss (the live case: Finn talked with Ayla, a bystander in reach). Measured 2026-11-03 with a trace: the receiver still took it by a
+  collect packet after 2 s. The receiver must end up holding the seed and the giver must report it taken.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, keepInventory: true, randomTickSpeed: 0 }
+reset:
+  - "fill -16 -59 -16 20 -40 16 air"
+setup:
+  # The wall right behind the receiver, two blocks high.
+  - "fill -3 -60 3 3 -59 3 barrier"
+players:
+  - name: Giver
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: wheat_seeds, count: 1 }
+  - name: Receiver
+    pos: [0.5, -60, 1.9]
+  - name: Bystander
+    pos: [1.5, -60, 1.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hand-over.ts]
+params: { giver: 0, receiver: 1, item_name: wheat_seeds, count: 1 }
+
+goal:
+  kind: all
+  timeout: 30
+  goals:
+    - { kind: completion, who: Giver }
