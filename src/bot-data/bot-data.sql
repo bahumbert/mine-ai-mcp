@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS bot_status (
   time_of_day INTEGER NOT NULL CHECK (time_of_day BETWEEN 0 AND 23999),
   is_sleeping INTEGER NOT NULL CHECK (is_sleeping IN (0, 1)),
   is_raining INTEGER NOT NULL CHECK (is_raining IN (0, 1)),
+  item_families_json TEXT CHECK (item_families_json IS NULL OR json_valid(item_families_json)),
   updated_at TEXT NOT NULL
 ) STRICT;
 
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS bot_inventory (
   item_name TEXT NOT NULL,
   count INTEGER NOT NULL CHECK (count > 0),
   held INTEGER NOT NULL CHECK (held IN (0, 1)),
+  families TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(families)),
   PRIMARY KEY (bot_id, slot)
 ) STRICT;
 
@@ -404,6 +406,7 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'bot_status', 'time_of_day', 'World clock in ticks from 0 (sunrise) to 23999; beds accept the bot from 12542 to 23458.'),
   ('main', 'bot_status', 'is_sleeping', '1 while the bot lies in a bed, else 0.'),
   ('main', 'bot_status', 'is_raining', '1 while it is raining or thundering in the world, else 0.'),
+  ('main', 'bot_status', 'item_families_json', 'JSON {source, version, overrides}: where item families come from, server (the server''s tags packet), shipped (tags shipped for the version) or none, with the version and the override namespaces in use. NULL only in a row written before this column existed or by a test fixture.'),
   ('main', 'bot_status', 'updated_at', 'UTC timestamp when this situation record and bot_inventory were refreshed.'),
   ('main', 'bot_last_death', NULL, 'Most recently observed death retained across respawn and reconnect for recovery planning.'),
   ('main', 'bot_last_death', 'bot_id', 'Bot whose most recent death this row records.'),
@@ -430,6 +433,7 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'bot_inventory', 'item_name', 'Registry item name, matching knowledge.items.name.'),
   ('main', 'bot_inventory', 'count', 'Items in the stack.'),
   ('main', 'bot_inventory', 'held', '1 for the hotbar stack currently in the bot''s hand, else 0.'),
+  ('main', 'bot_inventory', 'families', 'JSON array of the item''s families (sword, pickaxe, helmet, food, bed...), sorted; ''[]'' when it has none.'),
   ('main', 'events', NULL, 'Durable chronology of model-relevant observations for bots using this data store.'),
   ('main', 'events', 'event_id', 'Monotonic event chronology and per-bot read cursor.'),
   ('main', 'events', 'bot_id', 'Bot that observed and receives this event.'),

@@ -110,34 +110,40 @@ export function observeLiveSituation(
     inventory: {
       usedSlots: carried.length,
       freeSlots: CARRIED_SLOT_COUNT - carried.length,
-      stacks: [...snapshot.inventory],
+      stacks: snapshot.inventory.map((stack) => ({ ...stack, families: [...stack.families] })),
       foods: carriedFoods(bot, carried),
     },
     tools: snapshot.tools!,
+    item_families: { ...snapshot.itemFamilies!, overrides: [...snapshot.itemFamilies!.overrides] },
     nearby: observeNearby(bot),
-    endFight: {
-      dragons: Object.values(bot.entities)
-        .filter((e) => e.isValid && e.name === "ender_dragon")
-        .map((e) => {
-          const observedPhase = dragonPhase(bot, e);
-          const head = perchedDragonHead(bot, e);
-          const landingHead = predictedLandingHeadPosition(bot, e);
-          return {
-            entityId: e.id,
-            position: roundedPosition(e.position),
-            health: entityHealth(bot, e),
-            phase: observedPhase,
-            phaseName: dragonPhaseName(observedPhase),
-            perched: isDragonPerched(observedPhase),
-            headEstimate: head ? roundedPosition(head.position) : null,
-            landingHeadEstimate: landingHead ? roundedPosition(landingHead) : null,
-          };
-        }),
-      crystals: Object.values(bot.entities)
-        .filter((e) => e.isValid && e.name === "end_crystal")
-        .map((e) => ({ entityId: e.id, position: roundedPosition(e.position), cage: crystalCage(bot, e.position) })),
-      clouds: readDragonClouds(bot),
-    },
+    endFight: observeEndFight(bot),
+  };
+}
+
+/** Loaded End fight entities only: the dragons, the crystals and the breath clouds. */
+function observeEndFight(bot: Bot): LiveSituation["endFight"] {
+  return {
+    dragons: Object.values(bot.entities)
+      .filter((e) => e.isValid && e.name === "ender_dragon")
+      .map((e) => {
+        const observedPhase = dragonPhase(bot, e);
+        const head = perchedDragonHead(bot, e);
+        const landingHead = predictedLandingHeadPosition(bot, e);
+        return {
+          entityId: e.id,
+          position: roundedPosition(e.position),
+          health: entityHealth(bot, e),
+          phase: observedPhase,
+          phaseName: dragonPhaseName(observedPhase),
+          perched: isDragonPerched(observedPhase),
+          headEstimate: head ? roundedPosition(head.position) : null,
+          landingHeadEstimate: landingHead ? roundedPosition(landingHead) : null,
+        };
+      }),
+    crystals: Object.values(bot.entities)
+      .filter((e) => e.isValid && e.name === "end_crystal")
+      .map((e) => ({ entityId: e.id, position: roundedPosition(e.position), cage: crystalCage(bot, e.position) })),
+    clouds: readDragonClouds(bot),
   };
 }
 
@@ -227,11 +233,12 @@ function headingDegrees(yaw: number): number {
 /** Each carried food kind once, with what one restores from game data, most filling first. */
 function carriedFoods(bot: Bot, carried: readonly InventoryStack[]): LiveSituation["inventory"]["foods"] {
   const counts = new Map<string, number>();
-  for (const stack of carried) if (bot.registry.foodsByName[stack.name]) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
+  for (const stack of carried) if (stack.families.includes("food")) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
   return [...counts]
-    .map(([name, count]) => {
-      const food = bot.registry.foodsByName[name]!;
-      return { name, count, points: food.foodPoints, saturation: food.saturation };
+    .flatMap(([name, count]) => {
+      // The food family is the registry's food list (item-families.ts); a server tag cannot add an item with no hunger value.
+      const food = bot.registry.foodsByName[name];
+      return food ? [{ name, count, points: food.foodPoints, saturation: food.saturation }] : [];
     })
     .sort((left, right) => right.points - left.points || right.saturation - left.saturation || left.name.localeCompare(right.name));
 }
@@ -356,7 +363,6 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
   const { situation } = result;
   const { vitals, mobility, clock, position, inventory, nearby, tools } = situation;
   const yesNo = (value: boolean | null) => (value === null ? "unknown" : value ? "yes" : "no");
-  const at = (point: Position3) => `\`${point.x}, ${point.y}, ${point.z}\``;
   const phaseChange =
     clock.phase === "night"
       ? `day breaks in ${clock.ticksUntilChange} ticks (~${clock.minutesUntilChange} min)`
@@ -365,35 +371,8 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     situation.dimension === "the_nether" || situation.dimension === "the_end"
       ? "no daylight cycle in this dimension"
       : "daylight cycle unknown for this dimension";
-  const held = inventory.stacks.find((stack) => stack.held);
-  const worn = inventory.stacks.filter((stack) => !isCarried(stack));
-  const carried = groupCarried(inventory.stacks.filter(isCarried));
   const lines = [
-    ...(situation.endFight.dragons.length || situation.endFight.crystals.length || situation.endFight.clouds.length
-      ? [
-          "### End fight (loaded observations)",
-          ...situation.endFight.dragons.map(
-            (d) =>
-              `- Dragon #${d.entityId}: health ${d.health ?? "unknown"}, phase ${d.phase ?? "unknown"} (${d.phaseName ?? "unknown"}), perched ${d.perched}; at ${at(d.position)}${d.headEstimate ? `; estimated head ${at(d.headEstimate)}` : ""}`,
-          ),
-          ...situation.endFight.dragons.flatMap((d) =>
-            d.landingHeadEstimate
-              ? [`- Predicted head after landing: ${at(d.landingHeadEstimate)}; direction may change.`]
-              : [],
-          ),
-          ...(situation.endFight.dragons.length
-            ? ["- Perch hint: use `prepare_dragon_perch` before the first landing; it opens a low staging sightline and yields on observed landing. Then use `attack_dragon_perch` to follow the settled head. The head can turn, and breath can enter tunnels. A roofed first scan can leave the dragon treating you as unseen even after the roof is removed, shortening later perches."]
-            : []),
-          ...situation.endFight.crystals.map((c) => `- Crystal #${c.entityId} at ${at(c.position)}; cage ${c.cage.replaceAll("_", " ")}`),
-          ...(situation.endFight.crystals.length
-            ? ["- Bow tip: bows can hit caged crystals through gaps, but may waste arrows. Prefer exposed crystals when arrows are scarce."]
-            : []),
-          ...situation.endFight.clouds.map(
-            (c) => `- Dragon breath #${c.id}: radius ${c.radius.toFixed(1)} at ${at(c)}`,
-          ),
-          "",
-        ]
-      : []),
+    ...endFightLines(situation.endFight),
     `**${situation.botId}** in \`${situation.dimension}\` (${situation.gameMode}), observed ${situation.observedAt}.`,
     "",
     "### Vitals",
@@ -427,24 +406,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     ...(situation.vehicle ? [`- Riding ${situation.vehicle.name} #${situation.vehicle.id}`] : []),
     `- Last death: ${situation.lastDeath ? `${at(situation.lastDeath.position)} in \`${situation.lastDeath.dimension}\` at ${situation.lastDeath.observedAt}${situation.lastDeath.cause ? ` (${situation.lastDeath.cause})` : ""}` : "none recorded"}`,
     "",
-    `### Inventory (${inventory.usedSlots} of ${CARRIED_SLOT_COUNT} slots used, ${inventory.freeSlots} free)`,
-    `- Held: ${held ? `${held.name} x${held.count}` : "nothing"}`,
-    `- Worn: ${worn.length > 0 ? worn.map((stack) => `${stack.location} ${stack.name}`).join(", ") : "nothing"}`,
-    ...(carried.length > 0
-      ? carried.map(
-          (group) =>
-            `- ${group.name} x${group.count} (${group.slots.length > 1 ? "slots" : "slot"} ${group.slots.join(", ")})`,
-        )
-      : ["- Carrying nothing"]),
-    ...inventory.stacks.flatMap((stack) =>
-      stack.durability === null
-        ? []
-        : [
-            `- Durability: ${stack.name} (slot ${stack.slot}, ${stack.location}) ${stack.durability.remaining}/${stack.durability.maximum} remaining`,
-          ],
-    ),
-    "- Durability is unavailable or not applicable for stacks without a durability entry.",
-    `- Food carried: ${inventory.foods.length > 0 ? inventory.foods.map((food) => `${food.name} x${food.count} (${food.points} hunger points, ${food.saturation} saturation each)`).join("; ") : "none"}`,
+    ...inventoryLines(inventory, situation.item_families),
     "",
     "### Best tools and armour",
     ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.tier}${entry.item ? ` (${entry.item}, slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : ""}`),
@@ -524,6 +486,66 @@ const MOBILITY_BLOCKER_TEXT: Readonly<Record<MobilityBlocker, string>> = {
 
 function blockedBecause(blockers: readonly MobilityBlocker[]): string {
   return blockers.map((blocker) => MOBILITY_BLOCKER_TEXT[blocker]).join("; ");
+}
+
+const at = (point: Position3) => `\`${point.x}, ${point.y}, ${point.z}\``;
+
+/** The End-fight section, empty when no dragon, crystal or breath cloud is loaded. */
+function endFightLines(endFight: LiveSituation["endFight"]): string[] {
+  if (!endFight.dragons.length && !endFight.crystals.length && !endFight.clouds.length) return [];
+  return [
+    "### End fight (loaded observations)",
+    ...endFight.dragons.map(
+      (d) =>
+        `- Dragon #${d.entityId}: health ${d.health ?? "unknown"}, phase ${d.phase ?? "unknown"} (${d.phaseName ?? "unknown"}), perched ${d.perched}; at ${at(d.position)}${d.headEstimate ? `; estimated head ${at(d.headEstimate)}` : ""}`,
+    ),
+    ...endFight.dragons.flatMap((d) =>
+      d.landingHeadEstimate ? [`- Predicted head after landing: ${at(d.landingHeadEstimate)}; direction may change.`] : [],
+    ),
+    ...(endFight.dragons.length
+      ? ["- Perch hint: use `prepare_dragon_perch` before the first landing; it opens a low staging sightline and yields on observed landing. Then use `attack_dragon_perch` to follow the settled head. The head can turn, and breath can enter tunnels. A roofed first scan can leave the dragon treating you as unseen even after the roof is removed, shortening later perches."]
+      : []),
+    ...endFight.crystals.map((c) => `- Crystal #${c.entityId} at ${at(c.position)}; cage ${c.cage.replaceAll("_", " ")}`),
+    ...(endFight.crystals.length
+      ? ["- Bow tip: bows can hit caged crystals through gaps, but may waste arrows. Prefer exposed crystals when arrows are scarce."]
+      : []),
+    ...endFight.clouds.map((c) => `- Dragon breath #${c.id}: radius ${c.radius.toFixed(1)} at ${at(c)}`),
+    "",
+  ];
+}
+
+/** The inventory section: held, worn and carried stacks, durability, carried food, and where the families come from. */
+function inventoryLines(inventory: LiveSituation["inventory"], families: LiveSituation["item_families"]): string[] {
+  const held = inventory.stacks.find((stack) => stack.held);
+  const worn = inventory.stacks.filter((stack) => !isCarried(stack));
+  const carried = groupCarried(inventory.stacks.filter(isCarried));
+  return [
+    `### Inventory (${inventory.usedSlots} of ${CARRIED_SLOT_COUNT} slots used, ${inventory.freeSlots} free)`,
+    `- Held: ${held ? `${held.name} x${held.count}` : "nothing"}`,
+    `- Worn: ${worn.length > 0 ? worn.map((stack) => `${stack.location} ${stack.name}`).join(", ") : "nothing"}`,
+    ...(carried.length > 0
+      ? carried.map(
+          (group) =>
+            `- ${group.name} x${group.count} (${group.slots.length > 1 ? "slots" : "slot"} ${group.slots.join(", ")})`,
+        )
+      : ["- Carrying nothing"]),
+    ...inventory.stacks.flatMap((stack) =>
+      stack.durability === null
+        ? []
+        : [
+            `- Durability: ${stack.name} (slot ${stack.slot}, ${stack.location}) ${stack.durability.remaining}/${stack.durability.maximum} remaining`,
+          ],
+    ),
+    "- Durability is unavailable or not applicable for stacks without a durability entry.",
+    `- Food carried: ${inventory.foods.length > 0 ? inventory.foods.map((food) => `${food.name} x${food.count} (${food.points} hunger points, ${food.saturation} saturation each)`).join("; ") : "none"}`,
+    `- Item families: ${itemFamiliesLine(families)}; each stack's \`families\` is in the structured result and in \`main.bot_inventory.families\``,
+  ];
+}
+
+/** "server tags (1.21.4) + override minecraft": where the families of the stacks (structured result) come from. */
+function itemFamiliesLine(families: LiveSituation["item_families"]): string {
+  const origin = families.source === "none" ? `no tags known for ${families.version}` : `${families.source} tags (${families.version})`;
+  return families.overrides.length > 0 ? `${origin} + override ${families.overrides.join(", ")}` : origin;
 }
 
 function isCarried(stack: LiveSituation["inventory"]["stacks"][number]): boolean {

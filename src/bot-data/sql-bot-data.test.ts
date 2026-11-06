@@ -61,6 +61,32 @@ test("async call migration preserves historical replies and publishes execution 
   assert.deepEqual(migrated.read("PRAGMA foreign_key_check"), []);
 });
 
+test("an old bot_inventory and bot_status without the family columns are re-created, not altered", (t) => {
+  const storage = persistentBotData(t);
+  const original = storage.open("families-migration");
+  original.transaction((db) => {
+    db.exec(`DROP TABLE bot_inventory; DROP TABLE bot_status;
+      CREATE TABLE bot_status (
+        bot_id TEXT PRIMARY KEY, dimension TEXT NOT NULL, game_mode TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL,
+        z REAL NOT NULL, chunk_x INTEGER NOT NULL, chunk_z INTEGER NOT NULL, yaw REAL NOT NULL, pitch REAL NOT NULL,
+        on_ground INTEGER NOT NULL, in_water INTEGER NOT NULL, health REAL NOT NULL, food INTEGER NOT NULL,
+        saturation REAL NOT NULL, time_of_day INTEGER NOT NULL, is_sleeping INTEGER NOT NULL, is_raining INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE bot_inventory (
+        bot_id TEXT NOT NULL, slot INTEGER NOT NULL, location TEXT NOT NULL, item_name TEXT NOT NULL,
+        count INTEGER NOT NULL, held INTEGER NOT NULL, PRIMARY KEY (bot_id, slot)
+      ) STRICT;
+      INSERT INTO bot_inventory VALUES ('Old', 9, 'main', 'stick', 1, 0);`);
+  });
+  original.close();
+  const migrated = storage.open("families-migration");
+  const columns = (table: string) => migrated.read(`SELECT name FROM pragma_table_info('${table}')`).map((row) => row.name);
+  assert.ok(columns("bot_inventory").includes("families"));
+  assert.ok(columns("bot_status").includes("item_families_json"));
+  assert.deepEqual(migrated.read("SELECT * FROM bot_inventory"), [], "a snapshot table: the runtime's next status write refills it");
+});
+
 test("runtime lock contention reports an error without consuming the watchdog allowance", (t) => {
   const storage = persistentBotData(t);
   const data = storage.open("locked-runtime");

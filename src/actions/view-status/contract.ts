@@ -97,6 +97,15 @@ export const inventoryStackSchema = z.strictObject({
     .strictObject({ remaining: z.number().nonnegative(), maximum: z.number().positive() })
     .nullable()
     .describe("Remaining and maximum durability; null when durability is not reported or not applicable."),
+  families: z
+    .array(z.string())
+    .describe("The item's families (sword, pickaxe, helmet, food, bed...) from the server's tags, else the tags shipped for the version; sorted, empty when none."),
+});
+
+export const itemFamiliesSourceSchema = z.strictObject({
+  source: z.enum(["server", "shipped", "none"]).describe("server: the server's tags packet arrived; shipped: the tags shipped for the version; none: neither exists."),
+  version: z.string().describe("The server's version for server, the shipped file's version for shipped."),
+  overrides: z.array(z.string()).describe("Namespaces of the family override files in use."),
 });
 
 export const liveSituationSchema = z.strictObject({
@@ -258,6 +267,7 @@ export const liveSituationSchema = z.strictObject({
     ),
   }),
   tools: toolSnapshotSchema,
+  item_families: itemFamiliesSourceSchema.describe("Where the stacks' families come from; a stack's families are those of this source."),
   nearby: z.strictObject({
     rangeBlocks: z.number().positive(),
     players: z.array(

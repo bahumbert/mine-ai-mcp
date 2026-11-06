@@ -3,6 +3,7 @@ import type { Item } from "prismarine-item";
 import { chunkPosition } from "../world/chunks.js";
 import type { SqlBotData } from "./sql-bot-data.js";
 import { snapshotTools, type ToolSnapshot } from "../world/tool-tiers.js";
+import { familyIndexOf, type FamilySource } from "../world/item-families.js";
 
 /** Player inventory window slots that hold worn or off-hand equipment. */
 export const EQUIPMENT_SLOTS = Object.freeze({ head: 5, torso: 6, legs: 7, feet: 8, "off-hand": 45 });
@@ -21,6 +22,8 @@ export interface InventoryStack {
   readonly held: boolean;
   /** Null when the item has no reported durability, including ordinary stackable items. */
   readonly durability: { readonly remaining: number; readonly maximum: number } | null;
+  /** The item's families (`item-families.ts`), sorted; empty when none. */
+  readonly families: readonly string[];
 }
 
 export interface BotStatusSnapshot {
@@ -46,6 +49,8 @@ export interface BotStatusSnapshot {
   readonly isRaining: boolean;
   readonly inventory: readonly InventoryStack[];
   readonly tools?: ToolSnapshot;
+  /** Where the families came from (server tags, shipped tags, none); unset in a snapshot that did not look. */
+  readonly itemFamilies?: FamilySource;
   readonly updatedAt?: string;
 }
 
@@ -75,6 +80,7 @@ export function snapshotBotStatus(bot: Bot): BotStatusSnapshot {
     isRaining: bot.isRaining ?? false,
     inventory: snapshotInventory(bot),
     tools: snapshotTools(bot),
+    itemFamilies: familyIndexOf(bot).source(),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -87,6 +93,7 @@ export function snapshotInventory(bot: Bot): InventoryStack[] {
   // in player-inventory coordinates without mutating Mineflayer's items.
   const window = bot.currentWindow ?? bot.inventory;
   const slotOffset = bot.currentWindow ? bot.currentWindow.inventoryStart - bot.inventory.inventoryStart : 0;
+  const families = familyIndexOf(bot);
   const carried = (window?.items() ?? []).map((item): InventoryStack => {
     const slot = item.slot - slotOffset;
     return {
@@ -96,6 +103,7 @@ export function snapshotInventory(bot: Bot): InventoryStack[] {
       count: item.count,
       held: slot === heldSlot,
       durability: itemDurability(item),
+      families: families.itemFamilies(item.name),
     };
   });
   const worn = Object.entries(EQUIPMENT_SLOTS).flatMap(([location, slot]): InventoryStack[] => {
@@ -109,6 +117,7 @@ export function snapshotInventory(bot: Bot): InventoryStack[] {
             count: item.count,
             held: false,
             durability: itemDurability(item),
+            families: families.itemFamilies(item.name),
           },
         ]
       : [];
@@ -136,8 +145,8 @@ export function updateBotStatus(data: SqlBotData, status: BotStatusSnapshot): vo
       .prepare(
         `INSERT OR REPLACE INTO bot_status (
            bot_id, dimension, game_mode, x, y, z, chunk_x, chunk_z, yaw, pitch, on_ground, in_water,
-           health, food, saturation, time_of_day, is_sleeping, is_raining, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           health, food, saturation, time_of_day, is_sleeping, is_raining, item_families_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         status.botId,
@@ -158,14 +167,15 @@ export function updateBotStatus(data: SqlBotData, status: BotStatusSnapshot): vo
         status.timeOfDay,
         Number(status.isSleeping),
         Number(status.isRaining),
+        status.itemFamilies ? JSON.stringify(status.itemFamilies) : null,
         updatedAt,
       );
     database.prepare("DELETE FROM bot_inventory WHERE bot_id = ?").run(status.botId);
     const insert = database.prepare(
-      "INSERT INTO bot_inventory (bot_id, slot, location, item_name, count, held) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO bot_inventory (bot_id, slot, location, item_name, count, held, families) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     for (const stack of status.inventory) {
-      insert.run(status.botId, stack.slot, stack.location, stack.name, stack.count, Number(stack.held));
+      insert.run(status.botId, stack.slot, stack.location, stack.name, stack.count, Number(stack.held), JSON.stringify(stack.families));
     }
     database.prepare("DELETE FROM bot_tools WHERE bot_id = ?").run(status.botId);
     const insertTool = database.prepare(

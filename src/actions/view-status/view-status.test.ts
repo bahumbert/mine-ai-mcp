@@ -4,7 +4,7 @@ import { parseViewStatusRequest, viewStatusResultSchema } from "./contract.js";
 import { createViewStatusAction, formatViewStatusResult, observeLiveSituation } from "./view-status.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fixtures.test.js";
-
+import { watchServerTags } from "../../world/server-tags.js";
 test("reports the observed clock without predicting daylight outside the Overworld", (t) => {
   // Servers may supply a custom dimension beyond Mineflayer's built-in union.
   for (const dimension of ["the_nether", "the_end", "custom_dimension"]) {
@@ -77,11 +77,11 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
     usedSlots: 3,
     freeSlots: 33,
     stacks: [
-      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: { remaining: 363, maximum: 363 } },
-      { slot: 9, location: "main", name: "cobblestone", count: 64, held: false, durability: null },
-      { slot: 10, location: "main", name: "cobblestone", count: 12, held: false, durability: null },
-      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: { remaining: 131, maximum: 131 } },
-      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: { remaining: 336, maximum: 336 } },
+      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: { remaining: 363, maximum: 363 }, families: ["helmet"] },
+      { slot: 9, location: "main", name: "cobblestone", count: 64, held: false, durability: null, families: [] },
+      { slot: 10, location: "main", name: "cobblestone", count: 12, held: false, durability: null, families: [] },
+      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: { remaining: 131, maximum: 131 }, families: ["pickaxe"] },
+      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: { remaining: 336, maximum: 336 }, families: ["shield"] },
     ],
     foods: [],
   });
@@ -323,4 +323,22 @@ test("species-age groups expose a farther adult without losing the nearest baby 
   viewStatusResultSchema.parse(result);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, age unknown\) x1/);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, adult\) x2, nearest #2941/);
+});
+
+test("a carried diamond_sword reports families [sword]; item_families names shipped tags before a tags packet, the server after", (t) => {
+  const bot = liveBot({ carried: { 36: { name: "diamond_sword" }, 9: { name: "bread", count: 3 } } });
+  watchServerTags(bot);
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+
+  const before = observeLiveSituation(bot, data, idleActivity);
+  assert.deepEqual(before.inventory.stacks.find((stack) => stack.name === "diamond_sword")?.families, ["sword"]);
+  assert.deepEqual(before.inventory.stacks.find((stack) => stack.name === "bread")?.families, ["food"]);
+  assert.deepEqual(before.item_families, { source: "shipped", version: bot.version, overrides: ["minecraft"] });
+  assert.deepEqual(data.read("SELECT item_families_json FROM bot_status"), [{ item_families_json: JSON.stringify(before.item_families) }]);
+  assert.deepEqual(data.read("SELECT families FROM bot_inventory WHERE item_name = 'diamond_sword'"), [{ families: '["sword"]' }]);
+  const markdown = formatViewStatusResult(viewStatusResultSchema.parse({ status: "succeeded", situation: before }));
+  assert.match(markdown, /Item families: shipped tags \(1\.21\.4\) \+ override minecraft/);
+
+  bot._client.emit("tags", { tags: [] });
+  assert.equal(observeLiveSituation(bot, data, idleActivity).item_families.source, "server");
 });

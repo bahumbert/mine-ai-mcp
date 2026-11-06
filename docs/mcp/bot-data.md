@@ -155,7 +155,7 @@ exposes these tables and views:
 | -------------------------- | ----- | --------------------------------------------------------------------------------- |
 | `sql_bot_data_metadata`    | Table | Stores internal database identity, schema version, and world IDs.                 |
 | `bot_status`               | Table | Holds live coordinates, yaw, pitch, vitals, time of day, and weather.             |
-| `bot_inventory`            | Table | Lists every carried and worn stack, slot numbers, and held status.                |
+| `bot_inventory`            | Table | Lists every carried and worn stack, slot numbers, held status, and item families. |
 | `bot_tools`                | Table | Holds the current best item, tier, slot, and durability for every tool and armour class. |
 | `events`                   | Table | Stores durable event chronologies, types, timestamps, and JSON payloads.          |
 | `event_read_state`         | Table | Records the highest event ID read by each bot.                                    |

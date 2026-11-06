@@ -254,6 +254,12 @@ function statusClient(situation: Record<string, unknown>): ToolClient {
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
+test("families parse from the runtime's stacks; a runtime that sends none means empty", async () => {
+  const stacks = [{ name: "diamond_sword", count: 1, families: ["sword"] }, { name: "cobblestone", count: 3 }];
+  const status = await McpBotRuntime.over(statusClient({ inventory: { stacks } })).status();
+  assert.deepEqual(status.inventory.map(({ name, families }) => [name, families]), [["diamond_sword", ["sword"]], ["cobblestone", []]]);
+});
+
 test("status carries the dimension view_status names; a runtime that names none is the overworld", async () => {
   assert.equal((await McpBotRuntime.over(statusClient({ dimension: "the_nether" })).status()).dimension, "the_nether");
   assert.equal((await McpBotRuntime.over(statusClient({})).status()).dimension, "minecraft:overworld");

@@ -44,6 +44,8 @@ export interface CarriedStack {
   readonly name: string;
   readonly count: number;
   readonly durability?: { readonly remaining: number; readonly maximum: number } | null;
+  /** The item's families (`sword`, `food`...) as the runtime reports them; `status()` always sets it, `[]` when the item has none or the runtime is older. Optional so hand-built stacks need not list it. */
+  readonly families?: readonly string[];
 }
 
 /** A carried food kind and what one restores (game data). */
@@ -361,7 +363,7 @@ const viewStatusSchema = z.object({
       difficulty: z.string().optional(),
       vitals: z.object({ health: z.number(), food: z.number() }),
       inventory: z.object({
-        stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null) })),
+        stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null), families: z.array(z.string()).default([]) })),
         foods: z.array(z.object({ name: z.string(), count: z.number(), points: z.number(), saturation: z.number() })).default([]),
       }),
       nearby: z.object({
@@ -565,7 +567,7 @@ export class McpBotRuntime implements BotRuntime {
       health: situation.vitals.health,
       food: situation.vitals.food,
       difficulty: situation.difficulty,
-      inventory: situation.inventory.stacks.map(({ name, count, durability }) => ({ name, count, durability })),
+      inventory: situation.inventory.stacks.map(({ name, count, durability, families }) => ({ name, count, durability, families })),
       foods: situation.inventory.foods,
       mobs: mobSpecies(situation.nearby.mobs),
       players: situation.nearby.players,

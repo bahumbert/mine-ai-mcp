@@ -128,6 +128,15 @@ species with its count, whether it is in the game's hostile category (the one `c
 a shield), and the nearest one's entity ID, distance and position, at any distance. Defined in
 [src/actions/view-status/contract.ts](../../src/actions/view-status/contract.ts).
 
+Every inventory stack carries `families` (sorted, empty when none): the item's
+kinds such as `sword`, `pickaxe`, `helmet`, `food` or `bed`, taken from the
+server's tags, else the tags shipped for the bot's version, plus the vanilla
+override of items no tag groups. The result's `item_families` says which:
+`{ source: "server" | "shipped" | "none", version, overrides }`, and the text
+prints it as "Item families: server tags (1.21.4) + override minecraft". The
+same data is in `bot_inventory.families` (JSON array) and
+`bot_status.item_families_json`.
+
 The `mobility` section answers what the carried inventory unlocks, which the
 stack list alone does not say: a route falls at most three blocks unassisted,
 a longer descent is planned only as a water-bucket drop of up to eighty blocks

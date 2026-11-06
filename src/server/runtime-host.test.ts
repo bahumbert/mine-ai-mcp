@@ -208,8 +208,8 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
   assert.deepEqual(health.minecraft.inventory, [
     // A worn stack is a prismarine Item, as the real window holds: its maximum is the 1.21.4 data's
     // (`prismarine-item` index.js:41, 50-51) and a new helmet has used none. No contract check covers armour yet.
-    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 } },
-    { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null },
+    { slot: 5, location: "head", name: "iron_helmet", count: 1, held: false, durability: { remaining: 165, maximum: 165 }, families: ["helmet"] },
+    { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null, families: [] },
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);
 });
