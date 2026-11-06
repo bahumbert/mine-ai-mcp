@@ -1,0 +1,24 @@
+Situation:
+- Position 0 64 0; health 20/20; food 20/20.
+- Inventory: 1 item_number_1, 2 item_number_2 (2 of 36 slots used).
+- Players online: Player1 (11 blocks, at 10 64 5), Player2 (21 blocks, at 20 64 5), Player3 (30 blocks, at 30 64 5).
+- Places you know: the small medieval house you built for yourself (door -1204 76 803 facing north); a farm of wheat (around 40 64 -20); note: iron seen (at 300 20 -45).
+- Protected areas (you never dig or place blocks there): #1 area 1 (owner Steve, 20 60 0 to 28 80 8).
+- Currently doing: nothing.
+
+Right now you feel most like building, or else farming.
+
+Things that could use doing, by what they are for: 
+- (building) hint1 0 hint1 8 hint1 16 hint1 25 hint1 34 hint1 43 hint1 52 hint1 61 hint1 70 hint1 79 hint1 88 hint1 97 hint1 106 hint1 116 hint1 126 hint1 136 hint1 146 hint1 156 hint1 166 hint1 176 hint1 186 hint1 196 hint1 206 hint1 216 hint1 226 hint1 236 hint1 246 hint
+- (farming) hint2 0 hint2 8 hint2 16 hint2 25 hint2 34 hint2 43 hint2 52 hint2 61 hint2 70 hint2 79 hint2 88 hint2 97 hint2 106 hint2 116 hint2 126 hint2 136 hint2 146 hint2 156 hint2 166 hint2 176 hint2 186 hint2 196 hint2 206 hint2 216 hint2 226 hint2 236 hint2 246 hint
+- (building) hint3 0 hint3 8 hint3 16 hint3 25 hint3 34 hint3 43 hint3 52 hint3 61 hint3 70 hint3 79 hint3 88 hint3 97 hint3 106 hint3 116 hint3 126 hint3 136 hint3 146 hint3 156 hint3 166 hint3 176 hint3 186 hint3 196 hint3 206 hint3 216 hint3 226 hint3 236 hint3 246 hint
+- (farming) hint4 0 hint4 8 hint4 16 hint4 25 hint4 34 hint4 43 hint4 52 hint4 61 hint4 70 hint4 79 hint4 88 hint4 97 hint4 106 hint4 116 hint4 126 hint4 136 hint4 146 hint4 156 hint4 166 hint4 176 hint4 186 hint4 196 hint4 206 hint4 216 hint4 226 hint4 236 hint4 246 hint
+
+How you spent the last hour: building 30 min, farming 12 min.
+
+Lately, oldest first:
+- lately1 0 lately1 10 lately1 21 lately1 32 lately1 43 lately1 54 lately1 65 lately1 76 lately1 87 lately1 98 lately1 109 lately1 121 lately1 133 lately1 145 lat
+- lately2 0 lately2 10 lately2 21 lately2 32 lately2 43 lately2 54 lately2 65 lately2 76 lately2 87 lately2 98 lately2 109 lately2 121 lately2 133 lately2 145 lat
+- lately3 0 lately3 10 lately3 21 lately3 32 lately3 43 lately3 54 lately3 65 lately3 76 lately3 87 lately3 98 lately3 109 lately3 121 lately3 133 lately3 145 lat
+- lately4 0 lately4 10 lately4 21 lately4 32 lately4 43 lately4 54 lately4 65 lately4 76 lately4 87 lately4 98 lately4 109 lately4 121 lately4 133 lately4 145 lat
+- lately5 0 lately5 10 lately5 21 lately5 32 lately5 43 lately5 54 lately5 65 lately5 76 lately5 87 lately5 98 lately5 109 lately5 121 lately5 133 lately5 145 lat

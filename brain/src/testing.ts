@@ -515,11 +515,19 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
 /** A chat model replying from a script, recording what it was sent. */
 export class ScriptedModel implements ChatModel {
   readonly requests: (readonly ChatTurn[])[] = [];
-  constructor(readonly name: string, private readonly replies: string[] = []) {}
+  private readonly replies: { readonly text: string; readonly counts: ReplyCounts }[];
+  constructor(readonly name: string, replies: string[] = []) {
+    this.replies = replies.map((text) => ({ text, counts: NO_COUNTS }));
+  }
 
-  /** Queue replies, as objects (sent as JSON) or raw text. */
+  /** Queue replies, as objects (sent as JSON) or raw text. They come with no token count, as an OpenAI-compatible server may send. */
   reply(...replies: (string | object)[]): this {
-    this.replies.push(...replies.map((reply) => (typeof reply === "string" ? reply : JSON.stringify(reply))));
+    return this.replyCounted(NO_COUNTS, ...replies);
+  }
+
+  /** Queue replies that come with the server's token counts (`promptTokens`, and the window as `contextTokens`). */
+  replyCounted(counts: ReplyCounts, ...replies: (string | object)[]): this {
+    this.replies.push(...replies.map((reply) => ({ text: typeof reply === "string" ? reply : JSON.stringify(reply), counts })));
     return this;
   }
 
@@ -550,9 +558,16 @@ export class ScriptedModel implements ChatModel {
     }
     const reply = this.replies.shift();
     if (reply === undefined) throw new Error(`${this.name}: no scripted reply left`);
-    return { text: reply, promptTokens: null, contextTokens: null };
+    return { text: reply.text, ...reply.counts };
   }
 }
+
+/** What a model reply tells about the prompt it read: null when the server does not say. */
+export interface ReplyCounts {
+  readonly promptTokens: number | null;
+  readonly contextTokens: number | null;
+}
+const NO_COUNTS: ReplyCounts = { promptTokens: null, contextTokens: null };
 
 /** One scripted model per tier, plus the mind using them. */
 export function scriptedMind() {

@@ -1,6 +1,7 @@
 import { describeActivity, type Activity } from "./activities.ts";
 import type { BlockRole } from "./building/blueprint.ts";
 import type { KnownFarm } from "./memory.ts";
+import { HINTS } from "./prompt-budget.ts";
 import type { BotSnapshot, Position } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 
@@ -14,6 +15,8 @@ export interface Opportunity {
   /** The kinds of work it would take; several when there are several ways (food: farming, hunting or cooking). */
   readonly activities: readonly Activity[];
   readonly text: string;
+  /** Urgent (a tool about to break, no tools, food): never dropped when the prompt budget shrinks the hint list. */
+  readonly pressing?: boolean;
 }
 
 /** A material a house of her own still needs, and the work that gets it (as `get_items` would). */
@@ -44,8 +47,8 @@ export interface OpportunityFacts {
   } | null;
 }
 
-/** Shown to the goal tier at most: more is a list to read, not a hint. */
-export const MAX_OPPORTUNITIES = 6;
+/** Shown to the goal tier at most: more is a list to read, not a hint (the one cap on hints, `prompt-budget.ts`). */
+export const MAX_OPPORTUNITIES = HINTS.lines;
 /** A tool with this share of its uses left or fewer is nearly worn out. */
 const WORN_SHARE = 0.1;
 /** ... or with this many uses left or fewer, whatever its tier. */
@@ -214,7 +217,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
  * "no farm yet" never reached the prompt behind the house and bed lines (run 11, 2026-10-14).
  */
 export function findOpportunities(facts: OpportunityFacts, drawn: readonly Activity[] = []): Opportunity[] {
-  const pressing = [wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
+  const pressing = [wornTools, missingTools, lowFood].flatMap((finder) => finder(facts)).map((found) => ({ ...found, pressing: true }));
   const rest = [farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noFarm, noBed, gear].flatMap((finder) => finder(facts));
   return [...pressing, ...drawnFirst(rest, drawn)].slice(0, MAX_OPPORTUNITIES);
 }
@@ -228,5 +231,10 @@ export function drawnFirst(opportunities: readonly Opportunity[], drawn: readonl
 /** One line each, `- (farming) ...`, for the goal tier's situation. */
 export function describeOpportunities(opportunities: readonly Opportunity[]): string {
   if (opportunities.length === 0) return "none that you know of";
-  return opportunities.map((opportunity) => `\n- (${opportunity.activities.map(describeActivity).join(", ")}) ${opportunity.text}`).join("");
+  return opportunities.map((opportunity) => `\n${opportunityLine(opportunity)}`).join("");
+}
+
+/** One hint as the goal tier reads it, `- (farming) ...`; the prompt budget counts its characters from here too. */
+export function opportunityLine(opportunity: Opportunity): string {
+  return `- (${opportunity.activities.map(describeActivity).join(", ")}) ${opportunity.text}`;
 }

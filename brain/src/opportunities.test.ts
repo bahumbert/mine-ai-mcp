@@ -52,6 +52,23 @@ test("a tool nearly worn out is a crafting opportunity; a fresh one is not", () 
   assert.deepEqual(texts({ ...facts, snapshot: { ...facts.snapshot, inventory } }), ["(crafting) your stone_pickaxe has 12 uses left"]);
 });
 
+test("pressing hints are marked: a worn tool, no tools, low food; the others are not", () => {
+  const facts = settled({
+    farms: [],
+    ownHome: false,
+    snapshot: snapshot({ food: 10, inventory: [{ name: "stone_pickaxe", count: 1, durability: { remaining: 3, maximum: 131 } }] }),
+  });
+  const found = findOpportunities(facts);
+  const pressing = found.filter((entry) => entry.pressing === true).map((entry) => entry.text);
+  assert.equal(pressing.length, 3);
+  assert.match(pressing[0]!, /stone_pickaxe has 3 uses left/u);
+  assert.match(pressing[1]!, /you carry no sword/u);
+  assert.match(pressing[2]!, /you carry no food/u);
+  const others = found.filter((entry) => entry.pressing !== true);
+  assert.ok(others.length > 0);
+  assert.ok(others.every((entry) => entry.pressing === undefined), "an unmarked hint carries no marker at all");
+});
+
 test("food carried for less than a day is an opportunity to farm, hunt or cook", () => {
   const facts = settled({ snapshot: snapshot({ food: 14, inventory: [{ name: "bread", count: 2 }, { name: "red_bed", count: 1 }, ...TOOLS], foods: [{ name: "bread", count: 2, points: 5, saturation: 6 }] }) });
   assert.deepEqual(texts(facts), ["(farming, hunting, cooking) you carry food for 10 hunger points (2 bread); your hunger is 14/20"]);

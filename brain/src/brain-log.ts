@@ -19,6 +19,14 @@ const MAX_BYTES = 20 * 1024 * 1024;
 /** Which part of the mind a model call was for. */
 export type MindTier = "chat" | "work" | "goal" | "narrate";
 
+/** What the budget did to one prompt: the tokens allowed, the first turn's estimate, the parts shown shorter, still over. */
+export interface PromptBudgetUse {
+  readonly tokens: number;
+  readonly estimated: number;
+  readonly shrunk: readonly string[];
+  readonly overBudget: boolean;
+}
+
 export interface ModelCall {
   readonly tier: MindTier;
   readonly model: string;
@@ -31,6 +39,8 @@ export interface ModelCall {
   readonly promptTokens?: number | null;
   /** The context window the model ran with; null when unknown. A prompt near it was probably cut. */
   readonly contextTokens?: number | null;
+  /** The prompt budget the first turn was fitted to (spec 2026-11-06-p4-02a-prompt-budget); absent in older logs. */
+  readonly budget?: PromptBudgetUse;
   /** The decision read from the last reply, or why none could be. */
   readonly result?: unknown;
   readonly error?: string;

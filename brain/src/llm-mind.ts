@@ -2,20 +2,13 @@ import { z } from "zod";
 import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
-import type { MindTier, ModelCall } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import type { MindTier, ModelCall, PromptBudgetUse } from "./brain-log.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type GoalInput, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
-import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
-import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
-import { describeTime } from "./time-spent.ts";
-
-/** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
-/** The player inventory's main slots (hotbar included): a full inventory stops crafting and gathering. */
-const INVENTORY_SLOTS = 36;
-/** Steps of the current objective shown to the work tier: the latest ones are what it needs. */
-const PROMPT_STEPS = 10;
+import { budgetFor, fitPrompt, ModelCalibration, type PromptPart } from "./prompt-budget.ts";
+import { goalParts, historyPart, narrateParts, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
 
 /** A disposition, not a rule: what the character does with a request stays its own call (Rule #0). */
 const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
@@ -98,8 +91,19 @@ export class LlmMind implements Mind {
   /** `onCall`: told about every model call (the brain log, read by the monitor). */
   constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void) {}
 
-  private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
-    return ask(model, system, request, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
+  /** What each model has shown about its tokens and window: the budget of its next call is fitted to it. */
+  private readonly calibration = new ModelCalibration();
+
+  /**
+   * One call: the parts fitted to the tier's budget (cut to the model's window, estimated at its own characters per
+   * token), sent as one text that every repair round repeats; the first reply teaches the calibration.
+   */
+  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
+    const tokens = budgetFor(tier, this.calibration.window(model.name));
+    const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], tokens, this.calibration.charsPerToken(model.name));
+    const budget: PromptBudgetUse = { tokens, estimated: fitted.estimated, shrunk: fitted.shrunk, overBudget: fitted.overBudget };
+    const learn = (promptTokens: number | null, contextTokens: number | null) => this.calibration.learn(model.name, system.length + fitted.text.length, promptTokens, contextTokens);
+    return ask(model, system, fitted.text, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget }), learn);
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
@@ -123,28 +127,14 @@ export class LlmMind implements Mind {
     // now" after a line to Opus), or others talked among themselves just before, none of it to her ("pareil, je vois
     // plus les skins" after two players' lines on it).
     if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return leftAlone();
-    const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
     const canWait = input.canWait ?? true;
-    const request = [
-      describeSituation(input.snapshot, input.activity, input.places, input.areas),
-      // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
-      // once. The reply is written from what she knows: that it stops now.
-      ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first."]),
-      describeHistory(input.history),
-      // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
-      // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
-      describeConversation(input),
-      // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
-      // 2026-10-07).
-      `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
-    ].filter((part) => part !== "").join("\n\n");
     // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
     // it through).
     let firstReading: readonly string[] | null = null;
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
-    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait), request, signal, (json) => {
+    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait), chatParts(input, canWait), signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const restated = reply.request.trim();
       // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
@@ -221,7 +211,7 @@ export class LlmMind implements Mind {
     const skills = personaSkills(input.persona);
     let signChecked = false;
     const refused = input.refused ?? new Map<string, number>();
-    return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), describeWork(input), signal, (json) => {
+    return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), workParts(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
       // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
       // oak logs are in protected areas", was lost with the rejected reply) is read as what it says.
@@ -300,7 +290,7 @@ export class LlmMind implements Mind {
     let sentBack = false;
     // In our own order, not the chances': the list says what exists, the draw says what is likely.
     const available = ACTIVITIES.filter((activity) => input.chances.some((entry) => entry.activity === activity));
-    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona, available), describeGoal(input), signal, (json) => {
+    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona, available), goalParts(input), signal, (json) => {
       const { objective, for: purpose } = goalReplySchema.parse(json);
       const failed = input.lastFailed;
       if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
@@ -322,8 +312,7 @@ export class LlmMind implements Mind {
     const tell = input.outcome === "progress"
       ? "If it helps the players around you follow what you do and why, tell them in one short line, in character; if it adds nothing to what was already said, reply with an empty say."
       : "Tell the players around you in one short line, in character.";
-    const request = [describeHistory(input.history), news, tell].join("\n\n");
-    return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), request, signal, (json) => narrateReplySchema.parse(json).say);
+    return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), narrateParts(input, news, tell), signal, (json) => narrateReplySchema.parse(json).say);
   }
 }
 
@@ -336,7 +325,11 @@ const SEND_BACK_ROUNDS = 4;
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
 class SendBack extends Error {}
-async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
+/** `onFirstReply` hears the counts of the first reply only (a repair round's count is not a sample), whether `report` is set or not. */
+async function ask<T>(
+  model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T,
+  report?: (call: Omit<ModelCall, "tier" | "budget">) => void, onFirstReply?: (promptTokens: number | null, contextTokens: number | null) => void,
+): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = monotonicNow();
@@ -350,6 +343,7 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
     let text: string;
     try {
       const reply = await model.complete(turns, signal);
+      if (replies.length === 0) onFirstReply?.(reply.promptTokens, reply.contextTokens ?? null);
       text = reply.text;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
       contextTokens = reply.contextTokens ?? contextTokens;
@@ -499,7 +493,7 @@ ${persona.preferences === undefined ? "" : `- "work": first, the kind of work th
 `}Understand casual phrasing, typos, slang and other languages.`;
 }
 
-function narrateSystemPrompt(persona: Persona): string {
+export function narrateSystemPrompt(persona: Persona): string {
   return `${personaPrompt(persona)}
 ${persona.preferences === undefined ? "" : "\nYour feelings about the work may show in what you say.\n"}
 Reply with only a JSON object: {"say": "<your chat line>"}.`;
@@ -511,7 +505,7 @@ function skillList(persona: Persona, improveHouse = true): string {
 }
 
 /** The work tier (ADR-011): one step at a time, with the results of the last ones in view. */
-function workSystemPrompt(persona: Persona, ownsTemporaryHouse: boolean): string {
+export function workSystemPrompt(persona: Persona, ownsTemporaryHouse: boolean): string {
   return `${personaPrompt(persona)}
 
 You work towards your current objective one step at a time: pick the next step, see what it did, then pick again.
@@ -540,7 +534,7 @@ or {"give_up": "<why>"}.`;
 }
 
 /** The goal tier (ADR-011): the next concrete objective towards the character's own goal. */
-function goalSystemPrompt(persona: Persona, available: readonly Activity[]): string {
+export function goalSystemPrompt(persona: Persona, available: readonly Activity[]): string {
   const kinds = available.length === 0 ? "none of the kinds of work you know" : `one of ${available.map(describeActivity).join(", ")}`;
   return `${personaPrompt(persona)}
 
@@ -569,83 +563,6 @@ function knownByEarlierExplore(steps: readonly StepRecord[], block: string): str
     return record.detail.includes("you know of") ? /you know of is (.*?): get_items /u.exec(record.detail)?.[1] ?? record.detail : null;
   }
   return null;
-}
-
-function describeStepRecord(record: StepRecord, index: number): string {
-  return `${index + 1}. ${record.step} -> ${record.outcome}: ${record.detail}`;
-}
-
-function describeWork(input: WorkInput): string {
-  const { objective } = input;
-  const whose = objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
-  const steps = input.steps.slice(-PROMPT_STEPS);
-  return [
-    describeSituation(input.snapshot, `working on this objective`, input.places, input.areas),
-    `Objective (${whose}): ${JSON.stringify(objective.text)}`,
-    input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
-    steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
-    describeEarlierFailures((input.earlierFailures ?? []).filter((failure) => failure.objective === objective.text && !failure.changed)),
-    nowCarried(input),
-  ].filter((part) => part !== "").join("\n\n");
-}
-/**
- * Facts before, not corrections after (ADR-017): what already failed for this objective, and why. Other objectives'
- * failures guard by key (rule 2) but are not shown (live 2026-10-11: Theo's junk-drop hint of his own goal buried an
- * order's materials); nor is one whose cause changed (the inventory or the place differs: "no boat is carried" stayed
- * in a prompt while Vex crafted 13 boats).
- */
-function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
-  if (failures.length === 0) return "";
-  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago${failure.count >= MAX_STEP_FAILURES ? " (refused now)" : ""}: ${failure.detail}`);
-  return `Steps that failed lately in this objective (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
-}
-
-/**
- * A build refused for missing materials, when all of them are carried now: said, since the model did not see it (live
- * 2026-10-04: given everything a house lacked, Ayla went on looking for logs for 20 more steps and never built).
- */
-function nowCarried(input: WorkInput): string {
-  const refused = input.steps.findLast((record) => record.outcome === "failed" && /^missing .+ for .+ \(the rest is carried\)/u.test(record.detail));
-  if (refused === undefined) return "";
-  const [, list = "", what = ""] = /^missing (.+?) for (.+?) \(the rest is carried\)/u.exec(refused.detail) ?? [];
-  const carried = new Map<string, number>();
-  for (const stack of input.snapshot.inventory) carried.set(stack.name, (carried.get(stack.name) ?? 0) + stack.count);
-  const needed = list.split(", ").map((part) => /^(\d+) ([a-z0-9_]+)$/u.exec(part.trim())).filter((match) => match !== null);
-  if (needed.length === 0 || needed.some((match) => (carried.get(match[2]!) ?? 0) < Number(match[1]))) return "";
-  return `Everything ${what} was missing (${list}) is carried now: build it again.`;
-}
-
-function describeGoal(input: GoalInput): string {
-  return [
-    describeSituation(input.snapshot, "nothing", input.places, input.areas),
-    input.drawn.length === 0 ? "" : `Right now you feel most like ${input.drawn.map(describeActivity).join(", or else ")}.`,
-    `Things that could use doing, by what they are for: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
-    `How you spent the last hour: ${describeTime(input.time)}.`,
-    input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
-  ].filter((part) => part !== "").join("\n\n");
-}
-
-function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[]): string {
-  const { x, y, z } = snapshot.position;
-  // Every item, stacks of the same item added up, and how full it is: a list cut short hid the junk she could drop
-  // (live 2026-10-02: she dropped the roof's stairs and kept 64 snowballs she never saw).
-  const totals = new Map<string, number>();
-  for (const stack of snapshot.inventory) totals.set(stack.name, (totals.get(stack.name) ?? 0) + stack.count);
-  const inventory = snapshot.inventory.length === 0
-    ? "empty"
-    : `${[...totals].map(([name, count]) => `${count} ${name}`).join(", ")} (${snapshot.inventory.length} of ${INVENTORY_SLOTS} slots used)`;
-  const players = snapshot.players.length === 0
-    ? "none"
-    : snapshot.players.map((player) => player.position === null
-      ? `${player.username} (far away)`
-      : `${player.username} (${Math.round(Math.hypot(player.position.x - x, player.position.y - y, player.position.z - z))} blocks, at ${Math.floor(player.position.x)} ${Math.floor(player.position.y)} ${Math.floor(player.position.z)})`).join(", ");
-  return `Situation:
-- Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}; health ${Math.round(snapshot.health)}/20; food ${snapshot.food}/20.
-- Inventory: ${inventory}.
-- Players online: ${players}.
-- Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.
-- Protected areas (you never dig or place blocks there): ${areas.length === 0 ? "none" : areas.map((area) => `#${area.regionId} ${area.label} (owner ${area.owner}, ${area.min.x} ${area.min.y} ${area.min.z} to ${area.max.x} ${area.max.y} ${area.max.z})`).join("; ")}.
-- Currently doing: ${activity}.`;
 }
 
 /** Lines back a conversation with her still counts as going on... */
@@ -838,11 +755,32 @@ function withPlace(request: string, place: Place | undefined, input: ChatInput):
   return `${request} (at ${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}, where ${input.message.username} stands)`;
 }
 
-function describeHistory(history: readonly ChatLine[]): string {
-  if (history.length === 0) return "Recent chat: (none)";
-  // Whom each line spoke to, as she read it then ("unclear" says nothing, so it is left out).
-  const to = (line: ChatLine) => line.to === undefined || line.to.length === 0 || line.to.includes("unclear") ? "" : ` to ${line.to.join(", ")}`;
-  return `Recent chat (with whom each line spoke to, as you read it then):\n${history.map((line) => `${line.speaker}${to(line)}: ${JSON.stringify(line.text)}`).join("\n")}`;
+/** The names the chat prompt never drops from the players list: the speaker, those the history shows, those the message names. */
+function namesToKeep(input: ChatInput): string[] {
+  const inHistory = input.history.flatMap((line) => [line.speaker, ...(line.to ?? [])]);
+  return [input.message.username, ...inHistory, ...knownNamesOf(input).filter((name) => namesWord(input.message.message, name))];
+}
+
+/**
+ * The chat tier's user message as parts: the situation, what she is doing, the chat so far, what the history shows about
+ * the message, and the message itself (never shrunk).
+ */
+export function chatParts(input: ChatInput, canWait: boolean): PromptPart[] {
+  const { message } = input;
+  const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
+  return [
+    ...situationParts(input.snapshot, input.activity, input.places, input.areas, namesToKeep(input)),
+    // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
+    // once. The reply is written from what she knows: that it stops now.
+    { key: "taking-on", maxLevel: 0, render: () => canWait || input.activity === "idle" ? "" : "What you are doing now is your own: taking a request on (act) stops it at once, so you start right away and never finish it first." },
+    historyPart(input.history),
+    // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
+    // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
+    { key: "conversation", maxLevel: 0, render: () => describeConversation(input) },
+    // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
+    // 2026-10-07).
+    { key: "message", maxLevel: 0, render: () => `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)` },
+  ];
 }
 
 /** Models often wrap JSON in prose or code fences; take the outermost object. */

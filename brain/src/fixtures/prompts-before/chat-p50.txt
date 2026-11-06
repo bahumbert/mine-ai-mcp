@@ -1,0 +1,24 @@
+Situation:
+- Position 0 64 0; health 20/20; food 20/20.
+- Inventory: 1 item_number_1, 2 item_number_2 (2 of 36 slots used).
+- Players online: Player1 (11 blocks, at 10 64 5), Player2 (21 blocks, at 20 64 5), Player3 (30 blocks, at 30 64 5).
+- Places you know: the small medieval house you built for yourself (door -1204 76 803 facing north); a farm of wheat (around 40 64 -20); note: iron seen (at 300 20 -45).
+- Protected areas (you never dig or place blocks there): #1 area 1 (owner Steve, 20 60 0 to 28 80 8).
+- Currently doing: idle.
+
+Recent chat (with whom each line spoke to, as you read it then):
+Steve: "line1 0 line1 8 line1 16 line1 25 line1 34 line1 43 line1 52 line1 61 line1 70 line1 79 li"
+Ayla to Steve: "line2 0 line2 8 line2 16 line2 25 line2 34 line2 43 line2 52 line2 61 line2 70 line2 79 li"
+Steve: "line3 0 line3 8 line3 16 line3 25 line3 34 line3 43 line3 52 line3 61 line3 70 line3 79 li"
+Ayla to Steve: "line4 0 line4 8 line4 16 line4 25 line4 34 line4 43 line4 52 line4 61 line4 70 line4 79 li"
+Steve: "line5 0 line5 8 line5 16 line5 25 line5 34 line5 43 line5 52 line5 61 line5 70 line5 79 li"
+Ayla to Steve: "line6 0 line6 8 line6 16 line6 25 line6 34 line6 43 line6 52 line6 61 line6 70 line6 79 li"
+Steve: "line7 0 line7 8 line7 16 line7 25 line7 34 line7 43 line7 52 line7 61 line7 70 line7 79 li"
+Ayla to Steve: "line8 0 line8 8 line8 16 line8 25 line8 34 line8 43 line8 52 line8 61 line8 70 line8 79 li"
+Steve: "line9 0 line9 8 line9 16 line9 25 line9 34 line9 43 line9 52 line9 61 line9 70 line9 79 li"
+Ayla to Steve: "line10 0 line10 9 line10 18 line10 28 line10 38 line10 48 line10 58 line10 68 line10 78 li"
+Steve: "line11 0 line11 9 line11 18 line11 28 line11 38 line11 48 line11 58 line11 68 line11 78 li"
+Ayla to Steve: "line12 0 line12 9 line12 18 line12 28 line12 38 line12 48 line12 58 line12 68 line12 78 li"
+
+New message: Player2 says in chat, naming you: "Ayla, can you help Player3 with the fence?"
+("say" is written in this message's language, the one you name in "language".)
