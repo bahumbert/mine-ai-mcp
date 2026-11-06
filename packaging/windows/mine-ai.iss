@@ -108,6 +108,14 @@ const
   // RunLauncherAndWait gives LAUNCHER_NOT_STARTED when bun.exe or the launcher is missing or cannot start: that is no refusal to stop either.
   STOP_REFUSED_EXIT_CODE = 3;
   LAUNCHER_NOT_STARTED = -1;
+  // The launcher's exit code for arguments it cannot use (main.ts runCli; iss-launcher-calls.test.ts runs it). `configure
+  // --llm-remote-saved-key` ends with it when the settings hold no key it can read: another Windows user's or PC's blob, or none.
+  USAGE_EXIT_CODE = 2;
+  // The key box shows this (masked) while the settings hold an encrypted key: the setup never decrypts, so it has no key to show. The
+  // mark reaches no launcher call; KeySaved says the box is untouched.
+  SAVED_KEY_MARK = 'saved-key-unchanged';
+  KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';
+  SAVED_KEY_UNUSABLE_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Type the key again in the API key box, replacing the dots (silent install: /LLMKEY=).';
   // What the player does by hand when a removal asked for at uninstall did not happen: {app} is gone by then, so no "run this step again".
   OLLAMA_REMOVE_BY_HAND = 'Remove Ollama yourself: Windows Settings > Apps > Installed apps > Ollama > Uninstall.';
   // Setup stores the data folder under this name (GetPreviousData/SetPreviousData); the uninstaller reads it back from the
@@ -145,6 +153,9 @@ var
   StepsLog: TNewMemo;
   ActiveGauge: TNewProgressBar;
   ActiveStatus: TNewStaticText;
+  // KeySaved: the key box holds the mark of an encrypted key the player has not touched (the launcher keeps that key). ClearKeyMigrated:
+  // the settings held the key in clear; the first save encrypts it and the player is told once (NoteClearKeyMigrated).
+  KeySaved, ClearKeyMigrated: Boolean;
   GpuChecked, GpuVerdictIsRemote, OllamaFolderNeeded, OllamaReady, SetupDone, PreviousLlmWasRemote, SilentWantsLocalModel: Boolean;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
@@ -814,16 +825,59 @@ begin
   Result := ExpandConstant('{tmp}\mine-ai-models.txt');
 end;
 
-// What is wrong with the URL (and with the key, which the launcher gets on its command line); '' when the endpoint can be called.
+// What is wrong with the URL (and with a typed key, which the launcher gets on its command line); '' when the endpoint can be called.
+// A URL the launcher's `configure` would refuse (configure-command.ts checkEndpoint: a scheme and something after it) is refused here: a
+// refusal by the launcher with a saved key is read by ConfigureFailure as "the saved key cannot be used".
 function RemoteUrlProblem(): String;
 begin
   Result := '';
   if (Pos('http://', RemoteUrlEdit.Text) <> 1) and (Pos('https://', RemoteUrlEdit.Text) <> 1) then
     Result := 'The endpoint URL must start with http:// or https://.'
+  else if (Trim(RemoteUrlEdit.Text) = 'http://') or (Trim(RemoteUrlEdit.Text) = 'https://') then
+    Result := 'The endpoint URL needs an address after http:// or https:// (for example https://openrouter.ai/api/v1).'
   else if (Pos('<', RemoteUrlEdit.Text) > 0) or (Pos('>', RemoteUrlEdit.Text) > 0) then
     Result := 'Replace <IP> with the address of the PC that runs Ollama (for example 192.168.1.20).'
   else if (Pos('"', RemoteUrlEdit.Text + RemoteKeyEdit.Text) > 0) or (Pos(' ', Trim(RemoteUrlEdit.Text)) > 0) then
     Result := 'The URL has no spaces and no field contains a double quote.';
+end;
+
+// Any edit of the key box (a typed key, a cleared box, a fill button) means the saved key is no longer the one to keep.
+procedure RemoteKeyChanged(Sender: TObject);
+begin
+  KeySaved := False;
+end;
+
+// The key part of `install endpoint-models`: the saved key stays in the settings (`--saved-key`), a typed one is given (`--key`, empty
+// included: without a key option the launcher falls back to the settings' key, so an empty box must say so).
+function ListKeyArguments(): String;
+begin
+  if KeySaved then
+    Result := ' --saved-key'
+  else
+    Result := ' --key ' + Quoted(RemoteKeyEdit.Text);
+end;
+
+// The LLM part of `configure`, for the endpoint page's save and the progress page's save: the saved key is kept by the launcher and never
+// travels on a command line; a typed key (or a clear key an older install saved) is given as before.
+function RemoteLlmArguments(): String;
+begin
+  if KeySaved then
+    Result := '--llm-remote-saved-key ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(Trim(RemoteModelCombo.Text))
+  else
+    Result := '--llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelCombo.Text));
+end;
+
+// After the first successful `configure` over a key the settings held in clear: the launcher encrypted it, and the setup throws
+// configure's words away, so it says so itself, once (owner rule: an automatic change is always told). Not told when the box was emptied
+// (no key was saved) or the local model was chosen.
+procedure NoteClearKeyMigrated();
+begin
+  if (not ClearKeyMigrated) or (RemoteKeyEdit.Text = '') then
+    Exit;
+  ClearKeyMigrated := False;
+  Log('API key: ' + KEY_ENCRYPTED_NOTICE);
+  if not WizardSilent then
+    SuppressibleMsgBox(KEY_ENCRYPTED_NOTICE, mbInformation, MB_OK, IDOK);
 end;
 
 // The text without the notice that starts it: the launcher's error and detail start with the /v1 notice, which is shown on its own.
@@ -1000,7 +1054,7 @@ begin
   SetArrayLength(ModelListLines, 0);
   // A list file of an earlier press must never be read as this press's answer: the step writes none on a failure.
   DeleteFile(ModelListFile());
-  Listed := RunStepSucceeded('install endpoint-models --url ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' --key ' + Quoted(RemoteKeyEdit.Text) + ' --list ' + Quoted(ModelListFile()), EndpointGauge, EndpointStepStatus, Json);
+  Listed := RunStepSucceeded('install endpoint-models --url ' + Quoted(Trim(RemoteUrlEdit.Text)) + ListKeyArguments() + ' --list ' + Quoted(ModelListFile()), EndpointGauge, EndpointStepStatus, Json);
   ApplyEndpointCorrection(Json);
   if Listed and LoadModelList() then
     ListStatus.Caption := WithoutNotice(JsonString(Json, 'detail'), JsonString(Json, 'notice'))
@@ -1212,17 +1266,33 @@ begin
 end;
 
 // An update (or a second run) starts from the settings.json of the data folder, so it never resets a server or an endpoint.
+// The key: an encrypted one (apiKeyProtected) is never decrypted here; the box shows the mark and the launcher keeps the key
+// (KeySaved). A clear one (an install before the encryption) fills the box as before and is encrypted by the first save.
+// This also runs on the data page's Next: the box and the flag are emptied first, so a Back to another data folder keeps nothing of the last.
 procedure PrefillFromSettings();
 var
   Llm, Server, Kind: String;
 begin
+  RemoteKeyEdit.Text := '';
+  KeySaved := False;
+  ClearKeyMigrated := False;
   if not ReadSettingsSections(Llm, Server) then
     Exit;
   if JsonString(Llm, 'kind') = 'remote' then
   begin
     PreviousLlmWasRemote := True;
     RemoteUrlEdit.Text := JsonString(Llm, 'baseUrl');
-    RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
+    if JsonString(Llm, 'apiKeyProtected') <> '' then
+    begin
+      // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
+      RemoteKeyEdit.Text := SAVED_KEY_MARK;
+      KeySaved := True;
+    end
+    else if JsonString(Llm, 'apiKey') <> '' then
+    begin
+      RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
+      ClearKeyMigrated := True;
+    end;
     RemoteModelCombo.Text := JsonString(Llm, 'model');
   end;
   Kind := JsonString(Server, 'kind');
@@ -1275,7 +1345,10 @@ begin
   if ParamGiven('LLMURL') then
     RemoteUrlEdit.Text := Param('LLMURL', '');
   if ParamGiven('LLMKEY') then
+  begin
     RemoteKeyEdit.Text := Param('LLMKEY', '');
+    KeySaved := False;
+  end;
   if ParamGiven('LLMMODEL') then
     RemoteModelCombo.Text := Param('LLMMODEL', '');
   Server := Param('SERVER', PARAM_UNSET);
@@ -1304,6 +1377,8 @@ begin
     ApplySilentParameters()
   else
     PrefillFromSettings();
+  // After the first prefill: its own assignments are not edits by the player. A silent /LLMKEY= clears KeySaved itself.
+  RemoteKeyEdit.OnChange := @RemoteKeyChanged;
 end;
 
 // Silent Setup still clicks through every page that is not skipped once the files are copied (measured with a probe
@@ -1406,17 +1481,31 @@ begin
     Result := 'The URL has no spaces and no field contains a double quote.';
 end;
 
+// Why a `configure` of the remote endpoint failed (Lead says what did not happen). When the key is the saved one and the launcher ended with
+// its usage code, the saved key is what it could not use: its own text names the usage line and "run the setup again", which is no help
+// inside the setup, so the setup says what to do here.
+function ConfigureFailure(const Lead: String; Code: Integer): String;
+begin
+  if KeySaved and ModelRemoteRadio.Checked and (Code = USAGE_EXIT_CODE) then
+    Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_TEXT
+  else
+    Result := Lead + #13#10 + LastLogTail;
+end;
+
 // Saves the endpoint, then makes one test call with the brain's own parameters (`install endpoint-test`); Failure says why not.
 // A URL the test corrected (it added /v1) is put in the URL box and told once; the failure text then leaves the notice out.
 function SaveAndTestEndpoint(var Failure: String): Boolean;
 var
   Json: String;
+  Code: Integer;
 begin
   Result := False;
-  if RunLauncher('configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelCombo.Text)), False, EndpointGauge, EndpointStepStatus, Json) <> 0 then
-    Failure := 'Mine AI could not save the endpoint.' + #13#10 + LastLogTail
+  Code := RunLauncher('configure ' + RemoteLlmArguments(), False, EndpointGauge, EndpointStepStatus, Json);
+  if Code <> 0 then
+    Failure := ConfigureFailure('Mine AI could not save the endpoint.', Code)
   else
   begin
+    NoteClearKeyMigrated();
     Result := RunStepSucceeded('install endpoint-test', EndpointGauge, EndpointStepStatus, Json);
     ApplyEndpointCorrection(Json);
     if Result then
@@ -1551,7 +1640,7 @@ end;
 function ConfigureArguments(): String;
 begin
   if ModelRemoteRadio.Checked then
-    Result := 'configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelCombo.Text))
+    Result := 'configure ' + RemoteLlmArguments()
   else
     Result := 'configure --llm-local';
   if ServerLocalRadio.Checked then
@@ -1587,15 +1676,17 @@ end;
 function RunConfigure(): Boolean;
 var
   Ignored: String;
+  Code: Integer;
 begin
   StepsStatus.Caption := 'Saving your choices...';
-  Result := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored) = 0;
+  Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  Result := Code = 0;
   if Result then
     NoteSetup('OK   settings saved in ' + DataDir('') + '\settings.json')
   else
   begin
-    SetupFailure := 'Mine AI could not save your choices in settings.json. ' + LastLogTail;
-    NoteSetup('FAIL settings: ' + LastLogTail);
+    SetupFailure := ConfigureFailure('Mine AI could not save your choices in settings.json.', Code);
+    NoteSetup('FAIL settings: ' + SetupFailure);
   end;
 end;
 
@@ -1678,6 +1769,7 @@ end;
 //   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none; install model
 //   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none; install model
 //   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port>
+//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model>; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port>
 //   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local; install model; install java; install server --accept-eula
 //   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none
 //   CALLS /DELETEDATA=1 (uninstall): stop; install model-remove; install ollama-remove

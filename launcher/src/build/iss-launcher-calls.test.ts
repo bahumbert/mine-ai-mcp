@@ -12,7 +12,9 @@ import type { CliContext } from "../cli-context.ts";
 import { runConfigureCommand } from "../configure-command.ts";
 import { STOP_REFUSED_EXIT_CODE } from "../control-commands.ts";
 import { INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "../install-command.ts";
+import { runCli } from "../main.ts";
 import { loadManifest } from "../manifest.ts";
+import { loadSettings, settingsPath } from "../settings.ts";
 
 const repoRoot = join(import.meta.dirname, "..", "..", "..");
 const iss = readFileSync(join(repoRoot, "packaging", "windows", "mine-ai.iss"), "utf8");
@@ -46,11 +48,26 @@ function setup() {
   return { root, context, stepsRun, steps };
 }
 
+/** A CALLS parameter set marked `(key-saved)` is an update over settings that already hold a remote key and are given no /LLMKEY=. */
+const KEY_SAVED = "(key-saved)";
+
+/** What the settings file holds for the remote key, as written (on Windows an `apiKeyProtected` blob, elsewhere the clear `apiKey`), and the key as the launcher reads it. */
+function savedKey(root: string): { readonly fileApiKey: unknown; readonly fileBlob: unknown; readonly loaded: string } {
+  const file = (JSON.parse(readFileSync(settingsPath(root), "utf8")) as { llm: { apiKey?: unknown; apiKeyProtected?: unknown } }).llm;
+  const llm = loadSettings(root, loadManifest()).llm;
+  assert.equal(llm.kind, "remote");
+  return { fileApiKey: file.apiKey, fileBlob: file.apiKeyProtected, loaded: llm.kind === "remote" ? llm.apiKey : "" };
+}
+
 test("every launcher call of every silent parameter set runs on the CLI and leaves the settings the parameters name", async () => {
   for (const { parameters, calls } of callsLines()) {
     const t = setup();
     const label = `${parameters.join(" ")}: ${calls.join("; ")}`;
     const installs: string[] = [];
+    const keyWasSaved = parameters.includes(KEY_SAVED);
+    // The update's earlier install: the key is saved through `configure --llm-remote` (encrypted on Windows, clear in WSL).
+    if (keyWasSaved) assert.equal(await runConfigureCommand(["--llm-remote", VALUES["<url>"]!, VALUES["<key>"]!, "old-model"], t.context, { totalRamBytes: () => 32 * 1024 ** 3 }), 0, `${label}: the earlier save`);
+    const before = keyWasSaved ? savedKey(t.root) : undefined;
     for (const call of calls) {
       const words = call.split(" ").map((word) => VALUES[word] ?? word);
       const [name, ...args] = words;
@@ -65,6 +82,12 @@ test("every launcher call of every silent parameter set runs on the CLI and leav
     const wanted = (name: string): string | undefined => parameters.find((parameter) => parameter.startsWith(`/${name}=`))?.slice(name.length + 2);
     if (wanted("LLM") !== undefined) assert.equal(settings().llm?.kind, wanted("LLM"), label);
     if (wanted("SERVER") !== undefined) assert.equal(settings().server?.kind, wanted("SERVER"), label);
+    // The saved-key form keeps the key as it was (the blob byte for byte on Windows) and takes the new model.
+    if (before !== undefined) {
+      assert.deepEqual(savedKey(t.root), before, `${label}: the saved key changed`);
+      assert.equal(before.loaded, VALUES["<key>"], label);
+      assert.equal((settings() as { llm: { model?: string } }).llm.model, VALUES["<model>"], label);
+    }
   }
 });
 
@@ -73,7 +96,7 @@ test("every launcher call of every silent parameter set runs on the CLI and leav
  * Each has the reason it is exempt and the flags only it passes (the other flags stay checked against the CALLS lines).
  */
 const WIZARD_ONLY_STEPS: Readonly<Record<string, { readonly reason: string; readonly flags: readonly string[] }>> = {
-  "endpoint-models": { reason: "fills the endpoint page's model list on the player's button; a silent install gives /LLMMODEL= and never lists", flags: ["--url", "--key", "--list"] },
+  "endpoint-models": { reason: "fills the endpoint page's model list on the player's button; a silent install gives /LLMMODEL= and never lists", flags: ["--url", "--key", "--saved-key", "--list"] },
   disk: { reason: "the model page's free-space text (spec D2); nobody reads it in a silent install, whose steps keep their own guards", flags: ["--no-model"] },
 };
 
@@ -415,8 +438,6 @@ test("the model name is a drop-down combo box on the endpoint page; no RemoteMod
   assert.match(functionBody("CreateEndpointPage"), /RemoteModelCombo\.Style := csDropDown/u);
   assert.match(functionBody("ApplySilentParameters"), /RemoteModelCombo\.Text := Param\('LLMMODEL', ''\)/u);
   assert.match(functionBody("PrefillFromSettings"), /RemoteModelCombo\.Text := JsonString\(Llm, 'model'\)/u);
-  // ConfigureArguments (the progress page's save) reads the combo and the URL box the /v1 correction wrote.
-  assert.match(functionBody("ConfigureArguments"), /Quoted\(Trim\(RemoteUrlEdit\.Text\)\)[\s\S]*Quoted\(Trim\(RemoteModelCombo\.Text\)\)/u);
 });
 
 test("the endpoint test and the model list run on the endpoint page's own gauge and status, never the model page's", () => {
@@ -472,9 +493,8 @@ test("`install disk` is run by the model page's disk text only, after `install g
 test("the model list: the stale list file is deleted before each run and read only when the step succeeded; the key is always given; a failure shows the step's text in the list status without a box", () => {
   const list = functionBody("ListModels");
   assert.ok(list.includes("DeleteFile(ModelListFile())") && list.indexOf("DeleteFile(ModelListFile())") < list.indexOf("'install endpoint-models"), "the stale file is not deleted before the run");
-  // The key option is given even when empty: without --key the launcher falls back to the settings' key (endpoint-models.ts).
-  assert.match(list, /'install endpoint-models --url ' \+ Quoted\(Trim\(RemoteUrlEdit\.Text\)\)/u);
-  assert.match(list, /' --key ' \+ Quoted\(RemoteKeyEdit\.Text\)/u);
+  // A key option is always given, even for an empty key: without one the launcher falls back to the settings' key (endpoint-models.ts).
+  assert.match(list, /'install endpoint-models --url ' \+ Quoted\(Trim\(RemoteUrlEdit\.Text\)\) \+ ListKeyArguments\(\)/u);
   assert.match(list, /' --list ' \+ Quoted\(ModelListFile\(\)\)/u);
   assert.match(list, /RemoteUrlProblem\(\)/u);
   assert.doesNotMatch(list, /RemoteFieldProblem/u, "listing must not demand the model name it is there to find");
@@ -508,6 +528,103 @@ test("Ollama on another PC: the fill button writes http://<IP>:11434/v1, empties
   assert.match(problem, /\(Pos\('<', RemoteUrlEdit\.Text\) > 0\) or \(Pos\('>', RemoteUrlEdit\.Text\) > 0\)/u);
   assert.ok(problem.includes("Replace <IP> with the address of the PC that runs Ollama (for example 192.168.1.20)."));
   assert.match(functionBody("RemoteFieldProblem"), /RemoteUrlProblem\(\)/u);
+});
+
+// ---------- T4b: the saved key in the setup, the migration notice, the player doc (spec D3 "The setup never decrypts", D4(c)) ----------
+
+test("the setup never reads a key: apiKey and apiKeyProtected are read in PrefillFromSettings only, and the box shows a mark when a blob is saved", () => {
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => /'apiKey/u.test(body)).map(([name]) => name), ["PrefillFromSettings"]);
+  const prefill = functionBody("PrefillFromSettings");
+  // Empty box and flag first, before the file is read: this also runs on the data page's Next, and a Back to another data folder must not keep the mark.
+  const emptied = prefill.indexOf("RemoteKeyEdit.Text := '';");
+  const cleared = prefill.indexOf("KeySaved := False;");
+  const read = prefill.indexOf("ReadSettingsSections(");
+  assert.ok(emptied >= 0 && cleared >= 0 && emptied < read && cleared < read, "the box and KeySaved are not reset before the file is read");
+  // The mark first, the flag after it: an OnChange fired by the assignment must not leave the flag cleared.
+  const mark = prefill.indexOf("RemoteKeyEdit.Text := SAVED_KEY_MARK;");
+  const flag = prefill.indexOf("KeySaved := True;");
+  assert.ok(mark > read && flag > mark, "KeySaved is set before the mark is in the box");
+  assert.match(prefill, /JsonString\(Llm, 'apiKeyProtected'\) <> ''/u);
+  // The mark is the box's text and nothing else: it reaches no launcher call.
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("SAVED_KEY_MARK")).map(([name]) => name), ["PrefillFromSettings"]);
+});
+
+test("a key typed in the box is sent; a key the setup did not touch is never on a command line: the box text goes to the launcher only behind a KeySaved test, in RemoteLlmArguments and ListKeyArguments", () => {
+  const holders = [...codeFunctions()].filter(([, body]) => body.includes("Quoted(RemoteKeyEdit.Text)")).map(([name]) => name).sort();
+  assert.deepEqual(holders, ["ListKeyArguments", "RemoteLlmArguments"]);
+  assert.match(functionBody("RemoteLlmArguments"), /if KeySaved then\s+Result := '--llm-remote-saved-key ' \+ Quoted\(Trim\(RemoteUrlEdit\.Text\)\) \+ ' ' \+ Quoted\(Trim\(RemoteModelCombo\.Text\)\)\s+else\s+Result := '--llm-remote ' \+ Quoted\(Trim\(RemoteUrlEdit\.Text\)\) \+ ' ' \+ Quoted\(RemoteKeyEdit\.Text\)/u);
+  assert.match(functionBody("ListKeyArguments"), /if KeySaved then\s+Result := ' --saved-key'\s+else\s+Result := ' --key ' \+ Quoted\(RemoteKeyEdit\.Text\)/u);
+  // One builder of the configure's LLM part, used by the endpoint page's save and the progress page's save: no second `--llm-remote` spelling.
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("'--llm-remote")).map(([name]) => name), ["RemoteLlmArguments"]);
+  for (const name of ["SaveAndTestEndpoint", "ConfigureArguments"]) assert.match(functionBody(name), /RemoteLlmArguments\(\)/u, name);
+});
+
+test("any edit of the key box clears KeySaved, attached after the first prefill; a silent /LLMKEY= clears it too", () => {
+  assert.match(functionBody("RemoteKeyChanged"), /KeySaved := False;/u);
+  const init = functionBody("InitializeWizard");
+  const attached = init.indexOf("RemoteKeyEdit.OnChange := @RemoteKeyChanged;");
+  assert.ok(attached > init.indexOf("ApplySilentParameters()") && attached > init.indexOf("PrefillFromSettings()"), "the handler is attached before the first prefill");
+  assert.match(functionBody("ApplySilentParameters"), /if ParamGiven\('LLMKEY'\) then\s+begin\s+RemoteKeyEdit\.Text := Param\('LLMKEY', ''\);\s+KeySaved := False;\s+end;/u);
+});
+
+test("a saved key that cannot be used is told in the setup's words, never the launcher's usage text, for the endpoint page's save and the progress page's save", () => {
+  const text = functionBody("ConfigureFailure");
+  assert.match(text, /KeySaved and ModelRemoteRadio\.Checked and \(Code = USAGE_EXIT_CODE\)/u);
+  assert.match(code, /SAVED_KEY_UNUSABLE_TEXT = '[^']*Type the key again in the API key box[^']*\/LLMKEY=/u);
+  assert.match(functionBody("SaveAndTestEndpoint"), /ConfigureFailure\('Mine AI could not save the endpoint\.', Code\)/u);
+  assert.match(functionBody("RunConfigure"), /ConfigureFailure\('Mine AI could not save your choices in settings\.json\.', Code\)/u);
+  // Exit 2 is the launcher's code for any usage error, so a URL its configure refuses (a scheme with nothing after it) must be refused by the
+  // setup first, or a good saved key would be reported unusable.
+  assert.match(functionBody("RemoteUrlProblem"), /\(Trim\(RemoteUrlEdit\.Text\) = 'http:\/\/'\) or \(Trim\(RemoteUrlEdit\.Text\) = 'https:\/\/'\)/u);
+});
+
+test("the launcher answers a configure that cannot keep the saved key with the exit code the setup reads as 'key unusable'", async () => {
+  assert.equal(Number(/^\s+USAGE_EXIT_CODE = (\d+);/mu.exec(iss)?.[1]), 2);
+  const t = setup();
+  // No settings at all: no saved key (a blob another user wrote gives the same UsageError, configure-command.test.ts).
+  const exit = await runCli(["configure", "--llm-remote-saved-key", VALUES["<url>"]!, VALUES["<model>"]!], t.context);
+  assert.equal(exit, Number(/^\s+USAGE_EXIT_CODE = (\d+);/mu.exec(iss)?.[1]));
+  assert.equal(existsSync(settingsPath(t.root)), false, "a refused configure wrote the settings");
+});
+
+test("the encryption notice is shown and logged once, after the first successful configure, and only when a key really was saved", () => {
+  const note = functionBody("NoteClearKeyMigrated");
+  assert.match(note, /if \(not ClearKeyMigrated\) or \(RemoteKeyEdit\.Text = ''\) then\s+Exit;/u);
+  assert.ok(code.includes("KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';"));
+  assert.match(note, /ClearKeyMigrated := False;/u);
+  assert.match(note, /if not WizardSilent then\s+SuppressibleMsgBox\(KEY_ENCRYPTED_NOTICE/u);
+  // A clear key in the file: set by the prefill, from the settings' own apiKey.
+  assert.match(functionBody("PrefillFromSettings"), /ClearKeyMigrated := True;/u);
+  assert.match(functionBody("PrefillFromSettings"), /ClearKeyMigrated := False;/u);
+  const save = functionBody("SaveAndTestEndpoint");
+  const configured = save.indexOf("'configure ' + RemoteLlmArguments()");
+  assert.ok(configured >= 0 && save.indexOf("NoteClearKeyMigrated()") > configured && save.indexOf("NoteClearKeyMigrated()") < save.indexOf("'install endpoint-test'"), "the notice is not between the save and the test");
+  assert.match(save, /else\s+begin\s+NoteClearKeyMigrated\(\);/u, "the notice is not in the branch of a successful configure");
+});
+
+test("the doc tells the player about the remote endpoint: Ollama on another PC with its firewall line, the list and what it costs, the /v1 correction, the encrypted key", () => {
+  const titles = [...doc.matchAll(/^#{2,3} (.+)$/gmu)].map((match) => match[1]!);
+  for (const title of ["A remote AI endpoint", "Listing the models", "The /v1 correction", "Ollama on another PC", "Your API key"]) assert.ok(titles.includes(title), `no section "${title}"`);
+  const section = doc.slice(doc.indexOf("## A remote AI endpoint"), doc.indexOf("## Ollama you already have"));
+  assert.ok(section.includes('New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -Protocol TCP -LocalPort 11434 -Profile Private -Action Allow'));
+  assert.match(section, /OLLAMA_HOST=0\.0\.0\.0:11434/u);
+  assert.match(section, /Ollama has no password/u);
+  assert.match(section, /List models/u);
+  assert.match(section, /no text|generates no text/u);
+  assert.match(section, /one short test message/u);
+  assert.match(section, /`\/v1`/u);
+  assert.match(section, /another Windows user or on another PC/u);
+  assert.match(section, /\/LLMKEY=/u);
+  assert.match(section, /goes to whatever URL is in the URL box/u);
+  assert.match(doc, /\| `\/LLMKEY=` \|[^\n]*an empty one removes the saved key[^\n]*Leave it out to keep/u);
+  // settings.json: the key is not in clear.
+  const settings = doc.slice(doc.indexOf("## Settings, data and logs"), doc.indexOf("## Ollama you already have"));
+  assert.ok(settings.includes("apiKeyProtected"));
+  // /LOG records the command line: a key given as /LLMKEY= is in the log.
+  const silent = doc.slice(doc.indexOf("## Silent install"));
+  assert.match(silent, /\/LOG=[^\n]*\/LLMKEY=|\/LLMKEY=[^\n]*\/LOG=/u);
+  // The flag is internal: the player's doc never names it.
+  assert.doesNotMatch(doc, /llm-remote-saved-key|--saved-key/u);
 });
 
 interface TestCompiler {
