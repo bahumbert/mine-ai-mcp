@@ -4,7 +4,7 @@
  * Sizes come from data (a response header, the registry's manifest, `packaging/manifest.json`), never from a table here.
  */
 import { existsSync, statSync } from "node:fs";
-import { readdir, stat, statfs } from "node:fs/promises";
+import { readdir, readFile, statfs } from "node:fs/promises";
 import path, { join } from "node:path";
 import { z } from "zod";
 import { failure, type StepFailure } from "./step.ts";
@@ -115,7 +115,8 @@ export function spaceFailure(short: Shortfall, hint: string): StepFailure {
 export interface ModelStoreDeps {
   fetchImpl: typeof fetch;
   exists(path: string): boolean;
-  sizeOf(path: string): Promise<number>;
+  /** The text of a part file of a cut pull. */
+  readText(path: string): Promise<string>;
   /** The names in a folder; empty when it is missing. */
   listDir(path: string): Promise<string[]>;
   /** The bound of the registry read (default 15 s); tests shorten it. */
@@ -125,20 +126,33 @@ export interface ModelStoreDeps {
 export const realModelStoreDeps: ModelStoreDeps = {
   fetchImpl: fetch,
   exists: existsSync,
-  sizeOf: async (file) => (await stat(file)).size,
+  readText: (file) => readFile(file, "utf8"),
   listDir: (folder) => readdir(folder).catch(() => []),
 };
 
 const blobSchema = z.object({ digest: z.string().regex(/^sha256:[0-9a-f]{64}$/u), size: z.number().int().nonnegative() });
 const registryManifestSchema = z.object({ config: blobSchema, layers: z.array(blobSchema) });
 
-/** Bytes of `blob` the store lacks: 0 for a complete `blobs/sha256-<hex>`, else its size minus its `-partial*` files (a resumed pull). */
+/** One `<blob>-partial-<N>` file of Ollama's resumable pull: how much of its 100 MB part is done. */
+const partProgressSchema = z.object({ Completed: z.number().int().nonnegative() });
+
+/**
+ * Bytes of `blob` the store lacks: 0 for a complete `blobs/sha256-<hex>`, else its size minus what the `<blob>-partial-<N>`
+ * files say they completed. The `<blob>-partial` file itself is as long as the whole layer from the start (Ollama 0.35.0,
+ * measured 2026-11-06), so its size says nothing about progress; a part file that cannot be read counts as nothing done.
+ */
 async function missingBytes(blob: z.infer<typeof blobSchema>, blobsDir: string, names: readonly string[], deps: ModelStoreDeps): Promise<number> {
   const file = blob.digest.replace(":", "-");
   if (deps.exists(join(blobsDir, file))) return 0;
-  let partial = 0;
-  for (const name of names.filter((candidate) => candidate.startsWith(`${file}-partial`))) partial += await deps.sizeOf(join(blobsDir, name));
-  return Math.max(0, blob.size - partial);
+  let completed = 0;
+  for (const name of names.filter((candidate) => candidate.startsWith(`${file}-partial-`))) {
+    try {
+      completed += partProgressSchema.parse(JSON.parse(await deps.readText(join(blobsDir, name)))).Completed;
+    } catch {
+      // a part file being rewritten or damaged: that part is counted as not done
+    }
+  }
+  return Math.max(0, blob.size - completed);
 }
 
 /**

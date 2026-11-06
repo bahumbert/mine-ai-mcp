@@ -17,27 +17,10 @@ import {
   type DiskDeps,
   type ModelStoreDeps,
 } from "./disk.ts";
+import { fakeDisk } from "./fixtures/fake-disk.ts";
 
 const GIB = 1024 ** 3;
 const RESERVE = GIB;
-
-/** A disk where `existing` folders exist and each `roots` prefix has the given free bytes (and the `dev` number `devs` names). */
-function fakeDisk(options: { platform: NodeJS.Platform; existing: string[]; roots: Record<string, number>; devs?: Record<string, string> }): DiskDeps & { statfsCalls: string[] } {
-  const statfsCalls: string[] = [];
-  const rootOf = (path: string) => Object.keys(options.roots).find((root) => path.toUpperCase().startsWith(root.toUpperCase()));
-  return {
-    platform: options.platform,
-    statfsCalls,
-    exists: (path) => options.existing.includes(path),
-    statfs: async (path) => {
-      statfsCalls.push(path);
-      const root = rootOf(path);
-      if (root === undefined) throw Object.assign(new Error(`ENOENT: no such file or directory, statfs '${path}'`), { code: "ENOENT" });
-      return { bavail: BigInt(options.roots[root]), bsize: 1n };
-    },
-    dev: (path) => Object.entries(options.devs ?? {}).sort((a, b) => b[0].length - a[0].length).find(([prefix]) => path.startsWith(prefix))?.[1] ?? "0",
-  };
-}
 
 const windowsDisk = (existing: string[], roots: Record<string, number>) => fakeDisk({ platform: "win32", existing, roots });
 
@@ -140,8 +123,8 @@ const MODEL_LAYER = "sha256-bb722270d54346adc198f213851dbe0207e87c3ecf2a0aff4d92
 const FILE_PARTS = ["registry.ollama.ai", "library", "gemma4", "12b"];
 const STORE = "/store";
 
-/** A model store holding `blobs` (name -> size); the registry answers `body` with `status` unless `fetchImpl` is given. */
-function fakeStore(blobs: Record<string, number>, answer: { status?: number; body?: string; fetchImpl?: typeof fetch } = {}): ModelStoreDeps & { requests: { url: string; accept: string | null }[] } {
+/** A model store holding `blobs` (name -> a complete blob's size, or a part file's text); the registry answers `body` with `status` unless `fetchImpl` is given. */
+function fakeStore(blobs: Record<string, number | string>, answer: { status?: number; body?: string; fetchImpl?: typeof fetch } = {}): ModelStoreDeps & { requests: { url: string; accept: string | null }[] } {
   const requests: { url: string; accept: string | null }[] = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     requests.push({ url: String(input), accept: new Headers(init?.headers).get("accept") });
@@ -151,7 +134,7 @@ function fakeStore(blobs: Record<string, number>, answer: { status?: number; bod
     requests,
     fetchImpl: answer.fetchImpl ?? fetchImpl,
     exists: (path) => Object.hasOwn(blobs, basename(path)),
-    sizeOf: async (path) => blobs[basename(path)],
+    readText: async (path) => String(blobs[basename(path)]),
     listDir: async () => Object.keys(blobs),
   };
 }
@@ -166,9 +149,29 @@ test("modelBytesToPull leaves out a layer whose blob is complete in the store (a
   assert.equal(await modelBytesToPull(FILE_PARTS, STORE, fakeStore({ [PROJECTOR]: 175115616 })), 8021618941 - 175115616);
 });
 
-test("modelBytesToPull subtracts the bytes of a layer's -partial files, never going below 0", async () => {
-  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, fakeStore({ [`${MODEL_LAYER}-partial`]: 1000 })), 8021618941 - 1000);
-  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, fakeStore({ [`${MODEL_LAYER}-partial`]: 4_000_000_000, [`${MODEL_LAYER}-partial-0`]: 4_000_000_000 })), 8021618941 - 7381383680);
+// Ollama 0.35.0's resumable pull, measured 2026-11-06 (own serve, `llama3.2:1b`, cut after 3 s): one `<blob>-partial` file
+// already as long as the whole layer (its size says nothing about progress) plus one `<blob>-partial-<N>` JSON file per 100 MB
+// part with what that part completed; a resumed pull restarted at exactly the sum of the `Completed` values.
+const partFile = (part: number, offset: number, size: number, completed: number) => JSON.stringify({ N: part, Offset: offset, Size: size, Completed: completed });
+
+test("modelBytesToPull of a cut pull is the layer's size minus what the -partial-N files say they completed, not the size of the -partial file", async () => {
+  const cut = fakeStore({
+    [`${MODEL_LAYER}-partial`]: 4_000_000_000, // the preallocated file: as long as the layer, so subtracting its size would say 0 left
+    [`${MODEL_LAYER}-partial-0`]: partFile(0, 0, 100_000_000, 57_425_875),
+    [`${MODEL_LAYER}-partial-1`]: partFile(1, 100_000_000, 100_000_000, 100_000_000),
+  });
+  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, cut), 8021618941 - 157_425_875);
+});
+
+test("modelBytesToPull counts a layer whose -partial file has no part files yet as not started, and ignores a part file it cannot read", async () => {
+  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, fakeStore({ [`${MODEL_LAYER}-partial`]: 4_000_000_000 })), 8021618941);
+  const damaged = fakeStore({ [`${MODEL_LAYER}-partial-0`]: "{not json", [`${MODEL_LAYER}-partial-1`]: partFile(1, 100_000_000, 100_000_000, 1_000) });
+  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, damaged), 8021618941 - 1_000);
+});
+
+test("modelBytesToPull never goes below 0 for a layer, whatever its part files claim", async () => {
+  const overclaiming = fakeStore({ [`${PROJECTOR}-partial-0`]: partFile(0, 0, 175115616, 999_999_999_999) });
+  assert.equal(await modelBytesToPull(FILE_PARTS, STORE, overclaiming), 8021618941 - 175115616);
 });
 
 test("modelBytesToPull asks the registry named by a model with a host, and by a namespaced model", async () => {

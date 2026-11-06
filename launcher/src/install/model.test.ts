@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
+import { diskWithRoomForAnything, twoDrives } from "./fixtures/fake-disk.ts";
 import { fakeOllama, type FakeOllamaOptions } from "./fixtures/fake-ollama.ts";
 import { tempDataRoot, testContext, testManifest } from "./fixtures/install-test-support.ts";
 import { model, modelOnDisk, modelRemove, type ModelDeps } from "./model.ts";
@@ -16,8 +17,19 @@ function setup(options: FakeOllamaOptions = {}, state: InstallState = {}, exe: s
   const root = join(dir.root, `case-${rootCount++}`);
   saveInstallState(root, state);
   const serve = fakeOllama(options);
-  const deps: ModelDeps = { ...serve.deps, ollamaExe: () => exe };
+  // by default the registry does not know the model and the disk has room: the free-space guard (below) lets the pull go on
+  const deps: ModelDeps = { ...serve.deps, ollamaExe: () => exe, registryFetch: registryAnswering(404, "{}").fetchImpl, disk: diskWithRoomForAnything() };
   return { root, serve, deps, ctx: testContext(root, testManifest({ model: tag })) };
+}
+
+/** A registry that answers every manifest request with `status` and `body`, counting the requests. */
+function registryAnswering(status: number, body: string) {
+  const urls: string[] = [];
+  const fetchImpl = (async (input: string | URL | Request) => {
+    urls.push(String(input));
+    return new Response(body, { status });
+  }) as typeof fetch;
+  return { fetchImpl, urls };
 }
 
 const pullLines = [
@@ -88,6 +100,86 @@ test("a pull answered with an HTTP error fails with the status", async () => {
   const result = await model(ctx, deps);
   assert.ok(!result.ok);
   assert.match(result.error, /500/);
+});
+
+// Free-space guard (plan T1b). The registry's answer for gemma4:12b is 8021618941 bytes (measured 2026-11-06); Mine AI keeps 1 GiB free.
+const GIB = 1024 ** 3;
+const REGISTRY_ANSWER = readFileSync(new URL("./fixtures/gemma4-12b-registry-manifest.json", import.meta.url), "utf8");
+const MODEL_LAYER_FILE = "sha256-bb722270d54346adc198f213851dbe0207e87c3ecf2a0aff4d92262726215391";
+
+/** The step on our own Ollama whose store is `<root>/models` (or on the other drive), over a disk with the given free bytes, with the registry answering gemma4:12b. */
+function guarded(free: { data: number; other?: number }, options: { fake?: FakeOllamaOptions; storeOnOtherDrive?: boolean; registry?: typeof fetch } = {}) {
+  const root = join(dir.root, `case-${rootCount}`);
+  const drives = twoDrives(dir.root, { data: free.data, other: free.other ?? 0 });
+  const store = options.storeOnOtherDrive ? drives.otherFolder("models") : join(root, "models");
+  const made = setup({ pullLines, ...options.fake }, { ollama: "installed", ollamaModels: store });
+  const registry = registryAnswering(200, REGISTRY_ANSWER);
+  made.deps.registryFetch = options.registry ?? registry.fetchImpl;
+  made.deps.disk = drives.disk;
+  return { ...made, registry, store, disk: drives.disk };
+}
+
+test("a store too small for the model's layers fails before the pull is sent and before the model is recorded as ours, naming the drive and the sizes", async () => {
+  const { root, serve, deps, ctx, registry } = guarded({ data: 8 * GIB });
+  const result = await model(ctx, deps);
+  assert.ok(!result.ok);
+  assert.match(result.error, /^Not enough free space on \S+ for the model gemma4:12b: it needs 8\.5 GB \(including the 1\.0 GB Mine AI keeps free\) and \S+ has 8\.0 GB free\.$/u);
+  assert.match(result.hint, /^Free some space on \S+, then run the step again\.$/u);
+  assert.equal(serve.requestsTo("/api/pull").length, 0);
+  assert.equal(loadInstallState(root).modelPulledByUs, undefined, "a cut-short step leaves nothing for model-remove to clean up");
+  assert.equal(serve.killed, 1, "our serve is stopped as after any failure");
+  assert.deepEqual(registry.urls, ["https://registry.ollama.ai/v2/library/gemma4/manifests/12b"]);
+});
+
+test("a store on another drive than the data folder is counted on that drive", async () => {
+  const short = guarded({ data: 1000 * GIB, other: 8 * GIB }, { storeOnOtherDrive: true });
+  assert.ok(!(await model(short.ctx, short.deps)).ok);
+  assert.equal(short.serve.requestsTo("/api/pull").length, 0);
+  const fits = guarded({ data: 1 * GIB, other: 9 * GIB }, { storeOnOtherDrive: true });
+  assert.equal((await model(fits.ctx, fits.deps)).ok, true, "the data drive holds none of the model: only 9 GB on the other drive count");
+  assert.equal(fits.serve.requestsTo("/api/pull").length, 1);
+});
+
+test("layers already in the store, and the finished part of a cut pull, are not counted again (Ollama's -partial-N files say how far it got)", async () => {
+  const resumed = guarded({ data: 5 * GIB });
+  const blobs = join(resumed.store, "blobs");
+  mkdirSync(blobs, { recursive: true });
+  // Ollama 0.35.0's layout of a cut pull, measured 2026-11-06: the -partial file is already the whole layer long, the part files hold the progress
+  writeFileSync(join(blobs, `${MODEL_LAYER_FILE}-partial`), "x");
+  writeFileSync(join(blobs, `${MODEL_LAYER_FILE}-partial-0`), JSON.stringify({ N: 0, Offset: 0, Size: 100_000_000, Completed: 4_000_000_000 }));
+  assert.equal((await model(resumed.ctx, resumed.deps)).ok, true, "7.5 GB minus the 3.7 GB done leaves 3.7 GB, plus the 1.0 GB reserve is 4.7 GB: 5.0 GB holds it");
+
+  const fresh = guarded({ data: 5 * GIB });
+  assert.ok(!(await model(fresh.ctx, fresh.deps)).ok, "the same 5.0 GB cannot hold the whole model");
+});
+
+test("a model that is listed already, or a serve that was reused (the player's Ollama on our port, maybe another store), makes no registry request", async () => {
+  const listed = guarded({ data: 0 }, { fake: { models: ["gemma4:12b"] } });
+  assert.equal((await model(listed.ctx, listed.deps)).ok, true);
+  assert.deepEqual(listed.registry.urls, []);
+  assert.deepEqual(listed.disk.statfsCalls, []);
+
+  const reused = guarded({ data: 0 }, { fake: { alreadyUp: true } });
+  assert.equal((await model(reused.ctx, reused.deps)).ok, true, "no check: the pull goes to the Ollama that answered");
+  assert.deepEqual(reused.registry.urls, []);
+  assert.equal(reused.serve.requestsTo("/api/pull").length, 1);
+});
+
+test("a registry that cannot be reached does not stop the pull (its own error stays the guard)", async () => {
+  const unreachable = guarded({ data: 0 }, { registry: (async () => { throw new TypeError("Unable to connect"); }) as unknown as typeof fetch });
+  assert.equal((await model(unreachable.ctx, unreachable.deps)).ok, true);
+  assert.equal(unreachable.serve.requestsTo("/api/pull").length, 1);
+});
+
+test("a model store on a drive that is not there fails saying so, before the pull", async () => {
+  const missing = process.platform === "win32" ? "X:\\models" : "/no-such-drive/models";
+  const { root, serve, deps, ctx } = guarded({ data: 1000 * GIB });
+  saveInstallState(root, { ollama: "installed", ollamaModels: missing });
+  const result = await model(ctx, deps);
+  assert.ok(!result.ok);
+  assert.equal(result.error, `The drive of ${missing} does not exist.`);
+  assert.doesNotMatch(result.hint, /free some space/iu);
+  assert.equal(serve.requestsTo("/api/pull").length, 0);
 });
 
 test("without Ollama on disk the step fails and names the Ollama step", async () => {

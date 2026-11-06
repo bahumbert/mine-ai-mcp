@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { defaultOllamaFolder, diskReport, driveLines, type DiskReport, type DiskReportDeps } from "./disk-report.ts";
+import { diskReport, driveLines, type DiskReport, type DiskReportDeps } from "./disk-report.ts";
 import { gb, type DiskDeps, type ModelStoreDeps } from "./disk.ts";
 import { testContext, testManifest } from "./fixtures/install-test-support.ts";
 import type { StepFailure } from "./step.ts";
@@ -51,7 +51,7 @@ function fakeNetwork(answers: Answers = {}) {
   const store: ModelStoreDeps = {
     fetchImpl,
     exists: () => false,
-    sizeOf: async () => 0,
+    readText: async () => "",
     listDir: async () => [],
   };
   return { fetchImpl, store, requests };
@@ -261,12 +261,6 @@ test("no drive can be read at all: ok:false with what was tried and what to do",
   const failed = result as StepFailure;
   assert.match(failed.error, /does not exist/u);
   assert.notEqual(failed.hint, "");
-});
-
-test("defaultOllamaFolder is the per-user folder of Ollama's own setup: LOCALAPPDATA, else the home's AppData\\Local; elsewhere the data root's", () => {
-  assert.equal(defaultOllamaFolder({ LOCALAPPDATA: "D:\\Local" }, "win32", "C:\\Users\\me", "C:\\MineAI"), "D:\\Local\\Programs\\Ollama");
-  assert.equal(defaultOllamaFolder({}, "win32", "C:\\Users\\me", "C:\\MineAI"), "C:\\Users\\me\\AppData\\Local\\Programs\\Ollama");
-  assert.equal(defaultOllamaFolder({}, "linux", "/home/me", "/data/mine-ai"), "/data/mine-ai");
 });
 
 test("driveLines groups folders by drive, names what is on each, and says 'not found' for a drive that is gone", async () => {

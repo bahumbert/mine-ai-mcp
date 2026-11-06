@@ -235,7 +235,7 @@ test("the real disk step passes --dir and --no-model to the report: the Ollama f
   const deps = (): DiskReportDeps => ({
     disk: { platform: "win32", exists: (path) => /^[CD]:\\$/u.test(path), statfs: async () => ({ bavail: BigInt(50 * GIB), bsize: 1n }), dev: () => "0" },
     fetchImpl: noBody,
-    modelStoreDeps: { fetchImpl: noBody, exists: () => false, sizeOf: async () => 0, listDir: async () => [] },
+    modelStoreDeps: { fetchImpl: noBody, exists: () => false, readText: async () => "", listDir: async () => [] },
     ollamaExe: () => null,
     modelOnDisk: () => false,
     modelStore: () => "C:\\MineAI\\models",

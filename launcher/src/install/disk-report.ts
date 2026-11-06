@@ -5,11 +5,11 @@
  * The step guards of each download (`checkSpace` in each step) stay the real stop: this report only tells the player early.
  */
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
+import { join } from "node:path";
 import { checkSpace, DiskError, driveOf, freeBytes, gb, headSize, modelBytesToPull, realDiskDeps, realModelStoreDeps, type DiskDeps, type ModelStoreDeps, type SpaceNeed } from "./disk.ts";
 import { isPinnedJreInstalled } from "./java.ts";
 import { manifestFileParts, modelOnDisk, modelStore } from "./model.ts";
-import { ollamaExeFor } from "./ollama.ts";
+import { defaultOllamaFolder, ollamaExeFor } from "./ollama.ts";
 import { loadInstallState } from "./state.ts";
 import { failure, type InstallContext, type StepFailure } from "./step.ts";
 
@@ -39,12 +39,6 @@ type GroupedNeed = SpaceNeed & { group: Group; choosable?: true };
 
 const SUBJECT: Record<Group, string> = { model: "the local AI model", server: "a local Minecraft server" };
 const UNREADABLE_HINT = "Check that the folders you chose are on drives that exist, then try again. Each install step checks the space itself before it downloads.";
-
-/** Ollama's per-user install folder (`%LOCALAPPDATA%\Programs\Ollama`, where its own setup puts it without `/DIR=`); off Windows there is no such folder, so the data root stands in. */
-export function defaultOllamaFolder(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home: string, root: string): string {
-  if (platform !== "win32") return root;
-  return win32.join(env.LOCALAPPDATA || win32.join(home, "AppData", "Local"), "Programs", "Ollama");
-}
 
 /** The models folder a first install of ours uses: the recorded one of an earlier attempt, else `<root>\models` (`ollama.ts` `installOurOllama`). */
 function firstInstallModelStore(root: string): string {
