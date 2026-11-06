@@ -9,6 +9,7 @@
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { waitForTicksOrCancel } from "../utils/physics-ticks.js";
 import { isLiquid, isReplaceableForPlacement } from "./block-classification.js";
 import { STANDING_EYE_HEIGHT } from "./block-visibility.js";
 import type { WorldBlock } from "./placement.js";
@@ -245,7 +246,7 @@ export async function settledFormations(
   let last = observeFormations(bot, watch);
   let stableTicks = 0;
   for (let tick = 0; tick < SPREAD_TIMEOUT_TICKS && stableTicks < SPREAD_SETTLED_TICKS; tick += 1) {
-    await bot.waitForTicks(1);
+    await waitForTicksOrCancel(bot, 1, signal);
     signal?.throwIfAborted();
     const next = observeFormations(bot, watch);
     stableTicks = sameFormed(next, last) ? stableTicks + 1 : 0;

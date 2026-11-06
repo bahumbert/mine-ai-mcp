@@ -7,7 +7,7 @@
  */
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { asVec3, cellKey } from "../../../utils/index.js";
+import { asVec3, cellKey, waitForTicksOrCancel } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../../world/block-visibility.js";
 import { droppedItemName } from "../../../world/item-pickup.js";
 import type { useItemAt } from "../../../world/item-use.js";
@@ -959,7 +959,7 @@ class MineTargeting {
 
 async function waitForProcessTick(bot: Bot, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
-  await bot.waitForTicks(1);
+  await waitForTicksOrCancel(bot, 1, signal);
   signal?.throwIfAborted();
 }
 

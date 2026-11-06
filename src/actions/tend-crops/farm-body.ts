@@ -9,6 +9,7 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { createMovements, nearGoal, observeMineflayerBlock, type NavigationRuntime } from "../../navigation/index.js";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { ripeState, seedOf } from "../../world/block-drops.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { droppedItemName, isItemEntity, pickupObservedItem, snapshotEntityIds } from "../../world/item-pickup.js";
@@ -200,7 +201,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
           .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
         if (target === undefined) {
           quiet += 1;
-          await bot.waitForTicks(QUIET_LOOK_TICKS);
+          await waitForTicksOrCancel(bot, QUIET_LOOK_TICKS, signal);
           continue;
         }
         quiet = 0;

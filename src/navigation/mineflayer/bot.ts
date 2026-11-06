@@ -1,7 +1,7 @@
 import { saveWaterLanding } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
-import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { waitForPhysicsTicks, waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { SupportedPositionController } from "../execution/supported-position-controller.js";
 import { holdWaterPosition, landOnStanceFloor } from "../steering/hold-water-position.js";
 import { holdSwimDepth } from "../world/swimming.js";
@@ -113,7 +113,7 @@ export interface MineflayerBotSurface {
   /** Wait, bounded, for a body held over `stance`'s solid floor to land on it; see `landOnStanceFloor`. Optional so fakes need no change. */
   landOnStanceFloor?(stance: BlockPosition, signal: AbortSignal): Promise<boolean>;
   getControlState?(control: "jump" | "sneak"): boolean;
-  waitForTicks(ticks: number): Promise<void>;
+  waitForTicks(ticks: number, signal?: AbortSignal): Promise<void>; // the signal ends the wait when physics stopped: `waitForTicksOrCancel`
   lookAt(position: Position3, force?: boolean): Promise<void>;
   equip(item: { readonly type: number }, destination: "hand"): Promise<void>;
   /**
@@ -197,7 +197,7 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     },
     getControlState: (control) => bot.getControlState(control),
     itemName: (type) => bot.registry.items[type]?.name ?? null,
-    waitForTicks: (ticks) => bot.waitForTicks(ticks),
+    waitForTicks: (ticks, signal) => waitForTicksOrCancel(bot, ticks, signal),
     lookAt: (position, force) => bot.lookAt(new Vec3(position.x, position.y, position.z), force),
     look: (yaw, pitch, force) => bot.look(yaw, pitch, force),
     equip: (value, destination) => bot.equip(item(value), destination),
@@ -685,7 +685,7 @@ export class MineflayerBot implements NavigationBot {
   async #awaitRefill(position: BlockPosition, signal: AbortSignal): Promise<{ readonly block: unknown } | null> {
     for (let tick = 0; tick < 40; tick += 1) {
       signal.throwIfAborted();
-      await this.bot.waitForTicks(1);
+      await this.bot.waitForTicks(1, signal);
       const block = this.bot.blockAt(position);
       const name = blockName(block);
       if (name !== null && !name.endsWith("air")) return { block };
@@ -860,14 +860,14 @@ export class MineflayerBot implements NavigationBot {
     let highestY = this.bot.entity.position.y;
     this.#control("sneak", true);
     try {
-      await this.bot.waitForTicks(1);
+      await this.bot.waitForTicks(1, signal);
       // The support's top face is directly beneath the feet, so its
       // yaw is as meaningless as a straight-down dig's.
       if (!(await this.#aimVertical(-Math.PI / 2))) await this.bot.lookAt(placementTarget, true);
       this.#control("jump", true);
       for (let tick = 0; tick < 20; tick += 1) {
         signal.throwIfAborted();
-        await this.bot.waitForTicks(1);
+        await this.bot.waitForTicks(1, signal);
         highestY = Math.max(highestY, this.bot.entity.position.y);
         if (this.bot.entity.position.y > operation.placement.position.y + 1.1) {
           roseAbovePlacement = true;

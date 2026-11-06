@@ -1,5 +1,6 @@
 import { MemoryWorld as GoalTestWorld } from "../../world/memory-world.js";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
@@ -58,6 +59,8 @@ test("a target at head height is already occupied, so pathing to it does nothing
 const STAYS_ON_THE_GROUND_TICKS = 1_000_000;
 /** Clock the process may use in one test, ms; every wait of a run is a tick or a timer of this clock. */
 const RUN_BOUND_MS = 60_000;
+/** When the caller of `onArrival` cancels in the test of a wait with physics stopped: after the dig wait's own bound. */
+const CALLER_CANCEL_MS = 4_000;
 
 /** The entity id of the scene's `index`th drop: past the bot's own id. */
 const dropId = (index: number) => 100 + index;
@@ -136,6 +139,12 @@ function mineScene(options: SceneOptions = {}): MineScene {
       await options.onWaitForTicks!(scene);
       await waitForTicks(ticks);
     };
+    // The miner's own tick wait listens to `physicsTick` itself (`waitForPhysicsTicks`, so a cancel ends it when physics
+    // stops): the hook runs on the tick such a wait consumes, before the wait hears it (this listener is the first). Our
+    // listener is the only one when nothing waits.
+    bot.on("physicsTick", () => {
+      if (bot.listenerCount("physicsTick") > 1) void options.onWaitForTicks!(scene);
+    });
   }
   return scene;
 }
@@ -1648,8 +1657,6 @@ test("target observers see block removal and pickup during a route without an ar
 test("a swimmer waiting to settle while physics has stopped gives up on the arrival dig within seconds", async () => {
   const target = new Vec3(1, 64, 0);
   const feet = new Vec3(0.5, 64, 0.5);
-  // The first tick the process waits for comes after the settle wait gave up on the dig.
-  let tickWaitAtMs: number | undefined;
   using scene = mineScene({
     blocks: [target],
     // The eye cell: the eyes rule reads whole cells.
@@ -1657,12 +1664,18 @@ test("a swimmer waiting to settle while physics has stopped gives up on the arri
     feet,
     onGround: false,
     isInWater: true,
-    onWaitForTicks: ({ clock }) => {
-      tickWaitAtMs ??= clock.now();
-    },
+  });
+  // The last wait for a physics tick starts after the settle wait gave up on the dig; the process waits on it until the caller cancels.
+  let lastTickWaitAtMs: number | undefined;
+  // `newListener` is the emitter's own event, not one of the bot's typed events.
+  EventEmitter.prototype.on.call(scene.bot, "newListener", (event: string | symbol) => {
+    if (event === "physicsTick") lastTickWaitAtMs = scene.clock.now();
   });
   // Before the wall bound this wait ended only with the caller's abort.
   scene.bot.physicsEnabled = false;
+  const callerCancel = new AbortController();
+  scene.clock.after(CALLER_CANCEL_MS, () => callerCancel.abort(new Error("the caller cancelled")));
+  let arrivalEnd: unknown;
   let breakAttempts = 0;
   let arrivalOver = false;
   await runMine(scene, {
@@ -1676,18 +1689,20 @@ test("a swimmer waiting to settle while physics has stopped gives up on the arri
       const observation = { position: scene.bot.entity.position, entities: new Map() } as never;
       const node = { feet: scene.bot.entity.position.floored(), remainingScaffolds: 0, overlayId: "overlay:0" };
       try {
-        await options.onArrival?.({ goalRevision: "test", node, observation, signal: new AbortController().signal });
-      } catch {
-        // Known code bug, not asserted: `waitForProcessTick` waits on a bare `bot.waitForTicks(1)`, which Mineflayer
-        // rejects at 5050 ms when physics sends no tick (`physics.js:456-475`, facts runtime-pitfalls.md "waitForTicks").
-        // The old fake resolved that wait at once; this test is about the dig wait before it.
+        await options.onArrival?.({ goalRevision: "test", node, observation, signal: callerCancel.signal });
+      } catch (cause) {
+        arrivalEnd = cause;
       }
       arrivalOver = true;
       return { status: "completed", elapsedMs: 0 };
     },
   });
   assert.equal(breakAttempts, 0);
-  assert.ok(tickWaitAtMs !== undefined && tickWaitAtMs < 3_000, `the dig wait gave up after ${tickWaitAtMs} ms`);
+  assert.ok(lastTickWaitAtMs !== undefined && lastTickWaitAtMs < 3_000, `the dig wait gave up after ${lastTickWaitAtMs} ms`);
+  // `waitForProcessTick` listens to the tick itself, so the caller's cancel ends it with physics stopped: a bare
+  // `bot.waitForTicks(1)` here ended only at Mineflayer's own 5050 ms timeout (`physics.js:462`) with its own error.
+  assert.match(String(arrivalEnd), /the caller cancelled/);
+  assert.equal(scene.bot.listenerCount("physicsTick"), 0, "the cancelled wait left no tick listener");
 });
 
 /**

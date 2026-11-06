@@ -11,6 +11,7 @@ import {
   safeSupportingCell,
 } from "../../navigation/world/block-geometry.js";
 import type { BlockPosition, Position3, WorldView } from "../../navigation/world/world.js";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { findPlacementSupport, occupiedCell, placeBlock, type BlockPlacementResult } from "../../world/placement.js";
@@ -148,7 +149,7 @@ export class FootingRecovery implements Disposable {
       else this.bot.deactivateItem();
       steer();
       // The velocity packet can precede the physics tick that leaves the floor.
-      await this.bot.waitForTicks(1);
+      await waitForTicksOrCancel(this.bot, 1, signal);
       while (this.bot.health > 0) {
         signal.throwIfAborted();
         if (canReleaseOnObservedGround(this.world, this.bot.entity)) {
@@ -214,7 +215,7 @@ export class FootingRecovery implements Disposable {
           };
           break;
         }
-        await this.bot.waitForTicks(1);
+        await waitForTicksOrCancel(this.bot, 1, signal);
       }
       this.#state = {
         ...this.#state!,

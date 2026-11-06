@@ -91,6 +91,35 @@ test("missing catching geometry reports failure and releases movement instead of
   assert.equal(fixtureBot.controls.size, 0);
 });
 
+test("a cancel ends the first wait for a tick at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
+  const f = fixture();
+  using recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  f.bot.physicsEnabled = false; // a death turns physics off (`physics.js:480`)
+  const abort = new AbortController();
+  f.clock.after(100, () => abort.abort(new Error("bot died")));
+  await assert.rejects(f.clock.settle(recovery.recover(abort.signal), 1_000), /bot died/);
+  assert.equal(f.controls.size, 0);
+});
+
+test("a cancel ends the wait inside the steering loop at once when physics stops after the first tick", async () => {
+  const f = fixture();
+  using recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  let ticks = 0;
+  f.onEachTick(() => {
+    ticks++;
+    f.entity.position.y = 48; // above the support, in the air, nothing to place: the loop only waits for the next tick
+    f.entity.onGround = false;
+    if (ticks === 1) f.bot.physicsEnabled = false;
+  });
+  const abort = new AbortController();
+  f.clock.after(200, () => abort.abort(new Error("bot died")));
+  await assert.rejects(f.clock.settle(recovery.recover(abort.signal), 1_000), /bot died/);
+  assert.equal(ticks, 1, "the loop was waiting on its second tick, not past it");
+  assert.equal(f.controls.size, 0);
+});
+
 test("an observed lower terrace preserves protection and resumes only after actual landing", async () => {
   const f = fixture();
   f.world.load({ x: 1, y: 45, z: 0 }, { stateId: 1 });

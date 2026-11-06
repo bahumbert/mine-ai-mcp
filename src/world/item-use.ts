@@ -13,6 +13,8 @@
  */
 import type { Bot } from "mineflayer";
 import { asVec3, type Position3 } from "../utils/index.js";
+import { raceSignal } from "../utils/race-signal.js";
+import { waitForTicksOrCancel } from "../utils/physics-ticks.js";
 import type { InventoryItem, WorldBlock } from "./placement.js";
 import { carriedCount } from "./inventory-count.js";
 import { waitForWorldAge, type WorldAgeOptions } from "./world-age.js";
@@ -80,12 +82,12 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
   const inventoryBefore = gain ? carriedCount(bot, gain.item) : 0;
   try {
     use.signal?.throwIfAborted();
-    await bot.equip(use.item, "hand");
+    await raceSignal(bot.equip(use.item, "hand"), use.signal);
     use.signal?.throwIfAborted();
-    await bot.lookAt(asVec3(use.lookAt), true);
+    await raceSignal(bot.lookAt(asVec3(use.lookAt), true), use.signal);
     use.signal?.throwIfAborted();
     use.onSent?.();
-    if (use.on) await bot.activateBlock(use.on.block, asVec3(use.on.face));
+    if (use.on) await raceSignal(bot.activateBlock(use.on.block, asVec3(use.on.face)), use.signal);
     else bot.activateItem();
     const ageAtUse = bot.time?.age;
     const settled = () => cellsSettled(bot, use) && handSettled(bot, use) && (!gain || carriedCount(bot, gain.item) >= inventoryBefore + gain.count);
@@ -96,7 +98,7 @@ export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> 
       timedOut = ended === "timeout";
     } else {
       for (let tick = 0; tick < timeoutTicks; tick += 1) {
-        await bot.waitForTicks(1);
+        await waitForTicksOrCancel(bot, 1, use.signal);
         use.signal?.throwIfAborted();
         if (settled()) return { kind: "used" };
       }

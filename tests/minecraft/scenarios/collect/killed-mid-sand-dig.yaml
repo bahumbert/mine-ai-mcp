@@ -1,0 +1,33 @@
+template: ../../templates/hostile-night.yaml
+
+name: killed-mid-sand-dig
+tags: [regression, exclusive]
+description: >-
+  A death turns Mineflayer's physics off, and the miner's waits for the sand above a broken block to land and for the
+  drops to arrive ignored the action's cancel signal, so they ended only at Mineflayer's own 5 s tick timeout. An
+  actor collecting from a column of sand is killed (`/kill`) the moment the bottom block is broken: collect_block
+  settles cancelled within three seconds of the kill, not with a tick timeout, the actor respawns once, and the
+  navigate after the respawn arrives.
+
+geometry:
+  - fill: { block: stone, from: [-6, -60, -6], to: [8, -60, 6] }
+  - fill: { block: sand, from: [2, -59, 0], to: [2, -56, 0] }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/killed-mid-action.ts]
+
+params:
+  action: collect_block
+  input: { block_name: sand, count: 4, scaffold: false }
+  killWhenCellEmpty: [2, -59, 0]
+  settleWithinMs: 3000
+  respawnWithinMs: 15000
+  nextStepBlocks: 5
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }

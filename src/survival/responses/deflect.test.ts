@@ -42,6 +42,15 @@ test("a swing followed by disappearance is not evidence of reflection", async ()
   assert.equal((await result).kind, "unobserved");
 });
 
+test("a cancel ends the wait for the next tick at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
+  const { bot, clock, ball } = fixture();
+  const stop = new AbortController();
+  bot.physicsEnabled = false; // a death turns physics off (`physics.js:480`)
+  clock.after(100, () => stop.abort(new Error("bot died")));
+  await assert.rejects(clock.settle(deflectFireball(bot, ball.id, stop.signal), 1_000), /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+});
+
 test("cancellation while aiming prevents a late swing", async () => {
   const { bot, ball, swings } = fixture();
   const stop = new AbortController();

@@ -176,8 +176,6 @@ interface ItemCase {
   readonly boundMs: number;
   /** The clock the action's wait runs on: `real` (the drop's `sleepMs`), or the fake clock (a window click, a physics tick). The fake clock runs far faster than real time while a test drives it. */
   readonly boundOn: "real" | "fake";
-  /** A code bug this case's first test found (plan task 3 step 4: reported to the master, not fixed here): the test runs as a todo. */
-  readonly bug?: string;
   /** Bot `index` in its own world on `clock`, carrying `10 + index` of its item. */
   world(index: number, clock: FakeClock): FakeHarness;
   request(index: number): object;
@@ -308,11 +306,6 @@ const CASES: readonly ItemCase[] = [
     action: "use_bucket",
     boundMs: BUCKET_USE_MS,
     boundOn: "fake",
-    bug:
-      "src/world/item-use.ts:99 `await bot.waitForTicks(1)` ignores `use.signal`: a death turns Mineflayer's physics off (`physics.js:480`), " +
-      "no tick comes, and the cancelled use ends at the wait's own 5050 ms timeout (`physics.js:462`) with `Timeout waiting for 1 ticks after 5050ms` instead of `<bot> died.`. " +
-      "Fix: wait with `waitForPhysicsTicks(bot, 1, signal)` (`src/utils/physics-ticks.ts:23`, which honours the signal), and drop this todo when the test passes (bun prints a todo as todo whether it passes or not: run `bun test --todo` to see it). " +
-      "Same shape, unchecked: `world/liquid.ts:248`, `tend-crops/farm-body.ts:203`, `navigation/mineflayer/bot.ts:688,863,870`, `mining/mine-process.ts:962`, `survival/responses/deflect.ts:59`, `footing.ts:151,217`, `steering/local-steering.ts:77`, `supported-position.ts:79`",
     world: (index, clock) =>
       createFakeBot({ clock, username: `Bucket${index}`, position: new Vec3(0.5, 64, 0.5), simulatePhysics: true, cells: { [WATER]: "water" }, slots: { [HOTBAR_SLOT]: { name: "bucket", count: 1 } } }),
     request: () => ({ action: "fill", liquid: "water", x: 3, y: 63, z: 0 }),
@@ -333,7 +326,7 @@ const CASES: readonly ItemCase[] = [
 ];
 
 for (const case_ of CASES) {
-  test(`${case_.title}: a death at its first wait ends it as cancelled by death within its own bound`, { timeout: TEST_MS, ...(case_.bug && { todo: case_.bug }) }, async (t) => {
+  test(`${case_.title}: a death at its first wait ends it as cancelled by death within its own bound`, { timeout: TEST_MS }, async (t) => {
     const harness = case_.world(0, createFakeClock({ mode: "manual" }));
     const rig = await rigOn(t, harness);
     case_.armDeath(harness, () => kill(harness));

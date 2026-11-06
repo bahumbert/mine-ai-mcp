@@ -330,6 +330,69 @@ test("a break that brings sand down waits for it to land and breaks it again bef
   assert.equal(cell, "air");
 });
 
+/**
+ * A tick wait of a bot whose physics stopped after `ticksBeforeStop` ticks (a death turns physics off, `physics.js:480`):
+ * it ends only on the signal the effect gave it. Without that signal it waits for ever, as Mineflayer's own wait does
+ * until its `ticks * 50 + 5000` ms timeout (`physics.js:462`).
+ */
+function physicsStoppingAfter(ticksBeforeStop: number) {
+  let ticks = 0;
+  return async (_ticks: number, signal?: AbortSignal): Promise<void> => {
+    if (ticks++ < ticksBeforeStop) return;
+    await new Promise<void>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  };
+}
+
+test("the surface's tick wait on a connected bot ends at the signal's abort when physics has stopped, and on the tick otherwise", async () => {
+  const { bot, clock } = createFakeBot({ position: new Vec3(0.5, 64, 0.5) });
+  const surfaceOfBot = mineflayerBotSurface(bot);
+  await clock.settle(surfaceOfBot.waitForTicks(2, new AbortController().signal), 1_000);
+
+  bot.physicsEnabled = false; // a death turns physics off (`physics.js:480`)
+  const cancel = new AbortController();
+  clock.after(100, () => cancel.abort(new Error("bot died")));
+  await assert.rejects(clock.settle(surfaceOfBot.waitForTicks(1, cancel.signal), 1_000), /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+});
+
+test("a cancel ends the wait for a sand column to land at once when physics has stopped", async () => {
+  const cancel = new AbortController();
+  const bot = surface({
+    entity: { position: { x: 0.5, y: 63, z: 0.5 }, onGround: true, isInWater: false, yaw: 0 },
+    waitForTicks: physicsStoppingAfter(0),
+    blockAt: () => ({ name: "air" }),
+  });
+  const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 1, y: 64, z: 0 }, expectedStateId: 1, toolType: null, brings: [{ x: 1, y: 65, z: 0 }] },
+    { runId: "run", planId: "plan", stepId: "plug", attempt: 1 },
+    cancel.signal,
+  );
+  const ended = watch(effect.completion);
+  await flush();
+  assert.equal(ended.over, false, "the break waits for the sand to land");
+  cancel.abort(new Error("bot died"));
+  assert.deepEqual(await effect.completion, { kind: "failed", observation: "bot died" });
+});
+
+test("a cancel ends a pillar placement's waits at once when physics has stopped before and during the jump", async () => {
+  for (const ticksBeforeStop of [0, 1]) {
+    const cancel = new AbortController();
+    const bot = surface({
+      entity: { position: { x: 0.5, y: 63, z: 0.5 }, onGround: true, isInWater: false, yaw: 2.1 },
+      inventory: { items: () => [{ type: 1, count: 1 }] },
+      waitForTicks: physicsStoppingAfter(ticksBeforeStop),
+      look: async () => undefined,
+      blockAt: () => ({ name: "stone" }),
+    });
+    const effect = placeAt(new MineflayerBot(bot, { revision: 1 }), { x: 0, y: 63, z: 0 }, { x: 0, y: 62, z: 0 }, "pillar", cancel.signal);
+    await flush();
+    cancel.abort(new Error("bot died"));
+    assert.deepEqual(await effect.completion, { kind: "failed", observation: "bot died" }, `physics stopped after ${ticksBeforeStop} ticks`);
+  }
+});
+
 // ── Drops ────────────────────────────────────────────────────────────────────
 
 /**
@@ -557,11 +620,11 @@ test("direct-down digging proceeds after the centring window and leaves arrival 
 
 // ── Placing ──────────────────────────────────────────────────────────────────
 
-const placeAt = (actuator: MineflayerBot, position: Position3, support: Position3, stepId: string) =>
+const placeAt = (actuator: MineflayerBot, position: Position3, support: Position3, stepId: string, signal = new AbortController().signal) =>
   actuator.startEffect(
     { kind: "place", placement: { position, stateId: 1, itemType: 1, support, face: { x: 0, y: 1, z: 0 } } },
     { runId: "run", planId: "plan", stepId, attempt: 1 },
-    new AbortController().signal,
+    signal,
   );
 
 test("placing at the bot's feet jumps before issuing the pillar placement", async () => {

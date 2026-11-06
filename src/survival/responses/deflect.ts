@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
@@ -56,7 +57,7 @@ export async function deflectFireball(bot: Bot, targetId: number, signal: AbortS
       bot.attack(target);
       attacks += 1;
     }
-    await bot.waitForTicks(1);
+    await waitForTicksOrCancel(bot, 1, signal);
   }
   return {
     kind: "unobserved" as const,

@@ -138,6 +138,17 @@ test("a cell beyond the formation radius is not watched", () => {
   assert.deepEqual(observeFormations(bot, watch), {});
 });
 
+test("a cancel ends the wait for a pour to settle at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
+  const { bot, clock } = changingWorld({ "0,0,0": "lava" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+  const abort = new AbortController();
+  bot.physicsEnabled = false; // a death turns physics off (`physics.js:480`)
+  clock.after(100, () => abort.abort(new Error("bot died")));
+
+  await assert.rejects(clock.settle(settledFormations(bot, watch, abort.signal), 1_000), /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+});
+
 test("a pour is settled when the blocks it made stop changing, and the last count is returned", async () => {
   const { bot, world, clock } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava" });
   const watch = watchFormations(bot, cell(0, 0, 0));

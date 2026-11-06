@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { SupportedPositionController } from "../execution/supported-position-controller.js";
 import { setSneaking } from "../mineflayer/sneak.js";
 import type { WorldView } from "../world/world.js";
@@ -70,13 +70,11 @@ export class SupportedPositionHold {
         const step = this.#controller.advance(this.#snapshot());
         if (step.kind !== "running") return;
         this.tick();
-        if (signal) {
-          try {
-            await waitForPhysicsTicks(this.bot, 1, signal);
-          } catch (cause) {
-            if (!signal.aborted) throw cause;
-          }
-        } else await this.bot.waitForTicks(1);
+        try {
+          await waitForTicksOrCancel(this.bot, 1, signal);
+        } catch (cause) {
+          if (!signal?.aborted) throw cause;
+        }
       }
     } finally {
       this.release();

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
-import { plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
+import { mineflayerFarmBody, plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
 import { Vec3 } from "vec3";
 import { PLOT_FACTS, cutAfter, FakeFarm } from "../../test-support/fake-farm.js";
 import type { StallClock } from "../stall-watch.js";
@@ -61,6 +62,17 @@ test("the tend result schema carries the untillable cells by block name", () => 
   assert.deepEqual(parsed.untillable, { podzol: [{ x: 2, z: 3 }] });
   assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: { podzol: [{ x: 2 }] } }));
   assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: undefined }));
+});
+
+test("a cancel ends the quiet look for dropped items at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
+  // A death turns physics off (`physics.js:480`): `bot.waitForTicks(10)` alone ends only at 10 * 50 + 5000 ms.
+  const { bot: farmer, clock } = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5) });
+  const stop = new AbortController();
+  const body = mineflayerFarmBody(farmer, {} as NavigationRuntime, wheatPlot(), stop.signal);
+  farmer.physicsEnabled = false;
+  clock.after(100, () => stop.abort(new Error("bot died")));
+  await assert.rejects(clock.settle(body.collectDrops(), 1_000), /bot died/);
+  assert.equal(farmer.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
 });
 
 test("a failed hoe use is unchanged only when the server clock moved 20 ticks and the hoe is still carried", () => {

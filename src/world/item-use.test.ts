@@ -229,6 +229,41 @@ test("a server wait confirms an unchanged block only once the world age moved 40
   assert.equal(result.timedOut, undefined);
 });
 
+test("a cancel ends the wait for the use's effect at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
+  // A death turns physics off (`physics.js:480`): no tick comes, and `bot.waitForTicks(1)` alone ends only at 5050 ms.
+  const { bot, clock, stack } = usingBot(40);
+  const abort = new AbortController();
+  bot.physicsEnabled = false;
+  clock.after(100, () => abort.abort(new Error("bot died")));
+  const pending = useItemAt(bot, {
+    item: stack("bucket"),
+    lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+    expectedHeldItem: "water_bucket",
+    signal: abort.signal,
+  });
+  await assert.rejects(clock.settle(pending, 1_000), /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+  assert.equal(bot.usingHeldItem, false);
+});
+
+test("a cancel ends a use held by a pending equip, look or block activation at once, and releases the hand", async () => {
+  // A death leaves these Mineflayer calls pending until their own timeout; the use awaits them through the signal.
+  for (const pending of ["equip", "lookAt", "activateBlock"] as const) {
+    const { bot, clock, stack, obsidian } = usingBot(40);
+    const abort = new AbortController();
+    bot[pending] = () => new Promise<void>(() => undefined);
+    clock.after(100, () => abort.abort(new Error("bot died")));
+    const use = useItemAt(bot, {
+      item: stack("bucket"),
+      lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+      ...(pending === "activateBlock" && { on: { block: obsidian, face: { x: 0, y: 1, z: 0 } } }),
+      signal: abort.signal,
+    });
+    await assert.rejects(clock.settle(use, 1_000), /bot died/, `a pending ${pending}`);
+    assert.equal(bot.usingHeldItem, false, `a pending ${pending}`);
+  }
+});
+
 test("a server wait on a frozen world age ends on the wall clock and says it timed out", async () => {
   const world = serverWaitWorld();
   world.server.stop();

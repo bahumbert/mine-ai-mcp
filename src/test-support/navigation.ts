@@ -119,7 +119,7 @@ export async function executeBotMovement(actuator: MineflayerBot, step: PlannedS
   actuator.applyMovementControls(preparation.controller.initialControls);
   try {
     for (;;) {
-      await actuator.bot.waitForTicks(1);
+      await actuator.bot.waitForTicks(1, signal);
       const tick = preparation.controller.advance(actuator.movementSnapshot());
       if (tick.kind === "arrived") return { kind: "completed", arrival: tick.arrival } as const;
       if (tick.kind === "failed")
