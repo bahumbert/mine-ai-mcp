@@ -11,7 +11,7 @@ export const VIEW_STATUS_DESCRIPTION =
   "the ticks until that changes, and whether the bot is asleep or it is raining; exact position, dimension, footing, " +
   "and compass heading; every carried stack with its slot, the free slot count, the held item, and worn equipment; " +
   "each carried food with the hunger points and saturation one restores; " +
-  "remaining item durability, best carried tool and armour tiers, bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
+  "remaining item durability, best carried tool and armour (item, rank in its family, durability), bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
   "which movements the inventory unlocks: no carried water bucket caps every route at a three-block fall and disarms the emergency fall save, and pillaring and bridging need a carried scaffold block; " +
   "the players and hostile mobs nearby; every loaded dropped item, nearest first; and every loaded mob species and observed age group with its count, whether it is hostile, and the " +
   "nearest one's position, at any distance, so a cow sixty blocks off is listed. " +

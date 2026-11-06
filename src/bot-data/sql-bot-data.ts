@@ -289,13 +289,15 @@ function migrateEventReadState(database: DatabaseSync): void {
 
 /**
  * The live-status and inventory rows are rewritten on every refresh, so an outdated shape is dropped rather than
- * altered: bot_status without `time_of_day` or `item_families_json`, bot_inventory without `families`. The schema script
+ * altered: bot_status without `time_of_day` or `item_families_json`, bot_inventory without `families`, bot_tools without
+ * `rank` (it had `tier`, a material label read from the item name). The schema script
  * that follows re-creates them; the runtime rewrites them within a second (status heartbeat), so nothing is lost.
  */
 function migrateBotStatus(database: DatabaseSync): void {
   dropWhenMissingColumn(database, "bot_status", "time_of_day");
   dropWhenMissingColumn(database, "bot_status", "item_families_json");
   dropWhenMissingColumn(database, "bot_inventory", "families");
+  dropWhenMissingColumn(database, "bot_tools", "rank");
 }
 
 function dropWhenMissingColumn(database: DatabaseSync, table: string, column: string): void {

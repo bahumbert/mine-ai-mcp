@@ -196,7 +196,7 @@ test("progress marks absent physics samples and retains regressing inventory evi
 
 test("each waiter sees only tool changes since its own progress baseline", () => {
   let durabilityLeft = 9;
-  const p = new RequestProgress(null, () => ({ tools: [{ class: "pickaxe", tier: "iron", item: "iron_pickaxe", slot: 36,
+  const p = new RequestProgress(null, () => ({ tools: [{ class: "pickaxe", rank: 3, item: "iron_pickaxe", slot: 36,
     durabilityLeft, maximumDurability: 250 }], armour: [] }));
   const first = p.snapshot();
   durabilityLeft = 4;

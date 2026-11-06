@@ -6,6 +6,7 @@ import { WELL_FED, flatWorld, planningStart } from "../test-support/navigation.j
 import { createMovementCatalogue } from "../navigation/movements/catalogue.js";
 import { createMovementPolicy } from "../navigation/movements/policy.js";
 import { observeToolTierLoss } from "./tool-loss.js";
+import { watchServerTags } from "./server-tags.js";
 
 function select(bot: FakeBot, guard: ReturnType<typeof observeToolTierLoss>, item: string) {
   guard.select(bot.registry.itemsByName[item]!.id);
@@ -28,9 +29,55 @@ test("stops only when a relevant best harvest capability drops", async () => {
   await Promise.resolve();
   assert.equal(guard.signal.aborted, true);
   assert.equal(guard.loss()?.now.item, "stone_pickaxe");
-  assert.match(guard.loss()?.reason ?? "", /diamond_pickaxe was lost.*stone pickaxe remains/);
+  assert.match(guard.loss()?.reason ?? "", /diamond_pickaxe was lost.*stone_pickaxe remains/);
   guard.close();
   assert.equal(bot.registry.itemsByName.diamond_pickaxe?.maxDurability, 1561);
+});
+
+test("the loss failure names the lost family in a fixed field, and the item that remains", async () => {
+  const { bot } = createFakeBot({ slots: { 36: { name: "iron_axe" }, 9: { name: "wooden_axe" } } });
+  const guard = observeToolTierLoss(bot);
+  select(bot, guard, "iron_axe");
+  clearSlot(bot, 36);
+  await Promise.resolve();
+  assert.match(guard.loss()?.reason ?? "", /^\[TOOL_TIER_LOST\] iron_axe was lost at -?\d+,-?\d+,-?\d+; family: axe; wooden_axe remains\.$/);
+  assert.equal(guard.loss()?.class, "axe");
+  guard.close();
+});
+
+test("a stone pickaxe breaking while a netherite one is carried is no loss", async () => {
+  const { bot } = createFakeBot({ slots: { 36: { name: "netherite_pickaxe" }, 9: { name: "stone_pickaxe" } } });
+  const guard = observeToolTierLoss(bot);
+  select(bot, guard, "netherite_pickaxe");
+  clearSlot(bot, 9);
+  await Promise.resolve();
+  assert.equal(guard.loss(), null);
+  guard.close();
+});
+
+test("an item a datapack adds to swords is a tool whose loss stops the call; in swords and hoes it is watched as the sword the snapshot files it under", async () => {
+  for (const extraTag of [null, "minecraft:hoes"] as const) {
+    const harness = createFakeBot({ slots: { 36: { name: "stick" } } });
+    watchServerTags(harness.bot);
+    const entries = [harness.bot.registry.itemsByName.stick!.id];
+    harness.emitTags([{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:swords", entries }, ...(extraTag ? [{ tagName: extraTag, entries }] : [])] }]);
+    const guard = observeToolTierLoss(harness.bot);
+    select(harness.bot, guard, "stick");
+    clearSlot(harness.bot, 36);
+    await Promise.resolve();
+    assert.match(guard.loss()?.reason ?? "", /stick was lost.*family: sword; no sword remains/, String(extraTag));
+    guard.close();
+  }
+});
+
+test("a wooden pickaxe breaking while a golden one is carried is a loss (B1: golden ranks below wooden)", async () => {
+  const { bot } = createFakeBot({ slots: { 36: { name: "wooden_pickaxe" }, 9: { name: "golden_pickaxe" } } });
+  const guard = observeToolTierLoss(bot);
+  select(bot, guard, "wooden_pickaxe");
+  clearSlot(bot, 36);
+  await Promise.resolve();
+  assert.match(guard.loss()?.reason ?? "", /wooden_pickaxe was lost.*family: pickaxe; golden_pickaxe remains/);
+  guard.close();
 });
 
 test("gold replacement does not preserve stone harvest capability", async () => {
@@ -39,7 +86,7 @@ test("gold replacement does not preserve stone harvest capability", async () => 
   select(bot, guard, "stone_pickaxe");
   clearSlot(bot, 36);
   await Promise.resolve();
-  assert.equal(guard.loss()?.now.tier, "golden");
+  assert.equal(guard.loss()?.now.item, "golden_pickaxe");
   guard.close();
 });
 

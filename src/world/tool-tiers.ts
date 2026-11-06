@@ -1,17 +1,28 @@
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import { z } from "zod";
+import { familyIndexOf, type FamilyIndex, type ItemFamily, type RankedItem } from "./item-families.js";
 
-export const TOOL_CLASSES = ["pickaxe", "shovel", "axe", "sword", "hoe", "shears", "bow", "shield", "bucket", "water_bucket", "lava_bucket", "powder_snow_bucket"] as const;
-export const ARMOUR_CLASSES = ["helmet", "chestplate", "leggings", "boots"] as const;
+/** The families the snapshot keeps one best item of (the vocabulary is the family map's keys; `satisfies` checks it). */
+const TOOL_FAMILIES = ["pickaxe", "shovel", "axe", "sword", "hoe", "shears", "bow", "shield"] as const satisfies readonly ItemFamily[];
+const ARMOUR_FAMILIES = ["helmet", "chestplate", "leggings", "boots"] as const satisfies readonly ItemFamily[];
+/** Buckets stay item ids (no family): the empty bucket and the three filled ones the bot uses (B3: a milk bucket is none of them). */
+const BUCKET_ITEMS = ["bucket", "water_bucket", "lava_bucket", "powder_snow_bucket"] as const;
+
+export const TOOL_CLASSES = [...TOOL_FAMILIES, ...BUCKET_ITEMS] as const;
+export const ARMOUR_CLASSES = ARMOUR_FAMILIES;
 export type ToolClass = typeof TOOL_CLASSES[number];
 export type ArmourClass = typeof ARMOUR_CLASSES[number];
 export type EquipmentClass = ToolClass | ArmourClass;
-export type EquipmentTier = "wooden" | "stone" | "iron" | "golden" | "diamond" | "netherite" | "leather" | "chainmail" | "turtle" | "other" | "none";
 
 export interface ToolSnapshotEntry {
   class: EquipmentClass;
-  tier: EquipmentTier;
+  /**
+   * The item's place in its family's order (`FamilyIndex.compareRank`) among the registry's items of the family:
+   * 1 + the number of members that rank strictly below it, so a better item has a higher number, equal items share
+   * one, and 0 means none carried. Items with no family (the buckets) have rank 1 when carried.
+   */
+  rank: number;
   item: string | null;
   slot: number | null;
   durabilityLeft: number | null;
@@ -25,7 +36,7 @@ export interface ToolSnapshot {
 
 export const toolSnapshotEntrySchema = z.strictObject({
   class: z.enum([...TOOL_CLASSES, ...ARMOUR_CLASSES]),
-  tier: z.enum(["wooden", "stone", "iron", "golden", "diamond", "netherite", "leather", "chainmail", "turtle", "other", "none"]),
+  rank: z.number().int().nonnegative(),
   item: z.string().nullable(), slot: z.number().int().nullable(),
   durabilityLeft: z.number().int().nonnegative().nullable(), maximumDurability: z.number().int().positive().nullable(),
 });
@@ -42,19 +53,43 @@ export interface ToolChange {
   reason: "broke" | "replaced" | "durability_used" | "durability_restored" | "acquired" | "lost";
 }
 
-const materialPrefix = /^(wooden|stone|iron|golden|diamond|netherite|leather|chainmail|turtle)_/;
+const isBucketItem = (name: string): name is typeof BUCKET_ITEMS[number] => (BUCKET_ITEMS as readonly string[]).includes(name);
 
-function equipmentClass(name: string): EquipmentClass | null {
-  if (name === "water_bucket" || name === "lava_bucket" || name === "powder_snow_bucket") return name;
-  for (const value of [...TOOL_CLASSES, ...ARMOUR_CLASSES]) {
-    if (name === value || name.endsWith(`_${value}`)) return value;
-  }
-  return null;
+/** The snapshot class of an item: its bucket id, else the first tool or armour family it belongs to. */
+export function equipmentClass(index: FamilyIndex, name: string): EquipmentClass | null {
+  if (isBucketItem(name)) return name;
+  const families = index.itemFamilies(name);
+  return [...TOOL_FAMILIES, ...ARMOUR_FAMILIES].find((family) => families.includes(family)) ?? null;
 }
 
-function equipmentTier(name: string): EquipmentTier {
-  if (name === "shears" || name === "bow" || name === "shield" || name.endsWith("_bucket")) return "other";
-  return (materialPrefix.exec(name)?.[1] as EquipmentTier | undefined) ?? "other";
+/** The family a class is ranked in; null for a bucket item. */
+function rankFamily(kind: EquipmentClass): ItemFamily | null {
+  return isBucketItem(kind) ? null : kind;
+}
+
+/** The comparable item of a snapshot entry: its name and its own stack's maximum durability. */
+export function rankedItem(entry: Pick<ToolSnapshotEntry, "item" | "maximumDurability">): RankedItem {
+  return { name: entry.item!, ...(entry.maximumDurability === null ? {} : { maxDurability: entry.maximumDurability }) };
+}
+
+const membersByIndex = new WeakMap<FamilyIndex, Map<ItemFamily, readonly string[]>>();
+
+/** The registry's items of a family, read once per index (a tags packet makes a new index). */
+function familyMembers(bot: Bot, index: FamilyIndex, family: ItemFamily): readonly string[] {
+  const cache = membersByIndex.get(index) ?? new Map<ItemFamily, readonly string[]>();
+  membersByIndex.set(index, cache);
+  let members = cache.get(family);
+  if (members === undefined) {
+    members = bot.registry.itemsArray.map((item) => item.name).filter((name) => index.itemFamilies(name).includes(family));
+    cache.set(family, members);
+  }
+  return members;
+}
+
+function rankOf(bot: Bot, index: FamilyIndex, kind: EquipmentClass, item: RankedItem): number {
+  const family = rankFamily(kind);
+  if (family === null) return 1;
+  return 1 + familyMembers(bot, index, family).filter((member) => index.compareRank(item, { name: member }, family) < 0).length;
 }
 
 /** Durability left and the maximum of a carried item; both null for an item with no durability. */
@@ -66,42 +101,18 @@ export function durabilityOf(item: Item): Pick<ToolSnapshotEntry, "durabilityLef
     : { durabilityLeft: null, maximumDurability: null };
 }
 
-/**
- * The registry's block material maps encode both speed and harvest capability.
- * Gold has wooden harvest capability despite its greater mining speed, so the
- * `incorrect_for_*` membership is the ordering source rather than item names.
- */
-export function harvestTier(bot: Pick<Bot, "registry">, itemName: string): number {
-  const id = bot.registry.itemsByName[itemName]?.id;
-  if (id === undefined) return 0;
-  const materials = bot.registry.materials as Record<string, Record<number, number> | undefined>;
-  if (materials["incorrect_for_diamond_tool"]?.[id] !== undefined || itemName.startsWith("netherite_")) return 4;
-  if (materials["incorrect_for_iron_tool"]?.[id] !== undefined) return 3;
-  if (materials["incorrect_for_stone_tool"]?.[id] !== undefined) return 2;
-  if (materials["incorrect_for_wooden_tool"]?.[id] !== undefined) return 1;
-  return 0;
-}
-
-function speed(bot: Pick<Bot, "registry">, itemName: string, kind: EquipmentClass): number {
-  const id = bot.registry.itemsByName[itemName]?.id;
-  if (id === undefined) return 0;
-  const materials = bot.registry.materials as Record<string, Record<number, number> | undefined>;
-  return materials[`mineable/${kind}`]?.[id] ?? 0;
-}
-
 function empty(kind: EquipmentClass): ToolSnapshotEntry {
-  return { class: kind, tier: "none", item: null, slot: null, durabilityLeft: null, maximumDurability: null };
+  return { class: kind, rank: 0, item: null, slot: null, durabilityLeft: null, maximumDurability: null };
 }
 
-const tierStrength: Record<EquipmentTier, number> = {
-  none: 0, other: 1, wooden: 2, leather: 2, golden: 3, chainmail: 4, stone: 4,
-  turtle: 5, iron: 5, diamond: 6, netherite: 7,
-};
+type Candidate = Omit<ToolSnapshotEntry, "rank"> & { item: string };
 
-function capability(bot: Pick<Bot, "registry">, entry: ToolSnapshotEntry): number {
-  if (!entry.item) return 0;
-  return entry.class === "pickaxe" || entry.class === "shovel" || entry.class === "axe"
-    ? harvestTier(bot, entry.item) : tierStrength[entry.tier];
+/** Best first: the family's rank order, then the stack with more durability left, then the name (a stable tie). */
+function compareCandidates(index: FamilyIndex, kind: EquipmentClass, a: Candidate, b: Candidate): number {
+  const family = rankFamily(kind);
+  return (family === null ? 0 : index.compareRank(rankedItem(a), rankedItem(b), family)) ||
+    (b.durabilityLeft ?? Number.MAX_SAFE_INTEGER) - (a.durabilityLeft ?? Number.MAX_SAFE_INTEGER) ||
+    b.item.localeCompare(a.item);
 }
 
 /** Current best carried item per class. Worn armour is included because its slots are part of inventory. */
@@ -115,23 +126,16 @@ export function snapshotTools(bot: Bot): ToolSnapshot {
     const item = bot.inventory?.slots?.[slot];
     if (item && !items.some((entry) => entry.slot === slot)) items.push(item);
   }
-  const candidates = items.flatMap((item) => {
-    const kind = equipmentClass(item.name);
+  const index = familyIndexOf(bot);
+  const candidates = items.flatMap((item): Candidate[] => {
+    const kind = equipmentClass(index, item.name);
     if (!kind) return [];
-    return [{
-      class: kind,
-      tier: equipmentTier(item.name),
-      item: item.name,
-      slot: Number.isInteger(item.slot) ? item.slot : null,
-      ...durabilityOf(item),
-    } satisfies ToolSnapshotEntry];
+    return [{ class: kind, item: item.name, slot: Number.isInteger(item.slot) ? item.slot : null, ...durabilityOf(item) }];
   });
-  const choose = (kind: EquipmentClass) => candidates.filter((entry) => entry.class === kind).sort((a, b) =>
-    capability(bot, b) - capability(bot, a) ||
-    ((kind === "pickaxe" || kind === "shovel" || kind === "axe") ? speed(bot, b.item!, kind) - speed(bot, a.item!, kind) : 0) ||
-    (b.durabilityLeft ?? Number.MAX_SAFE_INTEGER) - (a.durabilityLeft ?? Number.MAX_SAFE_INTEGER) ||
-    b.item!.localeCompare(a.item!),
-  )[0] ?? empty(kind);
+  const choose = (kind: EquipmentClass): ToolSnapshotEntry => {
+    const best = candidates.filter((entry) => entry.class === kind).sort((a, b) => compareCandidates(index, kind, a, b))[0];
+    return best ? { ...best, rank: rankOf(bot, index, kind, rankedItem(best)) } : empty(kind);
+  };
   return { tools: TOOL_CLASSES.map(choose), armour: ARMOUR_CLASSES.map(choose) };
 }
 
@@ -151,5 +155,5 @@ export function toolChanges(before: ToolSnapshot, now: ToolSnapshot): ToolChange
 export function formatToolChange(change: ToolChange): string {
   const label = change.class;
   if (change.reason === "durability_used" || change.reason === "durability_restored") return `${label} durability ${change.before.durabilityLeft} → ${change.now.durabilityLeft}`;
-  return `${label}: ${change.before.tier} → ${change.now.tier}${change.reason === "broke" ? ` (${change.before.item} broke)` : ""}`;
+  return `${label}: ${change.before.item ?? "none"} → ${change.now.item ?? "none"}${change.reason === "broke" ? ` (${change.before.item} broke)` : ""}`;
 }

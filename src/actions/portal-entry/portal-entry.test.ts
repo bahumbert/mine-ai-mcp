@@ -114,7 +114,7 @@ test("a portal approach settles tool loss before issuing entry and retains navig
         },
       }, lifetime.signal);
     assert.equal(result.status, "partial");
-    assert.match("error" in result ? result.error : "", /TOOL_TIER_LOST.*stone pickaxe remains/);
+    assert.match("error" in result ? result.error : "", /TOOL_TIER_LOST.*family: pickaxe; stone_pickaxe remains/);
     assert.equal(controls.size, 0, "No portal entry was issued after the approach stopped.");
     assert.ok(result.navigation.scaffolding.some((stock) => stock.item === "end_stone"));
     assert.deepEqual(result.navigation.bucketDrops, { count: 0, waterRecovered: 0 });

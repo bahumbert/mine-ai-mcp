@@ -81,7 +81,7 @@ test("dig navigation safely settles partial when its best pickaxe capability dro
   const action = createNavigateAction(bot, fakeNavigation, toolLossDeps(bot, run));
   const output = await new ActionRunner().run(action, { x: 10, y: 64, z: 0, dig: true });
   assert.equal(output.result.status, "partial");
-  assert.match("error" in output.result ? output.result.error : "", /TOOL_TIER_LOST.*stone pickaxe remains/);
+  assert.match("error" in output.result ? output.result.error : "", /TOOL_TIER_LOST.*family: pickaxe; stone_pickaxe remains/);
 });
 
 /** The leg's navigation evidence after an engine that takes `legMs` of the installed clock, steps the wall clock by `wallStepMs` mid-leg, then throws. */

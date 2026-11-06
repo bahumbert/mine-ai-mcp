@@ -409,7 +409,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     ...inventoryLines(inventory, situation.item_families),
     "",
     "### Best tools and armour",
-    ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.tier}${entry.item ? ` (${entry.item}, slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : ""}`),
+    ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.item ? `${entry.item} (slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : "none"}`),
     "",
     `### Nearby (within ${nearby.rangeBlocks} blocks)`,
     `- Players: ${

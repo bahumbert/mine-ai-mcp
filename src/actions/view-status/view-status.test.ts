@@ -189,11 +189,12 @@ test("refreshes the queryable status and inventory rows in the same read", (t) =
     { slot: 45, location: "off-hand", item_name: "shield", count: 1, held: 0 },
   ]);
   // Fresh vanilla stacks: their whole durability from the item data, as in the inventory report above.
-  assert.deepEqual(data.read("SELECT class, tier, item_name, durability_left FROM bot_tools WHERE item_name IS NOT NULL ORDER BY class"), [
-    { class: "helmet", tier: "diamond", item_name: "diamond_helmet", durability_left: 363 },
-    { class: "pickaxe", tier: "stone", item_name: "stone_pickaxe", durability_left: 131 },
-    { class: "shield", tier: "other", item_name: "shield", durability_left: 336 },
-  ]);
+  assert.deepEqual(data.read("SELECT class, rank > 0 AS ranked, item_name, durability_left FROM bot_tools WHERE item_name IS NOT NULL OR class = 'shovel' ORDER BY class"), [
+    { class: "helmet", ranked: 1, item_name: "diamond_helmet", durability_left: 363 },
+    { class: "pickaxe", ranked: 1, item_name: "stone_pickaxe", durability_left: 131 },
+    { class: "shield", ranked: 1, item_name: "shield", durability_left: 336 },
+    { class: "shovel", ranked: 0, item_name: null, durability_left: null },
+  ], "a carried item has a rank above 0, a class with none carried has 0");
 });
 
 test("renders one compact Markdown situation report", async (t) => {
@@ -213,6 +214,9 @@ test("renders one compact Markdown situation report", async (t) => {
   assert.match(markdown, /- Held: stone_pickaxe x1/);
   assert.match(markdown, /- Worn: head diamond_helmet, off-hand shield/);
   assert.match(markdown, /- cobblestone x76 \(slots 9, 10\)/);
+  assert.match(markdown, /\n- pickaxe: stone_pickaxe \(slot 36, 131\/131 durability\)\n/, "the best tools line prints the item name");
+  assert.match(markdown, /\n- shovel: none\n/);
+  assert.doesNotMatch(markdown, /pickaxe: stone \(/, "no material label read from the name");
   assert.match(markdown, /- Players: Faraway \(online, not loaded nearby\); Scout 5\.3 blocks away at `-12, 99, 14`/);
   assert.match(markdown, /- Hostiles: zombie 5 blocks away/);
   assert.match(markdown, /- Loaded mobs \(every loaded chunk, any distance\):\n/);

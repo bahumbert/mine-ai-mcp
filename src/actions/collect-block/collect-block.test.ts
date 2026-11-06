@@ -212,12 +212,12 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
 test("a tool that broke during the run is reported as a field of the result, not only in the stop reason", () => {
   const request = parseCollectBlockRequest({ block_name: "dirt", count: 4 });
   const { bot } = createFakeBot({ carried: { dirt: 2 } });
-  const stopped = settle(bot, request, {}, new Set(["dirt"]), new Vec3(0, 64, 0), { status: "stopped", broken: [], reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains." });
+  const stopped = settle(bot, request, {}, new Set(["dirt"]), new Vec3(0, 64, 0), { status: "stopped", broken: [], reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; family: shovel; no shovel remains." });
   const lost = {
     class: "shovel" as const,
-    before: { class: "shovel" as const, tier: "wooden" as const, item: "wooden_shovel", slot: 36, durabilityLeft: 1, maximumDurability: 59 },
-    now: { class: "shovel" as const, tier: "none" as const, item: null, slot: null, durabilityLeft: null, maximumDurability: null },
-    reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains.",
+    before: { class: "shovel" as const, rank: 2, item: "wooden_shovel", slot: 36, durabilityLeft: 1, maximumDurability: 59 },
+    now: { class: "shovel" as const, rank: 0, item: null, slot: null, durabilityLeft: null, maximumDurability: null },
+    reason: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; family: shovel; no shovel remains.",
   };
   assert.deepEqual(reportToolLoss(stopped, lost).collected.toolLost, { item: "wooden_shovel", class: "shovel" });
   // No loss, no field.

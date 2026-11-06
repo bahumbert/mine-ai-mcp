@@ -179,11 +179,11 @@ export function updateBotStatus(data: SqlBotData, status: BotStatusSnapshot): vo
     }
     database.prepare("DELETE FROM bot_tools WHERE bot_id = ?").run(status.botId);
     const insertTool = database.prepare(
-      "INSERT INTO bot_tools (bot_id, class, category, tier, item_name, slot, durability_left, maximum_durability, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO bot_tools (bot_id, class, category, rank, item_name, slot, durability_left, maximum_durability, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     const tools = status.tools ?? { tools: [], armour: [] };
     for (const tool of [...tools.tools, ...tools.armour]) {
-      insertTool.run(status.botId, tool.class, tools.tools.includes(tool) ? "tool" : "armour", tool.tier,
+      insertTool.run(status.botId, tool.class, tools.tools.includes(tool) ? "tool" : "armour", tool.rank,
         tool.item, tool.slot, tool.durabilityLeft, tool.maximumDurability, updatedAt);
     }
   }, { name: "updateBotStatus" });

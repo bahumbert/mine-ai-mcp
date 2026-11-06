@@ -120,7 +120,7 @@ Use `view_status` to obtain an instantaneous snapshot of the bot's live
 state before planning or after physical execution. It accepts no tool-specific
 arguments. Success proves the bot sampled its vitals, world time, exact
 position, compass heading, carried items (each carried food with the hunger points and saturation one
-restores, from game data), best tool/armour tiers, and nearby entities, while refreshing
+restores, from game data), best tool/armour (item, rank in its family, durability), and nearby entities, while refreshing
 the `bot_status`, `bot_inventory`, and `bot_tools` tables in SQLite. Nearby entities are the
 players online, the hostiles the combat policy counts within sixteen blocks, every
 loaded dropped item nearest first (up to sixteen), and a summary of every loaded mob
