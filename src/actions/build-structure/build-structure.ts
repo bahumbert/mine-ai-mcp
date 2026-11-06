@@ -26,6 +26,7 @@ import {
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { placeBlock } from "../../world/index.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
@@ -96,7 +97,7 @@ function recordingPlacements(bot: Bot, botData: SqlBotData, physics: BuildStruct
     ...physics,
     place: async (placement) => {
       const result = await physics.place(placement);
-      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block);
+      if (result.kind === "placed") recordPlacedContainer(botData, bot, result.block, familyIndexOf(bot));
       return result;
     },
   };

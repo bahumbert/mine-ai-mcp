@@ -1,4 +1,5 @@
 import { isLocationOwnedContainer } from "../world/containers.js";
+import type { FamilyIndex } from "../world/item-families.js";
 import { guardObservedWrite } from "./observed-write.js";
 import type { SqlBotData } from "./sql-bot-data.js";
 
@@ -72,16 +73,17 @@ export interface PlacedBlock {
 
 /**
  * Remember that this bot itself placed a container at that cell (a placement the world confirmed). Anything that is
- * not a location-owned container is ignored. The write is guarded: a locked or closed store loses the record and
- * never ends the placement that already happened.
+ * not a location-owned container (block family `container` of `families`) is ignored. The write is guarded: a locked
+ * or closed store loses the record and never ends the placement that already happened.
  */
 export function recordPlacedContainer(
   data: SqlBotData,
   bot: PlacingBot,
   block: PlacedBlock,
+  families: FamilyIndex,
   placedAt: string = new Date().toISOString(),
 ): void {
-  if (!isLocationOwnedContainer(block.name)) return;
+  if (!isLocationOwnedContainer(families, block.name)) return;
   const location = { dimension: bot.game.dimension, ...block.position };
   guardObservedWrite("placed-containers")(() => {
     data.transaction((database) => {

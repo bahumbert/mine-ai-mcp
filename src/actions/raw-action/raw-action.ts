@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import {
@@ -244,7 +245,7 @@ async function place(
       "[RAW_PLACE_NOT_OBSERVED] Mineflayer completed the attempt but the requested block was not observed at the target.",
     );
   const placedBlock = bot.blockAt(evidence.target);
-  if (botData && placedBlock && evidence.beforeBlock !== placedBlock.name) recordPlacedContainer(botData, bot, { name: placedBlock.name, position: evidence.target });
+  if (botData && placedBlock && evidence.beforeBlock !== placedBlock.name) recordPlacedContainer(botData, bot, { name: placedBlock.name, position: evidence.target }, familyIndexOf(bot));
 }
 
 function swing(

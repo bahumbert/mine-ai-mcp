@@ -3,10 +3,23 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { forgetContainerObservation, recordContainerObservation, recordPlacedContainer } from "./container-observations.js";
+import {
+  forgetContainerObservation,
+  recordContainerObservation,
+  recordPlacedContainer as recordPlacedContainerWith,
+  type PlacedBlock,
+  type PlacingBot,
+} from "./container-observations.js";
 import { SqlBotData } from "./sql-bot-data.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
+import { familyIndexOf } from "../world/item-families.js";
+
+/** The placement record with the families of a fake 1.21.4 server, the way the placers pass `familyIndexOf(bot)`. */
+const families = familyIndexOf(createFakeBot().bot);
+const recordPlacedContainer = (data: SqlBotData, bot: PlacingBot, block: PlacedBlock, placedAt?: string) =>
+  recordPlacedContainerWith(data, bot, block, families, placedAt);
 
 /** One complete look inside a container, as the observing bot reports it. */
 const seen = (
@@ -133,9 +146,9 @@ test("a placed block that is no container records nothing", (t) => {
   assert.deepEqual(placedRows(data), []);
 });
 
-test("every location-owned container kind is recorded, a shulker box of any colour included", (t) => {
+test("every location-owned container kind is recorded, a shulker box of any colour or none included", (t) => {
   const data = temporaryBotData({ closeAfter: t });
-  const kinds = ["chest", "trapped_chest", "barrel", "hopper", "dropper", "dispenser", "red_shulker_box"];
+  const kinds = ["chest", "trapped_chest", "barrel", "hopper", "dropper", "dispenser", "red_shulker_box", "shulker_box"];
 
   kinds.forEach((kind, index) => recordPlacedContainer(data, placer(), placedBlock(kind, index)));
 

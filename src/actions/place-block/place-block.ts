@@ -11,6 +11,7 @@ import {
 } from "../../navigation/index.js";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { cellIntersectsPlayerBody, cellKey } from "../../utils/index.js";
 import {
@@ -364,7 +365,7 @@ async function placeAttempt(run: PlaceRun, context: ActionContext): Promise<Plac
 /** A container this request's own packet put down is remembered as the bot's; one already there, or a refusal, is not. */
 function recordPlacedContainerOf(botData: SqlBotData, bot: Bot, result: PlaceBlockResult): void {
   if (result.status !== "succeeded" || !result.placement.placed || result.placement.afterBlock === null) return;
-  recordPlacedContainer(botData, bot, { name: result.placement.afterBlock, position: result.placement.target });
+  recordPlacedContainer(botData, bot, { name: result.placement.afterBlock, position: result.placement.target }, familyIndexOf(bot));
 }
 
 /**
