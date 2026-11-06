@@ -188,6 +188,56 @@ test("the encryption notice is shown and logged once, after the first successful
   assert.match(save, /else\s+begin\s+NoteClearKeyMigrated\(\);/u, "the notice is not in the branch of a successful configure");
 });
 
+// ---------- T12 (owner 2026-11-07, review W10): the saved key stays when the URL changes; the player is warned, nothing is automated ----------
+
+test("the URLs are compared trimmed and without trailing slashes", () => {
+  const compare = functionBody("UrlForComparison");
+  assert.match(compare, /Result := Trim\(Url\);/u);
+  assert.match(compare, /while \(Result <> ''\) and \(Copy\(Result, Length\(Result\), 1\) = '\/'\) do\s+Result := Copy\(Result, 1, Length\(Result\) - 1\);/u);
+});
+
+test("the saved URL is remembered by the prefill only (and forgotten with the key flags), so a Back to another data folder compares with that folder's URL", () => {
+  assert.match(code, /^\s*SavedBaseUrl, KeyUrlChangeTold: String;/mu);
+  const prefill = functionBody("PrefillFromSettings");
+  const reset = prefill.indexOf("SavedBaseUrl := '';");
+  assert.ok(reset >= 0 && reset < prefill.indexOf("ReadSettingsSections("), "the saved URL is not forgotten before the settings are read");
+  assert.match(prefill, /KeyUrlChangeTold := '';/u);
+  assert.match(prefill, /SavedBaseUrl := JsonString\(Llm, 'baseUrl'\);/u);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => /SavedBaseUrl := /u.test(body)).map(([name]) => name), ["PrefillFromSettings"]);
+});
+
+test("the player is warned when a saved key meets another URL: only when both hold, once per URL, the box in the wizard and a log line in a silent install, and no flag, key or URL changes", () => {
+  const note = functionBody("NoteSavedKeyKeptForOtherUrl");
+  assert.match(note, /\(not KeySaved\) or \(SavedBaseUrl = ''\) or \(NewUrl = UrlForComparison\(SavedBaseUrl\)\) or \(NewUrl = KeyUrlChangeTold\) then\s+Exit;/u);
+  assert.match(note, /NewUrl := UrlForComparison\(RemoteUrlEdit\.Text\);/u);
+  assert.match(note, /KeyUrlChangeTold := NewUrl;/u);
+  assert.match(note, /The saved API key was made for ' \+ SavedBaseUrl/u);
+  assert.match(note, /replace the dots in the API key box with that provider''s key/u);
+  // The box is honest about the key travelling: the endpoint test that follows OK sends the saved key to the new URL.
+  assert.match(note, /Setup keeps it and sends it to ' \+ Shown \+ ' in the endpoint test that follows/u);
+  assert.match(note, /Log\('API key: /u);
+  assert.match(note, /if not WizardSilent then\s+SuppressibleMsgBox\([^\n]*mbInformation, MB_OK, IDOK\);/u);
+  // The silent log says the next action of a run with no key box.
+  assert.match(note, /\/LLMKEY=/u);
+  // No automation: the key, its flags and the URL are only read.
+  assert.doesNotMatch(note, /KeySaved :=|KeyWasSaved :=|ClearKeyMigrated :=|RemoteKeyEdit\.Text :=|RemoteUrlEdit\.Text :=|SavedBaseUrl :=|Abort|Result :=/u);
+});
+
+test("the warning comes before the save, in the one routine both the endpoint page's Next and a silent install run, and nothing else calls it", () => {
+  const save = functionBody("SaveAndTestEndpoint");
+  const warned = save.indexOf("NoteSavedKeyKeptForOtherUrl()");
+  assert.ok(warned >= 0 && warned < save.indexOf("'configure ' + RemoteLlmArguments()"), "the warning is not before the configure call");
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("NoteSavedKeyKeptForOtherUrl()")).map(([name]) => name), ["SaveAndTestEndpoint"]);
+  assert.match(functionBody("AcceptRemoteEndpoint"), /SaveAndTestEndpoint\(Failure\)/u);
+  assert.match(functionBody("SilentSetupFailure"), /SaveAndTestEndpoint\(Failure\)/u);
+});
+
+test("the doc's key part tells the player about the warning", () => {
+  const key = doc.slice(doc.indexOf("### Your API key"), doc.indexOf("## Ollama you already have"));
+  assert.match(key, /shows a message when you press \*\*Next\*\* with a saved key\s+and a URL that differs from the saved one/u);
+  assert.match(key, /replace the dots with the new provider's key/u);
+});
+
 test("the doc tells the player about the remote endpoint: Ollama on another PC with its firewall line, the list and what it costs, the /v1 correction, the encrypted key", () => {
   const titles = [...doc.matchAll(/^#{2,3} (.+)$/gmu)].map((match) => match[1]!);
   for (const title of ["A remote AI endpoint", "Listing the models", "The /v1 correction", "Ollama on another PC", "Your API key"]) assert.ok(titles.includes(title), `no section "${title}"`);

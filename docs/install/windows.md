@@ -27,6 +27,13 @@ file) before anything runs. A file that fails the check is deleted and the step 
 
 Bun, the bots and their AI code come inside the installer. The installer never ships the Minecraft server.
 
+## Disk space
+
+The AI model page shows the free space of each drive the downloads go to and what they need. The setup counts the
+downloads and installs only. Ollama's own installer also needs temporary room on the Windows drive (C:) while it runs,
+and the bots' memories and worlds grow as they play, so keep several GB free beyond the figures shown. The setup says
+the same on the AI model page and on the Ready page, and writes it in its log in a silent install.
+
 ## The Minecraft server
 
 The installer asks which server the bots join:
@@ -150,7 +157,11 @@ Ollama has no password: use this only on a network you trust. Without the settin
 The key is stored in `settings.json` encrypted for your Windows user (`apiKeyProtected`); it does not appear in clear in
 the file. When you run the installer again over settings that hold a key, the key box shows dots and Mine AI keeps the
 saved key unless you type another one; the saved key goes to whatever URL is in the URL box, so type the key again when
-you change to another service. A key saved by an older version in clear is encrypted by the first save, and the
+you change to another service. To remind you, the installer shows a message when you press **Next** with a saved key
+and a URL that differs from the saved one (a trailing `/` does not count): it names the URL the key was saved for and
+asks you to replace the dots with the new provider's key if it is another service. It changes nothing: the saved key
+stays until you type another one (silent install: a line in the setup log, and `/LLMKEY=` to give the new key). A key
+saved by an older version in clear is encrypted by the first save, and the
 installer tells you so. A key saved by another Windows user or on another PC (a copied data folder) cannot be read here:
 the installer says so; type the key again (silent install: `/LLMKEY=`). When you type a key, the installer hands it
 to Mine AI on a command line for a moment, so it is visible to your own processes in Task Manager for that moment.

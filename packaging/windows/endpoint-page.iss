@@ -3,7 +3,7 @@
 // Script sees it as one script. Needs from mine-ai.iss, above the #include: the page helpers (AddText, AddEdit, AddButton, AddGauge),
 // the launcher runs (RunLauncher, RunStepSucceeded, StepFailureText), the JSON readers (JsonString), Quoted and ModelPage.
 // Holds: the page's variables; the URL and key checks (RemoteUrlProblem); the key box (RemoteKeyChanged, ListKeyArguments,
-// RemoteLlmArguments, NoteClearKeyMigrated); the /v1 correction (ApplyEndpointCorrection); the model list (ListModels, the combo
+// RemoteLlmArguments, NoteClearKeyMigrated, UrlForComparison, NoteSavedKeyKeptForOtherUrl); the /v1 correction (ApplyEndpointCorrection); the model list (ListModels, the combo
 // box filter); the "Ollama on another PC" buttons; and CreateEndpointPage, which builds the page.
 // The save and test of the endpoint (SaveAndTestEndpoint, AcceptRemoteEndpoint), the prefill and the silent parameters stay in mine-ai.iss
 // and use this file's variables and routines; iss-endpoint-page.test.ts pins both sides.
@@ -24,6 +24,9 @@ var
   // prefill found such a key, so the mark in the box means it (a typed mark with no saved key is just text). ClearKeyMigrated: the settings
   // held the key in clear; the first save encrypts it and the player is told once (NoteClearKeyMigrated).
   KeySaved, KeyWasSaved, ClearKeyMigrated: Boolean;
+  // SavedBaseUrl: the URL the settings held when the prefill found them (the one the saved key was made for). KeyUrlChangeTold: the
+  // URL (compared form) NoteSavedKeyKeptForOtherUrl last warned about, so a retry after a failed test does not repeat the box.
+  SavedBaseUrl, KeyUrlChangeTold: String;
 
 // ---------- endpoint page: URL, key, model list and model name of a remote endpoint (spec D4) ----------
 
@@ -91,6 +94,31 @@ begin
   Log('API key: ' + KEY_ENCRYPTED_NOTICE);
   if not WizardSilent then
     SuppressibleMsgBox(KEY_ENCRYPTED_NOTICE, mbInformation, MB_OK, IDOK);
+end;
+
+// The form in which two endpoint URLs are compared: trimmed, without trailing slashes.
+function UrlForComparison(const Url: String): String;
+begin
+  Result := Trim(Url);
+  while (Result <> '') and (Copy(Result, Length(Result), 1) = '/') do
+    Result := Copy(Result, 1, Length(Result) - 1);
+end;
+
+// Before the save: the saved key is kept (the launcher uses it for whatever URL is in the box) and the player is told once when that URL
+// is not the one the key was saved for (owner 2026-11-07: a warning to change the key, no automation). It only reads: the key, its flags
+// and the URL stay as they are, and OK goes on. The wizard shows a box; a silent install has no key box, so its log line names /LLMKEY=.
+procedure NoteSavedKeyKeptForOtherUrl();
+var
+  NewUrl, Shown: String;
+begin
+  NewUrl := UrlForComparison(RemoteUrlEdit.Text);
+  if (not KeySaved) or (SavedBaseUrl = '') or (NewUrl = UrlForComparison(SavedBaseUrl)) or (NewUrl = KeyUrlChangeTold) then
+    Exit;
+  KeyUrlChangeTold := NewUrl;
+  Shown := Trim(RemoteUrlEdit.Text);
+  Log('API key: the saved key was made for ' + SavedBaseUrl + ' and is kept for ' + Shown + '. If that is another provider, run the setup again with /LLMKEY=<its key>.');
+  if not WizardSilent then
+    SuppressibleMsgBox('The saved API key was made for ' + SavedBaseUrl + '. Setup keeps it and sends it to ' + Shown + ' in the endpoint test that follows.' + #13#10#13#10 + 'If ' + Shown + ' is another provider, replace the dots in the API key box with that provider''s key (if the test refuses the saved key, you stay on this page to do it).', mbInformation, MB_OK, IDOK);
 end;
 
 // The text without the notice that starts it: the launcher's error and detail start with the /v1 notice, which is shown on its own.

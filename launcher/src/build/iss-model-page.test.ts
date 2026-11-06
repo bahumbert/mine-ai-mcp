@@ -3,7 +3,7 @@
 // Pascal is not run: each test reads the script's code (iss-test-support.ts) for what must hold.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { code, codeFunctions, functionBody } from "./iss-test-support.ts";
+import { code, codeFunctions, doc, functionBody } from "./iss-test-support.ts";
 
 // Findings 6c, 6d, 6f: wording and the EULA page's layout.
 test("the server and endpoint options say what they do, and the EULA check box has room above and below", () => {
@@ -36,4 +36,45 @@ test("`install disk` is run by the model page's disk text only, after `install g
   assert.match(disk, /JsonString\(Json, 'detail'\)/u);
   // A run that failed shows nothing.
   assert.match(disk, /else\s+DiskStatus\.Caption := '';/u);
+});
+
+// T11 (owner 2026-11-06): the disk figures count the downloads and installs only; the player is told what they do not count.
+const ROOM_WARNING_PARTS = [/downloads and installs only/u, /Ollama's own installer also needs temporary room on the Windows drive \(C:\)/u, /bots' memories and worlds grow as they play/u, /keep several GB free/u] as const;
+
+test("the room warning says what the setup does not count, in one constant that the model page, the Ready list and the silent log share", () => {
+  const constant = /ROOM_WARNING_TEXT = ((?:'(?:[^']|'')*'\s*\+?\s*)+);/u.exec(code)?.[1];
+  assert.notEqual(constant, undefined, "the .iss has no ROOM_WARNING_TEXT constant");
+  const text = constant!.replace(/'\s*\+\s*'/gu, "").replace(/''/gu, "'");
+  for (const part of ROOM_WARNING_PARTS) assert.match(text, part);
+  assert.match(functionBody("CreateModelPage"), /AddText\(ModelPage, ROOM_WARNING_TEXT, /u);
+  // After the Ready list's model and server lines, whichever branch they took (first install or update).
+  assert.match(functionBody("UpdateReadyMemo"), /else\s+Result := Result[^\n]*\n\s*Result := Result \+ NewLine \+ NewLine \+ 'Disk room:' \+ NewLine \+ Space \+ ROOM_WARNING_TEXT;/u);
+  // Silent: logged, never a box (nobody reads the page).
+  const silent = functionBody("ApplySilentParameters");
+  assert.match(silent, /Log\('Disk room: ' \+ ROOM_WARNING_TEXT\)/u);
+  assert.doesNotMatch(silent, /MsgBox/u);
+});
+
+test("the room warning has its own place on the model page: under the remote choice, above the step status and the gauge, none overlapping", () => {
+  const page = functionBody("CreateModelPage");
+  const place = (call: string) => {
+    const match = new RegExp(`${call}, (\\d+)(?:, (\\d+))?\\)`, "u").exec(page);
+    assert.notEqual(match, null, `${call} is not placed with a number`);
+    return { top: Number(match![1]), height: Number(match![2] ?? 0) };
+  };
+  const remote = /ModelRemoteRadio := AddRadio\(ModelPage, '[^\n]*', (\d+)\)/u.exec(page);
+  const warning = place("AddText\\(ModelPage, ROOM_WARNING_TEXT");
+  const status = place("ModelStepStatus := AddText\\(ModelPage, ''");
+  const gauge = place("ModelGauge := AddGauge\\(ModelPage");
+  assert.ok(remote !== null && Number(remote[1]) + 20 <= warning.top, "the warning overlaps the remote radio");
+  assert.ok(warning.top + warning.height <= status.top, "the warning overlaps the step status");
+  assert.ok(status.top + status.height <= gauge.top, "the step status overlaps the gauge");
+  // The endpoint page already reaches a gauge at 270: nothing on the model page goes lower.
+  assert.ok(gauge.top <= 270, "the model page goes lower than the endpoint page's gauge");
+});
+
+test("the doc's disk part says the same as the wizard: the setup counts downloads and installs, Ollama's installer needs room on C:, the bots' memories grow", () => {
+  const section = doc.slice(doc.indexOf("## Disk space"), doc.indexOf("## The Minecraft server"));
+  assert.ok(section.length > 0, "the doc has no section \"Disk space\" before \"The Minecraft server\"");
+  for (const part of ROOM_WARNING_PARTS) assert.match(section, part);
 });

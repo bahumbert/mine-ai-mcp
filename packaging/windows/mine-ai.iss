@@ -117,6 +117,9 @@ const
   // mark of a saved key reaches no launcher call (KeyWasSaved and the mark in the box make KeySaved); a mark typed with no saved key is a typed key.
   SAVED_KEY_MARK = 'saved-key-unchanged';
   KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';
+  // What the free-space figures (`install disk`) leave out (owner 2026-11-06: no measure of Ollama's own temporary files, only this warning).
+  // The model page, the Ready list and the silent log say it.
+  ROOM_WARNING_TEXT = 'The setup counts the downloads and installs only. Ollama''s own installer also needs temporary room on the Windows drive (C:) while it runs, and the bots'' memories and worlds grow as they play: keep several GB free.';
   SAVED_KEY_UNUSABLE_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Type the key again in the API key box, replacing the dots (silent install: /LLMKEY=).';
   // The same cause for a silent run, which has no key box: the next action is the parameter.
   SAVED_KEY_UNUSABLE_SILENT_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Run the setup again with /LLMKEY=<the key>.';
@@ -831,8 +834,10 @@ begin
   OllamaDirEdit.Text := ExpandConstant('{localappdata}\Programs\Ollama');
   // The endpoint's URL, key and model are asked on the next page (CreateEndpointPage), which a local choice skips.
   ModelRemoteRadio := AddRadio(ModelPage, 'On a remote OpenAI-compatible API (OpenRouter, your own server...)', 166);
-  ModelStepStatus := AddText(ModelPage, '', 206, 28);
-  ModelGauge := AddGauge(ModelPage, 238);
+  // What the disk text above does not count (T11): three lines with a line to spare; the step status and the gauge sit below, within the endpoint page's depth.
+  AddText(ModelPage, ROOM_WARNING_TEXT, 190, 44);
+  ModelStepStatus := AddText(ModelPage, '', 236, 28);
+  ModelGauge := AddGauge(ModelPage, 266);
   ModelLocalRadio.OnClick := @ModelChoiceChanged;
   ModelRemoteRadio.OnClick := @ModelChoiceChanged;
   ModelLocalRadio.Enabled := False;
@@ -966,12 +971,15 @@ begin
   KeySaved := False;
   KeyWasSaved := False;
   ClearKeyMigrated := False;
+  SavedBaseUrl := '';
+  KeyUrlChangeTold := '';
   if not ReadSettingsSections(Llm, Server) then
     Exit;
   if JsonString(Llm, 'kind') = 'remote' then
   begin
     PreviousLlmWasRemote := True;
-    RemoteUrlEdit.Text := JsonString(Llm, 'baseUrl');
+    SavedBaseUrl := JsonString(Llm, 'baseUrl');
+    RemoteUrlEdit.Text := SavedBaseUrl;
     if JsonString(Llm, 'apiKeyProtected') <> '' then
     begin
       // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
@@ -1017,6 +1025,7 @@ begin
   else
     // A first install, or an update that finds no settings.json: the pages after the copy still ask both.
     Result := Result + NewLine + NewLine + 'AI model and Minecraft server: chosen on the next pages, after the files are copied (the setup checks this PC''s graphics card there).';
+  Result := Result + NewLine + NewLine + 'Disk room:' + NewLine + Space + ROOM_WARNING_TEXT;
 end;
 
 // ---------- silent install: the wizard's choices from command-line parameters ----------
@@ -1026,6 +1035,8 @@ procedure ApplySilentParameters();
 var
   Server: String;
 begin
+  // No page is shown: the room warning of the model page and the Ready list goes to the log.
+  Log('Disk room: ' + ROOM_WARNING_TEXT);
   // At a first install only: an update keeps its data folder, and a different /DATADIR= is refused (SilentFolderProblem).
   if ParamGiven('DATADIR') and (PreviousDataDir() = '') then
     DataPage.Values[0] := Param('DATADIR', '');
@@ -1197,6 +1208,7 @@ var
   Code: Integer;
 begin
   Result := False;
+  NoteSavedKeyKeptForOtherUrl();
   Code := RunLauncher('configure ' + RemoteLlmArguments(), False, EndpointGauge, EndpointStepStatus, Json);
   if Code <> 0 then
     Failure := ConfigureFailure('Mine AI could not save the endpoint.', Code)
