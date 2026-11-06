@@ -9,7 +9,7 @@ import test from "node:test";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
 import { CarriedCounts } from "../test-support/carried-counts.js";
 import { craftingBot } from "../test-support/crafting.js";
-import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, flush } from "../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeHarness, NEW_LIFE_SETTLE_MS, createFakeBot, createFakeClock, flush } from "../test-support/fake-bot/index.js";
 import { structureWorld } from "../test-support/structure-world.js";
 import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runtime.js";
@@ -144,9 +144,8 @@ const equipScene: SceneFactory = (clock, index) => {
 };
 
 /**
- * Sleeps in a bed 2 or 3 blocks east of the bot at night: the bed use (`bot.sleep`) is the held wait. A death asleep is
- * not tested: damage wakes a sleeper before she dies (vanilla `ServerPlayer.hurt`), which the fake's `sendHealth` does
- * not send, so `isSleeping` would stay true through the respawn (unmeasured; a contract check first).
+ * Sleeps in a bed 2 or 3 blocks east of the bot at night: the bed use (`bot.sleep`) is the held wait, so the death comes before she lies
+ * down. A death asleep is the fake's and the contract check `respawn-while-asleep`'s (the wake comes first, so `isSleeping` is false in the next life).
  */
 const sleepScene: SceneFactory = (clock, index) => {
   const bedX = 2 + (index % 2);
@@ -244,17 +243,15 @@ async function untilAtWait(clock: FakeClock, scenes: readonly Scene[]): Promise<
   assert.ok(scenes.every((scene) => scene.reachedWait()), "every request reaches its held wait");
 }
 
-/** The server kills the bot (`/kill`): the measured death, then the respawn at full health. */
+/** The server kills the bot (`/kill`): the measured death; the bot asks to respawn at once and the fake server answers (contract check `respawn-after-death`). */
 const die = (scene: Scene) => scene.harness.combat.setHealth(0);
 /**
- * Full health, then the server's position for the new life (the fake's `sendPosition`; physics returns 1.5 s later,
- * `fake-bot-physics.ts`, `physics.js:429`). Stopgap: the real server's respawn packets are not measured by a contract
- * check; `sendHealth` alone leaves the fake's physics off, so a look (the bed use) would hang.
+ * Let the server put the dead bot back (`respawn`, `position`, full health a tick later); Mineflayer's physics returns 1.5 s after the
+ * `position` (`physics.js:426-430`), without which a look (the bed use) would hang.
  */
 async function respawn(clock: FakeClock, scene: Scene): Promise<void> {
-  scene.harness.combat.setHealth(20, 20);
-  scene.harness.server.sendPosition(scene.harness.bot.entity.position);
-  await clock.advance(2_000);
+  await clock.advance(NEW_LIFE_SETTLE_MS);
+  assert.equal(scene.harness.bot.health, 20, "the server respawned her");
 }
 
 for (const [label, make] of Object.entries(SCENES)) {

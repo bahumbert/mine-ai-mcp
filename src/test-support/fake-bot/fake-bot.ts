@@ -60,6 +60,8 @@ export interface FakeBotOptions {
   readonly username?: string;
   /** The feet; defaults to (0.5, 64, 0.5). */
   readonly position?: Point;
+  /** Where the server puts her after a death, unless she slept in a bed (`FakeServer.respawnPoint`); her feet when omitted. */
+  readonly spawn?: Point;
   readonly dimension?: string;
   readonly gameMode?: string;
   readonly health?: number;
@@ -188,6 +190,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const loginRegistry = registry as unknown as LoginRegistry;
   loadLoginRegistries(loginRegistry, version);
   const server = createFakeServer(clock, { ...options.server, lagMs: options.lagMs });
+  server.setRespawnPoint(options.spawn === undefined ? feet : new Vec3(options.spawn.x, options.spawn.y, options.spawn.z));
   const inventory = createFakeInventory(registry, { slots: options.slots, carried: options.carried });
   const EntityClass = (require("prismarine-entity") as (registry: Bot["registry"]) => new (id: number) => Entity)(registry);
   const entities = createFakeEntities(registry, EntityClass, FIRST_SPAWNED_ENTITY_ID);
@@ -229,7 +232,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeLavaFlow({ server, world });
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { server });
-  attachFakeSleep(bot, { server, world });
+  attachFakeSleep(bot, { server, world, combat });
   attachFakeChat(bot, { server, options: options.chat });
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));

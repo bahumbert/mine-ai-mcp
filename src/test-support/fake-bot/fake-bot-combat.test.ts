@@ -335,7 +335,8 @@ test("a shot at a bot that dies of it burns no more, and the next action from a 
   await harness.clock.advance(FIREBALL_FLIGHT_MS);
   assert.equal(harness.bot.health, 0);
   await harness.clock.advance(6_000);
-  assert.equal(harness.bot.health, 0, "no burn after death");
+  // She asked to respawn as she died: the server put her back at full health, and the fire of the first life does not follow her.
+  assert.equal(harness.bot.health, 20, "no burn after death: the second life stays whole");
   const alive = shooters();
   alive.combat.shootBot("arrow", SKELETON_ID, 17);
   await alive.clock.advance(300);
@@ -622,4 +623,69 @@ test("a use of the hand ends when the server reads the change of the held item, 
   assert.equal(drawing(), 1, "the server has not read the new slot yet: 100 ms after it was sent");
   await harness.clock.advance(450);
   assert.equal(drawing(), 0, "the server read the new slot and ended the use");
+});
+
+/** The `client_command` packets the client wrote (a respawn request is one with payload 0). */
+const respawnRequests = (harness: FakeHarness) => harness.server.packets.filter(({ name }) => name === "client_command");
+
+test("a death asks the server to respawn at once, and the server puts her at the world's spawn: respawn, position, then full health a tick on", async () => {
+  const spawn = new Vec3(20.5, -60, 5.5);
+  const harness = fight({ spawn });
+  const heard: string[] = [];
+  for (const name of ["respawn", "position", "update_health"]) harness.bot._client.on(name, () => void heard.push(name));
+  harness.combat.setHealth(0);
+  assert.equal(respawnRequests(harness).length, 1, "the request is written as she dies");
+  assert.deepEqual(heard, ["update_health"], "nothing else before the server answers");
+  await harness.clock.advance(500);
+  assert.deepEqual(heard, ["update_health", "respawn", "position", "update_health"]);
+  assert.deepEqual(harness.server.sentPositions, [spawn], "put at the world's spawn, not where she died");
+  assert.deepEqual([harness.bot.health, harness.bot.food], [20, 20]);
+});
+
+test("without a spawn option the world's spawn is where she stood when the bot was made", async () => {
+  const harness = fight({ position: new Vec3(3.5, -60, 4.5) });
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.deepEqual(harness.server.sentPositions, [new Vec3(3.5, -60, 4.5)]);
+});
+
+test("on a server that answers 450 ms late the respawn comes 450 ms after the request, the death in between", async () => {
+  const harness = fight({ lagMs: 450 });
+  harness.combat.setHealth(0);
+  await harness.clock.advance(300);
+  assert.equal(harness.bot.health, 0, "still dead: the server has not read the request");
+  await harness.clock.advance(1_000);
+  assert.equal(harness.bot.health, 20);
+});
+
+test("a health set by hand after a death is the new life: the server's answer to the request finds her alive and sends nothing", async () => {
+  const harness = fight();
+  harness.combat.setHealth(0);
+  harness.combat.setHealth(20, 20);
+  await harness.clock.advance(500);
+  assert.deepEqual(harness.server.sentPositions, [], "no position for a bot that is alive");
+  assert.equal(harness.bot.health, 20);
+});
+
+test("a request of an earlier death is not answered once she has died again: one respawn for the death that is on", async () => {
+  const harness = fight();
+  const heard: string[] = [];
+  for (const name of ["respawn", "position"]) harness.bot._client.on(name, () => void heard.push(name));
+  harness.combat.setHealth(0);
+  harness.combat.setHealth(20, 20);
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.equal(respawnRequests(harness).length, 2, "both deaths asked");
+  assert.deepEqual(heard, ["respawn", "position"], "the server answers the death she is in, not the one she left");
+});
+
+test("a second death in the next life asks again and is answered again", async () => {
+  const harness = fight();
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.equal(respawnRequests(harness).length, 2);
+  assert.equal(harness.server.sentPositions.length, 2);
+  assert.equal(harness.bot.health, 20);
 });

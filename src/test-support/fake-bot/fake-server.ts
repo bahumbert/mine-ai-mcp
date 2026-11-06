@@ -116,6 +116,13 @@ export interface FakeServer {
   /** Where the server has an entity, when it differs from the client's belief (a rider let off at the boat's top). */
   serverPositionOf(entityId: number): Vec3 | null;
   setServerPosition(entityId: number, position: Vec3): void;
+  /**
+   * Where the server puts the player after a death: the world's spawn, or the spot beside the bed she slept in (contract checks
+   * `respawn-after-death` and `respawn-while-asleep`). The world's spawn differs from where she died (8.5 blocks from the origin, 512 from the death in 3 runs).
+   * Null until a bot gives it (`createFakeBot` sets it to her feet, or to its `spawn` option).
+   */
+  readonly respawnPoint: Vec3 | null;
+  setRespawnPoint(point: Vec3): void;
   /** Every `position` packet sent to the client, in order. */
   readonly sentPositions: readonly Vec3[];
   /** Send the client a `position` packet (mineflayer restarts physics on it). */
@@ -400,10 +407,15 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
     if (outcome === "catch up") catchUp(nowMs - stoppedAtMs);
   };
 
+  let respawnPoint: Vec3 | null = null;
   const server = {
     get isRunning() {
       return running;
     },
+    get respawnPoint() {
+      return respawnPoint;
+    },
+    setRespawnPoint: (point: Vec3) => void (respawnPoint = point.clone()),
     onWeatherPacket: weatherChannel.onWeatherPacket,
     ...createClientPackets(clock),
     ...createPositions(),

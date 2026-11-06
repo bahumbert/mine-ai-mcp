@@ -7,7 +7,7 @@ import { useBucketResultSchema } from "../actions/use-bucket/contract.js";
 import { useContainerResultSchema } from "../actions/use-container/contract.js";
 import { CLICK_WALL_MS } from "../actions/use-container/window-answer.js";
 import { carriedCountField } from "../test-support/carried-counts.js";
-import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeHarness, NEW_LIFE_SETTLE_MS, createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runtime.js";
 
@@ -16,7 +16,7 @@ import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runti
 // state, and 20 bots with the same action keep their own records while one of them dies.
 //
 // The death is the measured one (`fake-bot-combat.ts` `sendHealth`: the cause packet, the inventory clear, health 0;
-// then health 20 and `spawn`). Each action's first wait is where the test kills the bot:
+// then the server's answer to the respawn request: `respawn`, `position` at the spawn, health 20 and `spawn`). Each action's first wait is where the test kills the bot:
 //   use_container  the first window click reached the server
 //   drop_item      the first toss resolved (the walk away and the pickup check are next)
 //   drop_item pit  the first dig started
@@ -103,18 +103,12 @@ function once(die: () => void): () => void {
 
 const kill = (harness: FakeHarness) => harness.combat.setHealth(0);
 
-/**
- * STOPGAP (waits for the fake's measured death to include the respawn's `position` packet): the server puts the respawned
- * player at its spawn with a `position` packet, and Mineflayer's physics stays off after a death until it arrives
- * (`physics.js:480-484` `shouldUsePhysics`, the fake mirrors it in `fake-bot-physics.ts`); `sendHealth(20, 20)` alone
- * sends none, so no action that waits for ticks or walks would finish. The packet itself is unmeasured on the real
- * server (no contract check yet; Mineflayer's `physics.js:426-430` delays its forced position after a death, so it
- * expects one). The bot respawns at its spawn, 8 blocks from where it died: what it tossed before the death lies
- * behind it, and is not picked up again.
- */
-function respawn(harness: FakeHarness): void {
-  harness.combat.setHealth(20, 20);
-  harness.server.sendPosition(harness.bot.entity.position.offset(SPAWN_OFFSET, 0, 0));
+/** Where the server respawns every bot of this file (`createFakeBot` option `spawn`): 8 blocks from where it died, so what it tossed before the death lies behind it and is not picked up again. */
+const SPAWN = { x: 0.5 + SPAWN_OFFSET, y: 64, z: 0.5 };
+/** Let the server put the dead bot back: its `respawn`, `position` and full health, then the physics. */
+async function respawn(harness: FakeHarness): Promise<void> {
+  await harness.clock.advance(NEW_LIFE_SETTLE_MS);
+  assert.equal(harness.bot.health, 20, "the server respawned her");
 }
 
 const isCancelled = (result: unknown) => (result as { kind?: string; status?: string }).kind === "runtime_failure" && (result as { status?: string }).status === "cancelled";
@@ -196,7 +190,7 @@ const CASES: readonly ItemCase[] = [
     boundMs: CLICK_WALL_MS,
     boundOn: "fake",
     world: (index, clock) =>
-      createFakeBot({ clock, username: `Chest${index}`, position: new Vec3(0.5, 64, 0.5), simulatePhysics: true, cells: { [CHEST]: "chest" }, containers: { [CHEST]: {} }, slots: { [MAIN_SLOT]: { name: "cobblestone", count: 10 + index } } }),
+      createFakeBot({ clock, username: `Chest${index}`, position: new Vec3(0.5, 64, 0.5), spawn: SPAWN, simulatePhysics: true, cells: { [CHEST]: "chest" }, containers: { [CHEST]: {} }, slots: { [MAIN_SLOT]: { name: "cobblestone", count: 10 + index } } }),
     request: (index) => ({ operation: "deposit", x: 1, y: 64, z: 1, items: [{ item_name: "cobblestone", count: 3 + index }] }),
     armDeath: (harness, die) => void harness.windows.onClickReceived(once(die)),
     async afterRespawn(harness, again) {
@@ -224,7 +218,7 @@ const CASES: readonly ItemCase[] = [
     boundMs: DROP_PICKUP_WAIT_MS,
     boundOn: "real",
     world: (index, clock) =>
-      createFakeBot({ clock, username: `Drop${index}`, position: new Vec3(0.5, 64, 0.5), simulatePhysics: true, slots: { [MAIN_SLOT]: { name: "cobblestone", count: 10 + index } } }),
+      createFakeBot({ clock, username: `Drop${index}`, position: new Vec3(0.5, 64, 0.5), spawn: SPAWN, simulatePhysics: true, slots: { [MAIN_SLOT]: { name: "cobblestone", count: 10 + index } } }),
     request: (index) => ({ items: [{ item_name: "cobblestone", count: 3 + index }] }),
     armDeath(harness, die) {
       const dieOnce = once(die);
@@ -266,7 +260,7 @@ const CASES: readonly ItemCase[] = [
     boundOn: "real",
     world(index, clock) {
       const harness = createFakeBot({
-        clock, username: `Pit${index}`, position: new Vec3(0.5, 64, 0.5), simulatePhysics: true,
+        clock, username: `Pit${index}`, position: new Vec3(0.5, 64, 0.5), spawn: SPAWN, simulatePhysics: true,
         slots: { [MAIN_SLOT]: { name: "dirt", count: 4 + index }, [MAIN_SLOT + 1]: { name: "cobblestone", count: 6 } },
       });
       tossesLandInThePit(harness, serverAnswersBreaks(harness));
@@ -307,7 +301,7 @@ const CASES: readonly ItemCase[] = [
     boundMs: BUCKET_USE_MS,
     boundOn: "fake",
     world: (index, clock) =>
-      createFakeBot({ clock, username: `Bucket${index}`, position: new Vec3(0.5, 64, 0.5), simulatePhysics: true, cells: { [WATER]: "water" }, slots: { [HOTBAR_SLOT]: { name: "bucket", count: 1 } } }),
+      createFakeBot({ clock, username: `Bucket${index}`, position: new Vec3(0.5, 64, 0.5), spawn: SPAWN, simulatePhysics: true, cells: { [WATER]: "water" }, slots: { [HOTBAR_SLOT]: { name: "bucket", count: 1 } } }),
     request: () => ({ action: "fill", liquid: "water", x: 3, y: 63, z: 0 }),
     armDeath: (harness, die) => void harness.server.onPacket("use_item", once(die)),
     async afterRespawn(harness, again) {
@@ -346,7 +340,7 @@ for (const case_ of CASES) {
     const request = case_.request(0);
     assert.ok(isCancelled((await ran(rig, case_.action, request, case_.boundMs)).result), "the death ended the first request");
 
-    respawn(harness);
+    await respawn(harness);
     await case_.afterRespawn(harness, async () => (await ran(rig, case_.action, request, REQUEST_MS)).result);
   });
 

@@ -1,0 +1,34 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-respawn-while-asleep
+tags:
+  - contract
+description: "A player asleep in a night bed dies of a hit: what the server sends the sleeper before the death and the respawn. Contract check tests/minecraft/contract/checks/respawn-while-asleep.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: respawn-while-asleep
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 1 -60 0 red_bed[facing=east,occupied=false,part=foot]
+  - setblock 2 -60 0 red_bed[facing=east,occupied=false,part=head]
+  - time set 14000
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

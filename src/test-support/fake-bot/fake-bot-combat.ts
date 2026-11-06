@@ -47,8 +47,13 @@ export interface FakeCombat {
   shootBot(projectile: ShotProjectile, shooterId: number, amount: number): void;
   /** The server summons a ghast's fireball at `position` flying with `motion` (blocks a tick) and accelerating along it; the bot can hit it to send it along her look. */
   launchFireball(position: Vec3, motion: Vec3): Entity;
-  /** `update_health`: the bot's health and food (food as it is when omitted). */
+  /**
+   * `update_health`: the bot's health and food (food as it is when omitted). At 0 she dies and the client asks to respawn at once, as Mineflayer does: the
+   * server puts her back a tick or two later (`respawn`, `position` at `FakeServer.respawnPoint`, then full health), so a test lets the clock run.
+   */
   setHealth(health: number, food?: number): void;
+  /** Run `listener` each time the bot is about to be hurt or to die, before it is told (a sleeper wakes first, contract check `respawn-while-asleep`). */
+  beforeBotHurt(listener: () => void): void;
   /** A creeper blows up at `position`: the `explosion` packet with the bot's knockback, her hurt, the creeper gone. */
   explode(position: Vec3): void;
 }
@@ -59,6 +64,11 @@ type CombatParts = { server: FakeServer; inventory: FakeInventory; entities: Ser
 const DEATH_ANIMATION_TICKS = 19;
 const SWING_ARM = 0;
 const STATUS_DEAD = 3;
+/** `client_command` 0 asks the server to respawn the player (`health.js:44`). */
+const RESPAWN_COMMAND = 0;
+/** A new life starts at full health and food (`update_health` 20, 20 after a respawn: contract check `respawn-after-death`). */
+const NEW_LIFE_HEALTH = 20;
+const NEW_LIFE_FOOD = 20;
 
 /** A creature's hurt window: its health, the ticks left of its invulnerability and the damage that opened it. */
 interface Creature {
@@ -89,39 +99,64 @@ function createSender(bot: FakeBot, parts: CombatParts) {
   });
   let alive = true;
   let deaths = 0;
+  /** The listeners told just before the bot is hurt or dies (`FakeCombat.beforeBotHurt`). */
+  const beforeBotHurt = new Set<() => void>();
   /** The server sends one cause packet per death: one a test sent itself (to name the cause) is that one. */
   let causeAnnounced = false;
   bot._client.on("death_combat_event", () => void (causeAnnounced = true));
+  /**
+   * `health.js:21-40`: the values filed, `health` emitted, and `death` / `spawn` as the health crosses 0. A death first
+   * sends `death_combat_event` (gear still on), then `entity_status` 3 (`entityDead`), then the inventory clear, then the health packet (measured: scenario
+   * `player-death-runtime-event`, real server 1.21.4, keepInventory false, 3 runs; the `entity_status` between the cause and the health:
+   * contract check `respawn-after-death`, 3 runs). A keepInventory world is not
+   * measured, so the fake has no such option: a test of one stays on its scenario.
+   * After the zero health the client asks to respawn at once (`health.js:34-35`, a `client_command`); the server's answer is `answerRespawn`.
+   */
+  const sendHealth = (health: number, food: number) => {
+    if (health <= 0 && alive) {
+      for (const beforeDeath of beforeBotHurt) beforeDeath(); // a sleeper wakes first, as a hit wakes her (`/kill` on a sleeper is unmeasured: she is not asleep in the next life either way)
+      if (!causeAnnounced) bot._client.emit("death_combat_event", { playerId: bot.entity.id, message: undefined });
+      bot._client.emit("entity_status", { entityId: bot.entity.id, entityStatus: STATUS_DEAD });
+      bot.emit("entityDead", bot.entity); // `entities.js:385-395`
+      parts.inventory.clearAll();
+    }
+    bot._client.emit("update_health", { health, food, foodSaturation: bot.foodSaturation });
+    Object.assign(bot, { health, food });
+    bot.emit("health");
+    if (health <= 0 && alive) {
+      alive = false;
+      deaths += 1;
+      bot.emit("death");
+      bot._client.write("client_command", bot.supportFeature("respawnIsPayload") ? { payload: RESPAWN_COMMAND } : { actionId: RESPAWN_COMMAND });
+    } else if (health > 0 && !alive) {
+      alive = true;
+      causeAnnounced = false;
+      bot.emit("spawn");
+    }
+  };
+  /**
+   * The server's answer to that request (contract check `respawn-after-death`, real 1.21.4, 3 runs): `respawn`, then `position` (absolute, at
+   * the world's spawn or beside the bed she slept in: `FakeServer.respawnPoint`), about a tick later the health and food of a new life
+   * (`update_health` 20, 20; 36 to 74 ms after the `respawn`). The client files the `respawn` as `health.js:6-9` does, which stops its physics until the `position`.
+   */
+  const answerRespawn = (deathAsked: number) => {
+    if (alive || deaths !== deathAsked) return; // a request of a death she has left, or of one already answered, gets nothing
+    const { respawnPoint } = parts.server;
+    if (respawnPoint === null) throw new Error("the fake server has no respawn point: createFakeBot sets one");
+    bot._client.emit("respawn", { worldState: { name: `minecraft:${bot.game.dimension}` }, copyMetadata: 0 });
+    bot.emit("respawn");
+    parts.server.sendPosition(respawnPoint);
+    later.push({ dueTick: ticks + 1, run: () => sendHealth(NEW_LIFE_HEALTH, NEW_LIFE_FOOD) });
+  };
   return {
     ticks: () => ticks,
     /** How many times the bot has died: a fire or a push that began in an earlier life is not hers any more. */
     deaths: () => deaths,
     afterTicks: (count: number, run: () => void) => void later.push({ dueTick: ticks + count, run }),
     hear: (name: string, data: unknown) => void bot._client.emit(name, data),
-    /**
-     * `health.js:21-40`: the values filed, `health` emitted, and `death` / `spawn` as the health crosses 0. A death first
-     * sends `death_combat_event` (gear still on), then the inventory clear, then the health packet (measured: scenario
-     * `player-death-runtime-event`, real server 1.21.4, keepInventory false, 3 runs). A keepInventory world is not
-     * measured, so the fake has no such option: a test of one stays on its scenario.
-     */
-    sendHealth(health: number, food: number) {
-      if (health <= 0 && alive) {
-        if (!causeAnnounced) bot._client.emit("death_combat_event", { playerId: bot.entity.id, message: undefined });
-        parts.inventory.clearAll();
-      }
-      bot._client.emit("update_health", { health, food, foodSaturation: bot.foodSaturation });
-      Object.assign(bot, { health, food });
-      bot.emit("health");
-      if (health <= 0 && alive) {
-        alive = false;
-        deaths += 1;
-        bot.emit("death");
-      } else if (health > 0 && !alive) {
-        alive = true;
-        causeAnnounced = false;
-        bot.emit("spawn");
-      }
-    },
+    sendHealth,
+    answerRespawn,
+    beforeBotHurt,
   };
 }
 
@@ -157,7 +192,7 @@ function trackSprint(server: FakeServer): { readonly active: () => boolean; read
 }
 
 /** The creatures' and the bot's hurt windows, hurts and deaths, each told to the client as the server tells it. */
-function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: MobKnockback) {
+function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: MobKnockback, beforeBotHurt: ReadonlySet<() => void>) {
   const creatures = new Map<number, Creature>();
   const botWindow: Creature = { health: bot.health, invulnerableTicks: 0, lastHurt: 0, dying: false };
   onServerTick(parts.server, () => {
@@ -216,18 +251,14 @@ function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: Mo
     const taken = damageTaken(amount, botWindow.invulnerableTicks, botWindow.lastHurt);
     if (taken <= 0 || bot.game.gameMode === "creative") return { taken: 0, opened: false };
     const opens = opensHurtWindow(botWindow.invulnerableTicks);
+    for (const beforeHurt of beforeBotHurt) beforeHurt();
     hooks.beforeEvent?.();
     if (opens) botWindow.invulnerableTicks = HURT_WINDOW_TICKS;
     botWindow.lastHurt = amount;
     if (opens) announceHurt(bot.entity, source, type, hooks.direct ?? source);
     hooks.afterEvent?.();
     if (opens && push !== null) pushBot(push);
-    const health = Math.max(0, bot.health - taken);
-    if (health <= 0) {
-      sender.hear("entity_status", { entityId: bot.entity.id, entityStatus: STATUS_DEAD });
-      bot.emit("entityDead", bot.entity);
-    }
-    sender.sendHealth(health, bot.food);
+    sender.sendHealth(Math.max(0, bot.health - taken), bot.food);
     return { taken, opened: opens };
   };
   return { creatureOf, hurtCreature, hurtTheBot, pushBot, die };
@@ -239,7 +270,12 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   const { swing } = parts;
   attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender });
   const knock = attachMobKnockback(bot, sender);
-  const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock);
+  const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock, sender.beforeBotHurt);
+  parts.server.onPacket("client_command", (data) => {
+    const { payload, actionId } = data as { payload?: number; actionId?: number };
+    const deathAsked = sender.deaths(); // the request is the death's that wrote it
+    if ((payload ?? actionId) === RESPAWN_COMMAND) parts.server.answer(() => sender.answerRespawn(deathAsked));
+  });
   const fireballs = attachFakeFireballs(bot, { server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
   const sprint = trackSprint(parts.server);
   const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, deaths: sender.deaths, hurtTheBot, pushBot });
@@ -295,6 +331,7 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
     shootBot,
     launchFireball: fireballs.launch,
     setHealth: (health, food) => sender.sendHealth(health, food ?? bot.food),
+    beforeBotHurt: (listener) => void sender.beforeBotHurt.add(listener),
     explode: (position) => {
       const creeper = parts.entities.spawn({ name: "creeper", position });
       const blast = blastOn(position, bot.entity.position, eyeHeightOf(bot.entity));

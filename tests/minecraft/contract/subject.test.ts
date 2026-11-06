@@ -119,6 +119,31 @@ test("setBlock and hurtBot on the fake resolve once the client has the change, a
   assert.ok(hurt, "hurtBot returned before the client heard the hurt");
 });
 
+test("killBot on the fake resolves once the client heard the bot die, at a 450 ms answer lag", async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), lagMs: 450 });
+  using _installed = harness.clock.install();
+  const subject = fakeContractSubject(harness, arenaFrame(ZERO_ARENA));
+  let died = false;
+  harness.bot.on("death", () => void (died = true));
+  await subject.killBot();
+  assert.ok(died, "killBot returned before the client heard the death");
+});
+
+test("killBot on a real server sends `/kill` with the bot's name and resolves on the `death` event; it rejects at the wall bound when the server never kills", async () => {
+  const sent: string[] = [];
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), overrides: { chat: (message: string) => void sent.push(message) } });
+  using _installed = harness.clock.install();
+  const subject = serverContractSubject(harness.bot, arenaFrame(ZERO_ARENA));
+  const killed = subject.killBot();
+  assert.deepEqual(sent, [`/kill ${harness.bot.username}`]);
+  harness.bot.emit("death");
+  await killed;
+  const never = subject.killBot();
+  const refused = assert.rejects(never, /\/kill: not heard after 3000 ms \(is the bot op\?\)/);
+  await harness.clock.advance(3_100);
+  await refused;
+});
+
 test("a server call on the fake rejects, saying the server did not answer, when the server stays stopped past the wall bound", async () => {
   const { harness, subject } = subjectOn();
   using _installed = harness.clock.install();

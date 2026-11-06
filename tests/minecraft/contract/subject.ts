@@ -35,6 +35,8 @@ export interface ContractSubject {
   hurtBot(amount: number, sourceId: number | null): Promise<void>;
   /** The server kills a mob (`/kill`); resolves once the client heard it die. */
   kill(entityId: number): Promise<void>;
+  /** The server kills the bot (`/kill` on her name); resolves once the client heard her die (`death`). The client asks to respawn by itself, as Mineflayer's `health.js` does. */
+  killBot(): Promise<void>;
   /** A creeper ignited with no fuse explodes at `position`, breaking no block; resolves once the client heard the explosion. */
   explode(position: Vec3): Promise<void>;
   /** The server summons the mob `name` at `position` (a world position) with the raw SNBT `nbt` (the fake reads none: its mobs have no AI); resolves with it once the client has it. */
@@ -297,6 +299,9 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     async kill(entityId) {
       await afterAnswer(() => combat.kill(entityId), "kill");
     },
+    async killBot() {
+      await afterAnswer(() => combat.setHealth(0), "killBot");
+    },
     async explode(position) {
       await afterAnswer(() => combat.explode(position), "explode");
     },
@@ -392,6 +397,11 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       const mob = bot.entities[entityId]!;
       const heard = heardWithin(bot, "entityDead", (entity: Entity) => entity === mob, "/kill");
       bot.chat(`/kill ${selectorOf(mob)}`);
+      await heard;
+    },
+    async killBot() {
+      const heard = heardWithin(bot, "death", () => true, "/kill");
+      bot.chat(`/kill ${bot.username}`);
       await heard;
     },
     async explode(position) {
