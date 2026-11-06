@@ -198,9 +198,10 @@ export async function collectBlock(
   request: CollectBlockRequest,
   context: ActionContext,
   discarded: DiscardedItems = createDiscardedItems(),
+  mineRun: typeof mine = mine,
 ): Promise<CollectBlockResult> {
   const lifetime = new AbortController();
-  try { return await beginCollectBlock(bot, navigation, request, discarded, () => {}, lifetime.signal)(context); }
+  try { return await beginCollectBlock(bot, navigation, request, discarded, () => {}, lifetime.signal, mineRun)(context); }
   finally { lifetime.abort("Collection request settled."); }
 }
 
@@ -214,18 +215,24 @@ interface CollectionAttempt {
   readonly inventoryBefore: Record<string, number>;
   readonly start: Vec3;
   readonly broken: MineResult["broken"][number][];
+  /** Broken sources whose drop never appeared, counted over every run of the request (a resume adds to it). */
+  lostDrops: number;
+  /** The mine process; a test passes a fake that reports what a physical run would. */
+  readonly mineRun: typeof mine;
   readonly toolLoss: ReturnType<typeof observeToolTierLoss>;
   /** Net inventory gain of the collectable items since the request began. */
   readonly gained: () => number;
 }
 
-function beginCollectBlock(
+/** Calling the returned function again resumes the request: its attempt (breaks, lost drops, start) is kept. */
+export function beginCollectBlock(
   bot: Bot,
   navigation: NavigationRuntime,
   request: CollectBlockRequest,
   discarded: DiscardedItems,
   observe: ObserveRequest = () => {},
   lifetime?: AbortSignal,
+  mineRun: typeof mine = mine,
 ) {
   const inventoryBefore = inventoryCounts(bot);
   const target = collectionTarget(bot, request);
@@ -233,6 +240,8 @@ function beginCollectBlock(
     bot, navigation, request, discarded, target, inventoryBefore,
     start: bot.entity.position.clone(),
     broken: [],
+    lostDrops: 0,
+    mineRun,
     toolLoss: observeToolTierLoss(bot),
     gained: () => sumValues(inventoryGains(bot, inventoryBefore, target.itemNames)),
   };
@@ -284,7 +293,8 @@ function showTargets(pursued: () => readonly MineTarget[], signal: AbortSignal):
 async function runCollection(attempt: CollectionAttempt, context: ActionContext): Promise<CollectBlockResult> {
   const { bot, navigation, request, target, broken, gained } = attempt;
   const collectable = target.itemNames;
-  const finish = (result: MineResult) => settle(bot, request, attempt.inventoryBefore, collectable, attempt.start, result);
+  const finish = (result: MineResult) =>
+    settle(bot, request, attempt.inventoryBefore, collectable, attempt.start, result, attempt.lostDrops);
   context.signal?.throwIfAborted();
   // A name that is no block and no tag has nothing to find: refuse before any walking, digging or exploring.
   if (!selectorKnown(bot, request.selector)) {
@@ -315,7 +325,7 @@ async function runCollection(attempt: CollectionAttempt, context: ActionContext)
   const highlights = new AbortController();
   showTargets(() => pursued, highlights.signal);
   try {
-    const result = await mine(bot, mineRequest(attempt, {
+    const result = await attempt.mineRun(bot, mineRequest(attempt, {
       movements, canMine, buildingBlocks,
       signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
       onTargets: (targets) => { pursued = targets; },
@@ -378,6 +388,7 @@ function mineRequest(
     ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
     onTargets: live.onTargets,
     onBroken: (position) => broken.push(position),
+    onLostDrop: () => { attempt.lostDrops += 1; },
   };
 }
 
@@ -441,6 +452,7 @@ export function settle(
   collectable: ReadonlySet<string>,
   start: Vec3,
   result: MineResult,
+  lostDrops = 0,
 ): CollectBlockResult {
   const gainedByItem = inventoryGains(bot, inventoryBefore, collectable);
   const gained = sumValues(gainedByItem);
@@ -462,7 +474,7 @@ export function settle(
     z: cell.z,
     distanceFromStart: decimal(asVec3(cell).offset(0.5, 0.5, 0.5).distanceTo(start)),
   }));
-  const collected = { requested: request.requested, gained, gainedByItem, blocksBroken: brokenAt.length, brokenAt };
+  const collected = { requested: request.requested, gained, gainedByItem, blocksBroken: brokenAt.length, brokenAt, lostDrops };
   if (status === "succeeded") return { status, collected };
   return {
     status,
@@ -494,6 +506,7 @@ export function formatCollectBlockResult(result: CollectBlockResult): string {
     `- Inventory gained: ${collected.gained}`,
     `- Matching blocks broken: ${collected.blocksBroken}`,
     ...(brokenAt ? [brokenAt] : []),
+    ...(collected.lostDrops ? [`- Drops never seen: ${collected.lostDrops}`] : []),
     "- Gains by item:",
     gains || "  - None observed",
   ].join("\n");

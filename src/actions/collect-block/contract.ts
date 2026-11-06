@@ -218,6 +218,12 @@ const collectionEvidenceSchema = z.strictObject({
   gainedByItem: z.record(z.string(), z.number().int().nonnegative()),
   blocksBroken: z.number().int().nonnegative(),
   brokenAt: z.array(brokenCellSchema),
+  /**
+   * Broken blocks for which no item entity appeared within the mine process's wait, over the whole request. A block
+   * that drops nothing (leaves, a wrong tool tier) counts too: the process cannot tell it from a drop that never spawned.
+   * Absent in old results.
+   */
+  lostDrops: z.number().int().nonnegative().optional(),
   /** The tool (carried item and its class) that broke or wore down to a lower tier during the run; absent when none did. */
   toolLost: z.strictObject({ item: z.string(), class: z.string() }).optional(),
 });

@@ -13,7 +13,7 @@ const DROP_PROXIMITY_SQUARED = 9;
  * Baritone bounds the same wait with `mineDropLoiterDurationMSThanksLouca` (250 ms), but a server seconds behind
  * (run 15) spawns the drop later, and the collect had ended by then: the loiter is 5 s of the monotonic clock, the
  * clock the caller passes to `noteBreak` and `update`. It ends at once when the item entity appears, so a picked-up
- * drop never leaves the break anticipated; one that never spawns is counted in `lostDrops`.
+ * drop never leaves the break anticipated; one that never spawns is reported through `onLostDrop`.
  */
 const DROP_LOITER_MS = 5_000;
 
@@ -37,6 +37,12 @@ const OBSERVED_DROP_SETTLE_MS = 1_500;
  */
 export const DROP_PICKUP_TIMEOUT_MS = 3_000;
 
+/** What a mine request lets its caller hear from the drop tracker. */
+export interface DropLossObserver {
+  /** Called once per broken source whose item entity never appeared within the loiter, even if the attempt is cancelled later. */
+  readonly onLostDrop?: () => void;
+}
+
 /** Bridge block removal, item spawn, and inventory packets without aging live drops out. */
 export class MineDropTracker {
   readonly #observedDrops = new Map<
@@ -48,21 +54,15 @@ export class MineDropTracker {
     }
   >();
   readonly #anticipatedDrops = new Map<string, { readonly position: BlockPosition; readonly expiresAt: number }>();
-  #lostDrops = 0;
   /** When the bot began overlapping each live item, and the gain it had then. */
   readonly #touching = new Map<number, { readonly since: number; readonly inventoryGain: number }>();
 
   constructor(
     private readonly bot: Bot,
-    private readonly request: Pick<MineRequest, "observedInventoryGain" | "ignoredDropIds">,
+    private readonly request: Pick<MineRequest, "observedInventoryGain" | "ignoredDropIds" | "onLostDrop">,
     private readonly droppedBlacklist: ReadonlySet<number>,
     private readonly anticipatedBlacklist: ReadonlySet<string>,
   ) {}
-
-  /** Breaks whose item entity never appeared within the loiter. */
-  get lostDrops(): number {
-    return this.#lostDrops;
-  }
 
   get anticipating(): boolean {
     return this.#anticipatedDrops.size > 0;
@@ -91,9 +91,17 @@ export class MineDropTracker {
 
   update(targets: readonly MineTarget[], observedAt: number): MineTarget[] {
     const found = [...targets];
+    this.#followAnticipatedDrops(found, targets.length === 0, observedAt);
+    this.#rememberLiveDrops(found);
+    this.#timeOverlaps(found, observedAt);
+    this.#settleVanishedDrops(found, observedAt);
+    return found;
+  }
+
+  /** Turn each anticipated break into its item entity once it spawns, or expire it (a lost drop) after the loiter. */
+  #followAnticipatedDrops(found: MineTarget[], nothingElseToDo: boolean, observedAt: number): void {
     // An anticipated drop ranks after every block and live drop: with 5 s of loiter, a collect whose blocks rarely
     // drop (leaves for apples) would otherwise walk to and wait on each broken cell. It is a target only at the end.
-    const nothingElseToDo = targets.length === 0;
     // Baritone keeps a just-broken location in `anticipatedDrops` while the
     // server is between its block-change and item-spawn packets. Without that
     // bridge, removing the final requested block briefly invalidates the goal
@@ -118,7 +126,7 @@ export class MineDropTracker {
         )[0];
       if (!spawnedItem && anticipated.expiresAt <= observedAt) {
         this.#anticipatedDrops.delete(key);
-        this.#lostDrops++;
+        this.request.onLostDrop?.();
         continue;
       }
       if (spawnedItem) {
@@ -131,11 +139,15 @@ export class MineDropTracker {
         found.push({ position: anticipated.position, kind: "anticipated_drop" });
       }
     }
+  }
 
-    // Baritone re-derives every live EntityItem on each scan and never ages one
-    // into its blacklist. Keep the same entity alive here regardless of age. A
-    // drop that vanishes gets a separate settlement state because Mineflayer
-    // can apply the destroy-entity packet one tick before its inventory packet.
+  /**
+   * Baritone re-derives every live EntityItem on each scan and never ages one
+   * into its blacklist. Keep the same entity alive here regardless of age. A
+   * drop that vanishes gets a separate settlement state because Mineflayer
+   * can apply the destroy-entity packet one tick before its inventory packet.
+   */
+  #rememberLiveDrops(found: readonly MineTarget[]): void {
     for (const target of found) {
       if (target.kind !== "drop") continue;
       this.#observedDrops.set(target.entityId, {
@@ -143,7 +155,10 @@ export class MineDropTracker {
         inventoryGainWhenSeen: this.request.observedInventoryGain(),
       });
     }
+  }
 
+  /** Time how long the bot overlaps each live drop without an inventory gain (`pickupStalled` reads it). */
+  #timeOverlaps(found: readonly MineTarget[], observedAt: number): void {
     // A drop the bot overlaps is either entering the inventory or unable to.
     // The overlap is timed from the last inventory change, so a stack that is
     // still filling from a pile of items is not judged by its first arrival.
@@ -163,7 +178,10 @@ export class MineDropTracker {
     for (const entityId of this.#touching.keys()) {
       if (!overlapped.has(entityId)) this.#touching.delete(entityId);
     }
+  }
 
+  /** A drop whose entity vanished stays a target for a short window, until the inventory packet settles it. */
+  #settleVanishedDrops(found: MineTarget[], observedAt: number): void {
     for (const [entityId, observed] of this.#observedDrops) {
       if (this.droppedBlacklist.has(entityId)) {
         this.#observedDrops.delete(entityId);
@@ -183,7 +201,5 @@ export class MineDropTracker {
       this.#observedDrops.set(entityId, { ...observed, disappearedAt });
       found.push({ kind: "settling_drop", position: observed.position, entityId });
     }
-
-    return found;
   }
 }

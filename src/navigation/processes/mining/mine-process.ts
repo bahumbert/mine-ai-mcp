@@ -38,7 +38,7 @@ import { DIG_REACH } from "../../movements/excavation.js";
 import { branchMiningGoal } from "./block-exploration.js";
 import { carriesWaterBucket, CAST_REACH, castOntoPool } from "./cast-obsidian.js";
 import { CastTargets } from "./cast-targets.js";
-import { DROP_PICKUP_TIMEOUT_MS, MineDropTracker } from "./mine-drops.js";
+import { DROP_PICKUP_TIMEOUT_MS, MineDropTracker, type DropLossObserver } from "./mine-drops.js";
 import { clearMiningWater } from "./mining-water.js";
 import { waterMiningStance } from "../../world/water.js";
 import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
@@ -156,7 +156,7 @@ export type MineTarget =
   | MinePoolTarget
   | MineWaterTarget;
 
-export interface MineRequest {
+export interface MineRequest extends DropLossObserver {
   /** Deliberate discards are excluded from both scans and anticipated drops. */
   readonly ignoredDropIds?: ReadonlySet<number>;
   /** Milliseconds on a monotonic clock; the drop and refresh timers read it. Tests inject a fake. */

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { collectBlockInputSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
-import { breakBudget, collectBlock, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
+import { collectBlockInputSchema, collectBlockResultSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
+import { beginCollectBlock, breakBudget, collectBlock, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
+import type { MineResult } from "../../navigation/processes/mining/mine-process.js";
 import { sourcesOf } from "../../world/block-drops.js";
+import { createDiscardedItems } from "../../world/discarded-items.js";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 
@@ -294,4 +296,71 @@ test("a refusal with coordinates names the unknown block, not a cell mismatch", 
   const result = await refusal("coal", "1.21.4", { count: 1, x: 3, y: 64, z: 3 });
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
+});
+
+// ── Drops that never appeared (P4-01a D8) ──────────────────────────────────────────────────
+
+type MineRun = NonNullable<Parameters<typeof collectBlock>[5]>;
+
+/** A mine process that reports `lost` drops never seen, then settles as `status`: no physical work, only the counting. */
+const mineLosing = (lost: number, status: MineResult["status"] = "satisfied"): MineRun => async (_bot, mineRequest) => {
+  for (let i = 0; i < lost; i++) mineRequest.onLostDrop?.();
+  return { status, broken: [], reason: status === "stopped" ? "[TEST_STOP] the fake process stopped." : null };
+};
+
+async function collectWith(mineRun: MineRun, count = 1) {
+  const { bot } = createFakeBot({ version: "1.21.4" });
+  const request = parseCollectBlockRequest({ block_name: "stone", count });
+  return collectBlock(bot, untouchedNavigation, request, {}, undefined, mineRun);
+}
+
+test("a break whose drop never appeared is reported as lostDrops and as a line of the text", async () => {
+  const result = await collectWith(mineLosing(1));
+  assert.equal(result.collected.lostDrops, 1);
+  assert.match(formatCollectBlockResult(result), /^- Drops never seen: 1$/mu);
+});
+
+test("a collection that lost no drop reports 0 and prints no line", async () => {
+  const result = await collectWith(mineLosing(0));
+  assert.equal(result.collected.lostDrops, 0);
+  assert.doesNotMatch(formatCollectBlockResult(result), /Drops never seen/u);
+});
+
+test("an old result with no lostDrops field still parses and prints no line", () => {
+  const old = { requested: 1, gained: 0, gainedByItem: {}, blocksBroken: 0, brokenAt: [] };
+  assert.equal(collectBlockResultSchema.safeParse({ status: "failed", error: "x", collected: old }).success, true);
+  assert.doesNotMatch(formatCollectBlockResult({ status: "failed", error: "x", collected: old }), /Drops never seen/u);
+});
+
+/** The capacity watch stops the run (the drop it walks to cannot enter): a stopped result, built from the catch path. */
+function capacityStoppedHarness() {
+  const harness: FakeHarness = createFakeBot({
+    carried: { birch_log: 3, stone: stoneStacks(35) },
+    entities: { 7: { name: "item", position: new Vec3(0, 64, 0), getDroppedItem: () => itemOf(harness.bot.registry, "oak_log") } },
+  });
+  const request = parseCollectBlockRequest({ block_name: "logs", count: 4 });
+  const stopWhileLosing = (lost: number): MineRun => async (bot, mineRequest) => {
+    for (let i = 0; i < lost; i++) mineRequest.onLostDrop?.();
+    mineRequest.onTargets?.([{ kind: "drop", entityId: 7, position: { x: 0, y: 64, z: 0 } }]);
+    bot.emit("physicsTick");
+    mineRequest.signal?.throwIfAborted();
+    throw new Error("the capacity watch did not stop the run");
+  };
+  return { harness, request, stopWhileLosing };
+}
+
+test("a lost drop, a stop that makes mine() throw, the resume and a second lost drop report both", async () => {
+  const { harness, request, stopWhileLosing } = capacityStoppedHarness();
+  const lifetime = new AbortController();
+  try {
+    let current = stopWhileLosing(1);
+    const run = beginCollectBlock(harness.bot, untouchedNavigation, request, createDiscardedItems(), () => {}, lifetime.signal, (...args) => current(...args));
+    const first = await run({});
+    assert.match("error" in first ? first.error : "", /INVENTORY_FULL/u, "the first run ended by the capacity stop, not by a normal result");
+    assert.equal(first.collected.lostDrops, 1);
+    current = mineLosing(1, "stopped");
+    assert.equal((await run({})).collected.lostDrops, 2);
+  } finally {
+    lifetime.abort("test done");
+  }
 });
