@@ -54,6 +54,7 @@ import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
+import { serverTags } from "./checks/server-tags.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
@@ -116,6 +117,7 @@ export interface ContractCheck {
 }
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
+  serverTags,
   worldAgePerSecond,
   worldAgeAtSlowTick,
   waitForTicksAndAge,

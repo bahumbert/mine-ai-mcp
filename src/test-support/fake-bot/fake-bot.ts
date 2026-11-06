@@ -24,6 +24,7 @@ import { type FakeCombat, attachFakeCombat } from "./fake-bot-combat.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
 import { attachFakeSwing } from "./fake-bot-swing.js";
 import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
+import { type FakeTagGroup, emitFakeTags } from "./fake-bot-tags.js";
 import { attachFakeWindows } from "./fake-bot-windows.js";
 import type { FakeWindows } from "./fake-window-server.js";
 import { type FakeClock, createFakeClock } from "./fake-clock.js";
@@ -103,6 +104,8 @@ export interface FakeHarness {
   readonly windows: FakeWindows;
   /** What other actors do to the bot and the creatures around her: hurt, swing, kill, health, a blast. */
   readonly combat: FakeCombat;
+  /** The server sends its `tags` packet (login, or a `/reload`); shape: contract check `server-tags`. */
+  emitTags(groups: readonly FakeTagGroup[]): void;
 }
 
 const BOT_ENTITY_ID = 1;
@@ -230,7 +233,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakeChat(bot, { server, options: options.chat });
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
-  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat };
+  return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat, emitTags: (groups) => emitFakeTags(bot, groups) };
 }
 
 /** The test's entities as Prismarine entities, sized from the version's data, keyed by id. */

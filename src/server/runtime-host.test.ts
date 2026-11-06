@@ -11,6 +11,7 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { plugin as toolPlugin } from "mineflayer-tool";
 import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
+import { serverTagsOf } from "../world/server-tags.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
@@ -183,6 +184,15 @@ test(
     assert.deepEqual(releases, ["database", "bot"]);
   },
 );
+
+test("the host listens for the server's tags packet on the bot it creates", async (t) => {
+  const options = await configuration(t);
+  const { bot } = connectedBot(t);
+  await using _host = await startRuntimeHost(source, options);
+  assert.equal(serverTagsOf(bot), null);
+  bot._client.emit("tags", { tags: [] });
+  assert.notEqual(serverTagsOf(bot), null);
+});
 
 test("health publishes the bot's own slots and the calls an observer cannot otherwise see", async (t) => {
   const options = await configuration(t);
