@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { iss as issWithIncludes } from "./build/iss-test-support.ts";
 import { cliContext, okInstallSteps } from "./cli-test-support.ts";
 import { CONFIGURE_FLAGS } from "./configure-command.ts";
 import { STOP_REFUSED_EXIT_CODE } from "./control-commands.ts";
@@ -177,7 +178,9 @@ test("`configure` then `stop` as the installer runs them: settings are written a
 });
 
 test("every command, install step and configure flag the Inno Setup script uses exists", () => {
-  const script = readFileSync(join(appRoot(), "packaging", "windows", "mine-ai.iss"), "utf8");
+  // The script with its #include files (the endpoint page's `--llm-remote*` flags and `install endpoint-models` are in endpoint-page.iss).
+  const script = issWithIncludes;
+  assert.match(script, /--llm-remote-saved-key/u, "the endpoint page's flags are not in the script read here");
   assert.ok(existsSync(MAIN));
   const stepNames = [...script.matchAll(/(?:RunSetupStep|RunInstallStepWithRetry)\('([a-z-]+)/gu), ...script.matchAll(/'install ([a-z-]+)/gu)].map((match) => match[1]);
   assert.ok(stepNames.length >= 6, `found ${stepNames.length} install steps in the script`);
