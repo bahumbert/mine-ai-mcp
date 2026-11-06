@@ -539,14 +539,16 @@ test("the setup never reads a key: apiKey and apiKeyProtected are read in Prefil
   const emptied = prefill.indexOf("RemoteKeyEdit.Text := '';");
   const cleared = prefill.indexOf("KeySaved := False;");
   const read = prefill.indexOf("ReadSettingsSections(");
-  assert.ok(emptied >= 0 && cleared >= 0 && emptied < read && cleared < read, "the box and KeySaved are not reset before the file is read");
-  // The mark first, the flag after it: an OnChange fired by the assignment must not leave the flag cleared.
+  const wasCleared = prefill.indexOf("KeyWasSaved := False;");
+  assert.ok(emptied >= 0 && cleared >= 0 && wasCleared >= 0 && emptied < read && cleared < read && wasCleared < read, "the box, KeySaved and KeyWasSaved are not reset before the file is read");
+  // The mark first, the flags after it: an OnChange fired by the assignment must not leave the flag cleared.
   const mark = prefill.indexOf("RemoteKeyEdit.Text := SAVED_KEY_MARK;");
   const flag = prefill.indexOf("KeySaved := True;");
-  assert.ok(mark > read && flag > mark, "KeySaved is set before the mark is in the box");
+  const wasFlag = prefill.indexOf("KeyWasSaved := True;");
+  assert.ok(mark > read && flag > mark && wasFlag > read, "KeySaved is set before the mark is in the box, or KeyWasSaved before the file is read");
   assert.match(prefill, /JsonString\(Llm, 'apiKeyProtected'\) <> ''/u);
-  // The mark is the box's text and nothing else: it reaches no launcher call.
-  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("SAVED_KEY_MARK")).map(([name]) => name), ["PrefillFromSettings"]);
+  // The mark is the box's text and nothing else: it is read back by the prefill and the box's change handler, and the mark of a saved key reaches no launcher call (KeySaved gates the sending).
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("SAVED_KEY_MARK")).map(([name]) => name).sort(), ["PrefillFromSettings", "RemoteKeyChanged"]);
 });
 
 test("a key typed in the box is sent; a key the setup did not touch is never on a command line: the box text goes to the launcher only behind a KeySaved test, in RemoteLlmArguments and ListKeyArguments", () => {
@@ -559,12 +561,17 @@ test("a key typed in the box is sent; a key the setup did not touch is never on 
   for (const name of ["SaveAndTestEndpoint", "ConfigureArguments"]) assert.match(functionBody(name), /RemoteLlmArguments\(\)/u, name);
 });
 
-test("any edit of the key box clears KeySaved, attached after the first prefill; a silent /LLMKEY= clears it too", () => {
-  assert.match(functionBody("RemoteKeyChanged"), /KeySaved := False;/u);
+// Review 2026-11-06 S1: a type-then-Backspace leaves the box on the mark; with KeySaved only cleared by an edit, Next saved the mark as the key.
+test("the key box means the saved key only while it holds the mark of a key the prefill saw: KeySaved is KeyWasSaved and the mark text, attached after the first prefill; a silent /LLMKEY= forgets the saved key; no other place writes or reads KeyWasSaved", () => {
+  const touching = (pattern: RegExp): string[] => [...codeFunctions()].filter(([, body]) => pattern.test(body)).map(([name]) => name).sort();
+  assert.deepEqual(touching(/KeyWasSaved :=/u), ["ApplySilentParameters", "PrefillFromSettings"]);
+  assert.deepEqual(touching(/KeyWasSaved\b(?! :=)/u), ["RemoteKeyChanged"]);
+  assert.match(functionBody("RemoteKeyChanged"), /^\s*KeySaved := KeyWasSaved and \(RemoteKeyEdit\.Text = SAVED_KEY_MARK\);\s*$/mu);
+  assert.doesNotMatch(functionBody("RemoteKeyChanged"), /KeySaved := False;/u);
   const init = functionBody("InitializeWizard");
   const attached = init.indexOf("RemoteKeyEdit.OnChange := @RemoteKeyChanged;");
   assert.ok(attached > init.indexOf("ApplySilentParameters()") && attached > init.indexOf("PrefillFromSettings()"), "the handler is attached before the first prefill");
-  assert.match(functionBody("ApplySilentParameters"), /if ParamGiven\('LLMKEY'\) then\s+begin\s+RemoteKeyEdit\.Text := Param\('LLMKEY', ''\);\s+KeySaved := False;\s+end;/u);
+  assert.match(functionBody("ApplySilentParameters"), /if ParamGiven\('LLMKEY'\) then\s+begin\s+RemoteKeyEdit\.Text := Param\('LLMKEY', ''\);\s+KeySaved := False;\s+KeyWasSaved := False;\s+end;/u);
 });
 
 test("a saved key that cannot be used is told in the setup's words, never the launcher's usage text, for the endpoint page's save and the progress page's save", () => {

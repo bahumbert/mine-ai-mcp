@@ -112,7 +112,7 @@ const
   // --llm-remote-saved-key` ends with it when the settings hold no key it can read: another Windows user's or PC's blob, or none.
   USAGE_EXIT_CODE = 2;
   // The key box shows this (masked) while the settings hold an encrypted key: the setup never decrypts, so it has no key to show. The
-  // mark reaches no launcher call; KeySaved says the box is untouched.
+  // mark of a saved key reaches no launcher call (KeyWasSaved and the mark in the box make KeySaved); a mark typed with no saved key is a typed key.
   SAVED_KEY_MARK = 'saved-key-unchanged';
   KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';
   SAVED_KEY_UNUSABLE_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Type the key again in the API key box, replacing the dots (silent install: /LLMKEY=).';
@@ -155,9 +155,10 @@ var
   StepsLog: TNewMemo;
   ActiveGauge: TNewProgressBar;
   ActiveStatus: TNewStaticText;
-  // KeySaved: the key box holds the mark of an encrypted key the player has not touched (the launcher keeps that key). ClearKeyMigrated:
-  // the settings held the key in clear; the first save encrypts it and the player is told once (NoteClearKeyMigrated).
-  KeySaved, ClearKeyMigrated: Boolean;
+  // KeySaved: the key box holds the mark of an encrypted key the player has not touched (the launcher keeps that key). KeyWasSaved: the
+  // prefill found such a key, so the mark in the box means it (a typed mark with no saved key is just text). ClearKeyMigrated: the settings
+  // held the key in clear; the first save encrypts it and the player is told once (NoteClearKeyMigrated).
+  KeySaved, KeyWasSaved, ClearKeyMigrated: Boolean;
   GpuChecked, GpuVerdictIsRemote, OllamaFolderNeeded, OllamaReady, SetupDone, PreviousLlmWasRemote, SilentWantsLocalModel: Boolean;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
@@ -843,10 +844,11 @@ begin
     Result := 'The URL has no spaces and no field contains a double quote.';
 end;
 
-// Any edit of the key box (a typed key, a cleared box, a fill button) means the saved key is no longer the one to keep.
+// Any edit of the key box (a typed key, a cleared box, a fill button) means the saved key is no longer the one to keep, unless the edits
+// brought the box back to the mark (a typed character, then Backspace): then the saved key is the one to keep, and the mark of a saved key is never sent as a key.
 procedure RemoteKeyChanged(Sender: TObject);
 begin
-  KeySaved := False;
+  KeySaved := KeyWasSaved and (RemoteKeyEdit.Text = SAVED_KEY_MARK);
 end;
 
 // The key part of `install endpoint-models`: the saved key stays in the settings (`--saved-key`), a typed one is given (`--key`, empty
@@ -1270,13 +1272,14 @@ end;
 // An update (or a second run) starts from the settings.json of the data folder, so it never resets a server or an endpoint.
 // The key: an encrypted one (apiKeyProtected) is never decrypted here; the box shows the mark and the launcher keeps the key
 // (KeySaved). A clear one (an install before the encryption) fills the box as before and is encrypted by the first save.
-// This also runs on the data page's Next: the box and the flag are emptied first, so a Back to another data folder keeps nothing of the last.
+// This also runs on the data page's Next: the key box and its flags are emptied first, so a Back to another data folder keeps no key of the last.
 procedure PrefillFromSettings();
 var
   Llm, Server, Kind: String;
 begin
   RemoteKeyEdit.Text := '';
   KeySaved := False;
+  KeyWasSaved := False;
   ClearKeyMigrated := False;
   if not ReadSettingsSections(Llm, Server) then
     Exit;
@@ -1289,6 +1292,7 @@ begin
       // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
       RemoteKeyEdit.Text := SAVED_KEY_MARK;
       KeySaved := True;
+      KeyWasSaved := True;
     end
     else if JsonString(Llm, 'apiKey') <> '' then
     begin
@@ -1350,6 +1354,7 @@ begin
   begin
     RemoteKeyEdit.Text := Param('LLMKEY', '');
     KeySaved := False;
+    KeyWasSaved := False;
   end;
   if ParamGiven('LLMMODEL') then
     RemoteModelCombo.Text := Param('LLMMODEL', '');

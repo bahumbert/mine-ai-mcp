@@ -134,7 +134,8 @@ export async function endpointModels(ctx: InstallContext, options: EndpointModel
   } catch (error) {
     return unansweredListing(error, source.baseUrl.replace(/\/+$/u, ""), timeoutMs);
   }
-  const correction = correctionOf(answer);
+  // With --url (the setup's path) the setup changes its URL box; without it the URL is the saved one and this step saves nothing.
+  const correction = correctionOf(answer, options.url !== undefined);
   const lines = modelLines(answer, ctx.manifest.brainEnv);
   if (!Array.isArray(lines)) return withCorrectionTold(lines, correction);
   try {

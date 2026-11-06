@@ -117,9 +117,17 @@ export const urlCorrectionNotice = (from: string, to: string): string =>
 /** The hint's addition when the `/v1` retry was tried and refused. */
 export const v1RefusedHint = (askedBase: string): string => `(${askedBase}/v1 did not answer as an OpenAI-compatible API either)`;
 
-/** What a step reports about a corrected URL: the fields of `InputCorrection` and the sentence. */
-export function correctionOf(answer: V1Answer): Required<InputCorrection> | null {
-  return answer.corrected ? { correctedUrl: answer.base, notice: urlCorrectionNotice(answer.askedBase, answer.base) } : null;
+/** The sentence for a corrected URL that the step did not save (it read the URL from the settings and writes none): where the endpoint answers, and how to keep it. */
+export const urlCorrectionUnsavedNotice = (from: string, to: string): string =>
+  `${from} answers at ${to}; run install endpoint-test (or the setup) to save it.`;
+
+/**
+ * What a step reports about a corrected URL: the fields of `InputCorrection` and the sentence. `urlIsSaved` is false when the
+ * step writes no settings for a URL it read from them: the notice then says where the endpoint answers, never "changed".
+ */
+export function correctionOf(answer: V1Answer, urlIsSaved = true): Required<InputCorrection> | null {
+  if (!answer.corrected) return null;
+  return { correctedUrl: answer.base, notice: (urlIsSaved ? urlCorrectionNotice : urlCorrectionUnsavedNotice)(answer.askedBase, answer.base) };
 }
 
 /** `result` with the correction told: its text starts with the notice (and `extra` sentences), the fields carry the new URL. */

@@ -114,6 +114,32 @@ test("a URL without /v1 that answers 404 while /v1 lists is corrected and told, 
   });
 });
 
+// Review 2026-11-06 S2: the step writes no settings, so a URL read from the settings is not "changed" by the listing.
+test("no --url: the corrected URL is told as where the endpoint answers, to be saved by endpoint-test, never as changed; the URL is still returned and nothing is written", async () => {
+  await withFakeEndpoint(onlyUnderV1(modelsAnswer(OLLAMA_ANSWER)), async (endpoint) => {
+    const ctx = remoteContext({ baseUrl: endpoint.rootUrl });
+    const listFile = listFileIn();
+    const result = await endpointModels(ctx, { savedKey: false, listFile });
+    const notice = `${endpoint.rootUrl} answers at ${endpoint.baseUrl}; run install endpoint-test (or the setup) to save it.`;
+    assert.equal(result.ok, true);
+    assert.equal(result.correctedUrl, endpoint.baseUrl);
+    assert.equal(result.notice, notice);
+    if (result.ok) assert.equal(result.detail, `${notice} 1 model listed.`);
+    assert.equal(readFileSync(listFile, "utf8"), "gemma4:12b\t\n");
+    assert.equal(existsSync(settingsPath(ctx.root)), false, "settings.json was written");
+  });
+});
+
+test("no --url and the corrected endpoint lists no text model: the failure carries the same unsaved-URL notice", async () => {
+  const imageOnly = { data: [{ id: "acme/image-maker", architecture: { output_modalities: ["image"] } }] };
+  await withFakeEndpoint(onlyUnderV1(modelsAnswer(imageOnly)), async (endpoint) => {
+    const result = await endpointModels(remoteContext({ baseUrl: endpoint.rootUrl }), { savedKey: false, listFile: listFileIn() });
+    assert.equal(result.ok, false);
+    assert.equal(result.notice, `${endpoint.rootUrl} answers at ${endpoint.baseUrl}; run install endpoint-test (or the setup) to save it.`);
+    if (!result.ok) assert.match(result.error, /lists no text model/u);
+  });
+});
+
 test("which key is sent: --key as a bearer token, an empty or no key none, --saved-key and the no-flag form the settings' key; the key is never in a result or the list file", async () => {
   await withFakeEndpoint(modelsAnswer(OLLAMA_ANSWER), async (endpoint) => {
     const ctx = remoteContext({ baseUrl: endpoint.baseUrl, apiKey: "sk-from-settings" });
