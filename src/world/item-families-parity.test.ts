@@ -65,6 +65,9 @@ function referenceItemFamilies(name: string): string[] {
   const kind = kindOf(name);
   if (kind !== null) families.add(kind);
   if (name === "crossbow") families.add("crossbow");
+  // contract.ts:46-47 (before families): the two worn non-armour items the slot rule named.
+  if (name === "carved_pumpkin") families.add("head_gear");
+  if (name === "elytra") families.add("torso_gear");
   if (STATIONS.includes(name)) families.add("station");
   if (REFLEX_AVOIDED_FOODS.has(name)) families.add("avoided_food");
   if (ARROW_ITEMS.includes(name)) families.add("arrow");
@@ -85,7 +88,7 @@ const ACCEPTED_BLOCK_EXTRAS: Readonly<Record<string, readonly string[]>> = {
 
 /** The families the references speak about: a family the new code adds beyond them (`food`, `sword` from a tag the old table lacks) is judged only for these. */
 const COMPARED_ITEM_FAMILIES: ReadonlySet<string> = new Set([
-  "pickaxe", "shovel", "axe", "sword", "hoe", "shears", "bow", "crossbow", "shield", "helmet", "chestplate", "leggings", "boots",
+  "pickaxe", "shovel", "axe", "sword", "hoe", "shears", "bow", "crossbow", "shield", "helmet", "chestplate", "leggings", "boots", "head_gear", "torso_gear",
   "bed", "boat", "station", "avoided_food", "arrow",
 ]);
 

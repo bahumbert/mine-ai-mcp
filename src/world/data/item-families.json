@@ -13,6 +13,8 @@
     "chestplate": ["chest_armor"],
     "leggings": ["leg_armor"],
     "boots": ["foot_armor"],
+    "head_gear": [],
+    "torso_gear": [],
     "arrow": ["arrows"],
     "food": [],
     "avoided_food": [],

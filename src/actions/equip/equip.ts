@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { raceSignal } from "../../utils/index.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import {
   equipAnnotations,
   equipOutcomes,
@@ -204,7 +205,7 @@ export function createEquipAction(bot: Bot) {
     formatResult: formatEquipResult,
     execution: { kind: "resumable_task" },
     annotations: equipAnnotations,
-    parse: parseEquipRequest,
+    parse: (input) => parseEquipRequest(input, familyIndexOf(bot)),
     begin: (request, _lifetime, observe) => beginEquip(bot, request, observe),
   });
 }
