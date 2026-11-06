@@ -9,7 +9,7 @@ import { memoryNote, recall } from "./memory.ts";
 import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
-import { planFollowStep } from "./skills.ts";
+import { planFollowStep } from "./skills/follow.ts";
 
 function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };

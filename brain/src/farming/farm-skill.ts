@@ -3,8 +3,13 @@ import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
 import type { KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
-import { describeWay, firstOfOwnSeed } from "../gathering.ts";
-import { describeOverlaps, findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, overlapsOf, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
+import { describeWay } from "../gathering/fetch-farther.ts";
+import { firstOfOwnSeed } from "../gathering/how-to-get.ts";
+import type { SkillContext, SkillResult } from "../skills.ts";
+import { levelZone } from "../skills/level-zone.ts";
+import { findPlayer, navigateInput } from "../skills/positions.ts";
+import { releaseArea } from "../skills/protect-area.ts";
+import { describeOverlaps, nearestClearSpot, noteArea, overlapsOf, SITE_SEARCH } from "../skills/protected-areas.ts";
 import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 

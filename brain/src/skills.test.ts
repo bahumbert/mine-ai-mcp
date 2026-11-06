@@ -4,8 +4,9 @@ import minecraftData from "minecraft-data";
 import { fuelsOf } from "#src/world/smelting.ts";
 import { describeStep, skillUsage, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
-import { RARE_DROP_BREAKS } from "./gathering.ts";
+import { runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
+import { houseBox } from "./skills/build-house.ts";
+import { RARE_DROP_BREAKS } from "./gathering/how-to-get.ts";
 import { DEFAULT_STYLE, STYLES } from "./building/styles.ts";
 import { neededItems } from "./inventory-room.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -339,6 +340,19 @@ test("a water bucket without a bucket crafts one from iron first, then fills it"
   const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.map((call) => call.tool), ["craft_item", "use_bucket"]);
+});
+
+test("get_items of a water bucket with no bucket carried makes the bucket first, then fills it", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "iron_ingot", count: 3 }] };
+  runtime.recipes = { bucket: { makes: 1, needs: [{ item: "iron_ingot", count: 3 }] } };
+  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
+  assert.deepEqual(result, { status: "done", detail: "got 1 water_bucket, now carrying 1 water_bucket (crafted 1 bucket, filled a bucket with water)" });
+  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input]), [
+    ["craft_item", { items: [{ item_name: "bucket", count: 1 }], temporary_workstation: true }],
+    ["use_bucket", { action: "fill", liquid: "water" }],
+  ]);
 });
 
 test("a fill that finds no water ends get_items with the runtime's words", async () => {
@@ -866,6 +880,24 @@ test("get_items keeps what it carried: planks that crafting the new items used u
   assert.ok(runtime.submitted.some((call) => call.tool === "collect_block" && call.input.block_name === "oak_log"), "chopped logs to make the planks again");
 });
 
+test("get_items that used her own carried planks for a craft, with no logs near to replace them, says what it used", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 20 }, { name: "oak_log", count: 2 }, { name: "crafting_table", count: 1 }] };
+  // The fake planner counts only raw leaves, so the craft itself takes her planks the way the game's does (6 of the 20).
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "craft_item") runtime.addItem("oak_planks", -6);
+    return submit(tool, input, ...rest);
+  };
+  // The logs that would make them again are out of range.
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_fence", count: 3 }] }, contextFor(runtime));
+  assert.deepEqual(runtime.submitted.map(describeCall), ["craft oak_fence at table", "collect oak_log"]);
+  assert.deepEqual(result, { status: "done", detail: "got 3 oak_fence, now carrying 3 oak_fence (crafted 3 oak_fence; used 6 oak_planks of what you carried (none near to replace it))" });
+});
+
 test("get_items does not fetch back the scaffold blocks spent walking home to craft", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
@@ -1084,6 +1116,25 @@ test("level_area flattens the zone between two marker blocks at their level, kee
   // Set aside while she works, given back after.
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "protect_region" || call.tool === "unprotect_region").map((call) => call.tool), ["protect_region", "unprotect_region"]);
   assert.deepEqual(context.areas, []);
+});
+
+test("level_area that fails while filling the holes counts its batches on from the dig: leveling stopped at N/M", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "dirt", count: 4 }] };
+  runtime.world.set("2,64,2", "gold_block");
+  runtime.world.set("6,64,5", "gold_block");
+  runtime.world.set("4,64,3", "grass_block");
+  runtime.world.set("4,65,3", "grass_block");
+  runtime.world.set("5,63,4", "air");
+  const submit = runtime.submit.bind(runtime);
+  // The two dig batches go through; the first fill batch (the hole) is refused for a reason that is no refusal of a cell.
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && builds(runtime).length === 2) runtime.failNext.build_structure = { error: "[BUILD_STOPPED] The build stopped: no progress in two passes." };
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
+  assert.equal(builds(runtime).length, 3);
+  assert.deepEqual(result, { status: "failed", detail: "leveling stopped at 3/3: [BUILD_STOPPED] The build stopped: no progress in two passes." });
 });
 
 test("a tool worn out while leveling is made again and the batch done again, not the end of the job", async () => {
