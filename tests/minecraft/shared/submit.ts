@@ -1,12 +1,13 @@
 // `bun submit.ts <yaml|dir>... [--repeat N] [--lanes N] [--lock] [--hold] [--isolated] [--out DIR] | --stop`: run scenarios on the shared server.
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenarioServerConfig } from "./config.ts";
 import { exchange } from "./daemon-client.ts";
 import { ensureDaemon } from "./daemon-launch.ts";
 import type { DaemonMessage } from "./protocol.ts";
-import { formatMessage, forwardedEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
+import { formatMessage, forwardedEnv, outputOnNinePWarning, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../..");
@@ -53,6 +54,8 @@ async function stopDaemon(args: SubmitArgs): Promise<number> {
 async function main(argv: readonly string[]): Promise<number> {
   const args = parseSubmitArgs(argv, process.cwd());
   if (args.stop) return stopDaemon(args);
+  const warning = outputOnNinePWarning(args.out, existsSync("/proc/mounts") ? readFileSync("/proc/mounts", "utf8") : "");
+  if (warning !== null) console.error(warning);
   if (args.isolated) return runIsolated(args);
   return runOnDaemon(args);
 }

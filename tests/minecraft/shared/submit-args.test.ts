@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatMessage, forwardedEnv, parseSubmitArgs } from "./submit-args.ts";
+import { formatMessage, forwardedEnv, outputOnNinePWarning, parseSubmitArgs } from "./submit-args.ts";
 
 test("paths and options are told apart and paths become absolute", () => {
   const args = parseSubmitArgs(["tests/a", "b.yaml", "--repeat", "3", "--lanes", "2", "--out", "out", "--lock"], "/work");
@@ -44,6 +44,21 @@ test("an unknown option, a lanes of 0 and a repeat that is not a number are refu
 test("--socket and --port are kept for a daemon of your own", () => {
   const args = parseSubmitArgs(["x.yaml", "--socket", "/tmp/mine.sock", "--port", "25300"], "/work");
   assert.deepEqual([args.socket, args.port], ["/tmp/mine.sock", 25_300]);
+});
+
+const MOUNTS = "D:\\ /mnt/d 9p rw 0 0\n/dev/sdc / ext4 rw 0 0\n";
+
+test("an --out on a 9P mount is warned about: it names the mount, the 'disk I/O error' it caused and the way out", () => {
+  const warning = outputOnNinePWarning("/mnt/d/work/.tmp/art", MOUNTS, path => path);
+  assert.match(warning ?? "", /\/mnt\/d\/work\/\.tmp\/art/u);
+  assert.match(warning ?? "", /9P/u);
+  assert.match(warning ?? "", /disk I\/O error/u);
+  assert.match(warning ?? "", /--out .*ext4/u);
+});
+
+test("an --out on ext4, or a link on 9P that leads to ext4, is not warned about", () => {
+  assert.equal(outputOnNinePWarning("/tmp/art", MOUNTS, path => path), null);
+  assert.equal(outputOnNinePWarning("/mnt/d/work/.tmp/art-link", MOUNTS, () => "/tmp/art-target"), null);
 });
 
 test("a result prints like Mine Labs: outcome, name, seconds, then the goal line", () => {
