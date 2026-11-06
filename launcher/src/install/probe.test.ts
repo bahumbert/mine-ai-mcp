@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import test from "node:test";
+import { monotonicNow } from "../clocks.ts";
 import { probeServer } from "./probe.ts";
 
 /** Packets recorded from real 1.21.4 servers by the W1 spike (`knowledge/facts/packaging.md` "Minecraft login answers"). */
@@ -194,11 +195,11 @@ test("a closed port is down with one line naming the address", async () => {
 
 test("a server that accepts and never answers times out within the limit", async () => {
   await withServer({ silent: true }, async (server) => {
-    const started = Date.now();
+    const started = monotonicNow();
     const result = await probeServer("127.0.0.1", server.port, "1.21.4", 400);
     assert.equal(result.up, false);
     assert.match(result.detail, /400 ms/u);
-    assert.ok(Date.now() - started < 2_000, "the probe respects its timeout");
+    assert.ok(monotonicNow() - started < 2_000, "the probe respects its timeout");
   });
 });
 

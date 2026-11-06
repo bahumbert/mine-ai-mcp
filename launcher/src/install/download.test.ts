@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
+import { monotonicNow } from "../clocks.ts";
 import { DownloadError, downloadFailureHint, downloadVerified } from "./download.ts";
 
 const payload = Buffer.from("the bytes of a pinned download ".repeat(5000));
@@ -188,9 +189,9 @@ test("a connection that stalls mid-body is cut after the idle timeout, keeps its
   const host = serve({ supportsRange: true, stallAfter: half });
   const dest = scratch();
   try {
-    const started = Date.now();
+    const started = monotonicNow();
     await assert.rejects(downloadVerified(host.url, dest, { sha256 }, undefined, fetch, 300), (error: unknown) => error instanceof DownloadError && error.kind === "stalled");
-    assert.ok(Date.now() - started < 3_000, "the idle timeout fires");
+    assert.ok(monotonicNow() - started < 3_000, "the idle timeout fires");
     assert.equal(statSync(`${dest}.part`).size, half);
     await downloadVerified(host.url, dest, { sha256 }, undefined, fetch, 300);
     assert.deepEqual(readFileSync(dest), payload);

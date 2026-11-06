@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { monotonicNow } from "../clocks.ts";
 import { fakeKeyCipher } from "../key-cipher-test-support.ts";
 import { loadManifest } from "../manifest.ts";
 import { loadSettings, settingsPath, type Settings, type SettingsOptions } from "../settings.ts";
@@ -138,11 +139,11 @@ test("an answer without a completion is an error, not a pass", async () => {
 
 test("an endpoint that never answers fails after the timeout, naming it", async () => {
   await withEndpoint(() => {}, async (endpoint) => {
-    const started = Date.now();
+    const started = monotonicNow();
     const result = await endpointTest(context(endpoint.baseUrl), { timeoutMs: 300 });
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.error, /300 ms/u);
-    assert.ok(Date.now() - started < 3_000);
+    assert.ok(monotonicNow() - started < 3_000);
   });
 });
 
