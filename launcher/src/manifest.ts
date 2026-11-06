@@ -19,10 +19,17 @@ export const manifestSchema = z.strictObject({
     /** Server heap in MB: `perRamGb` per GiB of the machine's RAM, clamped to `min`..`max`. */
     memoryMb: z.strictObject({ min: positiveInt, perRamGb: positiveInt, max: positiveInt }),
   }),
-  java: downloadSha256,
+  java: z.strictObject({
+    url: httpsUrl,
+    sha256,
+    /** Bytes of the unpacked JRE (`du -sb`, measured again whenever the pin changes): the disk check counts them beside the zip. */
+    installedBytes: positiveInt,
+  }),
   ollama: z.strictObject({
     url: httpsUrl,
     sha256,
+    /** Bytes of the installed Ollama folder (`du -sb`, measured again whenever the pin changes): the disk check counts them beside the setup. */
+    installedBytes: positiveInt,
     minVersion: z.string().min(1),
     port: positiveInt,
     env: z.record(z.string(), z.string()),
@@ -45,6 +52,8 @@ export const manifestSchema = z.strictObject({
     modelPullIdleMs: positiveInt,
   }),
   release: z.strictObject({ latestUrl: httpsUrl }),
+  /** `reserveBytes` stays free on each drive a step downloads to, counted once per drive (spec 2026-11-06 D1). */
+  disk: z.strictObject({ reserveBytes: positiveInt }),
   /**
    * In-game bot commands (spec D7): per-sender cooldown, refusal repeat, console poll, age limit of a heard line, delay
    * before the listener joins, and the longest a held answer waits for a way out (the listener joining after our own stop).

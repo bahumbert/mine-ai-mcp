@@ -16,7 +16,7 @@ function context(sha256: string = sha256Of(zipBytes)): InstallContext & { progre
   const manifest = loadManifest();
   const progress: string[] = [];
   return {
-    manifest: { ...manifest, java: { url: "https://example.invalid/jre.zip", sha256 } },
+    manifest: { ...manifest, java: { ...manifest.java, url: "https://example.invalid/jre.zip", sha256 } },
     settings: {} as Settings,
     root: mkdtempSync(join(tmpdir(), "java-step-")),
     onProgress: (_fraction, label) => progress.push(label),
@@ -26,7 +26,7 @@ function context(sha256: string = sha256Of(zipBytes)): InstallContext & { progre
 
 /** The same context pinned to another zip: what a new manifest does on an update. */
 function pinnedTo(ctx: InstallContext, bytes: Buffer): InstallContext {
-  return { ...ctx, manifest: { ...ctx.manifest, java: { url: "https://example.invalid/jre2.zip", sha256: sha256Of(bytes) } } };
+  return { ...ctx, manifest: { ...ctx.manifest, java: { ...ctx.manifest.java, url: "https://example.invalid/jre2.zip", sha256: sha256Of(bytes) } } };
 }
 
 /** A fetch serving `bytes`, counting the requests. */

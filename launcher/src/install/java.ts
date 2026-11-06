@@ -79,7 +79,8 @@ async function replaceFolder(fresh: string, target: string): Promise<void> {
   await rm(previous, { recursive: true, force: true });
 }
 
-async function isPinnedJreInstalled(root: string, sha256: string): Promise<boolean> {
+/** Whether the JRE under `<root>/runtime/java` was unpacked from the zip pinned by `sha256` (a step that would download it has nothing to do). */
+export async function isPinnedJreInstalled(root: string, sha256: string): Promise<boolean> {
   if (!existsSync(javaPath(root))) return false;
   const pinned = await readFile(join(root, "runtime", "java", PINNED_HASH_FILE), "utf8").catch(() => "");
   return pinned.trim() === sha256;

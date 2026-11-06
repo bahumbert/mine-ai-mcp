@@ -26,11 +26,16 @@ export interface ModelDeps extends ServeDeps {
  * `D:/mine-ai-w5/recheck/h0.txt`).
  */
 export function modelOnDisk(root: string, manifest: Manifest, env: Record<string, string | undefined> = process.env, home: string = homedir()): boolean {
-  const store = ollamaServeEnv(manifest, manifest.ollama.port, loadInstallState(root)).OLLAMA_MODELS ?? env.OLLAMA_MODELS ?? join(home, ".ollama", "models");
-  return existsSync(join(store, "manifests", ...manifestFileParts(manifest.ollama.model)));
+  return existsSync(join(modelStore(root, manifest, env, home), "manifests", ...manifestFileParts(manifest.ollama.model)));
 }
 
-function manifestFileParts(model: string): string[] {
+/** The models folder our serve would use: the recorded store of our own Ollama, else `OLLAMA_MODELS` of `env`, else `<home>/.ollama/models`. */
+export function modelStore(root: string, manifest: Manifest, env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
+  return ollamaServeEnv(manifest, manifest.ollama.port, loadInstallState(root)).OLLAMA_MODELS ?? env.OLLAMA_MODELS ?? join(home, ".ollama", "models");
+}
+
+/** `[host, ...namespace and name, tag]` of a model as the registry and the store's `manifests/` folder spell it (`gemma4:12b` is `registry.ollama.ai/library/gemma4/12b`). */
+export function manifestFileParts(model: string): string[] {
   const separator = model.lastIndexOf(":");
   const slash = model.lastIndexOf("/");
   const [name, tag] = separator > slash ? [model.slice(0, separator), model.slice(separator + 1)] : [model, "latest"];
