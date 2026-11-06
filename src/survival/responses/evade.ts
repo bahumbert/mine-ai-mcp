@@ -6,10 +6,9 @@ import { encounterBaseline, type EvadeResponseResult } from "../control/combat/r
 import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { observeExposedAvoidanceContact } from "../perception/combat/threats.js";
 import { monotonicNow } from "../../utils/index.js";
-import { permittedCombatItems } from "../policy/combat/permissions.js";
 import { creeperEscape } from "../policy/combat/tactics.js";
 import type { HostileDirective } from "../policy/combat/response.js";
-import { equipCombatLoadout, readCombatItems, selectMeleeLoadout } from "../weapons/equipment.js";
+import { equipCombatLoadout, permittedMeleeLoadout, readCombatItems } from "../weapons/equipment.js";
 import { combatItemsForTarget } from "../weapons/melee.js";
 import {
   guardRetreatProjectiles,
@@ -51,7 +50,7 @@ export async function evade(
   // Select the hand before navigation starts owning digs and placements.
   const target = request.threats.map((threat) => bot.entities[threat.id]).find((entity) => entity?.isValid);
   const carried = target ? combatItemsForTarget(bot, target) : readCombatItems(bot);
-  await equipCombatLoadout(bot, selectMeleeLoadout(permittedCombatItems(carried, context.policy)));
+  await equipCombatLoadout(bot, permittedMeleeLoadout(bot, carried, context.policy));
   signal.throwIfAborted();
   using defence = defendWhileRetreating(bot, context, signal);
   const makeGoal = () => safeFromEntitiesGoal([...threats.values()], request.safeRange + EVADE_ARRIVAL_MARGIN);

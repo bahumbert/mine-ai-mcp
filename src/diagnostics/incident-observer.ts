@@ -12,6 +12,7 @@ import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import type { CombatPerception } from "../survival/perception/combat/observations.js";
 import type { CombatPositionPlan } from "../survival/positioning/combat/geometry.js";
 import type { FootingRecoverySnapshot } from "../survival/responses/footing.js";
+import { isShield, OFF_HAND_SLOT } from "../survival/weapons/equipment.js";
 import { monotonicNow } from "../utils/index.js";
 import { airSupplyTicks } from "../world/air-supply.js";
 import { damageSourceName } from "../world/damage-registry.js";
@@ -212,7 +213,7 @@ export function observeIncidents(
     const phase = owner.combat.execution?.phase;
     if (phase) phaseTicks[phase] = (phaseTicks[phase] ?? 0) + 1;
     const useFlags = observedFlags(useFlagsIndex);
-    const observedShieldUse = bot.inventory.slots?.[45]?.name === "shield" && useFlags !== null && (useFlags & 3) === 3;
+    const observedShieldUse = isShield(bot, bot.inventory.slots?.[OFF_HAND_SLOT]) && useFlags !== null && (useFlags & 3) === 3;
     shieldUseTicks = observedShieldUse ? shieldUseTicks + 1 : 0;
     if (physicsSamples % 20 === 0) recorder.record("threats", { threats: threatSnapshot() }, atMs);
     const cost = performance.now() - started;
@@ -374,7 +375,7 @@ export function observeIncidents(
             shieldUseTicks >= 5 &&
             observedFlags(useFlagsIndex) !== null &&
             (observedFlags(useFlagsIndex)! & 3) === 3 &&
-            bot.inventory.slots?.[45]?.name === "shield",
+            isShield(bot, bot.inventory.slots?.[OFF_HAND_SLOT]),
           bearingBand: bearing,
           cause: attacker(value.sourceCauseId),
           direct: attacker(value.sourceDirectId),

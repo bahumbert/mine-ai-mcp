@@ -163,7 +163,7 @@ export class CoverFight {
       // A shooter can walk into melee as its old refuge loses cover. Contact
       // defence must run before pricing a replacement building project.
       if (this.weapons.contact() || canMeleeTarget(this.scene.bot, this.scene.target)) return { kind: "proceed" };
-      if (isRangedAttacker(this.scene.target)) this.scene.position.adoptExisting();
+      if (isRangedAttacker(this.scene.bot, this.scene.target)) this.scene.position.adoptExisting();
       const rays = positionWorld(this.scene.navigation.world);
       const exposed = this.scene.position
         .threats()

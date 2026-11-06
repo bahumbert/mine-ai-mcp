@@ -3,8 +3,9 @@ import { SHIELD_READY_TICKS } from "../../weapons/item-use.js";
 import { entityDimensions } from "../../../world/entity-dimensions.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { PositionThreat } from "../../positioning/combat/exposure.js";
-import { bowDrawAimedAtBot, isDrawingBow } from "./attention.js";
+import { bowDrawAimedAtBot, holdsBow, isDrawingBow } from "./attention.js";
 import { incomingBlazeProjectiles, isIncomingBlazeProjectile } from "./blaze-projectiles.js";
+import { holdsShooter } from "./contact.js";
 import { readProjectileSpawn } from "./projectile-spawn.js";
 import { isCreeper } from "./creepers.js";
 import { canBeBystander, isHostile } from "./threats.js";
@@ -17,9 +18,6 @@ const BLAZE_CHARGING_FLAG = 1;
 const BLAZE_MELEE_RANGE = 2;
 /** Vanilla's first blaze shot follows sixty ticks after a newly observed charge. */
 const BLAZE_CHARGE_TICKS = 60;
-function hasBow(entity: Entity): boolean {
-  return entity.heldItem?.name === "bow";
-}
 
 function blazeCharged(bot: Bot, entity: Entity): boolean | null {
   const index = bot.registry.entitiesByName.blaze?.metadataKeys?.indexOf("flags") ?? -1;
@@ -28,8 +26,8 @@ function blazeCharged(bot: Bot, entity: Entity): boolean | null {
 }
 
 /** Whether the target shoots: a bow in hand, or a species that shoots by nature. */
-export function isRangedAttacker(entity: Entity): boolean {
-  return hasBow(entity) || RANGED_SPECIES.has(entity.name ?? "");
+export function isRangedAttacker(bot: Bot, entity: Entity): boolean {
+  return holdsBow(bot, entity) || RANGED_SPECIES.has(entity.name ?? "");
 }
 
 /**
@@ -80,7 +78,7 @@ const MELEE_CLOSING_ALLOWANCE = Math.ceil(SHIELD_READY_TICKS * MOB_CLOSING_SPEED
  */
 export function meleeImminent(bot: Bot, entity: Entity): boolean {
   if (!isHostile(entity) || canBeBystander(bot, entity) || isCreeper(entity)) return false;
-  if (isRangedAttacker(entity) || hasBow(entity)) return false;
+  if (isRangedAttacker(bot, entity)) return false;
   if (entity.position.distanceTo(bot.entity.position) > MELEE_REACH + MELEE_CLOSING_ALLOWANCE) return false;
   return hasExposedBody(bot, entity);
 }
@@ -94,7 +92,7 @@ export function meleeImminent(bot: Bot, entity: Entity): boolean {
  * the mob is winding up, and whether the bot is what it is winding up at.
  */
 export function isWindingUpAtBot(bot: Bot, entity: Entity): boolean {
-  if (hasBow(entity)) return bowDrawAimedAtBot(bot, entity);
+  if (holdsBow(bot, entity)) return bowDrawAimedAtBot(bot, entity);
   return isWindingUp(bot, entity);
 }
 
@@ -104,7 +102,7 @@ export function isWindingUpAtBot(bot: Bot, entity: Entity): boolean {
  */
 
 export function isWindingUp(bot: Bot, entity: Entity): boolean {
-  if (hasBow(entity)) {
+  if (holdsBow(bot, entity)) {
     return isDrawingBow(bot, entity);
   }
   if (entity.name === "blaze") {
@@ -115,7 +113,7 @@ export function isWindingUp(bot: Bot, entity: Entity): boolean {
 }
 
 export function positionThreat(bot: Bot, entity: Entity): PositionThreat {
-  const projectile = entity.name === "blaze" || entity.heldItem?.name === "bow" || entity.heldItem?.name === "crossbow";
+  const projectile = entity.name === "blaze" || holdsShooter(bot, entity);
   // These modes are not stopped by a sight-line claim alone. Leave their
   // existing responses in charge until the cover contract models them.
   const unmodelled = [

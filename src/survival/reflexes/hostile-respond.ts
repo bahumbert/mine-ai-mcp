@@ -5,7 +5,8 @@ import { executeHostileResponse } from "../control/combat/respond.js";
 import { encounterBaseline, type EncounterEvidence, type HostileSettlement } from "../control/combat/response-result.js";
 import { completeResponse } from "../control/combat/settlement.js";
 import type { HostileResponse } from "../policy/combat/response.js";
-import { carriedShields, messageOf, shieldInOffHand, type HostileScene } from "./hostile-scene.js";
+import { shieldInOffHand } from "../weapons/equipment.js";
+import { carriedShields, messageOf, type HostileScene } from "./hostile-scene.js";
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
 const HOSTILE_TAKE_BACK_HITS = 15;

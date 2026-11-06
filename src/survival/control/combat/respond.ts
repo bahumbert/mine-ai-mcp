@@ -33,7 +33,7 @@ async function fight(
     const { perception } = context;
     const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
     if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
-    if (target?.isValid && defendsOnContact(target) && !inDefensiveContact(bot, target))
+    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target))
       contactEnded.abort("Melee target left defensive reach.");
   };
   bot.on("physicsTick", observeContact);
@@ -45,7 +45,7 @@ async function fight(
       decideFightMovement({
         policy: controller.policy.combat,
         health: bot.health,
-        target: target ? { name: target.name ?? "unknown", defendsOnContact: defendsOnContact(target) } : null,
+        target: target ? { name: target.name ?? "unknown", defendsOnContact: defendsOnContact(bot, target) } : null,
       }),
     );
     observeContact();

@@ -17,7 +17,7 @@ import { DEFAULT_FOOD_POLICY } from "../../policy/contract.js";
 import { decideCombatResponse, type CombatDecisionFacts } from "../../policy/combat/decision.js";
 import { permitsHide } from "../../policy/combat/permissions.js";
 import type { HostileDirective, HostileThreat } from "../../policy/combat/response.js";
-import { carriesCombatWeapon, carriesRangedWeapon, readCombatItems } from "../../weapons/equipment.js";
+import { carriesCombatWeapon, carriesRangedWeapon, isShield, readCombatItems } from "../../weapons/equipment.js";
 import { contextPolicy, type HostileContext } from "./context.js";
 import { responseScope } from "./scopes/response.js";
 const NO_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() };
@@ -52,7 +52,7 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
     recoveryAvailable: canRecover,
     weapon: carriesCombatWeapon(bot),
     rangedWeapon: carriesRangedWeapon(bot),
-    shield: readCombatItems(bot).some((item) => item.name === "shield"),
+    shield: readCombatItems(bot).some((item) => isShield(bot, item)),
     fireball: fireball
       ? {
           id: fireball.id,
@@ -71,8 +71,8 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
           // Exposed bow draws aimed at us are contact before their first projectile hits.
           inContact: inContact(threat, context) || bowDrawAimedAtBot(bot, entity),
           inReach: inDefensiveContact(bot, entity),
-          defendsOnContact: defendsOnContact(entity),
-          ranged: isRangedAttacker(entity),
+          defendsOnContact: defendsOnContact(bot, entity),
+          ranged: isRangedAttacker(bot, entity),
           utility: targetFacts(bot, entity, context.attackerIds.has(entity.id)),
         };
       }),

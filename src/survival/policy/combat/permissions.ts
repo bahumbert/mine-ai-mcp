@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import type { FamilyIndex } from "../../../world/item-families.js";
 import type { CombatPolicy } from "./contract.js";
 export function permitsHide(policy: Readonly<CombatPolicy>, recoveryAvailable: boolean): boolean {
   return (
@@ -9,10 +10,14 @@ export function permitsHide(policy: Readonly<CombatPolicy>, recoveryAvailable: b
 
 /** Keep weapon eligibility identical in ordinary, prepared, and retreat combat. */
 export function permittedCombatItems<Item extends { name: string }>(
+  index: FamilyIndex,
   items: readonly Item[],
   policy: Readonly<CombatPolicy>,
 ): Item[] {
-  return items.filter((item) => (item.name === "bow" ? policy.bow : item.name === "shield" ? policy.shield : true));
+  return items.filter((item) => {
+    const families = index.itemFamilies(item.name);
+    return families.includes("bow") ? policy.bow : families.includes("shield") ? policy.shield : true;
+  });
 }
 
 /** Only changed permissions consumed by this response require physical reconciliation. */

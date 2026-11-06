@@ -9,6 +9,7 @@ import type { FightScene } from "./scene.js";
 import type { FightMovement } from "./movement.js";
 import { FightWeapons } from "./weapons.js";
 import { selectMeleeLoadout } from "../../weapons/equipment.js";
+import { familyIndexOf } from "../../../world/item-families.js";
 
 /** Run `action` while the clock turns one physics tick at a time, until it settles; its outcome is returned as it came. */
 async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
@@ -103,7 +104,7 @@ test("a shielded lure lands ready shared strikes before returning home without w
     execution: { run: async (_phase: string, effect: () => Promise<void>) => effect() }, reportDecision: () => {},
   } as unknown as FightScene;
   const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
-  const loadout = selectMeleeLoadout(bot.inventory.items());
+  const loadout = selectMeleeLoadout(familyIndexOf(bot), bot.inventory.items());
   await bot.equip(loadout.weapon!, "hand");
   Reflect.set(weapons, "currentLoadout", () => loadout);
   // The lure starts with a readied guard, as its admission normally establishes.

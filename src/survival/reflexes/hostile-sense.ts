@@ -10,7 +10,8 @@ import { recoveryHealth } from "../policy/combat/health.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import type { ResponseDecision } from "../control/contract.js";
 import { decideHostileReflex } from "../policy/combat/reflex-decision.js";
-import { carriedShields, shieldInOffHand, type HostileScene } from "./hostile-scene.js";
+import { OFF_HAND_SLOT, shieldInOffHand } from "../weapons/equipment.js";
+import { carriedShields, type HostileScene } from "./hostile-scene.js";
 
 export type ShieldPreparation = { readonly kind: "prepare_shield" };
 
@@ -148,7 +149,7 @@ export function hostileScope(scene: HostileScene, response: HostileResponse | Sh
       response: "prepare_shield",
       scope: "off-hand",
       facts: () => ({
-        offHand: bot.inventory.slots[45]?.name ?? null,
+        offHand: bot.inventory.slots[OFF_HAND_SLOT]?.name ?? null,
         shields: carriedShields(bot).map((item) => item.slot),
       }),
       permissions: () => ({ shield: policy.combat.shield }),

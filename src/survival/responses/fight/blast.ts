@@ -2,9 +2,8 @@ import { Vec3 } from "vec3";
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { placeSolidBlockInto } from "../../../world/placement.js";
 import { blastBarrierScope } from "../../control/combat/scopes/blast-barrier.js";
-import { permittedCombatItems } from "../../policy/combat/permissions.js";
 import { blastBarrierMaterial } from "../../positioning/combat/blast-barrier.js";
-import { selectMeleeLoadout } from "../../weapons/equipment.js";
+import { permittedMeleeLoadout } from "../../weapons/equipment.js";
 import { canMeleeTarget, combatItemsForTarget } from "../../weapons/melee.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
@@ -21,7 +20,7 @@ export class BlastDefence {
     const threats = scene.perception.creeperClearance.observe(scene.perception.tick, scene.perception.resolvedIds);
     const threat = [...threats].sort((a, b) => Number(b.swelling) - Number(a.swelling) || a.distance - b.distance)[0];
     const target = threat && scene.bot.entities[threat.id]?.isValid ? scene.bot.entities[threat.id]! : scene.target;
-    const loadout = selectMeleeLoadout(permittedCombatItems(combatItemsForTarget(scene.bot, target), scene.policy.combat));
+    const loadout = permittedMeleeLoadout(scene.bot, combatItemsForTarget(scene.bot, target), scene.policy.combat);
     await weapons.equip(loadout);
     if (threat) await scene.bot.lookAt(threat.position.offset(0, 1, 0), true);
     else await weapons.faceGuard();
@@ -42,7 +41,7 @@ export class BlastDefence {
     await scene.execution.run("swing", async () => {
       const target = scene.bot.entities[targetId];
       if (!target?.isValid || !scene.policy.combat.melee || !canMeleeTarget(scene.bot, target)) return;
-      const loadout = selectMeleeLoadout(permittedCombatItems(combatItemsForTarget(scene.bot, target), scene.policy.combat));
+      const loadout = permittedMeleeLoadout(scene.bot, combatItemsForTarget(scene.bot, target), scene.policy.combat);
       await weapons.equip(loadout);
       if (scene.elapsedTicks < weapons.weaponReadyAt) { await this.protect(); return; }
       weapons.itemUse.lowerShield();

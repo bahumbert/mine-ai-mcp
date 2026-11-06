@@ -7,6 +7,7 @@ import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { observedEyeHeight, STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { exposedBodyFrom, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
+import { familyIndexOf, hasItemFamily } from "../../../world/item-families.js";
 import { isRangedAttacker, positionThreat } from "../../perception/combat/observations.js";
 import { arrowImpact, incomingShieldProjectiles } from "../../perception/combat/shield-projectiles.js";
 import { arrowFlight } from "../../perception/combat/arrow-flight.js";
@@ -21,9 +22,11 @@ import {
   BOW_DRAW_TICKS,
   equipCombatLoadout,
   MELEE_RANGE,
+  permittedMeleeLoadout,
   selectCombatLoadout,
   selectMeleeLoadout,
   selectRangedLoadout,
+  shieldInOffHand,
   type CombatLoadout,
 } from "../../weapons/equipment.js";
 import { assessBowWindow } from "../../weapons/bow-window.js";
@@ -215,7 +218,7 @@ export class FightWeapons {
       this.scene.bot.heldItem?.name !== loadout.weapon?.name ||
       this.scene.settled() || !target.isValid || this.scene.dead.has(target.id) ||
       !canMeleeTarget(this.scene.bot, target) ||
-      (loadout.weapon?.name.endsWith("_sword") && hasSweepBystander(this.scene.bot, target))) return false;
+      (loadout.weapon && hasItemFamily(this.scene.bot, loadout.weapon.name, "sword") && hasSweepBystander(this.scene.bot, target))) return false;
     this.scene.bot.attack(target);
     this.scene.attacks++;
     this.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
@@ -307,9 +310,7 @@ export class FightWeapons {
     const defender = this.contact();
     if (!defender) return false;
     return this.scene.execution.run("defend", async () => {
-      const loadout = selectMeleeLoadout(
-        permittedCombatItems(combatItemsForTarget(this.scene.bot, defender), this.scene.policy.combat),
-      );
+      const loadout = permittedMeleeLoadout(this.scene.bot, combatItemsForTarget(this.scene.bot, defender), this.scene.policy.combat);
       await this.equip(loadout);
       if (loadout.shield) await this.raiseGuard();
       await this.readyWeapon();
@@ -329,16 +330,18 @@ export class FightWeapons {
   };
   readonly loadoutFrom = (feet: Vec3) => {
     // Endermen evade arrows by teleporting; a carried bow cannot answer this target.
+    const index = familyIndexOf(this.scene.bot);
     const available = permittedCombatItems(
+      index,
       combatItemsForTarget(this.scene.bot, this.scene.target),
       this.scene.policy.combat,
-    ).filter((item) => this.scene.target.name !== "enderman" || item.name !== "bow");
+    ).filter((item) => this.scene.target.name !== "enderman" || !index.itemFamilies(item.name).includes("bow"));
     if (this.scene.position.plan || this.scene.movement === "hold") {
       const eye = feet.offset(0, STANDING_EYE_HEIGHT, 0);
       // Holding a position forbids chasing. The six-block open-ground
       // weapon cutoff must not strand an otherwise reachable bow target.
       if (nearestBodyPoint(eye, positionThreat(this.scene.bot, this.scene.target)).distanceTo(eye) > MELEE_RANGE) {
-        const ranged = selectRangedLoadout(available);
+        const ranged = selectRangedLoadout(index, available);
         if (ranged) return ranged;
       }
     }
@@ -346,24 +349,24 @@ export class FightWeapons {
     // when it can actually connect, rather than repeatedly choosing a bow
     // whose centre-directed trajectory is blocked by the ledge.
     if (!this.scene.policy.combat.melee) {
-      const ranged = selectRangedLoadout(available);
+      const ranged = selectRangedLoadout(index, available);
       if (ranged) return ranged;
     }
     if (feet.equals(this.scene.bot.entity.position) && canMeleeTarget(this.scene.bot, this.scene.target))
-      return selectMeleeLoadout(available);
+      return selectMeleeLoadout(index, available);
     // The six-block cutoff anticipates a walking melee attacker closing
     // during the draw. A shooter outside swing reach can be answered here
     // when its bow trajectory is already clear, including a hovering blaze.
-    if (isRangedAttacker(this.scene.target) && this.clearShot(feet)) {
-      const ranged = selectRangedLoadout(available);
+    if (isRangedAttacker(this.scene.bot, this.scene.target) && this.clearShot(feet)) {
+      const ranged = selectRangedLoadout(index, available);
       if (ranged) return ranged;
     }
-    return selectCombatLoadout(available, this.scene.target.position.minus(feet));
+    return selectCombatLoadout(index, available, this.scene.target.position.minus(feet));
   };
   readonly currentLoadout = () => this.loadoutFrom(this.scene.bot.entity.position);
   /** A commanded guard is not proof that the off-hand item survived a hit. */
   readonly maintainGuard = async (): Promise<void> => {
-    if (!this.itemUse.shieldRaised || this.scene.bot.inventory.slots[45]?.name === "shield") return;
+    if (!this.itemUse.shieldRaised || shieldInOffHand(this.scene.bot)) return;
     this.itemUse.invalidateShield();
     this.scene.signal.throwIfAborted();
     await this.raiseGuard();
@@ -371,9 +374,9 @@ export class FightWeapons {
   readonly raiseGuard = async () => {
     if (!this.scene.policy.combat.shield) return;
     const shield = this.currentLoadout().shield;
-    if (!shield || (this.itemUse.shieldRaised && this.scene.bot.inventory.slots[45]?.name === "shield")) return;
+    if (!shield || (this.itemUse.shieldRaised && shieldInOffHand(this.scene.bot))) return;
     return this.scene.execution.run("guard", async () => {
-      if (shield && this.scene.bot.inventory.slots[45]?.name !== "shield") {
+      if (shield && !shieldInOffHand(this.scene.bot)) {
         await this.scene.bot.equip(shield, "off-hand");
         this.itemUse.invalidateShield();
       }

@@ -7,6 +7,7 @@ import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { equipCombatLoadout, MELEE_RANGE, readCombatItems, selectMeleeLoadout } from "../../survival/weapons/equipment.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { BoatRide } from "./boat-crossing.js";
 import { isBoatEntity } from "./boat-entities.js";
 import { currentVehicle } from "./vehicle-sync.js";
@@ -88,7 +89,7 @@ interface StrikeState {
 /** One strike at `threat` if the weapon's cooldown has passed (wall clock): equipped on the first, looked at, hit. */
 async function strikeWhenReady(bot: Bot, state: StrikeState, threat: SeatedThreat, target: Entity): Promise<void> {
   if (state.loadout === null) {
-    state.loadout = selectMeleeLoadout(readCombatItems(bot));
+    state.loadout = selectMeleeLoadout(familyIndexOf(bot), readCombatItems(bot));
     await equipCombatLoadout(bot, state.loadout);
   }
   if (performance.now() - state.lastStrikeAt < state.loadout.cooldownTicks * TICK_MS) return;

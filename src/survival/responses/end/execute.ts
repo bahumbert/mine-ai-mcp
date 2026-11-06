@@ -40,7 +40,7 @@ import type { PerchObservation } from "../../perception/combat/perch.js";
 import { PerchPreparation } from "../../perception/combat/perch-preparation.js";
 import type { SurvivalPolicy } from "../../policy/contract.js";
 import { decideEndResponse } from "../../policy/combat/end-decision.js";
-import { permittedCombatItems, permitsHide } from "../../policy/combat/permissions.js";
+import { permitsHide } from "../../policy/combat/permissions.js";
 import { recoveryHealth } from "../../policy/combat/health.js";
 import { fullProtectionBlock } from "../../positioning/combat/build-protection.js";
 import { countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
@@ -56,9 +56,9 @@ import { bowTrajectory, clearBowTrajectory } from "../../weapons/bow-trajectory.
 import { fitsDragonShot } from "../../weapons/dragon-shot.js";
 import {
   equipCombatLoadout,
+  permittedMeleeLoadout,
+  permittedRangedLoadout,
   readCombatItems,
-  selectMeleeLoadout,
-  selectRangedLoadout,
 } from "../../weapons/equipment.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
 import {
@@ -283,7 +283,7 @@ export class EndCombat {
     };
     const unavailable = () => {
       if (!this.policy().combat.bow) return "[COMBAT_CONSTRAINED] Bow use is prohibited.";
-      if (!selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat)))
+      if (!permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat))
         return "[DRAGON_BOW_UNAVAILABLE] Carry a permitted bow and arrows before shooting.";
       return null;
     };
@@ -351,7 +351,7 @@ export class EndCombat {
         if (observation.attacks > 0) { await this.phase("observe_shot", () => this.tick(signal)); continue; }
         await this.settle(signal);
         if (!aim()) { observation.aimingTicks++; await this.tick(signal); continue; }
-        await equipCombatLoadout(bot, selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat))!);
+        await equipCombatLoadout(bot, permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat)!);
         await this.phase("shoot", async () => {
           using draw = use.drawBow();
           // Re-aim throughout the charge; a flying dragon moves tens of blocks
@@ -540,7 +540,7 @@ export class EndCombat {
     if (!target?.isValid || target.name !== "end_crystal")
       return this.crystalResult(observation, "stopped", "Selected end crystal is not loaded");
     const rangedAvailable = () =>
-      selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat)) !== null &&
+      permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat) !== null &&
       bot.inventory.items().some((i) => i.name === "arrow");
     if (observation.usedWeapon === null) {
       if (observation.weapon === "bow") {
@@ -671,7 +671,7 @@ export class EndCombat {
             unusableStances.add(`${feet.x},${feet.y},${feet.z}`);
           }
         }
-        const loadout = selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat));
+        const loadout = permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat);
         if (!loadout || !bot.inventory.items().some((i) => i.name === "arrow")) continue;
         await equipCombatLoadout(bot, loadout);
         if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
@@ -1281,7 +1281,7 @@ export class EndCombat {
         if (!head) {
           selectedPart = null;
           observation.stage = "waiting";
-          const loadout = selectMeleeLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat));
+          const loadout = permittedMeleeLoadout(bot, readCombatItems(bot), this.policy().combat);
           const heldBefore = bot.heldItem?.name;
           await equipCombatLoadout(bot, loadout);
           if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);
@@ -1434,7 +1434,7 @@ export class EndCombat {
           }
           continue;
         }
-        const loadout = selectMeleeLoadout(permittedCombatItems(combatItemsForTarget(bot, target), this.policy().combat));
+        const loadout = permittedMeleeLoadout(bot, combatItemsForTarget(bot, target), this.policy().combat);
         const heldBefore = bot.heldItem?.name;
         await equipCombatLoadout(bot, loadout);
         if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);

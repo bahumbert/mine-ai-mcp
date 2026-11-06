@@ -4,6 +4,7 @@ import { personalRespawnObservation } from "../actions/portal-entry/respawn-know
 import type { PlayerDeathContext } from "../bot-data/event-log.js";
 import { enclosedInPlace } from "../survival/responses/shelter-cells.js";
 import { carriesCombatWeapon, readCombatItems, selectMeleeLoadout } from "../survival/weapons/equipment.js";
+import { familyIndexOf } from "../world/item-families.js";
 import { monotonicNow } from "../utils/monotonic-clock.js";
 
 /** The newest health reading with the bot alive, on the monotonic clock. */
@@ -38,7 +39,7 @@ export function readDeathContext(bot: Bot, lastAlive: LastAliveReading | null): 
     held: bot.heldItem?.name ?? null,
     armour: { head: slotName("head"), chest: slotName("torso"), legs: slotName("legs"), feet: slotName("feet") },
     carriesWeapon: carriesCombatWeapon(bot),
-    bestMelee: selectMeleeLoadout(readCombatItems(bot)).weapon?.name ?? null,
+    bestMelee: selectMeleeLoadout(familyIndexOf(bot), readCombatItems(bot)).weapon?.name ?? null,
     enclosed: enclosedInPlace(bot),
     respawn: respawnPoint(bot),
   };

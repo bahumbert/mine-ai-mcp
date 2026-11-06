@@ -66,7 +66,7 @@ export async function runMeleeTurn(
     // its first swing.
     const stopped = await locomotion.approach(
       guarded && (weapons.projectileDefence() !== null || weapons.volleyActive() || meleeThreatInReach(scene)),
-      guarded && isRangedAttacker(scene.target) ? locomotion.volleyStop : null,
+      guarded && isRangedAttacker(scene.bot, scene.target) ? locomotion.volleyStop : null,
     );
     // A route also stops when its target dies mid-way, which is not a
     // reachability verdict: the next iteration reports what settled it.
@@ -88,7 +88,7 @@ export async function runMeleeTurn(
     (scene.perception.attackerIds.has(scene.target.id) ||
       meleeThreatInReach(scene) ||
       weapons.volleyActive() ||
-      isRangedAttacker(scene.target) ||
+      isRangedAttacker(scene.bot, scene.target) ||
       (scene.heightLimitedTarget && (scene.defendingAtStart || scene.roofTargetHostile())));
   const defendCurrentStance =
     !isHostile(scene.target) || scene.movement === "hold" || immediateGuard || roof.state.kind === "committed";

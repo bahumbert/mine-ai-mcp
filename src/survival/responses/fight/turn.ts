@@ -1,7 +1,6 @@
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isHostile } from "../../perception/combat/threats.js";
-import { permittedCombatItems } from "../../policy/combat/permissions.js";
-import { MELEE_RANGE, selectRangedLoadout } from "../../weapons/equipment.js";
+import { MELEE_RANGE, permittedRangedLoadout } from "../../weapons/equipment.js";
 import { combatItemsForTarget, hasMeleeKnockbackRoom, meleeDistance } from "../../weapons/melee.js";
 import type { CoverFight } from "./cover.js";
 import type { CombatTactic } from "../../policy/combat/tactics.js";
@@ -63,7 +62,7 @@ export async function runFightTurn(
   roof.refresh();
   if (
     !scene.policy.combat.melee &&
-    !selectRangedLoadout(permittedCombatItems(combatItemsForTarget(scene.bot, scene.target), scene.policy.combat))
+    !permittedRangedLoadout(scene.bot, combatItemsForTarget(scene.bot, scene.target), scene.policy.combat)
   ) {
     if (scene.policy.combat.shield && weapons.currentLoadout().shield) {
       await weapons.raiseGuard();

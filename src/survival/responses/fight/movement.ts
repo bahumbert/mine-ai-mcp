@@ -9,11 +9,10 @@ import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { isThreat } from "../../perception/combat/threats.js";
-import { permittedCombatItems } from "../../policy/combat/permissions.js";
 import { bowApproachGoal } from "../../positioning/combat/bow-approach.js";
 import { COMBAT_APPROACH_RADIUS, CombatPosition } from "../../positioning/combat/position.js";
 import { aimPoint, facing } from "../../weapons/aim.js";
-import { MELEE_RANGE, selectRangedLoadout } from "../../weapons/equipment.js";
+import { MELEE_RANGE, permittedRangedLoadout } from "../../weapons/equipment.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -85,11 +84,12 @@ export class FightMovement {
    * and the fight spun between guard and a zero-length approach without moving. */
   readonly approachGoal = (beganOutsideContact: boolean): Goal => {
     const melee = meleeApproachGoal(this.scene.bot, this.scene.target.id, this.scene.navigation.world);
-    const permitted = permittedCombatItems(
+    const permittedBow = permittedRangedLoadout(
+      this.scene.bot,
       combatItemsForTarget(this.scene.bot, this.scene.target),
       this.scene.policy.combat,
     );
-    if (!beganOutsideContact || !isRangedAttacker(this.scene.target) || !selectRangedLoadout(permitted)) return melee;
+    if (!beganOutsideContact || !isRangedAttacker(this.scene.bot, this.scene.target) || !permittedBow) return melee;
     return anyGoal([
       melee,
       bowApproachGoal(this.scene.bot, this.scene.target.id, () => aimPoint(this.scene.bot, this.scene.target)),
@@ -176,14 +176,14 @@ export class FightMovement {
             // Never scaffold up to a hovering shooter; the bow answers it from
             // the fighting level instead of stranding the bot on a pillar.
             scaffolding:
-              beganOutsideContact && !isRangedAttacker(this.scene.target) && this.scene.policy.combat.terrain.place,
+              beganOutsideContact && !isRangedAttacker(this.scene.bot, this.scene.target) && this.scene.policy.combat.terrain.place,
             // Never drop off a ledge to chase a hovering shooter. A blaze that
             // descends off the fortress bridge is out of melee reach, not an
             // invitation into the swarm below it; run 14's twelve-rod attempt
             // followed one down to y79 and bled out. A dived blaze is answered
             // by the bow or left unreached, and a walking mob still steps down
             // the one block an ordinary approach allows.
-            maximumDrop: isRangedAttacker(this.scene.target) ? 1 : undefined,
+            maximumDrop: isRangedAttacker(this.scene.bot, this.scene.target) ? 1 : undefined,
           }),
           goal: this.approachGoal(beganOutsideContact),
           signal: this.scene.signal,

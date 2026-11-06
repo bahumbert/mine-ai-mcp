@@ -1,5 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import type { HostileContext } from "../control/combat/context.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { MELEE_RANGE, selectMeleeLoadout } from "./equipment.js";
@@ -42,7 +43,7 @@ export function defendWhileRetreating(bot: Bot, context: HostileContext, signal:
       const distance = toward.norm();
       if (distance > 0 && bot.world.raycast(eye, toward.scaled(1 / distance), distance)) continue;
       if (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, target)) continue;
-      const loadout = selectMeleeLoadout(bot.heldItem ? [bot.heldItem] : []);
+      const loadout = selectMeleeLoadout(familyIndexOf(bot), bot.heldItem ? [bot.heldItem] : []);
       bot.attack(target);
       attacks += 1;
       struck.add(target.id);
