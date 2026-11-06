@@ -3,6 +3,7 @@ import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
 import { raceSignal } from "../../utils/index.js";
 import { carriedCount, settledNow, settleInventoryCount, type SettledInventoryCount } from "../../world/index.js";
+import { hasItemFamily } from "../../world/item-families.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { unconfirmedCount } from "../markdown.js";
@@ -118,7 +119,7 @@ async function eatAgainstBaseline(
   dependencies: EatFoodDependencies,
   onConsumeResolved: () => void = () => {},
 ): Promise<EatFoodResult> {
-  if (!bot.registry.foodsByName[request.foodName]) {
+  if (!hasItemFamily(bot, request.foodName, "food")) {
     return {
       status: "failed",
       error: eatFoodOutcomes.unknownFood(request.foodName),

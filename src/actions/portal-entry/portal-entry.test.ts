@@ -219,6 +219,16 @@ test("supply thresholds count usable items and exempt return", () => {
   assert.equal(portalSupplyWarning(bot, "overworld"), null);
 });
 
+test("B4: portal supplies count tipped and spectral arrows, and no avoided food", () => {
+  const harness = createFakeBot({ carried: { bread: 16, arrow: 10, spectral_arrow: 12, tipped_arrow: 10, rotten_flesh: 20 } });
+  assert.equal(portalSupplyWarning(harness.bot, "the_end"), null);
+  carry(harness, "tipped_arrow", 9);
+  assert.match(portalSupplyWarning(harness.bot, "the_end")!, /31\/32 arrows/);
+  carry(harness, "tipped_arrow", 10);
+  carry(harness, "bread", 4);
+  assert.match(portalSupplyWarning(harness.bot, "the_nether")!, /4\/16/);
+});
+
 test("personal respawn knowledge is confirmed separately from world spawn and invalidated by spawnReset", () => {
   const { bot } = createFakeBot();
   bot.spawnPoint = new Vec3(0, 64, 0);

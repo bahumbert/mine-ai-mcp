@@ -31,7 +31,7 @@
     "torso_gear": "worn on the chest but no armour: vanilla groups it in no tag of its own (enchantable/equippable also holds mob heads and every armour piece)",
     "boat": "the 1.19.4 boats tag lacks the cherry and bamboo boats that the 1.19.4 registry already holds (parity test, 2026-11-06)",
     "station": "vanilla has no tag of crafting stations",
-    "avoided_food": "the foods the hunger reflex never picks, each carrying an effect the model weighs for itself (REFLEX_AVOIDED_FOODS, src/world/food.ts); vanilla has no tag of them",
+    "avoided_food": "the foods the hunger reflex never picks, each carrying an effect the model weighs for itself (this list is the only home of the choice: selectReflexFood, src/world/food.ts, skips the family); vanilla has no tag of them",
     "container": "vanilla has no block tag of storage containers (shulker boxes come from the shulker_boxes tag)",
     "chest": "vanilla has no block tag of chests: the chests whose lid an opaque block above stops (src/world/chest-clearance.ts)",
     "projectile_entity": "the blaze's small fireball, tracked beside arrows (projectile-spawn.ts); the entity tag impact_projectiles also holds snowballs and eggs"

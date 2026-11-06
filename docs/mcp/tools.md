@@ -363,7 +363,7 @@ the native portal cooldown indefinitely. Leave the opening, allow the cooldown
 to expire, then call the same portal action for the return.
 
 Entry to the Nether or End returns `PORTAL_LOW_SUPPLIES` before movement
-when fewer than **16 auto-edible food items** or **32 regular arrows** are
+when fewer than **16 auto-edible food items** or **32 arrows** (regular, spectral or tipped) are
 carried. Food uses the hunger reflex's allowed foods; counts are items, not
 stacks or hunger points. The response includes both observed counts. Retry
 with `allow_low_supplies: true` to proceed deliberately despite the warning.
@@ -398,7 +398,7 @@ may require a wider baseline and another bearing. It stops before the journey.
 The result includes straight-line distance and walking minutes at 4.3 blocks/s;
 this is a baseline, not a computed path or terrain-aware ETA.
 
-Prepare for the Ender Dragon: carved pumpkin, bow, 64 regular arrows, 16
+Prepare for the Ender Dragon: carved pumpkin, bow, 64 arrows (regular, spectral or tipped), 16
 auto-edible food items, iron-or-better helmet/chestplate/leggings/boots and
 sword or axe, and a shield. Equipped items count. `phase: "locate"` checks this
 same checklist and reports missing items before moving. Supply them or set

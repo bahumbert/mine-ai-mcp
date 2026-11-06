@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { REGENERATION_HUNGER } from "../../../../world/food.js";
+import { hasItemFamily } from "../../../../world/item-families.js";
 import { hasRegeneration } from "../../../perception/combat/recovery.js";
 import { recoveryHealth } from "../../../policy/combat/health.js";
 import type { SurvivalPolicy } from "../../../policy/contract.js";
@@ -20,7 +21,7 @@ export function recoveryScope(
       return {
         foods: bot.inventory
           .items()
-          .filter((item) => bot.registry.foodsByName[item.name])
+          .filter((item) => hasItemFamily(bot, item.name, "food"))
           .map((item) => ({ name: item.name, count: item.count }))
           .sort((a, b) => a.name.localeCompare(b.name)),
         hungerEligible: bot.food >= REGENERATION_HUNGER,
