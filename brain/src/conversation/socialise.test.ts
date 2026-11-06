@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
-import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
+import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
 import { ConversationBudget, ConversationController } from "./controller.ts";
 import { pickPartner, socialise, type Clock } from "./socialise.ts";
 
@@ -14,21 +14,23 @@ function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) 
   const { chat, mind } = scriptedMind();
   const spoken: { text: string; shout: boolean }[] = [];
   let now = 1_000_000;
+  // The wall time is `now + wall.offset`: a test steps the wall clock by moving the offset.
+  const wall = { offset: 0 };
   // Free for the opening call; once a talk runs the queue is "full", so its end takes the topic as the gist.
   const budget = new ConversationBudget(2);
   const talks = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget, modelFree: () => talks.current === null, talkRange: 64, localized,
-    random: () => 0, now: () => now, speak: async (text, _to, _whisperTo, shout) => { spoken.push({ text, shout }); }, journal: () => undefined,
+    random: () => 0, now: () => now, wallNow: () => now + wall.offset, speak: async (text, _to, _whisperTo, shout) => { spoken.push({ text, shout }); }, journal: () => undefined,
     memorize: () => undefined, log: () => undefined, history: () => [],
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };
   const controller = new AbortController();
-  const run = (extra: { clock?: Clock; signal?: AbortSignal; openWaitMs?: number } = {}) => socialise({
+  const run = (extra: { clock?: Clock; signal?: AbortSignal; openWaitMs?: number; since?: number } = {}) => socialise({
     runtime, signal: extra.signal ?? controller.signal, partner: "Theo", talks,
     context: { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: controller.signal, self: "Ayla" },
-    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, since: 0, ...(extra.openWaitMs !== undefined && { openWaitMs: extra.openWaitMs }), ...(extra.clock !== undefined && { clock: extra.clock }),
+    openFacts: { activity: "idle", lately: [], lastFailed: null }, limits, since: extra.since ?? 0, ...(extra.openWaitMs !== undefined && { openWaitMs: extra.openWaitMs }), ...(extra.clock !== undefined && { clock: extra.clock }),
   });
-  return { runtime, chat, talks, spoken, clock, run, controller, budget };
+  return { runtime, chat, talks, spoken, clock, run, controller, budget, wall, now: () => now };
 }
 
 const theoAt = (x: number) => [{ username: "Theo", position: { x, y: 64, z: 0 } }];
@@ -154,4 +156,35 @@ test("with openWaitMs a cap that stays full fails at the deadline with the reaso
   t.budget.tryTake();
   const result = await t.run({ openWaitMs: 60 });
   assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
+});
+
+// The two clocks (monotonic-clock.ts header): the call's wait is a window (monotonic); `since` is compared with a talk's end (wall).
+test("the call's 60 s wait (default clock) ends on monotonic time although the wall clock steps back at each poll", async (t) => {
+  const clocks = steppedClocks(t);
+  const s = setup(true, []);
+  s.chat.reply(OPEN);
+  // One real 2 s poll: from the second look on, 61 s pass on the monotonic clock while the wall clock goes back 2 s as WSL does.
+  // A deadline read from the wall clock would not come (the run would wait its 60 s and time out).
+  const status = s.runtime.status.bind(s.runtime);
+  let looks = 0;
+  s.runtime.status = async () => {
+    looks += 1;
+    if (looks > 1) { clocks.monotonic(61_000); clocks.wall(-2_000); }
+    return status();
+  };
+  assert.deepEqual(await s.run(), { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
+});
+
+test("a talk that ended since the objective started is the one it came for: the end and the start are both wall times", async () => {
+  const t = setup(true, theoAt(3));
+  t.wall.offset = 1_700_000_000_000;
+  const startedWall = t.now() + t.wall.offset;
+  t.chat.reply({ gist: "Talked." });
+  t.talks.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  await t.clock.sleep(5_000, t.controller.signal);
+  t.wall.offset -= 2_000;
+  t.talks.end("silence");
+  await t.talks.finished();
+  assert.deepEqual(await t.run({ since: startedWall }), { status: "done", detail: "talked with Theo: Talked." });
+  assert.equal(t.spoken.length, 0, "it opened nothing new");
 });

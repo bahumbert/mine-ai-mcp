@@ -6,9 +6,10 @@ import { addMembers, capReached, checkRange, ending, FAR_NO_POSITION_MS, heardFa
 const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
 const limits: Limits = { ...personaSchema.parse(base).settings.conversation, talkRange: 64 };
 const t0 = 1_000_000;
+const wall0 = 1_700_000_000_000;
 const here = { x: 0, y: 0, z: 0 };
 const open = (extra: { waitUntil?: number } = {}) => openConversation({
-  self: "Ayla", opener: "Ayla", kind: "chance", members: ["Theo"], topic: "mine", planned: "short", whisper: false, now: t0, ...extra,
+  self: "Ayla", opener: "Ayla", kind: "chance", members: ["Theo"], topic: "mine", planned: "short", whisper: false, now: t0, wallNow: wall0, ...extra,
 });
 
 test("a member out of range for 20 s is dropped", () => {
@@ -67,10 +68,12 @@ test("addMembers ignores case and self", () => {
   assert.deepEqual(addMembers(c, ["theo", "Bruno"]), ["Bruno"]);
 });
 
-test("the record opens with self and opener, id from the opener", () => {
-  const c = openConversation({ self: "Ayla", opener: "Tester", kind: "chance", members: ["Ayla"], topic: "", planned: null, whisper: true, now: t0 });
+test("the record opens with self and opener, id from the opener and the wall time", () => {
+  const c = openConversation({ self: "Ayla", opener: "Tester", kind: "chance", members: ["Ayla"], topic: "", planned: null, whisper: true, now: t0, wallNow: wall0 });
   assert.deepEqual(c.members, ["Ayla", "Tester"]);
-  assert.equal(c.id, `Tester-${t0}`);
+  assert.equal(c.id, `Tester-${wall0}`, "the id is journaled and remembered across restarts: wall time");
+  assert.equal(c.startedAt, t0, "the windows run on the monotonic reading");
+  assert.equal(c.startedWall, wall0, "the wall start is what the chat history's line times are compared with");
 });
 
 test("manhattan distance", () => {
@@ -87,7 +90,7 @@ test("a call nobody answered ends out_of_range at waitUntil, not silence", () =>
 });
 
 test("a conversation opened by whisper ignores range (a whisper carries any distance) but not silence or the cap", () => {
-  const c = openConversation({ self: "Ayla", opener: "Theo", kind: "chance", members: [], topic: "", planned: null, whisper: true, now: t0 });
+  const c = openConversation({ self: "Ayla", opener: "Theo", kind: "chance", members: [], topic: "", planned: null, whisper: true, now: t0, wallNow: wall0 });
   assert.deepEqual(checkRange(c, "Ayla", here, [], limits, t0), []);
   assert.deepEqual(checkRange(c, "Ayla", here, [], limits, t0 + 120_000), [], "absent for two minutes: still a member");
   assert.deepEqual(c.members, ["Ayla", "Theo"]);

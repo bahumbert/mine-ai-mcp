@@ -11,6 +11,7 @@ import type { Persona } from "./persona.ts";
 import { memoryNote, recall } from "./memory.ts";
 import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
+import { monotonicNow } from "./monotonic-clock.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
@@ -1355,6 +1356,22 @@ test("another agent's line is still ignored outside a conversation, and always w
   assert.equal(off.agent.conversation, null);
 });
 
+test("the conversation's windows run on the monotonic clock and its end is written on the wall clock (the controller's two named clocks)", async (t) => {
+  const clocks = steppedClocks(t);
+  const { agent, chat } = agentFor(t, new FakeRuntime(), {}, talkOptions());
+  const talks = (agent as unknown as { talks: ConversationController }).talks;
+  chat.reply({ ...toAyla, say: "Sure, what's up?" });
+  await agent.handle(say("Vex", "Ayla, hi"));
+  assert.notEqual(agent.conversation, null);
+  clocks.monotonic(90_000);
+  clocks.wall(-2_000);
+  assert.equal(talks.facts()?.minutes, 1.5, "the minutes are the monotonic time since the start, the wall step changed nothing");
+  chat.reply({ gist: "Talked." });
+  talks.end("goodbye");
+  await talks.finished();
+  assert.ok(Math.abs((talks.lastTalk("Vex")?.endedAt ?? 0) - Date.now()) < 1_000, "the end is a wall time, the one a memory writes as an ISO date");
+});
+
 test("an agent's line naming her opens a conversation and is answered; a member's line naming nobody is answered too", async (t) => {
   const runtime = new FakeRuntime();
   const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
@@ -2286,27 +2303,27 @@ test("F7: a trading objective naming only carried items asks Theo for the need i
   await until(() => agent.conversation?.kind === "social", 4_000);
   assert.equal(action.requests.length, 2, "the routine ran: no work-tier call");
   assert.ok(!events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry/u.test(event.detail ?? "")));
-  assert.ok((agent as unknown as { asks: TradeAsks }).asks.needs.current(Date.now(), []).includes("iron_ingot"));
+  assert.ok((agent as unknown as { asks: TradeAsks }).asks.needs.current(monotonicNow(), []).includes("iron_ingot"));
 });
 
 test("F7: a second trading objective that fails before any ask pauses trading: the next goal call draws none though a need is set, until a new need", async (t) => {
   const { events, agent, planner } = await failedIronObjective(t);
   const asks = (agent as unknown as { asks: TradeAsks }).asks;
   await until(() => planner.requests.length >= 2, 4_000);
-  asks.failedFast(Date.now() - 60_000);
+  asks.failedFast(monotonicNow() - 60_000);
   assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u, "one fast failure: trading is still drawn");
   // The need is gone when the objective is planned (the memory ran out): "already carry bread" fails at once.
   asks.needs.drop("iron_ingot");
   planner.reply({ objective: "ask Theo to trade me bread", for: "trading" });
   await until(() => events.some((event) => event.kind === "objective" && event.event === "finished" && /already carry bread/u.test(event.detail ?? "")), 4_000);
   await until(() => planner.requests.length >= 3, 4_000);
-  assert.equal(asks.paused(Date.now()), true);
-  asks.needs.set(["iron_ingot"], Date.now());
+  assert.equal(asks.paused(monotonicNow()), true);
+  asks.needs.set(["iron_ingot"], monotonicNow());
   planner.reply({ objective: "gather wood" });
   await until(() => planner.requests.length >= 4, 4_000);
   assert.doesNotMatch(JSON.stringify(planner.requests[3]), /trading items with someone|trade for/u, "paused: no trading though a need is set");
-  asks.failed(["bucket"], [], Date.now());
-  assert.equal(asks.paused(Date.now()), false, "a new need ends the pause");
+  asks.failed(["bucket"], [], monotonicNow());
+  assert.equal(asks.paused(monotonicNow()), false, "a new need ends the pause");
 });
 
 test("an order during a trading objective aborts the routine and runs", async (t) => {
@@ -2322,7 +2339,7 @@ test("an order during a trading objective aborts the routine and runs", async (t
 
 test("every partner refused lately: the next goal call draws no trading, though a need is set", async (t) => {
   const { agent, planner } = await failedIronObjective(t);
-  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], monotonicNow() - 60_000);
   planner.reply({ objective: "gather wood" });
   await until(() => planner.requests.length >= 2, 4_000);
   assert.doesNotMatch(JSON.stringify(planner.requests[1]), /trading items with someone|trade for/u);
@@ -2330,7 +2347,7 @@ test("every partner refused lately: the next goal call draws no trading, though 
 
 test("one partner of two refused lately: trading is still drawn for the other", async (t) => {
   const { agent, planner } = await failedIronObjective(t, { otherAgents: others("Theo", "Bruno") }, 30, [{ username: "Bruno", position: { x: 20, y: 64, z: 0 } }]);
-  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 60_000);
+  (agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], monotonicNow() - 60_000);
   planner.reply({ objective: "ask Bruno for iron", for: "trading" });
   await until(() => planner.requests.length >= 2, 4_000);
   assert.match(JSON.stringify(planner.requests[1]), /trading items with someone/u);
@@ -2338,12 +2355,12 @@ test("one partner of two refused lately: trading is still drawn for the other", 
 
 test("a refusal older than 10 minutes, or a miss that is not yet a refusal, leaves trading drawn", async (t) => {
   const old = await failedIronObjective(t);
-  (old.agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], Date.now() - 10 * 60_000 - 1);
+  (old.agent as unknown as { asks: TradeAsks }).asks.refused.add("Theo", ["bread"], monotonicNow() - 10 * 60_000 - 1);
   old.planner.reply({ objective: "ask Theo for iron", for: "trading" });
   await until(() => old.planner.requests.length >= 2, 4_000);
   assert.match(JSON.stringify(old.planner.requests[1]), /trading items with someone/u);
   const missed = await failedIronObjective(t);
-  (missed.agent as unknown as { asks: TradeAsks }).asks.refused.missed("Theo", ["bread"], Date.now());
+  (missed.agent as unknown as { asks: TradeAsks }).asks.refused.missed("Theo", ["bread"], monotonicNow());
   missed.planner.reply({ objective: "ask Theo for iron", for: "trading" });
   await until(() => missed.planner.requests.length >= 2, 4_000);
   assert.match(JSON.stringify(missed.planner.requests[1]), /trading items with someone/u);
@@ -2491,7 +2508,7 @@ test("F9: 16 min of trading in the 30 min since the start: the next goal call dr
   // Edge 4: the wall clock moves, no step runs; the trading minutes fall out of the hour.
   const now = Date.now.bind(Date);
   t.mock.method(Date, "now", () => now() + 61 * MIN);
-  (agent as unknown as { asks: TradeAsks }).asks.needs.set(["iron_ingot"], Date.now());
+  (agent as unknown as { asks: TradeAsks }).asks.needs.set(["iron_ingot"], monotonicNow());
   planner.reply({ objective: "gather wood again" });
   await until(() => planner.requests.length >= 3, 6_000);
   assert.match(String(planner.requests[2]?.[1]?.content), /feel most like[^.]*trading/u, "trading capped, then drawn again");

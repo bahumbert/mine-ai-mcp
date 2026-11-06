@@ -1,7 +1,7 @@
 // The `trading` activity's code routine: go to a partner, ask for what the bot lacks, and judge the talk by what the
 // trade controller recorded (spec 2026-10-21-trading-activity-design).
 import type { Activity } from "../activities.ts";
-import { pickPartner, positionOf, socialise, type SocialiseDeps } from "../conversation/socialise.ts";
+import { monotonicClock, pickPartner, positionOf, socialise, type SocialiseDeps } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
 import { namesWord } from "../llm-mind.ts";
 import type { OpenFacts } from "../conversation/controller.ts";
@@ -14,6 +14,10 @@ import { carriedOf, sideText } from "./items.ts";
 import { AGREED_STATES } from "./trade.ts";
 import { type ItemCount, MINUTE_MS, type Relation, type SaidItem, type Trade } from "./types.ts";
 
+// Clocks (monotonic-clock.ts): the ask memory below (needs, refusals, misses, fast failures) is a window kept in memory and
+// takes monotonic readings (`now`). What is compared with a stored wall time takes the wall time (`wallNow`): a heard
+// need's `said.at`, a trade's `endedAt`/`createdAt`, a talk's `endedAt`, the `spent()` step records of `tradingShare`.
+
 /** A need, and a partner's refusal, are forgotten after this long. */
 const ASK_MEMORY_MS = 10 * MINUTE_MS;
 /** Two trading objectives that fail before any ask within this long pause trading for as long. */
@@ -24,7 +28,7 @@ const MAX_NEEDS = 3;
 const MAX_OFFER_STACKS = 5;
 /** Longest run of words that makes one item id ("iron ingot" = 2, "white stained glass" = 3). */
 const MAX_ID_WORDS = 3;
-/** A deliberate trading opening waits this long (wall clock) for the model, a conversation slot or its own talk to end. */
+/** A deliberate trading opening waits this long (real time) for the model, a conversation slot or its own talk to end. */
 export const OPENING_WAIT_MS = 45_000;
 
 type Inventory = BotSnapshot["inventory"];
@@ -199,14 +203,15 @@ const metSince = (record: Relation, said: SaidItem): boolean => record.trades.so
 /**
  * What partners said they need (their relation records) and the bot carries, newest first. The record ages said items
  * only on the next gist write, so the window is applied here. `only.asks` leaves out an offer the partner refused
- * lately; `only.partners` (omitted: every record) the records of anyone not in that list.
+ * lately; `only.partners` (omitted: every record) the records of anyone not in that list. `clocks.wallNow` ages a said
+ * item (a wall time of the record), `clocks.now` (monotonic) the refusals; the two are never compared.
  */
-export function heardNeeds(relations: readonly Relation[], inventory: Inventory, now: number, forgetMinutes: number, only: { readonly asks?: TradeAsks; readonly partners?: readonly string[] } = {}): HeardNeed[] {
+export function heardNeeds(relations: readonly Relation[], inventory: Inventory, clocks: { readonly now: number; readonly wallNow: number }, forgetMinutes: number, only: { readonly asks?: TradeAsks; readonly partners?: readonly string[] } = {}): HeardNeed[] {
   const wanted = only.partners?.map((partner) => partner.toLowerCase());
   return relations
     .filter((record) => wanted === undefined || wanted.includes(record.partner.toLowerCase()))
     .flatMap((record) => record.saidNeeds
-      .filter((said) => now - said.at <= forgetMinutes * MINUTE_MS && carriedOf(inventory, said.item) >= 1 && !metSince(record, said) && only.asks?.refused.isRefused(record.partner, [said.item], now) !== true)
+      .filter((said) => clocks.wallNow - said.at <= forgetMinutes * MINUTE_MS && carriedOf(inventory, said.item) >= 1 && !metSince(record, said) && only.asks?.refused.isRefused(record.partner, [said.item], clocks.now) !== true)
       .map((said) => ({ partner: record.partner, item: said.item, carried: carriedOf(inventory, said.item), saidAt: said.at })))
     .sort((a, b) => b.saidAt - a.saidAt);
 }
@@ -292,6 +297,10 @@ export function tradePlan(objective: string, needs: readonly string[], partners:
 }
 
 export interface TradeRoutineDeps extends Omit<SocialiseDeps, "openFacts"> {
+  /** The objective's start as a monotonic reading (`since` is its wall time): the ask stamps of the conversation controller are monotonic. */
+  readonly sinceMonotonic: number;
+  /** Wall milliseconds (default `Date.now`): the start of the second talk, compared with a talk's wall `endedAt`. `clock.now` stays monotonic. */
+  readonly wallNow?: () => number;
   readonly want: readonly string[];
   /** With no `want`: the items a partner said it needs, offered instead of the bag. */
   readonly offer?: readonly string[];
@@ -314,10 +323,11 @@ export const agreedDetail = (partner: string, trade: Pick<Trade, "give" | "get">
  * talk that never took place counts as neither, except a partner who did not come (a miss too).
  */
 export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult> {
-  const { runtime, signal, partner, asks, trades, talks, since } = deps;
+  const { runtime, signal, partner, asks, trades, talks, since, sinceMonotonic } = deps;
   // A declined or missed offer is kept under the offered item: the ask memory is keyed by items.
   const want = deps.want.length > 0 ? deps.want : deps.offer ?? [];
-  const now = (): number => (deps.clock ?? { now: () => Date.now() }).now();
+  const now = (): number => (deps.clock ?? monotonicClock).now();
+  const wallNow = (): number => (deps.wallNow ?? Date.now)();
   const snapshot = await runtime.status();
   const offer = deps.want.length === 0 && deps.offer !== undefined ? deps.offer.map((item) => ({ item, count: carriedOf(snapshot.inventory, item) })) : offerFrom(snapshot.inventory, want);
   const intent: OpenFacts["intent"] = { kind: "trade", want: deps.want, offer };
@@ -339,16 +349,16 @@ export async function tradeRoutine(deps: TradeRoutineDeps): Promise<SkillResult>
     if (ended !== null) return ended;
     asks.resume();
     let trade = trades.latestWith(partner, since);
-    if (!(trade !== null && AGREED_STATES.has(trade.state)) && !talks.askedSince(partner, since)) {
+    if (!(trade !== null && AGREED_STATES.has(trade.state)) && !talks.askedSince(partner, sinceMonotonic)) {
       // The talk was already open (or over) and nothing asked: once more, so a fresh opening carries the ask.
-      ended = unfinished(await talk(now()));
+      ended = unfinished(await talk(wallNow()));
       if (ended !== null) return ended;
       trade = trades.latestWith(partner, since);
     }
     if (trade !== null && AGREED_STATES.has(trade.state)) {
       return { status: "done", detail: agreedDetail(partner, trade) };
     }
-    if (talks.askedSince(partner, since) || (trade !== null && DECLINED.has(trade.state))) {
+    if (talks.askedSince(partner, sinceMonotonic) || (trade !== null && DECLINED.has(trade.state))) {
       asks.refused.add(partner, want, now());
       return { status: "failed", detail: `${partner} did not trade ${want.join(", ")}` };
     }

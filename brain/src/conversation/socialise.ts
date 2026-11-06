@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { namesWord } from "../llm-mind.ts";
+import { monotonicNow } from "../monotonic-clock.ts";
 import type { BotRuntime, BotSnapshot, Position } from "../runtime-client.ts";
 import { runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import type { ConversationController, OpenFacts } from "./controller.ts";
@@ -20,9 +21,18 @@ export interface Clock {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
 
+const sleepOn = (ms: number, signal: AbortSignal): Promise<void> => sleep(ms, undefined, { signal }).catch(() => undefined);
+
+/** Wall time: the relations' clock (book, trades, hand-offs: Task B2 of plan 2026-11-05-held-wording-and-relations-clock moves their windows off it). */
 export const realClock: Clock = {
   now: () => Date.now(),
-  sleep: (ms, signal) => sleep(ms, undefined, { signal }).catch(() => undefined),
+  sleep: sleepOn,
+};
+
+/** Monotonic milliseconds: what `socialise` and the trade routine measure their windows on (the call's wait), never compared with a wall time. */
+export const monotonicClock: Clock = {
+  now: monotonicNow,
+  sleep: sleepOn,
 };
 
 export interface SocialiseDeps {
@@ -35,10 +45,11 @@ export interface SocialiseDeps {
   readonly openFacts: Omit<OpenFacts, "snapshot">;
   /** The persona's settings the routine needs: opening distance, talk range, the conversation's minutes cap. */
   readonly limits: { readonly openingDistance: number; readonly talkRange: number; readonly maxMinutes: number };
-  /** When the objective started (the clock's time): a talk with the partner that ended since is the one it came for. */
+  /** When the objective started, as a wall time (a talk's `endedAt` is one): a talk with the partner that ended since is the one it came for. */
   readonly since: number;
-  /** How long a deliberate opening waits for the model, a conversation slot or the bot's own talk (wall clock); default none. */
+  /** How long a deliberate opening waits for the model, a conversation slot or the bot's own talk (real time); default none. */
   readonly openWaitMs?: number;
+  /** Monotonic: the call's wait deadline; default {@link monotonicClock}. */
   readonly clock?: Clock;
 }
 
@@ -66,7 +77,7 @@ export function positionOf(snapshot: BotSnapshot, partner: string): Position | n
  */
 export async function socialise(deps: SocialiseDeps): Promise<SkillResult> {
   const { runtime, signal, partner, talks, context, openFacts, limits, since } = deps;
-  const clock = deps.clock ?? realClock;
+  const clock = deps.clock ?? monotonicClock;
   const stopped: SkillResult = { status: "stopped" };
   // Set aside while it talked and back with the conversation over: it talked, it opens nothing new.
   if (talks.current === null) {

@@ -25,7 +25,10 @@ export interface Conversation {
   planned: PlannedLength | null;
   /** Lines said in it, all members. */
   lines: number;
+  /** Monotonic: the minutes cap and the minutes journaled count from it. */
   readonly startedAt: number;
+  /** Wall time of the start: the chat history's line times (wall) are compared with it. Never compared with a monotonic reading. */
+  readonly startedWall: number;
   lastLineAt: number;
   /** Member -> first ms seen out of range. */
   outOfRangeSince: Record<string, number>;
@@ -41,13 +44,18 @@ export type Limits = Persona["settings"]["conversation"] & { readonly talkRange:
 
 export function openConversation(a: {
   self: string; opener: string; kind: ConversationKind; members: readonly string[]; topic: string;
-  planned: PlannedLength | null; whisper: boolean; now: number; waitUntil?: number;
+  planned: PlannedLength | null; whisper: boolean;
+  /** Monotonic reading: every window of the record (`waitUntil` too) is measured on it. */
+  now: number;
+  /** Wall time: the id (journaled, remembered across restarts) and {@link Conversation.startedWall}. */
+  wallNow: number;
+  waitUntil?: number;
 }): Conversation {
   const members = [a.self];
   for (const name of [a.opener, ...a.members]) if (!members.some((m) => same(m, name))) members.push(name);
   return {
-    id: `${a.opener}-${a.now}`, kind: a.kind, opener: a.opener, members, topic: a.topic, planned: a.planned, lines: 0,
-    startedAt: a.now, lastLineAt: a.now, outOfRangeSince: {}, whisper: a.whisper, waitUntil: a.waitUntil ?? null,
+    id: `${a.opener}-${a.wallNow}`, kind: a.kind, opener: a.opener, members, topic: a.topic, planned: a.planned, lines: 0,
+    startedAt: a.now, startedWall: a.wallNow, lastLineAt: a.now, outOfRangeSince: {}, whisper: a.whisper, waitUntil: a.waitUntil ?? null,
     capReachedAt: null,
   };
 }

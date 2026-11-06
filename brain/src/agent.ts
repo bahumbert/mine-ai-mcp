@@ -126,8 +126,9 @@ export interface AgentOptions {
 /** One objective on the stack and what was done for it. */
 interface Work {
   readonly objective: Objective;
-  /** When it was taken on (ms), for the socialising routine: a talk ended since then is the one it came for. */
+  /** When it was taken on: wall ms for the socialising routine (a talk ended since then is the one it came for), and the same moment monotonic for the conversation controller's ask stamps. */
   readonly startedAt: number;
+  readonly startedAtMonotonic: number;
   readonly steps: StepRecord[];
   /** What was carried after each of `steps` (name:count, sorted; null when unknown); not shown to the model, so prompts do not change. */
   readonly carried: (string | null)[];
@@ -183,7 +184,7 @@ function carriedOf(snapshot: BotSnapshot): string {
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, startedAt: Date.now(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+  return { objective, startedAt: Date.now(), startedAtMonotonic: monotonicNow(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
 }
 
 /**
@@ -308,7 +309,7 @@ export class Agent {
       talkRange: localizedChat?.range ?? persona.settings.conversation.stayingDistance,
       localized: localizedChat !== undefined,
       random: options.random ?? Math.random,
-      now: Date.now,
+      now: monotonicNow, wallNow: () => Date.now(),
       speak: (text, to, whisperTo, shout) => this.speak(text, undefined, to, whisperTo, shout),
       journal: (event) => options.journal?.(event),
       memorize: (talk) => this.memorize(talk),
@@ -915,15 +916,15 @@ export class Agent {
     const share = tradingShare(hour, Date.now(), this.startedAt);
     // Nor while no partner is seen within `relations.seekReach` blocks (the talk range): the routine walks to or calls a partner that near.
     const inReach = partnersInReach(this.partners(), snapshot, this.seekReach());
-    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, Date.now(), share, inReach);
+    const available = withoutRefusedTrading(availableActivities(personaSkills(persona), snapshot, this.partners()), this.partners(), this.asks, monotonicNow(), share, inReach);
     const chances = activityChances(available, persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     // Getting an item failed lately: trading takes the second place while someone has not refused it yet.
-    this.asks.dropRefused(this.partners(), Date.now());
-    const needs = this.asks.needs.current(Date.now(), snapshot.inventory);
+    this.asks.dropRefused(this.partners(), monotonicNow());
+    const needs = this.asks.needs.current(monotonicNow(), snapshot.inventory);
     // A partner in reach said it needs something she carries: a trade to offer, trading takes the second place for it too.
-    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, Date.now(), persona.settings.relations.offersForgetMinutes, { asks: this.asks, partners: inReach });
+    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, { now: monotonicNow(), wallNow: Date.now() }, persona.settings.relations.offersForgetMinutes, { asks: this.asks, partners: inReach });
     const drawn = withTrading(drawTwo(chances, this.options.random ?? Math.random), available, needs, share, heard.length);
-    const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, inReach, this.asks, snapshot.inventory, Date.now()) : undefined;
+    const tradeNeeds = needs.length > 0 && drawn.includes("trading") ? tradeNeedsFacts(needs, inReach, this.asks, snapshot.inventory, monotonicNow()) : undefined;
     const opportunities = await this.opportunities(snapshot, drawn, { ...(tradeNeeds !== undefined && { tradeNeeds }), ...(heard.length > 0 && drawn.includes("trading") && { heardNeeds: heard }) });
     const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.knownPlaces(), areas: [...this.areas], lately: [...this.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances, ...(this.relations !== null && { relations: this.relations.lines(this.partners()) }) }, this.runSignal);
     this.modelFailures = 0;
@@ -1161,13 +1162,12 @@ export class Agent {
     }
     const snapshot = await this.options.runtime.status();
     const partners = this.partners();
-    const { offersForgetMinutes } = this.options.persona.settings.relations;
     const inReach = partnersInReach(partners, snapshot, this.seekReach());
-    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, Date.now(), offersForgetMinutes, { asks: this.asks, partners: inReach });
-    const plan = tradePlan(work.objective.text, this.asks.needs.current(Date.now(), snapshot.inventory), partners, this.asks, snapshot, Date.now(), { inReach, heard });
+    const heard = heardNeeds(this.relations?.book.records() ?? [], snapshot.inventory, { now: monotonicNow(), wallNow: Date.now() }, this.options.persona.settings.relations.offersForgetMinutes, { asks: this.asks, partners: inReach });
+    const plan = tradePlan(work.objective.text, this.asks.needs.current(monotonicNow(), snapshot.inventory), partners, this.asks, snapshot, monotonicNow(), { inReach, heard });
     if ("failed" in plan) {
       // It failed before any ask: after two in a row trading is not drawn for a while.
-      this.asks.failedFast(Date.now());
+      this.asks.failedFast(monotonicNow());
       return this.finish(work, "failed", plan.failed);
     }
     const { want, partner, offer } = plan;
@@ -1178,7 +1178,7 @@ export class Agent {
   }
 
   /** Runs a conversation routine as the objective's step: journals it, counts its time for `activity`, ends the objective with its result. */
-  private async routineStep(work: Work, activity: "socialising" | "trading", label: string, input: Record<string, string>, run: (base: Omit<SocialiseDeps, "partner" | "openFacts">) => Promise<SkillResult>): Promise<void> {
+  private async routineStep(work: Work, activity: "socialising" | "trading", label: string, input: Record<string, string>, run: (base: Omit<SocialiseDeps, "partner" | "openFacts"> & { readonly sinceMonotonic: number }) => Promise<SkillResult>): Promise<void> {
     const { persona, runtime, log } = this.options;
     const talks = this.talks!;
     const controller = new AbortController();
@@ -1194,7 +1194,7 @@ export class Agent {
         runtime,
         signal,
         talks,
-        since: work.startedAt,
+        since: work.startedAt, sinceMonotonic: work.startedAtMonotonic,
         context: { runtime, body: this.body, signal, self: persona.username },
         limits: { openingDistance: persona.settings.conversation.openingDistance, talkRange, maxMinutes: persona.settings.conversation.maxMinutes },
       });
@@ -1262,7 +1262,7 @@ export class Agent {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lastFailed = outcome === "failed" ? { objective: objective.text, reason: detail } : null;
       // A trading objective's own failure is not a new need: the ask would never time out.
-      if (outcome === "failed" && objective.purpose !== "trading") this.asks.failed(work.wanted, this.lastLook?.inventory ?? [], Date.now());
+      if (outcome === "failed" && objective.purpose !== "trading") this.asks.failed(work.wanted, this.lastLook?.inventory ?? [], monotonicNow());
       this.lately.push(outcomeLine);
       if (this.lately.length > OWN_MEMORY) this.lately.splice(0, this.lately.length - OWN_MEMORY);
       this.memorize({ kind: "own_objective", outcome: outcomeLine });

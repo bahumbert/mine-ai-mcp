@@ -16,7 +16,7 @@ const PARTNERS_KEPT = 5;
 const CALL_WAIT_MS = 60_000;
 /** A gist waits this long for a model slot before the fallback is written. */
 const GIST_WAIT_MS = 120_000;
-/** How often a deliberate opening looks again at what blocks it (wall clock). */
+/** How often a deliberate opening looks again at what blocks it (real time). */
 const OPEN_POLL_MS = 1_000;
 /** The most of a member's last line the fallback gist quotes. */
 const FALLBACK_GIST_CHARS = 120;
@@ -72,7 +72,10 @@ export interface ControllerDeps {
   /** Whether the server limits how far talk carries (Localized Chat): only then is a call shouted. */
   readonly localized?: boolean;
   readonly random: () => number;
+  /** Monotonic milliseconds (`monotonicNow`): every window of the controller (cooldown, minutes cap, checks, the ask stamps). Never compared with {@link ControllerDeps.wallNow}. */
   readonly now: () => number;
+  /** Wall milliseconds (`Date.now`): what is written down or shown (a talk's end, its age) and the chat history's line times. */
+  readonly wallNow: () => number;
   /** Resolves once the line is sent; rejects when it was not. */
   readonly speak: (text: string, to: readonly string[], whisperTo: string | null, shout: boolean) => Promise<void>;
   readonly journal: (event: ConversationEvent) => void;
@@ -95,6 +98,7 @@ interface Talk {
   readonly with: readonly string[];
   readonly topic: string;
   readonly gist: string;
+  /** Wall time: it is stored in the memory as an ISO date and compared with an objective's wall start. */
   readonly endedAt: number;
 }
 
@@ -160,7 +164,7 @@ export class ConversationController {
     return this.record !== null && isMember(this.record, name);
   }
 
-  /** The latest talk with `name` (gist, else topic), or null when there was none. */
+  /** The latest talk with `name` (gist, else topic), or null when there was none; `endedAt` is a wall time. */
   lastTalk(name: string): { readonly topic: string; readonly gist: string; readonly endedAt: number } | null {
     const talk = this.talks.get(name.toLowerCase());
     return talk === undefined ? null : { topic: talk.topic, gist: talk.gist, endedAt: talk.endedAt };
@@ -175,7 +179,7 @@ export class ConversationController {
     this.carried = null;
   }
 
-  /** A trade ask was said to `partner` at or after `since`. */
+  /** A trade ask was said to `partner` at or after `since` (a monotonic reading). */
   askedSince(partner: string, since: number): boolean {
     return (this.askedAt.get(partner.toLowerCase()) ?? -Infinity) >= since;
   }
@@ -191,6 +195,7 @@ export class ConversationController {
     const c = this.record;
     if (c === null) return undefined;
     const now = this.deps.now();
+    const wallNow = this.deps.wallNow();
     const others = c.members.filter((name) => !same(name, this.deps.self));
     const gists = new Set<Talk>();
     for (const name of others) {
@@ -201,7 +206,7 @@ export class ConversationController {
     if (pending !== null) pending.shown = true;
     return {
       kind: c.kind, others, opener: c.opener, topic: c.topic, planned: c.planned, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10,
-      iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => this.pastTalk(talk, now)),
+      iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => this.pastTalk(talk, wallNow)),
       ...(pending !== null && { intent: { ...pending.intent, partner: pending.partner } }),
     };
   }
@@ -240,7 +245,8 @@ export class ConversationController {
     this.deps.log(`conversation: chance ${sociability.toFixed(2)} drew ${draw < sociability ? "yes" : "no"}`);
     if (draw >= sociability) return false;
     if (!this.deps.budget.tryTake()) return false;
-    return this.open("chance", near.map((player) => this.nearby(player.username, player.distance, now)), o, false, null, signal);
+    const wallNow = this.deps.wallNow();
+    return this.open("chance", near.map((player) => this.nearby(player.username, player.distance, wallNow)), o, false, null, signal);
   }
 
   /** Why the last deliberate opening that returned false was blocked: `model busy`, `conversation limit` or `in a talk with <names>`; null when nothing blocked it. */
@@ -250,7 +256,7 @@ export class ConversationController {
 
   /**
    * A deliberate opening (the socialising and trading activities): no chance draw, no cooldown. It waits up to `waitMs`
-   * of wall clock for what blocks it (the bot's own talk, a model slot, a conversation slot), then leaves the reason in
+   * of real time (`performance.now`) for what blocks it (the bot's own talk, a model slot, a conversation slot), then leaves the reason in
    * {@link openRefusal}.
    */
   async openSocial(partner: string, partnerPosition: Position | null, o: OpenFacts, signal: AbortSignal, waitMs = 0): Promise<boolean> {
@@ -269,9 +275,9 @@ export class ConversationController {
       }
       await this.pauseWithin(Math.min(left, this.deps.openPollMs ?? OPEN_POLL_MS), blocked === "model busy", signal);
     }
-    const now = this.deps.now();
+    const wallNow = this.deps.wallNow();
     const calling = partnerPosition === null || manhattan(o.snapshot.position, partnerPosition) > this.limits.talkRange;
-    const near = [this.nearby(partner, calling || partnerPosition === null ? null : manhattan(o.snapshot.position, partnerPosition), now)];
+    const near = [this.nearby(partner, calling || partnerPosition === null ? null : manhattan(o.snapshot.position, partnerPosition), wallNow)];
     return this.open("social", near, o, calling, partner, signal);
   }
 
@@ -282,7 +288,7 @@ export class ConversationController {
     return this.deps.budget.tryTake() ? null : "conversation limit";
   }
 
-  /** Sleeps `ms` of wall clock, or waits that long for a model slot; ends early on abort. */
+  /** Sleeps `ms` of real time, or waits that long for a model slot; ends early on abort. */
   private async pauseWithin(ms: number, forModel: boolean, signal: AbortSignal): Promise<void> {
     const started = performance.now();
     if (forModel && this.deps.waitForModel !== undefined && (await this.slotWithin(ms, signal))) return;
@@ -304,6 +310,7 @@ export class ConversationController {
       return false;
     }
     const now = this.deps.now();
+    const wallNow = this.deps.wallNow();
     // Only the names the line holds hear it as spoken to them (a favour of ADR-017's name rule).
     const to = (partner !== null ? [partner] : this.addressed(decision.to, o.snapshot)).filter((name) => namesWord(decision.say, name));
     this.deps.log(`conversation: opening answer open=${decision.open} to=${to.join(",")} length=${decision.length} say=${JSON.stringify(decision.say)}`);
@@ -315,11 +322,11 @@ export class ConversationController {
     }
     const waitUntil = calling ? now + CALL_WAIT_MS : undefined;
     const c = openConversation({
-      self: this.deps.self, opener: this.deps.self, kind, members: to, topic: decision.topic, planned: decision.length, whisper: false, now,
+      self: this.deps.self, opener: this.deps.self, kind, members: to, topic: decision.topic, planned: decision.length, whisper: false, now, wallNow,
       ...(waitUntil !== undefined && { waitUntil }),
     });
     this.begin(c, true);
-    this.keep(this.deps.self, decision.say, now);
+    this.keep(this.deps.self, decision.say, wallNow);
     lineSaid(c, now);
     const said = this.deps.speak(decision.say, to, null, calling && this.deps.localized === true);
     const asked = (decision.asksOf ?? []).filter((name) => to.some((heard) => same(heard, name)));
@@ -335,13 +342,14 @@ export class ConversationController {
     const { self } = this.deps;
     if (same(speaker, self)) return;
     const now = this.deps.now();
+    const wallNow = this.deps.wallNow();
     const c = this.record;
     const namesHer = named.some((name) => same(name, self));
     if (c === null) {
       if (!namesHer) return;
-      const opened = openConversation({ self, opener: speaker, kind: "chance", members: named, topic: "", planned: null, whisper: channel === "whisper", now });
+      const opened = openConversation({ self, opener: speaker, kind: "chance", members: named, topic: "", planned: null, whisper: channel === "whisper", now, wallNow });
       this.begin(opened, false);
-      this.keep(speaker, text, now);
+      this.keep(speaker, text, wallNow);
       lineSaid(opened, now);
       this.journal("opened", opened, { conversationKind: "chance", topic: "", planned: null });
       return;
@@ -361,7 +369,7 @@ export class ConversationController {
       this.touched.add(speaker);
       this.journal("joined", c, { member: speaker, why: "spoke to the conversation" });
     }
-    this.keep(speaker, text, now);
+    this.keep(speaker, text, wallNow);
     lineSaid(c, now);
     for (const member of addMembers(c, named)) {
       this.touched.add(member);
@@ -390,6 +398,7 @@ export class ConversationController {
     const c = this.record;
     if (c === null) return;
     const now = this.deps.now();
+    const endedWall = this.deps.wallNow();
     const { self } = this.deps;
     this.record = null;
     if (this.holdsBudget) this.deps.budget.give();
@@ -403,8 +412,8 @@ export class ConversationController {
     const finish = (gist: string): void => {
       this.deps.log(`conversation: ended ${reason} after ${c.lines} lines`);
       this.journal("ended", c, { reason, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10, gist });
-      this.deps.memorize({ kind: "conversation", talk: { id: c.id, members: others, topic: c.topic, gist, endedAt: new Date(now).toISOString(), reason } });
-      if (gist !== "" || c.topic !== "") this.remember({ with: others, topic: c.topic, gist, endedAt: now });
+      this.deps.memorize({ kind: "conversation", talk: { id: c.id, members: others, topic: c.topic, gist, endedAt: new Date(endedWall).toISOString(), reason } });
+      if (gist !== "" || c.topic !== "") this.remember({ with: others, topic: c.topic, gist, endedAt: endedWall });
     };
     const fallback = fallbackGist(c.topic, lines.filter((line) => !same(line.speaker, self)), others);
     if (c.lines === 0) {
@@ -438,15 +447,15 @@ export class ConversationController {
     });
   }
 
-  /** Her line just said in the conversation: the agent writes it to the chat history before it calls {@link said}. */
+  /** Her line just said in the conversation: the agent writes it to the chat history before it calls {@link said}. The history's line times are wall times: compared with the talk's wall start. */
   private keepOwnLine(c: Conversation): void {
     const mine = this.deps.history().findLast((line) => same(line.speaker, this.deps.self));
-    if (mine === undefined || mine === this.lastOwnKept || (mine.at !== undefined && mine.at < c.startedAt)) return;
+    if (mine === undefined || mine === this.lastOwnKept || (mine.at !== undefined && mine.at < c.startedWall)) return;
     this.lastOwnKept = mine;
-    this.keep(mine.speaker, mine.text, mine.at ?? this.deps.now());
+    this.keep(mine.speaker, mine.text, mine.at ?? this.deps.wallNow());
   }
 
-  /** Keeps a line of the current conversation, at most `gistLines` of them. */
+  /** Keeps a line of the current conversation (`at`: wall time, as the chat history's lines have), at most `gistLines` of them. */
   private keep(speaker: string, text: string, at: number): void {
     this.lines.push({ speaker, text, at });
     if (this.lines.length > this.limits.gistLines) this.lines.splice(0, this.lines.length - this.limits.gistLines);
@@ -480,13 +489,14 @@ export class ConversationController {
     return to.flatMap((name) => online.filter((known) => same(known, name) && !same(known, this.deps.self)));
   }
 
-  private nearby(username: string, distance: number | null, now: number): Nearby {
+  private nearby(username: string, distance: number | null, wallNow: number): Nearby {
     const talk = this.talks.get(username.toLowerCase());
-    return { username, distance, lastTalk: talk === undefined ? null : this.pastTalk(talk, now) };
+    return { username, distance, lastTalk: talk === undefined ? null : this.pastTalk(talk, wallNow) };
   }
 
-  private pastTalk(talk: Talk, now: number): PastTalk {
-    return { with: talk.with, topic: talk.topic, gist: talk.gist, minutesAgo: Math.max(0, Math.round((now - talk.endedAt) / 60_000)) };
+  /** A talk's age in minutes: `wallNow` less its stored wall `endedAt` (a recalled talk comes from an ISO date). */
+  private pastTalk(talk: Talk, wallNow: number): PastTalk {
+    return { with: talk.with, topic: talk.topic, gist: talk.gist, minutesAgo: Math.max(0, Math.round((wallNow - talk.endedAt) / 60_000)) };
   }
 
   private remember(talk: Talk): void {

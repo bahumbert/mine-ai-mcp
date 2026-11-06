@@ -11,7 +11,8 @@ const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "short", say
 function setup(options: { random?: number; budget?: ConversationBudget; modelFree?: () => boolean; localized?: boolean; history?: ChatLine[]; decision?: OpeningDecision; waitForModel?: ControllerDeps["waitForModel"]; relations?: ControllerDeps["relations"]; pollMs?: number; sent?: Promise<void> } = {}) {
   const { chat, mind: scripted } = scriptedMind();
   const mind = options.decision === undefined ? scripted : Object.assign(Object.create(scripted) as typeof scripted, { openConversation: async () => options.decision as OpeningDecision });
-  const clock = { now: 1_000_000 };
+  // `now` is the monotonic reading, the wall time is `now + wallOffset`: a test steps the wall clock by moving `wallOffset`.
+  const clock = { now: 1_000_000, wallOffset: 0 };
   const spoken: { text: string; to: readonly string[]; whisperTo: string | null; shout: boolean }[] = [];
   const journal: ConversationEvent[] = [];
   const memories: ConversationMemory[] = [];
@@ -20,7 +21,7 @@ function setup(options: { random?: number; budget?: ConversationBudget; modelFre
   const draw = { value: options.random ?? 0.1 };
   const controller = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget, modelFree: options.modelFree ?? (() => true), ...(options.waitForModel !== undefined && { waitForModel: options.waitForModel }), ...(options.relations !== undefined && { relations: options.relations }), talkRange: 64, ...(options.pollMs !== undefined && { openPollMs: options.pollMs }),
-    ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now,
+    ...(options.localized !== undefined && { localized: options.localized }), random: () => draw.value, now: () => clock.now, wallNow: () => clock.now + clock.wallOffset,
     speak: async (text, to, whisperTo, shout) => { spoken.push({ text, to, whisperTo, shout }); await options.sent; },
     journal: (event) => journal.push(event), memorize: (memory) => memories.push(memory), log: (line) => logs.push(line),
     history: () => options.history ?? [],
@@ -398,7 +399,7 @@ function pair(deliverAtOnce: boolean) {
     });
     const budget = new ConversationBudget(2);
     const controller = new ConversationController({
-      self, persona: testPersona(), mind, budget, modelFree: () => true, talkRange: 64, random: () => 0, now: () => clock.now,
+      self, persona: testPersona(), mind, budget, modelFree: () => true, talkRange: 64, random: () => 0, now: () => clock.now, wallNow: () => clock.now,
       speak: async (text) => {
         const hear = () => getOther().heard(self, text, [other], "chat");
         if (deliverAtOnce) hear(); else outbox.push(hear);
@@ -799,4 +800,62 @@ test("a talk she opened that nobody answered is remembered with who it was with 
   t.controller.end("silence");
   await t.controller.finished();
   assert.equal(t.memories[0]?.talk.gist, "with Theo");
+});
+
+// The two clocks (monotonic-clock.ts header): `now` times the windows, `wallNow` is what is written down or shown.
+const WALL_AT_START = 1_700_000_000_000;
+
+test("a talk's age and end are wall times: a recalled talk 30 min old reads 30 min, the end is written as an ISO time of today, not of 1970", async () => {
+  const t = setup({ modelFree: () => false });
+  t.clock.wallOffset = WALL_AT_START;
+  t.controller.recalled([{ members: ["Theo"], topic: "iron", gist: "logs", endedAt: new Date(t.clock.now + t.clock.wallOffset - 30 * 60_000).toISOString() }]);
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  assert.equal(t.controller.facts()?.lastGists[0]?.minutesAgo, 30, "its age is read from the stored wall end, whatever the monotonic reading is");
+  t.clock.now += 5_000;
+  t.clock.wallOffset -= 2_000;
+  t.controller.end("silence");
+  await t.controller.finished();
+  const wallNow = t.clock.now + t.clock.wallOffset;
+  assert.equal(t.memories[0]?.talk.endedAt, new Date(wallNow).toISOString());
+  assert.equal(t.controller.lastTalk("Theo")?.endedAt, wallNow, "socialise compares it with the objective's wall start");
+});
+
+test("the pair cooldown and the minutes cap run on the monotonic clock: a wall clock stepped back 2 s shifts neither", async () => {
+  const t = setup({ random: 0.1 });
+  t.clock.wallOffset = WALL_AT_START;
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.clock.now += 6 * 60_000;
+  t.clock.wallOffset -= 2_000;
+  assert.equal(t.controller.facts()?.minutes, 6, "the minutes are the monotonic time since the start");
+  assert.equal(t.controller.facts()?.sayGoodbye, true, "the 6-minute cap is reached on that same reading");
+  t.controller.end("silence");
+  await t.controller.finished();
+  const cooldown = testPersona().settings.conversation.pairCooldownMinutes * 60_000;
+  t.chat.reply(OPEN);
+  t.clock.now += cooldown - 30_001;
+  t.clock.wallOffset += 5_000;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false, "inside the cooldown, whatever the wall clock did");
+  t.clock.now += 30_000;
+  t.clock.wallOffset -= 2_000;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), false, "1 ms before the cooldown ends (30 s after the last check)");
+  t.clock.now += 30_000;
+  assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(10)), signal), true, "open once it is over");
+});
+
+test("an own line from before the talk stays out of it: the history's wall time is compared with the talk's wall start", async () => {
+  const history: ChatLine[] = [];
+  const t = setup({ history });
+  t.clock.wallOffset = WALL_AT_START;
+  const startedWall = t.clock.now + t.clock.wallOffset;
+  history.push({ speaker: "Ayla", text: "before the talk", at: startedWall - 5_000 });
+  t.chat.reply({ gist: "Talked." });
+  t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat");
+  t.controller.said(false);
+  t.clock.now += 5_000;
+  t.clock.wallOffset -= 2_000;
+  history.push({ speaker: "Ayla", text: "after hello", at: t.clock.now + t.clock.wallOffset });
+  t.controller.said(false);
+  const text = await gistedLines(t);
+  assert.match(text, /after hello/u);
+  assert.doesNotMatch(text, /before the talk/u);
 });

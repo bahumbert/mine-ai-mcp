@@ -4,7 +4,8 @@ import type { Activity } from "../activities.ts";
 import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
-import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
+import { monotonicNow } from "../monotonic-clock.ts";
+import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
 import { heardNeeds, offerFrom, partnersInReach, reachOf, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
 import type { ActivityTime } from "../time-spent.ts";
 import { newRelation, withSaid } from "./record.ts";
@@ -62,9 +63,13 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
   runtime.snapshot = { ...runtime.snapshot, players, inventory: [stack("oak_log", 32)] };
   const { chat, mind } = scriptedMind();
   let now = startAt;
+  // The wall time is `now + wall.offset` plus 1 ms per reading (time passes between a talk's end and the next look: a second talk
+  // starts after the first ended); a test steps the wall clock by moving the offset.
+  const wall = { offset: 0, reads: 0 };
+  const wallNow = (): number => now + wall.offset + wall.reads++;
   const talks = new ConversationController({
     self: "Ayla", persona: testPersona(), mind, budget: new ConversationBudget(2), modelFree: () => talks.current === null, talkRange: 64, localized: true,
-    random: () => 0, now: () => now, speak: async () => {}, journal: () => undefined, memorize: () => undefined, log: () => undefined, history: () => [],
+    random: () => 0, now: () => now, wallNow, speak: async () => {}, journal: () => undefined, memorize: () => undefined, log: () => undefined, history: () => [],
   });
   const clock: Clock = { now: () => now, sleep: async (ms) => { now += ms; } };
   const controller = new AbortController();
@@ -77,13 +82,13 @@ function setup(players: FakeRuntime["snapshot"]["players"], startAt = 1_000_000)
     found = state === null ? null : ({ id: "t", partner: "Theo", give, get, first: "me", state, createdAt: now, agreedAt: null, receivedAt: null, gaveAt: null, received: [], endedAt: null, brokenBy: null, late: false, note: "", handedBack: [], gaveSome: [] } as Trade);
   };
   // The fake clock jumps instead of waiting: only for the runs that wait on a partner who never comes (a fake sleep in the follow loop would never yield).
-  const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number; want?: string[]; offer?: string[] } = {}) => tradeRoutine({
+  const run = (extra: { signal?: AbortSignal; fake?: boolean; since?: number; sinceMonotonic?: number; want?: string[]; offer?: string[] } = {}) => tradeRoutine({
     runtime, signal: extra.signal ?? controller.signal, partner: "Theo", want: extra.want ?? ["iron_ingot"], ...(extra.offer !== undefined && { offer: extra.offer }), asks,
     trades: { latestWith: (partner, since) => { reads.push({ partner, since }); return found; } }, talks,
     context: { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: controller.signal, self: "Ayla" },
-    openFacts: { activity: "trading", lately: [], lastFailed: null }, limits, since: extra.since ?? 5, ...(extra.fake === true && { clock }),
+    openFacts: { activity: "trading", lately: [], lastFailed: null }, limits, since: extra.since ?? 5, sinceMonotonic: extra.sinceMonotonic ?? extra.since ?? 5, wallNow, ...(extra.fake === true && { clock }),
   });
-  return { runtime, chat, talks, asks, reads, setTrade, run, controller, clock, now: () => now };
+  return { runtime, chat, talks, asks, reads, setTrade, run, controller, clock, wall, now: () => now };
 }
 
 /** Starts the routine with a partner 30 blocks away and returns it once the opening line is out. */
@@ -103,7 +108,7 @@ for (const state of ["agreed", "i_gave", "they_gave", "done"] as const) {
     await until(() => t.talks.current !== null);
     t.talks.said(true);
     assert.deepEqual(await running, { status: "done", detail: "agreed with Theo: 4 oak_log for 3 iron_ingot" });
-    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
     assert.deepEqual(t.reads, [{ partner: "Theo", since: 5 }], "read with the objective's start");
     assert.match(JSON.stringify(t.chat.requests[0]), /You came to trade: ask for iron_ingot, offer some of 32 oak_log/u);
   });
@@ -117,7 +122,7 @@ for (const state of [null, "cancelled", "proposed", "broken"] as const) {
     await until(() => t.talks.current !== null);
     t.talks.said(true);
     assert.deepEqual(await running, { status: "failed", detail: "Theo did not trade iron_ingot" });
-    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true);
+    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true);
   });
 }
 
@@ -144,10 +149,10 @@ test("a partner who did not come, then did not get a word in, within 10 minutes 
   const t = setup([], Date.now());
   t.chat.reply(OPEN);
   assert.equal((await t.run({ fake: true, since: t.now() + 1 })).status, "failed");
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
   t.runtime.snapshot = { ...t.runtime.snapshot, players: theoAt(30) };
   assert.deepEqual(await leaverRun(t, { since: t.now() + 1 }), { status: "failed", detail: "did not get to ask Theo" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true);
 });
 
 test("a partner who did not come, a second time after 10 minutes, is a first miss again", async () => {
@@ -166,7 +171,7 @@ test("a model that has nothing to say is no refusal", async () => {
   const result = await t.run();
   assert.equal(result.status, "failed");
   assert.match(result.status === "failed" ? result.detail : "", /had nothing to say/u);
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
 });
 
 test("a model that has nothing to say twice is still no refusal", async () => {
@@ -175,8 +180,8 @@ test("a model that has nothing to say twice is still no refusal", async () => {
     t.chat.reply({ ...OPEN, open: false });
     assert.match((await t.run() as { detail: string }).detail, /had nothing to say/u);
   }
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
-  assert.equal(t.asks.refused.refusedAnything("Theo", Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
+  assert.equal(t.asks.refused.refusedAnything("Theo", monotonicNow()), false);
 });
 
 test("an abort mid-talk is stopped: no refusal, no trade read", async () => {
@@ -185,8 +190,36 @@ test("an abort mid-talk is stopped: no refusal, no trade read", async () => {
   await until(() => t.talks.current !== null);
   t.controller.abort();
   assert.deepEqual(await running, { status: "stopped" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
   assert.deepEqual(t.reads, []);
+});
+
+test("the routine reads the trade by the objective's wall start and the ask by its monotonic start", async () => {
+  const t = setup(theoAt(30));
+  t.wall.offset = 1_700_000_000_000;
+  t.setTrade("cancelled");
+  t.chat.reply(OPEN);
+  const startedWall = t.now() + t.wall.offset - 1;
+  const running = t.run({ since: startedWall, sinceMonotonic: t.now() - 1 });
+  await until(() => t.talks.current !== null);
+  t.talks.said(true);
+  assert.deepEqual(await running, { status: "failed", detail: "Theo did not trade iron_ingot" }, "the ask, said at a monotonic reading after the start, is found");
+  assert.deepEqual(t.reads, [{ partner: "Theo", since: startedWall }], "the trade board is read by the wall start");
+});
+
+test("a declined offer is held 10 min of monotonic time, whatever the wall clock does", async (c) => {
+  const clocks = steppedClocks(c);
+  const t = setup(theoAt(30));
+  t.setTrade("cancelled");
+  const running = startTalk(t);
+  await until(() => t.talks.current !== null);
+  t.talks.said(true);
+  await running;
+  clocks.monotonic(5 * MIN);
+  clocks.wall(-2_000);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true, "5 min later, the wall clock stepped back: still refused");
+  clocks.monotonic(5 * MIN + 100);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false, "10 min and 100 ms of monotonic time: over");
 });
 
 test("tradePlan names the items and a partner, else why not", () => {
@@ -247,7 +280,7 @@ test("a chance talk open when the routine starts: the bot's reply carries the in
   t.talks.said(true);
   assert.deepEqual(await running, { status: "failed", detail: "Theo did not trade iron_ingot" });
   assert.equal(t.talks.askedSince("Theo", 5), true);
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true);
   assert.equal(t.chat.requests.length, 1, "only the gist: no extra opening");
 });
 
@@ -283,9 +316,9 @@ test("a talk open with another bot shows no intent; once it ends, the extra run 
 test("a partner who ends the talk before the bot speaks: 'did not get to ask' the first time, a refusal the second within 10 minutes", async () => {
   const t = setup(theoAt(30));
   assert.deepEqual(await leaverRun(t), { status: "failed", detail: "did not get to ask Theo" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
   assert.deepEqual(await leaverRun(t), { status: "failed", detail: "did not get to ask Theo" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true, "the second miss is a refusal");
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true, "the second miss is a refusal");
 });
 
 test("an extra opening that fails is 'had nothing to say': no refusal, no miss", async () => {
@@ -297,7 +330,7 @@ test("an extra opening that fails is 'had nothing to say': no refusal, no miss",
     assert.match(result.status === "failed" ? result.detail : "", /had nothing to say/u);
     await t.talks.finished();
   }
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
 });
 
 test("a trade agreed through the chat path before the bot asks is done, with no extra run", async () => {
@@ -313,7 +346,7 @@ test("a cancelled or broken trade since the start is a refusal even when no ask 
     const t = setup(theoAt(30));
     t.setTrade(state);
     assert.deepEqual(await leaverRun(t), { status: "failed", detail: "Theo did not trade iron_ingot" });
-    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), true);
+    assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true);
   }
 });
 
@@ -321,7 +354,7 @@ test("a proposed trade with no ask said is not a refusal", async () => {
   const t = setup(theoAt(30));
   t.setTrade("proposed");
   assert.deepEqual(await leaverRun(t), { status: "failed", detail: "did not get to ask Theo" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
 });
 
 test("an abort mid-talk releases the intent: no extra run, and a later talk shows none", async () => {
@@ -332,7 +365,7 @@ test("an abort mid-talk releases the intent: no extra run, and a later talk show
   t.controller.abort();
   assert.deepEqual(await running, { status: "stopped" });
   assert.equal(t.chat.requests.length, 0, "no extra opening");
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
   t.talks.end("goodbye");
   t.talks.heard("Theo", "Ayla, again", ["Ayla"], "chat");
   assert.equal(t.talks.facts()?.intent, undefined);
@@ -474,7 +507,7 @@ test("a full conversation cap makes the trading routine fail 'had nothing to say
   Object.defineProperty(t.talks, "openRefusal", { get: () => "conversation limit" });
   const result = await t.run();
   assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
-  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], Date.now()), false);
+  assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false);
 });
 
 const trading = (endedAgo: number, minutes: number, now: number): ActivityTime => ({ activity: "trading", purpose: "trading", ended: new Date(now - endedAgo * MIN).toISOString(), minutes });
@@ -580,11 +613,26 @@ test("F10 two 'too far away' failures within 5 minutes pause trading for 5 minut
 /** Theo said, `ago` ms before `now`, that he needs the items. */
 const theoNeeds = (items: readonly (string | ItemCount)[], now: number, ago = 0) => withSaid(newRelation("Theo", now - ago, 0), [], items, now - ago);
 const BAG = [stack("bread", 5), stack("oak_log", 12)];
+/** One reading for both clocks, where a test does not tell them apart. */
+const same = (at: number) => ({ now: at, wallNow: at });
+
+test("heardNeeds ages a said need on the wall clock and a refusal on the monotonic one: a need heard 70 min ago is stale, a refusal made 5 min ago holds, one made 11 min ago does not", () => {
+  const wallNow = 1_700_000_000_000;
+  const now = 20 * MIN;
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], wallNow, 70 * MIN)], BAG, { now, wallNow }, 60), [], "70 min old by the wall clock");
+  assert.equal(heardNeeds([theoNeeds(["bread"], wallNow, 50 * MIN)], BAG, { now, wallNow }, 60).length, 1, "50 min old by the wall clock");
+  const recent = new TradeAsks();
+  recent.refused.add("Theo", ["bread"], now - 5 * MIN);
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], wallNow, MIN)], BAG, { now, wallNow }, 60, { asks: recent }), [], "refused 5 min ago, monotonic");
+  const old = new TradeAsks();
+  old.refused.add("Theo", ["bread"], now - 11 * MIN);
+  assert.equal(heardNeeds([theoNeeds(["bread"], wallNow, MIN)], BAG, { now, wallNow }, 60, { asks: old }).length, 1, "refused 11 min ago: offered again");
+});
 
 test("heardNeeds lists a said need the bot carries, newest first, and leaves out one it does not carry", () => {
   const now = 10 * MIN;
   const lena = withSaid(newRelation("Lena", 0, 0), [], [{ item: "oak_log", count: 2 }], now - 5 * MIN);
-  const found = heardNeeds([theoNeeds([{ item: "bread", count: 3 }, "iron_ingot"], now, MIN), lena], BAG, now, 60);
+  const found = heardNeeds([theoNeeds([{ item: "bread", count: 3 }, "iron_ingot"], now, MIN), lena], BAG, same(now), 60);
   assert.deepEqual(found, [
     { partner: "Theo", item: "bread", carried: 5, saidAt: now - MIN },
     { partner: "Lena", item: "oak_log", carried: 12, saidAt: now - 5 * MIN },
@@ -593,26 +641,26 @@ test("heardNeeds lists a said need the bot carries, newest first, and leaves out
 
 test("heardNeeds leaves out a need said more than forgetMinutes ago though still in the record", () => {
   const now = 100 * MIN;
-  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now, 60 * MIN + 1)], BAG, now, 60), []);
-  assert.equal(heardNeeds([theoNeeds(["bread"], now, 60 * MIN)], BAG, now, 60).length, 1, "exactly the window still counts");
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now, 60 * MIN + 1)], BAG, same(now), 60), []);
+  assert.equal(heardNeeds([theoNeeds(["bread"], now, 60 * MIN)], BAG, same(now), 60).length, 1, "exactly the window still counts");
 });
 
 test("heardNeeds leaves out a partner who refused that offer lately, and partners not asked for", () => {
   const now = 10 * MIN;
   const asks = new TradeAsks();
   asks.refused.add("theo", ["bread"], now - MIN);
-  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { asks }), []);
-  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { asks: new TradeAsks() }).length, 1);
-  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { partners: ["Lena"] }), [], "Theo is not among the partners");
-  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, now, 60, { partners: ["THEO"] }).length, 1, "names compare lowercased");
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, same(now), 60, { asks }), []);
+  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, same(now), 60, { asks: new TradeAsks() }).length, 1);
+  assert.deepEqual(heardNeeds([theoNeeds(["bread"], now)], BAG, same(now), 60, { partners: ["Lena"] }), [], "Theo is not among the partners");
+  assert.equal(heardNeeds([theoNeeds(["bread"], now)], BAG, same(now), 60, { partners: ["THEO"] }).length, 1, "names compare lowercased");
 });
 
 test("heardNeeds leaves out a need a trade done after it already met", () => {
   const now = 10 * MIN;
   const done = (endedAt: number): Trade => ({ id: "t", partner: "Theo", give: [{ item: "bread", count: 3 }], get: [], first: "me", state: "done", createdAt: 0, agreedAt: 0, receivedAt: null, gaveAt: null, received: [], endedAt, brokenBy: null, late: false, note: "", handedBack: [], gaveSome: [] } as Trade);
   const said = theoNeeds(["bread"], now, 5 * MIN);
-  assert.deepEqual(heardNeeds([{ ...said, trades: [done(now - MIN)] }], BAG, now, 60), [], "given after he said it");
-  assert.equal(heardNeeds([{ ...said, trades: [done(now - 6 * MIN)] }], BAG, now, 60).length, 1, "given before he said it: a new need");
+  assert.deepEqual(heardNeeds([{ ...said, trades: [done(now - MIN)] }], BAG, same(now), 60), [], "given after he said it");
+  assert.equal(heardNeeds([{ ...said, trades: [done(now - 6 * MIN)] }], BAG, same(now), 60).length, 1, "given before he said it: a new need");
 });
 
 test("withTrading: no own need but a heard need in reach puts trading second; own need and no need are as before", () => {
@@ -672,5 +720,5 @@ test("an offer routine offers only the heard item, and a declined offer is refus
   assert.deepEqual(await running, { status: "failed", detail: "Theo did not trade bread" });
   assert.match(JSON.stringify(t.chat.requests[0]), /offer them your bread: they said they need it/u);
   assert.doesNotMatch(JSON.stringify(t.chat.requests[0]), /oak_log/u, "not the whole bag");
-  assert.equal(t.asks.refused.isRefused("Theo", ["bread"], Date.now()), true, "not redrawn for that item");
+  assert.equal(t.asks.refused.isRefused("Theo", ["bread"], monotonicNow()), true, "not redrawn for that item");
 });
