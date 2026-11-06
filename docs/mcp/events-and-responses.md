@@ -69,7 +69,13 @@ The event log captures these event types:
   the message addressed the bot's username.
 - `player_death`: Death events containing the dimension and world coordinates of
   the death location, and the server's own account of the cause as the chat
-  line reads: "drowned", "was slain by Zombie", "tried to swim in lava".
+  line reads: "drowned", "was slain by Zombie", "tried to swim in lava". It also
+  carries a `context` read when the server's cause packet arrives (the server
+  clears the inventory just after): the last health, food and saturation seen
+  alive, the item held, the four armour pieces, whether the bot carried a
+  weapon and which melee weapon was best, whether it was walled in, and the
+  bed or world spawn it would wake at with its distance. Rows written before
+  `context` existed have none.
 - `player_dimension_change`: The bot crossing a portal, with the dimensions
   left and entered and where it arrived.
 - `hostile_encounter`: Combat reflex engagements detailing the response mode

@@ -113,6 +113,38 @@ test("setHealth files health and food and ends in death once; a health above 0 a
   assert.deepEqual(heard, ["health", "health", "death", "health", "health", "spawn"]);
 });
 
+/**
+ * Measured on the real 1.21.4 server (scenario `player-death-runtime-event`, keepInventory false, 3 runs): the client hears
+ * `death_combat_event` with its gear still on, then the inventory clears, and `death` finds the hands, armour and bags
+ * empty.
+ */
+test("a death sends the combat event with the gear on, clears the inventory, then emits death", () => {
+  const harness = fight({ slots: { 36: { name: "iron_sword" }, 5: { name: "iron_helmet" } }, carried: { dirt: 4 } });
+  const { bot } = harness;
+  const gear = () => [bot.heldItem?.name ?? null, bot.inventory.slots[bot.getEquipmentDestSlot("head")]?.name ?? null, bot.inventory.items().length];
+  const seen: [string, unknown][] = [];
+  bot._client.on("death_combat_event", (packet: { playerId: number }) => void seen.push(["death_combat_event", [packet.playerId, ...gear()]]));
+  bot.on("death", () => void seen.push(["death", gear()]));
+  harness.combat.setHealth(0);
+  assert.deepEqual(seen, [
+    ["death_combat_event", [bot.entity.id, "iron_sword", "iron_helmet", 2]],
+    ["death", [null, null, 0]],
+  ]);
+});
+
+test("a death sends one cause packet: the one a test announced, else the fake's own, again in the next life", () => {
+  const { bot, combat } = fight();
+  const messages: unknown[] = [];
+  bot._client.on("death_combat_event", (packet: { message?: unknown }) => void messages.push(packet.message ?? "(none)"));
+
+  bot._client.emit("death_combat_event", { playerId: bot.entity.id, message: "drowned" });
+  combat.setHealth(0);
+  combat.setHealth(20);
+  combat.setHealth(0);
+
+  assert.deepEqual(messages, ["drowned", "(none)"]);
+});
+
 test("a bot hurt down to 2 health still hits: the next attack answers", async () => {
   const harness = fight();
   harness.combat.hurtBot(18, OTHER_ID);

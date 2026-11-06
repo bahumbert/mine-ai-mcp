@@ -156,6 +156,68 @@ test("returns and formats a player death lifecycle event through the existing ev
   assert.match(markdown, /Position: `12.5, 64, -3.25`/);
 });
 
+test("a death event with its context tells the model what the bot held, wore and where it would wake", (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  recordEvent(data, "MineAI", {
+    type: "player_death",
+    observedAt: "2026-08-30T01:02:03.000Z",
+    summary: "MineAI died at 12.5, 64, -3.25 in overworld.",
+    payload: {
+      dimension: "overworld",
+      position: { x: 12.5, y: 64, z: -3.25 },
+      cause: "MineAI was slain by Zombie",
+      context: {
+        lastAlive: { health: 14, food: 9, saturation: 0, msBefore: 1_200 },
+        food: 9,
+        held: "iron_sword",
+        armour: { head: "iron_helmet", chest: null, legs: null, feet: "iron_boots" },
+        carriesWeapon: true,
+        bestMelee: "iron_sword",
+        enclosed: false,
+        respawn: { kind: "bed", dimension: "overworld", x: 20.5, y: 64, z: -3.25, distance: 8 },
+      },
+    },
+  });
+  recordEvent(data, "MineAI", {
+    type: "player_death",
+    observedAt: "2026-08-30T02:00:00.000Z",
+    summary: "MineAI died at 1, 64, 1 in the_nether.",
+    payload: {
+      dimension: "the_nether",
+      position: { x: 1, y: 64, z: 1 },
+      cause: null,
+      context: {
+        lastAlive: null,
+        food: 20,
+        held: null,
+        armour: { head: null, chest: null, legs: null, feet: null },
+        carriesWeapon: false,
+        bestMelee: null,
+        enclosed: true,
+        respawn: { kind: "world_spawn", dimension: "overworld", x: 0, y: 70, z: 0, distance: null },
+      },
+    },
+  });
+  recordEvent(data, "MineAI", {
+    type: "player_death",
+    observedAt: "2026-08-30T03:00:00.000Z",
+    summary: "MineAI died at 1, 64, 1 in overworld.",
+    payload: { dimension: "overworld", position: { x: 1, y: 64, z: 1 }, cause: null },
+  });
+
+  const markdown = formatReadRecentEventsResult(readRecentBotEvents(data, "MineAI", { limit: 50 }));
+
+  assert.match(
+    markdown,
+    /- State at death: held iron_sword; armour head iron_helmet, feet iron_boots; food 9; last health 14 \(1\.2 s before\); in the open; respawn bed 8 blocks away/,
+  );
+  assert.match(
+    markdown,
+    /- State at death: held nothing; armour none; food 20; last health not seen; enclosed; respawn world spawn in another dimension/,
+  );
+  assert.equal(markdown.match(/State at death/g)?.length, 2, "an old row without context prints no state line");
+});
+
 test("a status recorded before dig_straight_down existed reads back with its default", async () => {
   // Live 2026-10-04: Tom's old survival receipts failed validation on his first read, and his brain stopped.
   const { withNavigationDefaults } = await import("./read-recent-events.js");

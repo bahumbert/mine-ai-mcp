@@ -5,6 +5,7 @@ import {
   defineSqlQuery,
   getSqlQuery,
   type BotEvent,
+  type PlayerDeathContext,
   type SqlBotData,
 } from "../../bot-data/index.js";
 import { formatSurvivalStatus } from "../../survival/evidence/format.js";
@@ -133,6 +134,29 @@ export function readRecentBotEvents(
   };
 }
 
+/** One line: what the bot held and wore, its last health, whether it was walled in, and where it would wake. */
+function describeDeathContext(context: PlayerDeathContext): string {
+  const worn = Object.entries(context.armour).flatMap(([slot, item]) => (item ? [`${slot} ${item}`] : []));
+  const lastHealth = context.lastAlive
+    ? `${context.lastAlive.health} (${(context.lastAlive.msBefore / 1000).toFixed(1)} s before)`
+    : "not seen";
+  const { respawn } = context;
+  const place = respawn?.kind === "bed" ? "bed" : "world spawn";
+  const wakes = !respawn
+    ? "unknown"
+    : respawn.distance === null
+      ? `${place} in another dimension`
+      : `${place} ${Math.round(respawn.distance)} blocks away`;
+  return [
+    `held ${context.held ?? "nothing"}`,
+    `armour ${worn.length > 0 ? worn.join(", ") : "none"}`,
+    `food ${context.food}`,
+    `last health ${lastHealth}`,
+    context.enclosed ? "enclosed" : "in the open",
+    `respawn ${wakes}`,
+  ].join("; ");
+}
+
 export function formatReadRecentEventsResult(result: ReadRecentEventsResult): string {
   const sections = result.events.map(formatEvent);
   if (sections.length === 0) sections.push("No unread events were waiting.");
@@ -142,6 +166,21 @@ export function formatReadRecentEventsResult(result: ReadRecentEventsResult): st
   );
   if (result.status !== "succeeded") sections.push(`**Observed stop:** ${result.error}`);
   return sections.join("\n\n");
+}
+
+function formatPlayerDeath(
+  eventId: number,
+  observedAt: string,
+  payload: Extract<BotEvent, { type: "player_death" }>["payload"],
+): string {
+  return [
+    `### Event ${eventId}: player death`,
+    `- Observed: ${observedAt}`,
+    `- Dimension: \`${payload.dimension}\``,
+    `- Position: \`${payload.position.x}, ${payload.position.y}, ${payload.position.z}\``,
+    `- Cause: ${payload.cause ?? "not reported"}`,
+    ...(payload.context ? [`- State at death: ${describeDeathContext(payload.context)}`] : []),
+  ].join("\n");
 }
 
 function formatEvent(event: BotEvent): string {
@@ -211,13 +250,7 @@ Constraint: ${event.payload.constraint ?? "none"}`;
         markdownCodeBlock(event.payload.message),
       ].join("\n");
     case "player_death":
-      return [
-        `### Event ${event.eventId}: player death`,
-        `- Observed: ${event.observedAt}`,
-        `- Dimension: \`${event.payload.dimension}\``,
-        `- Position: \`${event.payload.position.x}, ${event.payload.position.y}, ${event.payload.position.z}\``,
-        `- Cause: ${event.payload.cause ?? "not reported"}`,
-      ].join("\n");
+      return formatPlayerDeath(event.eventId, event.observedAt, event.payload);
     case "player_dimension_change":
       return [
         `### Event ${event.eventId}: dimension change`,

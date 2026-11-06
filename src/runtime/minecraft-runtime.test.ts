@@ -509,11 +509,13 @@ test("death cancels the foreground action, records one event, and permits work a
   const eventPage = readRecentEventsResultSchema.parse(events.result);
   assert.equal(eventPage.status, "succeeded");
   assert.equal(eventPage.events.filter((event) => event.type === "player_death").length, 1);
-  assert.deepEqual(eventPage.events.find((event) => event.type === "player_death")?.payload, {
+  const { context, ...deathPayload } = (eventPage.events.find((event) => event.type === "player_death")?.payload ?? {}) as { context?: unknown };
+  assert.deepEqual(deathPayload, {
     dimension: "overworld",
     position: { x: 12.5, y: 64, z: -3.25 },
     cause: null,
   });
+  assert.equal(typeof context, "object", "the death carries the state it happened in");
 
   const resumed = runtime.run(rawAction, { operation: "control", state: "jump", ticks: 1 });
   assert.equal(runtime.status().activeAction?.action, "raw_action");

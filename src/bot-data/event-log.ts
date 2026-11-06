@@ -53,6 +53,41 @@ const playerMessageEventInputSchema = z.strictObject({
   payload: playerMessagePayloadSchema,
 });
 
+/**
+ * The state a death happened in (P4-01 spec D3), read when the server's cause packet arrives: the real server clears the
+ * inventory before the `death` event (`knowledge/facts/live-testing.md` "Gear at death"). Optional on the payload so
+ * rows written before it still parse.
+ */
+const playerDeathContextSchema = z.strictObject({
+  /** The last reading with health above 0 and how long before the death it came; null when none was seen. */
+  lastAlive: z
+    .strictObject({ health: z.number(), food: z.number(), saturation: z.number(), msBefore: z.number().nonnegative() })
+    .nullable(),
+  food: z.number(),
+  held: z.string().nullable(),
+  armour: z.strictObject({
+    head: z.string().nullable(),
+    chest: z.string().nullable(),
+    legs: z.string().nullable(),
+    feet: z.string().nullable(),
+  }),
+  carriesWeapon: z.boolean(),
+  bestMelee: z.string().nullable(),
+  enclosed: z.boolean(),
+  /** Where the bot would wake: a bed it slept in, else the world spawn; `distance` is null across dimensions. */
+  respawn: z
+    .strictObject({
+      kind: z.enum(["bed", "world_spawn"]),
+      dimension: z.string().min(1),
+      x: z.number(),
+      y: z.number(),
+      z: z.number(),
+      distance: z.number().nullable(),
+    })
+    .nullable(),
+});
+export type PlayerDeathContext = z.infer<typeof playerDeathContextSchema>;
+
 const playerDeathPayloadSchema = z.strictObject({
   dimension: z.string().min(1),
   position: z.strictObject({
@@ -62,6 +97,7 @@ const playerDeathPayloadSchema = z.strictObject({
   }),
   /** The server's own account of what killed the bot, as the chat line reads; null when none arrived. */
   cause: z.string().nullable(),
+  context: playerDeathContextSchema.optional(),
 });
 
 const playerDeathEventInputSchema = z.strictObject({

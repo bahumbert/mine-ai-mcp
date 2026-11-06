@@ -89,14 +89,26 @@ function createSender(bot: FakeBot, parts: CombatParts) {
   });
   let alive = true;
   let deaths = 0;
+  /** The server sends one cause packet per death: one a test sent itself (to name the cause) is that one. */
+  let causeAnnounced = false;
+  bot._client.on("death_combat_event", () => void (causeAnnounced = true));
   return {
     ticks: () => ticks,
     /** How many times the bot has died: a fire or a push that began in an earlier life is not hers any more. */
     deaths: () => deaths,
     afterTicks: (count: number, run: () => void) => void later.push({ dueTick: ticks + count, run }),
     hear: (name: string, data: unknown) => void bot._client.emit(name, data),
-    /** `health.js:21-40`: the values filed, `health` emitted, and `death` / `spawn` as the health crosses 0. */
+    /**
+     * `health.js:21-40`: the values filed, `health` emitted, and `death` / `spawn` as the health crosses 0. A death first
+     * sends `death_combat_event` (gear still on), then the inventory clear, then the health packet (measured: scenario
+     * `player-death-runtime-event`, real server 1.21.4, keepInventory false, 3 runs). A keepInventory world is not
+     * measured, so the fake has no such option: a test of one stays on its scenario.
+     */
     sendHealth(health: number, food: number) {
+      if (health <= 0 && alive) {
+        if (!causeAnnounced) bot._client.emit("death_combat_event", { playerId: bot.entity.id, message: undefined });
+        parts.inventory.clearAll();
+      }
       bot._client.emit("update_health", { health, food, foodSaturation: bot.foodSaturation });
       Object.assign(bot, { health, food });
       bot.emit("health");
@@ -106,6 +118,7 @@ function createSender(bot: FakeBot, parts: CombatParts) {
         bot.emit("death");
       } else if (health > 0 && !alive) {
         alive = true;
+        causeAnnounced = false;
         bot.emit("spawn");
       }
     },

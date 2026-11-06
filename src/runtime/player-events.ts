@@ -1,6 +1,7 @@
 import type { Bot, BotEvents } from "mineflayer";
-import { guardObservedWrite, recordEvent, type SqlBotData } from "../bot-data/index.js";
+import { guardObservedWrite, recordEvent, type PlayerDeathContext, type SqlBotData } from "../bot-data/index.js";
 import { isChatCommandLine, type ChatCommandRing } from "./chat-commands.js";
+import { aliveReading, readDeathContext, type LastAliveReading } from "./death-context.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -65,16 +66,7 @@ export function observePlayerEvents(
 
   const onChat = observeMessage("chat");
   const onWhisper = observeMessage("whisper");
-  let lastDeathMessage: string | null = null;
-  const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
-    if (packet.playerId !== undefined && packet.playerId !== bot.entity?.id) return;
-    lastDeathMessage = deathMessage(bot, packet.message);
-  };
-  const onDeath: DeathListener = () => {
-    const cause = lastDeathMessage;
-    lastDeathMessage = null;
-    recordPlayerDeath(bot, data, cause, cancelForegroundAction, guarded);
-  };
+  const { onHealth, onCombatDeath, onDeath } = deathListeners(bot, data, cancelForegroundAction, guarded);
 
   // Respawn updates the dimension before the destination position packet.
   // Record arrival only when forcedMove observes that new position.
@@ -95,12 +87,14 @@ export function observePlayerEvents(
   bot.on("chat", onChat);
   bot.on("whisper", onWhisper);
   bot.on("death", onDeath);
+  bot.on("health", onHealth);
   bot.on("respawn", onRespawn);
   bot.on("forcedMove", onForcedMove);
   bot._client?.on("death_combat_event", onCombatDeath);
 
   return () => {
     bot._client?.removeListener("death_combat_event", onCombatDeath);
+    bot.off("health", onHealth);
     bot.off("respawn", onRespawn);
     bot.off("forcedMove", onForcedMove);
     bot.off("death", onDeath);
@@ -109,11 +103,54 @@ export function observePlayerEvents(
   };
 }
 
-/** The foreground action is cancelled before the event is written, so a failing write cannot keep the dead bot working. */
+/**
+ * The three listeners of one death: `health` keeps the last alive reading, the cause packet (which arrives while the gear
+ * is still on) names the cause and reads the state, and `death` records both and cancels the foreground action.
+ */
+function deathListeners(bot: Bot, data: SqlBotData, cancelForegroundAction: CancelForegroundAction, guarded: GuardedWrite) {
+  let lastDeathMessage: string | null = null;
+  let lastAlive: LastAliveReading | null = null;
+  let contextAtCause: PlayerDeathContext | undefined;
+  const onHealth = () => {
+    const alive = aliveReading(bot);
+    if (!alive) return;
+    lastAlive = alive;
+    // A cause packet that no `death` followed belonged to a life that is over: it must not describe the next death.
+    contextAtCause = undefined;
+  };
+  const onCombatDeath = (packet: { playerId?: number; message?: unknown }) => {
+    if (packet.playerId !== undefined && packet.playerId !== bot.entity?.id) return;
+    lastDeathMessage = deathMessage(bot, packet.message);
+    contextAtCause = readDeathContextSafely(bot, lastAlive);
+  };
+  const onDeath: DeathListener = () => {
+    const cause = lastDeathMessage;
+    // No cause packet came: the death handler reads what is left (the server may have cleared the gear).
+    const context = contextAtCause ?? readDeathContextSafely(bot, lastAlive);
+    lastDeathMessage = null;
+    contextAtCause = undefined;
+    lastAlive = null;
+    recordPlayerDeath(bot, data, cause, context, cancelForegroundAction, guarded);
+  };
+  return { onHealth, onCombatDeath, onDeath };
+}
+
+/** A failing read of the death's state must not stop the death from cancelling the action and being recorded. */
+function readDeathContextSafely(bot: Bot, lastAlive: LastAliveReading | null): PlayerDeathContext | undefined {
+  try {
+    return readDeathContext(bot, lastAlive);
+  } catch (error) {
+    process.stderr.write(`[player-events] death context not read: ${String(error)}\n`);
+    return undefined;
+  }
+}
+
+/** The context is read by the caller before this cancels; the action is cancelled before the event is written, so a failing write cannot keep the dead bot working. */
 function recordPlayerDeath(
   bot: Bot,
   data: SqlBotData,
   cause: string | null,
+  context: PlayerDeathContext | undefined,
   cancelForegroundAction: CancelForegroundAction,
   guarded: GuardedWrite,
 ): void {
@@ -132,7 +169,7 @@ function recordPlayerDeath(
       type: "player_death",
       observedAt,
       summary,
-      payload: { dimension, position, cause },
+      payload: { dimension, position, cause, ...(context && { context }) },
     }),
   );
 }
