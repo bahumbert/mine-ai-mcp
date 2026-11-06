@@ -2,7 +2,8 @@ import type { Bot } from "mineflayer";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import type { BlockPosition } from "../../index.js";
 import { withinItemPickupReach } from "../../world/item-geometry.js";
-import type { MineRequest, MineTarget } from "./mine-process.js";
+import { expectedDropOfBreak } from "./expected-drop.js";
+import type { MineRequest, MineTarget, MinecraftBlock } from "./mine-process.js";
 
 /** Associate a just-broken source with its nearby observed item entity. */
 const DROP_PROXIMITY_SQUARED = 9;
@@ -39,7 +40,10 @@ export const DROP_PICKUP_TIMEOUT_MS = 3_000;
 
 /** What a mine request lets its caller hear from the drop tracker. */
 export interface DropLossObserver {
-  /** Called once per broken source whose item entity never appeared within the loiter, even if the attempt is cancelled later. */
+  /**
+   * Called once per broken source that should have dropped an item (`expectedDropOfBreak`: not `nothing`) and whose
+   * item entity never appeared within the loiter, even if the attempt is cancelled later.
+   */
   readonly onLostDrop?: () => void;
 }
 
@@ -53,7 +57,10 @@ export class MineDropTracker {
       readonly disappearedAt?: number;
     }
   >();
-  readonly #anticipatedDrops = new Map<string, { readonly position: BlockPosition; readonly expiresAt: number }>();
+  readonly #anticipatedDrops = new Map<
+    string,
+    { readonly position: BlockPosition; readonly expiresAt: number; readonly expectsDrop: boolean }
+  >();
   /** When the bot began overlapping each live item, and the gain it had then. */
   readonly #touching = new Map<number, { readonly since: number; readonly inventoryGain: number }>();
 
@@ -79,8 +86,14 @@ export class MineDropTracker {
     return air(entity.position) && air(entity.position.offset(0, -0.01, 0));
   }
 
-  noteBreak(position: BlockPosition, now: number): void {
-    this.#anticipatedDrops.set(cellKey(position), { position, expiresAt: now + DROP_LOITER_MS });
+  /**
+   * A source just came down; `before` is the block as the last scan saw it (its state is gone now). A break the loot
+   * table says drops nothing (`expectedDropOfBreak`) still loiters for a surprise drop, but its expiry is no lost
+   * drop. No block or no table (`unknown`) counts, as every break did before.
+   */
+  noteBreak(position: BlockPosition, now: number, before: MinecraftBlock | null = null): void {
+    const expectsDrop = before === null || expectedDropOfBreak(this.bot, before) !== "nothing";
+    this.#anticipatedDrops.set(cellKey(position), { position, expiresAt: now + DROP_LOITER_MS, expectsDrop });
   }
 
   /** A live item the bot has overlapped for the whole pickup timeout without gaining anything. */
@@ -126,7 +139,7 @@ export class MineDropTracker {
         )[0];
       if (!spawnedItem && anticipated.expiresAt <= observedAt) {
         this.#anticipatedDrops.delete(key);
-        this.request.onLostDrop?.();
+        if (anticipated.expectsDrop) this.request.onLostDrop?.();
         continue;
       }
       if (spawnedItem) {

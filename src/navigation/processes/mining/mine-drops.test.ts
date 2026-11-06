@@ -4,9 +4,10 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { MineDropTracker } from "./mine-drops.js";
 
-function trackerWith(drops: Record<number, Vec3>) {
+function trackerWith(drops: Record<number, Vec3>, cells: Record<string, string> = {}) {
   const { bot, entities: server } = createFakeBot({
     position: new Vec3(0, 64, 0),
+    cells,
     entities: Object.fromEntries(Object.entries(drops).map(([id, position]) => [id, { name: "item", position }])),
   });
   let lostDrops = 0;
@@ -19,7 +20,7 @@ function trackerWith(drops: Record<number, Vec3>) {
   /** The server spawns a drop of the block just broken, after the bot was made. */
   const spawnDrop = (id: number, position: Vec3) => server.spawn({ id, name: "item", position, item: { name: "cobblestone", count: 1 } });
   /** Breaks whose drop never appeared, as the caller of the tracker hears them through `onLostDrop`. */
-  return { tracker, entities: bot.entities, spawnDrop, lost: () => lostDrops };
+  return { tracker, entities: bot.entities, spawnDrop, lost: () => lostDrops, blockAt: (x: number, z: number) => bot.blockAt(new Vec3(x, 64, z)) };
 }
 
 describe("MineDropTracker anticipated drops", () => {
@@ -43,6 +44,23 @@ describe("MineDropTracker anticipated drops", () => {
     assert.equal(lost(), 1);
     tracker.update([], 9_000);
     assert.equal(lost(), 1, "an expired anticipation is not counted again");
+  });
+
+  test("a block with no loot data is counted lost when no drop appears, as before", () => {
+    const { tracker, lost, blockAt } = trackerWith({}, { "5,64,5": "bedrock" });
+    tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0, blockAt(5, 5));
+    tracker.update([], 5_000);
+    assert.equal(lost(), 1);
+  });
+
+  test("a stone broken by hand loiters like any break but, expiring with a dirt break, only the dirt counts lost", () => {
+    const { tracker, lost, blockAt } = trackerWith({}, { "5,64,5": "stone", "9,64,5": "dirt" });
+    tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0, blockAt(5, 5));
+    tracker.noteBreak({ x: 9, y: 64, z: 5 }, 0, blockAt(9, 5));
+    assert.equal(tracker.update([], 2_000).length, 2, "both are provisional targets while they loiter");
+    tracker.update([], 5_000);
+    assert.equal(tracker.anticipating, false);
+    assert.equal(lost(), 1);
   });
 
   test("once the item entity appeared and vanished, the break is no longer anticipated", () => {

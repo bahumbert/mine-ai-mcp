@@ -303,7 +303,7 @@ test("a refusal with coordinates names the unknown block, not a cell mismatch", 
 
 type MineRun = NonNullable<Parameters<typeof collectBlock>[5]>;
 
-/** A mine process that reports `lost` drops never seen, then settles as `status`: no physical work, only the counting. */
+/** A mine process that reports `lost` expected drops never seen, then settles as `status`: no physical work, only the counting. */
 const mineLosing = (lost: number, status: MineResult["status"] = "satisfied"): MineRun => async (_bot, mineRequest) => {
   for (let i = 0; i < lost; i++) mineRequest.onLostDrop?.();
   return { status, broken: [], reason: status === "stopped" ? "[TEST_STOP] the fake process stopped." : null };
@@ -318,19 +318,19 @@ async function collectWith(mineRun: MineRun, count = 1) {
 test("a break whose drop never appeared is reported as lostDrops and as a line of the text", async () => {
   const result = await collectWith(mineLosing(1));
   assert.equal(result.collected.lostDrops, 1);
-  assert.match(formatCollectBlockResult(result), /^- Drops never seen: 1$/mu);
+  assert.match(formatCollectBlockResult(result), /^- Expected drops never seen: 1$/mu);
 });
 
 test("a collection that lost no drop reports 0 and prints no line", async () => {
   const result = await collectWith(mineLosing(0));
   assert.equal(result.collected.lostDrops, 0);
-  assert.doesNotMatch(formatCollectBlockResult(result), /Drops never seen/u);
+  assert.doesNotMatch(formatCollectBlockResult(result), /drops never seen/iu);
 });
 
 test("an old result with no lostDrops field still parses and prints no line", () => {
   const old = { requested: 1, gained: 0, gainedByItem: {}, blocksBroken: 0, brokenAt: [] };
   assert.equal(collectBlockResultSchema.safeParse({ status: "failed", error: "x", collected: old }).success, true);
-  assert.doesNotMatch(formatCollectBlockResult({ status: "failed", error: "x", collected: old }), /Drops never seen/u);
+  assert.doesNotMatch(formatCollectBlockResult({ status: "failed", error: "x", collected: old }), /drops never seen/iu);
 });
 
 /** The capacity watch stops the run (the drop it walks to cannot enter): a stopped result, built from the catch path. */

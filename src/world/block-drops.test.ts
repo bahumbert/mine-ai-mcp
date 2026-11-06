@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { blockDropsData, likeliestOrdinaryDrop, ordinaryDrops, ripeState, seedOf, sourcesOf } from "./block-drops.js";
+import { blockDropsData, expectedDrop, likeliestOrdinaryDrop, ordinaryDrops, ripeState, seedOf, sourcesOf } from "./block-drops.js";
 
 test("the shipped data serves the server's version, or the nearest older one, or a newer patch, or none", () => {
   assert.equal(blockDropsData("1.21.4")?.version, "1.21.4");
@@ -43,4 +43,18 @@ test("a crop's ripe state and its seed come from its loot table", () => {
   assert.equal(seedOf("carrots", "1.21.4"), "carrot");
   assert.equal(seedOf("potatoes", "1.21.4"), "potato");
   assert.equal(seedOf("beetroots", "1.21.4"), "beetroot_seeds");
+});
+
+test("a break is expected to drop only what the loot table guarantees with the tool in hand and the block's state", () => {
+  const bare = { heldItem: null, silkTouch: false, state: {} };
+  assert.equal(expectedDrop("stone", "1.21.4", bare), "drops");
+  assert.equal(expectedDrop("spawner", "1.21.4", bare), "nothing", "a table with no drop at all");
+  assert.equal(expectedDrop("oak_leaves", "1.21.4", bare), "nothing", "saplings and sticks are chance, not a guarantee");
+  assert.equal(expectedDrop("oak_leaves", "1.21.4", { ...bare, heldItem: "shears" }), "drops");
+  assert.equal(expectedDrop("oak_leaves", "1.21.4", { ...bare, heldItem: "stick" }), "nothing");
+  assert.equal(expectedDrop("glass", "1.21.4", bare), "nothing", "glass drops only with silk touch");
+  assert.equal(expectedDrop("glass", "1.21.4", { ...bare, silkTouch: true }), "drops");
+  assert.equal(expectedDrop("oak_door", "1.21.4", { ...bare, state: { half: "lower" } }), "drops");
+  assert.equal(expectedDrop("oak_door", "1.21.4", { ...bare, state: { half: "upper" } }), "nothing");
+  assert.equal(expectedDrop("stone", "1.20.1", bare), "unknown", "a version with no shipped table is unknown, never guessed");
 });

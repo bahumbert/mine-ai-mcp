@@ -506,7 +506,7 @@ export function formatCollectBlockResult(result: CollectBlockResult): string {
     `- Inventory gained: ${collected.gained}`,
     `- Matching blocks broken: ${collected.blocksBroken}`,
     ...(brokenAt ? [brokenAt] : []),
-    ...(collected.lostDrops ? [`- Drops never seen: ${collected.lostDrops}`] : []),
+    ...(collected.lostDrops ? [`- Expected drops never seen: ${collected.lostDrops}`] : []),
     "- Gains by item:",
     gains || "  - None observed",
   ].join("\n");

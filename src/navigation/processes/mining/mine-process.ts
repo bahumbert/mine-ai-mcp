@@ -671,7 +671,7 @@ class MineTargeting {
   #goal: Goal | null = null;
   #branchGoal: Goal | null = null;
   #branchFailure: string | null = null;
-  #knownBlocks: readonly BlockPosition[] = [];
+  #knownBlocks: readonly { readonly position: BlockPosition; readonly block: MinecraftBlock | null }[] = [];
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
   /** Monotonic: a wall clock that steps (NTP, WSL host sync) must not stretch or cut the drop timers. */
   readonly #now: () => number;
@@ -853,12 +853,12 @@ class MineTargeting {
     // A block this run knew about that is loaded and no longer matches came
     // down, whoever removed it. The route breaks its own target on the way in,
     // so this is the only place a break can be observed.
-    for (const position of this.#knownBlocks) {
+    for (const { position, block: before } of this.#knownBlocks) {
       const block = this.bot.blockAt(asVec3(position));
       if (block === null || this.request.matches(block)) continue;
       this.broken.push(position);
       this.request.onBroken?.(position);
-      this.#drops.noteBreak(position, now);
+      this.#drops.noteBreak(position, now, before);
     }
 
     const scanResult = scan(this.bot, this.request, {
@@ -886,7 +886,7 @@ class MineTargeting {
       if (target.kind === "drop" || target.kind === "settling_drop") return !this.#dropBlacklist.has(target.entityId);
       return !this.#anticipatedDropBlacklist.has(cellKey(target.position));
     });
-    this.#knownBlocks = this.#targets.filter((target) => target.kind === "block").map((target) => target.position);
+    this.#knownBlocks = this.#targets.filter((target) => target.kind === "block").map(({ position }) => ({ position, block: this.bot.blockAt(asVec3(position)) }));
     // Obsidian is the one block a bot manufactures, so a cast request with
     // nothing to mine makes its targets out of the lava it can see. Asked only
     // then, which keeps a second full scan off every ordinary refresh.

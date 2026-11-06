@@ -219,8 +219,9 @@ const collectionEvidenceSchema = z.strictObject({
   blocksBroken: z.number().int().nonnegative(),
   brokenAt: z.array(brokenCellSchema),
   /**
-   * Broken blocks for which no item entity appeared within the mine process's wait, over the whole request. A block
-   * that drops nothing (leaves, a wrong tool tier) counts too: the process cannot tell it from a drop that never spawned.
+   * Broken blocks that should have dropped an item and showed no item entity within the mine process's wait, over the
+   * whole request. A block whose loot table guarantees nothing with the tool used (leaves without shears, ore with a
+   * too low tool tier) is not counted; a block the version has no loot table for is (`mining/expected-drop.ts`).
    * Absent in old results.
    */
   lostDrops: z.number().int().nonnegative().optional(),

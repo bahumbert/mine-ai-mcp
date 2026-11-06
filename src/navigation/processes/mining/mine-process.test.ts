@@ -368,6 +368,35 @@ test("an anticipated drop follows Mineflayer's item entity before its metadata a
   assert.equal(result.status, "satisfied");
 });
 
+/** Mine one stone that comes down with no item entity ever spawning; returns how many lost drops the process reported. */
+async function lostDropsOfUnspawnedBreak(carrying: Record<string, number>): Promise<number> {
+  const target = new Vec3(5, 64, 0);
+  using scene = mineScene({ blocks: [target], carrying });
+  let lost = 0;
+  await runMine(scene, {
+    onLostDrop: () => { lost += 1; },
+    route: async (options) => {
+      const observation = { position: scene.bot.entity.position, entities: new Map() } as never;
+      options.goal.resolve(observation);
+      scene.world.setCell(target, "air");
+      await scene.clock.sleep(300);
+      options.goal.resolve(observation);
+      await scene.clock.sleep(5_500);
+      options.goal.resolve(observation);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  return lost;
+}
+
+test("a stone broken with a pickaxe whose drop never appears is reported lost", async () => {
+  assert.equal(await lostDropsOfUnspawnedBreak({ wooden_pickaxe: 1 }), 1);
+});
+
+test("a stone broken by hand drops nothing, so no drop is reported lost", async () => {
+  assert.equal(await lostDropsOfUnspawnedBreak({}), 0);
+});
+
 test("an occupied drop arrival yields a server pickup interval before continuing", async () => {
   let ticks = 0;
   using scene = mineScene({
