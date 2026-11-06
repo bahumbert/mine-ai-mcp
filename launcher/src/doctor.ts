@@ -56,7 +56,7 @@ export function realDoctorDeps(root: string, manifest: Manifest): DoctorDeps {
     javaInstalled: () => existsSync(javaPath(root)),
     gpuSummary: async () => {
       const report = await assessGpu(null, manifest);
-      const adapters = report.adapters.map((adapter, i) => `Adapter ${i + 1}: ${(adapter.bytes / 1024 ** 3).toFixed(1)} GiB`);
+      const adapters = report.adapters.map((adapter, i) => `Adapter ${i + 1}: ${adapter.name}, ${(adapter.bytes / 1024 ** 3).toFixed(1)} GiB`);
       return [...adapters, report.choice.kind === "local" ? `Local model ${report.choice.model} can run here.` : remoteVerdictText(report.choice)];
     },
     portOwner: async (port) => {

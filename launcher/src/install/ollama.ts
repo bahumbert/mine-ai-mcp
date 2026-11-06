@@ -155,7 +155,7 @@ async function installOurOllama(ctx: InstallContext, deps: OllamaDeps, dir: stri
 
 const onlyIfThere = (exe: string, deps: OllamaDeps): string | null => (deps.fileExists(exe) ? exe : null);
 
-/** Stage 2: our serve reports the GPUs it can run on, which the registry alone cannot tell (ROCm card, dropped iGPU). */
+/** Stage 2: our serve reports the GPUs it can run on, which DXGI alone cannot tell (ROCm card, dropped iGPU). */
 async function discoverCompute(ctx: InstallContext, exe: string, deps: OllamaDeps): Promise<OllamaStepResult> {
   ctx.onProgress(0.9, "Asking Ollama which GPU it can use");
   try {

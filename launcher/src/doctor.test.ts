@@ -18,7 +18,7 @@ function fixture(change: (settings: Settings) => Settings = (settings) => settin
     platform: "win32",
     ollamaVersion: async () => "0.35.0",
     javaInstalled: () => true,
-    gpuSummary: async () => ["Adapter 1: 24.0 GiB", "Local model gemma4:12b can run here."],
+    gpuSummary: async () => ["Adapter 1: AMD Radeon RX 7900 XTX, 24.0 GiB", "Local model gemma4:12b can run here."],
     portOwner: async () => "free",
   };
   return { root, manifest, settings, deps };
@@ -32,7 +32,7 @@ test("lists the versions, the GPU answer and the settings path", async () => {
   assert.match(text, new RegExp(`Mine AI ${manifest.version.replaceAll(".", "\\.")}`, "u"));
   assert.match(text, /Bun 1\.4\.2/u);
   assert.match(text, /Ollama 0\.35\.0/u);
-  assert.match(text, /Adapter 1: 24\.0 GiB/u);
+  assert.match(text, /Adapter 1: AMD Radeon RX 7900 XTX, 24\.0 GiB/u);
   assert.match(text, /settings\.json/u);
 });
 

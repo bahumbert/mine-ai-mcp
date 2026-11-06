@@ -1,17 +1,14 @@
-// Decides local model or remote endpoint from the display adapters (registry), what Ollama reports it can use, and RAM.
-import { execFile } from "node:child_process";
+// Decides local model or remote endpoint from the display adapters (DXGI), what Ollama reports it can use, and RAM.
 import { totalmem } from "node:os";
-import { promisify } from "node:util";
 import type { Manifest } from "../manifest.ts";
+import { listDxgiAdapters, type DxgiAdapter } from "./dxgi.ts";
 import type { InstallContext } from "./step.ts";
 
 const GIB = 1024 ** 3;
-const DISPLAY_ADAPTER_CLASS_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}";
-const MEMORY_VALUE = "HardwareInformation.qwMemorySize";
 const SIZE_UNITS: Record<string, number> = { B: 1, KiB: 1024, MiB: 1024 ** 2, GiB: GIB, TiB: 1024 ** 4 };
 const KNOWN_LIBRARIES = ["cuda", "rocm", "vulkan", "metal", "cpu"] as const;
 
-export type DisplayAdapter = { bytes: number };
+export type DisplayAdapter = { name: string; bytes: number };
 export type ComputeLibrary = (typeof KNOWN_LIBRARIES)[number];
 export type ComputeDevice = { library: ComputeLibrary; name: string; totalBytes: number; freeBytes: number };
 /** A remote verdict: `reason` is the facts, `hint` the next action (the installer shows both, so neither repeats the other). */
@@ -24,29 +21,13 @@ export type GpuReport = { adapters: DisplayAdapter[]; compute: ComputeDevice[] |
 export type GpuStepResult = { ok: true; detail: string; report: GpuReport };
 
 export type GpuFacts = {
-  readRegistry(): Promise<string>;
+  listAdapters(): Promise<DisplayAdapter[]>;
   totalRamBytes(): number;
 };
 
-/** The dedicated memory of each display adapter in `reg query ... /v HardwareInformation.qwMemorySize` output. */
-export function parseRegistryVram(text: string): DisplayAdapter[] {
-  const adapters: DisplayAdapter[] = [];
-  for (const line of text.split(/\r?\n/u)) {
-    if (!line.includes(MEMORY_VALUE)) continue;
-    const bytes = registryValueBytes(line);
-    if (bytes !== null) adapters.push({ bytes });
-  }
-  return adapters;
-}
-
-/** REG_QWORD and REG_DWORD print `0x<hex>`; some drivers write REG_BINARY, 8 hex-pair bytes least significant first. */
-function registryValueBytes(line: string): number | null {
-  const number = /REG_(?:QWORD|DWORD)\s+0x([0-9a-f]+)/iu.exec(line);
-  if (number) return Number(BigInt(`0x${number[1]}`));
-  const binary = /REG_BINARY\s+([0-9a-f]+)\s*$/iu.exec(line);
-  if (!binary || binary[1].length % 2 !== 0) return null;
-  const pairs = binary[1].match(/../gu) ?? [];
-  return Number(BigInt(`0x${pairs.reverse().join("")}`));
+/** The hardware display adapters of a DXGI list: the software one (Microsoft Basic Render Driver) has no video memory to run a model on. */
+export function displayAdapters(list: DxgiAdapter[]): DisplayAdapter[] {
+  return list.filter((adapter) => !adapter.software).map((adapter) => ({ name: adapter.name, bytes: adapter.dedicatedBytes }));
 }
 
 /** The devices Ollama says it will run on: one `msg="inference compute"` line each. Dropped-device lines are ignored. */
@@ -87,8 +68,8 @@ function sizeBytes(text: string | undefined): number | null {
 }
 
 /**
- * Stage 1 (`compute` null): the registry's largest adapter. Stage 2: the most free memory on a non-cpu device Ollama
- * reports (spec D4: free VRAM), since the registry also lists adapters Ollama drops or cannot use. Too little RAM goes
+ * Stage 1 (`compute` null): DXGI's largest adapter. Stage 2: the most free memory on a non-cpu device Ollama
+ * reports (spec D4: free VRAM), since DXGI also lists adapters Ollama drops or cannot use. Too little RAM goes
  * remote either way (the model's commit lands in RAM beside the game, W1 facts).
  */
 export function chooseModel(adapters: DisplayAdapter[], compute: ComputeDevice[] | null, ramBytes: number, manifest: ModelRequirements): ModelChoice {
@@ -118,11 +99,11 @@ function formatGiB(bytes: number): string {
   return `${(bytes / GIB).toFixed(1)} GiB`;
 }
 
-/** The adapters and RAM of this PC with the model choice; a registry that cannot be read is a remote answer. */
+/** The adapters and RAM of this PC with the model choice; display adapters that cannot be read are a remote answer. */
 export async function assessGpu(compute: ComputeDevice[] | null, manifest: ModelRequirements, facts: GpuFacts = realGpuFacts): Promise<GpuReport> {
   const ramBytes = facts.totalRamBytes();
   try {
-    const adapters = parseRegistryVram(await facts.readRegistry());
+    const adapters = await facts.listAdapters();
     return { adapters, compute, ramBytes, choice: chooseModel(adapters, compute, ramBytes, manifest) };
   } catch (error) {
     const reason = `Could not read the display adapters (${error instanceof Error ? error.message : String(error)}).`;
@@ -138,9 +119,6 @@ export async function gpu(ctx: InstallContext, facts: GpuFacts = realGpuFacts): 
 }
 
 const realGpuFacts: GpuFacts = {
-  async readRegistry() {
-    const { stdout } = await promisify(execFile)("reg.exe", ["query", DISPLAY_ADAPTER_CLASS_KEY, "/s", "/v", MEMORY_VALUE], { encoding: "latin1", windowsHide: true });
-    return stdout;
-  },
+  listAdapters: async () => displayAdapters(listDxgiAdapters()),
   totalRamBytes: totalmem,
 };

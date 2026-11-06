@@ -8,7 +8,7 @@ import { INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./inst
 import type { GpuReport } from "./install/gpu.ts";
 
 const REMOTE_REPORT: GpuReport = { adapters: [], compute: null, ramBytes: 8 * 1024 ** 3, choice: { kind: "remote", reason: "This PC has 2.0 GiB of video memory; the local model needs 10.", hint: "Use a remote endpoint." } };
-const LOCAL_REPORT: GpuReport = { adapters: [{ bytes: 24 * 1024 ** 3 }], compute: null, ramBytes: 64 * 1024 ** 3, choice: { kind: "local", model: "gemma4:12b" } };
+const LOCAL_REPORT: GpuReport = { adapters: [{ name: "AMD Radeon RX 7900 XTX", bytes: 24 * 1024 ** 3 }], compute: null, ramBytes: 64 * 1024 ** 3, choice: { kind: "local", model: "gemma4:12b" } };
 
 function setup(steps: Partial<InstallSteps> = {}) {
   const { root, out, context } = cliContext("install");

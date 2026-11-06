@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Manifest } from "../../manifest.ts";
 import type { Settings } from "../../settings.ts";
+import type { DxgiAdapter } from "../dxgi.ts";
 import type { InstallContext } from "../step.ts";
 
 export function testManifest(ollama: Partial<Manifest["ollama"]> = {}, waits: Partial<Manifest["waits"]> = {}): Manifest {
@@ -49,6 +50,14 @@ export function testContext(root: string, manifest: Manifest = testManifest()): 
   const progress: [number, string][] = [];
   return { manifest, settings, root, progress, onProgress: (fraction, label) => progress.push([fraction, label]) };
 }
+
+/** The four adapters DXGI listed on the owner's PC, 2026-11-06 (probe `dxgi-adapters.ts`), in its order. */
+export const MEASURED_DXGI_ADAPTERS: DxgiAdapter[] = [
+  { name: "AMD Radeon RX 7900 XTX", dedicatedBytes: 25708240896, software: false },
+  { name: "AMD Radeon(TM) Graphics", dedicatedBytes: 509374464, software: false },
+  { name: "AMD Radeon RX 7900 XTX", dedicatedBytes: 25708240896, software: false },
+  { name: "Microsoft Basic Render Driver", dedicatedBytes: 0, software: true },
+];
 
 /** A fresh data root in the OS temp folder; call the returned `remove` in `after`. */
 export function tempDataRoot(): { root: string; remove(): void } {

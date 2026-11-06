@@ -4,7 +4,8 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { DownloadError } from "./download.ts";
 import { fakeOllama, type FakeOllamaOptions } from "./fixtures/fake-ollama.ts";
-import { tempDataRoot, testContext, testManifest } from "./fixtures/install-test-support.ts";
+import { MEASURED_DXGI_ADAPTERS, tempDataRoot, testContext, testManifest } from "./fixtures/install-test-support.ts";
+import { displayAdapters } from "./gpu.ts";
 import { defaultStoreWithModels, ollama, ollamaExe, ollamaRemove, parseOllamaVersion, runCommand, type OllamaDeps } from "./ollama.ts";
 import { loadInstallState, saveInstallState } from "./state.ts";
 
@@ -55,7 +56,7 @@ function scenario(options: Scenario = {}) {
     fileExists: () => true,
     defaultStoreWithModels: () => options.defaultStore ?? null,
     removeFile: (path) => removed.push(path),
-    gpuFacts: { readRegistry: async () => fixture("reg-vram.txt"), totalRamBytes: () => 64 * GIB },
+    gpuFacts: { listAdapters: async () => displayAdapters(MEASURED_DXGI_ADAPTERS), totalRamBytes: () => 64 * GIB },
   };
   return { deps, serve, ran, downloads, removed, stateWhenSetupRan, useRoot: (r: string) => (root = r) };
 }
@@ -84,7 +85,7 @@ test("stage 2 reads the GPU Ollama reports from our serve", async () => {
   assert.equal(result.report.compute?.[0].library, "rocm");
 });
 
-test("stage 2: Ollama running on the cpu only is a remote answer even with a big card in the registry", async () => {
+test("stage 2: Ollama running on the cpu only is a remote answer even with a big card in DXGI's list", async () => {
   const { s, ctx } = context({ output: CPU_ONLY_LOG });
   const result = await ollama(ctx, s.deps);
   assert.ok(result.ok && "report" in result);
