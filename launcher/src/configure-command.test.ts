@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { UsageError } from "./cli-context.ts";
 import { cliContext } from "./cli-test-support.ts";
 import { runConfigureCommand } from "./configure-command.ts";
+import { fakeKeyCipher, unreadingCipher } from "./key-cipher-test-support.ts";
 import { loadManifest } from "./manifest.ts";
 
 function setup() {
@@ -18,8 +20,9 @@ const GIB = 1024 ** 3;
 test("--server-remote then --llm-remote leave both in settings.json and keep unknown keys", async () => {
   const t = setup();
   writeFileSync(join(t.root, "settings.json"), JSON.stringify({ note: "mine", server: { kind: "none", comment: "kept?" } }));
-  assert.equal(await runConfigureCommand(["--server-remote", "play.example", "25570"], t.context), 0);
-  assert.equal(await runConfigureCommand(["--llm-remote", "https://api.example.test/v1", "sk-1", "big-model"], t.context), 0);
+  const clearKeys = { totalRamBytes: () => 8 * GIB, settings: { platform: "linux", cipher: null } } as const; // the form on any system the tests run on
+  assert.equal(await runConfigureCommand(["--server-remote", "play.example", "25570"], t.context, clearKeys), 0);
+  assert.equal(await runConfigureCommand(["--llm-remote", "https://api.example.test/v1", "sk-1", "big-model"], t.context, clearKeys), 0);
   const saved = t.settings();
   assert.deepEqual(saved.server, { kind: "remote", host: "play.example", port: 25_570 });
   assert.deepEqual(saved.llm, { kind: "remote", baseUrl: "https://api.example.test/v1", apiKey: "sk-1", model: "big-model" });
@@ -110,4 +113,85 @@ test("--command-players with a bad name, a missing value or given twice is a usa
     await assert.rejects(runConfigureCommand(args, t.context), UsageError, JSON.stringify(args));
   }
   assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
+});
+
+// The API key (plan 2026-11-06-installer-improvements T2, spec D3): a fake Windows with a fake cipher.
+function onWindows() {
+  const t = setup();
+  const deps = { totalRamBytes: () => 8 * GIB, settings: { platform: "win32" as const, cipher: fakeKeyCipher() } };
+  const run = (...args: string[]) => runConfigureCommand(args, t.context, deps);
+  return { ...t, run };
+}
+
+test("--llm-remote-saved-key changes the URL and the model and writes the saved blob back as it is", async () => {
+  const t = onWindows();
+  assert.equal(await t.run("--llm-remote", "https://old.test/v1", "sk-saved", "old-model"), 0);
+  const blob = t.settings().llm.apiKeyProtected;
+  assert.equal(await t.run("--llm-remote-saved-key", "https://new.test/v1", "new-model", "--server-remote", "h", "25565"), 0);
+  assert.deepEqual(t.settings().llm, { kind: "remote", baseUrl: "https://new.test/v1", model: "new-model", apiKeyProtected: blob });
+  assert.equal(t.settings().server.host, "h");
+});
+
+test("--llm-remote-saved-key with no saved key is a usage error naming --llm-remote, and writes nothing", async () => {
+  const t = onWindows();
+  await assert.rejects(t.run("--llm-remote-saved-key", "https://x.test/v1", "m"), (error: Error) => error instanceof UsageError && error.message.startsWith("No API key is saved: use --llm-remote <url> <key> <model>."));
+  assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
+  assert.equal(await t.run("--llm-remote", "https://x.test/v1", "", "m"), 0);
+  const before = readFileSync(join(t.root, "settings.json"), "utf8");
+  await assert.rejects(t.run("--llm-remote-saved-key", "https://y.test/v1", "m"), UsageError);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+});
+
+test("--llm-remote-saved-key on a key this PC cannot read says so and leaves the file as it is", async () => {
+  const t = setup();
+  const text = JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKeyProtected: "QUJD" } });
+  writeFileSync(join(t.root, "settings.json"), text);
+  const deps = { totalRamBytes: () => 8 * GIB, settings: { platform: "win32" as const, cipher: unreadingCipher } };
+  await assert.rejects(runConfigureCommand(["--llm-remote-saved-key", "https://y.test/v1", "m"], t.context, deps), (error: Error) => error instanceof UsageError && /cannot be read here/u.test(error.message) && error.message.includes("--llm-remote <url> <key> <model>"));
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), text);
+});
+
+test("--llm-remote-saved-key needs a URL and a model like --llm-remote does", async () => {
+  const t = onWindows();
+  await t.run("--llm-remote", "https://x.test/v1", "sk-saved", "m");
+  for (const args of [["--llm-remote-saved-key", "https://x.test/v1"], ["--llm-remote-saved-key", "not-a-url", "m"], ["--llm-remote-saved-key", "https://x.test/v1", ""], ["--llm-remote-saved-key", "https://x.test/v1", "m", "--llm-local"]]) {
+    await assert.rejects(t.run(...args), UsageError, JSON.stringify(args));
+  }
+});
+
+test("--server-local on a file whose key cannot be read keeps the blob as it was", async () => {
+  const t = setup();
+  writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKeyProtected: "QUJD" } }));
+  const deps = { totalRamBytes: () => 8 * GIB, settings: { platform: "win32" as const, cipher: unreadingCipher } };
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, deps), 0);
+  assert.deepEqual(t.settings().llm, { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKeyProtected: "QUJD" });
+});
+
+test("--llm-remote on a file whose key cannot be read replaces it with the new key", async () => {
+  const t = setup();
+  writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKeyProtected: "QUJD" } }));
+  const cipher = fakeKeyCipher();
+  const deps = { totalRamBytes: () => 8 * GIB, settings: { platform: "win32" as const, cipher: { protect: cipher.protect, unprotect: unreadingCipher.unprotect } } };
+  assert.equal(await runConfigureCommand(["--llm-remote", "https://x.test/v1", "sk-new", "m"], t.context, deps), 0);
+  assert.notEqual(t.settings().llm.apiKeyProtected, "QUJD");
+  assert.equal("keyUnreadable" in t.settings().llm, false);
+});
+
+test("a save that encrypts a key found in clear says so once, naming the file and the Windows user", async () => {
+  const t = onWindows();
+  writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKey: "sk-old" } }));
+  assert.equal(await t.run("--server-none"), 0);
+  const said = t.out.filter((line) => line.includes("is now encrypted"));
+  assert.deepEqual(said, [`The API key in ${join(t.root, "settings.json")} is now encrypted for the Windows user ${userInfo().username}; it no longer appears in clear in the file.`]);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8").includes("sk-old"), false);
+  t.out.length = 0;
+  assert.equal(await t.run("--server-none"), 0);
+  assert.equal(t.out.some((line) => line.includes("encrypted")), false);
+});
+
+test("--llm-remote with a new key over a key in clear says nothing about encryption: the player just gave the new one", async () => {
+  const t = onWindows();
+  writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKey: "sk-old" } }));
+  await t.run("--llm-remote", "https://x.test/v1", "sk-new", "m");
+  assert.equal(t.out.some((line) => line.includes("encrypted")), false);
 });

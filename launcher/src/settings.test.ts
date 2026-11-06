@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fakeKeyCipher, unreadingCipher } from "./key-cipher-test-support.ts";
 import { loadSettings, saveSettings, settingsFileExists, settingsPath, type ManifestDefaults } from "./settings.ts";
 
 const MANIFEST: ManifestDefaults = { ollama: { model: "gemma4:12b" }, defaultBots: ["ayla"] };
@@ -56,11 +57,12 @@ test("unknown keys survive a load and save, at the top level and inside llm", ()
 
 test("a saved file loads back to the same settings, and save creates the data root", () => {
   const root = join(tempRoot(), "new", "MineAI");
-  const settings = loadSettings(root, MANIFEST);
+  const clearKeys = { platform: "linux", cipher: null } as const; // on Windows it loads back with its blob too: tests below
+  const settings = loadSettings(root, MANIFEST, clearKeys);
   settings.llm = { kind: "remote", baseUrl: "https://api.example/v1", apiKey: "k", model: "m" };
   settings.server = { kind: "local", port: 25565, memoryMb: 4096 };
-  saveSettings(root, settings);
-  assert.deepEqual(loadSettings(root, MANIFEST), settings);
+  saveSettings(root, settings, clearKeys);
+  assert.deepEqual(loadSettings(root, MANIFEST, clearKeys), settings);
 });
 
 test("an invalid file fails with its path and the issue, and is never replaced", () => {
@@ -150,4 +152,67 @@ test("a prefix of one to three symbols other than a slash is accepted", () => {
     writeSettings(root, JSON.stringify({ commands: { prefix } }));
     assert.equal(loadSettings(root, MANIFEST).commands.prefix, prefix);
   }
+});
+
+// The API key on disk (plan 2026-11-06-installer-improvements T2, spec D3): a fake Windows with a fake cipher.
+const WINDOWS = () => ({ platform: "win32" as const, cipher: fakeKeyCipher() });
+const REMOTE = { kind: "remote", baseUrl: "https://api.example/v1", model: "m" };
+const fileLlm = (root: string): Record<string, unknown> => JSON.parse(readFileSync(settingsPath(root), "utf8")).llm;
+
+test("on Windows a remote key is saved as a blob only, loads back clear, and a save of other settings leaves the blob byte for byte", () => {
+  const root = tempRoot();
+  const options = WINDOWS();
+  const settings = loadSettings(root, MANIFEST, options);
+  settings.llm = { ...REMOTE, apiKey: "sk-or-v1-secret" } as typeof settings.llm;
+  saveSettings(root, settings, options);
+  assert.equal(readFileSync(settingsPath(root), "utf8").includes("sk-or-v1-secret"), false);
+  assert.equal("apiKey" in fileLlm(root), false);
+  const blob = fileLlm(root).apiKeyProtected;
+  assert.equal(typeof blob, "string");
+  const loaded = loadSettings(root, MANIFEST, options);
+  assert.equal(loaded.llm.kind === "remote" && loaded.llm.apiKey, "sk-or-v1-secret");
+  saveSettings(root, { ...loaded, checkUpdates: false }, options);
+  assert.equal(fileLlm(root).apiKeyProtected, blob);
+  assert.deepEqual(Object.keys(fileLlm(root)).sort(), ["apiKeyProtected", "baseUrl", "kind", "model"], "no helper field reaches the file");
+});
+
+test("an old clear key loads on Windows with clearKeyInFile, and the next save encrypts it for good and keeps the llm's unknown keys", () => {
+  const root = tempRoot();
+  const options = WINDOWS();
+  writeSettings(root, JSON.stringify({ llm: { ...REMOTE, apiKey: "sk-old", note: "mine" } }));
+  const settings = loadSettings(root, MANIFEST, options);
+  assert.equal(settings.llm.kind === "remote" && settings.llm.clearKeyInFile, true);
+  saveSettings(root, settings, options);
+  assert.equal(readFileSync(settingsPath(root), "utf8").includes("sk-old"), false);
+  assert.equal("clearKeyInFile" in fileLlm(root), false);
+  assert.equal(fileLlm(root).note, "mine");
+  const again = loadSettings(root, MANIFEST, options);
+  assert.equal(again.llm.kind === "remote" && again.llm.clearKeyInFile, undefined);
+  assert.equal(again.llm.kind === "remote" && again.llm.apiKey, "sk-old");
+});
+
+test("a blob that cannot be decrypted loads without throwing, as keyUnreadable, and a save of other settings keeps it", () => {
+  const root = tempRoot();
+  writeSettings(root, JSON.stringify({ llm: { ...REMOTE, apiKeyProtected: "QUJD" } }));
+  const options = { platform: "win32" as const, cipher: unreadingCipher };
+  const settings = loadSettings(root, MANIFEST, options);
+  assert.equal(settings.llm.kind === "remote" && settings.llm.keyUnreadable, true);
+  assert.equal(settings.llm.kind === "remote" && settings.llm.apiKey, "");
+  saveSettings(root, { ...settings, bots: ["brea"] }, options);
+  assert.equal(fileLlm(root).apiKeyProtected, "QUJD");
+  assert.equal("keyUnreadable" in fileLlm(root), false);
+  assert.equal("apiKey" in fileLlm(root), false);
+});
+
+// File modes mean nothing on a Windows drive: this one runs in WSL.
+test("on Linux the key stays in clear and a file that was wider before is narrowed to its owner only", { skip: process.platform === "win32" }, () => {
+  const root = tempRoot();
+  const options = { platform: "linux" as const, cipher: null };
+  writeSettings(root, "{}");
+  chmodSync(settingsPath(root), 0o644);
+  const settings = loadSettings(root, MANIFEST, options);
+  settings.llm = { ...REMOTE, apiKey: "sk-linux" } as typeof settings.llm;
+  saveSettings(root, settings, options);
+  assert.equal(fileLlm(root).apiKey, "sk-linux");
+  assert.equal(statSync(settingsPath(root)).mode & 0o777, 0o600);
 });

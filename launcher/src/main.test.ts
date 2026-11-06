@@ -167,7 +167,8 @@ test("`configure` then `stop` as the installer runs them: settings are written a
   const configured = await runLikeTheInstaller(["configure", "--llm-remote", "https://x.test/v1", "key with space", "model-1", "--server-remote", "10.0.0.5", "25565"]);
   assert.equal(configured.code, 0, configured.stderr);
   const saved = JSON.parse(readFileSync(join(configured.dataFolder, process.platform === "win32" ? "MineAI" : "mine-ai", "settings.json"), "utf8"));
-  assert.equal(saved.llm.apiKey, "key with space");
+  if (process.platform === "win32") assert.equal(typeof saved.llm.apiKeyProtected, "string"); // encrypted for the Windows user
+  else assert.equal(saved.llm.apiKey, "key with space");
   assert.equal(saved.server.host, "10.0.0.5");
   const stopped = await runLikeTheInstaller(["stop"]);
   assert.equal(stopped.code, 0, stopped.stderr);

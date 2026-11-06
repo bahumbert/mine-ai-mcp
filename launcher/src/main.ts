@@ -23,7 +23,7 @@ export const USAGE = `Usage: mine-ai <command>
   doctor                        versions, GPU answer, ports, settings and the last errors, for a bug report
   bot start|stop <persona id or name>   start or stop one bot while Mine AI runs
   install <gpu|ollama|ollama-remove|model|model-remove|java|server|endpoint-test> [--accept-eula] [--json <file>]
-  configure --llm-local | --llm-remote <url> <key> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
+  configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
             and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)`;
 
 const HELP_FLAGS: readonly string[] = ["--help", "-h"];
