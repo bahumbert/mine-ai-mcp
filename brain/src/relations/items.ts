@@ -9,11 +9,16 @@ export const sideText = (items: readonly ItemCount[]): string => items.map((i) =
 /** How many of an item the inventory holds, over all its stacks. */
 export const carriedOf = (inventory: BotSnapshot["inventory"], item: string): number => inventory.filter((s) => s.name === item).reduce((sum, s) => sum + s.count, 0);
 
-/** My side not yet given of one agreed trade, as `SkillContext.owed` lists it. */
+/** My side not yet given of one agreed trade, as `SkillContext.owed` lists it; or, with `held`, their payment I hold for a trade that ended (`heldOwed`). */
 export interface OwedItem extends ItemCount {
   readonly partner: string;
   readonly tradeId: string;
+  /** Set only for a payment held for an ended trade: it is theirs and kept from other work, not a promise of mine. */
+  readonly held?: true;
 }
+
+/** How a held payment is worded after "N item <partner>": the same story as the model's own held line (`describeHeld`). */
+const HELD_TAIL = "handed over for a trade that ended, not given back";
 
 const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
@@ -56,22 +61,48 @@ export function freeStacks<S extends { readonly name: string; readonly count: nu
 
 /**
  * What a step did to the owed items: for each item that fell during it (`before` to `after`) below what the other
- * trades owe, "you now carry <a> <item> of the <n> you owe <partners> (trade)"; empty when none did. `partner` is the
- * player a give went to: their own trade is not held back from them.
+ * trades owe or hold, "you now carry <a> <item> of the <n> you owe <partners> (trade)" for agreed entries and "... of the
+ * <n> <partners> handed over for a trade that ended, not given back" for held ones (both when an item has both); empty
+ * when none did. `partner` is the player a give went to: their own trade is not held back from them.
  */
 export function owedUsed(owed: readonly OwedItem[], before: BotSnapshot["inventory"], after: BotSnapshot["inventory"], partner?: string): string {
   return [...new Set(owed.map((o) => o.item))].flatMap((item) => {
     const held = heldTotal(owed, item, partner);
     const now = carriedOf(after, item);
     if (held === 0 || now >= held || now >= carriedOf(before, item)) return [];
-    const partners = [...new Set(heldBack(owed, item, partner).map((o) => o.partner))].join(", ");
-    return [`you now carry ${now} ${item} of the ${held} you owe ${partners} (trade)`];
+    const entries = heldBack(owed, item, partner);
+    const part = (isHeld: boolean, wording: (count: number, partners: string) => string): string[] => {
+      const of = entries.filter((o) => (o.held === true) === isHeld);
+      return of.length === 0 ? [] : [wording(of.reduce((sum, o) => sum + o.count, 0), [...new Set(of.map((o) => o.partner))].join(", "))];
+    };
+    const owing = part(false, (count, partners) => `of the ${count} you owe ${partners} (trade)`);
+    const holding = part(true, (count, partners) => `of the ${count} ${partners} ${HELD_TAIL}`);
+    return [`you now carry ${now} ${item} ${[...owing, ...holding].join(" and ")}`];
   }).join("; ");
 }
 
-/** "1 crafting_table to Ayla, 2 crafting_table to Bruno": the trades that hold the item back from `partner`; empty when none. */
-export const owedText = (owed: readonly OwedItem[], item: string, partner?: string): string =>
-  heldBack(owed, item, partner).map((o) => `${o.count} ${o.item} to ${o.partner}`).join(", ");
+/** The agreed entries as "1 crafting_table to Ayla, 2 crafting_table to Bruno". */
+const agreedWords = (entries: readonly OwedItem[]): string => entries.filter((o) => o.held !== true).map((o) => `${o.count} ${o.item} to ${o.partner}`).join(", ");
+/** The held entries as "5 iron_ingot Theo handed over for a trade that ended, not given back". */
+const heldWords = (entries: readonly OwedItem[]): string => entries.filter((o) => o.held === true).map((o) => `${o.count} ${o.item} ${o.partner} ${HELD_TAIL}`).join(", ");
+const joinParts = (parts: readonly string[]): string => parts.filter((p) => p !== "").join("; ");
+
+/** The entries that hold the item back from `partner`, as the start of a sentence: "you owe <agreed> (trade)" for agreed entries, "you hold <held>" for held ones, both joined by "; "; empty when none. */
+export const owedSentence = (owed: readonly OwedItem[], item: string, partner?: string): string => {
+  const entries = heldBack(owed, item, partner);
+  const agreed = agreedWords(entries);
+  const held = heldWords(entries);
+  return joinParts([agreed === "" ? "" : `you owe ${agreed} (trade)`, held === "" ? "" : `you hold ${held}`]);
+};
+
+/** What keeps `items` from a give to `partner` after a fetch: "owed to another agreed trade", "held for a trade that ended (...)" or both. */
+export function holdsBack(owed: readonly OwedItem[], items: readonly string[], partner: string): string {
+  const entries = items.flatMap((item) => heldBack(owed, item, partner));
+  const heldToo = entries.some((o) => o.held === true);
+  const agreedToo = entries.some((o) => o.held !== true);
+  const held = "held for a trade that ended (handed over to me, not given back)";
+  return heldToo && agreedToo ? `owed to another agreed trade and ${held}` : heldToo ? held : "owed to another agreed trade";
+}
 
 /**
  * What a bill of materials lacks once the owed counts are kept out of the bag, and a note naming the missing blocks
@@ -82,15 +113,19 @@ export function billShortfall(bill: readonly MaterialCount[], inventory: BotSnap
   const plain = shortfall(bill, inventory);
   const notes = missing.flatMap(({ item, count }) => {
     const owedPart = count - (plain.find((entry) => entry.item === item)?.count ?? 0);
-    return owedPart > 0 ? [`${owedPart} ${item} you carry are owed: ${owedText(owed, item)} (trade)`] : [];
+    if (owedPart <= 0) return [];
+    const entries = heldBack(owed, item);
+    const agreed = agreedWords(entries);
+    const held = heldWords(entries);
+    return [`${owedPart} ${item} you carry are ${joinParts([agreed === "" ? "" : `owed: ${agreed} (trade)`, held === "" ? "" : `held: ${held}`])}`];
   });
   return { missing, owedNote: notes.join("; ") };
 }
 
-/** The fact for an item the bag holds only for the trades that owe it ("you owe 4 bread to Ayla (trade); you carry no bread beyond it"); null when a spare is carried or nothing is owed. */
+/** The fact for an item the bag holds only for the trades that owe it or hold it ("you owe 4 bread to Ayla (trade); you carry no bread beyond it"); null when a spare is carried or nothing is owed. */
 export function noSpareFact(owed: readonly OwedItem[], inventory: BotSnapshot["inventory"], item: string): string | null {
-  const holding = owedText(owed, item);
-  return holding === "" || spareFor(carriedOf(inventory, item), owed, item) > 0 ? null : `you owe ${holding} (trade); you carry no ${item} beyond it`;
+  const holding = owedSentence(owed, item);
+  return holding === "" || spareFor(carriedOf(inventory, item), owed, item) > 0 ? null : `${holding}; you carry no ${item} beyond it`;
 }
 
 /** What a bag may spend of an item: carried minus the reserved counts and the held ones (may be negative: nothing to spend). */

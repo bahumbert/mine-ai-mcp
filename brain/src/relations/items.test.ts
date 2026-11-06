@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { billShortfall, carriedOf, freeStacks, noSpareFact, spareCounter, heldCounts, heldKinds, heldTotal, owedText, owedUsed, sideText, spareFor } from "./items.ts";
+import { billShortfall, carriedOf, freeStacks, holdsBack, noSpareFact, spareCounter, heldCounts, heldKinds, heldTotal, owedSentence, owedUsed, sideText, spareFor } from "./items.ts";
 
 test("sideText lists count and item per entry, empty for no entry", () => {
   assert.equal(sideText([{ item: "oak_log", count: 2 }, { item: "iron_ingot", count: 1 }]), "2 oak_log, 1 iron_ingot");
@@ -27,10 +27,10 @@ test("spareFor keeps what is owed to every trade except the partner's", () => {
   assert.equal(spareFor(9, [], "crafting_table"), 9);
 });
 
-test("owedText names each trade that holds the item back", () => {
-  assert.equal(owedText(owedTables, "crafting_table"), "1 crafting_table to Ayla, 2 crafting_table to Bruno");
-  assert.equal(owedText(owedTables, "crafting_table", "Ayla"), "2 crafting_table to Bruno");
-  assert.equal(owedText(owedTables, "dirt"), "");
+test("owedSentence names each trade that holds the item back, the partner's own left out", () => {
+  assert.equal(owedSentence(owedTables, "crafting_table"), "you owe 1 crafting_table to Ayla, 2 crafting_table to Bruno (trade)");
+  assert.equal(owedSentence(owedTables, "crafting_table", "Ayla"), "you owe 2 crafting_table to Bruno (trade)");
+  assert.equal(owedSentence(owedTables, "dirt"), "");
 });
 
 const bag = (...stacks: [string, number][]) => stacks.map(([name, count]) => ({ name, count }));
@@ -109,4 +109,36 @@ test("spareCounter takes the reserved and the held counts off what a bag carries
   assert.equal(spare("cobblestone"), 6);
   assert.equal(spare("dirt"), 6);
   assert.equal(spare("sand"), 0);
+});
+
+// A payment held for a trade that ended (`heldOwed` sets `held`): worded as held, never as owed.
+const HELD_TAIL = "handed over for a trade that ended, not given back";
+const heldIron = [{ item: "iron_ingot", count: 5, partner: "Theo", tradeId: "h1", held: true as const }];
+const agreedIron = [{ item: "iron_ingot", count: 2, partner: "Ayla", tradeId: "t1" }];
+
+test("owedSentence says you owe for agreed entries and you hold for held ones; a held entry never reads as owed", () => {
+  assert.equal(owedSentence(agreedIron, "iron_ingot"), "you owe 2 iron_ingot to Ayla (trade)");
+  assert.equal(owedSentence(heldIron, "iron_ingot"), `you hold 5 iron_ingot Theo ${HELD_TAIL}`);
+  assert.equal(owedSentence([...agreedIron, ...heldIron], "iron_ingot"), `you owe 2 iron_ingot to Ayla (trade); you hold 5 iron_ingot Theo ${HELD_TAIL}`);
+  assert.equal(owedSentence(heldIron, "iron_ingot", "theo"), "", "the payer's own held payment is not held back from them");
+});
+
+test("owedUsed words a fall below a held payment as held, an agreed one as owed, both when one item has both", () => {
+  assert.equal(owedUsed(heldIron, bag(["iron_ingot", 6]), bag(["iron_ingot", 2])), `you now carry 2 iron_ingot of the 5 Theo ${HELD_TAIL}`);
+  assert.equal(owedUsed(agreedIron, bag(["iron_ingot", 6]), bag(["iron_ingot", 1])), "you now carry 1 iron_ingot of the 2 you owe Ayla (trade)");
+  assert.equal(owedUsed([...agreedIron, ...heldIron], bag(["iron_ingot", 9]), bag(["iron_ingot", 3])), `you now carry 3 iron_ingot of the 2 you owe Ayla (trade) and of the 5 Theo ${HELD_TAIL}`);
+  assert.equal(owedUsed(heldIron, bag(["iron_ingot", 6]), bag(["iron_ingot", 2]), "Theo"), "", "a give back to the partner is not reported");
+});
+
+test("billShortfall and noSpareFact word a held payment as held", () => {
+  const bill = [{ item: "iron_ingot", count: 6 }];
+  assert.deepEqual(billShortfall(bill, bag(["iron_ingot", 6]), heldIron), { missing: [{ item: "iron_ingot", count: 5 }], owedNote: `5 iron_ingot you carry are held: 5 iron_ingot Theo ${HELD_TAIL}` });
+  assert.equal(billShortfall(bill, bag(["iron_ingot", 7]), [...agreedIron, ...heldIron]).owedNote, `6 iron_ingot you carry are owed: 2 iron_ingot to Ayla (trade); held: 5 iron_ingot Theo ${HELD_TAIL}`);
+  assert.equal(noSpareFact([...agreedIron, ...heldIron], bag(["iron_ingot", 7]), "iron_ingot"), `you owe 2 iron_ingot to Ayla (trade); you hold 5 iron_ingot Theo ${HELD_TAIL}; you carry no iron_ingot beyond it`);
+});
+
+test("holdsBack names what keeps an item from a give: agreed trades, a held payment, or both", () => {
+  assert.equal(holdsBack(agreedIron, ["iron_ingot"], "Bo"), "owed to another agreed trade");
+  assert.equal(holdsBack(heldIron, ["iron_ingot"], "Bo"), "held for a trade that ended (handed over to me, not given back)");
+  assert.equal(holdsBack([...agreedIron, ...heldIron], ["iron_ingot"], "Bo"), "owed to another agreed trade and held for a trade that ended (handed over to me, not given back)");
 });

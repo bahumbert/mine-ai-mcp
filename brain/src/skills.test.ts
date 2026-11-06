@@ -2596,6 +2596,48 @@ test("a full bag where every kind is owed: the craft fails with no drop, and a g
 
 const owedBread = (count: number) => [{ item: "bread", count, partner: "Ayla", tradeId: "t1" }];
 
+const heldTable = [{ item: "crafting_table", count: 1, partner: "Ayla", tradeId: "t1", held: true as const }];
+const HELD_TABLE_WORDS = "1 crafting_table Ayla handed over for a trade that ended, not given back";
+
+test("give and drop_item word a held payment as held, with what can go and a next step, never as owed", async () => {
+  const runtime = new FakeRuntime();
+  stevesFeet(runtime, 1);
+  const refused = await runStep(stepSchema.parse({ skill: "give_item", player: "Steve", item: "crafting_table", count: 1 }), contextFor(runtime, { owed: () => heldTable }));
+  assert.equal(refused.status, "failed");
+  const detail = refused.status === "failed" ? refused.detail : "";
+  assert.ok(detail.includes(`you hold ${HELD_TABLE_WORDS}: you can give 0; keep the rest for them`), detail);
+  assert.doesNotMatch(detail, /you owe/u);
+  assert.deepEqual(runtime.submitted, []);
+
+  const dropping = new FakeRuntime();
+  dropping.snapshot = { ...dropping.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "dirt", count: 2 }] };
+  const dropped = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "crafting_table" }, { item: "dirt" }] }), contextFor(dropping, { requester: "Finn", owed: () => heldTable }));
+  const droppedDetail = dropped.status === "done" ? dropped.detail : "";
+  assert.ok(droppedDetail.includes(`kept 1 crafting_table: you hold ${HELD_TABLE_WORDS}: you can drop 0`), droppedDetail);
+  assert.doesNotMatch(droppedDetail, /you owe/u);
+});
+
+test("give with a held entry and an agreed one for another partner says both; the held partner gets its payment back", async () => {
+  const runtime = new FakeRuntime();
+  stevesFeet(runtime, 2);
+  const both = [...owedToAyla.map((o) => ({ ...o, partner: "Bruno" })), ...heldTable];
+  const refused = await runStep(stepSchema.parse({ skill: "give_item", player: "Steve", item: "crafting_table", count: 2 }), contextFor(runtime, { owed: () => both }));
+  const detail = refused.status === "failed" ? refused.detail : "";
+  assert.ok(detail.includes(`you owe 1 crafting_table to Bruno (trade); you hold ${HELD_TABLE_WORDS}: you can give 0`), detail);
+  const back = new FakeRuntime();
+  stevesFeet(back, 1);
+  back.snapshot = { ...back.snapshot, players: [{ username: "Ayla", position: { x: 3, y: 64, z: 0 } }] };
+  const given = await runStep(stepSchema.parse({ skill: "give_item", player: "Ayla", item: "crafting_table", count: 1 }), contextFor(back, { owed: () => heldTable }));
+  assert.equal(given.status, "done", "a give back to the one who handed it over is not held back");
+});
+
+test("eat is refused with a held fact when the food was handed over for a trade that ended", async () => {
+  const none = new FakeRuntime();
+  none.snapshot = { ...none.snapshot, inventory: [{ name: "bread", count: 4 }] };
+  const refused = await runStep({ skill: "eat", food: "bread" }, contextFor(none, { owed: () => [{ item: "bread", count: 4, partner: "Ayla", tradeId: "t1", held: true as const }] }));
+  assert.deepEqual(refused, { status: "failed", detail: "you hold 4 bread Ayla handed over for a trade that ended, not given back; you carry no bread beyond it" });
+});
+
 test("eat is refused with the fact when the named food has no spare, and eats when one is spare", async () => {
   const none = new FakeRuntime();
   none.snapshot = { ...none.snapshot, inventory: [{ name: "bread", count: 4 }] };

@@ -7,7 +7,7 @@ import type { ItemCount, Trade } from "./types.ts";
 
 /** What the held payments of the given trades are, as the brain's own work must treat them (owed to their partner). */
 export function heldOwed(trades: readonly Trade[], within: HeldWindow): OwedItem[] {
-  return trades.flatMap((t) => heldPayment(t, within).map((h) => ({ ...h, partner: t.partner, tradeId: t.id })));
+  return trades.flatMap((t) => heldPayment(t, within).map((h) => ({ ...h, partner: t.partner, tradeId: t.id, held: true as const })));
 }
 
 /** Saves a trade that moved by a late give or a give-back: no state change, no facts, no score. */

@@ -1985,7 +1985,7 @@ test("B1: a later give_item of my own side closes the line (paying late)", async
 test("B1: a held payment is in owed() for 60 min, then not; the held trade does not make the controller busy", async () => {
   const h = harness();
   const id = await brokenWithPayment(h);
-  assert.deepEqual(h.c.owed(), [{ item: "iron_ingot", count: 5, partner: "Theo", tradeId: id }]);
+  assert.deepEqual(h.c.owed(), [{ item: "iron_ingot", count: 5, partner: "Theo", tradeId: id, held: true }], "a held payment carries the flag: the words say held, not owed");
   assert.equal(h.c.busy(), false);
   h.state.now += 59 * MIN;
   assert.equal(h.c.owed().length, 1);
@@ -2038,6 +2038,8 @@ test("B1 review: a payment held for an ended trade is not promised to another pa
   const h = harness();
   await brokenWithPayment(h);
   const s = snapshot({ inventory: [{ name: "iron_ingot", count: 5 }, { name: "bread", count: 10 }] });
-  assert.match(h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Bruno", s) ?? "", /5 of them promised in other trades/u);
+  const refused = h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Bruno", s) ?? "";
+  assert.match(refused, /5 of them Theo handed over for a trade that ended, not given back/u);
+  assert.doesNotMatch(refused, /promised/u, "a held payment is worded as held, not as a promise");
   assert.equal(h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Theo", s), null);
 });

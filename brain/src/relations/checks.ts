@@ -26,21 +26,29 @@ export interface CheckInput {
 }
 
 /** What other trades I already promised and have not handed over, per item. */
-function promisedOf(trades: readonly Trade[], item: string, except: string | undefined, held: readonly OwedItem[] = [], speaker = ""): number {
-  const heldBack = held.filter((h) => h.item === item && h.partner.toLowerCase() !== speaker.toLowerCase()).reduce((sum, h) => sum + h.count, 0);
-  return heldBack + trades.filter((t) => t.id !== except && (t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null)
+function promisedOf(trades: readonly Trade[], item: string, except: string | undefined): number {
+  return trades.filter((t) => t.id !== except && (t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null)
     .flatMap((t) => t.give).filter((g) => g.item === item).reduce((sum, g) => sum + g.count, 0);
+}
+
+/** The payments held for ended trades of an item, kept from every partner but the speaker: a count and who handed them over. */
+function heldPaymentsOf(held: readonly OwedItem[], item: string, speaker: string): { readonly count: number; readonly partners: string } {
+  const kept = held.filter((h) => h.item === item && h.partner.toLowerCase() !== speaker.toLowerCase());
+  return { count: kept.reduce((sum, h) => sum + h.count, 0), partners: [...new Set(kept.map((h) => h.partner))].join(", ") };
 }
 
 function whatIsWrongWithMySide(i: CheckInput, answered: Trade | undefined): string | null {
   for (const { item, count } of i.decision.give) {
     const carried = carriedOf(i.snapshot.inventory, item) + (i.givenOutside?.get(item) ?? 0);
-    const promised = promisedOf(i.trades, item, answered?.id, i.held, i.speaker);
-    if (carried - promised < count) {
-      const free = carried - promised;
+    const promised = promisedOf(i.trades, item, answered?.id);
+    const held = heldPaymentsOf(i.held ?? [], item, i.speaker);
+    const free = carried - promised - held.count;
+    if (free < count) {
       // An accept cannot change the offer's terms, so the model is told what it may propose instead (a counter-offer).
       const hint = i.decision.action === "accept" && free > 0 ? `: you may propose ${free} instead` : "";
-      return `you carry ${carried} ${item}${promised > 0 ? `, ${promised} of them promised in other trades` : ""}, not ${count}${hint}`;
+      const promisedPart = promised > 0 ? `, ${promised} of them promised in other trades` : "";
+      const heldPart = held.count > 0 ? `, ${held.count} of them ${held.partners} handed over for a trade that ended, not given back` : "";
+      return `you carry ${carried} ${item}${promisedPart}${heldPart}, not ${count}${hint}`;
     }
   }
   return null;

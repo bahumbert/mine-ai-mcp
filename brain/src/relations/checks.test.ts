@@ -60,6 +60,16 @@ test("an accept refused for an amount says how many I may propose instead; none 
   assert.match(check(decision({ action: "accept", give: [{ item: "bread", count: 18 }] }), 5, { trades: [promised] }) ?? "", /you carry 10 bread, 4 of them promised in other trades, not 18: you may propose 6 instead$/u);
 });
 
+test("an accept refused for an amount names a held payment apart from the promised ones", () => {
+  const heldBread = [{ item: "bread", count: 3, partner: "Mia", tradeId: "h", held: true as const }];
+  const run = (over: { trades?: Trade[]; held?: typeof heldBread }) => checkTradeDecision({ decision: decision({ action: "accept", give: [{ item: "bread", count: 18 }] }), speaker: "Theo", snapshot: snapshotWithTheoAt(5), trades: over.trades ?? [], maxOpenTrades: 3, reach: 32, ...(over.held === undefined ? {} : { held: over.held }) }) ?? "";
+  assert.match(run({ held: heldBread }), /you carry 10 bread, 3 of them Mia handed over for a trade that ended, not given back, not 18: you may propose 7 instead$/u);
+  assert.doesNotMatch(run({ held: heldBread }), /promised/u, "a held payment is not a promise");
+  const promised = openTrade({ id: "p", partner: "Bo", state: "agreed", give: [{ item: "bread", count: 4 }] });
+  assert.match(run({ trades: [promised], held: heldBread }), /you carry 10 bread, 4 of them promised in other trades, 3 of them Mia handed over for a trade that ended, not given back, not 18: you may propose 3 instead$/u);
+  assert.doesNotMatch(run({ held: [{ ...heldBread[0]!, partner: "Theo" }] }), /handed over/u, "the speaker's own payment is not held back from them");
+});
+
 test("termsDifferFromWords names a number the words give an item of the terms that is not the terms' count", () => {
   const terms = [{ item: "glass_pane", count: 1 }, { item: "cobblestone", count: 18 }];
   assert.deepEqual(termsDifferFromWords("I give 16 glass panes for 18 cobblestone", terms), ["trade: terms differ from the words: glass_pane 1 in terms, 16 in the line"]);

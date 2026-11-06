@@ -3,7 +3,7 @@ import type { Clock } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { Position } from "../runtime-client.ts";
 import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
-import { carriedOf, sideText, spareFor } from "./items.ts";
+import { carriedOf, holdsBack, sideText, spareFor } from "./items.ts";
 import { type ItemCount, MINUTE_MS } from "./types.ts";
 
 /** How far around itself a collect looks for the partner's items. */
@@ -85,7 +85,7 @@ async function getBackShort(context: SkillContext, partner: string, short: reado
   const fetched = await runStep({ skill: "get_items", items: short.map(({ item, lacking }) => ({ item, count: lacking })) }, { ...context, signal: AbortSignal.any([context.signal, timeout]) });
   const still = await shortOf(context, partner, short);
   if (still.length === 0) return null;
-  const said = timeout.aborted ? `the trade's clock ran out after ${Math.round(getBackMs / 1000)} s` : fetched.status === "done" ? "what it fetched is owed to another agreed trade" : "detail" in fetched ? fetched.detail : fetched.status;
+  const said = timeout.aborted ? `the trade's clock ran out after ${Math.round(getBackMs / 1000)} s` : fetched.status === "done" ? `what it fetched is ${holdsBack(context.owed?.() ?? [], still.map((s) => s.item), partner)}` : "detail" in fetched ? fetched.detail : fetched.status;
   return `I no longer carry ${sideText(still)}; getting it back failed: ${said}`;
 }
 

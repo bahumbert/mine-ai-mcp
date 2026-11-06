@@ -5,6 +5,7 @@ import { Body } from "../body.ts";
 import { runStep, type SkillContext } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
 import type { Clock } from "../conversation/socialise.ts";
+import type { OwedItem } from "./items.ts";
 import type { ItemCount } from "./types.ts";
 import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, PICK_BACK_RADIUS, runHandoff, type AwaitOptions } from "./handoff.ts";
 
@@ -549,6 +550,23 @@ test("a give does not take the count another agreed trade owes: it fetches the d
   const gone = handoffOutcome(await runHandoff({ ...contextFor(noRecipe), owed }, giveTable(), undefined, alwaysDue));
   assert.equal(gone.outcome, "items_gone");
   assert.equal(drops(noRecipe).length, 0);
+});
+
+test("a fetch absorbed by a held payment says so, not that another agreed trade owes it", async () => {
+  // The fetch crafts the table, and a trade of Bruno's ends meanwhile with a table of his in my bag: the new table is held back, so the give is still short.
+  const heldAfterCraft = async (entries: () => OwedItem[]) => {
+    const runtime = tableGone();
+    return handoffOutcome(await runHandoff({ ...contextFor(runtime), owed: () => (crafts(runtime).length > 0 ? entries() : []) }, giveTable(), undefined, alwaysDue));
+  };
+  const heldOnly = (): OwedItem[] => [{ item: "crafting_table", count: 1, partner: "Bruno", tradeId: "u", held: true }];
+  const held = await heldAfterCraft(heldOnly);
+  assert.equal(held.outcome, "items_gone");
+  assert.match(held.detail, /what it fetched is held for a trade that ended \(handed over to me, not given back\)/u);
+  assert.doesNotMatch(held.detail, /owed to another agreed trade/u);
+  const both = await heldAfterCraft(() => [...heldOnly(), { item: "crafting_table", count: 1, partner: "Cleo", tradeId: "v" }]);
+  assert.match(both.detail, /owed to another agreed trade and held for a trade that ended/u);
+  const plain = await heldAfterCraft(() => [{ item: "crafting_table", count: 1, partner: "Bruno", tradeId: "u" }]);
+  assert.match(plain.detail, /what it fetched is owed to another agreed trade$/u, "an agreed entry keeps its wording");
 });
 
 /** Partners positions by poll: the clock moves the partner as the game does. */

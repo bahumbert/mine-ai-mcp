@@ -15,7 +15,7 @@ import type { KnownPlace } from "./mind.ts";
 import { handedOver, recipientSettled, recipientTook, tossSpot } from "./give-result.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { NEWEST_REGISTRY_VERSION as ENTITY_REGISTRY_VERSION } from "./newest-registry.ts";
-import { billShortfall, carriedOf, heldCounts, heldKinds, noSpareFact, owedText, spareCounter, spareFor, type OwedItem } from "./relations/items.ts";
+import { billShortfall, carriedOf, heldCounts, heldKinds, noSpareFact, owedSentence, spareCounter, spareFor, type OwedItem } from "./relations/items.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
@@ -261,7 +261,7 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
 }
 
-/** Eats the named food, unless an agreed trade owes all of what is carried of it. */
+/** Eats the named food, unless an agreed trade owes, or a trade that ended holds, all of what is carried of it. */
 async function eat(context: SkillContext, food: string, why: string): Promise<SkillResult> {
   const owed = context.owed?.() ?? [];
   const fact = owed.length === 0 ? null : noSpareFact(owed, (await context.runtime.status()).inventory, food);
@@ -424,20 +424,20 @@ async function dropItems(context: SkillContext, step: Extract<Step, { skill: "dr
 /** The drop entry cut to what no agreed trade owes (orders too), with the line that says what was kept; the entry is null when nothing of it may go. */
 function spareDrop(context: SkillContext, inventory: BotSnapshot["inventory"], entry: { readonly item: string; readonly count?: number | undefined }): { readonly entry: typeof entry | null; readonly kept: string | null } {
   const owed = context.owed?.() ?? [];
-  const holding = owedText(owed, entry.item);
+  const holding = owedSentence(owed, entry.item);
   if (holding === "") return { entry, kept: null };
   const carried = carriedOf(inventory, entry.item);
   const spare = spareFor(carried, owed, entry.item);
   if (entry.count !== undefined && entry.count <= spare) return { entry, kept: null };
-  return { entry: spare === 0 ? null : { item: entry.item, count: entry.count === undefined ? spare : Math.min(entry.count, spare) }, kept: `kept ${carried - spare} ${entry.item}: you owe ${holding} (trade): you can drop ${spare}` };
+  return { entry: spare === 0 ? null : { item: entry.item, count: entry.count === undefined ? spare : Math.min(entry.count, spare) }, kept: `kept ${carried - spare} ${entry.item}: ${holding}: you can drop ${spare}` };
 }
 
 async function give(context: SkillContext, player: string, item: string, count: number): Promise<SkillResult> {
   const owed = context.owed?.() ?? [];
-  const holding = owedText(owed, item, player);
+  const holding = owedSentence(owed, item, player);
   if (holding !== "") {
     const spare = spareFor(carriedOf((await context.runtime.status()).inventory, item), owed, item, player);
-    if (count > spare) return { status: "failed", detail: `you owe ${holding} (trade): you can give ${spare}; keep the rest for them` };
+    if (count > spare) return { status: "failed", detail: `${holding}: you can give ${spare}; keep the rest for them` };
   }
   const { result, taken } = await giveTo(context, player, item, count);
   return result.status === "done" && taken !== null ? { ...result, taken } : result;
