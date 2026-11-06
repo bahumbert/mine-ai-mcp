@@ -1,4 +1,4 @@
-// The trade state machine and payment attribution: pure, every clock is a wall-clock `now` passed in.
+// The trade state machine and payment attribution: pure, every `now` passed in is wall time (a trade's own times are stored and compared with it).
 import { manhattan } from "../conversation/state.ts";
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
@@ -64,6 +64,18 @@ const OPEN_STATES: ReadonlySet<TradeState> = new Set(["proposed", "agreed", "i_g
 /** Open: still moving. A broken trade is ended, though a late payment can still close it (see `awaitsPayment`). */
 export function isOpen(t: Trade): boolean {
   return OPEN_STATES.has(t.state);
+}
+
+/** How a trade closed before my side was given: its state ("gone" for no trade); null while it is open, or once my side was given (done, or a give made outside the hand-off). */
+export function closedBeforeGiven(t: Trade | undefined): string | null {
+  if (t === undefined) return "gone";
+  return isOpen(t) || t.state === "done" || t.gaveAt !== null ? null : t.state;
+}
+
+/** How a trade ended when the wait for their side is over: its state and note ("gone" for no trade); null while it is open or once it is done. */
+export function endedWhileWaiting(t: Trade | undefined): string | null {
+  if (t === undefined) return "gone";
+  return isOpen(t) || t.state === "done" ? null : `${t.state}: ${t.note}`;
 }
 
 /** True for trades whose credits are still accepted: open and agreed ones, and ones they left unpaid. */

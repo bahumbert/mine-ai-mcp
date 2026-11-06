@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { BotSnapshot } from "../runtime-client.ts";
-import { Arrivals } from "./collects.ts";
+import { Arrivals, COLLECT_WATCH_MS, CollectFallback } from "./collects.ts";
 import { proposeTrade } from "./trade.ts";
 import type { Trade } from "./types.ts";
 
@@ -68,4 +68,19 @@ test("a credit to another trade is explained for every baseline taken before it"
   a.start(newer, bag(0));
   a.explain([{ item: "iron_ingot", count: 5 }]);
   assert.deepEqual(a.arrived(newer, bag(5), none), [], "those 5 were credited to the older trade");
+});
+
+// The two clocks (monotonic-clock.ts header): the line's wall time is tested against the stored agreement, the watch runs on the monotonic reading.
+const WALL = 1_700_000_000_000;
+
+test("the collect watch runs 5 s from the monotonic reading of a line whose wall time is not before the agreement; an earlier line starts none", () => {
+  const agreed: Trade = { ...trade(5), state: "agreed", agreedAt: WALL };
+  const view = { pending: new Map(), find: () => agreed, partners: new Map([["Theo", { x: 1, y: 64, z: 0 }]]), position: { x: 0, y: 64, z: 0 } };
+  const after = new CollectFallback();
+  after.heard([agreed], "Theo", { now: 10_000, wallNow: WALL + 1_000 });
+  assert.deepEqual([...after.readNow(view, 10_000 + COLLECT_WATCH_MS - 1)], [], "4.999 s after the line");
+  assert.deepEqual([...after.readNow(view, 10_000 + COLLECT_WATCH_MS)], [agreed.id], "5 s after the line, however far the wall time is from the reading");
+  const before = new CollectFallback();
+  before.heard([agreed], "Theo", { now: 10_000, wallNow: WALL - 1 });
+  assert.deepEqual([...before.readNow(view, 10_000 + 60_000)], [], "a line stamped before the agreement starts no watch");
 });

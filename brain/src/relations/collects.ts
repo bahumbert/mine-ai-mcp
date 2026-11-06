@@ -4,7 +4,7 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { COLLECT_RADIUS, type Handoff } from "./handoff.ts";
 import { carriedOf } from "./items.ts";
 import { creditTrade, isOpen, owedItems, partnerPosition } from "./trade.ts";
-import type { ItemCount, Trade } from "./types.ts";
+import type { Clocks, ItemCount, Trade } from "./types.ts";
 
 /** A partner's line after agreement starts this watch for their payment before the collect fallback. */
 export const COLLECT_WATCH_MS = 5_000;
@@ -45,11 +45,11 @@ export class Arrivals {
    * The open trades (oldest agreement first) the unseen arrivals pay, for those `wanted`: each credit is explained at once,
    * so a later trade owing the same item shares only what is left.
    */
-  credits(trades: readonly Trade[], o: { readonly inventory: BotSnapshot["inventory"]; readonly ownStepYields: ReadonlySet<string>; readonly now: number; readonly wanted: (t: Trade) => boolean }): { trade: Trade; next: Trade; used: readonly ItemCount[] }[] {
+  credits(trades: readonly Trade[], o: { readonly inventory: BotSnapshot["inventory"]; readonly ownStepYields: ReadonlySet<string>; readonly wallNow: number; readonly wanted: (t: Trade) => boolean }): { trade: Trade; next: Trade; used: readonly ItemCount[] }[] {
     const out: { trade: Trade; next: Trade; used: readonly ItemCount[] }[] = [];
     const open = trades.filter((t) => isOpen(t) && owedItems(t).length > 0).sort((a, b) => (a.agreedAt ?? a.createdAt) - (b.agreedAt ?? b.createdAt));
     for (const trade of open.filter(o.wanted)) {
-      const { trade: next, used } = creditTrade(trade, this.arrived(trade, o.inventory, o.ownStepYields), o.now);
+      const { trade: next, used } = creditTrade(trade, this.arrived(trade, o.inventory, o.ownStepYields), o.wallNow);
       if (used.length === 0) continue;
       this.explain(used);
       out.push({ trade, next, used });
@@ -87,17 +87,20 @@ export interface CollectView {
  */
 export class CollectFallback {
   readonly arrivals = new Arrivals();
-  /** Trade id -> when the partner's line started the wait for their payment. */
+  /** Trade id -> the monotonic reading when the partner's line started the wait for their payment. */
   private readonly watches = new Map<string, number>();
   private readonly collected = new Set<string>();
   /** Trades whose collect ended: the next tick reads the bag for them. */
   private readonly recheck = new Set<string>();
 
-  /** A line of the partner starts the watch of each agreed trade with them that is still owed and was agreed by then, once. */
-  heard(trades: readonly Trade[], speaker: string, at: number): void {
+  /**
+   * A line of the partner starts the watch of each agreed trade with them that is still owed and was agreed by then, once.
+   * `at.wallNow`: the line's wall time, tested against the stored agreement; `at.now`: the monotonic reading the 5 s watch runs from.
+   */
+  heard(trades: readonly Trade[], speaker: string, at: Clocks): void {
     for (const t of trades) {
-      const waiting = (t.state === "agreed" || t.state === "i_gave") && owedItems(t).length > 0 && (t.agreedAt ?? Infinity) <= at;
-      if (waiting && t.partner.toLowerCase() === speaker.toLowerCase() && !this.collected.has(t.id) && !this.watches.has(t.id)) this.watches.set(t.id, at);
+      const waiting = (t.state === "agreed" || t.state === "i_gave") && owedItems(t).length > 0 && (t.agreedAt ?? Infinity) <= at.wallNow;
+      if (waiting && t.partner.toLowerCase() === speaker.toLowerCase() && !this.collected.has(t.id) && !this.watches.has(t.id)) this.watches.set(t.id, at.now);
     }
   }
 

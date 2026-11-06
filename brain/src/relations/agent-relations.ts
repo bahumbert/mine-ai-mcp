@@ -3,6 +3,7 @@ import type { Body } from "../body.ts";
 import type { ConversationRelations } from "../conversation/controller.ts";
 import { manhattan } from "../conversation/state.ts";
 import { realClock, type Clock } from "../conversation/socialise.ts";
+import { monotonicNow } from "../monotonic-clock.ts";
 import { memoryNote, relationContextPrefix, relationNotesQuery, type Memory, type Recalled } from "../memory.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
 import type { Persona } from "../persona.ts";
@@ -25,7 +26,7 @@ import type { ItemCount, Relation, RelationEvent, TradeEvent } from "./types.ts"
 /** With only a player's window open (no trade), the tick runs this often at most: it only watches for a payment tossed before the deal. */
 const WATCH_LOOK_MS = 2_000;
 
-/** Open requests are looked at for running out this often at most (wall clock). */
+/** Open requests are looked at for running out this often at most (monotonic clock; the requests' own times are wall times). */
 const REQUEST_CHECK_MS = 5_000;
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -45,8 +46,10 @@ export interface AgentRelationsDeps {
   readonly lacks: (inventory?: BotSnapshot["inventory"]) => readonly string[];
   readonly journal: (e: TradeEvent | RelationEvent) => void;
   readonly log: (line: string) => void;
-  /** The wall clock the wait for a partner's payment runs on; the real one unless a test moves it. */
+  /** The wall clock the book and the wait for a partner's payment run on; the real one unless a test moves it. */
   readonly clock?: Clock;
+  /** The monotonic clock the trade ledgers' windows and the look and request-check throttles run on; `monotonicNow` unless a test moves it. */
+  readonly monotonic?: () => number;
   /** The brain's trade board, when the characters of one process trade with each other. */
   readonly board?: TradeBoard;
   /** Blocks (Manhattan) my talk carries: Localized Chat's range when the server has it, else the staying distance. */
@@ -65,8 +68,9 @@ export class AgentRelations {
   /** Note writes run one after the other in the background: the book never waits for the body's queue. */
   private writes: Promise<unknown> = Promise.resolve();
   private looking = false;
-  private lastLookAt = 0;
-  private lastRequestCheckAt = 0;
+  /** Monotonic readings of the last look and the last request check (none yet: the first of each runs at once). */
+  private lastLookAt = -Infinity;
+  private lastRequestCheckAt = -Infinity;
   private readonly moods: ObeyMoods;
 
   constructor(private readonly deps: AgentRelationsDeps) {
@@ -74,13 +78,18 @@ export class AgentRelations {
     this.moods = new ObeyMoods(persona.settings.relations.obey);
     this.book = new RelationBook({ save: (memory) => this.queue(() => this.saveNote(memory)), remove: (context) => this.queue(() => this.forgetNotes(context)), now: () => this.now(), log, scoring: scoringOf(persona.settings.relations) });
     this.trades = new TradeController({
-      self: persona.username, persona, book: this.book, settings: persona.settings.relations, now: () => Date.now(),
+      self: persona.username, persona, book: this.book, settings: persona.settings.relations, now: () => this.monotonicNow(), wallNow: () => Date.now(),
       takeHandoff: deps.takeHandoff, journal: deps.journal, log, ...(deps.board !== undefined && { board: deps.board }),
     });
   }
 
+  /** Wall time: the book's, and what the requests' times are compared with. */
   private now(): number {
     return (this.deps.clock ?? realClock).now();
+  }
+
+  private monotonicNow(): number {
+    return (this.deps.monotonic ?? monotonicNow)();
   }
 
   /** The records recalled at start; requests that ran out while the brain was away are dropped (nobody watched the wait). */
@@ -198,9 +207,10 @@ export class AgentRelations {
 
   /** Requests that ran out are closed and the ignored ones score, as the clock says (no model call, no brain tick needed). */
   private expireOpenRequests(): void {
+    const checkedAt = this.monotonicNow();
+    if (checkedAt - this.lastRequestCheckAt < REQUEST_CHECK_MS) return;
+    this.lastRequestCheckAt = checkedAt;
     const now = this.now();
-    if (now - this.lastRequestCheckAt < REQUEST_CHECK_MS) return;
-    this.lastRequestCheckAt = now;
     const { requestAnswerMinutes } = this.book.scoring.score;
     for (const r of this.book.records()) {
       const o = { waiting: this.deps.waitingFrom(r.partner), offline: !this.deps.isOnline(r.partner) };
@@ -240,7 +250,7 @@ export class AgentRelations {
    * "ticked": a tick started with the yields; "idle": nothing is open, so no gain is counted; "busy_wait": a tick runs or the watch throttle skipped it, so the yields must wait for the next look.
    */
   look(ownStepYields: ReadonlySet<string>, onStack: ReadonlySet<string>, signal: AbortSignal, ownWork = false): LookAnswer {
-    const now = this.now();
+    const now = this.monotonicNow();
     if (!signal.aborted) this.expireOpenRequests();
     if (signal.aborted || !this.trades.busy()) {
       this.trades.forgetSeen();

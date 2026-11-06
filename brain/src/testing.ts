@@ -627,3 +627,19 @@ export function steppedClocks(t: { mock: { method(object: object, name: "now", i
     },
   };
 }
+
+/**
+ * `steppedClocks` with both clocks moved together, for code that reads both (the relations): `offset` is how far both are
+ * ahead of the real clocks (assign or `+=`); `wall(ms)` and `monotonic(ms)` still move one alone.
+ */
+export function movedClocks(t: Parameters<typeof steppedClocks>[0]) {
+  const clocks = steppedClocks(t);
+  let moved = 0;
+  return {
+    get offset(): number { return moved; },
+    set offset(value: number) { clocks.wall(value - moved); clocks.monotonic(value - moved); moved = value; },
+    wall: clocks.wall,
+    monotonic: clocks.monotonic,
+    restore: clocks.restore,
+  };
+}

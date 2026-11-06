@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
-import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
+import { FakeRuntime, movedClocks, scriptedMind, testPersona, until } from "../testing.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
+import { EARLIER_GAIN_MS, EARLIER_GIVE_MS } from "./earlier.ts";
 import { obeyChance } from "./obey.ts";
 import { TradeBoard } from "./board.ts";
 import { newRelation } from "./record.ts";
@@ -19,7 +20,7 @@ function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
   const time = { at: 1_000_000 };
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
-    isAgent: () => false, lacks: () => [], journal: (event) => { if (event.kind === "relation") rows.push(event); }, log: () => {}, clock,
+    isAgent: () => false, lacks: () => [], journal: (event) => { if (event.kind === "relation") rows.push(event); }, log: () => {}, clock, monotonic: () => time.at,
     hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0, ...over,
   });
   const look = async () => { relations.look(new Set(), new Set(), new AbortController().signal); await new Promise((r) => setTimeout(r, 5)); };
@@ -29,15 +30,14 @@ function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
 const MIN = 60_000;
 const IRON_TRADE = { action: "accept" as const, give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "them" as const };
 
-/** Relations over a runtime whose clock (the controller's and the look's) is moved by hand through `Date.now`. */
+/** Relations over a runtime whose two clocks (the wall `Date.now` and the monotonic `performance.now`) are moved by hand: `time.offset` moves both, `clocks` each alone. */
 function relationsOverTime(t: TestContext) {
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const time = { offset: 0 };
+  const clocks = movedClocks(t);
+  const time = clocks;
   /** Armed, the journal throws on the next `received` event: a tick that fails after it credited a payment. */
   const journal = { failOnReceived: false };
-  const real = Date.now.bind(Date);
-  t.mock.method(Date, "now", () => real() + time.offset);
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: {} as Body, takeHandoff: () => {},
     isAgent: () => false, lacks: () => [], log: (line) => logs.push(line), hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0,
@@ -58,8 +58,33 @@ function relationsOverTime(t: TestContext) {
   };
   const trade = () => relations.book.get("Theo")?.trades.at(-1);
   const keptLines = () => logs.filter((line) => line.includes("picked up while a player talked"));
-  return { relations, runtime, logs, time, journal, carry, look, trade, keptLines };
+  return { relations, runtime, logs, time, clocks, journal, carry, look, trade, keptLines };
 }
+
+test("the earlier give window runs on the monotonic clock: a wall clock stepped back 2 s does not keep a give of 10 min ago", async (t) => {
+  const h = relationsOverTime(t);
+  await h.relations.trades.gaveOutside("Theo", "bread", 5);
+  h.clocks.monotonic(EARLIER_GIVE_MS + 1_000);
+  h.clocks.wall(-2_000);
+  await h.relations.trades.onDecision({ ...IRON_TRADE, first: "me" }, "Theo", h.runtime.snapshot);
+  assert.equal(h.trade()?.state, "agreed", "the give of 10 min ago is no credit of the new trade");
+  assert.deepEqual(h.relations.trades.leftToGive(h.trade()!.id), [{ item: "bread", count: 5 }]);
+});
+
+test("a window closed by monotonic time stays closed when the wall clock is stepped back", async (t) => {
+  const h = relationsOverTime(t);
+  h.relations.trades.heardLine("Theo", Date.now(), 2);
+  assert.equal(await h.look(), "ticked");
+  h.clocks.monotonic(EARLIER_GAIN_MS + 1_000);
+  h.clocks.wall(-2_000);
+  assert.equal(await h.look(), "idle", "10 min of monotonic time are over");
+});
+
+test("the trade's times are wall times: an agreement written through the relations is a date of today, not a monotonic reading", async (t) => {
+  const h = relationsOverTime(t);
+  await h.relations.trades.onDecision(IRON_TRADE, "Theo", h.runtime.snapshot);
+  assert.ok((h.trade()?.agreedAt ?? 0) > 1_700_000_000_000, `agreed at ${h.trade()?.agreedAt}`);
+});
 
 test("B2: hours of own work after a window closed by time are not kept as a talking player's earlier gain", async (t) => {
   const h = relationsOverTime(t);
@@ -227,6 +252,44 @@ test("an ignored request scores after 2 min with no brain tick in between", asyn
   time.at += 10 * MIN;
   await look();
   assert.equal(relations.book.get("Theo")!.ledger.length, 1, "scored once");
+});
+
+test("the request check is throttled on the monotonic clock: the wall clock moving does not run it, 5 s of monotonic time does", async () => {
+  const mono = { at: 1_000 };
+  const { relations, time, look, rows } = relationsWithClock({ monotonic: () => mono.at });
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await look();
+  time.at += 3 * MIN;
+  await look();
+  assert.equal(rows.length, 0, "the check ran 0 s of monotonic time ago");
+  mono.at += 5_000;
+  await look();
+  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
+});
+
+test("the first request check runs at once in a process whose monotonic reading is small", async () => {
+  const { relations, time, look, rows } = relationsWithClock({ monotonic: () => 1_000 });
+  relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
+  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  time.at += 3 * MIN;
+  await look();
+  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
+});
+
+test("the look of a watching bot is throttled on the monotonic clock: the wall clock moving does not poll the status", async () => {
+  const mono = { at: 1_000 };
+  const { relations, time, look, calls } = relationsWithClock({ monotonic: () => mono.at });
+  relations.trades.heardLine("Theo", Date.now(), 2);
+  await look();
+  time.at += 5_000;
+  await look();
+  assert.equal(calls(), 1, "the wall clock moved 5 s, the monotonic one 0");
+  mono.at += 2_000;
+  await look();
+  assert.equal(calls(), 2);
 });
 
 test("out of range is never ignored", async () => {

@@ -21,7 +21,7 @@ function bot(self: string, board: TradeBoard | undefined) {
   const notes: string[] = [];
   const book = new RelationBook({ save: async () => {}, remove: async () => {}, now: () => state.now, log: (l) => lines.push(l), scoring: testScoring() });
   const c = new TradeController({
-    self, persona: testPersona(), book, settings, now: () => state.now, takeHandoff: (h) => { if (h.kind === "give") handoffs.push(h); },
+    self, persona: testPersona(), book, settings, now: () => state.now, wallNow: () => state.now, takeHandoff: (h) => { if (h.kind === "give") handoffs.push(h); },
     journal: (e) => { if ("note" in e) notes.push(e.note); }, log: (l) => lines.push(l), ...(board !== undefined && { board }),
   });
   const snapshot = (inventory: BotSnapshot["inventory"] = [{ name: "bread", count: 10 }, { name: "oak_log", count: 10 }]): BotSnapshot => ({ ...new FakeRuntime().snapshot, inventory, players: ["Finn", "Ayla", "Theo", "Lena"].map((username) => ({ username, position: { x: 2, y: 64, z: 0 } })) });

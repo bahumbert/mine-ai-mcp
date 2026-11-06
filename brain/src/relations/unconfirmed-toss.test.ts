@@ -32,7 +32,7 @@ async function aylaOwesTheo() {
   const theoLines: string[] = [];
   const theoBook = new RelationBook({ save: async () => {}, remove: async () => {}, now: () => Date.now(), log: (l) => theoLines.push(l), scoring: testScoring() });
   const theoHandoffs: Handoff[] = [];
-  const theo = new TradeController({ self: "Theo", persona: testPersona({ username: "Theo" }), book: theoBook, settings, now: () => Date.now(), takeHandoff: (h) => theoHandoffs.push(h), journal: () => undefined, log: (l) => theoLines.push(l), board });
+  const theo = new TradeController({ self: "Theo", persona: testPersona({ username: "Theo" }), book: theoBook, settings, now: () => performance.now(), wallNow: () => Date.now(), takeHandoff: (h) => theoHandoffs.push(h), journal: () => undefined, log: (l) => theoLines.push(l), board });
   const relations = new AgentRelations({
     persona: testPersona(), mind: scriptedMind().mind, runtime, body: new Body(runtime, () => undefined), takeHandoff: () => undefined, isAgent: () => true, lacks: () => [],
     journal: () => undefined, log: () => undefined, clock, board, hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0,

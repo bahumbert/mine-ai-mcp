@@ -27,20 +27,21 @@ interface Harness {
   readonly events: (TradeEvent | RelationEvent)[];
   readonly logs: string[];
   readonly chat: ReturnType<typeof scriptedMind>["chat"];
-  readonly state: { now: number };
+  /** `now` is the monotonic reading (the controller's windows); the wall time is `now + wallOffset` (what is written in the book): a test steps the wall clock by moving `wallOffset`. */
+  readonly state: { now: number; wallOffset: number };
 }
 
 function harness(over: { settings?: Partial<TradeSettings> } = {}): Harness {
-  const state = { now: t0 };
+  const state = { now: t0, wallOffset: 0 };
   const handoffs: Handoff[] = [];
   const awaits: Handoff[] = [];
   const events: (TradeEvent | RelationEvent)[] = [];
   const logs: string[] = [];
   const saved: Memory[] = [];
-  const book = new RelationBook({ save: async (m) => { saved.push(m); }, remove: async () => {}, now: () => state.now, log: (l) => logs.push(l), scoring: testScoring() });
+  const book = new RelationBook({ save: async (m) => { saved.push(m); }, remove: async () => {}, now: () => state.now + state.wallOffset, log: (l) => logs.push(l), scoring: testScoring() });
   const { chat } = scriptedMind();
   const c = new TradeController({
-    self: "Ayla", persona: testPersona(), book, settings: { ...settings, ...over.settings }, now: () => state.now,
+    self: "Ayla", persona: testPersona(), book, settings: { ...settings, ...over.settings }, now: () => state.now, wallNow: () => state.now + state.wallOffset,
     takeHandoff: (h) => (h.kind === "await" ? awaits : handoffs).push(h),
     journal: (e) => events.push(e), log: (l) => logs.push(l),
   });
@@ -1144,7 +1145,7 @@ test("a restart loses the baseline: a collect that ends credits nothing from an 
   await h.c.onDecision(decision({ first: "them" }), "Theo", away(bagWith(5)));
   const trade = theirTrade(h);
   // A fresh controller over the same book: the baseline map is memory only.
-  const fresh = new TradeController({ self: "Ayla", persona: testPersona(), book: h.book, settings: { ...settings }, now: () => h.state.now, takeHandoff: () => {}, journal: () => {}, log: () => {} });
+  const fresh = new TradeController({ self: "Ayla", persona: testPersona(), book: h.book, settings: { ...settings }, now: () => h.state.now, wallNow: () => h.state.now + h.state.wallOffset, takeHandoff: () => {}, journal: () => {}, log: () => {} });
   await fresh.tick(away(), new Set(), signal);
   await fresh.handoffEnded(trade.id, "failed", "nothing");
   await fresh.tick(away(bagWith(5)), new Set(), signal);
@@ -2042,4 +2043,64 @@ test("B1 review: a payment held for an ended trade is not promised to another pa
   assert.match(refused, /5 of them Theo handed over for a trade that ended, not given back/u);
   assert.doesNotMatch(refused, /promised/u, "a held payment is worded as held, not as a promise");
   assert.equal(h.c.checkDecision(decision({ action: "propose", give: ingots(5), get: bread(1) }), "Theo", s), null);
+});
+
+// The two clocks (monotonic-clock.ts header): `now` times the ledgers' windows, `wallNow` is what is written in the book.
+const WALL = 1_700_000_000_000;
+
+test("a trade's times are wall times: the agreement, the payment and the give are written on the wall clock, not the monotonic reading", async () => {
+  const h = harness();
+  h.state.wallOffset = WALL;
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...s.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  assert.equal(theirTrade(h).agreedAt, t0 + WALL);
+  assert.equal(theirTrade(h).receivedAt, t0 + 1_000 + WALL, "credited at the wall time of the tick");
+  h.state.now += 1_000;
+  await h.c.tick(snapshot({ inventory: [...s.inventory, { name: "iron_ingot", count: 5 }] }), new Set(), signal);
+  await h.c.handoffEnded(theirTrade(h).id, "done", "gave");
+  assert.equal(theirTrade(h).gaveAt, t0 + 2_000 + WALL);
+  assert.ok(new Date(theirTrade(h).endedAt ?? 0).getFullYear() >= 2023, "the end is a date of today, not of 1970");
+});
+
+test("a payment credited from the earlier ledger at agreement carries the wall time of the agreement", async () => {
+  const h = harness();
+  h.state.wallOffset = WALL;
+  h.c.heardLine("Theo", h.state.now + WALL, 2);
+  await h.c.tick(snapshot(), new Set(), signal);
+  h.state.now += 5_000;
+  await h.c.tick(withIron(snapshot(), 5), new Set(), signal);
+  h.state.now += 1_000;
+  await h.c.onDecision(decision({ first: "them" }), "Theo", withIron(snapshot(), 5));
+  assert.equal(theirTrade(h).state, "they_gave");
+  assert.equal(theirTrade(h).receivedAt, t0 + 6_000 + WALL);
+});
+
+test("the collect watch starts at the partner's line and fires 5 s of monotonic time later, whatever the wall clock did meanwhile", async () => {
+  const h = harness();
+  h.state.wallOffset = WALL;
+  const s = snapshot();
+  await h.c.onDecision(decision({ first: "them" }), "Theo", s);
+  await h.c.tick(s, new Set(), signal);
+  h.state.now += 3_000;
+  h.state.wallOffset -= 2_000; // the wall clock steps back after the agreement; the line is still after it on the wall clock
+  h.c.heardLine("Theo", h.state.now + h.state.wallOffset, 2);
+  h.state.now += 4_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(h.handoffs, [], "4 s after the line");
+  h.state.wallOffset -= 2_000;
+  h.state.now += 1_000;
+  await h.c.tick(s, new Set(), signal);
+  assert.deepEqual(kinds(h), ["collect"], "5 s after the line on the monotonic clock");
+});
+
+test("the pay-back time left reads the stored wall times", async () => {
+  const h = harness();
+  h.state.wallOffset = WALL;
+  await h.c.onDecision(decision({ first: "them" }), "Theo", snapshot());
+  h.state.now += 60_000;
+  h.state.wallOffset -= 2_000;
+  assert.equal(h.c.payBackLeftMs(theirTrade(h).id), 10 * MIN - 58_000, "58 s of wall time since the agreement");
 });

@@ -10,12 +10,13 @@ export class GiveBook {
   private readonly droppedAt = new Map<string, number>();
   /** Trades whose last give found the recipient moving: retaken after the wait only with the partner near, whatever the failures. */
   private readonly busy = new Set<string>();
-  /** Trade id -> when its give was handed to the agent: a give pending longer than the pay-back time is stuck (queued behind an order), and no longer holds the deadline back. */
+  /** Trade id -> the wall time its give was handed to the agent (it falls back to the trade's stored times in the pay-back clock): a give pending longer than the pay-back time is stuck (queued behind an order), and no longer holds the deadline back. */
   private readonly takenAt = new Map<string, number>();
   /** Trade id -> item -> count of my side given by a `give_item` outside the hand-off (memory only: a restart loses it). */
   private readonly outside = new Map<string, Map<string, number>>();
 
-  constructor(private readonly now: () => number, private readonly payBackMs: number) {}
+  /** `now`: monotonic (the retake wait); `wallNow`: wall (when a give was taken, read against the trade's stored times). */
+  constructor(private readonly now: () => number, private readonly wallNow: () => number, private readonly payBackMs: number) {}
 
   /** What of my side the partner took outside the hand-off, per item; undefined when nothing was. */
   givenOf(tradeId: string): ReadonlyMap<string, number> | undefined { return this.outside.get(tradeId); }
@@ -40,7 +41,7 @@ export class GiveBook {
 
   /** The give was handed to the agent. */
   taken(tradeId: string): void {
-    this.takenAt.set(tradeId, this.now());
+    this.takenAt.set(tradeId, this.wallNow());
     this.droppedAt.delete(tradeId);
   }
 
@@ -67,9 +68,9 @@ export class GiveBook {
   waitingToRetake(tradeId: string): boolean { return this.now() - (this.droppedAt.get(tradeId) ?? -Infinity) < RETAKE_AFTER_MS; }
 
   /** A give for the trade is pending and was taken less than the pay-back time ago: it is bounded by its own walk, toss and wait. */
-  running(tradeId: string, pending: boolean): boolean { return pending && this.now() - (this.takenAt.get(tradeId) ?? this.now()) < this.payBackMs; }
+  running(tradeId: string, pending: boolean): boolean { return pending && this.wallNow() - (this.takenAt.get(tradeId) ?? this.wallNow()) < this.payBackMs; }
 
-  /** When the pending give was taken, if it was. */
+  /** When (wall time) the pending give was taken, if it was. */
   takenSince(tradeId: string): number | undefined { return this.takenAt.get(tradeId); }
 
   /** What of my side an open trade has given and why its give waits, for the line the model reads. */

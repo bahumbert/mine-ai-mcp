@@ -22,7 +22,7 @@ function bot(self: string, board: TradeBoard | undefined) {
   const lines: string[] = [];
   const book = new RelationBook({ save: async () => {}, remove: async () => {}, now: () => state.now, log: (l) => lines.push(l), scoring: testScoring() });
   const c = new TradeController({
-    self, persona: testPersona(), book, settings, now: () => state.now, takeHandoff: (h) => { handoffs.push(h); },
+    self, persona: testPersona(), book, settings, now: () => state.now, wallNow: () => state.now, takeHandoff: (h) => { handoffs.push(h); },
     journal: () => undefined, log: (l) => lines.push(l), ...(board !== undefined && { board }),
   });
   const bag = (bread = 10, oak = 10): BotSnapshot["inventory"] => [{ name: "bread", count: bread }, { name: "oak_log", count: oak }];

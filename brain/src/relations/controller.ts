@@ -21,8 +21,8 @@ import { relationsBlock } from "./prompts.ts";
 import { countLateToss, giveToHeldTrades, heldOwed } from "./held.ts";
 import { heldWindow, withTrade } from "./record.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
-import { AGREED_STATES, agreeTrade, cancelTrade, failTrade, flipped, giveLate, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
-import { type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
+import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
+import { type Clocks, type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
 const GIVE_ATTEMPTS = 2;
@@ -31,7 +31,10 @@ export interface TradeControllerDeps {
   readonly persona: Persona;
   readonly book: RelationBook;
   readonly settings: TradeSettings;
+  /** Monotonic: the ledgers' windows, the retake waits (never written, never compared with a trade's time). */
   readonly now: () => number;
+  /** Wall time: a trade's own times, the book, the scores and the pay-back clock, which are stored and compared with stored times. */
+  readonly wallNow: () => number;
   /** The agent pushes the routine objective for this hand-off. */
   readonly takeHandoff: (h: Handoff) => void;
   readonly journal: (e: TradeEvent | RelationEvent) => void;
@@ -72,12 +75,12 @@ export class TradeController implements BoardPeer {
   private readonly shown: PartnerRecord;
 
   constructor(private readonly deps: TradeControllerDeps) {
-    this.gives = new GiveBook(deps.now, deps.settings.payBackMinutes * MINUTE_MS);
+    this.gives = new GiveBook(deps.now, deps.wallNow, deps.settings.payBackMinutes * MINUTE_MS);
     this.queue = new HandoffQueue(this.gives, deps.now, deps.takeHandoff);
     this.ledgers = new TradeLedgers({ gives: this.gives, find: (id) => this.find(id), recordReceived: (trade) => this.recordStep(trade, "received") });
     this.peer = boardPeerHandlers({
-      self: deps.self, now: deps.now, log: deps.log,
-      find: (id) => this.find(id), tracked: (step) => this.tracked(step), record: (t, event) => this.record(t, event), startAgreed: (t, partner, now) => this.startAgreed(t, partner, now),
+      self: deps.self, wallNow: deps.wallNow, log: deps.log,
+      find: (id) => this.find(id), tracked: (step) => this.tracked(step), record: (t, event) => this.record(t, event), startAgreed: (t, partner) => this.startAgreed(t, partner, this.clocks()),
       waiting: (id) => this.queue.awaiting.has(id), comeTo: (id) => void this.cameDown.add(id),
     });
     this.shown = new PartnerRecord({ book: deps.book, board: deps.board, gives: this.gives, log: deps.log, find: (id) => this.find(id), givePending: (id) => this.queue.givePending(id) || this.running_.has(id), heldWindow: () => this.heldWindow(), giveIfCovered: (t, partner) => this.giveIfCovered(t, partner) });
@@ -121,12 +124,12 @@ export class TradeController implements BoardPeer {
    * A trade just agreed: earlier gives and payments are claimed, then my side is given at once if covered, or handed to the agent if due.
    * With no inventory to claim against (a board accept after a tick that failed) the start waits for the next tick.
    */
-  private async startAgreed(agreed: Trade, partner: string, now: number, carried?: BotSnapshot["inventory"]): Promise<void> {
+  private async startAgreed(agreed: Trade, partner: string, at: Clocks, carried?: BotSnapshot["inventory"]): Promise<void> {
     if (carried === undefined && this.previous === null) {
       this.startAtNextTick.add(agreed.id);
       return;
     }
-    const current = await this.ledgers.claimEarlier(agreed, now, carried ?? this.carriedNow());
+    const current = await this.ledgers.claimEarlier(agreed, at, carried ?? this.carriedNow());
     // The bag the claim used; a deferred start runs inside a tick, which has already replaced `previous` by the new bag.
     const seen = carried ?? this.previous?.inventory;
     if (seen !== undefined) this.ledgers.agreedWith(current, seen);
@@ -140,7 +143,8 @@ export class TradeController implements BoardPeer {
    */
   onDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot, seen?: DecisionSeen): Promise<string | null> {
     return this.exclusive(async () => {
-      const now = this.deps.now();
+      const at = this.clocks();
+      const now = at.wallNow;
       // The inventory the next tick's gains are counted from, when no tick has been watching.
       this.previous ??= { inventory: snapshot.inventory, partners: new Map(snapshot.players.map((p) => [p.username, p.position])) };
       const mine = this.openWith(speaker);
@@ -154,12 +158,12 @@ export class TradeController implements BoardPeer {
       const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
       const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? repeatOfDone(this.deps.book.trades(), speaker, terms, now) : undefined;
       if (repeated !== undefined) return this.note(null, `trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
-      if (d.action === "propose") return this.onPropose(deal, mine, theirOffer, seen, this.carriedNow(snapshot));
+      if (d.action === "propose") return this.onPropose(deal, at, mine, theirOffer, seen, this.carriedNow(snapshot));
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) return this.note(null, `trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
-        return this.proposeAndPost(deal, now, this.carriedNow(snapshot), seen?.say);
+        return this.proposeAndPost(deal, at, this.carriedNow(snapshot), seen?.say);
       }
       if (d.action === "accept") {
         if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
@@ -167,7 +171,7 @@ export class TradeController implements BoardPeer {
         // Before the record: saving an agreed trade takes its id off the board.
         if (offer !== undefined) this.deps.board?.accept(offer.id, this.deps.self);
         await this.record(agreed, "agreed");
-        await this.startAgreed(agreed, speaker, now, this.carriedNow(snapshot));
+        await this.startAgreed(agreed, speaker, at, this.carriedNow(snapshot));
         return agreed.id;
       }
       if (theirOffer !== undefined) this.deps.board?.decline(theirOffer.id, this.deps.self, d.action === "decline" ? "declined" : "cancelled");
@@ -183,7 +187,7 @@ export class TradeController implements BoardPeer {
   private note<T>(answer: T, line: string): T { this.deps.log(line); return answer; }
 
   /** A propose: replaces my open proposal to them (a restated one stays), and counters their offer when I read it first (`seen`, bot partners). */
-  private async onPropose(deal: Parameters<typeof proposeTrade>[0], mine: Trade | undefined, theirOffer: BoardOffer | undefined, seen: DecisionSeen | undefined, carried: BotSnapshot["inventory"]): Promise<string | null> {
+  private async onPropose(deal: Parameters<typeof proposeTrade>[0], at: Clocks, mine: Trade | undefined, theirOffer: BoardOffer | undefined, seen: DecisionSeen | undefined, carried: BotSnapshot["inventory"]): Promise<string | null> {
     const { partner: speaker, now } = deal;
     const { board, self } = this.deps;
     const dropped = whyProposalDropped({ speaker, mine, ownOfferId: board?.offerFrom(self, speaker)?.id, local: board?.isLocal(speaker) === true, theirOffer, heardAt: seen?.heardAt, seenOfferId: seen?.seenOfferId });
@@ -195,21 +199,21 @@ export class TradeController implements BoardPeer {
       board?.decline(theirOffer.id, self, "countered");
       this.deps.log(`trade: counter-offer to ${speaker}: I give ${sideText(deal.give)}, I get ${sideText(deal.get)}; their ${theirOffer.id} declined`);
     }
-    const id = await this.proposeAndPost(deal, now, carried, seen?.say);
+    const id = await this.proposeAndPost(deal, at, carried, seen?.say);
     const fresh = this.find(id);
     if (fresh !== undefined) for (const [item, count] of kept) this.gives.credit(fresh, item, count);
     return id;
   }
 
   /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */
-  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], now: number, carried: BotSnapshot["inventory"], said?: string): Promise<string> {
+  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], at: Clocks, carried: BotSnapshot["inventory"], said?: string): Promise<string> {
     for (const line of termsDifferFromWords(said, [...deal.give, ...deal.get])) this.deps.log(line);
     const proposed = proposeTrade(deal);
     await this.record(proposed, "proposed");
     this.post(proposed);
-    await this.ledgers.claimEarlier(proposed, now, carried);
+    await this.ledgers.claimEarlier(proposed, at, carried);
     // A payment dropped while the model was still deciding is already kept: the proposal it answers is agreed as it is posted.
-    await this.agreePaidProposals(carried, now);
+    await this.agreePaidProposals(carried, at);
     return proposed.id;
   }
 
@@ -233,7 +237,7 @@ export class TradeController implements BoardPeer {
     const due = trade.state === "agreed" || trade.state === "they_gave";
     if (!due || trade.give.length === 0 || (this.gives.leftOf(trade) ?? []).length > 0) return false;
     this.gives.clearCredit(trade.id);
-    const gave = markGave(trade, this.deps.now());
+    const gave = markGave(trade, this.deps.wallNow());
     await this.recordStep(gave, "gave", `gave ${sideText(trade.give)} to ${partner}, outside the hand-off`);
     return true;
   }
@@ -263,7 +267,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** The board accepts that waited for a baseline are started from this tick's bag, oldest agreement first; one that fails keeps its place and drops the baseline, so the retry reads a fresh bag. */
-  private async startDeferred(previous: Seen | null, snapshot: BotSnapshot, now: number): Promise<void> {
+  private async startDeferred(previous: Seen | null, snapshot: BotSnapshot, at: Clocks): Promise<void> {
     for (const id of [...this.startAtNextTick]) {
       const trade = this.find(id);
       if (trade === undefined || (trade.state !== "agreed" && trade.state !== "they_gave")) {
@@ -271,7 +275,7 @@ export class TradeController implements BoardPeer {
         continue;
       }
       try {
-        await this.startAgreed(trade, trade.partner, now, previous?.inventory ?? snapshot.inventory);
+        await this.startAgreed(trade, trade.partner, at, previous?.inventory ?? snapshot.inventory);
       } catch (error) {
         this.forgetSeen();
         throw error;
@@ -313,7 +317,10 @@ export class TradeController implements BoardPeer {
   }
 
   /** How long a payment held for an ended trade counts, as of now. */
-  private heldWindow(): HeldWindow { return heldWindow(this.deps.now(), this.deps.book.scoring); }
+  private heldWindow(): HeldWindow { return heldWindow(this.deps.wallNow(), this.deps.book.scoring); }
+
+  /** Both clocks, read together. */
+  private clocks(): Clocks { return { now: this.deps.now(), wallNow: this.deps.wallNow() }; }
 
   /**
    * How long my give for the trade may still run before the pay-back clock ends the trade: from the agreement while
@@ -323,18 +330,14 @@ export class TradeController implements BoardPeer {
     const trade = this.find(tradeId);
     if (trade === undefined || !isOpen(trade)) return 0;
     const since = trade.state === "they_gave" ? this.gives.takenSince(tradeId) ?? trade.receivedAt ?? trade.agreedAt ?? trade.createdAt : trade.state === "i_gave" ? trade.gaveAt ?? trade.createdAt : trade.agreedAt ?? trade.createdAt;
-    return Math.max(0, this.deps.settings.payBackMinutes * MINUTE_MS - (this.deps.now() - since));
+    return Math.max(0, this.deps.settings.payBackMinutes * MINUTE_MS - (this.deps.wallNow() - since));
   }
 
   /**
    * How a trade closed before my side was given (its state, or "gone" when the book has no such trade); null while it
    * is open, or once my side was given (done, or a give made outside the hand-off).
    */
-  closedAs(tradeId: string): string | null {
-    const trade = this.find(tradeId);
-    if (trade === undefined) return "gone";
-    return isOpen(trade) || trade.state === "done" || trade.gaveAt !== null ? null : trade.state;
-  }
+  closedAs(tradeId: string): string | null { return closedBeforeGiven(this.find(tradeId)); }
 
   /** A hand-off found nothing left to give: the agent ended it, so it is no longer pending (no retake clock). */
   handoffSkipped(tradeId: string): void { this.queue.pending.delete(tradeId); }
@@ -346,11 +349,7 @@ export class TradeController implements BoardPeer {
   }
 
   /** How a trade ended when the wait for their side is over: its state and note, "gone" when the book has no such trade; null while it is open or once it is done. */
-  awaitOver(tradeId: string): string | null {
-    const trade = this.find(tradeId);
-    if (trade === undefined) return "gone";
-    return isOpen(trade) || trade.state === "done" ? null : `${trade.state}: ${trade.note}`;
-  }
+  awaitOver(tradeId: string): string | null { return endedWhileWaiting(this.find(tradeId)); }
 
   /** A wait for their side ended: dropped (a stop, a shelter) it is taken again after a while; any other end is final. */
   awaitEnded(tradeId: string, outcome: HandoffEnd["outcome"]): void {
@@ -363,39 +362,39 @@ export class TradeController implements BoardPeer {
     this.queue.awaitDropped(tradeId);
   }
 
-  /** A partner's line: after agreement it starts the short watch for their payment (the collect fallback). */
+  /** A partner's line (`at`: its wall time, as the agent heard it): after agreement it starts the short watch for their payment (the collect fallback). */
   heardLine(speaker: string, at: number, distance: number | null): void {
-    this.ledgers.heard(this.deps.book.trades(), speaker, at, distance, this.deps.persona.settings.conversation.openingDistance);
+    this.ledgers.heard(this.deps.book.trades(), speaker, { now: this.deps.now(), wallNow: at }, distance, this.deps.persona.settings.conversation.openingDistance);
   }
 
   /** The agent's poll tick: credits gains, runs the deadlines, takes due hand-offs. Never waits on a model. */
   tick(snapshot: BotSnapshot, ownStepYields: ReadonlySet<string>, signal: AbortSignal, ownWork = false): Promise<void> {
     return this.exclusive(async () => {
-      const now = this.deps.now();
+      const at = this.clocks();
       const previous = this.previous;
       this.partners = new Map(snapshot.players.map((p) => [p.username, p.position]));
       this.previous = { inventory: snapshot.inventory, partners: this.partners };
       this.position = snapshot.position;
-      this.ledgers.noteTick(snapshot, this.deps.settings.handoffDistance, now);
-      await this.startDeferred(previous, snapshot, now);
+      this.ledgers.noteTick(snapshot, this.deps.settings.handoffDistance, at.now);
+      await this.startDeferred(previous, snapshot, at);
       if (previous !== null) {
-        await creditGains(this.creditHost(), snapshot, previous, ownStepYields, now, ownWork);
+        await creditGains(this.creditHost(), snapshot, previous, ownStepYields, at, ownWork);
         this.ticksCounted += 1; // after the gains were counted: a tick that threw before counted none
       } else this.ledgers.rebase(this.deps.book.trades(), snapshot.inventory);
-      await this.agreePaidProposals(snapshot.inventory, now);
-      await creditArrived(this.creditHost(), snapshot.inventory, ownStepYields, now);
-      await this.settleOpen(now);
+      await this.agreePaidProposals(snapshot.inventory, at);
+      await creditArrived(this.creditHost(), snapshot.inventory, ownStepYields, at);
+      await this.settleOpen(at.wallNow);
       await this.shown.claimAll();
-      this.ledgers.startCollects(this.collectView(), now, this.deps.takeHandoff);
+      this.ledgers.startCollects(this.collectView(), at.now, this.deps.takeHandoff);
       if (!this.busy()) this.previous = null;
     });
   }
 
   /** Whether the agent should tick: a trade is open, one broken by them may still be paid late, a hand-off is waiting. */
   busy(withWindow = true): boolean {
-    const now = this.deps.now();
-    const waiting = this.deps.book.trades().some((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && now - (t.endedAt ?? now) < this.deps.settings.offersForgetMinutes * MINUTE_MS && owedItems(t).length > 0));
-    return waiting || (withWindow && this.ledgers.watching(now)) || this.queue.pending.size > 0 || this.running.size > 0;
+    const wallNow = this.deps.wallNow();
+    const waiting = this.deps.book.trades().some((t) => isOpen(t) || (t.state === "broken" && t.brokenBy === "them" && wallNow - (t.endedAt ?? wallNow) < this.deps.settings.offersForgetMinutes * MINUTE_MS && owedItems(t).length > 0));
+    return waiting || (withWindow && this.ledgers.watching(this.deps.now())) || this.queue.pending.size > 0 || this.running.size > 0;
   }
 
   /** Busy for a player's window alone (no trade or hand-off): the agent may poll slowly. */
@@ -427,7 +426,7 @@ export class TradeController implements BoardPeer {
         await this.shown.claim(tradeId);
         if (this.find(tradeId)?.gaveAt !== null) return;
       }
-      const now = this.deps.now();
+      const now = this.deps.wallNow();
       if (kind === "collect") {
         this.ledgers.collectEnded(tradeId);
         this.deps.log(`trade: collect for ${tradeId} ${outcome}: ${detail}`);
@@ -470,7 +469,7 @@ export class TradeController implements BoardPeer {
 
   /** The gist's nudge of the score of each other member (one write with what they said they have or need). */
   onConversationEnded(partners: readonly GistPartner[]): Promise<void> {
-    return this.exclusive(() => writeGist(this.deps.book, partners, this.deps.now(), this.deps.settings.offersForgetMinutes, this.deps.journal));
+    return this.exclusive(() => writeGist(this.deps.book, partners, this.deps.wallNow(), this.deps.settings.offersForgetMinutes, this.deps.journal));
   }
 
   /** The relations block of a chat request: the records of those in it, trades nobody started, and what the objective lacks. */
@@ -524,7 +523,7 @@ export class TradeController implements BoardPeer {
     if (trade.state !== "proposed") this.deps.board?.withdraw(trade.id);
     // An end and its score are one write: a replayed end cannot be scored twice, a crash cannot store the end without its score.
     if (ended) {
-      for (const row of await scoreEndedTrade(this.deps.book, trade, this.deps.now())) this.deps.journal(row);
+      for (const row of await scoreEndedTrade(this.deps.book, trade, this.deps.wallNow())) this.deps.journal(row);
     } else {
       await this.deps.book.update(trade.partner, (r) => withTrade(r, trade, this.heldWindow()));
     }
@@ -541,15 +540,15 @@ export class TradeController implements BoardPeer {
    * The trade is agreed on its own terms by the path of a spoken agreement, which credits the kept gains. A gift proposal
    * (nothing asked back) is never paid, and a partial payment stays kept until a later gain completes the side.
    */
-  private async agreePaidProposals(carried: BotSnapshot["inventory"], now: number): Promise<void> {
+  private async agreePaidProposals(carried: BotSnapshot["inventory"], at: Clocks): Promise<void> {
     for (const trade of this.deps.book.trades().filter((t) => t.state === "proposed" && t.get.length > 0)) {
-      const kept = this.ledgers.earlier.keptFrom(trade.partner, now);
+      const kept = this.ledgers.earlier.keptFrom(trade.partner, at.now);
       const covered = trade.get.every((g) => Math.min(kept.find((k) => k.item === g.item)?.count ?? 0, carried.filter((c) => c.name === g.item).reduce((n, c) => n + c.count, 0)) >= g.count);
       if (!covered) continue;
       this.deps.log(`trade: ${trade.partner} paid my proposal ${trade.id}: agreed`);
-      const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now });
+      const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now: at.wallNow });
       await this.record(agreed, "agreed");
-      await this.startAgreed(agreed, trade.partner, now, carried);
+      await this.startAgreed(agreed, trade.partner, at, carried);
     }
   }
 

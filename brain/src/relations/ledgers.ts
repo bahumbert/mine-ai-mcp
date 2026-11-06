@@ -5,7 +5,7 @@ import { CollectFallback, type CollectView } from "./collects.ts";
 import { EarlierLedger, NearLedger } from "./earlier.ts";
 import type { GiveBook } from "./gives.ts";
 import { creditTrade } from "./trade.ts";
-import type { ItemCount, Trade } from "./types.ts";
+import type { Clocks, ItemCount, Trade } from "./types.ts";
 
 /** What the ledgers need of the controller: the credits of gives, the book's trades, and the write of a received payment. */
 export interface LedgerHost {
@@ -25,15 +25,15 @@ export class TradeLedgers {
 
   constructor(private readonly host: LedgerHost) {}
 
-  /** A trade just made takes the partner's earlier gives still inside the window, once (capped at its side); an agreed one also the payment picked up before the agreement. Returns the trade as it stands then. */
-  async claimEarlier(trade: Trade, now: number, carried: BotSnapshot["inventory"]): Promise<Trade> {
-    const claimed = this.earlier.claimGives(trade, now);
+  /** A trade just made takes the partner's earlier gives still inside the window (`at.now`, monotonic), once (capped at its side); an agreed one also the payment picked up before the agreement, credited on `at.wallNow`. Returns the trade as it stands then. */
+  async claimEarlier(trade: Trade, at: Clocks, carried: BotSnapshot["inventory"]): Promise<Trade> {
+    const claimed = this.earlier.claimGives(trade, at.now);
     for (const e of claimed) this.host.gives.credit(trade, e.item, e.count);
     if (trade.state === "proposed" && claimed.length > 0) this.fromLedger.set(trade.id, claimed);
-    const { trade: next, used } = creditTrade(trade, trade.state === "agreed" ? this.earlier.claimGains(trade, carried, now) : [], now);
+    const { trade: next, used } = creditTrade(trade, trade.state === "agreed" ? this.earlier.claimGains(trade, carried, at.now) : [], at.wallNow);
     if (used.length > 0) await this.host.recordReceived(next).catch((error: unknown) => {
       // The write failed: the payment is kept for the retry (while the book shows no credit), not lost with the claim.
-      if (this.host.find(trade.id)?.received.length === trade.received.length) this.earlier.gained(used, new Map([[trade.partner.toLowerCase(), 0]]), now);
+      if (this.host.find(trade.id)?.received.length === trade.received.length) this.earlier.gained(used, new Map([[trade.partner.toLowerCase(), 0]]), at.now);
       throw error;
     });
     return next;
@@ -52,9 +52,9 @@ export class TradeLedgers {
   /** A tick: the players who stood near are noted for the gains this tick will credit. */
   noteTick(snapshot: BotSnapshot, handoffDistance: number, now: number): void { this.near.note(snapshot, handoffDistance, now); }
 
-  /** A partner's line: inside the opening distance it opens the earlier ledger's watch, and after agreement it starts the collect fallback's short watch for their payment. */
-  heard(trades: readonly Trade[], speaker: string, at: number, distance: number | null, openingDistance: number): void {
-    if (distance !== null && distance <= openingDistance) this.earlier.heard(speaker, at);
+  /** A partner's line (`at.wallNow` its wall time, `at.now` the monotonic reading of hearing it): inside the opening distance it opens the earlier ledger's watch, and after agreement it starts the collect fallback's short watch for their payment. */
+  heard(trades: readonly Trade[], speaker: string, at: Clocks, distance: number | null, openingDistance: number): void {
+    if (distance !== null && distance <= openingDistance) this.earlier.heard(speaker, at.now);
     this.collects.heard(trades, speaker, at);
   }
 

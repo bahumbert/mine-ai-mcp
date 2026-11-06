@@ -12,7 +12,7 @@ import { memoryNote, recall } from "./memory.ts";
 import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
 import { monotonicNow } from "./monotonic-clock.ts";
-import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
+import { FakeRuntime, movedClocks, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
 import type { AgentRelations } from "./relations/agent-relations.ts";
 import { TradeBoard } from "./relations/board.ts";
@@ -1769,9 +1769,7 @@ test("shelter keeps the trade due: a stop during the give drops the hand-off, th
   const runtime = tradingRuntime();
   runtime.durations.drop_item = 100_000;
   const { agent, chat } = agentFor(t, runtime);
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  const clock = t.mock.method(Date, "now", () => now() + offset);
+  const time = movedClocks(t);
   chat.reply(ACCEPT, { say: "Okay.", route: "stop", request: "" });
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
   await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
@@ -1781,14 +1779,14 @@ test("shelter keeps the trade due: a stop during the give drops the hand-off, th
   assert.equal(agent.activity, "idle");
   assert.deepEqual([savedRelations(runtime)[0]?.trades[0]?.state, savedRelations(runtime)[0]?.trades[0]?.gaveAt], ["agreed", null], "the trade is still due");
   delete runtime.durations.drop_item;
-  offset = 31_000;
+  time.offset = 31_000;
   await sleep(300);
   assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "i_gave", "taken again later and given");
-  offset += 11 * MIN;
+  time.offset += 11 * MIN;
   await sleep(300);
   const broken = savedRelations(runtime)[0]?.trades[0];
   assert.deepEqual([broken?.state, broken?.brokenBy], ["broken", "them"]);
-  clock.mock.restore();
+  time.restore();
 });
 
 test("a player's give_item request outside a trade is unchanged, and keeps no relation", async (t) => {
@@ -2375,18 +2373,16 @@ test("a hand-off the partner did not take is retaken and done once the partner t
     { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 5 }], recipient: { collected: true, collectedCount: 5 } },
   );
   const { agent, chat } = agentFor(t, runtime);
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  const clock = t.mock.method(Date, "now", () => now() + offset);
+  const time = movedClocks(t);
   chat.reply(ACCEPT);
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
   await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
   await sleep(200);
   assert.equal(savedRelations(runtime)[0]?.trades[0]?.state, "agreed", "not taken: the trade is still due, no gave row");
-  offset = 31_000;
+  time.offset = 31_000;
   await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
   assert.equal(runtime.submitted.filter((call) => call.tool === "drop_item").length, 2);
-  clock.mock.restore();
+  time.restore();
 });
 
 test("a partly taken hand-off credits the taken part: the retake gives only what is left", async (t) => {
@@ -2398,18 +2394,16 @@ test("a partly taken hand-off credits the taken part: the retake gives only what
     { status: "succeeded", error: null, dropped: [{ item: "bread", dropped: 3 }], recipient: { collected: true, collectedCount: 3 } },
   );
   const { agent, chat } = agentFor(t, runtime);
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  const clock = t.mock.method(Date, "now", () => now() + offset);
+  const time = movedClocks(t);
   chat.reply(ACCEPT);
   await agent.handle(say("Theo", "Ayla, 5 iron_ingot for your 5 bread?"));
   await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
   await sleep(200);
-  offset = 31_000;
+  time.offset = 31_000;
   await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "i_gave", 4_000);
   const counts = runtime.submitted.filter((call) => call.tool === "drop_item").map((call) => (call.input.items as { count: number }[])[0]?.count);
   assert.deepEqual(counts, [5, 3]);
-  clock.mock.restore();
+  time.restore();
 });
 
 test("an outside give_item the partner did not pick up is not counted toward the trade (s1d, bug A)", async (t) => {
@@ -2640,9 +2634,7 @@ test("D1: a partner who never takes the give gets exactly 2 tosses in 15 min, th
   runtime.simulateInventory = true;
   runtime.dropOutcomes.push(untaken(runtime), untaken(runtime));
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base" });
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  const clock = t.mock.method(Date, "now", () => now() + offset);
+  const time = movedClocks(t);
   planner.reply({ objective: "collect 16 oak_log" });
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { step: { skill: "collect_block", block: "oak_log", count: 16 } }, { step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
   await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
@@ -2651,17 +2643,17 @@ test("D1: a partner who never takes the give gets exactly 2 tosses in 15 min, th
   await until(() => runtime.submitted.some((call) => call.tool === "pick_up_items"), 4_000);
   await sleep(200);
   assert.equal(heldTrade(agent)?.state, "agreed", "one try is not the end");
-  offset = 31_000;
+  time.offset = 31_000;
   await until(() => heldTrade(agent)?.state === "broken", 4_000);
   assert.deepEqual([heldTrade(agent)?.brokenBy, heldTrade(agent)?.note], ["me", "Theo did not take 5 bread (2 tries); I kept them"]);
   const aborted = runtime.cancelled.length;
   delete runtime.durations.collect_block;
-  offset += 15 * MIN;
+  time.offset += 15 * MIN;
   await until(() => runtime.submitted.filter((call) => call.tool === "collect_block").length >= 3, 4_000);
   await sleep(300);
   assert.equal(dropCount(runtime), 2, "no third toss in 15 min");
   assert.equal(runtime.cancelled.length, aborted, "the next step of the own objective was never aborted");
-  clock.mock.restore();
+  time.restore();
 });
 
 test("T7: a give coming due during a player's order waits below it: the order's step is not aborted, and the give runs after the order", async (t) => {
@@ -2704,9 +2696,7 @@ test("T7 + D2: a give that waited behind a long order past the deadline ends bro
   runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, steveAt(3)] };
   runtime.durations.collect_block = 100_000;
   const { agent, chat, action } = agentFor(t, runtime);
-  const now = Date.now.bind(Date);
-  let offset = 0;
-  const clock = t.mock.method(Date, "now", () => now() + offset);
+  const time = movedClocks(t);
   chat.reply({ say: "On it.", route: "act", request: "collect 5 dirt" }, { ...ACCEPT, trade: { ...ACCEPT.trade, first: "them" } });
   action.reply({ step: { skill: "collect_block", block: "dirt", count: 5 } }, { done: "got the dirt" });
   await agent.handle(say("Steve", "Ayla, collect 5 dirt"));
@@ -2715,7 +2705,7 @@ test("T7 + D2: a give that waited behind a long order past the deadline ends bro
   await until(() => heldTrade(agent)?.state === "agreed", 4_000);
   runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "iron_ingot", count: 5 }] };
   await until(() => heldTrade(agent)?.state === "they_gave", 4_000);
-  offset += 11 * MIN;
+  time.offset += 11 * MIN;
   await until(() => heldTrade(agent)?.state === "broken", 4_000);
   assert.deepEqual([heldTrade(agent)?.brokenBy, heldTrade(agent)?.note], ["me", "could not hand over 5 bread within 10 min"]);
   assert.equal(dropCount(runtime), 0);
@@ -2726,7 +2716,7 @@ test("T7 + D2: a give that waited behind a long order past the deadline ends bro
   await sleep(200);
   assert.equal(dropCount(runtime), 0, "the ended trade is never handed over");
   assert.equal(heldTrade(agent)?.state, "broken");
-  clock.mock.restore();
+  time.restore();
 });
 
 /** A step of the agent's run by hand (B1): it starts, its yield lands in the inventory and it ends in one turn, so no look sees the step running. */
@@ -2735,15 +2725,13 @@ async function stepEndingBetweenLooks(t: TestContext, agent: Agent, runtime: Fak
   const answers: string[] = [];
   const look = inside.relations.look.bind(inside.relations);
   inside.relations.look = (...args) => { const answer = look(...args); answers.push(answer); return answer; };
-  const real = Date.now.bind(Date);
-  let offset = 0;
-  t.mock.method(Date, "now", () => real() + offset);
+  const time = movedClocks(t);
   const work = { step: null };
   inside.startStep(work, new AbortController(), step);
   await until(() => answers.includes("ticked")); // a tick read the inventory before the yield landed
   runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, ...gained] };
   inside.endStep(work);
-  offset += 2_000; // past the 2 s watch throttle of a window alone
+  time.offset += 2_000; // past the 2 s watch throttle of a window alone
   answers.length = 0;
   await until(() => answers.includes("ticked"));
   await until(() => !(inside.relations as unknown as { looking: boolean }).looking);
@@ -2801,12 +2789,10 @@ function ticksOnce(t: TestContext, agent: Agent): { next(): Promise<void> } {
   const answers: string[] = [];
   const look = inside.relations.look.bind(inside.relations);
   inside.relations.look = (...args) => { const answer = look(...args); answers.push(answer); return answer; };
-  const real = Date.now.bind(Date);
-  let offset = 0;
-  t.mock.method(Date, "now", () => real() + offset);
+  const time = movedClocks(t);
   return {
     async next(): Promise<void> {
-      offset += 2_000; // past the 2 s watch throttle of a window alone
+      time.offset += 2_000; // past the 2 s watch throttle of a window alone
       answers.length = 0;
       await until(() => answers.includes("ticked"));
       await until(() => !(inside.relations as unknown as { looking: boolean }).looking);

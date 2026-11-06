@@ -29,7 +29,7 @@ function refusal(first: ChatDecision, o: { chat: BotSnapshot; fresh: () => Promi
   const logs: string[] = [];
   const asked: ChatInput[] = [];
   const book = new RelationBook({ save: async () => {}, remove: async () => {}, now: () => 0, log: () => {}, scoring: testScoring() });
-  const trades = new TradeController({ self: "Ayla", persona: testPersona(), book, settings: testPersona().settings.relations, now: () => 0, takeHandoff: () => {}, journal: () => {}, log: () => {} });
+  const trades = new TradeController({ self: "Ayla", persona: testPersona(), book, settings: testPersona().settings.relations, now: () => 0, wallNow: () => 0, takeHandoff: () => {}, journal: () => {}, log: () => {} });
   const mind = { chat: async (input: ChatInput) => { asked.push(input); return o.second ?? plain; } };
   const input = { relations: { block: "b", tradeOn: true } } as unknown as ChatInput;
   const run = () => resendRefusedTrade({ mind, input, first, trades, speaker: "Theo", snapshot: o.chat, fresh: o.fresh, signal: o.signal ?? new AbortController().signal, log: (line) => logs.push(line) });

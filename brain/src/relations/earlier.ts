@@ -3,7 +3,7 @@ import { manhattan } from "../conversation/state.ts";
 import { owedItems } from "./trade.ts";
 import { type ItemCount, MINUTE_MS, type Trade } from "./types.ts";
 
-/** How long a give or a gain waits for a trade with the player (memory only: a brain restart loses it). */
+/** How long a give or a gain waits for a trade with the player (memory only: a brain restart loses it). The ledgers' times are monotonic readings (`Clocks.now`), never a trade's wall times. */
 export const EARLIER_GIVE_MS = 10 * MINUTE_MS;
 export const EARLIER_GAIN_MS = 10 * MINUTE_MS;
 
@@ -156,7 +156,7 @@ const RECENT_NEAR_MS = 30_000;
 
 /** Who stood within hand-off distance of me, and when (memory only). */
 export class NearLedger {
-  /** Player (lower case) -> the wall-clock time they were last within hand-off distance of me. */
+  /** Player (lower case) -> the monotonic reading when they were last within hand-off distance of me. */
   private readonly at = new Map<string, number>();
 
   /** Remembers who stands within hand-off distance now; the ones not near for a while are forgotten. */

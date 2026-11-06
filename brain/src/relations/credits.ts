@@ -4,7 +4,7 @@ import type { CollectFallback, CollectView } from "./collects.ts";
 import { EARLIER_GIVE_MS, type EarlierLedger, type NearLedger } from "./earlier.ts";
 import { sideText } from "./items.ts";
 import { attributeGains, creditTrade, inventoryGains, isOpen, ownGains, settleTrade } from "./trade.ts";
-import { MINUTE_MS, type Trade, type TradeSettings } from "./types.ts";
+import { type Clocks, MINUTE_MS, type Trade, type TradeSettings } from "./types.ts";
 
 /** What the controller holds that crediting reads and writes. */
 export interface CreditHost {
@@ -21,8 +21,8 @@ export interface CreditHost {
   collectView(): CollectView;
 }
 
-/** What the bag gained since the last tick goes to the trades it pays (or to the earlier ledger, or to nobody). */
-export async function creditGains(host: CreditHost, snapshot: BotSnapshot, previous: { readonly inventory: BotSnapshot["inventory"]; readonly partners: ReadonlyMap<string, Position | null> }, ownStepYields: ReadonlySet<string>, now: number, ownWork: boolean): Promise<void> {
+/** What the bag gained since the last tick goes to the trades it pays (or to the earlier ledger, or to nobody). `at`: the ledgers' windows read `now`, a credit is written on `wallNow`. */
+export async function creditGains(host: CreditHost, snapshot: BotSnapshot, previous: { readonly inventory: BotSnapshot["inventory"]; readonly partners: ReadonlyMap<string, Position | null> }, ownStepYields: ReadonlySet<string>, at: Clocks, ownWork: boolean): Promise<void> {
   const gains = inventoryGains(previous.inventory, snapshot.inventory);
   if (gains.length === 0) return;
   const { trades, earlier, collects } = host;
@@ -31,20 +31,20 @@ export async function creditGains(host: CreditHost, snapshot: BotSnapshot, previ
   const partners = new Map(host.partners);
   for (const t of collecting) partners.set(t.partner, snapshot.position);
   const mined = ownGains(gains, ownStepYields, ownWork, trades, collecting);
-  const credited = attributeGains({ gains, trades, partners, previous: previous.partners, self: snapshot.position, ownStepYields: mined, handoffDistance: host.settings.handoffDistance, recentlyNear: host.near.recently(now) });
+  const credited = attributeGains({ gains, trades, partners, previous: previous.partners, self: snapshot.position, ownStepYields: mined, handoffDistance: host.settings.handoffDistance, recentlyNear: host.near.recently(at.now) });
   for (const [id, items] of credited) {
     const trade = trades.find((t) => t.id === id);
     if (trade === undefined) continue;
-    const { trade: next, used } = creditTrade(trade, items, now);
+    const { trade: next, used } = creditTrade(trade, items, at.wallNow);
     if (used.length === 0) continue;
     // A payment kept for this partner before this tick (a tick that had no baseline) must not stay kept for their next trade (review 2026-10-29 S1).
-    earlier.consume(trade.partner, used, now);
+    earlier.consume(trade.partner, used, at.now);
     collects.arrivals.explain(used);
     collects.paid(id);
     await host.recordReceived(next);
   }
   collects.arrivals.explain(gains.filter((g) => mined.has(g.item)));
-  const kept = earlier.keepUnpaidFor({ gains, credited, mined, partners, previous: previous.partners, self: snapshot.position, handoffDistance: host.settings.handoffDistance, recentlyNear: host.near.recently(now) }, now);
+  const kept = earlier.keepUnpaidFor({ gains, credited, mined, partners, previous: previous.partners, self: snapshot.position, handoffDistance: host.settings.handoffDistance, recentlyNear: host.near.recently(at.now) }, at.now);
   // A kept payment is another player's (or this partner's later trade): no arrival for any trade open now.
   if (kept === null) return;
   collects.arrivals.explain(kept.items);
@@ -52,12 +52,12 @@ export async function creditGains(host: CreditHost, snapshot: BotSnapshot, previ
 }
 
 /** Credits what reached the bag unseen (walked over after the agreement) to the trades whose collect ended, is about to start, or which the clock ends. */
-export async function creditArrived(host: CreditHost, inventory: BotSnapshot["inventory"], ownStepYields: ReadonlySet<string>, now: number): Promise<void> {
-  const due = host.collects.readNow(host.collectView(), now);
-  const ends = (t: Trade): boolean => !isOpen(settleTrade(t, now, host.settings, { givePending: host.giveRunning(t.id) }).trade);
-  for (const { trade, next, used } of host.collects.arrivals.credits(host.trades, { inventory, ownStepYields, now, wanted: (t) => due.has(t.id) || ends(t) })) {
+export async function creditArrived(host: CreditHost, inventory: BotSnapshot["inventory"], ownStepYields: ReadonlySet<string>, at: Clocks): Promise<void> {
+  const due = host.collects.readNow(host.collectView(), at.now);
+  const ends = (t: Trade): boolean => !isOpen(settleTrade(t, at.wallNow, host.settings, { givePending: host.giveRunning(t.id) }).trade);
+  for (const { trade, next, used } of host.collects.arrivals.credits(host.trades, { inventory, ownStepYields, wallNow: at.wallNow, wanted: (t) => due.has(t.id) || ends(t) })) {
     host.log(`trade: ${sideText(used)} from ${trade.partner} found in the bag, walked over after the agreement`);
-    host.earlier.consume(trade.partner, used, now);
+    host.earlier.consume(trade.partner, used, at.now);
     await host.recordReceived(next);
   }
 }

@@ -133,6 +133,16 @@ export interface GiveProgress {
 /** Trade times are set in minutes. */
 export const MINUTE_MS = 60_000;
 
+/**
+ * The two clocks of the trade ledgers, read together (monotonic-clock.ts header): `now` is monotonic and times the
+ * windows and waits (never leaves the process); `wallNow` is wall time and goes into a trade, the book and the score,
+ * or is compared with such a time. The two are never compared with each other.
+ */
+export interface Clocks {
+  readonly now: number;
+  readonly wallNow: number;
+}
+
 export interface TradeSettings {
   readonly payBackMinutes: number;
   readonly startMinutes: number;

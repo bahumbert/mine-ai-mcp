@@ -11,9 +11,10 @@ export class HandoffQueue {
   private readonly awaited = new Set<string>();
   /** Trades whose wait is on the agent's stack now. */
   readonly awaiting = new Set<string>();
-  /** When each dropped wait for a partner's side was dropped (keyed by `awaitKey`). */
+  /** When (monotonic reading) each dropped wait for a partner's side was dropped (keyed by `awaitKey`). */
   private readonly awaitDroppedAt = new Map<string, number>();
 
+  /** `now`: the monotonic clock (the retake wait). */
   constructor(private readonly gives: GiveBook, private readonly now: () => number, private readonly take: (h: Handoff) => void) {}
 
   /** They are to pay first, or I paid first, and nothing came: wait near them, once (a dropped wait after a while). */
