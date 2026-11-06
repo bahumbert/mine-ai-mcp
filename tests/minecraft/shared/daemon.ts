@@ -9,6 +9,7 @@ import { serveSocket } from "./daemon-socket.ts";
 import { GameruleDefaultsCache } from "./gamerule-defaults.ts";
 import { LabsServerFactory } from "./labs-server.ts";
 import { runLabsTrial } from "./labs-trial.ts";
+import { putLshwStubOnPath } from "./lshw-stub.ts";
 import { MachineProbe, residentMbOfPid } from "./machine-load.ts";
 import { realMirrorPorts, ScenarioMirror, type MirrorPorts } from "./mirror.ts";
 import { ModulesTrees, pruneModules } from "./mirror-modules.ts";
@@ -106,6 +107,8 @@ function probeServers(pool: ServerPool, config: ScenarioServerConfig, now: () =>
 /** The daemon's server factory and template builds (the real ones unless a test gave its own), after killing the java servers a dead daemon left. */
 async function serverParts(options: DaemonOptions): Promise<{ readonly factory: ServerFactory; readonly templateBuilds: TemplateBuilds | undefined }> {
   const { config, log, socketPath } = options;
+  // Before any server starts: the server JVMs of the lanes and of the template builds inherit this process's PATH.
+  await putLshwStubOnPath(log);
   const serverRoot = join(options.stateDir, "servers");
   // Next to the socket, not in the checkout: a daemon started from another worktree still finds what a dead one left.
   const pidFile = new PidFile(`${socketPath}.pids`);
