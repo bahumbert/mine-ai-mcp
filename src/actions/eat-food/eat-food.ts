@@ -1,6 +1,7 @@
 import { eatCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
+import { raceSignal } from "../../utils/index.js";
 import { carriedCount, settledNow, settleInventoryCount, type SettledInventoryCount } from "../../world/index.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
@@ -138,27 +139,23 @@ async function eatAgainstBaseline(
   const carriedAtStart = carriedCount(bot, request.foodName);
   using resources = new DisposableStack();
   let consuming = false;
-  let cancelWait: ((reason: unknown) => void) | null = null;
   const stopConsumption = () => {
     if (consuming && bot.usingHeldItem) bot.deactivateItem();
-    cancelWait?.(context.signal?.reason);
   };
   context.signal?.addEventListener("abort", stopConsumption, { once: true });
   // Mineflayer may resolve consume before the bite actually finishes. Keep
   // cancellation attached through inventory confirmation as well.
   resources.defer(() => context.signal?.removeEventListener("abort", stopConsumption));
   try {
-    await dependencies.equip(item, "hand");
+    await raceSignal(dependencies.equip(item, "hand"), context.signal);
     context.signal?.throwIfAborted();
     consuming = true;
     // Mineflayer's deactivateItem releases the hand, but leaves consume's
     // completion promise pending until its 2.5-second timeout. Once released,
     // defence must not wait on that bookkeeping promise. Its late rejection
-    // remains handled by the race; it performs no further body effects.
-    const cancelled = new Promise<never>((_resolve, reject) => { cancelWait = reject; });
-    await Promise.race([dependencies.consume(), cancelled]);
+    // is swallowed by the race; it performs no further body effects.
+    await raceSignal(dependencies.consume(), context.signal);
     onConsumeResolved();
-    cancelWait = null;
     context.signal?.throwIfAborted();
   } catch (cause) {
     context.signal?.throwIfAborted();

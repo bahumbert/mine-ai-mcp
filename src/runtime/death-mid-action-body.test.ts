@@ -11,6 +11,7 @@ import { CarriedCounts } from "../test-support/carried-counts.js";
 import { craftingBot } from "../test-support/crafting.js";
 import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, flush } from "../test-support/fake-bot/index.js";
 import { structureWorld } from "../test-support/structure-world.js";
+import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runtime.js";
 
 interface Scene {
@@ -84,6 +85,12 @@ const UNANSWERED_CLICK_TIMEOUT = { ms: 3_000, message: "the server never answere
 const CLOCK_SLICE_MS = 50;
 
 /**
+ * Plan b task 8: a pending Mineflayer call (a window click, a bed use, a placement) the server never answers does not
+ * hold the death cancel back; the action races it against its signal, so the cancel comes within this much clock time.
+ */
+const DEATH_CANCEL_BOUND_MS = 1_000;
+
+/**
  * The 20-runtime tests take 1.7 s (eat_food) to 6.2 s (build_structure, craft_item) of wall time on this machine (2026-11-06,
  * WSL on the D: mount), against the runner's 5 s default: each builds 20 runtimes, so they carry their own bound.
  */
@@ -127,7 +134,7 @@ const equipScene: SceneFactory = (clock, index) => {
   bot.equip = held.held;
   const worn = { equips: ["iron_helmet", second], states: [true, true] };
   return {
-    harness, actionName: "equip", input: { items: [{ item_name: "iron_helmet" }, { item_name: second }] }, boundMs: UNANSWERED_CLICK_TIMEOUT.ms,
+    harness, actionName: "equip", input: { items: [{ item_name: "iron_helmet" }, { item_name: second }] }, boundMs: DEATH_CANCEL_BOUND_MS,
     reachedWait: held.reached, proceed: held.proceed,
     restock: () => { equipped.length = 0; carry(harness, { iron_helmet: 1, [second]: 1 }); },
     // Every item is worn by an equip of this life: the first life's helmet is not counted as worn now.
@@ -158,7 +165,7 @@ const sleepScene: SceneFactory = (clock, index) => {
   // The bot sleeps once in the run (the first life's bed use never reached the server): a leaked "slept already" would make it zero.
   const slept = { bedX, sleeps: 1 };
   return {
-    harness, actionName: "sleep", input: {}, boundMs: SLEEP_ANSWER_TIMEOUT.ms,
+    harness, actionName: "sleep", input: {}, boundMs: DEATH_CANCEL_BOUND_MS,
     reachedWait: bedUse.reached, proceed: bedUse.proceed,
     restock: () => {},
     report: (result) => ({ bedX: resultOf({ result }).sleep?.bedPosition?.x ?? JSON.stringify(result), sleeps }),
@@ -175,7 +182,7 @@ const buildScene: SceneFactory = (clock, index) => {
   harness.bot._placeBlockWithOptions = place.held;
   const wall = Array.from({ length }, (_, offset) => ({ x: 1 + offset, y: 64, z: 0, block_name: "cobblestone" }));
   return {
-    harness, actionName: "build_structure", input: { blocks: wall }, boundMs: PLACE_ANSWER_TIMEOUT.ms,
+    harness, actionName: "build_structure", input: { blocks: wall }, boundMs: DEATH_CANCEL_BOUND_MS,
     reachedWait: place.reached, proceed: place.proceed,
     restock: () => carry(harness, { cobblestone: 64 }),
     report: (result) => ({ cells: resultOf({ result }).structure.cells, correct: resultOf({ result }).structure.correct, placed: resultOf({ result }).structure.placed }),
@@ -192,7 +199,7 @@ const craftScene: SceneFactory = (clock, index) => {
   const craft = holdNthCall(bot.craft.bind(bot), 1, UNANSWERED_CLICK_TIMEOUT);
   bot.craft = craft.held;
   return {
-    harness, actionName: "craft_item", input: { items: [{ item_name: "stone_pickaxe", count: pickaxes }] }, boundMs: UNANSWERED_CLICK_TIMEOUT.ms,
+    harness, actionName: "craft_item", input: { items: [{ item_name: "stone_pickaxe", count: pickaxes }] }, boundMs: DEATH_CANCEL_BOUND_MS,
     reachedWait: craft.reached, proceed: craft.proceed,
     // Materials for one pickaxe only; the first life's table (set down before the held craft) is not owned by the new request.
     restock: () => carry(harness, { crafting_table: 1, cobblestone: 3, stick: 2 }),
@@ -260,10 +267,12 @@ for (const [label, make] of Object.entries(SCENES)) {
     const running = startRequest(runtime, scene);
     await untilAtWait(clock, [scene]);
 
+    const diedAt = monotonicNow();
     die(scene);
     const output = await clock.settle(running, scene.boundMs + CLOCK_SLICE_MS);
 
     assert.equal(output.result.status, "cancelled", JSON.stringify(output.result));
+    assert.ok(monotonicNow() - diedAt <= scene.boundMs, `the cancel took ${monotonicNow() - diedAt} ms of clock, over ${scene.boundMs}`);
     assert.equal(runtime.status().busy, false);
     const events = await runtime.run(actionNamedIn(runtime, "read_recent_events"), {});
     const deaths = readRecentEventsResultSchema.parse(events.result).events.filter((event) => event.type === "player_death");

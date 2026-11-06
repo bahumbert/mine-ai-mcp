@@ -2,7 +2,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { setSneaking } from "../navigation/mineflayer/sneak.js";
 import { blockClass } from "../navigation/mineflayer/world.js";
-import { asVec3, cellIntersectsBody, type Position3 } from "../utils/index.js";
+import { asVec3, cellIntersectsBody, raceSignal, type Position3 } from "../utils/index.js";
 import { isReplaceableForPlacement } from "./block-classification.js";
 import { carriedCount, settleInventoryCount } from "./inventory-count.js";
 import { SERVER_ANSWER_TICKS, waitForServerAnswer } from "./world-age.js";
@@ -139,15 +139,17 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     placement.signal?.throwIfAborted();
     const initialBlocker = occupiedCell(bot, cubeCell);
     if (initialBlocker) return { kind: "failed", error: initialBlocker, cause: "entity" };
-    await bot.equip(placement.item, "hand");
+    // Each Mineflayer call waits on the server (or on physics ticks): a death must end the placement, not the call.
+    await raceSignal(bot.equip(placement.item, "hand"), placement.signal);
 
     if (placement.lookDirection) {
       const direction = placement.lookDirection;
       const yaw = Math.atan2(-direction.x, -direction.z);
-      await bot.look(yaw, 0);
+      await raceSignal(bot.look(yaw, 0), placement.signal);
     } else if (placementBot._placeBlockWithOptions) {
       // Aim once, then check the bodies observed at the instant we will send the placement.
-      await bot.lookAt(placement.support.position.offset(0.5 + face.x / 2, 0.5 + face.y / 2, 0.5 + face.z / 2), true);
+      const aimAt = placement.support.position.offset(0.5 + face.x / 2, 0.5 + face.y / 2, 0.5 + face.z / 2);
+      await raceSignal(bot.lookAt(aimAt, true), placement.signal);
     }
 
     placement.signal?.throwIfAborted();
@@ -156,7 +158,7 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     setSneaking(bot, true);
     sentAtAge = bot.time?.age;
     placement.onSent?.();
-    await placeWithoutLooking(bot, placement.support, face, placement.half);
+    await raceSignal(placeWithoutLooking(bot, placement.support, face, placement.half), placement.signal);
   } catch (cause) {
     if (placement.signal?.aborted) throw cause;
     if (!isBlockUpdateTimeout(cause)) return { kind: "failed", error: message(cause) };
