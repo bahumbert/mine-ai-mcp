@@ -1,0 +1,31 @@
+{
+  "item": {
+    "pickaxe": ["pickaxes"],
+    "axe": ["axes"],
+    "shovel": ["shovels"],
+    "hoe": ["hoes"],
+    "sword": ["swords"],
+    "shears": [],
+    "bow": ["enchantable/bow"],
+    "crossbow": ["enchantable/crossbow"],
+    "shield": [],
+    "helmet": ["head_armor"],
+    "chestplate": ["chest_armor"],
+    "leggings": ["leg_armor"],
+    "boots": ["foot_armor"],
+    "arrow": ["arrows"],
+    "food": [],
+    "avoided_food": [],
+    "bed": ["beds"],
+    "boat": ["boats"],
+    "station": []
+  },
+  "block": {
+    "container": ["shulker_boxes"],
+    "chest": []
+  },
+  "entity_type": {
+    "arrow_entity": ["arrows"],
+    "projectile_entity": ["arrows"]
+  }
+}
