@@ -30,6 +30,9 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/bow-draw-and-release.yaml", /exclusive/u],
   // A contract check that sets the server's tick rate while it runs.
   ["contract/scenarios/world-age-at-slow-tick.yaml", /exclusive/u],
+  // The hostile-night bed: midnight and the difficulty are the whole server's, and a death reader must not share a server with another lane's mob.
+  ["scenarios/combat/zombie-at-night.yaml", /exclusive/u],
+  ["scenarios/combat/death-is-read.yaml", /exclusive/u],
   // The arena and its scratch copy pin more than the 256 chunks Minecraft force-loads.
   ["scenarios/collect/obsidian-by-exploring.yaml", /chunks/u],
   ["scenarios/pathfinder/at-sea-land-behind-kelp.yaml", /chunks/u],

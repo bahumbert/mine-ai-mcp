@@ -181,6 +181,13 @@ Starting grounded is the default. Add an exception only when a real fixture
 needs to start off the ground; there is no configuration option for it now.
 The action starts only after Mine Labs sends `start`.
 
+`templates/hostile-night.yaml` is the night bed for hostile-mob and death scenarios (spec P4-01 D6): midnight, normal
+difficulty, mob spawning off (a scenario summons the mob it needs), one op `Actor` whose driver sends commands as chat.
+Its tag `exclusive` gives each scenario a server of its own, and a scenario lists the tag itself (a merge replaces the
+whole field). `drivers/deaths.ts` (`observeDeaths(bot)`) reads deaths, their cause and respawns on the monotonic clock,
+a respawn being the first `spawn` after a `death` (never Mineflayer's `respawn`, which a dimension change also fires);
+`scenarios/combat/zombie-at-night.yaml` and `death-is-read.yaml` use it.
+
 ## Contract checks: the fake bot against the real server
 
 `contract/` holds the answers of Mineflayer and a 1.21.4 server that the shared fake bot

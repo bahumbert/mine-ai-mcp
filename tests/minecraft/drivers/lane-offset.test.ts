@@ -153,10 +153,12 @@ for (const { file, driver, name } of scenarios.filter(({ driver }) => !OWN_TEST.
  */
 const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "arrow-reservation.ts": "runs single-action.ts; the scenario's action input holds no x or z",
+  "death-is-read.ts": "no action; the death is made by a chat command on the actor itself (@s)",
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
   "idle-then-breathe.ts": "no action, reads the air",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
+  "zombie-at-night.ts": "no action; the zombie is summoned by a chat command relative to the actor (@s), and its position is never compared",
 };
 
 test("every driver but the listed ones was compared on a run that used coordinates", () => {

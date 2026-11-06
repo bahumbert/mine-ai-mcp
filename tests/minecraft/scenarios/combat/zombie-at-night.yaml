@@ -1,0 +1,31 @@
+template: ../../templates/hostile-night.yaml
+
+name: zombie-at-night
+tags: [acceptance, exclusive]
+description: >-
+  A night zombie summoned three blocks from an actor holding an iron sword, nothing asked of the bot. Any response of its
+  reflexes is valid (fight, evade, hide); the bed passes when the two came to blows within the bound and the fight then
+  ended, by the zombie gone or by a death the death reader saw.
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/zombie-at-night.ts
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: iron_sword, count: 1 }
+
+params:
+  withinSeconds: 60
+
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: completion, who: Actor }
