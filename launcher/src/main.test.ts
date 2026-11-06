@@ -17,6 +17,7 @@ import { COMMANDS, runCli, USAGE, type CliDeps } from "./main.ts";
 const setup = () => cliContext("main", appRoot());
 
 const doctorDeps: DoctorDeps = {
+  diskLines: async () => [],
   bunVersion: "1.4.2",
   platform: "win32 x64",
   ollamaVersion: async () => "0.35.0",

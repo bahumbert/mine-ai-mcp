@@ -92,7 +92,9 @@ test("a link inside a staged folder is not followed, so a link into the private 
   const outside = scratchDir();
   try {
     touch(outside, "private.ts", "secret");
-    symlinkSync(outside, join(root, "src", "private-link"), "dir");
+    // "junction" because a Windows user without the symlink privilege (no Developer Mode) gets EPERM for a "dir" link, and
+    // Bun 1.4.2 lists a junction as a symbolic link (probe 2026-11-06), so it tests the same skip; off Windows the type is ignored.
+    symlinkSync(outside, join(root, "src", "private-link"), "junction");
     assert.equal(stagedOf(root).some((file) => file.includes("private")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

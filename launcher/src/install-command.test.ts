@@ -4,7 +4,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { UsageError } from "./cli-context.ts";
 import { cliContext, okInstallSteps } from "./cli-test-support.ts";
-import { INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
+import { diskStep, INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
+import type { DiskReportDeps } from "./install/disk-report.ts";
 import type { GpuReport } from "./install/gpu.ts";
 
 const REMOTE_REPORT: GpuReport = { adapters: [], compute: null, ramBytes: 8 * 1024 ** 3, choice: { kind: "remote", reason: "This PC has 2.0 GiB of video memory; the local model needs 10.", hint: "Use a remote endpoint." } };
@@ -121,9 +122,9 @@ test("--dir reaches the ollama step as the folder to install Ollama into, and it
   assert.deepEqual(seen, ["D:\\Programmes Perso\\Ollama é", undefined]);
 });
 
-test("--dir on any step but `install ollama` is a usage error naming the step that takes it, and nothing runs", async () => {
+test("--dir on any step but `install ollama` and `install disk` is a usage error naming the step that takes it, and nothing runs", async () => {
   const t = setup();
-  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "ollama")) {
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "ollama" && name !== "disk")) {
     await assert.rejects(runInstallCommand([step, "--dir", "D:\\Apps", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install ollama --dir"), step);
   }
   assert.deepEqual(t.calls, []);
@@ -201,4 +202,60 @@ test("the keys the installer script reads from `install gpu`'s file are the keys
     assert.ok(key in output, `install gpu writes '${key}'`);
   }
   assert.equal(output.model, "gemma4:12b", "the wizard prints this name in 'The AI model <name> is already installed.'");
+});
+
+test("`install disk --json` writes the report as the step gave it: ok, detail, short and drives; a short drive is still ok:true and exit 0", async () => {
+  const report = { ok: true as const, detail: "D: 2.0 GB free. The local AI model needs 2.8 GB here.", short: true, drives: [{ drive: "D:", freeBytes: 2 * 1024 ** 3, needs: [{ what: "Ollama", bytes: 2963753072 }] }] };
+  const t = setup({ disk: async () => report });
+  assert.equal(await runInstallCommand(["disk", "--json", t.json], t.context, t.steps), 0);
+  assert.deepEqual(written(t.json), JSON.parse(JSON.stringify(report)));
+});
+
+test("`install disk` prints its detail when there is no --json, and an unreadable disk is exit 1 with the error and the hint", async () => {
+  const t = setup({ disk: async () => ({ ok: true, detail: "C: 10.0 GB free.", short: false, drives: [] }) });
+  await runInstallCommand(["disk"], t.context, t.steps);
+  assert.deepEqual(t.out, ["C: 10.0 GB free."]);
+  const failing = setup({ disk: async () => ({ ok: false, error: "The drive of X:\\a does not exist.", hint: "Choose another folder." }) });
+  assert.equal(await runInstallCommand(["disk", "--json", failing.json], failing.context, failing.steps), 1);
+  assert.equal(written(failing.json).hint, "Choose another folder.");
+});
+
+test("--dir and --no-model reach the disk step, each absent by default; --dir is checked like the one of `install ollama`: absolute, trailing separator dropped", async () => {
+  const seen: [string | undefined, boolean | undefined][] = [];
+  const t = setup({ disk: async (_ctx, _accept, dir, noModel) => (seen.push([dir, noModel]), { ok: true, detail: "x", short: false, drives: [] }) });
+  await runInstallCommand(["disk", "--dir", "D:\\Jeux é\\", "--no-model", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["disk", "--json", t.json], t.context, t.steps);
+  assert.deepEqual(seen, [["D:\\Jeux é", true], [undefined, false]]);
+  await assert.rejects(runInstallCommand(["disk", "--dir", "Ollama", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("absolute"));
+});
+
+test("the real disk step passes --dir and --no-model to the report: the Ollama folder's drive is listed, and not with --no-model", async () => {
+  const GIB = 1024 ** 3;
+  const noBody = (async () => new Response(null, { headers: { "content-length": "1000" } })) as unknown as typeof fetch;
+  const deps = (): DiskReportDeps => ({
+    disk: { platform: "win32", exists: (path) => /^[CD]:\\$/u.test(path), statfs: async () => ({ bavail: BigInt(50 * GIB), bsize: 1n }), dev: () => "0" },
+    fetchImpl: noBody,
+    modelStoreDeps: { fetchImpl: noBody, exists: () => false, sizeOf: async () => 0, listDir: async () => [] },
+    ollamaExe: () => null,
+    modelOnDisk: () => false,
+    modelStore: () => "C:\\MineAI\\models",
+    pinnedJreInstalled: async () => false,
+    defaultOllamaFolder: "C:\\Ollama",
+  });
+  const drivesFor = async (args: string[]) => {
+    const { context, json, steps } = setup();
+    await runInstallCommand(["disk", ...args, "--json", json], { ...context, root: "C:\\MineAI" }, { ...steps, disk: diskStep(deps) });
+    return (written(json).drives as { drive: string }[]).map((drive) => drive.drive);
+  };
+  assert.deepEqual(await drivesFor([]), ["C:"]);
+  assert.deepEqual(await drivesFor(["--dir", "D:\\Apps\\Ollama"]), ["C:", "D:"]);
+  assert.deepEqual(await drivesFor(["--dir", "D:\\Apps\\Ollama", "--no-model"]), ["C:"]);
+});
+
+test("--no-model on any step but `install disk` is a usage error naming the step that takes it, and nothing runs", async () => {
+  const t = setup();
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "disk")) {
+    await assert.rejects(runInstallCommand([step, "--no-model", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install disk"), step);
+  }
+  assert.deepEqual(t.calls, []);
 });
