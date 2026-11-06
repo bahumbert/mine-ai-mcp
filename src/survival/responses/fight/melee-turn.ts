@@ -11,6 +11,7 @@ import {
   hasMeleeKnockbackRoom,
   hasSweepBystander,
   meleeDistance,
+  sweepsOnSwing,
   waitingForDescendingCube,
 } from "../../weapons/melee.js";
 import type { EndermanFight } from "./enderman.js";
@@ -127,7 +128,7 @@ export async function runMeleeTurn(
     return null;
   // A bystander can enter during shield readiness or aiming. Select the
   // non-sweeping loadout on the next iteration before any attack lands.
-  if (loadout.weapon?.name.endsWith("_sword") && hasSweepBystander(scene.bot, scene.target)) return null;
+  if (sweepsOnSwing(scene.bot, loadout.weapon) && hasSweepBystander(scene.bot, scene.target)) return null;
   if (!scene.policy.combat.melee)
     return {
       ...scene.result("capability_blocked"),

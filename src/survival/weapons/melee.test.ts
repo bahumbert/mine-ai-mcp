@@ -3,9 +3,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld as GoalTestWorld } from "../../navigation/world/memory-world.js";
 import { type FakeEntitySpec, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { flatWorld, observation } from "../../test-support/navigation.js";
 import { entityDimensions } from "../../world/entity-dimensions.js";
-import { hasMeleeKnockbackRoom, meleeApproachGoal, meleeDistance } from "./melee.js";
+import { combatItemsForTarget, hasMeleeKnockbackRoom, meleeApproachGoal, meleeDistance } from "./melee.js";
 
 const goalTestWorld = new GoalTestWorld();
 const TARGET_ID = 7;
@@ -130,4 +131,31 @@ test("a full wall can catch knockback but a one-block lip cannot replace landing
   assert.equal(hasMeleeKnockbackRoom(world, from, target), false);
   world.load({ x: 0, y: 64, z: -1 }, { stateId: 1 });
   assert.equal(hasMeleeKnockbackRoom(world, from, target), true);
+});
+
+/** A zombie target two blocks away and, with `bystander`, a piglin beside it, a bot carrying `carried`. */
+function sweepScene(carried: Record<string, number>, bystander: boolean, datapackSwords: readonly string[] = []) {
+  const body = { width: 0.6, height: 1.95 };
+  const entities: Record<number, FakeEntitySpec> = { [TARGET_ID]: { name: "zombie", position: new Vec3(2, 64, 0), ...body } };
+  if (bystander) entities[8] = { name: "piglin", position: new Vec3(1, 64, 1), ...body };
+  const harness = createFakeBot({ position: new Vec3(0, 64, 0), carried, entities });
+  if (datapackSwords.length > 0) addItemsToServerTag(harness, "swords", datapackSwords);
+  return { bot: harness.bot, target: harness.bot.entities[TARGET_ID]! };
+}
+
+test("with a bystander in sweep range, every vanilla sword is withheld and the other tools stay", () => {
+  const carried = { wooden_sword: 1, stone_sword: 1, golden_sword: 1, iron_sword: 1, diamond_sword: 1, netherite_sword: 1, iron_axe: 1, iron_pickaxe: 1 };
+  const { bot, target } = sweepScene(carried, true);
+  assert.deepEqual(combatItemsForTarget(bot, target).map((item) => item.name).sort(), ["iron_axe", "iron_pickaxe"]);
+});
+
+test("with a bystander in sweep range, an item a datapack adds to swords is withheld", () => {
+  const { bot, target } = sweepScene({ stick: 1, iron_pickaxe: 1 }, true, ["stick"]);
+  assert.deepEqual(combatItemsForTarget(bot, target).map((item) => item.name), ["iron_pickaxe"]);
+});
+
+test("without a bystander every carried item stays, swords included", () => {
+  const { bot, target } = sweepScene({ stick: 1, iron_sword: 1 }, false, ["stick"]);
+  // `readCombatItems` lists the held item twice (hand, then inventory): the names, once each.
+  assert.deepEqual([...new Set(combatItemsForTarget(bot, target).map((item) => item.name))].sort(), ["iron_sword", "stick"]);
 });

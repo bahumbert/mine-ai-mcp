@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { familyIndexOf, type ItemFamily } from "../../../../world/item-families.js";
 import type { SurvivalPolicy } from "../../../policy/contract.js";
 import { recoveryHealth } from "../../../policy/combat/health.js";
 import { responsePermissions } from "../../../policy/combat/permissions.js";
@@ -7,6 +8,9 @@ import type { SurvivalResources } from "../../../state/resources.js";
 import { recoveryScope } from "./recovery.js";
 
 export type CombatResponse = "fight" | "hide" | "evade" | "deflect";
+
+/** The families a fight's answered-response record lists: what the bot can hit, shoot or guard with. */
+const FIGHT_TRACE_FAMILIES: readonly ItemFamily[] = ["bow", "crossbow", "arrow", "sword", "axe", "shield"];
 
 export function responseScope(
   bot: Bot,
@@ -29,13 +33,14 @@ export function responseScope(
         for (let z = -1; z <= 1; z++)
           for (let y = -3; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
       const items = bot.inventory.items();
+      const index = familyIndexOf(bot);
       return {
         cells,
         target: targetId === undefined ? null : (bot.entities[targetId]?.position.floored().toString() ?? null),
         weapons:
           kind === "fight"
             ? items
-                .filter((item) => /bow|arrow|sword|axe|shield/.test(item.name))
+                .filter((item) => index.itemFamilies(item.name).some((family) => FIGHT_TRACE_FAMILIES.includes(family)))
                 .map((item) => ({ name: item.name, available: item.count > 0 }))
                 .sort((a, b) => a.name.localeCompare(b.name))
             : [],

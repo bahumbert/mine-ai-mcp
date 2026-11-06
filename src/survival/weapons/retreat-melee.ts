@@ -3,7 +3,7 @@ import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 import type { HostileContext } from "../control/combat/context.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { MELEE_RANGE, selectMeleeLoadout } from "./equipment.js";
-import { hasSweepBystander, meleeDistance } from "./melee.js";
+import { hasSweepBystander, meleeDistance, sweepsOnSwing } from "./melee.js";
 
 /**
  * Strike reachable threats with the current hand while navigation owns movement.
@@ -41,7 +41,7 @@ export function defendWhileRetreating(bot: Bot, context: HostileContext, signal:
       const toward = target.position.offset(0, target.height / 2, 0).minus(eye);
       const distance = toward.norm();
       if (distance > 0 && bot.world.raycast(eye, toward.scaled(1 / distance), distance)) continue;
-      if (bot.heldItem?.name.endsWith("_sword") && hasSweepBystander(bot, target)) continue;
+      if (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, target)) continue;
       const loadout = selectMeleeLoadout(bot.heldItem ? [bot.heldItem] : []);
       bot.attack(target);
       attacks += 1;

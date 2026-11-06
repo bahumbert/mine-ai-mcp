@@ -3,6 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { HostileContext } from "../control/combat/context.js";
 import { type FakeEntitySpec, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { defendWhileRetreating } from "./retreat-melee.js";
 
 /** A wall between the bot's eye and the magma cube, which a raycast meets. */
@@ -14,7 +15,7 @@ function stolen(operation: string) {
 }
 
 /** A size-2 magma cube two blocks from a bot holding a diamond sword, and with `neutral`, a piglin beside it. */
-function fixture(options: { neutral?: boolean } = {}) {
+function fixture(options: { neutral?: boolean; weapon?: string; datapackSwords?: readonly string[] } = {}) {
   const metadata: unknown[] = [];
   const cube = { width: 1.04, height: 1.04 };
   const entities: Record<number, FakeEntitySpec> = {
@@ -24,7 +25,7 @@ function fixture(options: { neutral?: boolean } = {}) {
   const harness = createFakeBot({
     position: new Vec3(0, 64, 0),
     health: 11,
-    carried: { diamond_sword: 1 },
+    carried: { [options.weapon ?? "diamond_sword"]: 1 },
     entities,
     overrides: {
       attack: () => {
@@ -38,6 +39,7 @@ function fixture(options: { neutral?: boolean } = {}) {
     },
   });
   const { bot, clock, combat, world } = harness;
+  if (options.datapackSwords) addItemsToServerTag(harness, "swords", options.datapackSwords);
   metadata[bot.registry.entitiesByName.magma_cube!.metadataKeys!.indexOf("size")] = 2;
   const target = bot.entities[7]!;
   const attacks: number[] = [];
@@ -122,4 +124,29 @@ test("retreat preserves nearby neutrals from sword sweep and never selects them 
   await f.advance(20);
   assert.deepEqual(f.attacks, [2]);
   assert.equal(defence.evidence().attacks, 1);
+});
+
+test("retreat withholds the swing of any held item in the swords family beside a neutral (a datapack sword)", async () => {
+  const f = fixture({ neutral: true, weapon: "stick", datapackSwords: ["stick"] });
+  assert.equal(f.bot.heldItem?.name, "stick");
+  using _defence = defendWhileRetreating(f.bot, f.context, new AbortController().signal);
+  await f.advance(20);
+  assert.deepEqual(f.attacks, []);
+});
+
+test("retreat withholds the swing of every held vanilla sword beside a neutral", async () => {
+  for (const weapon of ["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]) {
+    const f = fixture({ neutral: true, weapon });
+    assert.equal(f.bot.heldItem?.name, weapon);
+    using _defence = defendWhileRetreating(f.bot, f.context, new AbortController().signal);
+    await f.advance(20);
+    assert.deepEqual(f.attacks, [], weapon);
+  }
+});
+
+test("retreat swings a held item outside the swords family beside a neutral", async () => {
+  const f = fixture({ neutral: true, weapon: "stick" });
+  using _defence = defendWhileRetreating(f.bot, f.context, new AbortController().signal);
+  await f.advance(20);
+  assert.ok(f.attacks.length > 0);
 });

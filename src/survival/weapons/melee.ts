@@ -7,6 +7,7 @@ import type { Position3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, observedEyeHeight } from "../../world/block-visibility.js";
 import { entityDimensions } from "../../world/entity-dimensions.js";
 import { exposedBodyFrom } from "../../world/entity-geometry.js";
+import { hasItemFamily } from "../../world/item-families.js";
 import { hasExposedBody } from "../../world/entity-visibility.js";
 import { canBeBystander, isHostile } from "../perception/combat/threats.js";
 import { MELEE_RANGE, readCombatItems } from "./equipment.js";
@@ -116,10 +117,15 @@ export function hasMeleeKnockbackRoom(world: WorldView, position: Position3, att
   return hasSupportedCorridor(world, position, { x: (dx / distance) * 3, y: 0, z: (dz / distance) * 3 });
 }
 
+/** Whether a swing of `item` sweeps the living bodies beside the target: every item of the `sword` family does. */
+export function sweepsOnSwing(bot: Bot, item: { readonly name: string } | null | undefined): boolean {
+  return item != null && hasItemFamily(bot, item.name, "sword");
+}
+
 /** Keep a non-sweeping tool available instead of equipping a sword whose swing must be withheld. */
 export function combatItemsForTarget(bot: Bot, target: Entity) {
   const carried = readCombatItems(bot);
-  return hasSweepBystander(bot, target) ? carried.filter((item) => !item.name.endsWith("_sword")) : carried;
+  return hasSweepBystander(bot, target) ? carried.filter((item) => !sweepsOnSwing(bot, item)) : carried;
 }
 
 /**

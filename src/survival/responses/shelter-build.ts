@@ -12,7 +12,7 @@ import { buildProtection } from "../positioning/combat/build-protection.js";
 import { countCapBlocks } from "../positioning/combat/hide-blocks.js";
 import { equipCombatLoadout, selectMeleeLoadout } from "../weapons/equipment.js";
 import type { CombatItemUse } from "../weapons/item-use.js";
-import { canMeleeTarget, combatItemsForTarget, hasSweepBystander } from "../weapons/melee.js";
+import { canMeleeTarget, combatItemsForTarget, hasSweepBystander, sweepsOnSwing } from "../weapons/melee.js";
 import { shieldFacing } from "../weapons/shield-facing.js";
 import type { CoveredRecovery } from "./recover.js";
 import { type Entity, shelterFeet, shelterIntruder } from "./shelter-cells.js";
@@ -193,7 +193,7 @@ export async function repelShelterIntruder(build: ShelterBuild, intruder: Entity
     !canMeleeTarget(bot, intruder)
   )
     return holdShelterGuard(build, 1);
-  if (bot.heldItem?.name.endsWith("_sword") && hasSweepBystander(bot, intruder)) return holdShelterGuard(build, 1);
+  if (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, intruder)) return holdShelterGuard(build, 1);
   bot.attack(intruder);
   build.swings += 1;
   if (loadout.shield) itemUse.activateShield();

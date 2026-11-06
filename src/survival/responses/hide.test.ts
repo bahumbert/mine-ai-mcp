@@ -10,6 +10,7 @@ import {
   createFakeBot,
   createFakeClock,
 } from "../../test-support/fake-bot/index.js";
+import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { hideInPlace } from "./hide.js";
 import { capBlock, countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../positioning/combat/hide-blocks.js";
@@ -60,8 +61,10 @@ function refuseEquip(message: string): Pick<NonNullable<FakeBotOptions["override
 
 /** The clock a hide may take before the test calls it stuck. */
 const HIDE_LIMIT_MS = 150_000;
+/** The deadline of a hide a test expects to withhold every swing, so only the deadline ends it. */
+const SHORT_HIDE_MS = 2_000;
 
-function hide(bot: FakeBot, resolvedIds: Set<number> = new Set()): ReturnType<typeof hideInPlace> {
+function hide(bot: FakeBot, resolvedIds: Set<number> = new Set(), maximumMs: number = DEFAULT_COMBAT_POLICY.recovery_timeout_ms): ReturnType<typeof hideInPlace> {
   return hideInPlace(bot, {
     threatContext: {
       ...combatTestContext(bot),
@@ -71,7 +74,7 @@ function hide(bot: FakeBot, resolvedIds: Set<number> = new Set()): ReturnType<ty
     },
     signal: new AbortController().signal,
     recoverTo: 18,
-    maximumMs: DEFAULT_COMBAT_POLICY.recovery_timeout_ms,
+    maximumMs,
   });
 }
 
@@ -328,6 +331,59 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   assert.deepEqual([...resolvedIds], [intruder.id], "the pickaxe's hit killed the intruder");
   assert.equal(bystander.isValid, true);
   assert.equal(bot.usingHeldItem, false, "the construction owner releases its shield on settlement");
+});
+
+/**
+ * A shelter intruder with an Enderman beside it, the bot holding `held` as its only weapon. The unequip is a no-op: which
+ * item the loadout puts in the hand is the loadout's rule (survival/weapons/equipment.ts), this test pins the swing
+ * check on what is held when the bystander is in sweep range.
+ */
+function heldWeaponBesideBystander(held: string, datapackSwords: readonly string[]) {
+  const harness = scene({
+    health: 20,
+    carried: { [held]: 1, cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton"), 3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) } },
+    overrides: { unequip: async () => {} },
+    mockedClock: true, // the hide never ends by itself when it withholds the swing: its 2 s deadline does
+  });
+  const { bot } = harness;
+  if (datapackSwords.length > 0) addItemsToServerTag(harness, "swords", datapackSwords);
+  const resolvedIds = killableIntruder(bot, 2, 1);
+  const equip = bot.equip;
+  bot.equip = async (item, destination) => {
+    if (typeof item === "number") throw new Error("Fixture expects a resolved item.");
+    if (item.name === "cobblestone") throw new Error("construction boundary");
+    return equip(item, destination);
+  };
+  return { ...harness, resolvedIds };
+}
+
+test("shelter contact does not swing any held vanilla sword beside a neutral Enderman", async () => {
+  for (const held of ["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]) {
+    const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander(held, []);
+    using _installed = clock.install();
+    assert.equal(bot.heldItem?.name, held);
+    const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
+    assert.deepEqual(attackedIds(server), [], `the ${held}'s sweep would have hit the Enderman`);
+    assert.equal(result.swings, 0, held);
+  }
+});
+
+test("shelter contact does not swing a held item a datapack adds to swords beside a neutral Enderman", async () => {
+  const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander("stick", ["stick"]);
+  using _installed = clock.install();
+  assert.equal(bot.heldItem?.name, "stick");
+  const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
+  assert.deepEqual(attackedIds(server), [], "the sweep would have hit the Enderman");
+  assert.equal(result.swings, 0);
+});
+
+test("shelter contact swings a held item outside the swords family beside a neutral Enderman", async () => {
+  const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander("stick", []);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
+  assert.deepEqual(attackedIds(server), [2]);
+  assert.equal(result.swings, 1);
 });
 
 test("a stopped physics stream does not prevent hide cancellation", async () => {
