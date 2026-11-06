@@ -137,3 +137,26 @@ test("no settings file: the Settings line says the file is not found and the val
   const present = (await runDoctor(root, manifest, settings, deps)).find((line) => line.startsWith("Settings:"));
   assert.equal(present, `Settings: ${settingsPath(root)}`);
 });
+
+const REMOTE = { kind: "remote", baseUrl: "https://api.example.test/v1", model: "big" } as const;
+
+for (const [state, llm, line] of [
+  ["a blob this user or PC cannot read", { apiKey: "", apiKeyProtected: "QUJD", keyUnreadable: true }, "key: saved for another Windows user or PC, cannot be read here"],
+  ["no key", { apiKey: "" }, "key: none"],
+  ["a clear key in the file on Windows (the next save encrypts it)", { apiKey: "sk-secret", clearKeyInFile: true }, "key: in clear (encrypted at the next start)"],
+  ["an encrypted key", { apiKey: "sk-secret", apiKeyProtected: "QUJD", loadedKey: "sk-secret" }, "key: saved, encrypted"],
+  ["a clear key where there is no cipher (Linux, macOS)", { apiKey: "sk-secret" }, "key: in the file, readable by this user only"],
+] as const) {
+  test(`a remote endpoint with ${state}: the doctor says '${line}' under the model line, and never shows the key`, async () => {
+    const { root, manifest, settings, deps } = fixture((s) => ({ ...s, llm: { ...REMOTE, ...llm } }));
+    const lines = await runDoctor(root, manifest, settings, deps);
+    const model = lines.findIndex((entry) => entry.startsWith("  model: remote"));
+    assert.equal(lines[model + 1], `  ${line}`);
+    assert.ok(!lines.join("\n").includes("sk-secret"));
+  });
+}
+
+test("a local model has no key line", async () => {
+  const { root, manifest, settings, deps } = fixture();
+  assert.ok(!(await runDoctor(root, manifest, settings, deps)).some((line) => line.trim().startsWith("key:")));
+});

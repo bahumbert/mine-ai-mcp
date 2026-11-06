@@ -116,8 +116,18 @@ function lastErrorLines(root: string): string[] {
   return found.slice(-ERROR_LINES_SHOWN).map(({ name, line }) => `  [${name}] ${line}`);
 }
 
-function describeLlm(settings: Settings): string {
-  return settings.llm.kind === "remote" ? `remote ${settings.llm.baseUrl}, model ${settings.llm.model} (key not shown)` : `local, model ${settings.llm.model}`;
+/** How the remote key is kept, from the settings as loaded; the key itself is never shown (spec D3). */
+function describeKey(llm: Extract<Settings["llm"], { kind: "remote" }>): string {
+  if (llm.keyUnreadable === true) return "key: saved for another Windows user or PC, cannot be read here";
+  if (llm.apiKey === "") return "key: none";
+  if (llm.clearKeyInFile === true) return "key: in clear (encrypted at the next start)";
+  return llm.apiKeyProtected === undefined ? "key: in the file, readable by this user only" : "key: saved, encrypted";
+}
+
+/** The settings lines about the model: the endpoint and, for a remote one, how its key is kept. */
+function describeLlm(settings: Settings): string[] {
+  const { llm } = settings;
+  return llm.kind === "remote" ? [`  model: remote ${llm.baseUrl}, model ${llm.model}`, `  ${describeKey(llm)}`] : [`  model: local, model ${llm.model}`];
 }
 
 function describeServer(settings: Settings): string {
@@ -147,7 +157,7 @@ export async function runDoctor(root: string, manifest: Manifest, settings: Sett
     "Ports:",
     ...(await portLines(manifest, settings, deps)),
     `Settings: ${settingsPath(root)}${settingsFileExists(root) ? "" : " (not found: the values below are the defaults)"}`,
-    `  model: ${describeLlm(settings)}`,
+    ...describeLlm(settings),
     `  server: ${describeServer(settings)}`,
     `  bots: ${settings.bots.join(", ") || "(none)"}`,
     `Logs: ${join(root, "logs")}`,

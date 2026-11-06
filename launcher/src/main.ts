@@ -22,8 +22,10 @@ export const USAGE = `Usage: mine-ai <command>
   status                        what is running
   doctor                        versions, GPU answer, ports, settings and the last errors, for a bug report
   bot start|stop <persona id or name>   start or stop one bot while Mine AI runs
-  install <gpu|disk|ollama|ollama-remove|model|model-remove|java|server|endpoint-test> [--accept-eula] [--dir <ollama folder>] [--no-model] [--json <file>]
+  install <gpu|disk|ollama|ollama-remove|model|model-remove|java|server|endpoint-test|endpoint-models> [--accept-eula] [--dir <ollama folder>] [--no-model] [--json <file>]
             (--dir: ollama and disk only; --no-model: disk only; disk lists the free space and what a local model and server need)
+  install endpoint-models --list <file> [--url <url>] [--key <key> | --saved-key] [--json <file>]
+            (writes the models the remote endpoint lists, one per line; without --url it reads the saved settings)
   configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
             and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)`;
 

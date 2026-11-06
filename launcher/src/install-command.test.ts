@@ -259,3 +259,45 @@ test("--no-model on any step but `install disk` is a usage error naming the step
   }
   assert.deepEqual(t.calls, []);
 });
+
+function endpointModelsCalls() {
+  const seen: unknown[] = [];
+  const t = setup({ "endpoint-models": async (_ctx, _accept, _dir, _noModel, models) => (seen.push(models), { ok: true, detail: "3 models listed." }) });
+  return { ...t, seen };
+}
+
+test("`install endpoint-models` passes --url, --key (a key starting with a dash too), --saved-key and --list to the step as they are, and the step's result goes to --json", async () => {
+  const t = endpointModelsCalls();
+  const list = join(t.context.root, "lists", "models.txt");
+  assert.equal(await runInstallCommand(["endpoint-models", "--url", "https://api.example.test/v1", "--key", "sk-typed", "--list", list, "--json", t.json], t.context, t.steps), 0);
+  assert.deepEqual(written(t.json), { ok: true, detail: "3 models listed." });
+  // util.parseArgs refuses `--key -abc` as an ambiguous option; a base64url key can start with a dash
+  await runInstallCommand(["endpoint-models", "--key", "-dash-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--key=-equals-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--url", "http://pc:11434", "--saved-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  assert.deepEqual(t.seen, [
+    { url: "https://api.example.test/v1", key: "sk-typed", savedKey: false, listFile: list },
+    { key: "-dash-key", savedKey: false, listFile: "l.txt" },
+    { key: "-equals-key", savedKey: false, listFile: "l.txt" },
+    { url: "http://pc:11434", savedKey: true, listFile: "l.txt" },
+    { savedKey: false, listFile: "l.txt" },
+  ]);
+});
+
+test("`install endpoint-models` needs --list, refuses --key together with --saved-key, and nothing runs", async () => {
+  const t = endpointModelsCalls();
+  await assert.rejects(runInstallCommand(["endpoint-models", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("--list"));
+  await assert.rejects(runInstallCommand(["endpoint-models", "--key", "k", "--saved-key", "--list", "l.txt", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("--saved-key") && error.message.includes("--key"));
+  assert.deepEqual(t.seen, []);
+});
+
+test("--url, --key, --saved-key and --list on any step but `install endpoint-models` are usage errors naming the step that takes them", async () => {
+  const t = setup();
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "endpoint-models")) {
+    for (const flag of [["--url", "x"], ["--key", "x"], ["--saved-key"], ["--list", "x"]]) {
+      await assert.rejects(runInstallCommand([step, ...flag, "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install endpoint-models"), `${step} ${flag[0]}`);
+    }
+  }
+  assert.deepEqual(t.calls, []);
+});

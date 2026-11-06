@@ -1,44 +1,14 @@
 import assert from "node:assert/strict";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
+import { fakeKeyCipher } from "../key-cipher-test-support.ts";
 import { loadManifest } from "../manifest.ts";
-import type { Settings } from "../settings.ts";
+import { loadSettings, settingsPath, type Settings, type SettingsOptions } from "../settings.ts";
 import { endpointTest } from "./endpoint.ts";
+import { answerJson as answer, answerText, fakeEndpoint, remoteContext, withFakeEndpoint as withEndpoint, type Handler } from "./fixtures/fake-endpoint.ts";
 import type { InstallContext } from "./step.ts";
 
-interface Seen {
-  readonly url: string;
-  readonly authorization: string | undefined;
-  readonly body: Record<string, unknown>;
-}
-
-type Handler = (response: ServerResponse, body: Record<string, unknown>) => void;
-
-/** An OpenAI-compatible fake; `handler` answers, and each request it saw is kept. Resolves to its `/v1` base URL. */
-async function fakeEndpoint(handler: Handler) {
-  const seen: Seen[] = [];
-  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    let text = "";
-    request.on("data", (chunk: Buffer) => (text += chunk.toString()));
-    request.on("end", () => {
-      const body = JSON.parse(text) as Record<string, unknown>;
-      seen.push({ url: request.url ?? "", authorization: request.headers.authorization, body });
-      handler(response, body);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return {
-    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
-    seen,
-    close: () => {
-      server.closeAllConnections();
-      server.close();
-    },
-  };
-}
-
-const answer = (status: number, body: unknown): Handler => (response) => void response.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
 const completion = answer(200, { choices: [{ message: { content: '{"ok":true}' } }] });
 
 function context(baseUrl: string, options: { brainEnv?: Record<string, string>; apiKey?: string } = {}): InstallContext {
@@ -49,15 +19,6 @@ function context(baseUrl: string, options: { brainEnv?: Record<string, string>; 
     root: "unused",
     onProgress: () => {},
   };
-}
-
-async function withEndpoint<T>(handler: Handler, body: (endpoint: Awaited<ReturnType<typeof fakeEndpoint>>) => Promise<T>): Promise<T> {
-  const endpoint = await fakeEndpoint(handler);
-  try {
-    return await body(endpoint);
-  } finally {
-    endpoint.close();
-  }
 }
 
 test("one chat completion with the brain's parameters ends ok, a trailing slash on the base URL included", async () => {
@@ -208,4 +169,132 @@ test("settings without a remote endpoint fail with the configure command", async
   const result = await endpointTest(ctx);
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.hint, /configure --llm-remote/u);
+});
+
+// --- the /v1 correction (spec D4(a)) and the unreadable saved key (spec D3) ---------------------------------------------
+
+const WINDOWS_KEYS: SettingsOptions = { platform: "win32", cipher: fakeKeyCipher() };
+/** Ollama's root: no such path (`404 page not found`, text/plain; measured 2026-11-06, facts packaging.md). */
+const rootHasNothing = answerText(404, "404 page not found");
+/** Ollama on the root URL: only `/v1/...` answers, with `v1`; anything else is the root's plain 404. */
+const answersOnlyUnderV1 = (v1: Handler): Handler => (response, body, seen) => (seen.url.startsWith("/v1/") ? v1 : rootHasNothing)(response, body, seen);
+/** What Ollama answers on `/v1/chat/completions` for a model it does not have (measured 2026-11-06, Ollama 0.35.0). */
+const ollamaModelNotFound = answer(404, { error: { message: "model 'big-model' not found", type: "not_found_error", param: null, code: null } });
+const savedLlm = (root: string): Record<string, unknown> => (JSON.parse(readFileSync(settingsPath(root), "utf8")) as { llm: Record<string, unknown> }).llm;
+const correctionNotice = (from: string, to: string): string => `The endpoint URL was changed from ${from} to ${to}: ${from} answered 404 (not found) and ${to} answers as an OpenAI-compatible API.`;
+
+test("a URL without /v1 (a trailing slash trimmed first) that answers 404 while /v1 answers is corrected: saved with the key still encrypted, returned and told; the next run goes to /v1 at once", async () => {
+  await withEndpoint(answersOnlyUnderV1(completion), async (endpoint) => {
+    const ctx = remoteContext({ baseUrl: `${endpoint.rootUrl}/` });
+    const result = await endpointTest(ctx, { settingsOptions: WINDOWS_KEYS });
+    assert.equal(result.ok, true);
+    assert.deepEqual(endpoint.seen.map((request) => request.url), ["/chat/completions", "/v1/chat/completions"]);
+    const notice = correctionNotice(endpoint.rootUrl, endpoint.baseUrl);
+    assert.equal(result.correctedUrl, endpoint.baseUrl);
+    assert.equal(result.notice, notice);
+    if (result.ok) assert.ok(result.detail.startsWith(notice), result.detail);
+    const saved = savedLlm(ctx.root);
+    assert.equal(saved.baseUrl, endpoint.baseUrl);
+    assert.equal("apiKey" in saved, false);
+    assert.equal(typeof saved.apiKeyProtected, "string");
+    assert.ok(!readFileSync(settingsPath(ctx.root), "utf8").includes("sk-test"));
+    endpoint.seen.length = 0;
+    const again = await endpointTest({ ...ctx, settings: loadSettings(ctx.root, ctx.manifest, WINDOWS_KEYS) }, { settingsOptions: WINDOWS_KEYS });
+    assert.equal(again.ok, true);
+    assert.deepEqual(endpoint.seen.map((request) => request.url), ["/v1/chat/completions"]);
+    assert.equal(again.correctedUrl, undefined);
+    assert.equal(again.notice, undefined);
+  });
+});
+
+test("a URL already ending in /v1 (any case) that answers 404 is not retried: model not found as before", async () => {
+  await withEndpoint(ollamaModelNotFound, async (endpoint) => {
+    for (const base of [endpoint.baseUrl, endpoint.baseUrl.replace("/v1", "/V1")]) {
+      endpoint.seen.length = 0;
+      const result = await endpointTest(remoteContext({ baseUrl: base }));
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.match(result.error, /model not found/iu);
+      assert.equal(endpoint.seen.length, 1);
+    }
+  });
+});
+
+for (const [label, v1Answer, failure] of [
+  ["Ollama's 404 JSON for a missing model", ollamaModelNotFound, /Model not found: big-model/u],
+  ["a JSON 401", answer(401, { error: { message: "Incorrect API key provided" } }), /key refused/iu],
+] as const) {
+  test(`root 404 and /v1 answering ${label}: URL corrected and saved, told, and the failure is the one /v1 gave`, async () => {
+    await withEndpoint(answersOnlyUnderV1(v1Answer), async (endpoint) => {
+      const ctx = remoteContext({ baseUrl: endpoint.rootUrl });
+      const result = await endpointTest(ctx);
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.ok(result.error.startsWith(correctionNotice(endpoint.rootUrl, endpoint.baseUrl)), result.error);
+      assert.match(result.error, failure);
+      assert.equal(result.correctedUrl, endpoint.baseUrl);
+      assert.equal(savedLlm(ctx.root).baseUrl, endpoint.baseUrl);
+    });
+  });
+}
+
+for (const [label, handler] of [
+  ["an HTML 401 on /v1 (a gateway)", answersOnlyUnderV1(answerText(401, "<html>Sign in</html>", "text/html"))],
+  ["JSON {\"error\": \"Not Found\"} on every path (an error string, no OpenAI error object)", answer(404, { error: "Not Found" })],
+] as const) {
+  test(`root 404 and ${label}: not corrected, nothing saved, the hint says /v1 did not answer as OpenAI`, async () => {
+    await withEndpoint(handler, async (endpoint) => {
+      const ctx = remoteContext({ baseUrl: endpoint.rootUrl });
+      const result = await endpointTest(ctx);
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.match(result.error, new RegExp(`Model not found: big-model at ${endpoint.rootUrl}`, "u"));
+      assert.ok(result.hint.includes(`(${endpoint.baseUrl} did not answer as an OpenAI-compatible API either)`), result.hint);
+      assert.equal(result.correctedUrl, undefined);
+      assert.deepEqual(endpoint.seen.map((request) => request.url), ["/chat/completions", "/v1/chat/completions"]);
+      assert.equal(existsSync(settingsPath(ctx.root)), false);
+    });
+  });
+}
+
+test("root 404 and a /v1 request that fails on the wire: today's 404 failure, nothing saved", async () => {
+  const cutOnV1: Handler = (response, body, seen) => (seen.url.startsWith("/v1/") ? void response.socket?.destroy() : rootHasNothing(response, body, seen));
+  await withEndpoint(cutOnV1, async (endpoint) => {
+    const ctx = remoteContext({ baseUrl: endpoint.rootUrl });
+    const result = await endpointTest(ctx);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /Model not found: big-model/u);
+    assert.equal(existsSync(settingsPath(ctx.root)), false);
+  });
+});
+
+test("a corrected URL saved over a key that was clear in the file also says the key is now encrypted", async () => {
+  await withEndpoint(answersOnlyUnderV1(completion), async (endpoint) => {
+    const result = await endpointTest(remoteContext({ baseUrl: endpoint.rootUrl, clearKeyInFile: true }), { settingsOptions: WINDOWS_KEYS });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.match(result.detail, /API key in .*settings\.json is now encrypted/u);
+  });
+});
+
+test("a corrected URL that cannot be saved is a failure that says so and still returns the corrected URL", async () => {
+  await withEndpoint(answersOnlyUnderV1(completion), async (endpoint) => {
+    const ctx = remoteContext({ baseUrl: endpoint.rootUrl });
+    const notAFolder = join(ctx.root, "file");
+    writeFileSync(notAFolder, "x");
+    const result = await endpointTest({ ...ctx, root: notAFolder });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.match(result.error, /could not be saved/u);
+    assert.equal(result.correctedUrl, endpoint.baseUrl);
+  });
+});
+
+test("a saved key that cannot be read here fails at once, with no request and with the setup-facing text", async () => {
+  await withEndpoint(completion, async (endpoint) => {
+    const result = await endpointTest(remoteContext({ baseUrl: endpoint.baseUrl, apiKey: "", apiKeyProtected: "QUJD", keyUnreadable: true }));
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error, "The saved API key was saved by another Windows user or on another PC and cannot be read here.");
+    assert.equal(result.hint, "Type the key again (silent install: /LLMKEY=).");
+    assert.equal(endpoint.seen.length, 0);
+  });
 });
