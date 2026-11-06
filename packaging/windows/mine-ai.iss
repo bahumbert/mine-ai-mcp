@@ -15,7 +15,7 @@
 ; Setup runs the same code as the progress page (AllSetupStepsSucceed); a failed step ends the setup with a non-zero exit
 ; code (7 for a wrong parameter, 100 for a failed step) and the error and hint in the /LOG= file. Pass /SUPPRESSMSGBOXES
 ; too: Setup's own error boxes are not silent without it.
-; Not compiled by tests: ISCC compiles it in the master's build, W5 walks every page.
+; iss-launcher-calls.test.ts compiles it with ISCC (a stand-in stage folder) when Inno Setup is installed; W5 walks every page.
 
 #ifndef StageDir
   #error StageDir is not defined: build with launcher/src/build/build-windows.ts.
@@ -123,13 +123,20 @@ const
 
 var
   DataPage: TInputDirWizardPage;
-  ModelPage, ServerPage, EulaPage, StepsPage: TWizardPage;
-  ModelStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  ModelPage, EndpointPage, ServerPage, EulaPage, StepsPage: TWizardPage;
+  ModelStatus, DiskStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
   ModelLocalRadio, ModelRemoteRadio: TNewRadioButton;
-  OllamaDirEdit, RemoteUrlEdit, RemoteModelEdit: TEdit;
-  OllamaBrowseButton: TButton;
+  OllamaDirEdit, RemoteUrlEdit, ModelFilterEdit: TEdit;
+  OllamaBrowseButton, ListModelsButton, OllamaOtherPcButton: TButton;
   RemoteKeyEdit: TPasswordEdit;
+  RemoteModelCombo: TNewComboBox;
   ModelGauge: TNewProgressBar;
+  // The endpoint page's own step status and gauge (the model page keeps ModelStepStatus and ModelGauge), the list's status and
+  // the info and count texts of the model list.
+  EndpointStepStatus, ListStatus, FilterCountText, ModelInfoText: TNewStaticText;
+  EndpointGauge: TNewProgressBar;
+  // The lines `<id>#9<info>` of the last `install endpoint-models` list (empty before one, and after a list that failed).
+  ModelListLines: TArrayOfString;
   ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio: TNewRadioButton;
   ServerHostEdit, ServerPortEdit: TEdit;
   EulaCheck: TNewCheckBox;
@@ -745,15 +752,23 @@ begin
   Result.Max := PROGRESS_STEPS;
 end;
 
+function AddButton(Page: TWizardPage; const Caption: String; Top, Left, Width: Integer): TButton;
+begin
+  Result := TButton.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Caption := Caption;
+  Result.Left := ScaleX(Left);
+  Result.Top := ScaleY(Top);
+  Result.Width := ScaleX(Width);
+  Result.Height := ScaleY(23);
+end;
+
 // The Ollama folder is asked only when this setup is going to install Ollama: the local model is chosen and `install gpu`
 // found no Ollama (OllamaFolderNeeded). Ollama that is already there stays where it is.
 procedure ModelChoiceChanged(Sender: TObject);
 var
   AskOllamaFolder: Boolean;
 begin
-  RemoteUrlEdit.Enabled := ModelRemoteRadio.Checked;
-  RemoteKeyEdit.Enabled := ModelRemoteRadio.Checked;
-  RemoteModelEdit.Enabled := ModelRemoteRadio.Checked;
   AskOllamaFolder := ModelLocalRadio.Checked and OllamaFolderNeeded;
   OllamaDirLabel.Visible := AskOllamaFolder;
   OllamaDirEdit.Visible := AskOllamaFolder;
@@ -787,39 +802,246 @@ begin
   ShellExec('open', MINECRAFT_EULA_URL, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
+// ---------- endpoint page: URL, key, model list and model name of a remote endpoint (spec D4) ----------
+
+// What the player reads before the first press of List models; the list itself generates no text, the test on Next does (D4b).
+const
+  LIST_COST_TEXT = 'Listing generates no text. Next sends one short test message to the model (a few tens of tokens).';
+
+// The one place the list file's name is spelled: `install endpoint-models --list` writes it, LoadModelList reads it.
+function ModelListFile(): String;
+begin
+  Result := ExpandConstant('{tmp}\mine-ai-models.txt');
+end;
+
+// What is wrong with the URL (and with the key, which the launcher gets on its command line); '' when the endpoint can be called.
+function RemoteUrlProblem(): String;
+begin
+  Result := '';
+  if (Pos('http://', RemoteUrlEdit.Text) <> 1) and (Pos('https://', RemoteUrlEdit.Text) <> 1) then
+    Result := 'The endpoint URL must start with http:// or https://.'
+  else if (Pos('<', RemoteUrlEdit.Text) > 0) or (Pos('>', RemoteUrlEdit.Text) > 0) then
+    Result := 'Replace <IP> with the address of the PC that runs Ollama (for example 192.168.1.20).'
+  else if (Pos('"', RemoteUrlEdit.Text + RemoteKeyEdit.Text) > 0) or (Pos(' ', Trim(RemoteUrlEdit.Text)) > 0) then
+    Result := 'The URL has no spaces and no field contains a double quote.';
+end;
+
+// The text without the notice that starts it: the launcher's error and detail start with the /v1 notice, which is shown on its own.
+function WithoutNotice(const Text, Notice: String): String;
+begin
+  Result := Text;
+  if (Notice <> '') and (Copy(Text, 1, Length(Notice)) = Notice) then
+    Result := Trim(Copy(Text, Length(Notice) + 1, Length(Text)));
+end;
+
+// After `install endpoint-test` and `install endpoint-models`: a URL the launcher corrected (it added /v1) goes in the URL box, so
+// ConfigureArguments saves it and the next run asks it at once, and the notice is logged and shown once. Silent: the log only.
+procedure ApplyEndpointCorrection(const Json: String);
+var
+  Corrected, Notice: String;
+begin
+  Corrected := JsonString(Json, 'correctedUrl');
+  Notice := JsonString(Json, 'notice');
+  if Corrected <> '' then
+    RemoteUrlEdit.Text := Corrected;
+  if Notice = '' then
+    Exit;
+  Log('Endpoint URL: ' + Notice);
+  if not WizardSilent then
+    SuppressibleMsgBox(Notice, mbInformation, MB_OK, IDOK);
+end;
+
+function ModelLineId(const Line: String): String;
+var
+  Tab: Integer;
+begin
+  Tab := Pos(#9, Line);
+  if Tab = 0 then
+    Result := Line
+  else
+    Result := Copy(Line, 1, Tab - 1);
+end;
+
+function ModelLineInfo(const Line: String): String;
+var
+  Tab: Integer;
+begin
+  Tab := Pos(#9, Line);
+  if Tab = 0 then
+    Result := ''
+  else
+    Result := Copy(Line, Tab + 1, Length(Line));
+end;
+
+procedure AddModelLine(const Line: String);
+var
+  Count: Integer;
+begin
+  if Trim(Line) = '' then
+    Exit;
+  Count := GetArrayLength(ModelListLines);
+  SetArrayLength(ModelListLines, Count + 1);
+  ModelListLines[Count] := Line;
+end;
+
+// Reads the list file the launcher wrote (UTF-8, one `<id>#9<info>` per line) into ModelListLines; False when it is unreadable or empty.
+function LoadModelList(): Boolean;
+var
+  Raw: AnsiString;
+  Text, Line: String;
+  I: Integer;
+begin
+  Result := False;
+  SetArrayLength(ModelListLines, 0);
+  if not LoadStringFromFile(ModelListFile(), Raw) then
+    Exit;
+  Text := UTF8Decode(Raw);
+  Line := '';
+  for I := 1 to Length(Text) do
+  begin
+    if Text[I] = #10 then
+    begin
+      AddModelLine(Line);
+      Line := '';
+    end
+    else if Text[I] <> #13 then
+      Line := Line + Text[I];
+  end;
+  AddModelLine(Line);
+  Result := GetArrayLength(ModelListLines) > 0;
+end;
+
+// The combo's items are the listed ids that contain the filter (case ignored). What the player typed in the combo stays: a refill of a
+// drop-down combo may clear its edit text (unprobed), so it is saved and put back.
+procedure FillModelCombo();
+var
+  Typed, Filter, Id: String;
+  I, Shown: Integer;
+begin
+  Typed := RemoteModelCombo.Text;
+  Filter := Lowercase(Trim(ModelFilterEdit.Text));
+  RemoteModelCombo.Items.Clear;
+  Shown := 0;
+  for I := 0 to GetArrayLength(ModelListLines) - 1 do
+  begin
+    Id := ModelLineId(ModelListLines[I]);
+    if (Filter = '') or (Pos(Filter, Lowercase(Id)) > 0) then
+    begin
+      RemoteModelCombo.Items.Add(Id);
+      Shown := Shown + 1;
+    end;
+  end;
+  RemoteModelCombo.Text := Typed;
+  if GetArrayLength(ModelListLines) = 0 then
+    FilterCountText.Caption := ''
+  else
+    FilterCountText.Caption := IntToStr(Shown) + ' of ' + IntToStr(GetArrayLength(ModelListLines)) + ' models';
+end;
+
+procedure FilterChanged(Sender: TObject);
+begin
+  FillModelCombo();
+end;
+
+// The info of the listed model whose id is in the combo (context, prices, parameters it does not list); nothing for a typed name.
+procedure ModelComboChanged(Sender: TObject);
+var
+  I: Integer;
+begin
+  ModelInfoText.Caption := '';
+  for I := 0 to GetArrayLength(ModelListLines) - 1 do
+    if ModelLineId(ModelListLines[I]) = Trim(RemoteModelCombo.Text) then
+      ModelInfoText.Caption := ModelLineInfo(ModelListLines[I]);
+end;
+
+// `Ollama on another PC`: a URL to complete, no key (Ollama has none), and <IP> selected so typing replaces it.
+procedure FillOllamaOnAnotherPc(Sender: TObject);
+begin
+  RemoteUrlEdit.Text := 'http://<IP>:11434/v1';
+  RemoteKeyEdit.Text := '';
+  WizardForm.ActiveControl := RemoteUrlEdit;
+  RemoteUrlEdit.SelStart := Pos('<IP>', RemoteUrlEdit.Text) - 1;
+  RemoteUrlEdit.SelLength := 4;
+end;
+
+procedure ShowOllamaHelp(Sender: TObject);
+begin
+  MsgBox('Ollama on another PC: on that PC set OLLAMA_HOST=0.0.0.0:11434 (Windows Settings > System > About > Advanced system settings > Environment Variables), restart Ollama, and allow TCP port 11434 in Windows Firewall for Private networks only.' + #13#10#13#10 + 'Ollama has no password: use this only on a network you trust. Leave the key empty.', mbInformation, MB_OK);
+end;
+
+// The page's inputs and buttons are off while a launcher run is in progress (the list or the endpoint test): the run keeps the window
+// answering, and a click on List models inside the test would start a second run over the same step-result file.
+procedure SetEndpointControlsEnabled(Enabled: Boolean);
+begin
+  ListModelsButton.Enabled := Enabled;
+  OllamaOtherPcButton.Enabled := Enabled;
+  RemoteUrlEdit.Enabled := Enabled;
+  RemoteKeyEdit.Enabled := Enabled;
+  ModelFilterEdit.Enabled := Enabled;
+  RemoteModelCombo.Enabled := Enabled;
+end;
+
+// `List models`: asks the endpoint for its models (`install endpoint-models`) and fills the combo. A failure is told in the list status
+// (the model name can still be typed); the model name is not demanded, since finding it is the point.
+procedure ListModels(Sender: TObject);
+var
+  Json, Problem: String;
+  Listed: Boolean;
+begin
+  Problem := RemoteUrlProblem();
+  if Problem <> '' then
+  begin
+    MsgBox(Problem, mbError, MB_OK);
+    Exit;
+  end;
+  SetEndpointControlsEnabled(False);
+  WizardForm.NextButton.Enabled := False;
+  ListStatus.Caption := 'Asking the endpoint for its models...';
+  SetArrayLength(ModelListLines, 0);
+  // A list file of an earlier press must never be read as this press's answer: the step writes none on a failure.
+  DeleteFile(ModelListFile());
+  Listed := RunStepSucceeded('install endpoint-models --url ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' --key ' + Quoted(RemoteKeyEdit.Text) + ' --list ' + Quoted(ModelListFile()), EndpointGauge, EndpointStepStatus, Json);
+  ApplyEndpointCorrection(Json);
+  if Listed and LoadModelList() then
+    ListStatus.Caption := WithoutNotice(JsonString(Json, 'detail'), JsonString(Json, 'notice'))
+  else if Listed then
+    ListStatus.Caption := 'The endpoint answered, but its model list could not be read. Type the model name.'
+  else if JsonString(Json, 'error') = '' then
+    ListStatus.Caption := 'The model list could not be fetched (the step gave no answer). Type the model name.'
+  else
+    ListStatus.Caption := WithoutNotice(StepFailureText(Json), JsonString(Json, 'notice'));
+  FillModelCombo();
+  ModelComboChanged(nil);
+  EndpointStepStatus.Caption := '';
+  EndpointGauge.Position := 0;
+  SetEndpointControlsEnabled(True);
+  WizardForm.NextButton.Enabled := True;
+end;
+
+// ---------- page creation ----------
+
 procedure CreateModelPage();
 begin
   ModelPage := CreateCustomPage(wpInfoAfter, 'AI model', 'Where should the bots'' AI model run?');
   ModelStatus := AddText(ModelPage, '', 0, 46);
+  // The free space of the drives the local model needs (ShowDiskSpace, wizard only).
+  // Room for about four lines: a short drive adds a warning sentence to the drive lines (disk-report.ts).
+  DiskStatus := AddText(ModelPage, '', 48, 60);
   // What the local choice does is set by CheckGpuOnce once it knows whether Ollama is already installed.
-  ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 50);
+  ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 112);
   // One row: the label, the folder and Browse; shown only when this setup will install Ollama (ModelChoiceChanged).
-  OllamaDirLabel := AddText(ModelPage, 'Install Ollama in', 76, 14);
+  OllamaDirLabel := AddText(ModelPage, 'Install Ollama in', 138, 14);
   OllamaDirLabel.Left := ScaleX(16);
   OllamaDirLabel.Width := ScaleX(90);
-  OllamaBrowseButton := TButton.Create(ModelPage);
-  OllamaBrowseButton.Parent := ModelPage.Surface;
-  OllamaBrowseButton.Caption := 'Browse...';
-  OllamaBrowseButton.Width := ScaleX(75);
+  OllamaBrowseButton := AddButton(ModelPage, 'Browse...', 134, 0, 75);
   OllamaBrowseButton.Left := ModelPage.SurfaceWidth - OllamaBrowseButton.Width;
-  OllamaBrowseButton.Top := ScaleY(72);
-  OllamaBrowseButton.Height := ScaleY(23);
   OllamaBrowseButton.OnClick := @BrowseOllamaFolder;
-  OllamaDirEdit := AddEdit(ModelPage, 73, ScaleX(110), OllamaBrowseButton.Left - ScaleX(110) - ScaleX(8));
+  OllamaDirEdit := AddEdit(ModelPage, 135, ScaleX(110), OllamaBrowseButton.Left - ScaleX(110) - ScaleX(8));
   OllamaDirEdit.Text := ExpandConstant('{localappdata}\Programs\Ollama');
-  ModelRemoteRadio := AddRadio(ModelPage, 'On a remote OpenAI-compatible API (OpenRouter, your own server...)', 102);
-  AddText(ModelPage, 'Endpoint URL (for example https://openrouter.ai/api/v1)', 126, 14);
-  RemoteUrlEdit := AddEdit(ModelPage, 140, 0, ModelPage.SurfaceWidth);
-  AddText(ModelPage, 'API key', 166, 14);
-  RemoteKeyEdit := TPasswordEdit.Create(ModelPage);
-  RemoteKeyEdit.Parent := ModelPage.Surface;
-  RemoteKeyEdit.Left := 0;
-  RemoteKeyEdit.Top := ScaleY(180);
-  RemoteKeyEdit.Width := ModelPage.SurfaceWidth;
-  AddText(ModelPage, 'Model name', 206, 14);
-  RemoteModelEdit := AddEdit(ModelPage, 220, 0, ModelPage.SurfaceWidth);
-  ModelStepStatus := AddText(ModelPage, '', 250, 28);
-  ModelGauge := AddGauge(ModelPage, 280);
+  // The endpoint's URL, key and model are asked on the next page (CreateEndpointPage), which a local choice skips.
+  ModelRemoteRadio := AddRadio(ModelPage, 'On a remote OpenAI-compatible API (OpenRouter, your own server...)', 166);
+  ModelStepStatus := AddText(ModelPage, '', 206, 28);
+  ModelGauge := AddGauge(ModelPage, 238);
   ModelLocalRadio.OnClick := @ModelChoiceChanged;
   ModelRemoteRadio.OnClick := @ModelChoiceChanged;
   ModelLocalRadio.Enabled := False;
@@ -827,11 +1049,59 @@ begin
   ModelChoiceChanged(nil);
 end;
 
+// The remote choice's page: URL, key, a model list the player can fetch and filter, the model name, and the page's own status and
+// gauge for the endpoint test (Next) and the list. Units are the .iss's (ScaleY applied by the helpers).
+procedure CreateEndpointPage();
+var
+  OllamaHelpButton: TButton;
+  FilterLabel: TNewStaticText;
+begin
+  EndpointPage := CreateCustomPage(ModelPage.ID, 'AI endpoint', 'Which OpenAI-compatible API should the bots use?');
+  AddText(EndpointPage, 'Endpoint URL (for example https://openrouter.ai/api/v1)', 0, 14);
+  RemoteUrlEdit := AddEdit(EndpointPage, 15, 0, EndpointPage.SurfaceWidth);
+  OllamaOtherPcButton := AddButton(EndpointPage, 'Ollama on another PC', 46, 0, 140);
+  OllamaOtherPcButton.OnClick := @FillOllamaOnAnotherPc;
+  OllamaHelpButton := AddButton(EndpointPage, 'Help...', 46, 148, 75);
+  OllamaHelpButton.OnClick := @ShowOllamaHelp;
+  AddText(EndpointPage, 'API key (empty for an endpoint that needs none)', 76, 14);
+  RemoteKeyEdit := TPasswordEdit.Create(EndpointPage);
+  RemoteKeyEdit.Parent := EndpointPage.Surface;
+  RemoteKeyEdit.Left := 0;
+  RemoteKeyEdit.Top := ScaleY(91);
+  RemoteKeyEdit.Width := EndpointPage.SurfaceWidth;
+  ListModelsButton := AddButton(EndpointPage, 'List models', 116, 0, 90);
+  ListModelsButton.OnClick := @ListModels;
+  ListStatus := AddText(EndpointPage, LIST_COST_TEXT, 114, 28);
+  ListStatus.Left := ScaleX(98);
+  ListStatus.Width := EndpointPage.SurfaceWidth - ScaleX(98);
+  FilterLabel := AddText(EndpointPage, 'Filter', 150, 14);
+  FilterLabel.Width := ScaleX(40);
+  ModelFilterEdit := AddEdit(EndpointPage, 146, ScaleX(44), ScaleX(150));
+  FilterCountText := AddText(EndpointPage, '', 150, 14);
+  FilterCountText.Left := ScaleX(204);
+  FilterCountText.Width := EndpointPage.SurfaceWidth - ScaleX(204);
+  AddText(EndpointPage, 'Model name (type it, or list the models and pick one)', 172, 14);
+  ModelInfoText := AddText(EndpointPage, '', 210, 28);
+  RemoteModelCombo := TNewComboBox.Create(EndpointPage);
+  RemoteModelCombo.Parent := EndpointPage.Surface;
+  RemoteModelCombo.Left := 0;
+  RemoteModelCombo.Top := ScaleY(187);
+  RemoteModelCombo.Width := EndpointPage.SurfaceWidth;
+  // A drop-down you can type in. Inno's TNewComboBox does not expose AutoComplete (ISCC 6.7.3: Unknown identifier), so a typed id that
+  // starts a longer listed id may be completed by the control (unprobed). What is saved is the combo's text as the player sees it
+  // when pressing Next, and the endpoint test's detail, which names the model that answered, goes to the setup log.
+  RemoteModelCombo.Style := csDropDown;
+  ModelFilterEdit.OnChange := @FilterChanged;
+  RemoteModelCombo.OnChange := @ModelComboChanged;
+  EndpointStepStatus := AddText(EndpointPage, '', 240, 28);
+  EndpointGauge := AddGauge(EndpointPage, 270);
+end;
+
 procedure CreateServerPage();
 var
   PortLeft: Integer;
 begin
-  ServerPage := CreateCustomPage(ModelPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
+  ServerPage := CreateCustomPage(EndpointPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
   ServerNoneRadio := AddRadio(ServerPage, 'No server for now (I will set one in settings.json)', 0);
   ServerLocalRadio := AddRadio(ServerPage, 'Install a Minecraft server on this PC (only this PC can join, by default)', 24);
   ServerRemoteRadio := AddRadio(ServerPage, 'Use an existing server', 48);
@@ -953,7 +1223,7 @@ begin
     PreviousLlmWasRemote := True;
     RemoteUrlEdit.Text := JsonString(Llm, 'baseUrl');
     RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
-    RemoteModelEdit.Text := JsonString(Llm, 'model');
+    RemoteModelCombo.Text := JsonString(Llm, 'model');
   end;
   Kind := JsonString(Server, 'kind');
   if Kind = 'local' then
@@ -1007,7 +1277,7 @@ begin
   if ParamGiven('LLMKEY') then
     RemoteKeyEdit.Text := Param('LLMKEY', '');
   if ParamGiven('LLMMODEL') then
-    RemoteModelEdit.Text := Param('LLMMODEL', '');
+    RemoteModelCombo.Text := Param('LLMMODEL', '');
   Server := Param('SERVER', PARAM_UNSET);
   if Server = 'none' then
     ServerNoneRadio.Checked := True
@@ -1026,6 +1296,7 @@ procedure InitializeWizard();
 begin
   CreateDataPage();
   CreateModelPage();
+  CreateEndpointPage();
   CreateServerPage();
   CreateEulaPage();
   CreateStepsPage();
@@ -1040,14 +1311,36 @@ end;
 // The data page shows at a first install only: an update keeps the first folder.
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  Result := WizardSilent and ((PageID = DataPage.ID) or (PageID = ModelPage.ID) or (PageID = ServerPage.ID) or (PageID = EulaPage.ID) or (PageID = StepsPage.ID));
+  Result := WizardSilent and ((PageID = DataPage.ID) or (PageID = ModelPage.ID) or (PageID = EndpointPage.ID) or (PageID = ServerPage.ID) or (PageID = EulaPage.ID) or (PageID = StepsPage.ID));
   if PageID = DataPage.ID then
     Result := Result or (PreviousDataDir() <> '');
+  // The endpoint is asked only for the remote choice (the local model needs no URL, key or model name).
+  if PageID = EndpointPage.ID then
+    Result := Result or (not ModelRemoteRadio.Checked);
   if PageID = EulaPage.ID then
     Result := Result or (not ServerLocalRadio.Checked);
 end;
 
 // ---------- AI model page ----------
+
+// `install disk` (spec D2): the free space of each drive the downloads go to and what they need, under the GPU text. The local model's
+// needs are left out when the local choice is not offered (--no-model). A run that failed (an older launcher, a crash) shows nothing:
+// the steps' own guards still hold. Wizard only: nobody reads it in a silent install, and it asks the network.
+procedure ShowDiskSpace();
+var
+  Json, Args: String;
+  Succeeded: Boolean;
+begin
+  DiskStatus.Caption := 'Checking disk space...';
+  Args := 'install disk';
+  if not ModelLocalRadio.Enabled then
+    Args := Args + ' --no-model';
+  Succeeded := RunStepSucceeded(Args, ModelGauge, ModelStepStatus, Json);
+  if Succeeded and (JsonString(Json, 'detail') <> '') then
+    DiskStatus.Caption := JsonString(Json, 'detail')
+  else
+    DiskStatus.Caption := '';
+end;
 
 // `install gpu`: ok means this PC can run the model; not ok means remote only, with the reason on the page.
 procedure CheckGpuOnce();
@@ -1094,6 +1387,8 @@ begin
     ModelStatus.Caption := GpuProblem;
     ModelRemoteRadio.Checked := True;
   end;
+  if not WizardSilent then
+    ShowDiskSpace();
   ModelChoiceChanged(nil);
   ModelStepStatus.Caption := '';
   ModelGauge.Position := 0;
@@ -1102,27 +1397,33 @@ end;
 
 function RemoteFieldProblem(): String;
 begin
-  Result := '';
-  if (Pos('http://', RemoteUrlEdit.Text) <> 1) and (Pos('https://', RemoteUrlEdit.Text) <> 1) then
-    Result := 'The endpoint URL must start with http:// or https://.'
-  else if Trim(RemoteModelEdit.Text) = '' then
+  Result := RemoteUrlProblem();
+  if Result <> '' then
+    Exit;
+  if Trim(RemoteModelCombo.Text) = '' then
     Result := 'Enter the model name the endpoint serves.'
-  else if (Pos('"', RemoteUrlEdit.Text + RemoteKeyEdit.Text + RemoteModelEdit.Text) > 0) or (Pos(' ', Trim(RemoteUrlEdit.Text)) > 0) then
+  else if Pos('"', RemoteModelCombo.Text) > 0 then
     Result := 'The URL has no spaces and no field contains a double quote.';
 end;
 
 // Saves the endpoint, then makes one test call with the brain's own parameters (`install endpoint-test`); Failure says why not.
+// A URL the test corrected (it added /v1) is put in the URL box and told once; the failure text then leaves the notice out.
 function SaveAndTestEndpoint(var Failure: String): Boolean;
 var
   Json: String;
 begin
   Result := False;
-  if RunLauncher('configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelEdit.Text)), False, ModelGauge, ModelStepStatus, Json) <> 0 then
+  if RunLauncher('configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelCombo.Text)), False, EndpointGauge, EndpointStepStatus, Json) <> 0 then
     Failure := 'Mine AI could not save the endpoint.' + #13#10 + LastLogTail
-  else if RunStepSucceeded('install endpoint-test', ModelGauge, ModelStepStatus, Json) then
-    Result := True
   else
-    Failure := 'The endpoint did not accept the test call.' + #13#10#13#10 + StepFailureText(Json);
+  begin
+    Result := RunStepSucceeded('install endpoint-test', EndpointGauge, EndpointStepStatus, Json);
+    ApplyEndpointCorrection(Json);
+    if Result then
+      Log('Endpoint test: ' + WithoutNotice(JsonString(Json, 'detail'), JsonString(Json, 'notice')))
+    else
+      Failure := 'The endpoint did not accept the test call.' + #13#10#13#10 + WithoutNotice(StepFailureText(Json), JsonString(Json, 'notice'));
+  end;
 end;
 
 function AcceptRemoteEndpoint(): Boolean;
@@ -1137,11 +1438,14 @@ begin
     Exit;
   end;
   WizardForm.NextButton.Enabled := False;
-  ModelStepStatus.Caption := 'Testing the endpoint...';
+  SetEndpointControlsEnabled(False);
+  EndpointStepStatus.Caption := 'Testing the endpoint...';
   Result := SaveAndTestEndpoint(Failure);
   if not Result then
     MsgBox(Failure, mbError, MB_OK);
-  ModelStepStatus.Caption := '';
+  EndpointStepStatus.Caption := '';
+  EndpointGauge.Position := 0;
+  SetEndpointControlsEnabled(True);
   WizardForm.NextButton.Enabled := True;
 end;
 
@@ -1154,6 +1458,8 @@ begin
   ModelRemoteRadio.Checked := True;
   ModelChoiceChanged(nil);
   ModelStatus.Caption := StepFailureText(Json);
+  // The disk text listed the local model's needs, which this PC no longer has.
+  DiskStatus.Caption := '';
   if InstallStateHas('"ollama":"installed"') then
   begin
     if SuppressibleMsgBox('This PC cannot run the model, so the Ollama that was just installed is not needed. Remove it now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
@@ -1245,7 +1551,7 @@ end;
 function ConfigureArguments(): String;
 begin
   if ModelRemoteRadio.Checked then
-    Result := 'configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelEdit.Text))
+    Result := 'configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelCombo.Text))
   else
     Result := 'configure --llm-local';
   if ServerLocalRadio.Checked then
@@ -1562,11 +1868,12 @@ begin
       MsgBox(DataFolderFailure, mbError, MB_OK);
       Result := False;
     end
-    else if ModelRemoteRadio.Checked then
-      Result := AcceptRemoteEndpoint()
-    else
+    // The remote choice goes on to the endpoint page, which saves and tests the endpoint on its own Next.
+    else if not ModelRemoteRadio.Checked then
       Result := AcceptLocalModel();
   end
+  else if CurPageID = EndpointPage.ID then
+    Result := AcceptRemoteEndpoint()
   else if CurPageID = ServerPage.ID then
   begin
     Problem := ServerFieldProblem();

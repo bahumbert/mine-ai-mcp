@@ -2,10 +2,12 @@
 // it makes to the launcher are real: its `CALLS` comment lines name, per silent parameter set, the launcher calls in
 // order; this test runs each on the launcher's CLI, and compares the lines with the code and with the player's doc.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { findInnoCompiler } from "./build-windows.ts";
 import type { CliContext } from "../cli-context.ts";
 import { runConfigureCommand } from "../configure-command.ts";
 import { STOP_REFUSED_EXIT_CODE } from "../control-commands.ts";
@@ -66,13 +68,33 @@ test("every launcher call of every silent parameter set runs on the CLI and leav
   }
 });
 
-test("the CALLS lines name every flag and install step the .iss code uses, and nothing it does not", () => {
+/**
+ * Install steps only the wizard runs, never a silent install: a CALLS line (one per silent parameter set) cannot name them.
+ * Each has the reason it is exempt and the flags only it passes (the other flags stay checked against the CALLS lines).
+ */
+const WIZARD_ONLY_STEPS: Readonly<Record<string, { readonly reason: string; readonly flags: readonly string[] }>> = {
+  "endpoint-models": { reason: "fills the endpoint page's model list on the player's button; a silent install gives /LLMMODEL= and never lists", flags: ["--url", "--key", "--list"] },
+  disk: { reason: "the model page's free-space text (spec D2); nobody reads it in a silent install, whose steps keep their own guards", flags: ["--no-model"] },
+};
+
+test("the CALLS lines name every flag and install step the .iss code uses, and nothing it does not, except the steps only the wizard runs", () => {
   const documented = callsLines().flatMap((line) => line.calls);
+  const wizardOnlyFlags = Object.values(WIZARD_ONLY_STEPS).flatMap((step) => step.flags);
   const flagsIn = (text: string): string[] => [...new Set([...text.matchAll(/--[a-z]+(?:-[a-z]+)*/gu)].map((match) => match[0]))].filter((flag) => flag !== "--json").sort();
-  assert.deepEqual(flagsIn(documented.join(" ")), flagsIn(code));
+  assert.deepEqual(flagsIn(documented.join(" ")), flagsIn(code).filter((flag) => !wizardOnlyFlags.includes(flag)));
   const stepsInCode = [...code.matchAll(/(?:'install |RunSetupStep\('|RunInstallStepWithRetry\(')([a-z]+(?:-[a-z]+)*)/gu)].map((match) => match[1]!);
   const stepsDocumented = documented.filter((call) => call.startsWith("install ")).map((call) => call.split(" ")[1]!);
-  assert.deepEqual([...new Set(stepsInCode)].sort(), [...new Set(stepsDocumented)].sort());
+  assert.deepEqual([...new Set(stepsInCode)].filter((step) => !(step in WIZARD_ONLY_STEPS)).sort(), [...new Set(stepsDocumented)].sort());
+});
+
+test("the steps exempt from the CALLS lines are exactly endpoint-models and disk: the code runs each, and no CALLS line names either", () => {
+  assert.deepEqual(Object.keys(WIZARD_ONLY_STEPS).sort(), ["disk", "endpoint-models"]);
+  const documented = callsLines().flatMap((line) => line.calls);
+  for (const [step, { flags }] of Object.entries(WIZARD_ONLY_STEPS)) {
+    assert.match(code, new RegExp(`'install ${step}[ ']`, "u"), `the .iss no longer runs install ${step}: drop its exemption`);
+    assert.equal(documented.some((call) => call.startsWith(`install ${step}`)), false, `a CALLS line names install ${step}, which is not exempt then`);
+    for (const flag of flags) assert.ok(code.includes(flag), `the .iss no longer passes ${flag}: drop it from the exemption`);
+  }
 });
 
 test("the progress page's steps run in the order the CALLS line for a local model and server gives", () => {
@@ -364,4 +386,172 @@ test("a removal the player asked for logs its result, shows the detail unless it
   // Shown once, together, and only when the player can answer.
   assert.match(functionBody("ShowUninstallNotes"), /\(UninstallNotes <> ''\) and \(not UninstallSilent\)/u);
   assert.match(functionBody("NoteUninstall"), /Log\(/u);
+});
+
+// ---------- T4a: the endpoint page, the model list, the /v1 notice, the disk text (spec D2, D4) ----------
+
+test("the endpoint page comes right after the model page, the server page after it, and the page is skipped for the local model and in a silent install", () => {
+  assert.match(functionBody("CreateEndpointPage"), /EndpointPage := CreateCustomPage\(ModelPage\.ID, /u);
+  assert.match(functionBody("CreateServerPage"), /ServerPage := CreateCustomPage\(EndpointPage\.ID, /u);
+  const order = functionBody("InitializeWizard");
+  assert.ok(order.indexOf("CreateModelPage()") < order.indexOf("CreateEndpointPage()") && order.indexOf("CreateEndpointPage()") < order.indexOf("CreateServerPage()"));
+  const skip = functionBody("ShouldSkipPage");
+  assert.match(skip, /WizardSilent and \([^\n]*PageID = EndpointPage\.ID/u);
+  assert.match(skip, /if PageID = EndpointPage\.ID then\s+Result := Result or \(not ModelRemoteRadio\.Checked\)/u);
+});
+
+test("the endpoint is saved and tested on the endpoint page's Next, never on the model page's: the model page's Next goes on with the remote choice", () => {
+  const next = functionBody("NextButtonClick");
+  assert.match(next, /CurPageID = EndpointPage\.ID then\s+Result := AcceptRemoteEndpoint\(\)/u);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("AcceptRemoteEndpoint(")).map(([name]) => name).sort(), ["NextButtonClick"]);
+  const modelPageBranch = next.slice(next.indexOf("CurPageID = ModelPage.ID"), next.indexOf("CurPageID = EndpointPage.ID"));
+  assert.doesNotMatch(modelPageBranch, /AcceptRemoteEndpoint/u);
+  assert.match(modelPageBranch, /if not ModelRemoteRadio\.Checked then\s+Result := AcceptLocalModel\(\)/u);
+});
+
+test("the model name is a drop-down combo box on the endpoint page; no RemoteModelEdit is left, the silent parameter and the prefill fill the combo", () => {
+  assert.doesNotMatch(iss, /RemoteModelEdit/u);
+  assert.match(code, /RemoteModelCombo: TNewComboBox/u);
+  assert.match(functionBody("CreateEndpointPage"), /RemoteModelCombo\.Style := csDropDown/u);
+  assert.match(functionBody("ApplySilentParameters"), /RemoteModelCombo\.Text := Param\('LLMMODEL', ''\)/u);
+  assert.match(functionBody("PrefillFromSettings"), /RemoteModelCombo\.Text := JsonString\(Llm, 'model'\)/u);
+  // ConfigureArguments (the progress page's save) reads the combo and the URL box the /v1 correction wrote.
+  assert.match(functionBody("ConfigureArguments"), /Quoted\(Trim\(RemoteUrlEdit\.Text\)\)[\s\S]*Quoted\(Trim\(RemoteModelCombo\.Text\)\)/u);
+});
+
+test("the endpoint test and the model list run on the endpoint page's own gauge and status, never the model page's", () => {
+  for (const name of ["SaveAndTestEndpoint", "AcceptRemoteEndpoint", "ListModels"]) {
+    const body = functionBody(name);
+    assert.match(body, /EndpointStepStatus/u, name);
+    assert.doesNotMatch(body, /ModelGauge|ModelStepStatus/u, name);
+  }
+  assert.match(functionBody("SaveAndTestEndpoint"), /EndpointGauge/u);
+  assert.match(functionBody("ListModels"), /EndpointGauge/u);
+});
+
+test("the /v1 correction is read after both endpoint steps: the corrected URL goes in the URL box before any configure, the notice is logged and shown once", () => {
+  const apply = functionBody("ApplyEndpointCorrection");
+  assert.match(apply, /JsonString\(Json, 'correctedUrl'\)/u);
+  assert.match(apply, /JsonString\(Json, 'notice'\)/u);
+  assert.match(apply, /RemoteUrlEdit\.Text := /u);
+  assert.match(apply, /Log\(/u);
+  assert.match(apply, /SuppressibleMsgBox\(Notice, mbInformation, MB_OK, IDOK\)/u);
+  assert.match(apply, /if not WizardSilent then\s+SuppressibleMsgBox/u);
+  for (const [name, step] of [["SaveAndTestEndpoint", "install endpoint-test"], ["ListModels", "install endpoint-models"]] as const) {
+    const body = functionBody(name);
+    const ran = body.indexOf(`'${step}`);
+    assert.ok(ran >= 0, `${name} does not run ${step}`);
+    assert.ok(body.indexOf("ApplyEndpointCorrection(Json)") > ran, `${name} does not read the correction after ${step}`);
+  }
+  // On a failure the launcher's error already starts with the notice: the failure text is shown without it, so the player reads it once.
+  assert.match(functionBody("SaveAndTestEndpoint"), /WithoutNotice\(StepFailureText\(Json\), JsonString\(Json, 'notice'\)\)/u);
+  assert.match(functionBody("ListModels"), /WithoutNotice\(/u);
+});
+
+test("the endpoint page's inputs are off while a launcher run is in progress, so no click starts a second run over the same step-result file", () => {
+  assert.match(functionBody("SetEndpointControlsEnabled"), /ListModelsButton\.Enabled := Enabled;[\s\S]*RemoteUrlEdit\.Enabled := Enabled;[\s\S]*RemoteKeyEdit\.Enabled := Enabled;[\s\S]*RemoteModelCombo\.Enabled := Enabled;/u);
+  for (const name of ["AcceptRemoteEndpoint", "ListModels"]) {
+    const body = functionBody(name);
+    assert.ok(body.indexOf("SetEndpointControlsEnabled(False)") >= 0 && body.indexOf("SetEndpointControlsEnabled(False)") < body.indexOf("SetEndpointControlsEnabled(True)"), name);
+  }
+});
+
+test("`install disk` is run by the model page's disk text only, after `install gpu`, not in a silent install, with --no-model when the local model is not offered", () => {
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("'install disk")).map(([name]) => name), ["ShowDiskSpace"]);
+  const gpu = functionBody("CheckGpuOnce");
+  assert.ok(gpu.indexOf("'install gpu'") >= 0 && gpu.indexOf("ShowDiskSpace()") > gpu.indexOf("'install gpu'"), "the disk text comes after the GPU text");
+  assert.match(gpu, /if not WizardSilent then\s+ShowDiskSpace\(\);/u);
+  const disk = functionBody("ShowDiskSpace");
+  assert.match(disk, /DiskStatus\.Caption := 'Checking disk space\.\.\.'/u);
+  assert.match(disk, /if not ModelLocalRadio\.Enabled then\s+Args := Args \+ ' --no-model'/u);
+  assert.match(disk, /JsonString\(Json, 'detail'\)/u);
+  // A run that failed shows nothing.
+  assert.match(disk, /else\s+DiskStatus\.Caption := '';/u);
+});
+
+test("the model list: the stale list file is deleted before each run and read only when the step succeeded; the key is always given; a failure shows the step's text in the list status without a box", () => {
+  const list = functionBody("ListModels");
+  assert.ok(list.includes("DeleteFile(ModelListFile())") && list.indexOf("DeleteFile(ModelListFile())") < list.indexOf("'install endpoint-models"), "the stale file is not deleted before the run");
+  // The key option is given even when empty: without --key the launcher falls back to the settings' key (endpoint-models.ts).
+  assert.match(list, /'install endpoint-models --url ' \+ Quoted\(Trim\(RemoteUrlEdit\.Text\)\)/u);
+  assert.match(list, /' --key ' \+ Quoted\(RemoteKeyEdit\.Text\)/u);
+  assert.match(list, /' --list ' \+ Quoted\(ModelListFile\(\)\)/u);
+  assert.match(list, /RemoteUrlProblem\(\)/u);
+  assert.doesNotMatch(list, /RemoteFieldProblem/u, "listing must not demand the model name it is there to find");
+  assert.match(list, /if Listed and LoadModelList\(\) then/u);
+  assert.match(list, /ListStatus\.Caption := WithoutNotice\(StepFailureText\(Json\)/u);
+  assert.doesNotMatch(list.slice(list.indexOf("ApplyEndpointCorrection")), /MsgBox\(/u, "a failed list is told in the list status only");
+  assert.match(functionBody("LoadModelList"), /UTF8Decode\(Raw\)/u);
+  assert.equal([...code.matchAll(/mine-ai-models\.txt/gu)].length, 1, "the list file's name is spelled once, in ModelListFile");
+});
+
+test("the combo box filter keeps what the player typed: the typed text is saved, the items refilled with the ids that contain the filter (case ignored), the text put back", () => {
+  const fill = functionBody("FillModelCombo");
+  const saved = fill.indexOf("Typed := RemoteModelCombo.Text");
+  assert.ok(saved >= 0 && saved < fill.indexOf("Items.Clear") && fill.indexOf("Items.Clear") < fill.indexOf("RemoteModelCombo.Text := Typed"));
+  assert.match(fill, /Lowercase\(/u);
+  assert.match(functionBody("CreateEndpointPage"), /ModelFilterEdit\.OnChange := @FilterChanged/u);
+  assert.match(functionBody("FilterChanged"), /FillModelCombo\(\)/u);
+  assert.match(functionBody("CreateEndpointPage"), /RemoteModelCombo\.OnChange := @ModelComboChanged/u);
+  assert.match(functionBody("ModelComboChanged"), /ModelInfoText\.Caption := /u);
+});
+
+test("Ollama on another PC: the fill button writes http://<IP>:11434/v1, empties the key and selects <IP>; Help... says what to set; a URL still holding < or > is refused before any call", () => {
+  const fill = functionBody("FillOllamaOnAnotherPc");
+  assert.match(fill, /RemoteUrlEdit\.Text := 'http:\/\/<IP>:11434\/v1'/u);
+  assert.match(fill, /RemoteKeyEdit\.Text := ''/u);
+  assert.match(fill, /SelStart := Pos\('<IP>', RemoteUrlEdit\.Text\) - 1/u);
+  assert.match(fill, /SelLength := 4/u);
+  const help = functionBody("ShowOllamaHelp");
+  for (const part of ["OLLAMA_HOST=0.0.0.0:11434", "TCP port 11434", "Private networks only", "Ollama has no password", "Leave the key empty"]) assert.ok(help.includes(part), part);
+  const problem = functionBody("RemoteUrlProblem");
+  assert.match(problem, /\(Pos\('<', RemoteUrlEdit\.Text\) > 0\) or \(Pos\('>', RemoteUrlEdit\.Text\) > 0\)/u);
+  assert.ok(problem.includes("Replace <IP> with the address of the PC that runs Ollama (for example 192.168.1.20)."));
+  assert.match(functionBody("RemoteFieldProblem"), /RemoteUrlProblem\(\)/u);
+});
+
+interface TestCompiler {
+  readonly program: string;
+  /** A path of this machine as the compiler reads it (WSL: `wslpath -w`). */
+  readonly path: (file: string) => string;
+}
+
+/** ISCC.exe: on Windows from `INNO_SETUP` or the default folders (as the release build); in WSL the same folders through the Windows drive. Undefined when Inno Setup is not installed. */
+function findIsccForTests(): TestCompiler | undefined {
+  if (process.platform === "win32") {
+    try {
+      return { program: findInnoCompiler(process.env, existsSync), path: (file) => file };
+    } catch {
+      return undefined;
+    }
+  }
+  const users = existsSync("/mnt/c/Users") ? readdirSync("/mnt/c/Users").map((user) => `/mnt/c/Users/${user}/AppData/Local/Programs/Inno Setup 6`) : [];
+  const folders = process.env.INNO_SETUP === undefined ? ["/mnt/c/Program Files (x86)/Inno Setup 6", "/mnt/c/Program Files/Inno Setup 6", ...users] : [process.env.INNO_SETUP];
+  const program = folders.map((folder) => join(folder, "ISCC.exe")).find((file) => existsSync(file));
+  if (program === undefined) return undefined;
+  return { program, path: (file) => spawnSync("wslpath", ["-w", file], { encoding: "utf8" }).stdout.trim() };
+}
+
+// Pascal Script is only checked by a real compile: a typo or a property Inno lacks on the endpoint page is otherwise found by the
+// master's build. ISCC runs on a stand-in stage folder (a bun.exe and a persona file), so the compile takes seconds.
+// Facts "Inno Setup script": MSYS2_ARG_CONV_EXCL="*" keeps Git Bash from rewriting the /D arguments; the /D paths are absolute.
+const compiler = findIsccForTests();
+test("the real script compiles with Inno Setup's ISCC", { skip: compiler === undefined ? "ISCC.exe not found (set INNO_SETUP to Inno Setup 6's folder; in WSL as a /mnt/c/... path)" : false, timeout: 120_000 }, () => {
+  mkdirSync(join(repoRoot, ".tmp"), { recursive: true });
+  const work = mkdtempSync(join(repoRoot, ".tmp", "iss-compile-"));
+  try {
+    const stage = join(work, "stage");
+    mkdirSync(join(stage, "personas"), { recursive: true });
+    writeFileSync(join(stage, "bun.exe"), "stand-in");
+    writeFileSync(join(stage, "personas", "stand-in.json"), "{}");
+    const args = [`/DStageDir=${compiler!.path(stage)}`, `/DOutputDir=${compiler!.path(join(work, "out"))}`, "/DAppVersion=0.0.0", compiler!.path(join(repoRoot, "packaging", "windows", "mine-ai.iss"))];
+    const result = spawnSync(compiler!.program, args, { encoding: "utf8", env: { ...process.env, MSYS2_ARG_CONV_EXCL: "*" } });
+    const output = `${result.stdout}\n${result.stderr}`;
+    // ISCC prints "Error on line <n> in <file>: Column <c>:" and, on the next line, what is wrong.
+    const error = output.slice(Math.max(0, output.search(/^Error on line/mu)));
+    assert.equal(result.status, 0, error);
+  } finally {
+    // maxRetries: a virus scanner may hold the freshly written setup exe for a moment on Windows.
+    rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
 });
