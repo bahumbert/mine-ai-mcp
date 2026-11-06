@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { UsageError } from "./cli-context.ts";
-import { cliContext, okInstallSteps } from "./cli-test-support.ts";
+import { cliContext, inTemporaryFolder, okInstallSteps } from "./cli-test-support.ts";
 import { diskStep, INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
 import type { DiskReportDeps } from "./install/disk-report.ts";
 import type { GpuReport } from "./install/gpu.ts";
@@ -104,6 +104,16 @@ test("without --json the result is printed as one line", async () => {
   const t = setup();
   await runInstallCommand(["java"], t.context, t.steps);
   assert.ok(t.out.includes("java done"));
+});
+
+test("--json with a bare file name or ./sub/x.json is written relative to the working folder (Windows Bun throws EEXIST on mkdir of \".\")", async () => {
+  const t = setup();
+  await inTemporaryFolder(async (folder) => {
+    assert.equal(await runInstallCommand(["java", "--json", "step.json"], t.context, t.steps), 0);
+    assert.deepEqual(written(join(folder, "step.json")), { ok: true, detail: "java done" });
+    assert.equal(await runInstallCommand(["java", "--json", "./sub/other.json"], t.context, t.steps), 0);
+    assert.deepEqual(written(join(folder, "sub", "other.json")), { ok: true, detail: "java done" });
+  });
 });
 
 test("an unknown step or none is a usage error that lists the steps", async () => {

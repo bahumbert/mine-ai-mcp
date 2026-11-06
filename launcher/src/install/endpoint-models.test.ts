@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { inTemporaryFolder } from "../cli-test-support.ts";
 import { settingsPath } from "../settings.ts";
 import { endpointModels } from "./endpoint-models.ts";
 import { answerJson, answerText, fakeEndpoint, remoteContext, withFakeEndpoint, type FakeEndpoint, type Handler } from "./fixtures/fake-endpoint.ts";
@@ -68,6 +69,16 @@ test("the list is one line per text model, `<id>`, a tab and the info built from
     assert.deepEqual(result, { ok: true, detail: "5 models listed." });
     assert.equal(readFileSync(listFile, "utf8"), `${OPENROUTER_LINES.join("\n")}\n`);
     assert.deepEqual(endpoint.seen.map((request) => `${request.method} ${request.url}`), ["GET /v1/models"]);
+  });
+});
+
+test("--list with a bare file name is written in the working folder (Windows Bun throws EEXIST on mkdir of \".\")", async () => {
+  await withFakeEndpoint(modelsAnswer(OLLAMA_ANSWER), async (endpoint) => {
+    await inTemporaryFolder(async (folder) => {
+      const result = await endpointModels(remoteContext({ baseUrl: endpoint.baseUrl }), { url: endpoint.baseUrl, savedKey: false, listFile: "models.txt" });
+      assert.deepEqual(result, { ok: true, detail: "1 model listed." });
+      assert.equal(readFileSync(join(folder, "models.txt"), "utf8"), "gemma4:12b\t\n");
+    });
   });
 });
 

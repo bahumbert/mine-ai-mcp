@@ -2,8 +2,8 @@
 // install steps (spec D2, D3). `--dir` is for `install ollama` and `install disk`: the folder Ollama's setup installs
 // into when Ollama is missing. `--no-model` is for `install disk` only: the GPU verdict is remote, so no model line.
 // `install endpoint-models [--url <url>] [--key <key> | --saved-key] --list <file>` writes the endpoint's model list.
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, posix } from "node:path";
+import { writeFileSync } from "node:fs";
+import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { UsageError, type CliContext } from "./cli-context.ts";
 import { diskReport, realDiskReportDeps, type DiskReport, type DiskReportDeps } from "./install/disk-report.ts";
@@ -16,6 +16,7 @@ import { ollama, ollamaExeFor, ollamaRemove } from "./install/ollama.ts";
 import { server } from "./install/server.ts";
 import { stepFailure, type InstallContext, type StepResult } from "./install/step.ts";
 import type { Manifest } from "./manifest.ts";
+import { ensureParentDir } from "./paths.ts";
 import { loadSettings } from "./settings.ts";
 
 export const INSTALL_STEP_NAMES = ["gpu", "disk", "ollama", "ollama-remove", "model", "model-remove", "java", "server", "endpoint-test", "endpoint-models"] as const;
@@ -183,7 +184,7 @@ export async function runInstallCommand(
   const result = parsed.step === "gpu" ? { ...output, ollamaExe: ollamaExeOrNull(findOllama, context.root), ...modelHint(context, modelPresent) } : output;
   const { json } = parsed;
   if (json !== undefined) {
-    mkdirSync(dirname(json), { recursive: true });
+    ensureParentDir(json);
     writeFileSync(json, JSON.stringify(result));
   } else context.out(result.ok === true ? String(result.detail) : `${String(result.error)} ${String(result.hint)}`.trim());
   return result.ok === true ? 0 : 1;

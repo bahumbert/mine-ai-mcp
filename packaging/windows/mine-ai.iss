@@ -116,6 +116,8 @@ const
   SAVED_KEY_MARK = 'saved-key-unchanged';
   KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';
   SAVED_KEY_UNUSABLE_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Type the key again in the API key box, replacing the dots (silent install: /LLMKEY=).';
+  // The same cause for a silent run, which has no key box: the next action is the parameter.
+  SAVED_KEY_UNUSABLE_SILENT_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Run the setup again with /LLMKEY=<the key>.';
   // What the player does by hand when a removal asked for at uninstall did not happen: {app} is gone by then, so no "run this step again".
   OLLAMA_REMOVE_BY_HAND = 'Remove Ollama yourself: Windows Settings > Apps > Installed apps > Ollama > Uninstall.';
   // Setup stores the data folder under this name (GetPreviousData/SetPreviousData); the uninstaller reads it back from the
@@ -1487,7 +1489,12 @@ end;
 function ConfigureFailure(const Lead: String; Code: Integer): String;
 begin
   if KeySaved and ModelRemoteRadio.Checked and (Code = USAGE_EXIT_CODE) then
-    Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_TEXT
+  begin
+    if WizardSilent then
+      Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_SILENT_TEXT
+    else
+      Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_TEXT;
+  end
   else
     Result := Lead + #13#10 + LastLogTail;
 end;

@@ -571,6 +571,12 @@ test("a saved key that cannot be used is told in the setup's words, never the la
   const text = functionBody("ConfigureFailure");
   assert.match(text, /KeySaved and ModelRemoteRadio\.Checked and \(Code = USAGE_EXIT_CODE\)/u);
   assert.match(code, /SAVED_KEY_UNUSABLE_TEXT = '[^']*Type the key again in the API key box[^']*\/LLMKEY=/u);
+  // A silent run has no key box to type in: its text names /LLMKEY= and nothing of the wizard.
+  const silentText = /SAVED_KEY_UNUSABLE_SILENT_TEXT = '([^']*)';/u.exec(code)?.[1];
+  assert.ok(silentText !== undefined, "no SAVED_KEY_UNUSABLE_SILENT_TEXT");
+  assert.match(silentText, /^The API key saved earlier cannot be used: [^]*\/LLMKEY=/u);
+  assert.doesNotMatch(silentText, /box|Type the key|dots|wizard|page/iu);
+  assert.match(text, /if WizardSilent then\s+Result := Lead \+ #13#10 \+ SAVED_KEY_UNUSABLE_SILENT_TEXT\s+else\s+Result := Lead \+ #13#10 \+ SAVED_KEY_UNUSABLE_TEXT/u);
   assert.match(functionBody("SaveAndTestEndpoint"), /ConfigureFailure\('Mine AI could not save the endpoint\.', Code\)/u);
   assert.match(functionBody("RunConfigure"), /ConfigureFailure\('Mine AI could not save your choices in settings\.json\.', Code\)/u);
   // Exit 2 is the launcher's code for any usage error, so a URL its configure refuses (a scheme with nothing after it) must be refused by the

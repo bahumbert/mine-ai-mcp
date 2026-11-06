@@ -2,10 +2,10 @@
  * Install step `endpointModels`: the models a remote endpoint lists (`GET <base>/models`), written for the installer's
  * model box. One request per call, no text generated, so it costs nothing (spec D4(b)).
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { writeFileSync } from "node:fs";
 import { z } from "zod";
 import { fetchErrorText } from "../fetch-error.ts";
+import { ensureParentDir } from "../paths.ts";
 import type { Settings } from "../settings.ts";
 import { bearerHeader, completionRequestBody, correctionOf, parseJsonErrorBody, REQUIRED_REQUEST_KEYS, savedKeyUnreadable, v1RefusedHint, withCorrectionTold, withV1Retry, type EndpointDeps, type V1Answer } from "./endpoint.ts";
 import { failure, type InstallContext, type StepFailure, type StepResult } from "./step.ts";
@@ -138,7 +138,7 @@ export async function endpointModels(ctx: InstallContext, options: EndpointModel
   const lines = modelLines(answer, ctx.manifest.brainEnv);
   if (!Array.isArray(lines)) return withCorrectionTold(lines, correction);
   try {
-    mkdirSync(dirname(options.listFile), { recursive: true });
+    ensureParentDir(options.listFile);
     writeFileSync(options.listFile, `${lines.join("\n")}\n`, "utf8");
   } catch (error) {
     return withCorrectionTold(failure(`The model list could not be written to ${options.listFile}: ${error instanceof Error ? error.message : String(error)}`, "Type the model name."), correction);

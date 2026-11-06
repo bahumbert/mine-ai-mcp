@@ -23,6 +23,18 @@ export function okInstallSteps(calls: string[] = []): InstallSteps {
   return Object.fromEntries(INSTALL_STEP_NAMES.map((name) => [name, async () => (calls.push(name), { ok: true as const, detail: `${name} done` })])) as unknown as InstallSteps;
 }
 
+/** Runs `run` with the working folder set to a new empty folder (restored after, even when `run` throws): for a test of a bare file name such as `step.json`. Tests of one file run one after the other, so the shared cwd is safe. */
+export async function inTemporaryFolder<T>(run: (folder: string) => Promise<T> | T): Promise<T> {
+  const folder = mkdtempSync(join(tmpdir(), "mine-ai-cwd-"));
+  const before = process.cwd();
+  process.chdir(folder);
+  try {
+    return await run(folder);
+  } finally {
+    process.chdir(before);
+  }
+}
+
 export const STATUS: StackStatus = {
   phase: "running",
   problem: null,
