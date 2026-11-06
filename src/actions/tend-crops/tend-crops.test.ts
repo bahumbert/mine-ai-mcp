@@ -141,7 +141,7 @@ test("ground cover is what the version's tags say, saplings never, and tilled so
   assert.equal(facts.isGroundCover("torch"), false);
   assert.equal(facts.isGroundCover("oak_sapling"), false);
   assert.equal(facts.isGroundCover("mangrove_propagule"), false);
-  assert.equal(plotFacts({ ...bot, version: "1.20.1" }).isGroundCover("short_grass"), false);
+  assert.equal(plotFacts({ ...bot, version: "1.18.2" }).isGroundCover("short_grass"), false);
   assert.equal(facts.isTilledSoil({ name: "farmland", properties: { moisture: 0 }, liquid: false, empty: false, breakable: true }), true);
   assert.equal(facts.isTilledSoil({ name: "dirt", properties: {}, liquid: false, empty: false, breakable: true }), false);
 });

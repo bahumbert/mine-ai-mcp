@@ -241,8 +241,9 @@ const untouchedNavigation = new Proxy({}, {
   get: (_target, property) => { throw new Error(`the refusal reached navigation.${String(property)}`); },
 }) as unknown as NavigationRuntime;
 
+/** `version` only sets the string the tag lookups read: the shared fake builds no registry older than 1.19.4. */
 function refusedBot(version = "1.21.4") {
-  return createFakeBot({ version }).bot;
+  return Object.assign(createFakeBot().bot, { version });
 }
 
 async function refusal(selector: string, version = "1.21.4", extra: Record<string, unknown> = {}) {
@@ -287,7 +288,7 @@ test("the singular log is unknown and its refusal suggests the logs", async () =
 });
 
 test("a version with no shipped tags matches exact names only: logs is the unknown-name refusal, not an exploration", async () => {
-  const result = await refusal("logs", "1.19.4");
+  const result = await refusal("logs", "1.18.2");
   assert.equal(result.status, "failed");
   assert.match(result.error ?? "", /^\[COLLECT_UNKNOWN_BLOCK\]/u);
 });

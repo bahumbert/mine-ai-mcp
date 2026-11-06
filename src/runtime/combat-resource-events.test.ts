@@ -122,14 +122,13 @@ test("a picked-up stack of two tipped arrows records one arrow_recovered per ite
   } finally { f.stop(); }
 });
 
-// Known gap (spec 2026-11-01 C1, open choice 5): no item tags are shipped for 1.20.x, so the `arrows` tag is unknown there
-// and a shot is not counted. Remove this test when those versions' tags ship.
-test("known gap: on 1.20.4 no item tags are shipped, so a shot arrow records no arrow_fired", () => {
+// Spec 2026-11-01 C1, open choice 5, closed by P4-17a task 2: the 1.20.x item tags are shipped, so the `arrows` tag is known there.
+test("on 1.20.4 the shipped item tags know the `arrows` tag, so a shot arrow records arrow_fired", () => {
   const f = fixture(undefined, undefined, "1.20.4");
   try {
     recordCombatResourceReceipt(f.bot, { kind: "arrow_release_command" });
     f.inventory.updateSlot(10, f.arrows(2));
-    assert.deepEqual(f.observed, []);
+    assert.deepEqual(f.observed, [{ kind: "arrow_fired" }]);
   } finally { f.stop(); }
 });
 

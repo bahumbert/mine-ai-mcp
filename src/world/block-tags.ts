@@ -3,12 +3,17 @@
  * server jar by `block-tags-extract.ts` (see `data/block-tags/`). A tag is the game's own grouping of blocks, so a
  * question such as "is this a log" is answered for every wood, nether stems included, without a list of names.
  */
+import tags_1_19_4 from "./data/block-tags/1.19.4.json" with { type: "json" };
+import tags_1_20_1 from "./data/block-tags/1.20.1.json" with { type: "json" };
+import tags_1_20_4 from "./data/block-tags/1.20.4.json" with { type: "json" };
+import tags_1_20_6 from "./data/block-tags/1.20.6.json" with { type: "json" };
+import tags_1_21_1 from "./data/block-tags/1.21.1.json" with { type: "json" };
 import tags_1_21_4 from "./data/block-tags/1.21.4.json" with { type: "json" };
 import { nearestShipped } from "./shipped-data.js";
 import { tagLookup, type TagsData } from "./tag-index.js";
 
 /** Shipped data files, by version. Add a file with `block-tags-extract.ts`, then list it here. */
-const SHIPPED: readonly TagsData[] = [tags_1_21_4];
+const SHIPPED: readonly TagsData[] = [tags_1_19_4, tags_1_20_1, tags_1_20_4, tags_1_20_6, tags_1_21_1, tags_1_21_4];
 
 const lookup = tagLookup(SHIPPED);
 

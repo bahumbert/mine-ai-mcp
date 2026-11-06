@@ -56,8 +56,8 @@ test("a snow layer is replaceable only as the single layer; a cell that does not
 });
 
 test("a version with no shipped tags replaces air and liquids only", () => {
-  for (const name of ["air", "cave_air", "water", "lava"]) assert.equal(isReplaceableForPlacement(block(name), "1.20.1"), true, name);
-  for (const name of ["short_grass", "tall_grass", "torch"]) assert.equal(isReplaceableForPlacement(block(name), "1.20.1"), false, name);
+  for (const name of ["air", "cave_air", "water", "lava"]) assert.equal(isReplaceableForPlacement(block(name), "1.18.2"), true, name);
+  for (const name of ["short_grass", "tall_grass", "torch"]) assert.equal(isReplaceableForPlacement(block(name), "1.18.2"), false, name);
 });
 
 /**

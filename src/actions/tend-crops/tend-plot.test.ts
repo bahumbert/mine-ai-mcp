@@ -69,7 +69,10 @@ test("a block with no shipped tag is never cleared, and a version with no shippe
   const modded = { name: "somemod_glow_flower", properties: {}, liquid: false, empty: true, breakable: true };
   assert.deepEqual(decideCell(block("dirt"), modded, PLOT_FACTS), { skip: "occupied by somemod_glow_flower" });
   assert.equal(isGroundCover("short_grass", "1.21.4"), true);
-  assert.equal(isGroundCover("short_grass", "1.20.1"), false);
+  // The shared fake builds no registry older than 1.19.4, and every version from 1.19.4 has shipped tags: 1.18.2 has none.
+  assert.equal(isGroundCover("short_grass", "1.18.2"), false);
+  // 1.20.1 ships its own tags and names the block `grass` (renamed `short_grass` in 1.20.3).
+  assert.equal(isGroundCover("grass", "1.20.1"), true);
 });
 
 test("soil is tilled when its block state has moisture", () => {

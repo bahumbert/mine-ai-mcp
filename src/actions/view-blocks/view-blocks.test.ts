@@ -105,7 +105,8 @@ test("find with the singular log fails as an unknown name; logs finds natural lo
 });
 
 test("find on a version with no shipped tags knows block names only", () => {
-  const bot = fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }, { version: "1.19.4" });
+  // The shared fake builds no registry older than 1.19.4 (every version from 1.19.4 has shipped tags): only the version string changes.
+  const bot = Object.assign(fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }), { version: "1.18.2" });
   assert.equal(viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] }).status, "failed");
   assert.equal(viewBlocks(bot, { find: { blockNames: ["oak_log"], limit: 12 }, box: null, cells: [] }).status, "succeeded");
 });
