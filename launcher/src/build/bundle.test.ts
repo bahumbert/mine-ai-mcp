@@ -93,7 +93,7 @@ test("the trimmed minecraft-data gives the 1.21.4 data the bots read, from a fol
   assert.equal(version, MINECRAFT_VERSION);
 });
 
-// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills.ts` for the
+// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills/explore.ts` for the
 // entity types), not the server's version: a copy trimmed to 1.21.4 alone threw in play, from the first boat or creature
 // question (task review 2026-10-31; `brain --help` never calls them).
 test("the trimmed minecraft-data also gives the newest registry the brain reads for boat recipes and entity types", () => {

@@ -35,7 +35,7 @@ const EXTERNAL_PACKAGES = [MINECRAFT_DATA_PACKAGE];
 const TOUCH_VERSION_VARIABLE = "MINE_AI_MINECRAFT_VERSION";
 /**
  * Loads the data of the Minecraft version and every key it returns, and the same for the package's newest version (the brain
- * reads the newest registry for boat recipes and entity types: `brain/src/boats.ts`, `brain/src/skills.ts`), then lists the
+ * reads the newest registry for boat recipes and entity types: `brain/src/boats.ts`, `brain/src/skills/explore.ts`), then lists the
  * package's files that `require` read. Run by `bun -e` in a folder whose `node_modules` holds the package.
  */
 const TOUCH_SCRIPT = `
