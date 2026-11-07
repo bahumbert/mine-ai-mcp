@@ -1,5 +1,6 @@
 // Building a house from the persona's style (build): the site, its protection and leveling, then the parts.
 import type { Step } from "../actions.ts";
+import { isCanopy } from "../block-kinds.ts";
 import { describeMaterials, shortfall } from "../building/blueprint.ts";
 import { checkMaterials } from "../building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Site } from "../building/plan.ts";
@@ -217,7 +218,7 @@ async function groundedDoor(runtime: BotRuntime, door: Position): Promise<Positi
   const area = await runtime.blocksIn({ x: door.x, y: door.y - GROUND_SEARCH, z: door.z }, { x: door.x, y: door.y + GROUND_SEARCH, z: door.z });
   const solid = (y: number) => {
     const block = area.blocks.get(areaKey(door.x, y, door.z));
-    return block !== undefined && !block.endsWith("_leaves") && area.kinds[block]?.solid === true;
+    return block !== undefined && area.kinds[block]?.solid === true && !isCanopy(area.kinds[block]);
   };
   for (let y = door.y + GROUND_SEARCH; y >= door.y - GROUND_SEARCH; y -= 1) {
     if (solid(y)) return { ...door, y: y + 1 };
