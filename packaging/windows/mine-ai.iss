@@ -1626,6 +1626,7 @@ end;
 procedure ShowFinishText();
 var
   I: Integer;
+  Line: String;
 begin
   if not SetupDone then
   begin
@@ -1635,7 +1636,12 @@ begin
     WizardForm.RunList.Visible := False;
     Exit;
   end;
-  WizardForm.FinishedLabel.Caption := 'Mine AI is installed.' + #13#10#13#10 +
+  // "Up to date", not "updated": IsUpdate() is also true for a first install run again after its steps failed, where nothing was updated.
+  if IsUpdate() then
+    Line := 'Mine AI is up to date.'
+  else
+    Line := 'Mine AI is installed.';
+  WizardForm.FinishedLabel.Caption := Line + #13#10#13#10 +
     JoinText() + #13#10#13#10 +
     'Program: ' + ExpandConstant('{app}') + #13#10 +
     'Settings: ' + DataDir('') + '\settings.json' + #13#10 +
@@ -1665,7 +1671,28 @@ begin
     WizardForm.ReadyLabel.Caption := 'Click Update to continue.';
   end
   else if CurPageID = wpInstalling then
+  begin
     WizardForm.PageNameLabel.Caption := 'Updating';
+    WizardForm.PageDescriptionLabel.Caption := 'Please wait while Setup updates Mine AI on your computer.';
+  end
+  else if CurPageID = wpPreparing then
+  begin
+    // Shown only when the stop of a running Mine AI is refused (PrepareToInstall returns the reason and the update is cancelled).
+    WizardForm.PageNameLabel.Caption := 'Preparing to update';
+    WizardForm.PageDescriptionLabel.Caption := 'Setup is preparing to update Mine AI on your computer.';
+  end;
+end;
+
+// Inno's exit box says "the program will not be installed": false on an update, where the old install stays. Only before the copy is
+// "stays as it was" true (Ready, Preparing; Cancel is off while copying): the model, server, EULA and steps pages come after it. A first
+// install and those later pages keep Inno's box (Confirm untouched).
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if IsUpdate() and ((CurPageID = wpReady) or (CurPageID = wpPreparing)) then
+  begin
+    Confirm := False;
+    Cancel := SuppressibleMsgBox('Stop the update? Mine AI stays as it was before this update; run the setup again to update it.', mbConfirmation, MB_YESNO, IDNO) = IDYES;
+  end;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

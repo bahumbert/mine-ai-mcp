@@ -77,7 +77,7 @@ test("an update says 'update or repair' on the Ready page and 'Updating' while c
   assert.match(say, /CurPageID = wpReady then[\s\S]*PageNameLabel\.Caption := 'Ready to update or repair'/u);
   assert.match(say, /PageDescriptionLabel\.Caption := 'Setup will update Mine AI and repair any missing file\. Your data folder, worlds and bots stay as they are; the AI model and server settings are set again on the next pages\.'/u);
   assert.match(say, /NextButton\.Caption := 'Update'/u);
-  assert.match(say, /CurPageID = wpInstalling then\s+WizardForm\.PageNameLabel\.Caption := 'Updating'/u);
+  assert.match(say, /CurPageID = wpInstalling then\s+begin\s+WizardForm\.PageNameLabel\.Caption := 'Updating';/u);
   assert.match(functionBody("CurPageChanged"), /SayUpdateOnPage\(CurPageID\)/u);
   assert.match(functionBody("IsUpdate"), /PrevAppDir <> ''/u);
 });
@@ -93,6 +93,47 @@ test("the update's Ready page line names the Update button and no Back; a first 
   assert.doesNotMatch(caption!, /Back|Install/u);
   // After the early Exit of a first install: only an update sets it.
   assert.ok(say.indexOf("ReadyLabel.Caption") > say.indexOf("if not IsUpdate() then"), "the Ready line is set before the first-install exit: a first install would lose Inno's line");
+});
+
+// The text a branch of SayUpdateOnPage sets on a label: from `CurPageID = <page> then` to the next `else if CurPageID` or the end.
+function updateBranchCaption(page: string, label: string): string | undefined {
+  const branch = new RegExp(`CurPageID = ${page} then([\\s\\S]*?)(?:\\n  else if CurPageID|\\nend;|$)`, "u").exec(functionBody("SayUpdateOnPage"))?.[1] ?? "";
+  return new RegExp(`WizardForm\\.${label}\\.Caption := '([^']*)';`, "u").exec(branch)?.[1];
+}
+
+// T23: on an update the Installing and Preparing pages kept Inno's "install" wording (Preparing shows when the stop of a running Mine AI is refused).
+test("the update's Installing and Preparing pages describe an update, never an install; a first install keeps Inno's texts", () => {
+  for (const [page, labels] of [["wpInstalling", ["PageDescriptionLabel"]], ["wpPreparing", ["PageNameLabel", "PageDescriptionLabel"]]] as const) {
+    for (const label of labels) {
+      const text = updateBranchCaption(page, label);
+      assert.notEqual(text, undefined, `the ${page} branch does not set ${label}`);
+      assert.match(text!, /update/iu);
+      assert.doesNotMatch(text!, /install/iu);
+    }
+  }
+  assert.match(updateBranchCaption("wpInstalling", "PageDescriptionLabel")!, /updates/u);
+  const say = functionBody("SayUpdateOnPage");
+  assert.ok(say.indexOf("wpPreparing") > say.indexOf("if not IsUpdate() then"));
+});
+
+// T23: "Mine AI is installed." is false on an update; "up to date" is true there and after a first install run again (IsUpdate is true then too).
+test("the Finished page opens with 'up to date' on an update and 'installed' on a first install; a failed run keeps its own text", () => {
+  const finish = functionBody("ShowFinishText");
+  assert.match(finish, /if IsUpdate\(\) then\s+Line := 'Mine AI is up to date\.'\s+else\s+Line := 'Mine AI is installed\.';/u);
+  assert.match(finish, /FinishedLabel\.Caption := Line \+ #13#10#13#10 \+\s+JoinText\(\)/u);
+  assert.match(finish, /'Setup did not finish\. Run the installer again to resume: the steps that are done are not repeated\.' \+ #13#10#13#10 \+ 'Details are on the previous page\.'/u);
+});
+
+// T23: Inno's exit box says "the program will not be installed", false on an update (the old install stays). Only before the copy
+// is "Mine AI stays as it was" true: the model, server, EULA and steps pages come after it, so they keep Inno's box.
+test("cancelling an update before the copy asks its own question; a first install and the pages after the copy keep Inno's box", () => {
+  const cancel = functionBody("CancelButtonClick");
+  const updateBranch = /if IsUpdate\(\) and \(\(CurPageID = wpReady\) or \(CurPageID = wpPreparing\)\) then\s+begin([\s\S]*?)\n  end;/u.exec(cancel)?.[1] ?? "";
+  assert.match(updateBranch, /Confirm := False;/u);
+  assert.match(updateBranch, /Cancel := SuppressibleMsgBox\('Stop the update\? Mine AI stays as it was before this update; run the setup again to update it\.', mbConfirmation, MB_YESNO, IDNO\) = IDYES;/u);
+  assert.doesNotMatch(updateBranch, /installed/u);
+  // Confirm is assigned only inside that branch.
+  assert.doesNotMatch(cancel.replace(updateBranch, ""), /Confirm :=/u);
 });
 
 // T20 (F3): the "Disk room" line of the Ready memo ran off to the right under a horizontal scroll bar.
