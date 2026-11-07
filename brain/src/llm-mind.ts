@@ -559,7 +559,7 @@ function knownByEarlierExplore(steps: readonly StepRecord[], block: string): str
   for (const record of steps.toReversed()) {
     if (record.step.startsWith("get ") && record.outcome === "failed" && record.step.split(/[^a-z0-9_]+/u).includes(block)) return null;
     if (!record.step.startsWith("explore ") || !record.step.endsWith(` for ${block}`)) continue;
-    // Done or failed: a walk that stopped still names the block it knows (skills.ts adds that before it decides the outcome).
+    // Done or failed: a walk that stopped still names the block it knows (`skills/explore.ts` adds that before it decides the outcome).
     return record.detail.includes("you know of") ? /you know of is (.*?): get_items /u.exec(record.detail)?.[1] ?? record.detail : null;
   }
   return null;

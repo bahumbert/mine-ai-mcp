@@ -1,5 +1,6 @@
 import type { Bot, BotEvents } from "mineflayer";
 import { guardObservedWrite, recordEvent, type PlayerDeathContext, type SqlBotData } from "../bot-data/index.js";
+import { describeDeathContext } from "../bot-data/death-context-text.js";
 import { isChatCommandLine, type ChatCommandRing } from "./chat-commands.js";
 import { aliveReading, readDeathContext, type LastAliveReading } from "./death-context.js";
 
@@ -161,7 +162,8 @@ function recordPlayerDeath(
   };
   const dimension = bot.game.dimension;
   const observedAt = new Date().toISOString();
-  const summary = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
+  const died = `${bot.username} died at ${position.x}, ${position.y}, ${position.z} in ${dimension}${cause ? `: ${cause}` : ""}.`;
+  const summary = context ? `${died}\nState at death: ${describeDeathContext(context)}` : died;
 
   cancelForegroundAction(`${bot.username} died${cause ? `: ${cause}` : ""}.`);
   guarded(() =>

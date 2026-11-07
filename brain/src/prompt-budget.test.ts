@@ -57,6 +57,15 @@ test("a level that renders the same text is skipped and not labelled", () => {
   assert.deepEqual(fitted.shrunk, ["x level 2"]);
 });
 
+// Review 2026-11-07 W1: the loop is synchronous, so a key named twice in `order` (never ending) would freeze the whole brain.
+test("a key named twice in order ends, and shrinks exactly as when named once", () => {
+  const make = () => [sized("x", [400, 200, 50]), sized("y", [400, 200, 50])];
+  const once = fitPrompt("S".repeat(1000), make(), ["x", "y"], 10, 1);
+  const twice = fitPrompt("S".repeat(1000), make(), ["x", "y", "x"], 10, 1);
+  assert.deepEqual(twice, once);
+  assert.equal(twice.overBudget, true);
+});
+
 test("a part with maxLevel 0 or absent from order is never shrunk", () => {
   const fixed = sized("f", [500]);
   const outside = sized("o", [500, 10]);

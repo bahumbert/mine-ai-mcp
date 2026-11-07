@@ -5,9 +5,11 @@ import { createFakeBot, listenerCounts } from "../../../src/test-support/fake-bo
 import { observeDeaths } from "./deaths.ts";
 
 /**
- * `death_combat_event`'s message as a chat component with a text node. UNMEASURED: no contract check sends this packet
- * (the fake's death sends none); the shape and the `playerId` filter follow `src/runtime/player-events.ts:69-72`, which
- * renders it with `deathMessage`. A contract check for the packet is a question for the master.
+ * `death_combat_event`'s message as a chat component with a text node. The packet itself and its place in a death are
+ * measured (scenario `player-death-runtime-event`, contract check `respawn-after-death`), and the fake's death sends it
+ * with `message: undefined`; the text-node shape of a message is UNMEASURED, and the shape and the `playerId` filter
+ * follow `src/runtime/player-events.ts` (`onCombatDeath`), which renders it with `deathMessage`. A contract check for a
+ * message's shape is a question for the master.
  */
 const DROWNED = { type: "compound", value: { text: { type: "string", value: "drowned" } } };
 

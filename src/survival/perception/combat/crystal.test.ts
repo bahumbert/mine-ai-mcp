@@ -12,7 +12,7 @@ import { ActionRunner } from "../../../session/action-runner.js";
 import type { FootingRecovery } from "../../responses/footing.js";
 
 /** The selected crystal #42 above the bot; the scene's blocks and carried items are the test's. */
-function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> = {}) {
+function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY" | "slots"> = {}) {
   const { bot, clock, combat, entities, server, world } = createFakeBot({
     ...options,
     server: { startAge: 100 },
@@ -193,9 +193,15 @@ test("explicit bow refuses before movement when ammunition is unavailable", asyn
 });
 
 // B4 (spec P4-17): any item of the family `arrow` (tag `arrows`) is ammunition, not the item `arrow` alone.
-for (const ammunition of ["spectral_arrow", "tipped_arrow"]) {
+// Review 2026-11-07 S8: arrows held in the off-hand (slot 45) are ammunition too (vanilla shoots them first: unmeasured here).
+const AMMUNITION: Record<string, Pick<FakeBotOptions, "carried" | "slots">> = {
+  spectral_arrow: { carried: { bow: 1, spectral_arrow: 3 } },
+  tipped_arrow: { carried: { bow: 1, tipped_arrow: 3 } },
+  "arrow in the off-hand": { carried: { bow: 1 }, slots: { 45: { name: "arrow", count: 4 } } },
+};
+for (const [ammunition, held] of Object.entries(AMMUNITION)) {
   test(`explicit bow starts its approach with ${ammunition} as the only ammunition`, async () => {
-    const f = fixture({ carried: { bow: 1, [ammunition]: 3 } });
+    const f = fixture(held);
     const navigation = {
       navigate: async () => ({ status: "failed", reason: "approach started", elapsedMs: 1 }) as const,
     } as unknown as NavigationRuntime;

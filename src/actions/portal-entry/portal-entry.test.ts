@@ -229,6 +229,12 @@ test("B4: portal supplies count tipped and spectral arrows, and no avoided food"
   assert.match(portalSupplyWarning(harness.bot, "the_nether")!, /4\/16/);
 });
 
+// Review 2026-11-07 S8 (the same pattern at another site): arrows held in the off-hand (slot 45) are carried arrows.
+test("portal supplies count arrows held in the off-hand", () => {
+  const { bot } = createFakeBot({ carried: { bread: 16, arrow: 20 }, slots: { 45: { name: "arrow", count: 12 } } });
+  assert.equal(portalSupplyWarning(bot, "the_end"), null);
+});
+
 test("personal respawn knowledge is confirmed separately from world spawn and invalidated by spawnReset", () => {
   const { bot } = createFakeBot();
   bot.spawnPoint = new Vec3(0, 64, 0);

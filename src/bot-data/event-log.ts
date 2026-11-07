@@ -429,7 +429,8 @@ export function readNotificationSummary(data: SqlBotData, botId: string): Notifi
     recentPreview: unread
       .reverse()
       .map((row) => {
-        const summary = String(row.summary);
+        // First line only: a death's summary carries a second "State at death" line that read_recent_events prints in full.
+        const summary = String(row.summary).split("\n")[0] ?? "";
         // Reflex previews need enough room for the interruption and observed vitals.
         const limit = row.event_type === "survival_outcome" ? 200 : 40;
         return summary.length <= limit ? summary : `${summary.slice(0, limit)}...`;

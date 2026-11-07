@@ -128,9 +128,10 @@ export function fitPrompt(
   charsPerToken: number,
 ): FittedPrompt {
   const levels = parts.map(() => 0);
-  const shrinkable = order
-    .map((key) => parts.findIndex((part) => part.key === key))
-    .filter((index) => index >= 0 && (parts[index]?.maxLevel ?? 0) > 0);
+  // Each part once, at the place of its first mention: a key named twice would keep the loop below from ever ending.
+  const shrinkable = [...new Set(order.map((key) => parts.findIndex((part) => part.key === key)))].filter(
+    (index) => index >= 0 && (parts[index]?.maxLevel ?? 0) > 0,
+  );
   const atFloor = new Set<number>();
   let rendered = renderParts(parts, levels);
   let text = joinRendered(parts, rendered);

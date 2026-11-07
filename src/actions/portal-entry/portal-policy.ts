@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import { isAutoEdibleFood } from "../../world/food.js";
+import { OFF_HAND_SLOT } from "../../survival/weapons/equipment.js";
 import { familyIndexOf } from "../../world/item-families.js";
 
 export type PortalDestination = "overworld" | "the_nether" | "the_end";
@@ -9,7 +10,8 @@ export function portalSupplyWarning(bot: Bot, destination: PortalDestination): s
   const index = familyIndexOf(bot);
   let food = 0;
   let arrows = 0;
-  for (const item of bot.inventory.items()) {
+  const offHand = bot.inventory.slots[OFF_HAND_SLOT];
+  for (const item of [...bot.inventory.items(), ...(offHand ? [offHand] : [])]) {
     if (isAutoEdibleFood(index, item.name)) food += item.count;
     if (index.itemFamilies(item.name).includes("arrow")) arrows += item.count;
   }

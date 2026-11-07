@@ -11,6 +11,7 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { plugin as toolPlugin } from "mineflayer-tool";
 import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
+import { emitFakeTags } from "../test-support/fake-bot/fake-bot-tags.js";
 import { serverTagsOf } from "../world/server-tags.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
@@ -190,7 +191,8 @@ test("the host listens for the server's tags packet on the bot it creates", asyn
   const { bot } = connectedBot(t);
   await using _host = await startRuntimeHost(source, options);
   assert.equal(serverTagsOf(bot), null);
-  bot._client.emit("tags", { tags: [] });
+  // A real server never sends an empty packet: one group with one measured tag (`fake-bot-tags.ts`).
+  emitFakeTags(bot, [{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:swords", entries: [bot.registry.itemsByName.diamond_sword!.id] }] }]);
   assert.notEqual(serverTagsOf(bot), null);
 });
 

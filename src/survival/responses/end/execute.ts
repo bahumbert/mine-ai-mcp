@@ -540,9 +540,7 @@ export class EndCombat {
     const target = bot.entities[targetId];
     if (!target?.isValid || target.name !== "end_crystal")
       return this.crystalResult(observation, "stopped", "Selected end crystal is not loaded");
-    const rangedAvailable = () =>
-      permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat) !== null &&
-      bot.inventory.items().some((i) => hasItemFamily(bot, i.name, "arrow"));
+    const rangedAvailable = () => permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat) !== null;
     if (observation.usedWeapon === null) {
       if (observation.weapon === "bow") {
         if (!this.policy().combat.bow)
@@ -673,7 +671,7 @@ export class EndCombat {
           }
         }
         const loadout = permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat);
-        if (!loadout || !bot.inventory.items().some((i) => hasItemFamily(bot, i.name, "arrow"))) continue;
+        if (!loadout) continue;
         await equipCombatLoadout(bot, loadout);
         if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
         const trajectory = bowTrajectory(bot.entity.position.offset(0, 1.52, 0), aim);

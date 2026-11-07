@@ -13,6 +13,10 @@ geometry:
   - fill: { block: stone, from: [-6, -60, -6], to: [8, -60, 6] }
   - fill: { block: sand, from: [2, -59, 0], to: [2, -56, 0] }
 
+# The stone floor is at y -60 (the template's position is inside it): stand the actor on top of it.
+players:
+  - { name: Actor, pos: [0.5, -59, 0.5], op: true }
+
 client:
   command: bun
   cwd: ../..

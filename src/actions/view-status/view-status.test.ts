@@ -4,6 +4,7 @@ import { parseViewStatusRequest, viewStatusResultSchema } from "./contract.js";
 import { createViewStatusAction, formatViewStatusResult, observeLiveSituation } from "./view-status.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fixtures.test.js";
+import { emitFakeTags } from "../../test-support/fake-bot/fake-bot-tags.js";
 import { watchServerTags } from "../../world/server-tags.js";
 test("reports the observed clock without predicting daylight outside the Overworld", (t) => {
   // Servers may supply a custom dimension beyond Mineflayer's built-in union.
@@ -343,6 +344,7 @@ test("a carried diamond_sword reports families [sword]; item_families names ship
   const markdown = formatViewStatusResult(viewStatusResultSchema.parse({ status: "succeeded", situation: before }));
   assert.match(markdown, /Item families: shipped tags \(1\.21\.4\) \+ override minecraft/);
 
-  bot._client.emit("tags", { tags: [] });
+  // A real server never sends an empty packet: one group with one measured tag (`fake-bot-tags.ts`).
+  emitFakeTags(bot, [{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:swords", entries: [bot.registry.itemsByName.diamond_sword!.id] }] }]);
   assert.equal(observeLiveSituation(bot, data, idleActivity).item_families.source, "server");
 });

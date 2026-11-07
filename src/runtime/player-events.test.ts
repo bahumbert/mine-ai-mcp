@@ -202,14 +202,23 @@ function armedBot(username: string, options: Partial<FakeBotOptions> = {}, whenC
 test("records the last alive vitals and the gear at death", async (t) => {
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();
-  const f = armedBot("Gear", { clock });
+  const f = armedBot("Gear", { clock, position: { x: 1, y: 64, z: 1 } });
   t.after(() => f.close());
 
   f.combat.setHealth(14, 9);
   await clock.advance(1_200);
   f.combat.setHealth(0, 9);
 
-  assert.deepEqual(f.deathContext(), {
+  // Review 2026-11-07 S4: the event's summary carries the state line; the notification preview stays on the first line.
+  assert.deepEqual(readNotificationSummary(f.data, "Gear").recentPreview, ["Gear died at 1, 64, 1 in overworld."]);
+  const [event] = readRecentEvents(f.data, "Gear", 50).events;
+  assert.equal(
+    event?.summary,
+    "Gear died at 1, 64, 1 in overworld.\n" +
+      "State at death: held iron_sword; armour head iron_helmet; food 9; last health 14 (1.2 s before); in the open; respawn unknown",
+  );
+
+  assert.deepEqual(event?.type === "player_death" ? event.payload.context : undefined, {
     lastAlive: { health: 14, food: 9, saturation: 5, msBefore: 1_200 },
     food: 9,
     held: "iron_sword",
