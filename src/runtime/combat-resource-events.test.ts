@@ -5,6 +5,7 @@ import type { CombatResourceObservation } from "../session/progress.js";
 import { type FakeClock, type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
 import { observeCombatResourceEvents } from "./combat-resource-events.js";
 import { recordCombatResourceReceipt } from "./combat-resource-receipts.js";
+import { addEntitiesToServerTag } from "../test-support/datapack-tags.js";
 
 /** A bow in hand and three arrows carried; `arm` changes the slots before the observer starts. */
 function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: FakeClock, version?: string) {
@@ -30,7 +31,7 @@ function fixture(arm: (harness: FakeHarness) => void = () => undefined, clock?: 
     recordScopedCombatResource: (candidate: string, event: CombatResourceObservation) => { if (candidate === scope) observed.push(event); },
   };
   const stop = observeCombatResourceEvents(bot, runner as never);
-  return { bot, client, inventory, arrows, observed, stop, idle: () => { owner = null as never; },
+  return { bot, client, inventory, arrows, observed, stop, harness, idle: () => { owner = null as never; },
     directHunt: () => { owner = "task"; action = "collect_mob_drop"; }, nextRequest: () => { scope = "request-2"; } };
 }
 
@@ -119,6 +120,16 @@ test("a picked-up stack of two tipped arrows records one arrow_recovered per ite
   try {
     f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[9]!);
     assert.deepEqual(f.observed, [{ kind: "arrow_recovered" }, { kind: "arrow_recovered" }]);
+  } finally { f.stop(); }
+});
+
+test("a collected entity a datapack adds to entity tag `arrows` records arrow_recovered; a snowball does not", () => {
+  const f = fixture(({ entities }) => entities.spawn({ id: 11, name: "snowball", position: new Vec3(0, 64, 0) }));  try {
+    f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[11]!);
+    assert.deepEqual(f.observed, [], "vanilla: a collected snowball is no arrow");
+    addEntitiesToServerTag(f.harness, "arrows", ["snowball"]);
+    f.bot.emit("playerCollect", f.bot.entity, f.bot.entities[11]!);
+    assert.deepEqual(f.observed, [{ kind: "arrow_recovered" }]);
   } finally { f.stop(); }
 });
 

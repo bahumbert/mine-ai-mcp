@@ -8,7 +8,9 @@ import {
   type FakeEntitySpec,
   createFakeBot,
   createFakeClock,
+  itemOf,
 } from "../../../test-support/fake-bot/index.js";
+import { addItemsToServerTag } from "../../../test-support/datapack-tags.js";
 import type { FootingRecovery } from "../footing.js";
 import { enclosedInPlace } from "../hide.js";
 import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
@@ -552,3 +554,46 @@ test("damage-interrupted breath excavation gives the next escape a route without
   assert.equal(result.outcome, "evaded");
   assert.equal(attempts, 2);
 });
+
+// A sword's sweep hits what stands within three blocks of the target: the check is "holds a member of the item family
+// `sword`" (tag `swords`), not a name ending in `_sword`. A bystander the loadout never saw (it walked up while the bot
+// aimed) is met by the withheld swing, so the cow arrives in `lookAt`.
+for (const held of [
+  { item: "diamond_sword", swordsTag: false },
+  { item: "stick", swordsTag: true },
+]) {
+  test(`the perch fight withholds its swing from a bystander while holding ${held.item}${held.swordsTag ? ", a datapack's sword" : ""}`, async () => {
+    const caller = new AbortController();
+    const reasons: string[] = [];
+    let swings = 0;
+    const scene = endScene({ position: new Vec3(12.5, 64, 0.5), carried: { [held.item]: 1 },
+      entities: { 42: dragonAt(new Vec3(0, 68, 0), 6), ...cloudColumn([62, 64, 66], 5) } });
+    const { bot, clock, server, entities, inventory } = scene;
+    if (held.swordsTag) addItemsToServerTag(scene, "swords", [held.item]);
+    onAttack(server, () => {
+      swings++;
+      caller.abort(new Error("swung"));
+    });
+    using _timers = clock.install();
+    const navigation = { navigate: async () => {
+      bot.entity.position.set(0.5, 64, -1.5);
+      return { status: "completed", elapsedMs: 1 };
+    } } as unknown as NavigationRuntime;
+    const lookAt = bot.lookAt.bind(bot);
+    bot.lookAt = async (...args) => {
+      // The server puts the held item in the hand (a loadout built before the tag change would not) and a cow beside the bot.
+      inventory.updateSlot(bot.inventory.hotbarStart + bot.quickBarSlot, itemOf(bot.registry, held.item, 1));
+      if (!bot.entities[60]) entities.spawn({ id: 60, name: "cow", kind: "Passive mobs", position: new Vec3(0.5, 64, -0.5) });
+      return lookAt(...args);
+    };
+    using observation = new PerchObservation(bot, 42);
+    const fight = new EndCombat(bot, navigation, { needed: false } as FootingRecovery, facts => {
+      const reason = (JSON.parse(JSON.stringify(facts)) as { reason: string }).reason;
+      reasons.push(reason);
+      if (reason === "sweep_bystander") caller.abort(new Error("withheld"));
+    });
+    await assert.rejects(clock.settle(fight.perch(42, caller.signal, observation), SETTLE_LIMIT_MS), /withheld|swung/);
+    assert.equal(swings, 0, "no swing while the cow stands within the sweep");
+    assert.ok(reasons.includes("sweep_bystander"), `reasons: ${reasons.join(", ")}`);
+  });
+}

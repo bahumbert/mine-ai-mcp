@@ -2,7 +2,7 @@ import type { EntityBody } from "../../../world/entity-geometry.js";
 import type { Bot } from "mineflayer";
 import { PROJECTILE_HIT_MARGIN, projectileContact } from "../../positioning/combat/exposure.js";
 import { isIncomingBlazeProjectile } from "./blaze-projectiles.js";
-import { arrowFlight } from "./arrow-flight.js";
+import { arrowFlight, isArrowEntity } from "./arrow-flight.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -12,7 +12,7 @@ export function arrowImpactInTicks(bot: Bot, arrow: Entity, movementAllowance = 
 }
 
 export function arrowImpact(bot: Bot, arrow: Entity, movementAllowance = 0, target: EntityBody = bot.entity) {
-  if (!arrow.isValid || (arrow.name !== "arrow" && arrow.name !== "spectral_arrow")) return null;
+  if (!arrow.isValid || !isArrowEntity(bot, arrow)) return null;
   const keys = bot.registry.entitiesByName[arrow.name]?.metadataKeys ?? [];
   const grounded: unknown = arrow.metadata?.[keys.indexOf("in_ground")];
   const piercing: unknown = arrow.metadata?.[keys.indexOf("pierce_level")];

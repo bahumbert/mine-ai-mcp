@@ -1,5 +1,6 @@
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
+import { familyIndexOf } from "../../../world/item-families.js";
 
 type Entity = Bot["entity"];
 type Flight = { entity: Entity; position: Vec3; velocity: Vec3; at: number; positionAt: number | null; velocityAt: number | null };
@@ -14,7 +15,10 @@ function lease(owner: { users: number; close: () => void }): Disposable {
     if (--owner.users === 0) owner.close();
   } };
 }
-const arrow = (entity: Entity | undefined) => entity?.name === "arrow" || entity?.name === "spectral_arrow";
+/** Whether the entity is in the family `arrow_entity` (entity tag `arrows`, the server's when it sent one). */
+export function isArrowEntity(bot: Bot, entity: Entity | undefined): entity is Entity & { name: string } {
+  return entity?.name !== undefined && familyIndexOf(bot).entityFamilies(entity.name).includes("arrow_entity");
+}
 
 /** Advance only the estimate. Mineflayer's position remains the last packet observation. */
 function advance(bot: Bot, flight: Flight, now: number): Flight {
@@ -50,7 +54,7 @@ export function trackArrowFlights(bot: Bot, now = () => performance.now()): Disp
     flights.set(entity.id, { entity, position: entity.position.clone(), velocity: entity.velocity.clone(), at,
       positionAt: observed ? at : null, velocityAt: observed ? at : null });
   };
-  for (const entity of Object.values(bot.entities)) if (arrow(entity)) anchor(entity, false);
+  for (const entity of Object.values(bot.entities)) if (isArrowEntity(bot, entity)) anchor(entity, false);
   const names = ["spawn_entity", "entity_velocity", "rel_entity_move", "entity_move_look", "entity_teleport", "sync_entity_position", "entity_destroy"];
   const listeners = names.map((name) => {
     const listener = (packet: { entityId: number; entityIds?: number[]; dX?: number; dY?: number; dZ?: number }) => {
@@ -59,7 +63,7 @@ export function trackArrowFlights(bot: Bot, now = () => performance.now()): Disp
         return;
       }
       const entity = bot.entities[packet.entityId];
-      if (!entity || !arrow(entity)) return;
+      if (!entity || !isArrowEntity(bot, entity)) return;
       if (name === "spawn_entity" || name === "sync_entity_position" || !flights.has(entity.id)) {
         anchor(entity);
         return;

@@ -7,7 +7,7 @@ import { arrowImpact, incomingShieldProjectiles } from "../perception/combat/shi
 import { isWindingUpAtBot } from "../perception/combat/observations.js";
 import { canBeBystander, isHostile } from "../perception/combat/threats.js";
 import { MELEE_RANGE } from "./equipment.js";
-import { arrowFlight } from "../perception/combat/arrow-flight.js";
+import { arrowFlight, isArrowEntity } from "../perception/combat/arrow-flight.js";
 import { bowReleaseInTicks } from "../perception/combat/bow-timing.js";
 import { meleeDistance } from "./melee.js";
 
@@ -96,7 +96,7 @@ export function observeProjectileDefence(bot: Bot, movementAllowance = 0, now = 
     bot.entity.position,
     directions,
   );
-  if (!held && urgent && (urgent.entity.name === "arrow" || urgent.entity.name === "spectral_arrow") &&
+  if (!held && urgent && isArrowEntity(bot, urgent.entity) &&
       hits.includes(urgent.entity) && urgent.impactInTicks <= HEAD_TURN_LEAD_TICKS) {
     // Cover imminent contacts without sacrificing their margin to a distant
     // shooter. Keep that heading while the server completes this impact.

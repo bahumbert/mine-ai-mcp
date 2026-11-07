@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
+import { familyIndexOf } from "../../../world/item-families.js";
 
 const spawnSchema = z.object({
   entityId: z.number().int(),
@@ -18,8 +19,11 @@ export function readProjectileSpawn(
   if (!parsed.success) return null;
   const { entityId, type, objectData, velocity } = parsed.data;
   const name = bot.registry.entities[type]?.name;
-  const blaze = name === "small_fireball" && bot.entities[objectData]?.name === "blaze";
-  if (!blaze && name !== "arrow" && name !== "spectral_arrow") return null;
+  const families = name === undefined ? [] : familyIndexOf(bot).entityFamilies(name);
+  const arrow = families.includes("arrow_entity");
+  // The other tracked projectiles (the family's override: a blaze's small fireball) count only when a blaze threw them.
+  const blaze = !arrow && families.includes("projectile_entity") && bot.entities[objectData]?.name === "blaze";
+  if (!blaze && !arrow) return null;
   return {
     projectileId: entityId,
     // Preserve established blaze attribution. Arrow guarding needs trajectory,

@@ -153,11 +153,13 @@ for (const gainedDuringReflex of [false, true])
     assert.equal(bot.listenerCount("entitySpawn"), 0);
   });
 
-for (const { reflexGain, dropName } of [
-  { reflexGain: 0, dropName: "white_wool" },
-  { reflexGain: 1, dropName: "white_wool" },
-  { reflexGain: 0, dropName: "arrow" },
-  { reflexGain: 1, dropName: "arrow" },
+for (const { reflexGain, dropName, arrows } of [
+  { reflexGain: 0, dropName: "white_wool", arrows: false },
+  { reflexGain: 1, dropName: "white_wool", arrows: false },
+  { reflexGain: 0, dropName: "arrow", arrows: true },
+  { reflexGain: 1, dropName: "arrow", arrows: true },
+  // Any member of the item family `arrow` (tag `arrows`) is hunted as arrows: the bow is reserved the same way.
+  { reflexGain: 0, dropName: "tipped_arrow", arrows: true },
 ]) {
   test(`a resumed ${dropName} hunt counts prior drops and ${reflexGain} drops gained during the reflex`, async () => {
     const inventory = { count: 0 };
@@ -169,7 +171,7 @@ for (const { reflexGain, dropName } of [
       entered = resolve;
     });
     const pursue: HuntMobDependencies["pursue"] = async (pursuit) => {
-      assert.equal(combat.policy.combat.bow, dropName !== "arrow");
+      assert.equal(combat.policy.combat.bow, !arrows);
       runs += 1;
       if (runs === 1) {
         inventory.count += 1;
@@ -190,7 +192,7 @@ for (const { reflexGain, dropName } of [
     const pending = runner.run(
       { ...action, execution: { kind: "resumable_task" } },
       {
-        mob_name: dropName === "arrow" ? "skeleton" : "sheep",
+        mob_name: arrows ? "skeleton" : "sheep",
         drop_name: dropName,
         count: 2,
         // The subject here is the arrow hunt's bow reserve, not the shield gate
@@ -200,7 +202,7 @@ for (const { reflexGain, dropName } of [
     );
     await firstRun;
     const claim = runner.claim("hunger_reflex", "ate bread", async () => {
-      assert.equal(combat.policy.snapshot().effective.combat.bow, dropName !== "arrow");
+      assert.equal(combat.policy.snapshot().effective.combat.bow, !arrows);
       inventory.count += reflexGain;
       return { value: null, continuation: { kind: "resume" as const } };
     });
@@ -211,7 +213,7 @@ for (const { reflexGain, dropName } of [
     if (!("hunt" in output.result)) throw new Error("expected hunt evidence");
     assert.equal(output.result.hunt.inventoryBefore, 0);
     assert.equal(output.result.hunt.gained, 2);
-    assert.equal(formatHuntMobResult(output.result).includes("Bow policy:"), dropName === "arrow");
+    assert.equal(formatHuntMobResult(output.result).includes("Bow policy:"), arrows);
     assert.equal(combat.policy.combat.bow, true, "request settlement releases the arrow reservation");
     assert.deepEqual(combat.policy.snapshot().overrides, [], "the hunt does not replace model policy");
   });

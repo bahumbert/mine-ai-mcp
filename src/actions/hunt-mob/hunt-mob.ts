@@ -11,16 +11,15 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
 import {
   HOSTILE_CONTACT_RANGE,
-  isHostileSpecies,
   type CombatController,
   type CombatOutcome,
   type CombatStyle,
 } from "../../survival/index.js";
 import { Budgets } from "../../survival/state/budgets.js";
-import { readCombatItems } from "../../survival/weapons/equipment.js";
 import { clockStart, monotonicNow, waitForSignal, type ClockStart, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
+import { hasItemFamily } from "../../world/item-families.js";
 import { mobNotItemAnswer, mobSourcesOf } from "../../world/mob-drops.js";
 import { similarNames } from "../../world/similar-names.js";
 import {
@@ -31,6 +30,7 @@ import {
   type ObservedItemEntity,
 } from "../../world/item-pickup.js";
 import { defineAction, type ActionContext } from "../action.js";
+import { shieldRefusal } from "./shield-gate.js";
 import {
   huntMobAnnotations,
   huntMobOutcomes,
@@ -376,6 +376,7 @@ interface HuntObservation {
   readonly drops: ReturnType<typeof observeHuntDrops>;
   readonly mob: string;
   readonly drop: string;
+  readonly arrowHunt: boolean;
   readonly requested: number;
   readonly inventoryBefore: number;
   inventoryAfter: number;
@@ -395,6 +396,7 @@ function huntEvidence(observation: HuntObservation): HuntEvidence {
   return {
     mob: observation.mob,
     drop: observation.drop,
+    ...(observation.arrowHunt && { arrowHunt: true }),
     requested: observation.requested,
     inventoryBefore: observation.inventoryBefore,
     inventoryAfter: observation.inventoryAfter,
@@ -489,27 +491,6 @@ function pursuitStop(request: HuntMobRequest, result: HuntResult, gained: number
     default:
       return huntMobOutcomes.noLoadedTarget(request.mobName, request.dropName, gained, request.count);
   }
-}
-
-/**
- * Refuse a hostile hunt that has nothing to block with.
- *
- * The gate is the species rather than the fight that follows, because the cost
- * of learning it the other way is paid in the body: a skeleton opens at range
- * and a creeper only has to arrive. Hostility is the registry's own category,
- * so the mobs whose `type` misreads them - hoglins, phantoms, slimes, magma
- * cubes, ghasts - are covered by the same rule that covers skeletons, and a
- * chicken is never asked for a shield it does not need.
- *
- * Carrying one is the test, not wearing one: the loadout moves a carried shield
- * into the off-hand when the fight starts. A policy that forbids shields makes
- * a carried one ornamental, so that is refused on the same terms.
- */
-function shieldRefusal(bot: Bot, request: HuntMobRequest, dependencies: HuntMobDependencies): string | null {
-  if (request.allowWithoutShield || !isHostileSpecies(bot, request.mobName)) return null;
-  if (!readCombatItems(bot).some((item) => item.name === "shield"))
-    return huntMobOutcomes.shieldNotCarried(request.mobName);
-  return dependencies.shieldPermitted() ? null : huntMobOutcomes.shieldNotPermitted(request.mobName);
 }
 
 /** Read the requested drop's count into the observation, and say whether the request is met. */
@@ -620,6 +601,35 @@ export async function huntMob(
   }
 }
 
+/** The hunt's evidence before its first step: nothing engaged, the drop count at the start. */
+function startHuntObservation(
+  bot: Bot,
+  request: HuntMobRequest,
+  lifetime: AbortSignal,
+  inventoryBefore: number,
+  mobEntityType: number | undefined,
+): HuntObservation {
+  return {
+    stopReason: "execution_failed",
+    drops: observeHuntDrops(bot, request.dropName, lifetime),
+    mob: request.mobName,
+    drop: request.dropName,
+    arrowHunt: hasItemFamily(bot, request.dropName, "arrow"),
+    requested: request.count,
+    inventoryBefore,
+    inventoryAfter: inventoryBefore,
+    targetsEngaged: 0,
+    selectedTargetId: null,
+    targetChanges: [],
+    targetDeathsObserved: 0,
+    attacks: 0,
+    combatStyles: new Set(),
+    projectileGuards: 0,
+    otherDropsCollected: 0,
+    loadedTargets: () => loadedTargets(bot, request.mobName, mobEntityType),
+  };
+}
+
 function beginHuntMob(
   bot: Bot,
   request: HuntMobRequest,
@@ -632,24 +642,7 @@ function beginHuntMob(
   const drop = bot.registry.itemsByName[request.dropName];
   const inventoryBefore = drop ? bot.inventory.count(drop.id, null) : 0;
   const camp = request.campSpawner ? dependencies.createCamp(request.observeForMs) : null;
-  const observation: HuntObservation = {
-    stopReason: "execution_failed",
-    drops: observeHuntDrops(bot, request.dropName, lifetime),
-    mob: request.mobName,
-    drop: request.dropName,
-    requested: request.count,
-    inventoryBefore,
-    inventoryAfter: inventoryBefore,
-    targetsEngaged: 0,
-    selectedTargetId: null,
-    targetChanges: [],
-    targetDeathsObserved: 0,
-    attacks: 0,
-    combatStyles: new Set(),
-    projectileGuards: 0,
-    otherDropsCollected: 0,
-    loadedTargets: () => loadedTargets(bot, request.mobName, mob?.id),
-  };
+  const observation = startHuntObservation(bot, request, lifetime, inventoryBefore, mob?.id);
   // Retain a terminal collection reason while a reflex interrupts its handoff.
   // Resumption finishes making the body safe; it does not restart the failed hunt.
   let phase: { kind: "collecting" | "observing" } | { kind: "finishing"; result: HuntAttemptResult } = {
@@ -690,7 +683,7 @@ function beginHuntMob(
     // Check admission, every target approach, and contact after drop collection.
     // One pursuit can fight several loaded targets before this function returns.
     let shieldRequired: string | null = null;
-    const checkShield = () => (shieldRequired = shieldRefusal(bot, request, dependencies));
+    const checkShield = () => (shieldRequired = shieldRefusal(bot, request, dependencies.shieldPermitted));
     const unshielded = checkShield();
     if (unshielded) return stoppedResult(unshielded, observation, "shield_required");
     const missingSpawner = camp?.unavailable();
@@ -868,7 +861,7 @@ export function formatHuntMobResult(result: HuntMobResult): string {
     `- Collection outcome: ${result.termination}.`,
     `- Handoff: ${result.handoff.kind === "safe" ? `observed ${result.handoff.basis} at ${JSON.stringify(result.handoff.position)}` : `${result.handoff.kind}: ${result.handoff.reason}`}.`,
     `Observed **${hunt.drop} ${hunt.gained}/${hunt.requested}** while intentionally hunting loaded \`${hunt.mob}\`.`,
-    ...(hunt.drop === "arrow"
+    ...(hunt.arrowHunt
       ? ["- Bow policy: bow use was temporarily disabled for this arrow hunt, including defensive interruptions. The hunt restriction is released when the request ends; the survival policy's combat permissions apply again, including any existing bow prohibition."]
       : []),
     `- Inventory: ${hunt.inventoryBefore} → ${hunt.inventoryAfter}`,
@@ -924,7 +917,7 @@ export function createCollectMobDropAction(
     annotations: huntMobAnnotations,
     parse: parseHuntMobRequest,
     begin: (request, lifetime, observe) => {
-      if (request.dropName === "arrow") combat.policy.reserveArrows(lifetime);
+      if (hasItemFamily(bot, request.dropName, "arrow")) combat.policy.reserveArrows(lifetime);
       combat.policy.declareQuarry(lifetime, request.mobName);
       return beginHuntMob(bot, request, dependencies, lifetime, observe, budgets);
     },

@@ -192,6 +192,24 @@ test("explicit bow refuses before movement when ammunition is unavailable", asyn
   assert.equal(moves, 0);
 });
 
+// B4 (spec P4-17): any item of the family `arrow` (tag `arrows`) is ammunition, not the item `arrow` alone.
+for (const ammunition of ["spectral_arrow", "tipped_arrow"]) {
+  test(`explicit bow starts its approach with ${ammunition} as the only ammunition`, async () => {
+    const f = fixture({ carried: { bow: 1, [ammunition]: 3 } });
+    const navigation = {
+      navigate: async () => ({ status: "failed", reason: "approach started", elapsedMs: 1 }) as const,
+    } as unknown as NavigationRuntime;
+    using observation = new CrystalObservation(f.bot, 42, "bow");
+    const result = await f.run(new EndCombat(f.bot, navigation, { needed: false } as FootingRecovery).crystal(
+      42,
+      new AbortController().signal,
+      observation,
+    ));
+    assert.notEqual(result.outcome, "weapon_unavailable");
+    assert.equal(result.crystal?.usedWeapon, "bow");
+  });
+}
+
 test("crystal bow search accepts distant clear shots without preferring a blocked closer stance", async () => {
   // A tower face between the near stance and the crystal; the far stance's ray passes above it.
   const tower = Object.fromEntries([71, 72, 73, 74, 75].flatMap((y) => [-2, -1, 0, 1, 2].map((z) => [`20,${y},${z}`, "obsidian"])));

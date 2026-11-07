@@ -28,6 +28,7 @@ import {
 import { entityHealth, dragonPhase, isDragonLanding, isDragonPerched, observedDragonLandingCenter, perchAttackCell, perchedDragonHead, perchedDragonBodyParts } from "../../../world/end-fight.js";
 import { nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { REGENERATION_HUNGER } from "../../../world/food.js";
+import { hasItemFamily } from "../../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { selectPolicyFood } from "../../perception/food.js";
 import type { CombatExecution, CombatPhase } from "../../control/combat/execution.js";
@@ -541,7 +542,7 @@ export class EndCombat {
       return this.crystalResult(observation, "stopped", "Selected end crystal is not loaded");
     const rangedAvailable = () =>
       permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat) !== null &&
-      bot.inventory.items().some((i) => i.name === "arrow");
+      bot.inventory.items().some((i) => hasItemFamily(bot, i.name, "arrow"));
     if (observation.usedWeapon === null) {
       if (observation.weapon === "bow") {
         if (!this.policy().combat.bow)
@@ -672,7 +673,7 @@ export class EndCombat {
           }
         }
         const loadout = permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat);
-        if (!loadout || !bot.inventory.items().some((i) => i.name === "arrow")) continue;
+        if (!loadout || !bot.inventory.items().some((i) => hasItemFamily(bot, i.name, "arrow"))) continue;
         await equipCombatLoadout(bot, loadout);
         if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
         const trajectory = bowTrajectory(bot.entity.position.offset(0, 1.52, 0), aim);
@@ -1442,7 +1443,7 @@ export class EndCombat {
         signal.throwIfAborted();
         observation.refresh();
         if (observation.ended || observation.died || this.danger || headMoved()) continue;
-        if (bot.heldItem?.name.endsWith("_sword") && hasSweepBystander(bot, target)) {
+        if (bot.heldItem && hasItemFamily(bot, bot.heldItem.name, "sword") && hasSweepBystander(bot, target)) {
           report("sweep_bystander");
           await this.tick(signal);
           continue;

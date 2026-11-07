@@ -118,6 +118,8 @@ export const huntRetargetSchema = z.strictObject({
 export const huntEvidenceSchema = z.strictObject({
   mob: z.string(),
   drop: z.string(),
+  /** The drop is in the item family `arrow`: the hunt reserved the bow for the pickup (the result text says so). */
+  arrowHunt: z.boolean().optional(),
   requested: z.number().int().positive(),
   gained: z.number().int().nonnegative(),
   inventoryBefore: z.number().int().nonnegative(),
