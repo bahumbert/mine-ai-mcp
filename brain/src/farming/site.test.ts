@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BlockArea, Position } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
-import { farmPlot } from "./plot.ts";
+import type { ProtectedArea } from "../runtime-client.ts";
+import { overlapsOf } from "../skills/protected-areas.ts";
+import { farmBox, farmPlot } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, REFUSAL_HOLD_MS, TillFacts } from "./site.ts";
 
 /** A fake runtime on flat dirt up to y 63 that counts its area reads and kind lookups. */
@@ -245,4 +247,52 @@ test("a refused name is named as learned in the refusal, and the hint does not s
   const stone = new CountingRuntime();
   layer(stone, 63, "stone");
   assert.match(refusalOf(await chooseSite(stone, asked, facts)), /walk to grass or dirt under the open sky/u);
+});
+
+/** A protected area as the runtime lists it. */
+const area = (regionId: number, owner: string, label: string, min: Position, max: Position): ProtectedArea => ({ regionId, owner, label, min, max });
+/** Over the asked plot and its ring (x -3..3, y 62..65, z 1..7), up to the roof; another bot's, which counts like her own. */
+const house = area(4, "Tom", "small medieval house", { x: -3, y: 60, z: 0 }, { x: 3, y: 75, z: 8 });
+
+test("an asked plot over a protected area moves to the nearest clear plot (live 2026-10-10: a farm protected over her own house)", async () => {
+  const chosen = siteOf(await chooseSite(new CountingRuntime(), asked, undefined, [house]));
+  assert.ok(chosen !== null);
+  assert.deepEqual(overlapsOf([house], farmBox(chosen)), []);
+  // The ring of the plot must clear the house's x -3..3: the nearest middles are 7 blocks east or west of the asked one.
+  assert.equal(Math.hypot(chosen.water.x - asked.water.x, chosen.water.z - asked.water.z), 7);
+});
+
+test("the box of a plot is its ring, soil -1 to soil +2: an area touching only the ring counts; beyond it, above it or below it does not", async () => {
+  // The plot's soil is x -2..2, its ring reaches x 3.
+  const ringOnly = area(5, "Ayla", "fence", { x: 3, y: 62, z: 2 }, { x: 3, y: 65, z: 6 });
+  const moved = siteOf(await chooseSite(new CountingRuntime(), asked, undefined, [ringOnly]));
+  assert.ok(moved !== null);
+  assert.notDeepEqual(moved, asked);
+  assert.deepEqual(overlapsOf([ringOnly], farmBox(moved)), []);
+  const beyond = area(6, "Ayla", "fence", { x: 4, y: 62, z: 2 }, { x: 4, y: 65, z: 6 });
+  const above = area(7, "Ayla", "tower", { x: -3, y: 66, z: 1 }, { x: 3, y: 80, z: 7 });
+  const below = area(8, "Ayla", "cellar", { x: -3, y: 40, z: 1 }, { x: 3, y: 61, z: 7 });
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, undefined, [beyond, above, below])), asked);
+});
+
+test("a leveling margin set aside by a job is not an area to avoid (as for houses)", async () => {
+  const leveling = area(10, "Ayla", "leveling the site", { x: -3, y: 60, z: 0 }, { x: 3, y: 75, z: 8 });
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, undefined, [leveling])), asked);
+});
+
+test("no clear plot within the radius refuses, names the area and hands it back for the farm skill", async () => {
+  const huge = area(11, "Tom", "tom's town", { x: -60, y: 0, z: -60 }, { x: 60, y: 120, z: 60 });
+  const found = await chooseSite(new CountingRuntime(), asked, undefined, [huge]);
+  assert.match(refusalOf(found), /protected area #11 'tom's town'/u);
+  assert.deepEqual("overlaps" in found ? found.overlaps : null, [huge]);
+});
+
+test("a refusal for bad ground only carries no overlaps; without areas the site is chosen as before", async () => {
+  const stone = new CountingRuntime();
+  layer(stone, 63, "stone");
+  const far = area(12, "Tom", "far hut", { x: 100, y: 60, z: 100 }, { x: 104, y: 70, z: 104 });
+  const found = await chooseSite(stone, asked, undefined, [far]);
+  assert.ok("refusal" in found);
+  assert.equal("overlaps" in found ? found.overlaps : undefined, undefined);
+  assert.deepEqual(siteOf(await chooseSite(new CountingRuntime(), asked, undefined, [])), asked);
 });

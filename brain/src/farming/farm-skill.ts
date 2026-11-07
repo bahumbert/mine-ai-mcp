@@ -2,7 +2,7 @@ import { z } from "zod";
 import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
 import type { FarmState, KnownFarm } from "../memory.ts";
-import type { BotSnapshot, Position } from "../runtime-client.ts";
+import type { BotSnapshot, Position, ProtectedArea } from "../runtime-client.ts";
 import { describeWay } from "../gathering/fetch-farther.ts";
 import { firstOfOwnSeed } from "../gathering/how-to-get.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
@@ -11,7 +11,7 @@ import { findPlayer, navigateInput } from "../skills/positions.ts";
 import { releaseArea } from "../skills/protect-area.ts";
 import { describeOverlaps, nearestClearSpot, noteArea, overlapsOf, SITE_SEARCH } from "../skills/protected-areas.ts";
 import { cropStage, describeStage } from "./growth.ts";
-import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
+import { farmBox, farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
 /** Farther than this from a new farm's middle, she walks there before leveling it. */
@@ -107,9 +107,26 @@ export async function farm(context: SkillContext, step: Extract<Step, { skill: "
   const toward = context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   const plot = at === null ? plotBehind(snapshot.position, toward, step.size) : farmPlot({ x: at.x, y: at.y - 1, z: at.z }, step.size);
   // The ground there must be tillable under the open sky; if not, the nearest plot that is, else a refusal that says why.
-  const site = await chooseSite(context.runtime, plot, context.soil);
-  if ("refusal" in site) return { status: "failed", detail: site.refusal };
+  const areas = await context.runtime.protectedRegions();
+  const site = await chooseSite(context.runtime, plot, context.soil, areas);
+  if ("refusal" in site) {
+    if (site.overlaps === undefined) return { status: "failed", detail: site.refusal };
+    return { status: "failed", detail: overlapRefusal(context, snapshot, plot, `a ${plot.size}x${plot.size} ${crop} farm`, areas, site.overlaps) };
+  }
   return makeFarm(context, snapshot, site.plot, crop);
+}
+
+/**
+ * Why a farm's site is refused over protected areas, and where the nearest plot clear of them lies (live 2026-10-10:
+ * a farm protected over her own house, then leveling failed, and the house was undone).
+ */
+function overlapRefusal(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, what: string, areas: readonly ProtectedArea[], blocked: readonly ProtectedArea[]): string {
+  const { water } = plot;
+  const clear = nearestClearSpot(areas, water, (spot) => farmBox(farmPlot(spot, plot.size)));
+  const where = clear === null
+    ? `no plot clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or farm somewhere else`
+    : `the nearest plot clear of them has its middle ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y + 1} ${clear.z} (clear of protected areas; its ground is checked when you farm there): farm there with those coordinates, or if that fails for its ground, farm somewhere else`;
+  return `the site of ${what} (middle at ${water.x} ${water.y + 1} ${water.z}) ${describeOverlaps(context, blocked)}; ${where}`;
 }
 
 async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: FarmPlot, asked: string): Promise<SkillResult> {
@@ -144,21 +161,12 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
   // A plot clear of every protected area before anything is protected or dug, and if not, where the nearest clear one
   // is (live 2026-10-10: a farm protected over her own house, then leveling failed, and the house was undone).
   const areas = await context.runtime.protectedRegions();
-  const boxAt = (middle: Position) => ({
-    min: { x: plot.min.x - 1 + middle.x - water.x, y: water.y - 1, z: plot.min.z - 1 + middle.z - water.z },
-    max: { x: plot.max.x + 1 + middle.x - water.x, y: water.y + 2, z: plot.max.z + 1 + middle.z - water.z },
-  });
-  const blocked = overlapsOf(areas, boxAt(water));
-  if (blocked.length > 0) {
-    const clear = nearestClearSpot(areas, water, boxAt);
-    const where = clear === null
-      ? `no plot clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or farm somewhere else`
-      : `the nearest plot clear of them has its middle ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y + 1} ${clear.z}: farm there with those coordinates`;
-    return { status: "failed", detail: `the site of ${what} (middle at ${water.x} ${water.y + 1} ${water.z}) ${describeOverlaps(context, blocked)}; ${where}` };
-  }
+  const box = farmBox(plot);
+  const blocked = overlapsOf(areas, box);
+  if (blocked.length > 0) return { status: "failed", detail: overlapRefusal(context, snapshot, plot, what, areas, blocked) };
   // Protected before the first change, ring included: her own gathering never digs or tramples into it (ADR-012).
   const protection = await context.runtime.protectRegion({
-    ...boxAt(water),
+    ...box,
     label: `farm ${crop}`,
     reason: `Keep my own digging out of the ${crop} farm I am making.`,
   });
