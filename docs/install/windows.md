@@ -184,8 +184,8 @@ Run a newer installer: it installs over the old version, in the same folders, an
 before; the button is **Update**. Running the same version again repairs: any missing file comes back, and your data
 folder, worlds and bots stay as they are (the AI model and server settings are set again on the pages after the copy). At a first install the Ready page lists the two folders and says that the AI model
 and the server are chosen on the next pages, after the files are copied (the graphics card check happens there). Mine AI checks once at start whether a
-newer release exists and tells you; it never downloads one by itself. The check is one request to GitHub's release
-list (GitHub sees this PC's address, nothing else is sent; see the [privacy page](../privacy.md)). A first install asks
+newer release exists and tells you; it never downloads one by itself. The check is one request for the latest release on
+GitHub (GitHub sees this PC's address, nothing else is sent; see the [privacy page](../privacy.md)). A first install asks
 in a box on the setup's tasks page, checked by default, and the Ready page repeats the answer. An update does not ask
 again: it keeps what `settings.json` says, so a check you switched off stays off. Switch it off or on later with
 `mine-ai configure --check-updates off` (or `on`), or with `"checkUpdates": false` in `settings.json`. A silent

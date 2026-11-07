@@ -19,7 +19,8 @@ server logs, and the seed prompt — are published as a
 Mine AI runs companion and rival AI players for Minecraft Java 1.21.4. Each player is run by an AI model of the
 player's choice, local or remote. For Windows, get the setup from the
 [releases page](https://github.com/bahumbert/mine-ai-mcp/releases) and follow the
-[Windows guide](docs/install/windows.md). The setup is signed through SignPath Foundation: see the
+[Windows guide](docs/install/windows.md). The setup is signed through SignPath Foundation once the project is
+accepted; until then the setup is unsigned and its release notes say so. See the
 [code signing policy](docs/code-signing-policy.md), and what the program sends over the network in
 [docs/privacy.md](docs/privacy.md).
 

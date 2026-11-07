@@ -9,13 +9,24 @@ This page lists every network contact of Mine AI and who chooses it. The downloa
   no name, no settings and no account. As with any web request, GitHub sees the IP address of the PC.
 - **When:** at each start of Mine AI, unless it is off.
 - **Who chose it:** at a first install, the setup asks with a box, "Check for a newer Mine AI at each start", checked
-  by default. `/CHECKUPDATES=0` turns it off for a silent install. `"checkUpdates": false` in `settings.json` turns it off
-  afterwards.
+  by default. `/CHECKUPDATES=0` turns it off for a silent install. `"checkUpdates": false` in `settings.json` turns it off afterwards.
+
+## Size checks on the AI model page (wizard only)
+
+When the setup shows its AI model page, it asks how large the downloads it may make would be, so the page can show
+the sizes. Each check is skipped when that part is already on the PC:
+
+- a HEAD request to the Ollama setup's URL, on GitHub, when Ollama is not installed yet;
+- a HEAD request to Adoptium's Java URL (it redirects to GitHub), when Java is not installed yet;
+- a HEAD request to Mojang's server file, when the server file is not on the PC yet;
+- a GET of the AI model's manifest from Ollama's model registry, when the model is not on the PC yet.
+
+Only the PC's address is seen. Nothing is downloaded by these checks.
 
 ## Downloads chosen during setup
 
-Each download happens only for a choice made on the setup pages. Each is checked against its hash (SHA-256; Mojang's
-SHA-1 for the server file) before it runs.
+Each download happens only for a choice made on the setup pages (the size checks above are not downloads). Each is
+checked against its hash (SHA-256; Mojang's SHA-1 for the server file) before it runs.
 
 - **Ollama**, from its official release, when a local AI model is chosen and Ollama is not installed yet.
 - **The AI model**, from Ollama's model library, through Ollama, when a local AI model is chosen.
@@ -28,6 +39,8 @@ SHA-1 for the server file) before it runs.
 - **What is sent:** the bots' prompts, which hold the chat and the game state the bots see. They go to the AI endpoint
   the player typed in, and the endpoint's own privacy policy applies to them.
 - **Local Ollama:** when the endpoint is Ollama on this PC, the prompts stay on this PC.
+- **The setup's own calls:** on the AI endpoint page, the setup asks the endpoint for its model list and sends one test chat
+  request to check the endpoint (a second request when the address needs `/v1`). Both carry the API key when one is set.
 - **Who chose it:** the player, on the AI endpoint page of the setup or in `settings.json`.
 
 ## The Minecraft server
