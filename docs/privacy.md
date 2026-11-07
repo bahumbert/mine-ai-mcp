@@ -9,7 +9,7 @@ This page lists every network contact of Mine AI and who chooses it. The downloa
   no name, no settings and no account. As with any web request, GitHub sees the IP address of the PC.
 - **When:** at each start of Mine AI, unless it is off.
 - **Who chose it:** at a first install, the setup asks with a box, "Check for a newer Mine AI at each start", checked
-  by default. `/CHECKUPDATES=0` turns it off for a silent install. `"checkUpdates": false` in `settings.json` turns it off afterwards.
+  by default unless the data folder's settings already turned the check off. `/CHECKUPDATES=0` turns it off for a silent install. `"checkUpdates": false` in `settings.json` turns it off afterwards.
 
 ## Size checks on the AI model page (wizard only)
 

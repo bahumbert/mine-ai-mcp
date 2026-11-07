@@ -186,7 +186,8 @@ folder, worlds and bots stay as they are (the AI model and server settings are s
 and the server are chosen on the next pages, after the files are copied (the graphics card check happens there). Mine AI checks once at start whether a
 newer release exists and tells you; it never downloads one by itself. The check is one request for the latest release on
 GitHub (GitHub sees this PC's address, nothing else is sent; see the [privacy page](../privacy.md)). A first install asks
-in a box on the setup's tasks page, checked by default, and the Ready page repeats the answer. An update does not ask
+in a box on the setup's tasks page, checked by default unless the data folder's settings already turned the check
+off, and the Ready page repeats the answer. An update does not ask
 again: it keeps what `settings.json` says, so a check you switched off stays off. Switch it off or on later with
 `mine-ai configure --check-updates off` (or `on`), or with `"checkUpdates": false` in `settings.json`. A silent
 install chooses with `/CHECKUPDATES=0` or `/CHECKUPDATES=1` (see "Silent install").
