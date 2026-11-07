@@ -102,12 +102,19 @@ export function mergeCombatData(version: string, parts: readonly MeasuredPart[],
   };
 }
 
+/** The version argument names the output file, so only a game version (`1.21.4`, `1.21`) passes; anything else throws. */
+export function gameVersionArgument(version: string): string {
+  if (!/^\d+\.\d+(\.\d+)?$/u.test(version)) throw new Error(`not a game version: ${JSON.stringify(version)} (expected 1.21.4 or 1.21)`);
+  return version;
+}
+
 if (import.meta.main) {
-  const [jar, version, ...logs] = process.argv.slice(2);
-  if (jar === undefined || version === undefined || logs.length === 0) {
+  const [jar, versionArgument, ...logs] = process.argv.slice(2);
+  if (jar === undefined || versionArgument === undefined || logs.length === 0) {
     console.log("Usage: bun src/world/combat-data-write.ts <server.jar> <version> <scenario log>...");
     process.exit(2);
   }
+  const version = gameVersionArgument(versionArgument);
   const parts = logs.flatMap((path) => parseMeasuredLines(readFileSync(path, "utf8")));
   const file = mergeCombatData(version, parts, extractDamageTypes(new Uint8Array(readFileSync(jar))));
   const target = new URL(`./data/combat-data/${version}.json`, import.meta.url);

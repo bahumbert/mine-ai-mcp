@@ -131,7 +131,7 @@ function fallingColumnStop(
 
 /**
  * Whether the block is a walkway in the air: something to stand on, with nothing under it for more blocks than a fall
- * is safe from and no deep water to land in. A bridge or a pillar the bot built is one, and mining it strands the bot
+ * is safe from and no deep source water to land in. A bridge or a pillar the bot built is one, and mining it strands the bot
  * (live 2026-10-10: Lena mined the blocks of her own bridge over a 23-block drop). A natural ceiling is not (solid above).
  */
 export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, position: BlockPosition): boolean {
@@ -148,7 +148,9 @@ export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, p
   if (depth <= movements.maximumDrop) return false;
   const landing = world.blockAt(position.x, position.y - 1 - depth, position.z);
   const below = world.blockAt(position.x, position.y - 2 - depth, position.z);
-  const deepWater = (block: typeof landing) => block.kind === "loaded" && block.traits.liquid === "water";
+  // Source water only: a long fall into flowing water is no landing (the planner offers none either, plan 06b T4).
+  const deepWater = (block: typeof landing) =>
+    block.kind === "loaded" && block.traits.liquid === "water" && block.traits.liquidSource;
   return !(deepWater(landing) && deepWater(below));
 }
 

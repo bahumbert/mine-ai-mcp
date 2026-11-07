@@ -18,7 +18,7 @@
  *   nibbles come out permuted (the closed box read 15 and the torch cell 0; a runtime torch's row, 2 to 7 cells from it, read 2, 1, 4, 3, 6, 5 where the server sent 12, 11, 10, ...). Rows
  *   that are one value all along (open air, solid rock) read right. The bytes the server sent are recoverable from the stored words (`sentLight` below).
  *   The check asserts what the server sent and writes what `blockAt` held in its note.
- * The shared fake answers none of this yet (`waitsForFake`): see the report of plan task 1.
+ * The shared fake answers none of this yet (`waitsForFake`). The measurement is kept in `.agent/knowledge/facts/runtime-pitfalls.md`, section "Light and armour points the client holds", the light bullet.
  */
 import assert from "node:assert/strict";
 import type { FakeCell } from "../../../../src/test-support/fake-bot/index.ts";

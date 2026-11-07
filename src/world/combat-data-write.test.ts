@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeCombatData, parseMeasuredLines } from "./combat-data-write.js";
+import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { gameVersionArgument, mergeCombatData, parseMeasuredLines } from "./combat-data-write.js";
 
 const MOBS = {
   mobs: {
@@ -19,6 +21,22 @@ const ITEMS = { bareHand: { attackDamage: 1, attackSpeed: 4 }, items: { iron_swo
 const ITEMS_MORE = { bareHand: { attackDamage: 1, attackSpeed: 4 }, items: { diamond_axe: { attackDamage: 9, attackSpeed: 1 } } };
 
 const log = (part: unknown) => `[12:00:01] some line\nAssertionError [ERR_ASSERTION]: MEASURED ${JSON.stringify(part)}\n    at run (check.ts:10:3)\n`;
+
+test("the version argument reaches a file path, so only a game version is accepted", () => {
+  assert.equal(gameVersionArgument("1.21.4"), "1.21.4");
+  assert.equal(gameVersionArgument("1.21"), "1.21");
+  for (const bad of ["../x", "1.21.4/../x", "..\\x", "1.21.4\n", "1.21.4.1", "1.21.", "", "latest", "1.21.4.json"])
+    assert.throws(() => gameVersionArgument(bad), /game version/u, JSON.stringify(bad));
+});
+
+test("the script itself refuses a path as its version: it exits non-zero and writes no file", () => {
+  const script = new URL("./combat-data-write.ts", import.meta.url).pathname;
+  const outside = new URL("../x.json", import.meta.url).pathname; // where "../../../x" would land from data/combat-data/
+  const run = spawnSync(process.execPath, [script, "no-such.jar", "../../../x", "no-such.log"], { encoding: "utf8" });
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /not a game version/u);
+  assert.equal(existsSync(outside), false);
+});
 
 test("every MEASURED line of a log is read, other lines left out", () => {
   const text = `${log(MOBS)}noise\n${log(ITEMS)}`;

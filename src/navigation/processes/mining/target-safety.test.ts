@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, type FakeCell } from "../../../test-support/fake-bot/index.js";
 import { flatWorld } from "../../../test-support/navigation.js";
 import { createMovementPolicy } from "../../movements/policy.js";
 import { evaluateMineTarget, lavaClosuresOf, standsOnBlock } from "./target-safety.js";
@@ -11,8 +11,8 @@ import { setProtectedRegionsProvider } from "../../../world/protected-regions.js
 import { rememberSealedPit } from "../../../world/sealed-pits.js";
 
 /** The cells of a box named by `nameAt`, for a world the test writes as a rule on x, y and z. */
-function cellsOf(box: { x: [number, number]; y: [number, number]; z: [number, number] }, nameAt: (x: number, y: number, z: number) => string): Record<string, string> {
-  const cells: Record<string, string> = {};
+function cellsOf(box: { x: [number, number]; y: [number, number]; z: [number, number] }, nameAt: (x: number, y: number, z: number) => FakeCell): Record<string, FakeCell> {
+  const cells: Record<string, FakeCell> = {};
   for (let x = box.x[0]; x <= box.x[1]; x++)
     for (let y = box.y[0]; y <= box.y[1]; y++)
       for (let z = box.z[0]; z <= box.z[1]; z++) cells[`${x},${y},${z}`] = nameAt(x, y, z);
@@ -132,6 +132,25 @@ test("a bridge over a deep drop is never a mining target, the same block on the 
   // Standing over the gap, the block is still the walkway that strands the bot.
   bot.entity.position = new Vec3(3.5, 65, 0.5);
   assert.match((reasonFor(3) as { reason: string }).reason, /walkway over a drop/);
+});
+
+test("a bridge over a long drop is a walkway unless the drop ends in two cells of source water (06b T4: a long fall needs source water)", () => {
+  // A cobblestone bridge at y 64 along z 0, x 0..4: ground at y 63 under x 0..1, a 10-deep gap under x 2..4 with two water cells at its foot (landing y 53, below y 52).
+  const bridge = (x: number, y: number, z: number): FakeCell =>
+    y === 64 && z === 0 && x >= 0 && x <= 4 ? "cobblestone" : y === 63 && x <= 1 ? "stone" : "air";
+  const flowing: FakeCell = { name: "water", properties: { level: 1 } };
+  const verdictOver = (landing: FakeCell, below: FakeCell) => {
+    const { bot } = createFakeBot({
+      position: new Vec3(9.5, 64, 9.5),
+      groundY: 40,
+      cells: { ...cellsOf({ x: [-3, 6], y: [54, 66], z: [-3, 3] }, bridge), ...cellsOf({ x: [2, 4], y: [53, 53], z: [0, 0] }, () => landing), ...cellsOf({ x: [2, 4], y: [52, 52], z: [0, 0] }, () => below) },
+    });
+    return evaluateMineTarget(bot, createMineflayerMovementPolicy(bot), bot.blockAt(new Vec3(3, 64, 0))!, viewOf(bot), 0).kind;
+  };
+  assert.equal(verdictOver("water", "water"), "mineable", "source water two deep is a landing");
+  assert.equal(verdictOver(flowing, flowing), "prohibited", "flowing water is no landing");
+  assert.equal(verdictOver("water", flowing), "prohibited", "a source landing over flowing water is not two deep");
+  assert.equal(verdictOver(flowing, "water"), "prohibited", "flowing water over a source is not a source landing");
 });
 
 test("standsOnBlock: on the block, not beside it or lower in its column; a swimmer afloat over it does not", () => {
