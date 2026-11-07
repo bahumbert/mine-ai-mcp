@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import test from "node:test";
+import test, { describe } from "node:test";
 import * as mineLabs from "mine-labs";
 
 /** What the scenario server (tests/minecraft/shared) runs a trial with: the pinned package exports it only through patches/. */
@@ -314,19 +315,27 @@ const BLOCK_LIMIT = "gamerule commandModificationBlockLimit";
 // The snapshot is the unpatched package's output for each YAML as it stood on 2026-10-23, with the sha256 of the YAML
 // text: a scenario edited since is skipped (its compiled output may change legitimately), the rest must still match.
 // Regenerate with .agent/scripts/scenario-capacity-probe/compile-snapshot.ts on a pristine mine-labs.
-test("without arena options compileScenario returns what the unpatched package returned for the scenarios not edited since", async () => {
-  const snapshot = JSON.parse(await readFile(join(import.meta.dirname, "mine-labs-compile.snapshot.json"), "utf8")) as Record<string, { sha256: string; compiled: unknown }>;
-  const files = Object.keys(snapshot);
-  assert.ok(files.length >= 94, `snapshot holds ${files.length} scenarios`);
-  let compared = 0;
-  for (const file of files) {
-    const path = join(import.meta.dirname, "../../..", file);
-    if (createHash("sha256").update(await readFile(path)).digest("hex") !== snapshot[file]!.sha256) continue;
-    const scenario = await mineLabs.loadScenario(path);
-    assert.deepEqual(JSON.parse(JSON.stringify(mineLabs.compileScenario(scenario))), snapshot[file]!.compiled, file);
-    compared += 1;
+// One test per snapshot entry: a single test looping over all of them grew past the 5 s test timeout as scenarios were added.
+const COMPILE_SNAPSHOT = JSON.parse(readFileSync(join(import.meta.dirname, "mine-labs-compile.snapshot.json"), "utf8")) as Record<string, { sha256: string; compiled: unknown }>;
+const SNAPSHOT_FILES = Object.keys(COMPILE_SNAPSHOT);
+const UNEDITED_SNAPSHOT_FILES = new Set(
+  SNAPSHOT_FILES.filter((file) => createHash("sha256").update(readFileSync(join(import.meta.dirname, "../../..", file))).digest("hex") === COMPILE_SNAPSHOT[file]!.sha256),
+);
+
+describe("without arena options compileScenario returns what the unpatched package returned for the scenarios not edited since", () => {
+  test("the snapshot holds at least 94 scenarios, half of them unedited since", () => {
+    assert.ok(SNAPSHOT_FILES.length >= 94, `snapshot holds ${SNAPSHOT_FILES.length} scenarios`);
+    assert.ok(UNEDITED_SNAPSHOT_FILES.size >= SNAPSHOT_FILES.length / 2, `only ${UNEDITED_SNAPSHOT_FILES.size} of ${SNAPSHOT_FILES.length} scenarios are unchanged since the snapshot: regenerate it`);
+  });
+
+  for (const file of SNAPSHOT_FILES) {
+    // An edited scenario (its YAML hash changed) is skipped: its compiled output may change legitimately.
+    const register = UNEDITED_SNAPSHOT_FILES.has(file) ? test : test.skip;
+    register(file, async () => {
+      const scenario = await mineLabs.loadScenario(join(import.meta.dirname, "../../..", file));
+      assert.deepEqual(JSON.parse(JSON.stringify(mineLabs.compileScenario(scenario))), COMPILE_SNAPSHOT[file]!.compiled, file);
+    });
   }
-  assert.ok(compared >= files.length / 2, `only ${compared} of ${files.length} scenarios are unchanged since the snapshot: regenerate it`);
 });
 
 test("the boxed entity clear names the lane's box and leaves players alone", () => {
