@@ -3,6 +3,9 @@
 Mine AI puts one or more AI players (bots) into a Minecraft Java 1.21.4 server. The installer sets up everything the
 bots need; you do not need a terminal, WSL, Git or administrator rights.
 
+See also the [code signing policy](../code-signing-policy.md) (who signs the installer, and what is signed) and the
+[privacy page](../privacy.md) (every network contact Mine AI makes, and who chooses it).
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
@@ -69,6 +72,7 @@ Who may type them:
 - **Any other server**, or a local server that listens on more than this PC: only the names in `commands.players`.
   Add them with `mine-ai configure --command-players Tom,Dara` (an empty value clears the list). Anyone else is
   told once that they may not, then ignored.
+- The update check has the same kind of switch: `mine-ai configure --check-updates on` or `off` (see "Updating").
 - With no names listed on such a server the commands are off, and the start window says so.
 
 On a server where no bot of yours is playing, Mine AI joins with a plain client named by `commands.listenerName`
@@ -180,8 +184,12 @@ Run a newer installer: it installs over the old version, in the same folders, an
 before; the button is **Update**. Running the same version again repairs: any missing file comes back, and your data
 folder, worlds and bots stay as they are (the AI model and server settings are set again on the pages after the copy). At a first install the Ready page lists the two folders and says that the AI model
 and the server are chosen on the next pages, after the files are copied (the graphics card check happens there). Mine AI checks once at start whether a
-newer release exists and tells you; it never downloads one by itself. Switch the check off with
-`"checkUpdates": false` in `settings.json`.
+newer release exists and tells you; it never downloads one by itself. The check is one request to GitHub's release
+list (GitHub sees this PC's address, nothing else is sent; see the [privacy page](../privacy.md)). A first install asks
+in a box on the setup's tasks page, checked by default, and the Ready page repeats the answer. An update does not ask
+again: it keeps what `settings.json` says, so a check you switched off stays off. Switch it off or on later with
+`mine-ai configure --check-updates off` (or `on`), or with `"checkUpdates": false` in `settings.json`. A silent
+install chooses with `/CHECKUPDATES=0` or `/CHECKUPDATES=1` (see "Silent install").
 
 ## Uninstalling
 
@@ -216,6 +224,7 @@ you leave out keeps the choice saved by an earlier install, else the first value
 | `/SERVERHOST=` | address | The existing server (`/SERVER=remote`). |
 | `/SERVERPORT=` | number | Its port (default 25565). |
 | `/EULA=` | `accept` | Accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA). A local server (`/SERVER=local`) fails the install without it. |
+| `/CHECKUPDATES=` | `0` or `1` | Whether Mine AI checks for a newer release at each start. Left out: the saved choice at an update, on at a first install. |
 | `/STARTNOW=` | `0` or `1` | Start Mine AI when the install ends (default `0`). |
 | `/DATADIR=` | folder | Where Mine AI keeps your data (default `%LOCALAPPDATA%\MineAI`). |
 | `/OLLAMADIR=` | folder | Where Ollama is installed when this setup installs it (default: Ollama's own folder). |

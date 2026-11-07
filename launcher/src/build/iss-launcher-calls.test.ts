@@ -57,10 +57,12 @@ test("every launcher call of every silent parameter set runs on the CLI and leav
       } else assert.equal(name, "stop", `${label}: ${call} is not a launcher command the test knows`);
     }
     assert.deepEqual(t.stepsRun, installs, label);
-    const settings = (): { llm?: { kind: string }; server?: { kind: string } } => JSON.parse(readFileSync(join(t.root, "settings.json"), "utf8")) as never;
+    const settings = (): { llm?: { kind: string }; server?: { kind: string }; checkUpdates?: boolean } => JSON.parse(readFileSync(join(t.root, "settings.json"), "utf8")) as never;
     const wanted = (name: string): string | undefined => parameters.find((parameter) => parameter.startsWith(`/${name}=`))?.slice(name.length + 2);
     if (wanted("LLM") !== undefined) assert.equal(settings().llm?.kind, wanted("LLM"), label);
     if (wanted("SERVER") !== undefined) assert.equal(settings().server?.kind, wanted("SERVER"), label);
+    // The update check is on unless /CHECKUPDATES=0 is given (the setup's default at a first install).
+    if (calls.some((call) => call.startsWith("configure "))) assert.equal(settings().checkUpdates, wanted("CHECKUPDATES") !== "0", label);
     // The saved-key form keeps the key as it was (the blob byte for byte on Windows) and takes the new model.
     if (before !== undefined) {
       assert.deepEqual(savedKey(t.root), before, `${label}: the saved key changed`);

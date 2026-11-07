@@ -8,7 +8,7 @@
 ; Silent install (/SILENT or /VERYSILENT): one command-line parameter per wizard choice, read by `Param()` below and
 ; listed in docs/install/windows.md (launcher/src/build/iss-launcher-calls.test.ts keeps the two in step):
 ;   /LLM=local|remote /LLMURL= /LLMKEY= /LLMMODEL= /SERVER=none|local|remote /SERVERHOST= /SERVERPORT=
-;   /DATADIR= /OLLAMADIR= /EULA=accept /STARTNOW=0|1; uninstall: /DELETEDATA=0|1.
+;   /DATADIR= /OLLAMADIR= /EULA=accept /CHECKUPDATES=0|1 /STARTNOW=0|1; uninstall: /DELETEDATA=0|1.
 ; The app folder is Inno's own /DIR=; the data folder (/DATADIR=) and the Ollama folder (/OLLAMADIR=) are asked by pages of
 ; this script. The folders chosen at the first install are kept by every update; the uninstaller removes them.
 ; A parameter not given keeps the choice saved in settings.json by an earlier install, else the first value listed.
@@ -26,6 +26,8 @@
 ; the same file in the version before the bundle, which an update meets in {app} until its copy has run.
 #define LauncherScript "launcher\src\main.js"
 #define SourceLauncherScript "launcher\src\main.ts"
+; The privacy page the update-check box and the Ready list point to (SignPath asks for the privacy policy at install, spec D5).
+#define PrivacyUrl "https://github.com/bahumbert/mine-ai-mcp/blob/main/docs/privacy.md"
 #ifndef OutputDir
   #error OutputDir is not defined: build with launcher/src/build/build-windows.ts.
 #endif
@@ -39,6 +41,12 @@ AppId={{6D0F3C2A-8B1E-4F57-9A64-2E7C5B91D3A8}
 AppName=Mine AI
 AppVersion={#AppVersion}
 AppPublisher=AI Bengineering
+; The version resource of the setup file. SignPath's artifact configuration restricts the product name and version (rule "product name
+; and version"), so the product name is written here and does not follow a later AppName change; Inno's defaults give the file
+; description "Mine AI Setup" (iss-compile.test.ts compiles the script).
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductName=Mine AI
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\MineAI
 DefaultGroupName=Mine AI
@@ -64,6 +72,10 @@ SignedUninstaller=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+; The tasks page shows at a first install only (ShouldSkipPage); an update keeps what settings.json says (SavedCheckUpdates).
+Name: "checkupdates"; Description: "Check for a newer Mine AI at each start (one request to GitHub's release list: GitHub sees this PC's address, nothing else is sent). Privacy: {#PrivacyUrl}"
 
 [Dirs]
 ; The data folder is the player's choice (DataDir in [Code]); the uninstaller deletes it by itself, and only on request.
@@ -156,6 +168,8 @@ var
   ActiveGauge: TNewProgressBar;
   ActiveStatus: TNewStaticText;
   GpuChecked, GpuVerdictIsRemote, OllamaFolderNeeded, OllamaReady, SetupDone, PreviousLlmWasRemote, SilentWantsLocalModel: Boolean;
+  // The update check the saved settings.json holds (PrefillFromSettings); an update keeps it, a first install asks (CheckUpdatesWanted).
+  SavedCheckUpdates: Boolean;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
@@ -961,6 +975,23 @@ begin
     Server := 'none (set one in settings.json)';
 end;
 
+// The update check of the saved settings.json: False only when the file says `"checkUpdates": false`. A missing file, key or
+// unreadable value is True, the launcher's own default (settings.ts).
+function SavedCheckUpdatesValue(): Boolean;
+var
+  Raw: AnsiString;
+  Settings: String;
+  P: Integer;
+begin
+  Result := True;
+  if not LoadStringFromFile(DataDir('') + '\settings.json', Raw) then
+    Exit;
+  Settings := UTF8Decode(Raw);
+  P := JsonValueStart(Settings, 'checkUpdates');
+  if (P > 0) and (Copy(Settings, P, 5) = 'false') then
+    Result := False;
+end;
+
 // An update (or a second run) starts from the settings.json of the data folder, so it never resets a server or an endpoint.
 // The key: an encrypted one (apiKeyProtected) is never decrypted here; the box shows the mark and the launcher keeps the key
 // (KeySaved). A clear one (an install before the encryption) fills the box as before and is encrypted by the first save.
@@ -985,8 +1016,10 @@ begin
   ServerNoneRadio.Checked := True;
   ServerHostEdit.Text := '';
   ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
+  SavedCheckUpdates := True;
   if ReadSettingsSections(Llm, Server) then
   begin
+    SavedCheckUpdates := SavedCheckUpdatesValue();
     if JsonString(Llm, 'kind') = 'remote' then
     begin
       PreviousLlmWasRemote := True;
@@ -1028,11 +1061,25 @@ begin
   Result := WizardForm.PrevAppDir <> '';
 end;
 
+// Whether Mine AI checks for a newer release at each start: /CHECKUPDATES= when given in a silent setup (like every other parameter,
+// it is read only there: a wizard shows its box and reports that box), else the tasks-page box at a first install, else the value
+// the settings.json of the update holds (Inno's own stored task value is never used at an update: it would switch back on a check
+// the player turned off in settings.json).
+function CheckUpdatesWanted(): Boolean;
+begin
+  if WizardSilent and ParamGiven('CHECKUPDATES') then
+    Result := Param('CHECKUPDATES', '') = '1'
+  else if not IsUpdate() then
+    Result := WizardIsTaskSelected('checkupdates')
+  else
+    Result := SavedCheckUpdates;
+end;
+
 // The Ready page's list (Inno's default shows the destination only). The model and server pages come after the copy, because
 // they run the launcher, so a first install cannot list them yet and says why; an update lists the saved ones.
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 var
-  Model, Server: String;
+  Model, Server, CheckAnswer: String;
 begin
   Result := MemoDirInfo + NewLine + NewLine + 'Data folder:' + NewLine + Space + DataDir('');
   if IsUpdate() and SettingsSummary(Model, Server) then
@@ -1041,6 +1088,11 @@ begin
     // A first install, or an update that finds no settings.json: the pages after the copy still ask both.
     Result := Result + NewLine + NewLine + 'AI model and Minecraft server: chosen on the next pages, after the files are copied (the setup checks this PC''s graphics card there).';
   Result := Result + NewLine + NewLine + 'Disk room:' + NewLine + Space + ROOM_WARNING_TEXT;
+  if CheckUpdatesWanted() then
+    CheckAnswer := 'yes'
+  else
+    CheckAnswer := 'no';
+  Result := Result + NewLine + NewLine + 'Check for updates at each start: ' + CheckAnswer + ' (privacy: {#PrivacyUrl})';
 end;
 
 // ---------- silent install: the wizard's choices from command-line parameters ----------
@@ -1115,6 +1167,9 @@ begin
     Result := Result or (not ModelRemoteRadio.Checked);
   if PageID = EulaPage.ID then
     Result := Result or (not ServerLocalRadio.Checked);
+  // The update-check box is asked at a first install only: an update opens on Ready and keeps what settings.json says.
+  if PageID = wpSelectTasks then
+    Result := Result or IsUpdate();
 end;
 
 // ---------- AI model page ----------
@@ -1410,6 +1465,11 @@ begin
     Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), DEFAULT_SERVER_PORT))
   else
     Result := Result + ' --server-none';
+  // The update check goes with the final configure only, never the endpoint-only one of the endpoint page.
+  if CheckUpdatesWanted() then
+    Result := Result + ' --check-updates on'
+  else
+    Result := Result + ' --check-updates off';
 end;
 
 // One line on the progress page and in the setup log (/LOG=).
@@ -1527,28 +1587,33 @@ end;
 // runs every call on the launcher's CLI and checks these lines against this code and docs/install/windows.md;
 // <url> <key> <model> <host> <port> <ollamadir> stand for the values given. Each `install` call also gets `--json <file>`.
 // `install ollama` gets `--dir` only when /OLLAMADIR= is given and `install gpu` found no Ollama (the wizard: its folder field).
-//   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none; install model
-//   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none; install model
-//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port>
-//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model>; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port>
-//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local; install model; install java; install server --accept-eula
-//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none
+// Every final `configure` ends with `--check-updates on` (the default when /CHECKUPDATES= is not given) or `off`.
+//   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none --check-updates on; install model
+//   CALLS /LLM=local /SERVER=none /CHECKUPDATES=0: install gpu; install ollama; configure --llm-local --server-none --check-updates off; install model
+//   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none --check-updates on; install model
+//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model>; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --check-updates on; install model; install java; install server --accept-eula
+//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none --check-updates on
 //   CALLS /DELETEDATA=1 (uninstall): stop; install model-remove; install ollama-remove
 // What is wrong with the silent parameters, before any file is copied (Setup then exits with code 7); '' when all is well.
 function SilentParameterProblem(): String;
 var
-  Llm, Server, StartNow: String;
+  Llm, Server, StartNow, CheckUpdates: String;
 begin
   Result := '';
   Llm := Param('LLM', 'local');
   Server := Param('SERVER', 'none');
   StartNow := Param('STARTNOW', '0');
+  CheckUpdates := Param('CHECKUPDATES', '1');
   if (Llm <> 'local') and (Llm <> 'remote') then
     Result := '/LLM= must be local or remote.'
   else if (Server <> 'none') and (Server <> 'local') and (Server <> 'remote') then
     Result := '/SERVER= must be none, local or remote.'
   else if (StartNow <> '0') and (StartNow <> '1') then
     Result := '/STARTNOW= must be 0 or 1.'
+  else if (CheckUpdates <> '0') and (CheckUpdates <> '1') then
+    Result := '/CHECKUPDATES= must be 0 or 1.'
   else if (not SilentWantsLocalModel) and (RemoteFieldProblem() <> '') then
     Result := 'With /LLM=remote: ' + RemoteFieldProblem() + ' Give /LLMURL=, /LLMKEY= (may be empty) and /LLMMODEL=.'
   else if ServerFieldProblem() <> '' then
