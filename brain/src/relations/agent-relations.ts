@@ -150,7 +150,7 @@ export class AgentRelations {
   }
 
   /** The trade a decision carries becomes a trade (its line was spoken already); its id when one was proposed or agreed, else null. `seen` is what the answered line was read against. */
-  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen?: Pick<DecisionSeen, "heardAt" | "seenOfferId">): Promise<string | null> {
+  async decided(decision: ChatDecision, speaker: string, snapshot: BotSnapshot, seen?: Pick<DecisionSeen, "heardAt" | "seenOfferId" | "asked">): Promise<string | null> {
     if (decision.trade === undefined) return null;
     return this.trades.onDecision(decision.trade, speaker, snapshot, seen === undefined ? undefined : { ...seen, say: decision.say }).catch((error: unknown) => {
       this.deps.log(`could not record the trade with ${speaker}: ${String(error)}`);

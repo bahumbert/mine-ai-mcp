@@ -26,15 +26,25 @@ function newTrade(a: DealArgs, state: "proposed" | "agreed"): Trade {
 const REPEAT_AFTER_DONE_MS = 2 * MINUTE_MS;
 
 export const flipped = (first: "me" | "them"): "me" | "them" => (first === "me" ? "them" : "me");
+
+/** Who goes first: a trade with nothing coming back has one giver, and it goes first (spec 2026-11-07-gift-asked-for D2); with both sides filled, the model's choice. */
+export function giverFirst(give: readonly ItemCount[], get: readonly ItemCount[], first: "me" | "them"): "me" | "them" {
+  if (give.length > 0 && get.length === 0) return "me";
+  if (give.length === 0 && get.length > 0) return "them";
+  return first;
+}
 export const sameTerms = (a: TradeDecision, b: TradeDecision): boolean => JSON.stringify([a.give, a.get, a.first]) === JSON.stringify([b.give, b.get, b.first]);
 
 const dealKey = (items: readonly ItemCount[]): string => JSON.stringify([...items].map((i) => [i.item, i.count]).sort());
 /** The same items and counts on both sides, in any order; who gives first does not matter. */
 export const sameDealTerms = (a: Pick<TradeDecision, "give" | "get">, b: Pick<TradeDecision, "give" | "get">): boolean => dealKey(a.give) === dealKey(b.give) && dealKey(a.get) === dealKey(b.get);
 
-/** The trade with the speaker that ended `done` within the repeat window on the same terms, if any: a chat reply written while it was open lands after it. */
-export function repeatOfDone(trades: readonly Trade[], speaker: string, terms: TradeDecision, now: number): Trade | undefined {
-  return trades.find((t) => t.state === "done" && t.partner.toLowerCase() === speaker.toLowerCase() && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && sameDealTerms(t, terms));
+/**
+ * The trade with the speaker that ended `done` within the repeat window on the same terms, if any: a chat reply written while it was open lands after it.
+ * `heardAt` (wall time of the line answered): a line heard after the end is a new ask, no repeat (spec 2026-11-07-gift-asked-for D5).
+ */
+export function repeatOfDone(trades: readonly Trade[], speaker: string, terms: TradeDecision, now: number, heardAt?: number): Trade | undefined {
+  return trades.find((t) => t.state === "done" && t.partner.toLowerCase() === speaker.toLowerCase() && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && (heardAt === undefined || heardAt <= t.endedAt) && sameDealTerms(t, terms));
 }
 
 /** The newest trade the filter keeps; on equal `createdAt` the later one in the list wins. */

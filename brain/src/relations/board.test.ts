@@ -509,3 +509,27 @@ test("B2 review: a tell for a real trade of mine with another partner ends nothi
   assert.equal(ayla.latest("Theo")!.state, "agreed");
   assert.ok(ayla.lines.some((l) => /Finn says .* not my partner/u.test(l)), ayla.lines.join("\n"));
 });
+
+test("A6: a gift asked by a bot of this brain stays a board proposal for its accept", async () => {
+  const { board, finn, ayla } = pair();
+  const id = await ayla.c.onDecision(propose(bread(1), []), "Finn", ayla.snapshot(), { heardAt: 1, asked: true });
+  assert.equal(ayla.latest("Finn")!.state, "proposed", "not agreed on her side alone");
+  assert.equal(board.offerFrom("Ayla", "Finn")?.id, id);
+  assert.deepEqual(ayla.handoffs, []);
+  assert.equal(await finn.c.onDecision(accept([], bread(1)), "Ayla", finn.snapshot()), id);
+  await ayla.c.settled();
+  for (const trade of [ayla.latest("Finn")!, finn.latest("Ayla")!]) assert.equal(trade.state, "agreed");
+  assert.equal(ayla.handoffs.length, 1, "her give starts on the board accept");
+});
+
+test("a gift to a bot of this brain whose give is not taken twice ends cancelled on both sides, no failure to pay (spec D3)", async () => {
+  const { finn, ayla } = pair();
+  const id = (await ayla.c.onDecision(propose(bread(1), []), "Finn", ayla.snapshot(), { heardAt: 1, asked: true }))!;
+  await finn.c.onDecision(accept([], bread(1)), "Ayla", finn.snapshot());
+  await ayla.c.settled();
+  await ayla.c.handoffEnded(id, "not_taken", "Finn did not take 1 bread");
+  await ayla.c.handoffEnded(id, "not_taken", "Finn did not take 1 bread");
+  await finn.c.settled();
+  for (const trade of [ayla.latest("Finn")!, finn.latest("Ayla")!]) assert.equal(trade.state, "cancelled");
+  assert.equal(ayla.book.get("Finn")!.facts.iFailedToPay, 0);
+});

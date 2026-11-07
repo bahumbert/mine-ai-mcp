@@ -626,12 +626,14 @@ test("agreed with me first: no await, the give is due at once", async () => {
   assert.deepEqual(kinds(h), ["give"]);
 });
 
-test("a trade that owes nothing is not awaited", async () => {
+test("a gift I accept is given and not awaited (first set to me; it was never due before, A7)", async () => {
   const h = harness();
   const s = snapshot();
   await h.c.onDecision(decision({ give: bread(5), get: [], first: "them" }), "Theo", s);
+  assert.equal(theirTrade(h).first, "me");
   await h.c.tick(s, new Set(), signal);
   assert.deepEqual(h.awaits, []);
+  assert.deepEqual(kinds(h), ["give"]);
 });
 
 test("the payment credited while waiting ends the wait, then the give comes due and is taken", async () => {
@@ -2103,4 +2105,189 @@ test("the pay-back time left reads the stored wall times", async () => {
   h.state.now += 60_000;
   h.state.wallOffset -= 2_000;
   assert.equal(h.c.payBackLeftMs(theirTrade(h).id), 10 * MIN - 58_000, "58 s of wall time since the agreement");
+});
+
+// Plan 2026-11-07-gift-asked-for Task A: a gift the recipient asked for is agreed at once; a one-sided trade's `first` is its giver.
+const gift = (over: Partial<TradeDecision> = {}): TradeDecision => decision({ action: "propose", give: bread(1), get: [], first: "me", ...over });
+const asked = { heardAt: t0, asked: true };
+
+test("A1: a gift asked for (the line taken as a request) is agreed at once and handed over", async () => {
+  const h = harness();
+  const id = await h.c.onDecision(gift(), "Theo", snapshot(), asked);
+  assert.equal(id, theirTrade(h).id);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(kinds(h), ["give"]);
+  const handoff = h.handoffs[0];
+  assert.deepEqual(handoff?.kind === "give" ? handoff.items : null, bread(1));
+  const events = h.events.filter((e): e is TradeEvent => e.kind === "trade" && e.tradeId === id).map((e) => e.event);
+  assert.deepEqual(events, ["proposed", "agreed"]);
+  assert.ok(h.logs.includes("trade: Theo asked for the gift: agreed"));
+  await h.c.handoffEnded(id!, "done", "gave 1 bread");
+  assert.equal(theirTrade(h).state, "done");
+  assert.equal(h.book.get("Theo")!.facts.giftsGiven, 1);
+  assert.deepEqual(scoredRows(h), [], "my own gift moves no score");
+});
+
+test("A3: a gift offered unasked stays a proposal; the recipient's next request repeating it agrees the same trade", async () => {
+  const h = harness();
+  const s = snapshot();
+  const first = await h.c.onDecision(gift(), "Theo", s, { heardAt: t0 });
+  assert.equal(theirTrade(h).state, "proposed");
+  assert.deepEqual(h.handoffs, []);
+  const second = await h.c.onDecision(gift(), "Theo", s, asked);
+  assert.equal(second, first);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(kinds(h), ["give"]);
+  assert.ok(h.logs.some((l) => l.includes("my proposal to Theo repeats")));
+});
+
+test("A4: a non-gift proposal on a line taken as a request stays a proposal", async () => {
+  const h = harness();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", snapshot(), asked);
+  assert.equal(theirTrade(h).state, "proposed");
+  assert.deepEqual(h.handoffs, []);
+});
+
+test("A5: a gift asked with first: them is agreed with first: me and given", async () => {
+  const h = harness();
+  await h.c.onDecision(gift({ first: "them" }), "Theo", snapshot(), asked);
+  assert.equal(theirTrade(h).first, "me");
+  assert.deepEqual(kinds(h), ["give"]);
+  assert.ok(h.logs.includes("trade: a gift has one giver: first set to me"));
+});
+
+test("A7b: an accept of a received gift with first: me waits for their side", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ give: [], get: bread(2), first: "me" }), "Theo", s);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.equal(theirTrade(h).first, "them");
+  assert.deepEqual(h.handoffs, []);
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(h.awaits.length, 1);
+  assert.equal(h.awaits[0]?.tradeId, theirTrade(h).id);
+});
+
+test("A9: an asked gift replaces my open non-gift proposal and is agreed", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision({ action: "propose" }), "Theo", s);
+  const [replaced] = h.book.get("Theo")!.trades;
+  h.state.now += 1_000;
+  await h.c.onDecision(gift(), "Theo", s, { heardAt: h.state.now, asked: true });
+  const trades = h.book.get("Theo")!.trades;
+  assert.equal(trades.find((t) => t.id === replaced!.id)?.state, "cancelled");
+  assert.equal(trades.find((t) => t.id === replaced!.id)?.note, "replaced");
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.notEqual(theirTrade(h).id, replaced!.id);
+});
+
+test("A10: an asked gift while an agreed trade with the speaker is open is dropped, the agreed trade stays", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(decision(), "Theo", s);
+  const id = theirTrade(h).id;
+  assert.equal(await h.c.onDecision(gift(), "Theo", s, asked), null);
+  assert.ok(h.logs.some((l) => l.includes("a proposal to Theo ignored")));
+  assert.equal(tradesWithTheo(h), 1);
+  assert.equal(theirTrade(h).id, id);
+});
+
+test("A12: a gift asked again after the first was done is agreed again (the line was heard after the end)", async () => {
+  const h = harness();
+  const s = snapshot();
+  const first = await h.c.onDecision(gift(), "Theo", s, asked);
+  await h.c.handoffEnded(first!, "done", "gave 1 bread");
+  h.state.now += 60_000;
+  const second = await h.c.onDecision(gift(), "Theo", s, { heardAt: h.state.now, asked: true });
+  assert.notEqual(second, null);
+  assert.notEqual(second, first);
+  assert.equal(theirTrade(h).state, "agreed");
+  assert.deepEqual(kinds(h), ["give", "give"]);
+  assert.ok(!h.logs.some((l) => l.includes("ignored, it repeats")));
+});
+
+test("A13: a reply to a line heard before the done trade ended is still ignored as a late repeat", async () => {
+  const h = harness();
+  const s = snapshot();
+  const first = await h.c.onDecision(gift(), "Theo", s, asked);
+  await h.c.handoffEnded(first!, "done", "gave 1 bread");
+  const endedAt = theirTrade(h).endedAt!;
+  assert.equal(await h.c.onDecision(gift(), "Theo", s, { heardAt: endedAt - 1_000, asked: true }), null);
+  assert.ok(h.logs.some((l) => l.includes("ignored, it repeats")));
+  h.logs.length = 0;
+  assert.equal(await h.c.onDecision(gift(), "Theo", s), null, "no line time: ignored as before");
+  assert.ok(h.logs.some((l) => l.includes("ignored, it repeats")));
+  assert.equal(tradesWithTheo(h), 1);
+});
+
+test("A14: a gift whose give never ran (held below another order) is cancelled 'nobody gave' at payBackMinutes", async () => {
+  const h = harness();
+  const s = snapshot();
+  await h.c.onDecision(gift(), "Theo", s, asked);
+  assert.deepEqual(kinds(h), ["give"], "the agent took the give and holds it; it never ends");
+  h.state.now += 10 * MIN;
+  await h.c.tick(s, new Set(), signal);
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.equal(theirTrade(h).note, "nobody gave");
+});
+
+// Task B (spec D3): a gift the recipient does not take, or walks away from, is no failure of mine.
+type GiveEnd = "not_taken" | "failed";
+const endGive = (h: Harness, id: string, outcome: GiveEnd) => h.c.handoffEnded(id, outcome, outcome === "not_taken" ? "Theo did not take 1 bread" : "Theo is out of reach");
+
+/** An asked gift whose give ended `first`, then (30 s later, Theo near) `second`. */
+async function giftGiveEnds(h: Harness, first: GiveEnd, second: GiveEnd, over: Partial<TradeDecision> = {}): Promise<string> {
+  const s = snapshot();
+  const id = (await h.c.onDecision(gift(over), "Theo", s, asked))!;
+  await endGive(h, id, first);
+  assert.equal(theirTrade(h).state, "agreed", "one try is not the end");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  await endGive(h, id, second);
+  return id;
+}
+
+test("B1: a gift the partner does not take twice ends cancelled, not broken: no iFailedToPay, no score", async () => {
+  const h = harness();
+  await giftGiveEnds(h, "not_taken", "not_taken");
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.equal(theirTrade(h).note, "Theo did not take 1 bread (2 tries); I kept them");
+  const facts = h.book.get("Theo")!.facts;
+  assert.deepEqual([facts.iFailedToPay, facts.giftsGiven], [0, 0]);
+  assert.ok(!h.events.some((e) => e.kind === "trade" && e.event === "broken"));
+  assert.deepEqual(scoredRows(h), []);
+  assert.equal(h.c.openWith("Theo"), undefined, "no open trade is left: the speaker's next order is taken (B3)");
+});
+
+test("B2: a gift whose items are gone still ends broken by me", async () => {
+  const h = harness();
+  const id = (await h.c.onDecision(gift(), "Theo", snapshot(), asked))!;
+  await h.c.handoffEnded(id, "items_gone", "no bread");
+  assert.equal(theirTrade(h).state, "broken");
+  assert.equal(theirTrade(h).brokenBy, "me");
+  assert.equal(h.book.get("Theo")!.facts.iFailedToPay, 1);
+});
+
+test("B4/B5: a gift whose recipient walked off, or failed in either order with not taken, ends cancelled with no failure to pay", async () => {
+  for (const [first, second] of [["failed", "failed"], ["not_taken", "failed"], ["failed", "not_taken"]] as const) {
+    const h = harness();
+    await giftGiveEnds(h, first, second);
+    assert.equal(theirTrade(h).state, "cancelled", `${first} then ${second}`);
+    assert.equal(h.book.get("Theo")!.facts.iFailedToPay, 0);
+    if (second === "failed") assert.equal(theirTrade(h).note, "Theo is out of reach");
+  }
+});
+
+test("B6: a gift of two items, one taken, then not taken twice, ends cancelled with the taken part on the record", async () => {
+  const h = harness();
+  const s = snapshot({ inventory: [{ name: "bread", count: 10 }, { name: "apple", count: 3 }] });
+  const id = (await h.c.onDecision(gift({ give: [...bread(1), { item: "apple", count: 1 }] }), "Theo", s, asked))!;
+  await h.c.tookInHandoff(id, bread(1));
+  await endGive(h, id, "not_taken");
+  h.state.now += 31_000;
+  await h.c.tick(s, new Set(), signal);
+  await endGive(h, id, "not_taken");
+  assert.equal(theirTrade(h).state, "cancelled");
+  assert.deepEqual(theirTrade(h).gaveSome, bread(1));
 });

@@ -5,7 +5,7 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { BoardOffer, BoardPeer, TradeBoard, TradeEndWhy } from "./board.ts";
 import type { RelationBook } from "./book.ts";
-import { checkTradeDecision, type DecisionSeen, givesCarriedOver, termsDifferFromWords, whyProposalDropped } from "./checks.ts";
+import { checkTradeDecision, type DecisionSeen, isAskedGift } from "./checks.ts";
 import type { CollectView } from "./collects.ts";
 import { type CreditHost, creditArrived, creditGains } from "./credits.ts";
 import { EARLIER_GIVE_MS } from "./earlier.ts";
@@ -16,12 +16,13 @@ import { HandoffQueue } from "./handoff-queue.ts";
 import { type OwedItem, sideText } from "./items.ts";
 import { TradeLedgers } from "./ledgers.ts";
 import { boardPeerHandlers } from "./peer.ts";
+import { OwnProposals } from "./proposals.ts";
 import { PartnerRecord } from "./partner-record.ts";
 import { relationsBlock } from "./prompts.ts";
 import { countLateToss, giveToHeldTrades, heldOwed } from "./held.ts";
 import { heldWindow, withTrade } from "./record.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
-import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, proposeTrade, repeatOfDone, sameDealTerms, sameTerms, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, giverFirst, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
 import { type Clocks, type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
@@ -60,6 +61,8 @@ export class TradeController implements BoardPeer {
   private readonly queue: HandoffQueue;
   /** The earlier ledger, who stood near, and the collect fallback. */
   private readonly ledgers: TradeLedgers;
+  /** My proposals: made, replaced, and agreed when paid or asked for. */
+  private readonly proposals: OwnProposals;
   private readonly nobodyGave = new Set<string>();
   /** Trades whose giver said it cannot reach me: my wait for that trade walks to it, once. */
   private readonly cameDown = new Set<string>();
@@ -78,6 +81,10 @@ export class TradeController implements BoardPeer {
     this.gives = new GiveBook(deps.now, deps.wallNow, deps.settings.payBackMinutes * MINUTE_MS);
     this.queue = new HandoffQueue(this.gives, deps.now, deps.takeHandoff);
     this.ledgers = new TradeLedgers({ gives: this.gives, find: (id) => this.find(id), recordReceived: (trade) => this.recordStep(trade, "received") });
+    this.proposals = new OwnProposals({
+      self: deps.self, board: deps.board, book: deps.book, gives: this.gives, ledgers: this.ledgers, log: deps.log,
+      find: (id) => this.find(id), record: (trade, ...events) => this.record(trade, ...events), startAgreed: (trade, partner, at, carried) => this.startAgreed(trade, partner, at, carried),
+    });
     this.peer = boardPeerHandlers({
       self: deps.self, wallNow: deps.wallNow, log: deps.log,
       find: (id) => this.find(id), tracked: (step) => this.tracked(step), record: (t, event) => this.record(t, event), startAgreed: (t, partner) => this.startAgreed(t, partner, this.clocks()),
@@ -111,13 +118,6 @@ export class TradeController implements BoardPeer {
   /** What an accept stands for: the proposer's terms, mirrored, when a bot of this brain proposed to me; else what my model wrote. */
   private termsOf(d: TradeDecision, offer: BoardOffer | undefined): TradeDecision {
     return offer === undefined ? d : { action: "accept", give: offer.get, get: offer.give, first: flipped(offer.first) };
-  }
-
-  /** A bot of this brain I propose or counter to: the proposal goes on the board for the partner's accept. */
-  private post(trade: Trade): void {
-    const { board } = this.deps;
-    if (board?.isLocal(trade.partner) !== true) return;
-    board.post({ id: trade.id, proposer: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, postedAt: trade.createdAt });
   }
 
   /**
@@ -155,15 +155,20 @@ export class TradeController implements BoardPeer {
       }
       const offer = d.action === "accept" ? theirOffer : undefined;
       const terms = this.termsOf(d, offer);
-      const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first: terms.first, now };
-      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? repeatOfDone(this.deps.book.trades(), speaker, terms, now) : undefined;
+      const first = giverFirst(terms.give, terms.get, terms.first);
+      if (first !== terms.first && (d.action === "propose" || d.action === "accept")) this.deps.log(`trade: a gift has one giver: first set to ${first}`);
+      const deal = { self: this.deps.self, partner: speaker, give: terms.give, get: terms.get, first, now };
+      const repeated = d.action !== "decline" && d.action !== "cancel" && mine === undefined && theirOffer === undefined ? repeatOfDone(this.deps.book.trades(), speaker, terms, now, seen?.heardAt) : undefined;
       if (repeated !== undefined) return this.note(null, `trade: a ${d.action} of ${speaker} ignored, it repeats ${repeated.id}, done ${Math.round((now - (repeated.endedAt ?? now)) / 1000)} s ago`);
-      if (d.action === "propose") return this.onPropose(deal, at, mine, theirOffer, seen, this.carriedNow(snapshot));
+      if (d.action === "propose") {
+        const id = await this.proposals.propose(deal, at, mine, theirOffer, seen, this.carriedNow(snapshot));
+        return isAskedGift(deal, seen, local) ? this.proposals.agreeAsked(id, speaker, at, this.carriedNow(snapshot)) : id;
+      }
       if (d.action === "accept" && local && offer === undefined) {
         if (mine !== undefined) return this.note(null, `trade: an accept of ${speaker} ignored, ${mine.id} is still open and they proposed nothing to me`);
         // They offered in words only (or the offer is gone): my terms stand as a counter-offer, and their accept closes it on both sides.
         this.deps.log(`trade: no proposal from ${speaker} on the board; my terms are posted as a counter-offer`);
-        return this.proposeAndPost(deal, at, this.carriedNow(snapshot), seen?.say);
+        return this.proposals.proposeAndPost(deal, at, this.carriedNow(snapshot), seen?.say);
       }
       if (d.action === "accept") {
         if (offer !== undefined && !sameTerms(d, terms)) this.deps.log(`trade: terms taken from ${speaker}'s offer: I give ${sideText(terms.give)}, I get ${sideText(terms.get)} (my reply said ${sideText(d.give)} for ${sideText(d.get)})`);
@@ -185,37 +190,6 @@ export class TradeController implements BoardPeer {
 
   /** Logs why a decision is not applied, and answers `answer`: no trade id, or the open trade it stays with. */
   private note<T>(answer: T, line: string): T { this.deps.log(line); return answer; }
-
-  /** A propose: replaces my open proposal to them (a restated one stays), and counters their offer when I read it first (`seen`, bot partners). */
-  private async onPropose(deal: Parameters<typeof proposeTrade>[0], at: Clocks, mine: Trade | undefined, theirOffer: BoardOffer | undefined, seen: DecisionSeen | undefined, carried: BotSnapshot["inventory"]): Promise<string | null> {
-    const { partner: speaker, now } = deal;
-    const { board, self } = this.deps;
-    const dropped = whyProposalDropped({ speaker, mine, ownOfferId: board?.offerFrom(self, speaker)?.id, local: board?.isLocal(speaker) === true, theirOffer, heardAt: seen?.heardAt, seenOfferId: seen?.seenOfferId });
-    if (dropped !== null) return this.note(null, dropped);
-    if (mine !== undefined && sameDealTerms(mine, deal) && mine.first === deal.first) return this.note(mine.id, `trade: my proposal to ${speaker} repeats ${mine.id}, which stays open`);
-    const kept = mine === undefined ? [] : givesCarriedOver(this.gives.givenOf(mine.id), this.ledgers.carriedOver(mine.id));
-    if (mine !== undefined) await this.record(cancelTrade(mine, now, "replaced"), "cancelled");
-    if (theirOffer !== undefined) {
-      board?.decline(theirOffer.id, self, "countered");
-      this.deps.log(`trade: counter-offer to ${speaker}: I give ${sideText(deal.give)}, I get ${sideText(deal.get)}; their ${theirOffer.id} declined`);
-    }
-    const id = await this.proposeAndPost(deal, at, carried, seen?.say);
-    const fresh = this.find(id);
-    if (fresh !== undefined) for (const [item, count] of kept) this.gives.credit(fresh, item, count);
-    return id;
-  }
-
-  /** A new proposal of mine, posted on the board when the partner is a bot of this brain. */
-  private async proposeAndPost(deal: Parameters<typeof proposeTrade>[0], at: Clocks, carried: BotSnapshot["inventory"], said?: string): Promise<string> {
-    for (const line of termsDifferFromWords(said, [...deal.give, ...deal.get])) this.deps.log(line);
-    const proposed = proposeTrade(deal);
-    await this.record(proposed, "proposed");
-    this.post(proposed);
-    await this.ledgers.claimEarlier(proposed, at, carried);
-    // A payment dropped while the model was still deciding is already kept: the proposal it answers is agreed as it is posted.
-    await this.agreePaidProposals(carried, at);
-    return proposed.id;
-  }
 
   /** A `give_item` the partner took, outside the trade's hand-off, counts toward my side of the oldest open trade with them whose side has the item (a proposed one too; capped at what is lacking); the side covered and agreed, the trade is given. */
   gaveOutside(partner: string, item: string, count: number): Promise<void> {
@@ -381,7 +355,7 @@ export class TradeController implements BoardPeer {
         await creditGains(this.creditHost(), snapshot, previous, ownStepYields, at, ownWork);
         this.ticksCounted += 1; // after the gains were counted: a tick that threw before counted none
       } else this.ledgers.rebase(this.deps.book.trades(), snapshot.inventory);
-      await this.agreePaidProposals(snapshot.inventory, at);
+      await this.proposals.agreePaid(snapshot.inventory, at);
       await creditArrived(this.creditHost(), snapshot.inventory, ownStepYields, at);
       await this.settleOpen(at.wallNow);
       await this.shown.claimAll();
@@ -442,11 +416,21 @@ export class TradeController implements BoardPeer {
       } else {
         const failures = this.gives.failed(tradeId);
         const why = outcome === "not_taken" ? `${trade.partner} did not take ${sideText(this.gives.leftOf(trade) ?? trade.give)} (${GIVE_ATTEMPTS} tries); I kept them` : detail;
-        if (failures >= GIVE_ATTEMPTS) await this.breakGive(trade, now, why);
+        if (failures >= GIVE_ATTEMPTS) await this.endFailedGive(trade, now, why);
         else this.deps.log(`trade: the give for ${tradeId} ${outcome === "not_taken" ? "was not taken" : "failed"} (${detail}); it stays due`);
         if (outcome === "not_taken") this.gives.dropped(tradeId);
       }
     });
+  }
+
+  /**
+   * A give not taken, or out of reach, after its attempts. A gift (nothing asked back) the recipient does not take, or walks
+   * away from, is no promise of mine broken: cancelled, no fact, no score (spec 2026-11-07-gift-asked-for D3); else broken by me.
+   */
+  private async endFailedGive(trade: Trade, now: number, why: string): Promise<void> {
+    if (trade.get.length > 0) return this.breakGive(trade, now, why);
+    await this.record(cancelTrade(trade, now, why), "cancelled");
+    this.tellEnd(trade, "cancelled");
   }
 
   /** My give failed for good: the trade is broken by me, and the partner bot is told. */
@@ -532,24 +516,6 @@ export class TradeController implements BoardPeer {
     this.ledgers.tradeEnded(trade, this.deps.now());
     this.nobodyGave.delete(trade.id);
     this.gives.forget(trade.id);
-  }
-
-  /**
-   * A partner who pays my whole proposal has accepted it (a player's acceptance in words never reaches a proposal: only a board
-   * offer is accepted by words): every `get` item is covered by what the earlier ledger kept from them and I carry now.
-   * The trade is agreed on its own terms by the path of a spoken agreement, which credits the kept gains. A gift proposal
-   * (nothing asked back) is never paid, and a partial payment stays kept until a later gain completes the side.
-   */
-  private async agreePaidProposals(carried: BotSnapshot["inventory"], at: Clocks): Promise<void> {
-    for (const trade of this.deps.book.trades().filter((t) => t.state === "proposed" && t.get.length > 0)) {
-      const kept = this.ledgers.earlier.keptFrom(trade.partner, at.now);
-      const covered = trade.get.every((g) => Math.min(kept.find((k) => k.item === g.item)?.count ?? 0, carried.filter((c) => c.name === g.item).reduce((n, c) => n + c.count, 0)) >= g.count);
-      if (!covered) continue;
-      this.deps.log(`trade: ${trade.partner} paid my proposal ${trade.id}: agreed`);
-      const agreed = agreeTrade(trade, { self: this.deps.self, partner: trade.partner, give: trade.give, get: trade.get, first: trade.first, now: at.wallNow });
-      await this.record(agreed, "agreed");
-      await this.startAgreed(agreed, trade.partner, at, carried);
-    }
   }
 
   /** Runs every open trade's clock; a state the clock changed is saved, and a give that came due is handed to the agent. */

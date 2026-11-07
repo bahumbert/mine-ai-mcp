@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Position } from "../runtime-client.ts";
 import type { ItemCount, Trade, TradeSettings } from "./types.ts";
-import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, heldPayment, inventoryGains, isOpen, markGave, proposeTrade, settleTrade } from "./trade.ts";
+import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, giverFirst, heldPayment, inventoryGains, isOpen, markGave, proposeTrade, settleTrade } from "./trade.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
@@ -259,4 +259,12 @@ test("heldPayment: nothing for a trade I gave, a done one, one nothing was paid 
   const held = failTrade(creditTrade(deal("them"), ingots, t0 + MIN).trade, t0 + 2 * MIN, "x");
   assert.deepEqual(heldPayment(held, { now: t0 + 2 * MIN + 59 * MIN, ms: 60 * MIN }), ingots);
   assert.deepEqual(heldPayment(held, { now: t0 + 2 * MIN + 60 * MIN, ms: 60 * MIN }), [], "gone at the end of the window");
+});
+
+test("giverFirst: a one-sided trade's giver goes first; both sides keep the model's first", () => {
+  assert.equal(giverFirst(bread, [], "them"), "me");
+  assert.equal(giverFirst([], bread, "me"), "them");
+  assert.equal(giverFirst(bread, ingots, "them"), "them");
+  assert.equal(giverFirst(bread, ingots, "me"), "me");
+  assert.equal(giverFirst([], [], "me"), "me");
 });

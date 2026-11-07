@@ -476,13 +476,15 @@ export class Agent {
     const whisperTo = message.channel === "whisper" ? message.username : null;
     const said = this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
     this.openRequestsOnceSaid(said, decision, whisperTo, snapshot);
-    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot, seen) ?? null;
+    // A stop with a request stops the work before `decided`: the give the line's own trade pushes is no work to stop (spec 2026-11-07-gift-asked-for D4).
+    if (carriesRequest && this.stack.length > 0) this.stopAndRest(message.username);
+    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot, { ...seen, asked: routed === "act" || routed === "later" }) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
     if (conversation !== undefined) this.spokeInConversation(decision, message.username);
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
-    if (routed === "stop" || (carriesRequest && this.stack.length > 0)) this.stopAndRest(message.username);
+    if (routed === "stop") this.stopAndRest(message.username);
     // A line that made a trade is that trade's action: its hand-off is what she does, not an order on top whose give the trade never sees (live 2026-10-19, B1).
     if ((routed === "act" || routed === "later") && tradeId !== null) {
       log(`the request is trade ${tradeId}: no order taken (${JSON.stringify(decision.request)})`);

@@ -1846,6 +1846,70 @@ test("a trade line routed act takes no order", async (t) => {
   assert.deepEqual(takenObjectives(events), ["own: hand over 5 bread to Theo (trade)", "own: wait for Theo to give their side (trade)"], "the give, then the wait for Theo");
 });
 
+// Plan 2026-11-07-gift-asked-for Task A (s3q 2026-11-07): a player asks for a gift and the model answers with a gift proposal.
+const GIFT_ASKED = { say: "Of course!", route: "act" as const, request: "give me one bread", trade: { action: "propose" as const, give: [{ item: "bread", count: 1 }], get: [], first: "me" as const } };
+const GIVE_ONE_BREAD = ["own: hand over 1 bread to Theo (trade)"];
+
+test("A8: a player's ask for a gift, answered with a gift proposal routed act, is handed over (s3q case)", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const logs: string[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event), log: (line) => logs.push(line) });
+  chat.reply(GIFT_ASKED);
+  await agent.handle(say("Theo", "Ayla, could you give me one bread?"));
+  await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  assert.deepEqual(takenObjectives(events), GIVE_ONE_BREAD);
+  assert.ok(!logs.some((line) => line.startsWith("not taken:")), logs.join("\n"));
+});
+
+test("A8b: the same gift answered with a later route (another player's order runs) is agreed: its give waits below the order", async (t) => {
+  const runtime = tradingRuntime();
+  runtime.durations.collect_block = 100_000;
+  const events: BrainEvent[] = [];
+  const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  // "later" is a route only while the character works for someone else (llm-mind.ts: canWait), so an order runs first.
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+  await agent.handle(say("Steve", "Ayla, collect 16 oak_log"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ ...GIFT_ASKED, route: "later" });
+  await agent.handle(say("Theo", "Ayla, could you give me one bread?"));
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "queued" && event.text === "hand over 1 bread to Theo (trade)"));
+  // A hand-off exists only for an agreed trade: the queued give is the proof that the gift was agreed on this line.
+  assert.deepEqual(takenObjectives(events), ["Steve: collect 16 oak_log"]);
+  assert.equal(runtime.cancelled.length, 0, "the order's step runs on");
+});
+
+test("A8c: the same gift offered unasked (route talk) stays a proposal and gives nothing", async (t) => {
+  const runtime = tradingRuntime();
+  const events: BrainEvent[] = [];
+  const { agent, chat } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+  chat.reply({ ...GIFT_ASKED, route: "talk", request: "" });
+  await agent.handle(say("Theo", "Ayla, I am hungry"));
+  await until(() => events.some((event) => event.kind === "chat") && savedRelations(runtime)[0]?.trades[0]?.state === "proposed");
+  assert.ok(!runtime.submitted.some((call) => call.tool === "drop_item"));
+});
+
+test("A8d: a stop carrying a request with an asked gift keeps the gift's give, idle or busy (spec D4)", async (t) => {
+  for (const busy of [false, true]) {
+    const runtime = tradingRuntime();
+    runtime.durations.collect_block = 1_500;
+    const events: BrainEvent[] = [];
+    const { agent, chat, action } = agentFor(t, runtime, {}, { journal: (event) => events.push(event) });
+    if (busy) {
+      chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+      action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } }, { done: "got the logs" });
+      await agent.handle(say("Steve", "Ayla, collect 16 oak_log"));
+      await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+    }
+    chat.reply({ ...GIFT_ASKED, say: "Sure.", route: "stop" });
+    await agent.handle(say("Theo", "Ayla, stop, and give me one bread"));
+    // Busy: Steve's order is not Theo's to stop, so the give waits below it and runs when it ends (about 1.5 s).
+    await until(() => runtime.submitted.some((call) => call.tool === "drop_item"), 4_000);
+    if (!busy) assert.deepEqual(takenObjectives(events), GIVE_ONE_BREAD);
+  }
+});
+
 test("a later route with a trade takes no order", async (t) => {
   const runtime = tradingRuntime();
   runtime.durations.collect_block = 100_000;

@@ -127,8 +127,15 @@ export function givesCarriedOver(taken: ReadonlyMap<string, number> | undefined,
 export interface DecisionSeen {
   readonly heardAt: number;
   readonly seenOfferId?: string;
+  /** The line was routed act or later: the model took the speaker's request, which a gift to them answers. */
+  readonly asked?: boolean;
   /** The line the model spoke with the decision: the terms are compared with its words (a log only). */
   readonly say?: string;
+}
+
+/** A gift asked for (spec 2026-11-07-gift-asked-for D1): the terms give and ask nothing back, the line was taken as a request, and the partner is no bot of this brain (those keep the board path). */
+export function isAskedGift(deal: Pick<Trade, "give" | "get">, seen: DecisionSeen | undefined, local: boolean): boolean {
+  return seen?.asked === true && !local && deal.give.length > 0 && deal.get.length === 0;
 }
 
 /** The terms' items the spoken line names with another number (`16 glass_pane` in the words, 1 in the terms), as log lines; empty when the words agree with the terms. */
