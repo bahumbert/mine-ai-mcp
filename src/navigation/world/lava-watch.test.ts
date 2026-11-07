@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { flatWorld } from "../../test-support/navigation.js";
 import { blockKey } from "./world.js";
-import { lavaWatchCells } from "./lava-watch.js";
+import { lavaWatchCells, lavaWatchedCells } from "./lava-watch.js";
 
 /** The flat world's feet cell is y 63 and its head cell y 64; lava is put by hand. */
 const ARRIVAL = { x: 0, y: 63, z: 0 };
@@ -32,3 +32,10 @@ test("lava far from the cell, or under its floor, is not watched", () => {
 test("an unloaded neighbourhood watches nothing", () => {
   assert.deepEqual(lavaWatchCells(flatWorld(), { x: 100, y: 63, z: 100 }), []);
 });
+
+test("with no lava near, the 9 cells are still lava-watched", () => {
+  const keys = new Set(lavaWatchedCells(ARRIVAL).map(blockKey));
+  assert.equal(keys.size, 9);
+  const expected = [{ x: 0, y: 65, z: 0 }];
+  for (const y of [63, 64]) for (const [x, z] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) expected.push({ x: x!, y, z: z! });
+  for (const cell of expected) assert.ok(keys.has(blockKey(cell)), JSON.stringify(cell));});

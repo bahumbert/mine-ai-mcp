@@ -270,6 +270,7 @@ export class NavigationRun {
   readonly #visitedFeet = new Set<number>();
   /** What the committed route being walked depends on. */
   #routeDependencies: ReadonlySet<number> = new Set<number>();
+  #routeLavaDependencies: ReadonlySet<number> = new Set<number>();
   #routeExecutor: RouteExecutor | undefined;
   /** The search running alongside the route being walked, held so settlement can stop and drain it. */
   #pending: PendingContinuation | null = null;
@@ -324,7 +325,7 @@ export class NavigationRun {
     // Only a committed route owns an execution dependency worth stopping.
     // Every selected step checks its concrete preconditions again before it
     // moves, so an old search result cannot execute stale world assumptions.
-    const classification = this.context.ledger.classify(change, this.#routeDependencies, monotonicNow());
+    const classification = this.context.ledger.classify(change, this.#routeDependencies, monotonicNow(), this.#routeLavaDependencies);
     this.#counters[CHANGE_COUNTER[classification]] += 1;
     this.#events.emit({ kind: "world_change", classification, change });
     this.#arrivalRepeat.worldChanged(change);
@@ -834,6 +835,7 @@ export class NavigationRun {
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
+    this.#routeLavaDependencies = plan.lavaDependencies;
     this.#events.emit({
       kind: "route_committed",
       planId: plan.id,

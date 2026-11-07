@@ -197,6 +197,7 @@ export function routePlan(steps: readonly PlannedStep[], options: { id?: string;
     endNode: { feet: last.to, remainingScaffolds: 0, overlayId: "overlay:0" },
     steps: [...steps],
     dependencies: new Set(),
+    lavaDependencies: new Set(),
     totalCost: options.totalCost ?? steps.reduce((sum, step) => sum + step.cost.total, 0),
     complete: true,
   };

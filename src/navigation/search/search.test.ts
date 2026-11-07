@@ -13,6 +13,10 @@ import { movementList } from "../movements/movement-candidates.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "../navigate.js";
 import type { StepField } from "../step-field.js";
+import { ExpectedMutationLedger } from "../execution/mutations.js";
+import { monotonicNow } from "../../utils/monotonic-clock.js";
+import { MemoryWorld } from "../world/memory-world.js";
+import { blockKey } from "../world/world.js";
 import type { SearchLimits } from "./search-result.js";
 import { IncrementalSearch, type SearchUpdate } from "./search.js";
 
@@ -96,6 +100,7 @@ function searchOver(
     limits?: SearchLimits;
     now?: () => number;
     stepField?: StepField;
+    world?: MemoryWorld;
   } = {},
 ): IncrementalSearch {
   return new IncrementalSearch({
@@ -105,7 +110,7 @@ function searchOver(
     ...(options.limits ? { limits: options.limits } : {}),
     now: options.now ?? (() => 0),
     context: {
-      world: flatWorld(),
+      world: options.world ?? flatWorld(),
       policy: createMovementPolicy(),
       player: WELL_FED,
       catalogue,
@@ -593,4 +598,32 @@ test("the farthest visited node counts height as well as the level, and a search
   }] : []));
   const tall = searchOver(NOWHERE, climb, { id: "tall" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
   assert.equal(tall.evidence.farthestVisited, 3);
+});
+
+/*
+ * Lava that starts 3 cells from a route cell is outside the near-lava scan (2 cells), so the route gained no dependency
+ * there; the flow reaches the cell beside the route one flow step before it fills the route cell (plan 2026-11-07-p4-06b
+ * T3b). The lava dependencies are watched whatever lies near. The search reads no dimension: the Nether (flow every 10
+ * ticks) changes when the flow arrives, not which cell is watched.
+ */
+test("lava flowing into a cell beside a route cell invalidates the route, for a flow that began 3 cells away", () => {
+  const world = flatWorld();
+  const lava = { stateId: 10, traits: { empty: true, liquid: "lava", liquidLevel: 8, damaging: true } } as const;
+  world.load({ x: 1, y: 63, z: 3 }, lava);
+  const done = expect(
+    searchOver(destination({ x: 3, y: 63, z: 0 }), createMovementCatalogue(), { id: "beside-lava", world }).advance({
+      maximumExpansions: 1_000,
+      maximumMilliseconds: Infinity,
+    }),
+    "complete",
+  );
+  const beside = { x: 1, y: 63, z: 1 };
+  assert.ok(done.plan.lavaDependencies.has(blockKey(beside)), "the cell beside the route is a lava dependency");
+  assert.equal(done.plan.dependencies.has(blockKey(beside)), false, "and not a plain one: a non-lava change there is irrelevant");
+
+  const before = world.blockAt(beside.x, beside.y, beside.z);
+  world.load(beside, lava);
+  const flow = { position: beside, before, after: world.blockAt(beside.x, beside.y, beside.z), worldRevision: world.revision };
+  const ledger = new ExpectedMutationLedger();
+  assert.equal(ledger.classify(flow, done.plan.dependencies, monotonicNow(), done.plan.lavaDependencies), "invalidating");
 });

@@ -102,6 +102,8 @@ export interface RoutePlan {
   readonly steps: readonly PlannedStep[];
   /** Every cell the route's preconditions read, as packed cell keys. */
   readonly dependencies: ReadonlySet<number>;
+  /** The cells lava could flow through into a route cell, as packed cell keys: only a change involving lava there invalidates. */
+  readonly lavaDependencies: ReadonlySet<number>;
   readonly totalCost: number;
   readonly complete: boolean;
 }

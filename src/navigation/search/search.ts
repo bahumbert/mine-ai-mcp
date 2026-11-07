@@ -28,7 +28,7 @@ import type { ResolvedGoal } from "../goals/goal.js";
 import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
-import { lavaWatchCells } from "../world/lava-watch.js";
+import { lavaWatchCells, routeLavaDependencies } from "../world/lava-watch.js";
 import { blockKey, packKey } from "../world/world.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { digContextAt } from "./dig-context.js";
@@ -273,6 +273,7 @@ function buildPlan(
     endNode: endState.node,
     steps: Object.freeze(steps),
     dependencies,
+    lavaDependencies: routeLavaDependencies(steps.map((step) => step.to)),
     totalCost: steps.reduce((total, step) => total + step.cost.total, 0),
     complete: complete && steps.length === route.length,
   });

@@ -123,3 +123,21 @@ test("a break that brings a column down owns every change in that column", async
   const outside = { x: 2, y: 64, z: 0 };
   assert.equal(ledger.classify(change(outside, 2), new Set([blockKey(outside)]), monotonicNow()), "invalidating");
 });
+
+test("a change at a lava dependency invalidates only when lava is in it before or after", () => {
+  const world = flatWorld();
+  const ledger = new ExpectedMutationLedger();
+  const cell = { x: 1, y: 63, z: 1 };
+  const lavaDependencies = new Set([blockKey(cell)]);
+  const lava = { stateId: 10, traits: { empty: true, liquid: "lava", liquidLevel: 8, damaging: true } } as const;
+  const classify = (block: { stateId: number; traits?: typeof lava.traits }) => {
+    const before = world.blockAt(cell.x, cell.y, cell.z);
+    world.load(cell, block);
+    const after = world.blockAt(cell.x, cell.y, cell.z);
+    return ledger.classify({ position: cell, before, after, worldRevision: world.revision }, new Set(), monotonicNow(), lavaDependencies);
+  };
+  assert.equal(classify({ stateId: 2 }), "irrelevant", "a block placed there is not lava");
+  assert.equal(classify({ stateId: 0 }), "irrelevant", "a block removed there is not lava");
+  assert.equal(classify(lava), "invalidating", "lava flowing in");
+  assert.equal(classify({ stateId: 0 }), "invalidating", "lava receding is a change worth a look too");
+});
