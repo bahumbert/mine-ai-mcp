@@ -1,0 +1,72 @@
+template: ../../templates/flat-single-action.yaml
+name: crops-grow-near-a-player
+tags: [regression]
+description: >-
+  Why planted crops are almost never harvested (plan 2026-11-07-p4-08b-crops T1): crops grow only while a player is
+  near. Two identical 3 x 3 plots, farmland at moisture 7 around one water cell and eight cells of wheat at age 0.
+  Plot N is two blocks from the only player; plot F is 196 blocks away from it (192 east, 40 north), its chunk force-loaded by the
+  scenario's own `forceload` for the whole trial. The random tick speed is 3000, so a plot that is simulated ripens in seconds. The actor stands still
+  for 30 seconds (view_status after a wait). Then N must be all ripe (age 7) while F is still all age 0, both read at
+  the same moment. If F ripens or changes at all the goal never holds: that is the finding, not a failure to loosen.
+  The scenario measures a vanilla rule (the facts line `farming.md` "Where crops grow"), not mine-ai-mcp code.
+
+world:
+  gamerules:
+    # 1000 left the near plot short of age 7 on one cell of 8 in 1 run of 3 (30 s = 600 ticks): a corner cell grows
+    # with chance about 1/10 per random tick it gets (vanilla CropBlock growth speed 2.75, game code, unmeasured) and
+    # gets 1000/4096 = 0.24 of them per tick, so 7 stages take about 290 ticks (sd about 110). At 3000 it takes
+    # about 100 (sd about 40): 600 ticks is 12 sd away.
+    randomTickSpeed: 3000
+
+geometry:
+  # Plot N: x 2..4, z -1..1, water at (3, -61, 0), two blocks from the actor at (0.5, 0.5).
+  - fill: { block: "farmland[moisture=7]", from: [2, -61, -1], to: [4, -61, 1] }
+  - fill: { block: water, from: [3, -61, 0], to: [3, -61, 0] }
+  - fill: { block: "wheat[age=0]", from: [2, -60, -1], to: [4, -60, 1] }
+  - fill: { block: air, from: [3, -60, 0], to: [3, -60, 0] }
+  # Plot F: the same plot at x 192..194, z -40..-38 (196 blocks from the actor), water at (193, -61, -39), all in
+  # one chunk. Mine Labs pins the arena only until the players have joined (the server log shows "Unmarked ... for
+  # force loading" before the trial starts), so without the `forceload` in `setup` below F's chunk unloads within
+  # seconds and every block read there fails (probe of 2026-11-07: F read fine at the first poll, gone at 5 s).
+  - fill: { block: "farmland[moisture=7]", from: [192, -61, -40], to: [194, -61, -38] }
+  - fill: { block: water, from: [193, -61, -39], to: [193, -61, -39] }
+  - fill: { block: "wheat[age=0]", from: [192, -60, -40], to: [194, -60, -38] }
+  - fill: { block: air, from: [193, -60, -39], to: [193, -60, -39] }
+
+# F's chunk stays loaded for the whole trial (forced, so loaded but 196 blocks from the only player). A `setup`
+# forceload does not last: Mine Labs' release of the arena pin after the join removes every chunk of the arena box,
+# F's included (server log, probe 2026-11-07: the chunk was marked, then unmarked with the box). So the tick commands
+# force it again every tick (a repeat of an already forced chunk is a harmless no-op). No `reset` line takes the pin
+# away: the arena pin that Mine Labs re-marks for the restore and releases afterwards covers F's chunk too, and a
+# `forceload remove` in `reset` would run before the setup fills and before the restore clone. The tick list
+# replaces the template's, so the template's own line is kept here.
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  - "forceload add 192 -40 194 -38"
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/action-sequence.ts
+
+params:
+  actions:
+    - { action: view_status, input: {}, waitTicks: 600 }
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: completion, who: Actor }
+    - kind: blocksAt
+      block: "wheat[age=7]"
+      positions: [[2, -60, -1], [3, -60, -1], [4, -60, -1], [2, -60, 0], [4, -60, 0], [2, -60, 1], [3, -60, 1], [4, -60, 1]]
+    - kind: blocksAt
+      block: "wheat[age=0]"
+      positions: [[192, -60, -40], [193, -60, -40], [194, -60, -40], [192, -60, -39], [194, -60, -39], [192, -60, -38], [193, -60, -38], [194, -60, -38]]

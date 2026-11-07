@@ -86,12 +86,12 @@ function sameButMoved(original: string, moved: string): { readonly problem: stri
 }
 
 /** Index of the z word of each position triple, by verb: a small table apart from the code under test. */
-const Z_WORDS: Readonly<Record<string, readonly number[]>> = { fill: [3, 6], setblock: [3], clone: [3, 6, 9], summon: [4] };
+const Z_WORDS: Readonly<Record<string, readonly number[]>> = { fill: [3, 6], setblock: [3], clone: [3, 6, 9], summon: [4], forceload: [3, 5] };
 
 /**
  * How many z numbers of this original command the shift must have moved, counted apart from the code under test:
  * selector `z=` arguments, `execute positioned`, `if|unless block|blocks` and `item ... block` positions, and the z words of the command
- * after the last `run`. A command in a scenario that this count does not know (tp, forceload...) fails the census with
+ * after the last `run`. A command in a scenario that this count does not know (tp...) fails the census with
  * a count mismatch: extend this function with the new construct.
  */
 function zNumbersToMove(command: string): number {
