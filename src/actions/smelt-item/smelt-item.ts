@@ -442,6 +442,43 @@ async function settleAttempt(
   return { status: produced > 0 ? "partial" : "failed", error: `${error}${recoveryError}`, smelt: observed };
 }
 
+type FurnaceReady =
+  | { readonly kind: "ready"; readonly furnace: FurnaceWindow; readonly supplies: Extract<Supplies, { kind: "ready" }> }
+  | { readonly kind: "stopped"; readonly result: SmeltItemResult };
+
+/**
+ * Clear the opened furnace of this request's leftovers and check what the attempt needs. The window is closed on every
+ * way out but "ready": that hands it to `loadAndCook`, which closes it itself. An abort or a throw anywhere between the
+ * open and that hand-off (the burn report wait, the clearing, the second supplies check) must not leave it open: an open
+ * window blocks the hostile reflex's shield (`hostile-respond.ts:22`).
+ */
+async function prepareOpenFurnace(
+  bot: Bot,
+  furnace: FurnaceWindow,
+  request: ExistingFurnaceRequest,
+  progress: SmeltProgress,
+  context: ActionContext,
+  dependencies: SmeltItemDependencies,
+): Promise<FurnaceReady> {
+  let handedOff = false;
+  try {
+    progress.ownsSlots = false;
+    const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress);
+    // A resumed attempt: the fuel it put in earlier may still be burning, and a window just opened has not said so yet.
+    if (blocked === null && progress.fuelInserted > 0) await settleBurnReport(furnace, dependencies, context.signal);
+    const supplies = blocked === null ? checkSupplies(bot, request, progress, burningItems(furnace, cookTicksFor(bot, request.itemName))) : null;
+    if (blocked !== null || supplies?.kind !== "ready") {
+      return { kind: "stopped", result: supplies?.kind === "refused" ? supplies.result : stoppedAttempt(bot, request, progress, blocked!) };
+    }
+    if (progress.produced >= request.count) return { kind: "stopped", result: { status: "succeeded", smelt: progressEvidence(bot, request, progress) } };
+    progress.current = furnaceObservation(furnace);
+    handedOff = true;
+    return { kind: "ready", furnace, supplies };
+  } finally {
+    if (!handedOff) furnace.close();
+  }
+}
+
 /** One attempt at the request in one furnace: smelts what earlier attempts left, whatever stops it. */
 async function smeltAttempt(
   bot: Bot,
@@ -457,22 +494,9 @@ async function smeltAttempt(
   if (early?.kind === "refused") return early.result;
   const opened = await openRequestedFurnace(bot, request, progress, context, dependencies);
   if (opened.kind === "stopped") return opened.result;
-  const { furnace } = opened;
-  progress.ownsSlots = false;
-  const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress);
-  // A resumed attempt: the fuel it put in earlier may still be burning, and a window just opened has not said so yet.
-  if (blocked === null && progress.fuelInserted > 0) await settleBurnReport(furnace, dependencies, context.signal);
-  const supplies = blocked === null ? checkSupplies(bot, request, progress, burningItems(furnace, cookTicksFor(bot, request.itemName))) : null;
-  if (blocked !== null || supplies?.kind !== "ready") {
-    furnace.close();
-    return supplies?.kind === "refused" ? supplies.result : stoppedAttempt(bot, request, progress, blocked!);
-  }
-  if (progress.produced >= request.count) {
-    furnace.close();
-    return { status: "succeeded", smelt: progressEvidence(bot, request, progress) };
-  }
-  progress.current = furnaceObservation(furnace);
-  const cook = await loadAndCook(bot, furnace, request, supplies, progress, context, dependencies);
+  const prepared = await prepareOpenFurnace(bot, opened.furnace, request, progress, context, dependencies);
+  if (prepared.kind === "stopped") return prepared.result;
+  const cook = await loadAndCook(bot, prepared.furnace, request, prepared.supplies, progress, context, dependencies);
   const recorded = await recordAttemptOutput(bot, request, progress, cook);
   context.signal?.throwIfAborted();
   return settleAttempt(bot, request, progress, cook, recorded, context);

@@ -8,7 +8,7 @@ import minecraftData from "minecraft-data";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
 import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { ANSWERED_ATTEMPT_MS, observedFurnace } from "../../test-support/furnace.js";
-import { createSmeltItemAction, parseSmeltItemRequest, smeltItem, type SmeltItemDependencies } from "./index.js";
+import { beginSmeltItem, createSmeltItemAction, parseSmeltItemRequest, smeltItem, type SmeltItemDependencies } from "./index.js";
 
 test("a named furnace and a temporary one are exclusive, and a temporary one must be carried", async () => {
   assert.deepEqual(
@@ -505,4 +505,113 @@ test("a cancel mid-cook keeps the ingots already taken and gives back the rest",
   const raw = fixture.bot.inventory.items().find((item) => item.name === "raw_iron")?.count ?? 0;
   assert(carriedIngots(fixture.bot) >= 29, `ingots ${carriedIngots(fixture.bot)}`);
   assert.equal(carriedIngots(fixture.bot) + raw, 64);
+});
+
+// The furnace window must be closed on every way out of an attempt before the cook is handed over: an open window
+// blocks the hostile reflex's shield (`hostile-respond.ts:22`, `hostile-sense.ts:74` read `bot.currentWindow`).
+const WINDOW_SMELT = { itemName: "raw_iron", count: 3, fuelItemName: "coal", x: 2, y: 64, z: 0 } as const;
+
+type WindowFixture = ReturnType<typeof observedFurnace>;
+
+/**
+ * The fixture's furnace as Mineflayer hands a window out: opening it sets `bot.currentWindow`, and `close` clears it and
+ * emits `close` on the window and `windowClose` on the bot (`inventory.js:377-382`, `:445-452`).
+ */
+function trackWindow(fixture: WindowFixture) {
+  const { bot, furnace } = fixture;
+  const tracking = { closes: 0 };
+  furnace.close = () => {
+    tracking.closes += 1;
+    bot.currentWindow = null;
+    bot.emit("windowClose", furnace as never);
+    furnace.emit("close");
+  };
+  const openFurnace = fixture.dependencies.openFurnace;
+  const dependencies: SmeltItemDependencies = {
+    ...fixture.dependencies,
+    openFurnace: async (actor, block) => {
+      const window = await openFurnace(actor, block);
+      bot.currentWindow = window as never;
+      return window;
+    },
+  };
+  return { tracking, dependencies };
+}
+
+/** A request a reflex splits: the first attempt is aborted mid-cook, so the second finds fuel already inserted. */
+async function firstAttemptAborted(fixture: WindowFixture, clock: FakeClock) {
+  const first = new AbortController();
+  const second = new AbortController();
+  const { tracking, dependencies } = trackWindow(fixture);
+  let resumed = false;
+  const resumable: SmeltItemDependencies = {
+    ...dependencies,
+    pause: async (milliseconds, signal) => {
+      // The reflex takes the body at the second attempt's first wait, whichever wait that is.
+      if (resumed) second.abort(new Error("reflex took the body"));
+      await dependencies.pause(milliseconds, signal);
+      if (fixture.now >= 15_000 && !resumed) first.abort(new Error("reflex took the body"));
+    },
+  };
+  const run = beginSmeltItem(fixture.bot, navigation, WINDOW_SMELT, resumable, () => {});
+  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  assert.equal(tracking.closes, 1, "the aborted cook closed its window");
+  resumed = true;
+  return { run, second, tracking };
+}
+
+test("an abort inside settleBurnReport closes the furnace window", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const fixture = observedFurnace({ clock, cookMs: 10_000, reportsBurnTime: true });
+  const { run, second, tracking } = await firstAttemptAborted(fixture, clock);
+  // The reopened window has not said what is burning yet, so the attempt waits for the report.
+  fixture.furnace.properties = (() => null) as never;
+
+  await assert.rejects(clock.settle(run({ signal: second.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+
+  assert.equal(tracking.closes, 2, "the second attempt's window was closed too");
+  assert.equal(fixture.bot.currentWindow, null, "no window left: the hostile reflex can raise the shield");
+});
+
+test("a throw in the second supplies check closes the furnace window", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const fixture = observedFurnace({ clock, cookMs: 10_000, reportsBurnTime: true });
+  const { run, tracking } = await firstAttemptAborted(fixture, clock);
+  // The burn report settles on the first read; the supplies check then reads the burn time again and the window breaks.
+  const report = fixture.furnace.properties!;
+  let reads = 0;
+  fixture.furnace.properties = () => {
+    reads += 1;
+    if (reads > 1) throw new Error("window broke under the read");
+    return report();
+  };
+
+  await assert.rejects(clock.settle(run({ signal: new AbortController().signal }), ANSWERED_ATTEMPT_MS), /window broke under the read/);
+
+  assert.equal(reads, 2);
+  assert.equal(tracking.closes, 2);
+  assert.equal(fixture.bot.currentWindow, null, "no window left: the hostile reflex can raise the shield");
+});
+
+test("a throw while clearing the furnace closes the window and removes the property listener", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const fixture = observedFurnace({ clock, cookMs: 10_000 });
+  const { tracking } = trackWindow(fixture);
+  fixture.bot.openFurnace = async () => {
+    fixture.bot.currentWindow = fixture.furnace as never;
+    return fixture.furnace as never;
+  };
+  fixture.furnace.inputItem = () => {
+    throw new Error("window broke under the read");
+  };
+  const run = createSmeltItemAction(fixture.bot, navigation).begin(WINDOW_SMELT, new AbortController().signal, () => {});
+
+  await assert.rejects(clock.settle(run({ signal: new AbortController().signal }), ANSWERED_ATTEMPT_MS), /window broke under the read/);
+
+  assert.equal(tracking.closes, 1);
+  assert.equal(fixture.bot.currentWindow, null, "no window left: the hostile reflex can raise the shield");
+  assert.equal(fixture.bot._client.listenerCount("craft_progress_bar"), 0);
 });

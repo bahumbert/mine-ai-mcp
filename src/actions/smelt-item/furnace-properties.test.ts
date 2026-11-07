@@ -85,6 +85,17 @@ test("the client listener is removed when the window closes and when it fails to
   assert.equal(failing.client.listenerCount("craft_progress_bar"), 0);
 });
 
+test("the client listener is removed when the server closes the window, which only the bot's windowClose says", async () => {
+  // `inventory.js:800-807`: a `close_window` packet clears `bot.currentWindow` and emits `windowClose` on the bot, never `close` on the window.
+  const { bot, client } = openingBot([]);
+  const window = await openFurnaceWithProperties(bot, {} as never);
+  assert.equal(client.listenerCount("craft_progress_bar"), 1);
+  bot.emit("windowClose", { id: 99 } as never);
+  assert.equal(client.listenerCount("craft_progress_bar"), 1, "another window's close does not end this one's listener");
+  bot.emit("windowClose", window as never);
+  assert.equal(client.listenerCount("craft_progress_bar"), 0);
+});
+
 /** A clock whose pause plays the scripted server: `at` ms after the start, run `act`. */
 function scriptedClock(script: readonly { readonly at: number; readonly act: () => void }[]) {
   let now = 0;
