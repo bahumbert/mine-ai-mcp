@@ -56,7 +56,7 @@ jobs:
         timeout-minutes: 10
         with:
           persist-credentials: false
-      # A tag must be pre-alpha-X.Y.Z; its version is X.Y.Z (build-windows.ts refuses one the manifest does not say).
+      # A tag must be pre-alpha-X.Y.Z; its version is X.Y.Z, the version of the setup (build-windows.ts writes it into the shipped manifest).
       - name: Tag guard
         id: guard
         if: github.ref_type == 'tag'

@@ -1,5 +1,5 @@
 ; Mine AI installer (Inno Setup 6.4 or later: ExecAndLogOutput), built by launcher/src/build/build-windows.ts, which passes:
-;   /DStageDir=<staged package> /DOutputDir=<folder for the setup exe> /DAppVersion=<manifest version>
+;   /DStageDir=<staged package> /DOutputDir=<folder for the setup exe> /DAppVersion=<the tag's version, or the manifest's for a local build>
 ;   and, for a signed build, /DSign=1 /SMineAiSign=<sign command with $f>.
 ; The pages after the file copy ask the questions: the GPU check, the endpoint test and the downloads are
 ; `bun.exe launcher\src\main.js install <step>` (the launcher's own tested code, bundled), and the launcher is on disk only after
