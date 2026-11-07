@@ -10,7 +10,7 @@ import type { FightOutcome } from "../../control/combat/engagement.js";
 import { CombatExecution } from "../../control/combat/execution.js";
 import { CombatTactics } from "../../control/combat/tactics.js";
 import { observeCombatDecision } from "../../control/combat/observation.js";
-import type { CombatProgressChange } from "../../control/combat/progress.js";
+import { tickBudgetWallMs, type CombatProgressChange } from "../../control/combat/progress.js";
 import { answeredResponses } from "../../control/combat/scopes/response.js";
 import { CombatPerception } from "../../perception/combat/observations.js";
 import { isThreat } from "../../perception/combat/threats.js";
@@ -212,7 +212,7 @@ export class FightScene implements Disposable {
   };
   readonly guardLimit = (): CombatOutcome => ({
     ...this.result("unreachable"),
-    observation: `Ranged guard did not observe a finished volley within ${this.policy.combat.volley_wait_ticks} ticks.`,
+    observation: `Ranged guard did not observe a finished volley within ${this.policy.combat.volley_wait_ticks} ticks or ${tickBudgetWallMs(this.policy.combat.volley_wait_ticks) / 1000} s.`,
   });
   readonly roofTargetHostile = () =>
     isThreat(this.bot, this.requestedTarget, this.perception) ||

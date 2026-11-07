@@ -11,11 +11,19 @@ import {
   safeSupportingCell,
 } from "../../navigation/world/block-geometry.js";
 import type { BlockPosition, Position3, WorldView } from "../../navigation/world/world.js";
+import { monotonicNow } from "../../utils/index.js";
 import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { findPlacementSupport, occupiedCell, placeBlock, type BlockPlacementResult } from "../../world/placement.js";
 import { lowerImpulseLanding, projectedFooting } from "../positioning/footing.js";
+import type { ReflexLimits } from "../control/contract.js";
+
+/**
+ * A landing may take 30 s; 5 s without landing, entering water or falling on (the base probe) ends the footing reflex,
+ * then a 2 s pause. The recovery keeps the 30 s as its own bound, so a recovery inside a fight ends there too.
+ */
+export const FOOTING_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 5_000, standDownMs: 2_000 };
 
 const impulseSchema = z.object({
   entityId: z.number(),
@@ -150,8 +158,19 @@ export class FootingRecovery implements Disposable {
       steer();
       // The velocity packet can precede the physics tick that leaves the floor.
       await waitForTicksOrCancel(this.bot, 1, signal);
+      // The footing reflex ends at this ceiling by itself; a recovery inside a fight runs under the fight's own
+      // 10 minute ceiling, so it keeps the reflex's number as its own bound.
+      const deadline = monotonicNow() + FOOTING_LIMITS.ceilingMs;
       while (this.bot.health > 0) {
         signal.throwIfAborted();
+        if (monotonicNow() >= deadline) {
+          this.#state = {
+            ...this.#state!,
+            phase: "failed",
+            reason: `footing not recovered in ${FOOTING_LIMITS.ceilingMs / 1000} s`,
+          };
+          return "failed";
+        }
         if (canReleaseOnObservedGround(this.world, this.bot.entity)) {
           this.#state = { ...this.#state!, phase: "landed" };
           return "landed";
@@ -173,48 +192,7 @@ export class FootingRecovery implements Disposable {
         }
         if (protect) await protect();
         const landing = projectedFooting(position, this.bot.entity.velocity, landingSupport.y);
-        const cell = { x: Math.floor(landing.x), y: landingSupport.y - 1, z: Math.floor(landing.z) };
-        // Place the first missing cell along the outgoing flight, so each new
-        // block has a real attachment face even when the landing is two cells out.
-        const distance = Math.hypot(landing.x - position.x, landing.z - position.z);
-        const samples = Math.max(1, Math.ceil(distance * 4));
-        for (let step = 0; step <= samples; step++) {
-          cell.x = Math.floor(position.x + ((landing.x - position.x) * step) / samples);
-          cell.z = Math.floor(position.z + ((landing.z - position.z) * step) / samples);
-          if (isSafeSupport(this.world.blockAt(cell.x, cell.y, cell.z))) continue;
-          const key = `${cell.x},${cell.y},${cell.z}`;
-          if (attempted.has(key)) continue;
-          const block = this.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
-          const support = findPlacementSupport(this.bot, cell);
-          const item = preferredScaffoldItem(this.bot);
-          if (!block || !isReplaceableForPlacement(block, this.bot.version) || !support || !item || occupiedCell(this.bot, cell))
-            continue;
-          const face = support.support.position.offset(
-            0.5 + support.face.x / 2,
-            0.5 + support.face.y / 2,
-            0.5 + support.face.z / 2,
-          );
-          if (face.distanceTo(position.offset(0, observedEyeHeight(this.bot.entity), 0)) > 4.5) continue;
-          attempted.add(key);
-          this.#state = { ...this.#state!, phase: "placing", placement: { cell: { ...cell }, result: "pending" } };
-          const result = await placeBlock(this.bot, {
-            item,
-            ...support,
-            expectedCells: [{ ...cell }],
-            signal,
-            matches: (placed) => placed.name === item.name,
-          });
-          this.#state = {
-            ...this.#state!,
-            phase: "steering",
-            placement: {
-              cell: { ...cell },
-              result: result.kind,
-              ...(result.kind === "failed" && { error: result.error }),
-            },
-          };
-          break;
-        }
+        await this.#placeFirstMissingCell(position, landing, landingSupport.y, attempted, signal);
         await waitForTicksOrCancel(this.bot, 1, signal);
       }
       this.#state = {
@@ -238,6 +216,56 @@ export class FootingRecovery implements Disposable {
         const item = this.bot.inventory.items().find((item) => item.name === heldItemName);
         if (item) await this.bot.equip(item, "hand");
       }
+    }
+  }
+
+  /** Place the first missing cell along the outgoing flight, so each new block has a real attachment face even when the landing is two cells out. */
+  async #placeFirstMissingCell(
+    position: Vec3,
+    landing: Position3,
+    supportY: number,
+    attempted: Set<string>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const cell = { x: Math.floor(landing.x), y: supportY - 1, z: Math.floor(landing.z) };
+    const distance = Math.hypot(landing.x - position.x, landing.z - position.z);
+    const samples = Math.max(1, Math.ceil(distance * 4));
+    for (let step = 0; step <= samples; step++) {
+      cell.x = Math.floor(position.x + ((landing.x - position.x) * step) / samples);
+      cell.z = Math.floor(position.z + ((landing.z - position.z) * step) / samples);
+      if (isSafeSupport(this.world.blockAt(cell.x, cell.y, cell.z))) continue;
+      const key = `${cell.x},${cell.y},${cell.z}`;
+      if (attempted.has(key)) continue;
+      const block = this.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+      const support = findPlacementSupport(this.bot, cell);
+      const item = preferredScaffoldItem(this.bot);
+      if (!block || !isReplaceableForPlacement(block, this.bot.version) || !support || !item || occupiedCell(this.bot, cell))
+        continue;
+      const face = support.support.position.offset(
+        0.5 + support.face.x / 2,
+        0.5 + support.face.y / 2,
+        0.5 + support.face.z / 2,
+      );
+      if (face.distanceTo(position.offset(0, observedEyeHeight(this.bot.entity), 0)) > 4.5) continue;
+      attempted.add(key);
+      this.#state = { ...this.#state!, phase: "placing", placement: { cell: { ...cell }, result: "pending" } };
+      const result = await placeBlock(this.bot, {
+        item,
+        ...support,
+        expectedCells: [{ ...cell }],
+        signal,
+        matches: (placed) => placed.name === item.name,
+      });
+      this.#state = {
+        ...this.#state!,
+        phase: "steering",
+        placement: {
+          cell: { ...cell },
+          result: result.kind,
+          ...(result.kind === "failed" && { error: result.error }),
+        },
+      };
+      return;
     }
   }
 

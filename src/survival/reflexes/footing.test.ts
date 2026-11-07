@@ -41,6 +41,15 @@ test("a body that hangs in the air with no landing is released after 5 s without
   await scene.dispose();
 });
 
+test("the footing reflex on a never-safe support ends by its 30 s ceiling", async () => {
+  const scene = fallingScene();
+  for (let tick = 0; tick < 580; tick++) await scene.step(1);
+  assert.equal(scene.runner.status().activeAction?.action, "recover_footing", "29 s of falling a block per tick: still marking");
+  for (let tick = 0; tick < 40; tick++) await scene.step(1);
+  assert.equal(scene.runner.status().owner, "idle", "the 30 s ceiling ends it although every tick marks progress");
+  await scene.dispose();
+});
+
 test("landing marks, and so does entering water", async () => {
   const scene = fallingScene();
   for (let tick = 0; tick < 80; tick++) await scene.step(0);

@@ -5,6 +5,7 @@ import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { observedEyeHeight } from "../../../world/block-visibility.js";
 import { clearCombatRay } from "../../../world/entity-geometry.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
+import { tickBudgetWall, tickBudgetWallMs } from "../../control/combat/progress.js";
 import { positionThreat } from "../../perception/combat/observations.js";
 import { roofLurePath, type RoofPosition } from "../../positioning/combat/planner.js";
 import type { AttemptBudget, ProgressBudget } from "../../state/budgets.js";
@@ -39,6 +40,11 @@ export class EndermanFight implements Disposable {
         ? this.targetWindow("enderman_return", `target:${scene.targetId}`)
         : null;
   }
+  /** The wait's two bounds as the model reads them: its physics ticks, or the wall time they stand for, whichever came first. */
+  private get waitLimit(): string {
+    const ticks = this.scene.policy.combat.enderman_wait_ticks;
+    return `${ticks} ticks or ${tickBudgetWallMs(ticks) / 1000} s`;
+  }
   readonly targetWindow = (name: string, scope: string) =>
     this.scene.survival.budgets.progress({
       name,
@@ -46,6 +52,7 @@ export class EndermanFight implements Disposable {
       unit: "ticks",
       limit: this.scene.policy.combat.enderman_wait_ticks,
       measure: () => this.scene.elapsedTicks,
+      wall: tickBudgetWall(this.scene.policy.combat.enderman_wait_ticks),
       progress: "confirmed_target_damage",
       exhaustion:
         "Return unreachable or reject this observed position; defensive hits and commands do not renew quarry progress.",
@@ -63,6 +70,7 @@ export class EndermanFight implements Disposable {
       unit: "ticks",
       limit: this.scene.policy.combat.enderman_wait_ticks,
       measure: () => this.scene.elapsedTicks,
+      wall: tickBudgetWall(this.scene.policy.combat.enderman_wait_ticks),
       exhaustion: "Return without constructing a roof when no hostility was observed.",
     }),
   });
@@ -215,7 +223,7 @@ export class EndermanFight implements Disposable {
       if (this.state.budget.exhausted || unusable || rejected) {
         const stalled = unusable || rejected
           ? "This shelter has no productive attack opening or level bait route to the quarry; seeking another position."
-          : `No confirmed damage to enderman#${this.scene.targetId} for ${this.scene.policy.combat.enderman_wait_ticks} ticks from the roof; confirmed hits ${this.state.hits}.`;
+          : `No confirmed damage to enderman#${this.scene.targetId} for ${this.waitLimit} from the roof; confirmed hits ${this.state.hits}.`;
         if (await this.weapons.defendContact()) return { kind: "outcome", outcome: this.unreachableRoof(stalled) };
         if (this.scene.movement === "hold" || canMeleeTarget(this.scene.bot, this.scene.target))
           return { kind: "outcome", outcome: this.unreachableRoof(stalled) };
@@ -363,7 +371,7 @@ export class EndermanFight implements Disposable {
           return {
             kind: "outcome",
             outcome: this.unreachableRoof(
-              `No hostility observed from enderman#${this.scene.targetId} after ${this.scene.policy.combat.enderman_wait_ticks} provoking ticks; no roof blocks were spent.`,
+              `No hostility observed from enderman#${this.scene.targetId} after ${this.waitLimit} of provoking; no roof blocks were spent.`,
             ),
           };
         if (this.state.plan.placements.length === 0 && this.scene.position.hasHeightProtection() &&
@@ -465,7 +473,7 @@ export class EndermanFight implements Disposable {
       return {
         kind: "outcome",
         outcome: this.unreachableRoof(
-          `No confirmed damage to enderman#${this.scene.targetId} for ${this.scene.policy.combat.enderman_wait_ticks} ticks during defensive hold.`,
+          `No confirmed damage to enderman#${this.scene.targetId} for ${this.waitLimit} during defensive hold.`,
         ),
       };
 

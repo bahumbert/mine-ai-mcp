@@ -2,6 +2,7 @@ import { isIncomingArrow } from "../../perception/combat/shield-projectiles.js";
 import { Vec3 } from "vec3";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
+import { tickBudgetWallMs } from "../../control/combat/progress.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { targetFacts } from "../../perception/combat/target.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
@@ -206,7 +207,7 @@ export class CoverFight {
         kind: "position_rejected",
         targetId: this.scene.target.id,
         position: plan.protected,
-        reason: `No confirmed quarry damage during ${this.scene.policy.combat.protected_wait_ticks} protected waiting ticks.`,
+        reason: `No confirmed quarry damage during ${this.scene.policy.combat.protected_wait_ticks} protected waiting ticks or ${tickBudgetWallMs(this.scene.policy.combat.protected_wait_ticks) / 1000} s.`,
       });
       this.scene.position.rejectCover();
       this.scene.protectedProgress.leave();

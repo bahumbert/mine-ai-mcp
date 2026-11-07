@@ -1030,6 +1030,28 @@ test("an excavating approach stops when its target reaches an unsafe ledge", asy
   assert.equal(stoppedForContact, true, "stop excavation before choosing an existing defensive stance");
 });
 
+test("after a failed footing recovery the fight goes on or settles within its limits", async () => {
+  const fixture = combatFixture(["iron_sword", "shield"]);
+  let pendingImpulse = true;
+  let recoveries = 0;
+  using recovery = new FootingRecovery(fixture.bot, new MemoryWorld());
+  Object.defineProperty(recovery, "needed", { get: () => pendingImpulse });
+  // The recovery's own 30 s bound answers `failed` and its state leaves `pending`, as the real one does.
+  recovery.recover = async () => {
+    recoveries++;
+    pendingImpulse = false;
+    return "failed";
+  };
+  const result = await createCombatController(fixture.bot, navigationFixture(), undefined, recovery).engage(
+    fixture.target.id,
+    new AbortController().signal,
+    "pursue",
+  );
+  assert.equal(recoveries, 1, "one failed recovery, not a loop of them");
+  assert.equal(result.kind, "failed");
+  assert.match("observation" in result ? String(result.observation) : "", /Footing recovery could not establish a safe landing/);
+});
+
 test("a carried bow cannot satisfy a route that is finding a safe melee stance", async () => {
   const fixture = blazePreflightFixture(["iron_sword", "bow", "arrow", "cobblestone"]);
   fixture.bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;

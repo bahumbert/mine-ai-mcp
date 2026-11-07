@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { type FakeClock, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
 import { FootingRecovery } from "./footing.js";
 
@@ -17,7 +17,7 @@ async function ticksUntilSettled(clock: FakeClock, pending: Promise<unknown>, ma
   return ticks;
 }
 
-function fixture(wide = false) {
+function fixture(wide = false, clock?: FakeClock) {
   const world = new MemoryWorld();
   for (let x = -3; x <= 5; x++)
     for (let z = -3; z <= 3; z++)
@@ -26,6 +26,7 @@ function fixture(wide = false) {
   const harness = createFakeBot({
     position: new Vec3(0.8, 47, 0.5),
     groundY: null,
+    clock,
   });
   const { bot } = harness;
   const entity = bot.entity;
@@ -118,6 +119,34 @@ test("a cancel ends the wait inside the steering loop at once when physics stops
   await assert.rejects(f.clock.settle(recovery.recover(abort.signal), 1_000), /bot died/);
   assert.equal(ticks, 1, "the loop was waiting on its second tick, not past it");
   assert.equal(f.controls.size, 0);
+});
+
+test("recover on a never-safe support inside a fight returns failed after 30 s", async () => {
+  const mocked = createFakeClock({ mode: "mocked" });
+  using _installed = mocked.install();
+  const f = fixture(false, mocked);
+  using recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  // Above the support and in the air, nothing to place: the loop only waits for the next tick, as a fight's recover does.
+  f.onEachTick(() => {
+    f.entity.position.y = 48;
+    f.entity.onGround = false;
+  });
+  let protectCalls = 0;
+  const recovered = recovery.recover(new AbortController().signal, async () => { protectCalls++; });
+  const settled = watch(recovered);
+  let slices = 0;
+  while (!settled.over && slices < 800) {
+    await mocked.advance(50);
+    slices++;
+  }
+  assert.equal(await recovered, "failed");
+  assert.ok(slices >= 590 && slices <= 620, `failed after ${slices * 50} ms of clock, not at the 30 s bound`);
+  assert.match(recovery.snapshot()?.reason ?? "", /footing not recovered in 30 s/);
+  assert.equal(recovery.snapshot()?.phase, "failed");
+  assert.ok(protectCalls > 100, "the fight's protection ran each tick until the bound");
+  assert.equal(f.controls.size, 0);
+  assert.equal(recovery.active, false);
 });
 
 test("an observed lower terrace preserves protection and resumes only after actual landing", async () => {

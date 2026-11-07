@@ -3,7 +3,9 @@ export type GuardOutcome = "volley_finished" | "fight_ended" | "windup_limit" | 
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
-import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { monotonicNow } from "../../../utils/index.js";
+import { PhysicsStoppedError, waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { tickBudgetWallMs } from "../../control/combat/progress.js";
 import { observedEyeHeight, STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { exposedBodyFrom, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
@@ -125,7 +127,9 @@ export class FightWeapons {
         } });
       }
       await this.raiseGuard();
-      for (let tick = 0; tick < this.scene.policy.combat.volley_wait_ticks && !this.scene.settled(); tick++) {
+      const volleyTicks = this.scene.policy.combat.volley_wait_ticks;
+      const wallEnd = monotonicNow() + tickBudgetWallMs(volleyTicks);
+      for (let tick = 0; tick < volleyTicks && monotonicNow() < wallEnd && !this.scene.settled(); tick++) {
         const guarded = this.itemUse.shieldRaised;
         await this.maintainGuard();
         if (guarded && !this.itemUse.shieldRaised) return true;
@@ -141,7 +145,7 @@ export class FightWeapons {
         }
         await this.scene.bot.lookAt(defence.facing, true);
         this.scene.signal.throwIfAborted();
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+        if (!(await this.waitTickBefore(wallEnd))) break;
       }
       return this.scene.settled();
     });
@@ -154,7 +158,10 @@ export class FightWeapons {
       this.scene.reportDecision({ kind: "response", evidence: {
         boundary: "final_volley", stage: "started", projectileIds: [...pending].map((entity) => entity.id),
       } });
-      while (pending.size) {
+      // Bounded like the guard loop: a projectile that never clears cannot hold the body past the volley budget.
+      const volleyTicks = this.scene.policy.combat.volley_wait_ticks;
+      const wallEnd = monotonicNow() + tickBudgetWallMs(volleyTicks);
+      for (let tick = 0; pending.size && tick < volleyTicks && monotonicNow() < wallEnd; tick++) {
         await this.scene.responsiveness.checkpoint(this.scene.signal);
         this.scene.signal.throwIfAborted();
         await this.maintainGuard();
@@ -174,22 +181,47 @@ export class FightWeapons {
         this.scene.signal.throwIfAborted();
         await this.itemUse.raiseShield();
         // holdFacing intentionally stops at target death; this wait follows projectile lifetime instead.
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+        if (!(await this.waitTickBefore(wallEnd))) break;
       }
       this.scene.reportDecision({ kind: "response", evidence: {
         boundary: "final_volley", stage: "ended", reason: pending.size ? "guard_unavailable" : "volley_clear",
       } });
     });
   };
+  /**
+   * Hold `ticks` physics ticks, but never past their wall twin (`tickBudgetWallMs`): slow or stopped ticks end the hold
+   * early. Only the time spent waiting for ticks counts: a shield re-equip or a footing recovery in between is not
+   * the server being slow, and must not cost the hold its ticks.
+   */
   readonly holdFacing = async (ticks: number): Promise<void> => {
-    for (let held = 0; held < ticks && !this.scene.settled(); held += 1) {
+    const limitMs = tickBudgetWallMs(ticks);
+    let waitedMs = 0;
+    for (let held = 0; held < ticks && waitedMs < limitMs && !this.scene.settled(); held += 1) {
       await this.maintainGuard();
       if (this.scene.footingRecovery.needed) await this.interruptions.recoverFooting();
       if (this.interruptions.returnToCover()) break;
       if (this.itemUse.shieldRaised) await this.faceGuard();
       else await this.face();
-      await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+      const waitStart = monotonicNow();
+      const ticked = await this.waitTickBefore(waitStart + limitMs - waitedMs);
+      waitedMs += monotonicNow() - waitStart;
+      if (!ticked) break;
     }
+  };
+  /**
+   * Wait one physics tick, at most until `wallEnd` on `monotonicNow()`. False when the wall time ran out first (the
+   * ticks stopped or crawled): the caller leaves its loop. An abort still rejects with the signal's reason.
+   */
+  private readonly waitTickBefore = async (wallEnd: number): Promise<boolean> => {
+    const wallMs = wallEnd - monotonicNow();
+    if (wallMs <= 0) return false;
+    try {
+      await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal, { wallMs });
+    } catch (cause) {
+      if (cause instanceof PhysicsStoppedError) return false;
+      throw cause;
+    }
+    return true;
   };
   readonly equip = async (loadout: CombatLoadout) => {
     const previous = this.scene.bot.heldItem?.name ?? null;
@@ -238,6 +270,7 @@ export class FightWeapons {
       this.scene.projectileGuards += 1;
       let held = 0;
       await this.raiseGuard();
+      const wallEnd = monotonicNow() + tickBudgetWallMs(this.scene.policy.combat.volley_wait_ticks);
       return await this.itemUse.guardUntil<GuardOutcome>(() => {
         if (this.scene.settled()) return "fight_ended";
         if (this.interruptions.returnToCover()) return "return_to_cover";
@@ -245,7 +278,7 @@ export class FightWeapons {
           this.scene.execution.progress.volleyFinished();
           return "volley_finished";
         }
-        return held++ >= this.scene.policy.combat.volley_wait_ticks ? "windup_limit" : null;
+        return held++ >= this.scene.policy.combat.volley_wait_ticks || monotonicNow() >= wallEnd ? "windup_limit" : null;
       });
     });
   readonly clearShot = (feet = this.scene.bot.entity.position) => {
