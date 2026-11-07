@@ -28,6 +28,7 @@ import { boatLeftEvidence, retryBoatTakeBack } from "./boat-left-retry.js";
 import { describeBoatLeft } from "./boat-take-back.js";
 import { describeEscape } from "./describe-escape.js";
 import { startFromSeat } from "./seated-leg.js";
+import { digCounterOf, type DigFacts } from "./slow-walk.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
 import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
 
@@ -75,9 +76,9 @@ function navigationEvidence(
   start: Position3,
   startDimension: string,
   elapsedMs: number,
-  scaffoldInventoryBefore: ReadonlyMap<string, number>,
-  bucketBefore: ReturnType<typeof bucketDropTotals>,
+  stocks: { scaffoldBefore: ReadonlyMap<string, number>; bucketBefore: ReturnType<typeof bucketDropTotals>; digs: DigFacts },
 ): NavigationEvidence {
+  const { scaffoldBefore: scaffoldInventoryBefore, bucketBefore, digs } = stocks;
   const target = { x: request.x, y: request.y, z: request.z };
   // GoalNear settles integral path nodes rather than the entity's fractional
   // centre, so the postcondition measures that same node. An unresolved
@@ -105,6 +106,7 @@ function navigationEvidence(
           (tool) => !bot.inventory.items().some((item) => item.name.endsWith(`_${tool}`)),
         )
       : [],
+    digs,
   };
 }
 
@@ -194,6 +196,7 @@ function startLeg(
   options: LegOptions,
 ): NavigateLeg {
   const toolLoss = request.dig ? toolLossObserverOf(bot, lifetime) : null;
+  digCounterOf(bot, lifetime); // counts from the first leg, so a later leg's evidence holds the whole call's digs
   return {
     bot,
     request,
@@ -244,7 +247,11 @@ function observeNavigateProgress(leg: NavigateLeg, observe: ObserveRequest): voi
 /** The evidence of the leg as it stands, measured against its resolved destination once there is one. */
 function legEvidence(leg: NavigateLeg): NavigationEvidence {
   const request = leg.destination ? { ...leg.request, ...leg.destination } : leg.request;
-  return navigationEvidence(leg.bot, request, leg.start, leg.startDimension, leg.elapsedMs, leg.scaffoldInventoryBefore, leg.bucketBefore);
+  return navigationEvidence(leg.bot, request, leg.start, leg.startDimension, leg.elapsedMs, {
+    scaffoldBefore: leg.scaffoldInventoryBefore,
+    bucketBefore: leg.bucketBefore,
+    digs: digCounterOf(leg.bot, leg.lifetime).facts(),
+  });
 }
 
 /** Why the destination itself refuses entry: an active portal is entered by its own action. */

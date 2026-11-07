@@ -1,5 +1,6 @@
 import { installNetherVinePhysics, MineflayerBot, mineflayerBotSurface, type MineflayerBotSurface } from "./bot.js";
 import { waterStancesHeld } from "../steering/hold-water-position.js";
+import { observeNavigationDigs, type NavigationDig } from "./dig-observer.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
@@ -854,6 +855,59 @@ test("a dig that throws still removes the server watch", async () => {
   );
   assert.equal((await effect.completion).kind, "failed");
   assert.equal(disposed, 1);
+});
+
+test("a break effect reports the block it dug and the tool, once, also when the dig throws", async () => {
+  const reported: NavigationDig[] = [];
+  const dug = surface({
+    blockAt: () => ({ name: "deepslate" }),
+    reportDig: (dig) => reported.push(dig),
+    watchServerChange: () => ({ answer: async () => true, dispose: () => undefined }),
+  });
+  const operation = { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] } as const;
+  const provenance = { runId: "run", planId: "plan", stepId: "downward", attempt: 1 };
+  await new MineflayerBot(dug, { revision: 1 }).startEffect(operation, provenance, new AbortController().signal).completion;
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]!.block, "deepslate");
+  assert.equal(reported[0]!.toolType, null);
+  assert.ok(reported[0]!.ms >= 0);
+  const failing = surface({
+    blockAt: () => ({ name: "stone" }),
+    dig: async () => {
+      throw new Error("dig interrupted");
+    },
+    reportDig: (dig) => reported.push(dig),
+  });
+  await new MineflayerBot(failing, { revision: 1 }).startEffect(operation, provenance, new AbortController().signal).completion;
+  assert.deepEqual(reported.map((dig) => dig.block), ["deepslate", "stone"]);
+});
+
+test("a break effect that never started a dig (no face in view) reports no dig", async () => {
+  const reported: NavigationDig[] = [];
+  let dug = 0;
+  const hidden = surface({
+    blockAt: () => ({ name: "stone" }),
+    visibleDigAim: () => null,
+    dig: async () => void (dug += 1),
+    reportDig: (dig) => reported.push(dig),
+  });
+  const effect = new MineflayerBot(hidden, { revision: 1 }).startEffect(
+    { kind: "break", position: { x: 4, y: 65, z: 3 }, expectedStateId: 1, toolType: null, brings: [] },
+    { runId: "run", planId: "plan", stepId: "hidden", attempt: 1 },
+    new AbortController().signal,
+  );
+  assert.equal((await effect.completion).kind, "failed");
+  assert.equal(dug, 0);
+  assert.deepEqual(reported, [], "a block that was never dug is not counted as dug");
+});
+
+test("the bot surface reports a dig to the observers of the raw bot the navigate call watches", () => {
+  const { bot: raw } = createFakeBot();
+  const seen: NavigationDig[] = [];
+  const close = observeNavigationDigs(raw, (dig) => seen.push(dig));
+  mineflayerBotSurface(raw).reportDig?.({ block: "stone", toolType: null, ms: 10 });
+  assert.deepEqual(seen, [{ block: "stone", toolType: null, ms: 10 }]);
+  close();
 });
 
 test("a water stance held through the bot surface is counted on the raw bot the runtime asks (review 2026-10-19 #2)", () => {

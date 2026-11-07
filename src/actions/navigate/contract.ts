@@ -97,6 +97,15 @@ const scaffoldStockSchema = z.strictObject({
   consumed: z.number().int().nonnegative(),
 });
 
+const digFactsSchema = z.strictObject({
+  count: z.number().int().nonnegative(),
+  ms: z.number().nonnegative(),
+  byHand: z.number().int().nonnegative(),
+  byHandMs: z.number().nonnegative(),
+  byHandBlocks: z.array(z.strictObject({ block: z.string(), count: z.number().int().positive() })),
+  fasterWith: z.array(z.strictObject({ family: z.string(), count: z.number().int().positive() })),
+});
+
 export const navigationEvidenceSchema = z.strictObject({
   startDimension: z.string(),
   endDimension: z.string(),
@@ -115,6 +124,7 @@ export const navigationEvidenceSchema = z.strictObject({
   missingDigTools: z
     .array(z.enum(["shovel", "pickaxe", "axe"]))
     .describe("Tool types absent from inventory when reporting navigation; empty when digging is disabled."),
+  digs: digFactsSchema.describe("The blocks this request broke on the way: how many, how long, how many by hand, which, and the tool families that would speed up the hand-dug ones."),
   boatBlocks: z
     .number()
     .int()
@@ -152,6 +162,9 @@ export const navigateResultSchema = actionResultSchema({
 export type NavigationEvidence = z.output<typeof navigationEvidenceSchema>;
 export type NavigateResult = z.output<typeof navigateResultSchema>;
 export type NavigateOutput = ActionOutput<typeof NAVIGATE, NavigateResult>;
+
+/** The code of a leg that got almost no nearer; the whole error text is built by `slowWalkText` (`slow-walk.ts`). */
+export const NAVIGATION_SLOW_CODE = "[NAVIGATION_SLOW]";
 
 export const navigateOutcomes = {
   toolTierLost: (reason: string) => reason,

@@ -3,7 +3,9 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { reportNavigationDig } from "../../navigation/index.js";
 import { parseNavigateRequest } from "../navigate/contract.js";
+import { digCounterOf } from "../navigate/slow-walk.js";
 import { parseEndPortalRequest, parseNetherPortalRequest } from "./contract.js";
 import { personalRespawnObservation, recordPersonalRespawn } from "./respawn-knowledge.js";
 import { portalSupplyWarning } from "./portal-policy.js";
@@ -72,6 +74,32 @@ test("portal action accepts only a server-positioned destination and releases ob
   lifetime.abort();
   assert.equal(bot.listenerCount("forcedMove"), 0);
   assert.equal(bot.listenerCount("death"), deathListeners);
+});
+
+test("portal evidence carries the digs of the approach, and its dig counter goes with the lifetime", async () => {
+  const { bot } = crossingBot();
+  const lifetime = new AbortController();
+  const result = await enterPortalAction(
+    bot,
+    parseEndPortalRequest({ x: 0, y: 64, z: 0, allow_distant_respawn: true, allow_low_supplies: true }),
+    {} as never,
+    {
+      createMovements: () => ({}) as never,
+      navigate: async () => {
+        reportNavigationDig(bot, { block: "stone", toolType: null, ms: 3000 });
+        bot.game.dimension = "the_end";
+        bot.entity.position.set(100.5, 49, 0.5);
+        bot.emit("forcedMove");
+        return { status: "stopped", reason: "dimension changed", elapsedMs: 7 };
+      },
+    },
+    lifetime.signal,
+  );
+  assert.equal(result.navigation.digs.count, 1);
+  assert.equal(result.navigation.digs.byHand, 1);
+  lifetime.abort();
+  reportNavigationDig(bot, { block: "stone", toolType: null, ms: 3000 });
+  assert.equal(digCounterOf(bot, lifetime.signal).facts().count, 1, "a dig after the call settled is not counted");
 });
 
 test("portal action preserves caller cancellation and lifetime cleanup", async () => {

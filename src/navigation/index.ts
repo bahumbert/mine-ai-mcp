@@ -36,6 +36,7 @@ export type {
 } from "./execution/in-place-break.js";
 export { SupportedPositionController } from "./execution/supported-position-controller.js";
 export { setSneaking, writeShiftKey } from "./mineflayer/sneak.js";
+export { observeNavigationDigs, reportNavigationDig, type NavigationDig } from "./mineflayer/dig-observer.js";
 export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/portal-entry.js";
 export { createNavigationRuntime, createMovements } from "./runtime.js";
 export { RouteOutcomes } from "./route-outcomes.js";

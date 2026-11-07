@@ -52,6 +52,7 @@ import {
   type WorldView,
 } from "../world/world.js";
 import { longestBreakDurationMs } from "./break-duration.js";
+import { reportNavigationDig, type NavigationDig } from "./dig-observer.js";
 import { putAwayHeldTool, visibleDigAim } from "./dig-preparation.js";
 import { requestCellResync } from "./cell-resync.js";
 import { type ServerChangeWatch, watchServerChange } from "./server-block-changes.js";
@@ -149,6 +150,8 @@ export interface MineflayerBotSurface {
   /** Listen for the server's own packet about `cell`: a break is done when the server says so, not when the dig timer ends. Optional so fakes need no change (their dig is the answer). */
   watchServerChange?(cell: Position3): ServerChangeWatch;
   combatResourceReceipt?(): void;
+  /** Tell the observers of this bot's digs (`dig-observer.ts`) that a break effect dug a block. Optional so fakes need no change. */
+  reportDig?(dig: NavigationDig): void;
   on(event: "physicsTick", listener: () => void): void;
   off(event: "physicsTick", listener: () => void): void;
   /** Observe a velocity packet for this player after Mineflayer applies it. */
@@ -213,6 +216,7 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     requestCellResync: (cell, signal) => requestCellResync(bot, new Vec3(cell.x, cell.y, cell.z), signal),
     watchServerChange: (cell) => watchServerChange(bot, cell),
     combatResourceReceipt: () => recordCombatResourceReceipt(bot, { kind: "scaffold_placed" }),
+    reportDig: (dig) => reportNavigationDig(bot, dig),
     on: (event, listener) => {
       bot.on(event, listener);
     },
@@ -740,6 +744,7 @@ export class MineflayerBot implements NavigationBot {
     );
     const serverWatch = this.bot.watchServerChange?.(operation.position);
     let airborne = !this.bot.entity.onGround;
+    let digEntered = false; // a dig that never started (no face in view, an abort before the swing) is not reported
     try {
       // The planner priced a dig from a stance over a solid floor as standing (`digContextAt`), and Minecraft digs
       // x5 slower off the ground: the hold lets the body sink onto that floor, and the swing waits for it, bounded.
@@ -750,6 +755,7 @@ export class MineflayerBot implements NavigationBot {
           (directlyBelowFeet || directlyAboveHead) &&
           (await this.#aimVertical(directlyBelowFeet ? -Math.PI / 2 : Math.PI / 2, yaw))
         ) {
+          digEntered = true;
           await this.bot.dig(target, "ignore");
           return null;
         }
@@ -770,6 +776,7 @@ export class MineflayerBot implements NavigationBot {
           } as const;
         }
         await this.bot.lookAt(new Vec3(aim.x, aim.y, aim.z), true);
+        digEntered = true;
         await this.bot.dig(target, "ignore");
         return null;
       };
@@ -791,6 +798,7 @@ export class MineflayerBot implements NavigationBot {
     } finally {
       serverWatch?.dispose();
       releaseStance();
+      if (digEntered) this.bot.reportDig?.({ block: blockName(block) ?? "unknown", toolType: operation.toolType, ms: elapsedSince(digStartedAt) });
       traceDig({
         position: operation.position,
         belowFeet: directlyBelowFeet,

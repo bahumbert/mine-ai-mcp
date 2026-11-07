@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import type { Bot } from "mineflayer";
-import { createMovements, type NavigationResult } from "../../navigation/index.js";
+import { createMovements, reportNavigationDig, type NavigationResult } from "../../navigation/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
@@ -337,6 +337,38 @@ test("uses standard movements without an arbitrary route timeout and verifies th
   ]);
 });
 
+test("digs are on every result: the blocks the route broke, how many by hand", async () => {
+  const { bot } = flatGroundBot();
+  const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
+    reportNavigationDig(bot, { block: "stone", toolType: null, ms: 4000 });
+    reportNavigationDig(bot, { block: "dirt", toolType: bot.registry.itemsByName.stone_shovel!.id, ms: 500 });
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 5000 };
+  };
+  const output = await new ActionRunner().run(
+    createNavigateAction(bot, fakeNavigation, dependencies(run)),
+    { x: 10, y: 64, z: 0, range: 1 },
+  );
+  assert.equal(output.result.status, "succeeded");
+  const digs = "navigation" in output.result ? output.result.navigation.digs : null;
+  assert.equal(digs?.count, 2);
+  assert.equal(digs?.byHand, 1);
+  assert.equal(digs?.ms, 4500);
+});
+
+test("a route that broke nothing reports zero digs", async () => {
+  const { bot } = flatGroundBot();
+  const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 1000 };
+  };
+  const output = await new ActionRunner().run(
+    createNavigateAction(bot, fakeNavigation, dependencies(run)),
+    { x: 10, y: 64, z: 0, range: 1 },
+  );
+  assert.equal("navigation" in output.result ? output.result.navigation.digs.count : null, 0);
+});
+
 test("uses the same feet-block distance as Pathfinder when verifying completion", async () => {
   const { bot } = flatGroundBot(-59);
   const run: NavigateDependencies["navigate"] = async (): Promise<NavigationResult> => {
@@ -428,6 +460,7 @@ test("formats the observed route rather than only its status", () => {
       remainingDistance: Math.sqrt(0.5),
       elapsedMs: 31_000,
       missingDigTools: ["shovel"],
+      digs: { count: 0, ms: 0, byHand: 0, byHandMs: 0, byHandBlocks: [], fasterWith: [] },
       bucketDrops: { count: 0, waterRecovered: 0 },
       scaffolding: [
         { item: "dirt", inventoryBefore: 4, inventoryAfter: 4, consumed: 0 },
