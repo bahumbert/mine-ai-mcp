@@ -125,20 +125,28 @@ function withoutWallWaits(params: Record<string, unknown>): Record<string, unkno
 const shifted = (calls: readonly Recorded[], frame: ArenaFrame): Recorded[] =>
   calls.map(({ action, input }) => ({ action, input: arenaActionInput(input, frame) }));
 
+/**
+ * Each scenario with its driver's `run`, imported here at collection and not in the first test: the drivers import the
+ * whole `@aibengineering/mine-ai-mcp` entry (667 exports), 3.8-5.5 s the first time on /mnt/d under 9P (WSL, load 5,
+ * 2026-11-07, a timed `await import()` x3) against ~30 ms for the driver itself, so the first test of the file timed out
+ * at 5000 ms (7099 ms seen at load 14-18). Loading a file is not under a test's timeout; the test bodies stay 50-190 ms.
+ * The cost is in the drivers' own `@aibengineering/mine-ai-mcp` imports (10 drivers); naming `src/actions/*\/contract.ts`
+ * there instead would touch them all and is left open.
+ */
 const scenarios = await Promise.all(
   yamlFilesUnder(path.join(MINECRAFT_DIR, "scenarios")).map(async (file) => {
     const scenario = await loadScenario(file);
     const driver = scenario.client.args.find((arg) => arg.startsWith("drivers/"))!;
-    return { file, driver, name: path.relative(MINECRAFT_DIR, file) };
+    const { run } = (await import(path.join(MINECRAFT_DIR, driver))) as { run: ScenarioRun };
+    return { file, driver, run, name: path.relative(MINECRAFT_DIR, file) };
   }),
 );
 
 /** The drivers that took coordinates from their params in at least one run, so the comparison above was not empty for them. */
 const driversThatMoved = new Set<string>();
 
-for (const { file, driver, name } of scenarios.filter(({ driver }) => !OWN_TEST.has(path.basename(driver)))) {
+for (const { file, driver, run, name } of scenarios.filter(({ driver }) => !OWN_TEST.has(path.basename(driver)))) {
   test(`${name}: ${path.basename(driver)} asks for the zero run's cells moved into the lane`, async () => {
-    const { run } = (await import(path.join(MINECRAFT_DIR, driver))) as { run: ScenarioRun };
     const atZero = await recordDriverRun(run, file, arenaFrame(ZERO_ARENA));
     const inLane = await recordDriverRun(run, file, SIDEWAYS);
     assert.deepEqual(inLane, shifted(atZero, SIDEWAYS));
