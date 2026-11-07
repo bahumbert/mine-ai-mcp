@@ -39,7 +39,8 @@ entities:
     nbt: "{NoAI:1b,IsBaby:0b,IsImmuneToZombification:1b,PersistenceRequired:1b}"
   - type: sheep
     pos: [10, -59, 2]
-    nbt: "{Color:0b,PersistenceRequired:1b}"
+    # NoAI: a wandering sheep stood in the cell place_block fills (12, -59, 0) in 2 of 20 runs.
+    nbt: "{NoAI:1b,Color:0b,PersistenceRequired:1b}"
 
 setup:
   - "difficulty normal"
@@ -78,7 +79,30 @@ params:
       arguments: { note: "Combat evidence tour started.", context: "Fresh-server MCP response qualification." }
     - action: note_read
       arguments: { n: 1 }
-    # The flat tour has neither End targets nor Eyes of Ender. These three
+    - action: note_delete
+      # Fresh temporary bot data: the note saved above is note 1. An id that does not exist is
+      # reported as not deleted, so this step cannot fail on the id.
+      arguments: { note_ids: [1] }
+    - action: view_smelting_recipes
+      arguments: { items: [iron_ingot, glass] }
+    - action: view_block_drops
+      arguments: { items: [wheat_seeds], blocks: [gravel] }
+    - action: protect_region
+      # Far from every other step's cells: a protected region stops digging and placing in it.
+      arguments:
+        corner_a: { x: -15, y: -59, z: 10 }
+        corner_b: { x: -14, y: -58, z: 11 }
+        label: Evidence shed
+        reason: Show the protected region response in the evidence tour.
+    - action: unprotect_region
+      # Fresh temporary bot data: the region protected above is region 1.
+      arguments: { region_id: 1 }
+    - action: tend_crops
+      # No hoe is carried and the floor is polished andesite, not soil: every cell is reported
+      # skipped, nothing is changed, and the call ends with its explicit incomplete outcome.
+      arguments: { x1: 20, z1: 10, x2: 21, z2: 11, y: -60 }
+      expected_error: "[TEND_INCOMPLETE]"
+    # The flat tour has neither End targets nor Eyes of Ender. These
     # explicitly arranged failures exercise truthful response boundaries;
     # successful physical jobs remain in the End and stronghold suites.
     - action: destroy_end_crystal
@@ -87,6 +111,12 @@ params:
     - action: attack_dragon_perch
       arguments: { entity_id: 2147483647 }
       expected_error: "Selected dragon is not loaded"
+    - action: shoot_dragon
+      arguments: { entity_id: 2147483647 }
+      expected_error: "Selected dragon is no longer loaded"
+    - action: prepare_dragon_perch
+      arguments: { entity_id: 2147483647 }
+      expected_error: "Selected dragon or its dimension is no longer observed"
     - action: locate_stronghold
       arguments: {}
       expected_error: "No carried Eyes of Ender remain"

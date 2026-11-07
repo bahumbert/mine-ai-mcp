@@ -115,8 +115,12 @@ test("parses fill without a cell and pour with one, and refuses a partial cell",
   assert.throws(() => parseUseBucketRequest({ action: "fill", x: 1 }), /all three/);
 });
 
+/** A stance inside the fill standoff (3.5 blocks from the eye), where the stubbed navigation has nothing to do. */
+const STANCE_IN_FILL_REACH = new Vec3(2.5, 64, 0.5);
+
 test("fill finds the nearest source, looks at its surface, and confirms the full bucket", async () => {
   const { bot, dependencies, uses, drive } = poolWorld("bucket");
+  bot.entity.position.set(STANCE_IN_FILL_REACH.x, STANCE_IN_FILL_REACH.y, STANCE_IN_FILL_REACH.z);
   const result = await drive(useBucket(bot, { action: "fill", liquid: "water", cell: null }, {}, dependencies));
 
   assert.equal(result.status, "succeeded");
@@ -178,8 +182,34 @@ for (const plant of ["seagrass", "tall_seagrass", "kelp", "bubble_column", "glow
   });
 }
 
+test("fill walks closer when its source is inside the server's reach but at the edge of it", async () => {
+  // Scenario action-catalog, 2026-11-07: a scoop from 4.49 of the 4.5 blocks the server reaches got no water in 4 to 5 runs of 10.
+  const { bot, dependencies, uses, drive } = poolWorld("bucket");
+  bot.entity.position.set(0.5, 64, 0.5);
+  let routes = 0;
+  const result = await drive(
+    useBucket(
+      bot,
+      { action: "fill", liquid: "water", cell: null },
+      {},
+      {
+        ...dependencies,
+        navigate: async () => {
+          routes += 1;
+          bot.entity.position.set(STANCE_IN_FILL_REACH.x, STANCE_IN_FILL_REACH.y, STANCE_IN_FILL_REACH.z);
+          return { status: "completed", elapsedMs: 0 };
+        },
+      },
+    ),
+  );
+  assert.equal(result.status, "succeeded");
+  assert.equal(routes, 1);
+  assert.equal(uses.length, 1);
+});
+
 test("fill checks visible sources beyond the first three blocked candidates", async () => {
   const { bot, dependencies, drive } = poolWorld("bucket");
+  bot.entity.position.set(STANCE_IN_FILL_REACH.x, STANCE_IN_FILL_REACH.y, STANCE_IN_FILL_REACH.z);
   const result = await drive(
     useBucket(
       bot,
@@ -228,6 +258,7 @@ test("fill refuses a named cell that is not a source, without walking to it", as
 
 test("a fill named at a flowing cell scoops the source feeding it", async () => {
   const { bot, setCell, dependencies, uses, drive } = poolWorld("bucket");
+  bot.entity.position.set(STANCE_IN_FILL_REACH.x, STANCE_IN_FILL_REACH.y, STANCE_IN_FILL_REACH.z);
   // Water spilling east from the source at 4,63,0 along the shelf above it.
   for (let x = 4; x <= 7; x += 1) setCell(new Vec3(x, 64, 0), { name: "water", properties: { level: x - 3 } });
 
