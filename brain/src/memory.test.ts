@@ -9,10 +9,24 @@ const farm = (overrides: Partial<KnownFarm> = {}): KnownFarm => ({
   tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0 }, ...overrides,
 });
 
+// `farm()` has none of the stage, dry farmland or dimension fields: this is also the note from before they existed
+// ("old farm note renders as before").
 test("a farm is remembered as a sentence for people and as data the brain reads back", () => {
   const { note, context } = memoryNote({ kind: "farm", farm: farm() });
   assert.equal(note, "My wheat_seeds farm, 9x9 around 10 63 -5: 80 planted, 0 ripe, 0 empty when I last tended it (2026-10-02T20:00:00.000Z).");
   assert.deepEqual(recall([context], LIMITS).farms, [farm()]);
+});
+
+test("farm note keeps stage, dry and dimension", () => {
+  const grown = farm({ state: { planted: 24, ripe: 0, empty: 0, stage: 3, ripeAge: 7, dry: 2 }, dimension: "overworld" });
+  const { note, context } = memoryNote({ kind: "farm", farm: grown });
+  assert.equal(note, "My wheat_seeds farm, 9x9 around 10 63 -5: 24 planted, 0 ripe, 0 empty, at stage 3.0 of 7, 2 dry farmland (grows slower; water within 4 blocks hydrates it) when I last tended it (2026-10-02T20:00:00.000Z).");
+  assert.deepEqual(recall([context], LIMITS).farms, [grown]);
+});
+
+test("a farm note with a stage that is not a number is skipped, as any note that does not parse", () => {
+  const bad = `brain memory: farm ${JSON.stringify({ kind: "farm", farm: { ...farm(), state: { planted: 1, ripe: 0, empty: 0, stage: "high" } } })}`;
+  assert.deepEqual(recall([bad], LIMITS).farms, []);
 });
 
 test("only the latest note of each farm is kept, at most the limit, oldest first", () => {

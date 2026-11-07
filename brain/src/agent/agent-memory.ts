@@ -1,6 +1,7 @@
 // What the agent knows and keeps across restarts: known places, farms, protected areas, its own outcomes, activity time, the unfinished house.
 import type { AgentOptions } from "../agent.ts";
 import type { Body } from "../body.ts";
+import { describeStage } from "../farming/growth.ts";
 import type { KnownPlace } from "../mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "../memory.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
@@ -46,10 +47,13 @@ export class AgentMemory {
   knownPlaces(): KnownPlace[] {
     // Her farms, as they were at their last tend: the models only know what the situation says (when to come back is
     // their choice).
-    const farms = this.farms.map((farm): KnownPlace => ({
-      name: `your ${farm.crop} farm`,
-      detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when you last tended it, ${minutesAgo(farm.tendedAt)}; farming it again harvests what is ripe and replants it`,
-    }));
+    const farms = this.farms.map((farm): KnownPlace => {
+      const growth = describeStage(farm.state);
+      return {
+        name: `your ${farm.crop} farm`,
+        detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty${growth === "" ? "" : `, ${growth}`} when you last tended it, ${minutesAgo(farm.tendedAt)}; farming it again harvests what is ripe and replants it`,
+      };
+    });
     const house = this.building.unfinished;
     if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;

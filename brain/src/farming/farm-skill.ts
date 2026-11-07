@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { FARM_RANGE, type Step } from "../actions.ts";
 import { describeMaterials } from "../building/blueprint.ts";
-import type { KnownFarm } from "../memory.ts";
+import type { FarmState, KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { describeWay } from "../gathering/fetch-farther.ts";
 import { firstOfOwnSeed } from "../gathering/how-to-get.ts";
@@ -10,6 +10,7 @@ import { levelZone } from "../skills/level-zone.ts";
 import { findPlayer, navigateInput } from "../skills/positions.ts";
 import { releaseArea } from "../skills/protect-area.ts";
 import { describeOverlaps, nearestClearSpot, noteArea, overlapsOf, SITE_SEARCH } from "../skills/protected-areas.ts";
+import { cropStage, describeStage } from "./growth.ts";
 import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
@@ -21,7 +22,18 @@ const STARTING_SEEDS = 16;
 /** What `tend_crops` reports of the plot afterwards (src/actions/tend-crops/contract.ts). */
 const tendedSchema = z.object({
   tended: z.object({
-    after: z.object({ crops: z.record(z.string(), z.number()), emptyFarmland: z.number() }),
+    // Each of these but `crops` and `emptyFarmland` is optional: an older runtime reports none of them.
+    after: z.object({
+      crops: z.record(z.string(), z.number()),
+      emptyFarmland: z.number(),
+      dryFarmland: z.number().optional(),
+      /** The age at which each crop block standing is ripe. */
+      ripeAge: z.record(z.string(), z.number()).optional(),
+    }),
+    /** The plot as the tend found it, before it harvested (the pace measure reads it). */
+    before: z.object({ crops: z.record(z.string(), z.number()) }).optional(),
+    harvested: z.number().optional(),
+    planted: z.number().optional(),
     skipped: z.record(z.string(), z.array(z.unknown())).optional(),
     tilledSoil: z.record(z.string(), z.number()).optional(),
     untillable: z.record(z.string(), z.array(z.unknown())).optional(),
@@ -229,9 +241,23 @@ function learnSoil(soil: TillFacts | undefined, plot: FarmPlot, tended: { readon
   for (const block of Object.keys(tended?.tilledSoil ?? {})) soil.tilled(block);
 }
 
+/**
+ * The block a farm's crop item is planted as (`wheat_seeds` -> `wheat`), from the runtime's drop data; null when the
+ * item has no planted source or the lookup fails (the tend goes on without a stage).
+ */
+async function plantedBlock(runtime: SkillContext["runtime"], crop: string): Promise<string | null> {
+  try {
+    return ((await runtime.blockSources([crop]))[crop] ?? []).find((source) => source.planted)?.block ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** One `tend_crops` over the plot, then the farm remembered as it stands. */
 async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string }, doneDetail: string): Promise<SkillResult> {
   const input = { x1: plot.min.x, z1: plot.min.z, x2: plot.max.x, z2: plot.max.z, y: plot.water.y, ...(plant !== null && { plant }) };
+  // Resolved before the tend: the farm's own crop block is what its stage is the mean age of.
+  const cropBlock = await plantedBlock(context.runtime, crop);
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   const tended = tendedSchema.safeParse(outcome.result).data?.tended;
@@ -239,21 +265,26 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
   const after = tended?.after;
   const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});
-  const state = {
+  const growth = after === undefined || cropBlock === null ? null : cropStage(after.crops, after.ripeAge?.[cropBlock], cropBlock);
+  const state: FarmState = {
     planted: crops.reduce((sum, [, count]) => sum + count, 0),
     ripe: crops.filter(([key]) => key.endsWith(" ripe")).reduce((sum, [, count]) => sum + count, 0),
     empty: after?.emptyFarmland ?? 0,
+    ...(growth !== null && growth),
+    ...(after?.dryFarmland !== undefined && { dry: after.dryFarmland }),
   };
+  const snapshot = await context.runtime.status();
   if (after !== undefined) {
-    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state });
+    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state, dimension: snapshot.dimension });
   }
   // Why farmland stays empty, as the step that fixes it (live 2026-10-03: told only "4 farmland empty", the model
   // tended the farm three more times).
-  const seeds = carried(await context.runtime.status(), crop);
+  const seeds = carried(snapshot, crop);
   const empty = state.empty > 0 && seeds === 0
     ? `${state.empty} farmland empty because you carry no ${crop}: get_items ${crop} ${state.empty}, then farm again to plant them`
     : `${state.empty} farmland empty`;
-  const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}`;
+  const growing = describeStage(state);
+  const summary = `${state.planted} planted, ${state.ripe} ripe, ${empty}${growing === "" ? "" : `, ${growing}`}`;
   if (outcome.status === "succeeded") return { status: "done", detail: `${doneDetail}: ${summary}` };
   if (outcome.status === "partial") return { status: "done", detail: `${doneDetail}, partly: ${summary}; ${left ?? outcome.error ?? ""}` };
   // Ground of air: the plot hangs in a cave or over a pit (live 2026-10-09: Ayla, in a cave at y 10, farmed "near my

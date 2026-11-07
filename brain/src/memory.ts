@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ACTIVITIES } from "./activities.ts";
 import { BUILD_ROLES } from "./building/blueprint.ts";
 import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
+import { describeStage } from "./farming/growth.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -12,6 +13,19 @@ import type { UnfinishedHouse } from "./skills.ts";
  * memory belongs to that world and bot, and the monitor shows it with the other notes. The note is a sentence for
  * people; the context carries the same memory as data, after a fixed prefix the brain reads back with one query.
  */
+/**
+ * Cells of a farm at its last tend: crops growing, ripe crops left, farmland left empty; then, when the runtime
+ * reported them, the mean growth stage of its crop, that crop's ripe age and the dry farmland (src/farming/growth.ts).
+ */
+export interface FarmState {
+  readonly planted: number;
+  readonly ripe: number;
+  readonly empty: number;
+  readonly stage?: number;
+  readonly ripeAge?: number;
+  readonly dry?: number;
+}
+
 /** A farm the character made, as it was when she last tended it. */
 export interface KnownFarm {
   /** The item planted on it (wheat_seeds, carrot...). */
@@ -21,8 +35,14 @@ export interface KnownFarm {
   readonly centre: { readonly x: number; readonly y: number; readonly z: number };
   readonly madeAt: string;
   readonly tendedAt: string;
-  /** Cells at the last tend: crops growing, ripe crops left, farmland left empty. */
-  readonly state: { readonly planted: number; readonly ripe: number; readonly empty: number };
+  /** Cells at the last tend (see {@link FarmState}). */
+  readonly state: FarmState;
+  /** The dimension it was tended in (the status's name for it); a note from before has none. */
+  readonly dimension?: string;
+  /** Stages gained per minute a player was near, measured between two tends (set by the pace measure, not by the tend). */
+  readonly pace?: number;
+  /** False after a tend stopped mid-way: the next tend measures no pace from its stale reading. */
+  readonly paceFresh?: boolean;
 }
 
 export type Memory =
@@ -83,7 +103,17 @@ const memorySchema = z.discriminatedUnion("kind", [
       centre: position,
       madeAt: z.string(),
       tendedAt: z.string(),
-      state: z.object({ planted: z.number().int().min(0), ripe: z.number().int().min(0), empty: z.number().int().min(0) }),
+      state: z.object({
+        planted: z.number().int().min(0),
+        ripe: z.number().int().min(0),
+        empty: z.number().int().min(0),
+        stage: z.number().min(0).optional(),
+        ripeAge: z.number().int().min(0).optional(),
+        dry: z.number().int().min(0).optional(),
+      }),
+      dimension: z.string().min(1).optional(),
+      pace: z.number().min(0).optional(),
+      paceFresh: z.boolean().optional(),
     }),
   }),
   z.object({
@@ -109,7 +139,8 @@ function describe(memory: Memory): string {
     }
     case "farm": {
       const { farm } = memory;
-      return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
+      const growth = describeStage(farm.state);
+      return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty${growth === "" ? "" : `, ${growth}`} when I last tended it (${farm.tendedAt}).`;
     }
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }

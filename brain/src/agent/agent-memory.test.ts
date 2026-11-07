@@ -37,6 +37,15 @@ test("her farms are places she knows, as they were at their last tend", async (t
   assert.match(planner.requests[0]?.[1]?.content ?? "", /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty when you last tended it, [^)]* ago; farming it again harvests what is ripe and replants it\)/u);
 });
 
+test("known farm says its stage and dry farmland", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.notes = [memoryNote({ kind: "farm", farm: { crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "2026-10-02T20:00:00.000Z", tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0, stage: 3, ripeAge: 7, dry: 2 } } })];
+  const { planner } = agentFor(t, runtime, { goal: "live well" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  assert.match(planner.requests[0]?.[1]?.content ?? "", /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty, at stage 3\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\) when you last tended it, [^)]* ago; farming it again/u);
+});
+
 test("memories an earlier run saved as notes come back: places, its own last objectives, an unfinished house", async (t) => {
   const runtime = new FakeRuntime();
   const house = { kind: "small medieval house", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" as const }, part: 2 };

@@ -120,6 +120,54 @@ test("farming near a farm she knows tends it: ripe crops harvested and replanted
   assert.match(result.status === "done" ? result.detail : "", /tended your wheat_seeds farm around 4 63 6/u);
 });
 
+/** A known 3x3 wheat farm and the runtime's answer to its tend, for the growth tests. */
+function grownFarm(after: Record<string, unknown> | null): { runtime: FakeRuntime; farms: KnownFarm[]; remembered: KnownFarm[] } {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }]);
+  runtime.tendAfter = after;
+  const farms: KnownFarm[] = [{ crop: "wheat_seeds", size: 3, centre: { x: 4, y: 63, z: 6 }, madeAt: "t0", tendedAt: "t0", state: { planted: 9, ripe: 0, empty: 0 } }];
+  return { runtime, farms, remembered: [] };
+}
+
+test("a tend result carries stage and dry farmland", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 6, "wheat age 7 ripe": 2 }, emptyFarmland: 1, dryFarmland: 2, ripeAge: { wheat: 7 }, water: 1 });
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(remembered[0]!.state, { planted: 8, ripe: 2, empty: 1, stage: 4, ripeAge: 7, dry: 2 });
+  assert.equal(remembered[0]!.dimension, runtime.snapshot.dimension);
+  assert.match(result.status === "done" ? result.detail : "", /8 planted, 2 ripe, 1 farmland empty.*, at stage 4\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\)/u);
+});
+
+test("a failed crop lookup still tends and remembers", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 9 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7 }, water: 1 });
+  runtime.blockSources = async () => { throw new Error("view_block_drops is down"); };
+  const result = await runStep({ skill: "farm", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(calls(runtime), ["tend_crops"]);
+  assert.deepEqual(remembered[0]!.state, { planted: 9, ripe: 0, empty: 0, dry: 0 });
+});
+
+test("a result without ripeAge still tends", async () => {
+  // An older runtime: no ripeAge, no dryFarmland reported.
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 9 }, emptyFarmland: 0, water: 1 });
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(remembered[0]!.state, { planted: 9, ripe: 0, empty: 0 });
+  assert.doesNotMatch(result.status === "done" ? result.detail : "", /stage|dry/u);
+});
+
+test("stage counts only the cells read", async () => {
+  // 5 of the 9 cells were read (the rest lie in an unloaded chunk): the stage is over those 5.
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 7 ripe": 2, "wheat age 1": 3 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7 }, water: 1 });
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.deepEqual([remembered[0]!.state.planted, remembered[0]!.state.stage], [5, 3.4]);
+});
+
+test("the stage is of the farm's own crop when another stands on the plot", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 2": 4, "carrots age 7 ripe": 4 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7, carrots: 7 }, water: 1 });
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+  assert.equal(remembered[0]!.state.stage, 2);
+});
+
 test("farmland left empty for want of seeds says so, naming the get_items step", async () => {
   // Live 2026-10-03: 4 of 24 cells stayed empty (20 seeds), the result only said "4 farmland empty", and the model
   // tended the farm three more times until the repeat guard failed the order.
