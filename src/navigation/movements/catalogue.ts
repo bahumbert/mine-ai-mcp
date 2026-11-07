@@ -517,20 +517,25 @@ function fall(context: MovementGenerationContext, a: Approach, out: MovementCand
     // Water at least `WATER_LANDING_DEPTH` deep takes the body in from any
     // height, and Minecraft cancels the fall damage on entering it. Its cells
     // are not support, so this landing is tested on its own.
-    if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && deepWaterLanding(context, x, landingY, z)) {
+    const bucketDrop = distance > context.policy.maximumDrop;
+    if (
+      !buried &&
+      landingFeet !== NO_CELL &&
+      landingHead !== NO_CELL &&
+      deepWaterLanding(context, x, landingY, z, { sourceOnly: bucketDrop })
+    ) {
       out
         .open("drop", x, landingY, z)
         .cell(a.feet)
         .cell(a.head)
         .cell(landingFeet)
         .cell(landingHead)
-        .hazard(distance > context.policy.maximumDrop ? distance * 2 : distance)
+        .hazard(bucketDrop ? distance * 2 : distance)
         .landsInWater()
         .overshoot(a.dx, a.dz)
         .offer();
       return;
     }
-    const bucketDrop = distance > context.policy.maximumDrop;
     if (bucketDrop && (isSolid(landingBlock) || isLiquid(landingBlock))) return;
     if (!buried && landingFeet !== NO_CELL && landingHead !== NO_CELL && safeLanding) {
       if (bucketDrop && !waterableLanding(context.view, { x, y: landingY, z })) return;
@@ -563,7 +568,7 @@ function fallIntoDeepWater(context: MovementGenerationContext, a: Approach, star
     if (block.kind !== "loaded" || !block.traits.empty || block.traits.liquid !== null) break;
     landingY -= 1;
   }
-  if (!deepWaterLanding(context, x, landingY, z)) return;
+  if (!deepWaterLanding(context, x, landingY, z, { sourceOnly: true })) return;
   const landingFeet = unlessLava(context, prepareCell(x, landingY, z, context), x, landingY, z);
   const landingHead = unlessLava(context, prepareHeadCell(x, landingY + 1, z, context), x, landingY + 1, z);
   if (landingFeet === NO_CELL || landingHead === NO_CELL || isFalling(look(context, x, landingY + 2, z))) return;
@@ -585,12 +590,19 @@ const MAXIMUM_WATER_LANDING_FALL = 320;
 /** Water blocks a column needs from the landing cell down for a fall of any height to end in it unharmed. */
 const WATER_LANDING_DEPTH = 2;
 
-/** Whether the landing cell and the ones under it hold enough water to break a fall. */
-function deepWaterLanding(context: MovementGenerationContext, x: number, landingY: number, z: number): boolean {
+/** Whether the landing cell and the ones under it hold enough water to break a fall; `sourceOnly` (a fall past the dry reach): source water only. */
+function deepWaterLanding(
+  context: MovementGenerationContext,
+  x: number,
+  landingY: number,
+  z: number,
+  { sourceOnly }: { sourceOnly: boolean },
+): boolean {
   for (let depth = 0; depth < WATER_LANDING_DEPTH; depth += 1) {
     const block = look(context, x, landingY - depth, z);
     if (block.kind !== "loaded" || !isWater(block)) return false;
-    if (!block.traits.liquidSource && !canOccupyWater(context, x, landingY - depth, z)) return false;
+    if (block.traits.liquidSource) continue;
+    if (sourceOnly || !canOccupyWater(context, x, landingY - depth, z)) return false;
   }
   return true;
 }
