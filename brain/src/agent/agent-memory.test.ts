@@ -1,9 +1,29 @@
 // Tests of what the agent remembers: places, farms, notes of earlier runs, and the activity time the goal tier sees.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Body, INSTANT_TYPING } from "../body.ts";
 import { memoryNote, recall } from "../memory.ts";
-import { FakeRuntime, SMALL_MEDIEVAL_HOUSE, until } from "../testing.ts";
+import { FakeRuntime, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "../testing.ts";
+import { AgentMemory } from "./agent-memory.ts";
 import { say, agentFor, journaledAgent } from "./agent-fixtures.test.ts";
+
+test("a second shelter replaces the first: one hole is kept, and no place line names it", async () => {
+  const runtime = new FakeRuntime();
+  const log = () => undefined;
+  const memory = new AgentMemory({ runtime, log, persona: testPersona() }, new Body(runtime, log, INSTANT_TYPING));
+  memory.rememberShelter({ x: 0, y: 64, z: 0, depth: 3, roofed: true });
+  memory.rememberShelter({ x: 9, y: 70, z: -4, depth: 2, roofed: false });
+  const { at, ...kept } = memory.shelter!;
+  assert.deepEqual(kept, { x: 9, y: 70, z: -4, depth: 2, roofed: false });
+  assert.ok(Number.isFinite(Date.parse(at)), "stamped with a wall-clock time");
+  await until(() => runtime.notes.length === 2);
+  assert.ok(runtime.notes.every((note) => note.context.startsWith("brain memory: shelter ")), "saved as shelter notes");
+  assert.deepEqual(memory.knownPlaces(), []);
+  // One shelter note per bot: the older note is deleted once the newer one is saved, never the newer one.
+  const deletes = () => runtime.submitted.filter((call) => call.tool === "note_delete").map((call) => call.input.note_ids);
+  await until(() => deletes().length > 0);
+  assert.ok(deletes().every((ids) => JSON.stringify(ids) === "[1]"), `deleted ${JSON.stringify(deletes())}`);
+});
 
 const BUILDER = { loves: "building", likes: "farming", dislikes: "mob_combat", hates: "mining" } as const;
 

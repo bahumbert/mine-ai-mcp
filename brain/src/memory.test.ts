@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm } from "./memory.ts";
+import { activityNotesQuery, memoryNote, recall, recallQuery, shelterNotesQuery, staleActivityNotes, staleShelterNotes, type KnownFarm } from "./memory.ts";
 
 const LIMITS = { places: 8, lately: 5, farms: 4, times: 3 };
 
@@ -84,4 +84,22 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: refused }).context], LIMITS).unfinished, refused, "the refused cells survive a restart");
   const older = { kind: "small medieval house", site, part: 2 };
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
+});
+
+test("a shelter note says the hole in a sentence and in data, and never reaches the memory a prompt is built from", () => {
+  const hole = { x: 0, y: 64, z: 0, depth: 3, roofed: true, at: "2026-11-07T21:04:00.000Z" };
+  const { note, context } = memoryNote({ kind: "shelter", hole });
+  assert.equal(note, "I dug in at 0 64 0, 3 deep, roofed (2026-11-07T21:04:00.000Z).");
+  assert.equal(context, `brain memory: shelter ${JSON.stringify({ kind: "shelter", hole })}`);
+  const recalled = recall([context], LIMITS);
+  assert.deepEqual([recalled.places, recalled.lately, recalled.farms, recalled.times, recalled.unfinished], [[], [], [], [], null]);
+  assert.doesNotMatch(recallQuery("Ayla", LIMITS), /shelter/u);
+});
+
+test("all but the newest shelter note are found to forget, whatever other notes lie between", () => {
+  const row = (id: number, x: number) => [id, memoryNote({ kind: "shelter", hole: { x, y: 64, z: 0, depth: 3, roofed: true, at: "2026-11-07T21:04:00.000Z" } }).context] as const;
+  const rows = [row(9, 3), [8, "not a memory"], row(7, 2), row(4, 1)];
+  assert.deepEqual(staleShelterNotes(rows), [7, 4]);
+  assert.deepEqual(staleShelterNotes([row(1, 0)]), []);
+  assert.match(shelterNotesQuery("Ayla"), /bot_id = 'Ayla' AND substr\(context, 1, \d+\) = 'brain memory: shelter ' ORDER BY note_id DESC/u);
 });

@@ -3,7 +3,7 @@ import type { AgentOptions } from "../agent.ts";
 import type { Body } from "../body.ts";
 import { describeStage } from "../farming/growth.ts";
 import type { KnownPlace } from "../mind.ts";
-import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "../memory.ts";
+import { activityNotesQuery, memoryNote, recall, recallQuery, shelterNotesQuery, staleActivityNotes, staleShelterNotes, type KnownFarm, type Memory, type ShelterHole } from "../memory.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
 import type { ProtectedArea } from "../runtime-client.ts";
 import type { UnfinishedHouse } from "../skills.ts";
@@ -27,6 +27,8 @@ export class AgentMemory {
   readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
   readonly farms: KnownFarm[] = [];
+  /** The hole it last dug in this run (see {@link rememberShelter}); none before the first dig-in. */
+  shelter: ShelterHole | null = null;
   readonly lately: string[] = [];
   /** Each finished step's activity and time over the last hour of play, oldest first. */
   readonly times: ActivityTime[] = [];
@@ -81,6 +83,28 @@ export class AgentMemory {
     this.farms.push(farm);
     if (this.farms.length > KNOWN_FARMS) this.farms.splice(0, this.farms.length - KNOWN_FARMS);
     this.memorize({ kind: "farm", farm });
+  }
+
+  /**
+   * The hole it last dug in, for the monitor's map: a new one replaces the old, and the older notes are deleted once
+   * the new one is saved (one shelter note per bot). Never part of {@link knownPlaces}: the models learn of a hole from
+   * the dig's own result.
+   */
+  rememberShelter(hole: Omit<ShelterHole, "at">): void {
+    this.shelter = { ...hole, at: new Date().toISOString() };
+    this.options.log(`shelter: dug in at ${hole.x} ${hole.y} ${hole.z}, ${hole.depth} deep, ${hole.roofed ? "roofed" : "open"}`);
+    this.body.act("note_save", memoryNote({ kind: "shelter", hole: this.shelter }), "Remember this across restarts.")
+      .then((outcome) => outcome.status === "succeeded" ? this.forgetOlderShelters() : this.options.log(`could not save a memory (${outcome.status}): ${outcome.error ?? ""}`))
+      .catch((error: unknown) => this.options.log(`could not save a shelter memory: ${String(error)}`));
+  }
+
+  /** Deletes every shelter note but the newest; a failure leaves the old notes, the monitor shows the newest anyway. */
+  private async forgetOlderShelters(): Promise<void> {
+    const rows = await this.options.runtime.queryBotData(shelterNotesQuery(this.options.persona.username));
+    const stale = staleShelterNotes(rows);
+    if (stale.length === 0) return;
+    const outcome = await this.body.act("note_delete", { note_ids: stale }, "Forget the shelter hole I dug in before.");
+    if (outcome.status !== "succeeded") this.options.log(`could not forget old shelter notes (${outcome.status}): ${outcome.error ?? ""}`);
   }
 
   /** The areas protected in this world's bot data, so the models know them from the first prompt. */

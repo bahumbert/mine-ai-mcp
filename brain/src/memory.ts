@@ -45,11 +45,26 @@ export interface KnownFarm {
   readonly paceFresh?: boolean;
 }
 
+/**
+ * The hole the character last dug in (`dig_shelter`): `x y z` its surface cell, `at` the wall-clock time (display
+ * only). Kept for the monitor's map; no prompt reads it.
+ */
+export interface ShelterHole {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly depth: number;
+  readonly roofed: boolean;
+  readonly at: string;
+}
+
 export type Memory =
   | { readonly kind: "place"; readonly place: KnownPlace }
   | { readonly kind: "own_objective"; readonly outcome: string }
   | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null }
   | { readonly kind: "farm"; readonly farm: KnownFarm }
+  /** Monitor only: {@link recall} and {@link recallQuery} leave it out, so no prompt carries it. */
+  | { readonly kind: "shelter"; readonly hole: ShelterHole }
   /** One finished step's activity and time (spec 2026-10-03-specialisations-preferences): the time per activity. */
   | { readonly kind: "activity_time"; readonly time: ActivityTime };
 
@@ -75,7 +90,7 @@ export interface RecallLimits {
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time"] as const; // not "shelter": the monitor reads those notes
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
@@ -117,6 +132,10 @@ const memorySchema = z.discriminatedUnion("kind", [
     }),
   }),
   z.object({
+    kind: z.literal("shelter"),
+    hole: z.object({ x: z.number(), y: z.number(), z: z.number(), depth: z.number().int().min(0), roofed: z.boolean(), at: z.string() }),
+  }),
+  z.object({
     kind: z.literal("activity_time"),
     time: z.object({ activity: z.enum(ACTIVITIES), purpose: z.enum(ACTIVITIES).optional(), ended: z.string(), minutes: z.number().min(0) }),
   }),
@@ -142,6 +161,7 @@ function describe(memory: Memory): string {
       const growth = describeStage(farm.state);
       return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty${growth === "" ? "" : `, ${growth}`} when I last tended it (${farm.tendedAt}).`;
     }
+    case "shelter": return `I dug in at ${memory.hole.x} ${memory.hole.y} ${memory.hole.z}, ${memory.hole.depth} deep, ${memory.hole.roofed ? "roofed" : "open"} (${memory.hole.at}).`;
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }
 }
@@ -198,6 +218,22 @@ export function activityNotesQuery(username: string): string {
   const prefix = `${PREFIX}: activity_time `;
   return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
     `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC`;
+}
+
+/** This bot's shelter notes, newest first, as `note_id` and `context` (for {@link staleShelterNotes}). */
+export function shelterNotesQuery(username: string): string {
+  const prefix = `${PREFIX}: shelter `;
+  return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
+    `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC`;
+}
+
+/** The ids of every shelter note but the newest (one hole is kept per bot), from rows of `note_id` and `context`, newest first. */
+export function staleShelterNotes(rows: readonly (readonly unknown[])[]): number[] {
+  const ids: number[] = [];
+  for (const [id, context] of rows) {
+    if (parse(String(context ?? ""))?.kind === "shelter" && typeof id === "number") ids.push(id);
+  }
+  return ids.slice(1);
 }
 
 /**
