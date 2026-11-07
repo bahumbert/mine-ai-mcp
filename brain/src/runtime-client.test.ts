@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import test, { mock } from "node:test";
+import test, { mock, type TestContext } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { sameDimensionSql } from "./bot-data-sql.ts";
-import { McpBotRuntime, type ToolClient } from "./runtime-client.js";
+import { McpBotRuntime, newToolClient, type ToolClient } from "./runtime-client.js";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 
@@ -366,4 +369,61 @@ test("the frontier-map queries run on the real bot-data schema, each in the dime
   assert.equal(await nether.seenAt("nether_quartz_ore", ORIGIN, 100), null, "inside the range already searched");
   assert.equal(await nether.waterAlong(ORIGIN, { x: 56, y: 64, z: 8 }).then((water) => water?.share), 0);
   assert.deepEqual(await nether.nearestLand(ORIGIN), { x: 56, z: 8 });
+});
+
+// Spec 2026-10-25-memory-per-bot C1: the SDK's default output-schema validator cost ~1.2 GB and 13 s per Client at listTools.
+const NUMBER_OUTPUT = { type: "object", properties: { n: { type: "number" } }, required: ["n"] } as const;
+
+/** A low-level MCP server listing one tool with `outputSchema`, answering every `tools/call` with `reply`; returns the transport for the client. */
+async function serverListing(outputSchema: Record<string, unknown>, reply: Record<string, unknown>): Promise<InMemoryTransport> {
+  const server = new Server({ name: "schema-server", version: "1" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{ name: "probe", description: "probe", inputSchema: { type: "object" as const }, outputSchema: outputSchema as { type: "object" } }],
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async () => reply as { content: [] });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  return clientTransport;
+}
+
+const mismatchedReply = { content: [], structuredContent: { response: { data: { n: "not a number" } } } };
+
+/** `client` connected to a server listing the tool; closed when the test ends, passed or failed. */
+async function connectedTo(t: TestContext, client: Client, outputSchema: Record<string, unknown>, reply: Record<string, unknown>): Promise<Client> {
+  t.after(() => client.close());
+  await client.connect(await serverListing(outputSchema, reply));
+  return client;
+}
+
+const defaultClient = () => new Client({ name: "default-validator", version: "0.1.0" });
+
+test("a reply that breaks the listed output schema still reaches the brain's parser", async (t) => {
+  // Run twice on a fresh client: a reconnect opens a new one through the same `newToolClient`.
+  for (const attempt of ["first client", "reconnected client"]) {
+    const client = await connectedTo(t, newToolClient("schema-test"), NUMBER_OUTPUT, mismatchedReply);
+    await client.listTools();
+    const reply = await client.callTool({ name: "probe", arguments: {} });
+    assert.deepEqual(reply.structuredContent, mismatchedReply.structuredContent, attempt);
+  }
+  const withDefault = await connectedTo(t, defaultClient(), NUMBER_OUTPUT, mismatchedReply);
+  await withDefault.listTools();
+  await assert.rejects(
+    withDefault.callTool({ name: "probe", arguments: {} }),
+    (error: unknown) => error instanceof McpError && error.code === ErrorCode.InvalidParams,
+    "the SDK default validator refuses the same reply, so the first half proves the switch",
+  );
+});
+
+test("a tool with an output schema that answers without structured content still throws", async (t) => {
+  const client = await connectedTo(t, newToolClient("schema-test"), NUMBER_OUTPUT, { content: [{ type: "text", text: "x" }] });
+  await client.listTools();
+  await assert.rejects(client.callTool({ name: "probe", arguments: {} }), /has an output schema but did not return structured content/u);
+});
+
+test("listing the tools compiles nothing", async (t) => {
+  const uncompilable = { type: "object", properties: { a: { $ref: "#/nowhere" } } };
+  const client = await connectedTo(t, newToolClient("schema-test"), uncompilable, { content: [] });
+  assert.deepEqual((await client.listTools()).tools.map((tool: { name: string }) => tool.name), ["probe"]);
+  const withDefault = await connectedTo(t, defaultClient(), uncompilable, { content: [] });
+  await assert.rejects(withDefault.listTools(), /can't resolve reference #\/nowhere/u, "AJV refuses the schema at listing, so the first half proves the switch");
 });

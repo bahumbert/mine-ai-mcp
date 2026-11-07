@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import type { JsonSchemaValidator, jsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/types.js";
 import { z } from "zod";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
 import type { CarriedStack } from "./carried-stack.ts";
@@ -520,6 +521,26 @@ export function errorCode(error: string | null | undefined): string | null {
   return /^\[([A-Z_]+)\]/u.exec(error ?? "")?.[1] ?? null;
 }
 
+/**
+ * An output-schema validator that accepts every reply. The SDK client builds one AJV validator per listed tool's
+ * output schema at `listTools` (`client/index.js:535`, used only by `callTool`, `:108`): ~1.2 GB and 13 s per Client for
+ * the runtime's catalog (spec 2026-10-25-memory-per-bot, measured with `.agent/scripts/ops/mcp-tools-mem.ts`). The
+ * server already checks each output against its schema (`McpServer.validateToolOutput`, `sdk/dist/esm/server/mcp.js:132,185`)
+ * and the brain reads every reply through its own zod schemas (`callOnce` and each method's schema). The SDK's other
+ * check, a tool with an output schema answering without structured content, does not use the validator and stays.
+ * `src/server/mcp-client-options.ts` holds the same three lines for `src/` (the brain imports nothing from there).
+ */
+const ACCEPT_ANY_OUTPUT: jsonSchemaValidator = {
+  getValidator<T>(): JsonSchemaValidator<T> {
+    return (input) => ({ valid: true, data: input as T, errorMessage: undefined });
+  },
+};
+
+/** The MCP client every brain connection uses (a first connection and each reconnect): no output-schema validators. */
+export function newToolClient(clientName: string): Client {
+  return new Client({ name: clientName, version: "0.1.0" }, { jsonSchemaValidator: ACCEPT_ANY_OUTPUT });
+}
+
 /** {@link BotRuntime} over one mine-ai-mcp host's Streamable HTTP endpoint (ADR-002: one MCP connection per bot). */
 /** The part of the MCP client the runtime client uses; tests give a fake. */
 export interface ToolClient {
@@ -540,7 +561,7 @@ export class McpBotRuntime implements BotRuntime {
 
   static async connect(url: string, clientName: string): Promise<McpBotRuntime> {
     const open = async (): Promise<ToolClient> => {
-      const client = new Client({ name: clientName, version: "0.1.0" });
+      const client = newToolClient(clientName);
       await client.connect(new StreamableHTTPClientTransport(new URL(url)));
       return client;
     };

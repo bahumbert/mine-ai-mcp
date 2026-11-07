@@ -11,6 +11,7 @@ import { createMinecraftMcpServer, createMinecraftRuntime } from "@aibengineerin
 import { actionEvidenceJsonPath, type ActionEvidence } from "./action-evidence-file.ts";
 import { renderActionEvidencePage } from "./action-evidence-page.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
+import { ACCEPT_ANY_OUTPUT } from "../../src/server/mcp-client-options.ts";
 import { droppedItemName } from "../../src/world/item-pickup.ts";
 
 const evidenceStepSchema = z.strictObject({
@@ -51,7 +52,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
       },
     });
     server = createMinecraftMcpServer(runtime, bot.username);
-    client = new Client({ name: "mine-ai-mcp-evidence", version: "1" });
+    client = new Client({ name: "mine-ai-mcp-evidence", version: "1" }, { jsonSchemaValidator: ACCEPT_ANY_OUTPUT });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
     await client.connect(clientTransport);
