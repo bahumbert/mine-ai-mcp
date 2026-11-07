@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { ActOutcome, Body } from "./body.ts";
-import type { BotRuntime, Position, ProtectedArea } from "./runtime-client.ts";
-import { DEPTH, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, type ShelterSpot } from "./shelter/spot.ts";
+import { areaKey, type BlockArea, type BotRuntime, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { DEPTH, isInHole, roofBlock, type ShelterSpot } from "./shelter/spot.ts";
 import type { SkillResult } from "./skills.ts";
 
 /**
@@ -38,6 +38,73 @@ export interface ShelterTimings {
   readonly landingPollMs: number;
   /** How often she looks at the sky (and at where she is) while waiting. */
   readonly waitSliceMs: number;
+}
+
+// The spot choice the live flow uses until plan 2026-11-07-p4-05a-shelter T3a switches it to `shelterSpots`
+// (shelter/spot.ts, T2, tested and called by nothing live): the one that ran before T2 (git show 30e2372^), whose
+// hole is always dug from solid ground. T2's choice also offers open holes, which this dig-in would "dig" as air.
+// Pre-T2 code kept as it was, name tables included (UNDIGGABLE, water, lava): flagged to the owner, not extended.
+/** How far around her (blocks) a column fit for the hole is looked for. */
+const LEGACY_SEARCH_RADIUS = 3;
+/** Blocks no bare hand or pickaxe she might carry digs in a reasonable time. */
+const UNDIGGABLE = new Set(["bedrock", "obsidian", "crying_obsidian", "reinforced_deepslate", "barrier", "end_portal_frame", "respawn_anchor"]);
+/** A neighbour's offset and the face of it that looks back at the hole. */
+const NEIGHBOURS: readonly (readonly [number, number, ShelterSpot["face"]])[] = [[1, 0, "west"], [-1, 0, "east"], [0, 1, "north"], [0, -1, "south"]];
+
+/** The box {@link legacyShelterSpot} needs read around `from`. */
+export function legacyShelterBox(from: Position): { readonly min: Position; readonly max: Position } {
+  const x = Math.floor(from.x);
+  const y = Math.floor(from.y);
+  const z = Math.floor(from.z);
+  return {
+    min: { x: x - LEGACY_SEARCH_RADIUS - 1, y: y - 2 - DEPTH - 2, z: z - LEGACY_SEARCH_RADIUS - 1 },
+    max: { x: x + LEGACY_SEARCH_RADIUS + 1, y: y + 2, z: z + LEGACY_SEARCH_RADIUS + 1 },
+  };
+}
+
+/**
+ * The nearest standing place (feet cell) within {@link LEGACY_SEARCH_RADIUS} of `from` where a hole {@link DEPTH} deep
+ * stays closed: solid blocks to dig (no cave under), a solid floor, solid walls around the two cells she will be in,
+ * a solid neighbour to roof against, and nothing in a protected area. Null when there is none. `dug` is 0 (always a
+ * fresh column) and `cost` 0 (unused by the flow).
+ */
+export function legacyShelterSpot(area: BlockArea, from: Position, areas: readonly ProtectedArea[]): ShelterSpot | null {
+  const name = (x: number, y: number, z: number) => area.blocks.get(areaKey(x, y, z));
+  const solid = (x: number, y: number, z: number) => {
+    const block = name(x, y, z);
+    return block !== undefined && area.kinds[block]?.solid === true;
+  };
+  const open = (x: number, y: number, z: number) => {
+    const block = name(x, y, z);
+    return block !== undefined && !solid(x, y, z) && block !== "water" && block !== "lava";
+  };
+  const protectedCell = (x: number, y: number, z: number) =>
+    areas.some(({ min, max }) => x >= min.x && x <= max.x && y >= min.y && y <= max.y && z >= min.z && z <= max.z);
+  const fx = Math.floor(from.x);
+  const fy = Math.floor(from.y);
+  const fz = Math.floor(from.z);
+  const columns: [number, number][] = [];
+  for (let dx = -LEGACY_SEARCH_RADIUS; dx <= LEGACY_SEARCH_RADIUS; dx += 1) {
+    for (let dz = -LEGACY_SEARCH_RADIUS; dz <= LEGACY_SEARCH_RADIUS; dz += 1) columns.push([fx + dx, fz + dz]);
+  }
+  columns.sort((a, b) => Math.hypot(a[0] - fx, a[1] - fz) - Math.hypot(b[0] - fx, b[1] - fz));
+  for (const [x, z] of columns) {
+    for (const feet of [fy, fy + 1, fy - 1, fy - 2]) {
+      if (!open(x, feet, z) || !open(x, feet + 1, z) || !solid(x, feet - 1, z)) continue;
+      const dug = Array.from({ length: DEPTH }, (_, index) => feet - 1 - index);
+      if (!dug.every((y) => solid(x, y, z) && !UNDIGGABLE.has(name(x, y, z)!))) continue;
+      if (!solid(x, feet - 1 - DEPTH, z)) continue;
+      // Her feet and head end in the two lowest dug cells; the roof goes in the top one.
+      const inside = dug.slice(1);
+      if (!NEIGHBOURS.every(([ox, oz]) => inside.every((y) => solid(x + ox, y, z + oz)))) continue;
+      if ([...dug, feet, feet + 1].some((y) => protectedCell(x, y, z))) continue;
+      const roof = feet - 1;
+      const support = NEIGHBOURS.find(([ox, oz]) => solid(x + ox, roof, z + oz));
+      if (support === undefined) continue;
+      return { x, y: feet, z, support: { x: x + support[0], y: roof, z: z + support[1] }, face: support[2], dug: 0, cost: 0 };
+    }
+  }
+  return null;
 }
 
 const WHY = "Night is dangerous: I dig in and wait for the day.";
@@ -144,13 +211,10 @@ async function walkToSpot(context: ShelterContext, act: ShelterAct, spot: Shelte
 export async function shelterForNight(context: ShelterContext): Promise<SkillResult> {
   const { runtime, body, signal } = context;
   const act: ShelterAct = (tool, input) => body.act(tool, input, WHY, { signal });
-  const status = await runtime.status();
-  const start = status.position;
-  const box = shelterBox(start);
-  const occupants = [...status.players, ...status.mobs].flatMap((one) => (one.position === null || one.position === undefined ? [] : [one.position]));
-  const search = shelterSpots(await runtime.blocksIn(box.min, box.max), start, context.areas, occupants);
-  const spot = search.spots[0];
-  if (spot === undefined) return { status: "failed", detail: describeNoSpot(search) };
+  const start = (await runtime.status()).position;
+  const box = legacyShelterBox(start);
+  const spot = legacyShelterSpot(await runtime.blocksIn(box.min, box.max), start, context.areas);
+  if (spot === null) return { status: "failed", detail: "no ground near here to dig a closed hole in (caves, water or protected areas)" };
   const unreachable = await walkToSpot(context, act, spot);
   if (unreachable !== null) return unreachable;
   const dug = await digIn(context, act, spot);

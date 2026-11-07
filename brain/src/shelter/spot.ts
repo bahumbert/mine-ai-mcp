@@ -187,6 +187,7 @@ function spotOrReason(input: SearchInput, x: number, z: number): ShelterSpot | S
   return { x, y: feet, z, ...supportOf(column)!, dug: dugCount(column), cost: walk + digSeconds(column) };
 }
 
+// Used from 05a T3a: until then the live night flow keeps the pre-T2 spot choice (night-shelter.ts `legacyShelterSpot`).
 /**
  * The best places within {@link SEARCH_RADIUS} of `from` to dig a hole {@link DEPTH} deep that stays closed, cheapest
  * first (estimated seconds, then distance), and for the columns that do not qualify the first rule each failed.

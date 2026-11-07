@@ -1,8 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body, INSTANT_TYPING } from "./body.ts";
-import { shelterForNight, type ShelterContext, type ShelterTimings } from "./night-shelter.ts";
+import { legacyShelterBox, legacyShelterSpot, shelterForNight, type ShelterContext, type ShelterTimings } from "./night-shelter.ts";
+import { areaKey, type BlockArea, type ProtectedArea } from "./runtime-client.ts";
 import { FakeRuntime } from "./testing.ts";
+
+const KINDS = {
+  air: { tool: null, solid: false, harvest: null },
+  short_grass: { tool: null, solid: false, harvest: null },
+  water: { tool: null, solid: false, harvest: null },
+  grass_block: { tool: "shovel" as const, solid: true, harvest: null },
+  dirt: { tool: "shovel" as const, solid: true, harvest: null },
+  stone: { tool: "pickaxe" as const, solid: true, harvest: ["wooden_pickaxe"] },
+  bedrock: { tool: null, solid: true, harvest: null },
+};
+
+/** Flat ground: grass at y 63, dirt to 60, stone under; air above. `change` edits single cells. */
+function ground(change: Record<string, string> = {}): BlockArea {
+  const blocks = new Map<string, string>();
+  const box = legacyShelterBox({ x: 0, y: 64, z: 0 });
+  for (let x = box.min.x - 4; x <= box.max.x + 4; x += 1) {
+    for (let y = box.min.y; y <= box.max.y; y += 1) {
+      for (let z = box.min.z - 4; z <= box.max.z + 4; z += 1) {
+        blocks.set(areaKey(x, y, z), y > 63 ? "air" : y === 63 ? "grass_block" : y >= 60 ? "dirt" : "stone");
+      }
+    }
+  }
+  for (const [key, name] of Object.entries(change)) blocks.set(key, name);
+  return { blocks, kinds: KINDS };
+}
+
+// The live flow keeps the spot choice of before plan 2026-11-07-p4-05a-shelter T2 (git show 30e2372^) until T3a
+// switches it to `shelterSpots`; `shelterSpots` has its own tests in shelter/spot.test.ts.
+test("a cave under her, an opening beside the hole, bedrock or a protected area move the hole aside", () => {
+  // A cave cell right under the hole's floor: the hole would open into it.
+  const cave = legacyShelterSpot(ground({ [areaKey(0, 60, 0)]: "air" }), { x: 0.5, y: 64, z: 0.5 }, []);
+  assert.ok(cave !== null);
+  assert.notDeepEqual([cave.x, cave.z], [0, 0]);
+  // Water beside where she would stand in the hole.
+  const wet = legacyShelterSpot(ground({ [areaKey(1, 61, 0)]: "water" }), { x: 0.5, y: 64, z: 0.5 }, []);
+  assert.notDeepEqual([wet?.x, wet?.z], [0, 0]);
+  const hard = legacyShelterSpot(ground({ [areaKey(0, 62, 0)]: "bedrock" }), { x: 0.5, y: 64, z: 0.5 }, []);
+  assert.notDeepEqual([hard?.x, hard?.z], [0, 0]);
+  const house: ProtectedArea = { regionId: 1, label: "house", owner: "Ayla", min: { x: -1, y: 60, z: -1 }, max: { x: 1, y: 70, z: 1 } };
+  const spot = legacyShelterSpot(ground(), { x: 0.5, y: 64, z: 0.5 }, [house]);
+  assert.ok(spot !== null && (Math.abs(spot.x) > 1 || Math.abs(spot.z) > 1));
+});
+
 
 /** Quick clocks for a night in the fake: the landing and the wait slices last milliseconds. */
 const FAST = { landingMs: 60, landingPollMs: 5, waitSliceMs: 5 };
@@ -183,4 +227,24 @@ test("a stop during the climb out is stopped, not a failed climb", async () => {
   };
   const result = await shelterForNight(context);
   assert.equal(result.status, "stopped");
+});
+
+test("the live flow digs a fresh column where she stands, not an open 3-deep hole beside her (its dig-in would dig air until 05a T3a)", async () => {
+  const { runtime, context, dayIn, calls } = rig();
+  for (const y of [61, 62, 63, 64]) runtime.world.set(areaKey(2, y, 0), "air");
+  const dug = runtime.succeedEffects.raw_action!;
+  runtime.succeedEffects.raw_action = (input) => { dug(input); if (input.operation === "place") dayIn(20); };
+  const result = await shelterForNight(context);
+  assert.equal(result.status, "done");
+  assert.deepEqual(calls("dig").slice(0, 3).map((dig) => [dig.x, dig.y, dig.z]), [[0, 63, 0], [0, 62, 0], [0, 61, 0]]);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input.range), [1], "the only walk is the climb out: she never walked to the hole");
+});
+
+test("the live flow looks for ground only 3 blocks around her, as before the new spot search", async () => {
+  const { runtime, context } = rig();
+  // Open water in every column within 3 of her; the new search (radius 6) would still find ground beyond.
+  for (let x = -4; x <= 4; x += 1) for (let z = -4; z <= 4; z += 1) for (let y = 58; y <= 63; y += 1) runtime.world.set(areaKey(x, y, z), "water");
+  const result = await shelterForNight(context);
+  assert.deepEqual(result, { status: "failed", detail: "no ground near here to dig a closed hole in (caves, water or protected areas)" });
+  assert.deepEqual(runtime.submitted, []);
 });
