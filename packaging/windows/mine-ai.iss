@@ -75,7 +75,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 ; The tasks page shows at a first install only (ShouldSkipPage); an update keeps what settings.json says (SavedCheckUpdates).
-Name: "checkupdates"; Description: "Check for a newer Mine AI at each start (one request to GitHub's release list: GitHub sees this PC's address, nothing else is sent). Privacy: {#PrivacyUrl}"
+; The box is checked by default, unless the data folder's settings already turned the check off (CurPageChanged sets it).
+Name: "checkupdates"; Description: "Check for a newer Mine AI at each start (one request for the latest release on GitHub: GitHub sees this PC's address, nothing else is sent). Privacy: {#PrivacyUrl}"
 
 [Dirs]
 ; The data folder is the player's choice (DataDir in [Code]); the uninstaller deletes it by itself, and only on request.
@@ -168,8 +169,12 @@ var
   ActiveGauge: TNewProgressBar;
   ActiveStatus: TNewStaticText;
   GpuChecked, GpuVerdictIsRemote, OllamaFolderNeeded, OllamaReady, SetupDone, PreviousLlmWasRemote, SilentWantsLocalModel: Boolean;
-  // The update check the saved settings.json holds (PrefillFromSettings); an update keeps it, a first install asks (CheckUpdatesWanted).
-  SavedCheckUpdates: Boolean;
+  // The update check the saved settings.json holds (PrefillFromSettings); an update keeps it, a first install asks (CheckUpdatesWanted);
+  // the box starts checked, unless the data folder's settings already turned the check off.
+  // SavedCheckUpdatesKnown: the file holds the key at all (a first install that ended before its configure leaves none).
+  SavedCheckUpdates, SavedCheckUpdatesKnown: Boolean;
+  // The data folder (DataDir('')) the tasks-page box was last set for from its settings.json; '' until the page first shows.
+  TasksBoxFolder: String;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
@@ -976,19 +981,21 @@ begin
 end;
 
 // The update check of the saved settings.json: False only when the file says `"checkUpdates": false`. A missing file, key or
-// unreadable value is True, the launcher's own default (settings.ts).
-function SavedCheckUpdatesValue(): Boolean;
+// unreadable value is True, the launcher's own default (settings.ts). Known: the file holds the key (only a configure writes it).
+function SavedCheckUpdatesValue(var Known: Boolean): Boolean;
 var
   Raw: AnsiString;
   Settings: String;
   P: Integer;
 begin
   Result := True;
+  Known := False;
   if not LoadStringFromFile(DataDir('') + '\settings.json', Raw) then
     Exit;
   Settings := UTF8Decode(Raw);
   P := JsonValueStart(Settings, 'checkUpdates');
-  if (P > 0) and (Copy(Settings, P, 5) = 'false') then
+  Known := P > 0;
+  if Known and (Copy(Settings, P, 5) = 'false') then
     Result := False;
 end;
 
@@ -1017,9 +1024,10 @@ begin
   ServerHostEdit.Text := '';
   ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
   SavedCheckUpdates := True;
+  SavedCheckUpdatesKnown := False;
   if ReadSettingsSections(Llm, Server) then
   begin
-    SavedCheckUpdates := SavedCheckUpdatesValue();
+    SavedCheckUpdates := SavedCheckUpdatesValue(SavedCheckUpdatesKnown);
     if JsonString(Llm, 'kind') = 'remote' then
     begin
       PreviousLlmWasRemote := True;
@@ -1063,16 +1071,30 @@ end;
 
 // Whether Mine AI checks for a newer release at each start: /CHECKUPDATES= when given in a silent setup (like every other parameter,
 // it is read only there: a wizard shows its box and reports that box), else the tasks-page box at a first install, else the value
-// the settings.json of the update holds (Inno's own stored task value is never used at an update: it would switch back on a check
-// the player turned off in settings.json).
+// the settings.json of the update holds. Inno's stored task value is used at an update only when that file holds no key: it would
+// switch back on a check the player turned off in settings.json, but a first install that ended after the copy and before its
+// configure left no key and Inno stored the box chosen then (UsePreviousTasks), which the rerun, an update, must keep. An install
+// from before this setup has neither, and WizardIsTaskSelected then gives the box's default (checked) = the launcher's default.
 function CheckUpdatesWanted(): Boolean;
 begin
   if WizardSilent and ParamGiven('CHECKUPDATES') then
     Result := Param('CHECKUPDATES', '') = '1'
   else if not IsUpdate() then
     Result := WizardIsTaskSelected('checkupdates')
+  else if SavedCheckUpdatesKnown then
+    Result := SavedCheckUpdates
   else
-    Result := SavedCheckUpdates;
+    Result := WizardIsTaskSelected('checkupdates');
+end;
+
+// ' --check-updates on|off' for every configure the setup runs: a configure saves the whole file (the default `checkUpdates: true`
+// included), so one without it would turn a saved "no" back to yes.
+function CheckUpdatesArgument(): String;
+begin
+  if CheckUpdatesWanted() then
+    Result := ' --check-updates on'
+  else
+    Result := ' --check-updates off';
 end;
 
 // The Ready page's list (Inno's default shows the destination only). The model and server pages come after the copy, because
@@ -1316,7 +1338,7 @@ var
 begin
   Result := False;
   NoteSavedKeyKeptForOtherUrl();
-  Code := RunLauncher('configure ' + RemoteLlmArguments(), False, EndpointGauge, EndpointStepStatus, Json);
+  Code := RunLauncher('configure ' + RemoteLlmArguments() + CheckUpdatesArgument(), False, EndpointGauge, EndpointStepStatus, Json);
   if Code <> 0 then
     Failure := ConfigureFailure('Mine AI could not save the endpoint.', Code)
   else
@@ -1465,11 +1487,7 @@ begin
     Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), DEFAULT_SERVER_PORT))
   else
     Result := Result + ' --server-none';
-  // The update check goes with the final configure only, never the endpoint-only one of the endpoint page.
-  if CheckUpdatesWanted() then
-    Result := Result + ' --check-updates on'
-  else
-    Result := Result + ' --check-updates off';
+  Result := Result + CheckUpdatesArgument();
 end;
 
 // One line on the progress page and in the setup log (/LOG=).
@@ -1591,10 +1609,10 @@ end;
 //   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none --check-updates on; install model
 //   CALLS /LLM=local /SERVER=none /CHECKUPDATES=0: install gpu; install ollama; configure --llm-local --server-none --check-updates off; install model
 //   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none --check-updates on; install model
-//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port> --check-updates on
-//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model>; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model> --check-updates on; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port> --check-updates on
 //   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --check-updates on; install model; install java; install server --accept-eula
-//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none --check-updates on
+//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none --check-updates on
 //   CALLS /DELETEDATA=1 (uninstall): stop; install model-remove; install ollama-remove
 // What is wrong with the silent parameters, before any file is copied (Setup then exits with code 7); '' when all is well.
 function SilentParameterProblem(): String;
@@ -1775,6 +1793,14 @@ begin
   end
   else if CurPageID = EulaPage.ID then
     WizardForm.NextButton.Enabled := EulaCheck.Checked
+  else if (CurPageID = wpSelectTasks) and (not WizardSilent) and (TasksBoxFolder <> DataDir('')) then
+  begin
+    // A first install over a data folder whose settings.json says "checkUpdates": false opens the box unchecked (the prefill on the
+    // data page's Next has read that file). Once per folder: a box the player changed stays as changed on Back/Next with the same
+    // folder, and another folder on Back sets it again. The list has one task. A silent setup keeps /TASKS= and /MERGETASKS=.
+    WizardForm.TasksList.Checked[0] := (not SavedCheckUpdatesKnown) or SavedCheckUpdates;
+    TasksBoxFolder := DataDir('');
+  end
   else if CurPageID = StepsPage.ID then
     RunSetupSteps()
   else if CurPageID = wpFinished then
