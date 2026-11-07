@@ -2,11 +2,16 @@ import type { Bot } from "mineflayer";
 import type { WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
 import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
-import { turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
+import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
-import { FIRE_ESCAPE_RADIUS, nearbyFireEscape, type FireEscapeReason } from "../positioning/fire-escape.js";
+import {
+  FIRE_ESCAPE_RADIUS,
+  FIRE_ESCAPE_RISE_IN_LAVA,
+  nearbyFireEscape,
+  type FireEscapeReason,
+} from "../positioning/fire-escape.js";
 import type { FireEscapeOutcome } from "../responses/fire.js";
 import { escapeThenSettle, type EscapeAndSettle } from "../responses/lava-settle.js";
 
@@ -25,12 +30,12 @@ function escapeAvailability(bot: Bot, world: WorldView) {
 }
 
 /** The facts a fire escape reads: exactly the primitive's search volume (floor and head included), the body, the blocks carried. */
-function fireEscapeFacts(bot: Bot) {
+export function fireEscapeFacts(bot: Bot) {
   const origin = bot.entity.position.floored();
   const cells: (number | null)[] = [];
   for (let x = -FIRE_ESCAPE_RADIUS; x <= FIRE_ESCAPE_RADIUS; x++)
     for (let z = -FIRE_ESCAPE_RADIUS; z <= FIRE_ESCAPE_RADIUS; z++)
-      for (let y = -2; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
+      for (let y = -2; y <= FIRE_ESCAPE_RISE_IN_LAVA + 1; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
   return {
     cells,
     body: { inLava: isInLava(bot), inFire: isInFire(bot), onGround: bot.entity.onGround },
@@ -103,14 +108,23 @@ function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["bl
  */
 const FIRE_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 6_000, standDownMs: 2_000 };
 
-/** What counts as getting somewhere: out of the lava or fire, the fire out, and every tick on dry ground (the lava wait). */
+/** A rise in lava that counts as a swim up: 0.05 block over the lowest the body reached (the sinking at the start is not progress). */
+const RISE_IN_LAVA_BLOCKS = 0.05;
+
+/**
+ * What counts as getting somewhere: out of the lava or fire, the fire out, every tick on dry ground (the lava wait), and
+ * a body in lava rising toward the surface (the swim up of a pool two deep takes seconds, with no block crossed).
+ */
 function fireProgress(bot: Bot, mark: (reason: string) => void): () => void {
   const onDryGround = () => !isInLava(bot) && !isInFire(bot) && bot.entity.onGround;
+  const climbed = climbsBy(() => bot.entity.position.y, RISE_IN_LAVA_BLOCKS);
   return watchBodyTicks(bot, mark, {
     out_of_lava: turnsTrue(() => !isInLava(bot)),
     out_of_fire: turnsTrue(() => !isInFire(bot)),
     fire_out: turnsTrue(() => !isBurning(bot)),
     on_dry_ground: onDryGround,
+    // `climbed` runs every tick, so its lowest point follows the body down; the lava test decides only whether it counts.
+    rose_in_lava: () => climbed() && isInLava(bot),
   });
 }
 

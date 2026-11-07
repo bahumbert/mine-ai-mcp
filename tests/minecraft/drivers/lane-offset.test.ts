@@ -142,6 +142,14 @@ const scenarios = await Promise.all(
   }),
 );
 
+// The drivers' module graphs load here, outside any test's 5 s clock: the first test used to pay the cold import itself
+// and timed out in 3 of 6 runs of this file on a loaded machine (5.2-7.6 s against the 5 s default, 2026-11-07).
+await Promise.all(
+  [...new Set(scenarios.map(({ driver }) => driver))]
+    .filter((driver) => !OWN_TEST.has(path.basename(driver)))
+    .map((driver) => import(path.join(MINECRAFT_DIR, driver))),
+);
+
 /** The drivers that took coordinates from their params in at least one run, so the comparison above was not empty for them. */
 const driversThatMoved = new Set<string>();
 
@@ -165,6 +173,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
   "idle-then-breathe.ts": "no action, reads the air",
+  "lava-pool-escape.ts": "asks only view_status; the teleport is a chat command built from the params' pool floor through arenaPoint",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
   "zombie-at-night.ts": "no action; the zombie is summoned by a chat command relative to the actor (@s), and its position is never compared",
 };

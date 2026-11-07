@@ -35,7 +35,13 @@ const lavaAt = (level: number): FakeCell => ({ name: "lava", properties: { level
  * body on the west bank.
  */
 function burningScene(
-  options: { cells?: Record<string, FakeCell>; position?: Vec3; entities?: Record<number, FakeEntitySpec>; clock?: FakeClock } = {},
+  options: {
+    cells?: Record<string, FakeCell>;
+    position?: Vec3;
+    entities?: Record<number, FakeEntitySpec>;
+    clock?: FakeClock;
+    carried?: Record<string, number>;
+  } = {},
 ) {
   const harness = createFakeBot({
     position: options.position ?? new Vec3(-0.5, 65, 0.5),
@@ -43,6 +49,7 @@ function burningScene(
     groundY: 64,
     entities: options.entities,
     clock: options.clock,
+    carried: options.carried,
   });
   const { bot } = harness;
   const controls = bot.controlState;
@@ -66,7 +73,7 @@ function burningScene(
   };
   /** Client ticks one at a time, letting the escape's waits settle between them. */
   const physicsTicks = (count: number) => harness.clock.advance(50 * count);
-  return { bot, clock: harness.clock, world, controls, cleared, setCell, physicsTicks };
+  return { bot, clock: harness.clock, server: harness.server, world, controls, cleared, setCell, physicsTicks };
 }
 
 const burningOnTheBank = (position?: Vec3) => burningScene({ position });
@@ -242,4 +249,132 @@ test("a lava cell holding a creature takes no step", () => {
     entities: { 7: { type: "mob", name: "zombie", position: new Vec3(1.5, 65, 0.5), width: 0.6, height: 1.95 } },
   });
   assert.deepEqual(lavaStepCells(bot, world), []);
+});
+
+/** A `size` x `size` lava pool (odd `size`) `depth` cells deep, centred on column (0, 0), its top row at y 64: the ground's surface. */
+function lavaPool(depth: number, size = 3): Record<string, FakeCell> {
+  const reach = (size - 1) / 2;
+  const cells: Record<string, FakeCell> = {};
+  for (let x = -reach; x <= reach; x++)
+    for (let z = -reach; z <= reach; z++) for (let y = 65 - depth; y <= 64; y++) cells[`${x},${y},${z}`] = "lava";
+  return cells;
+}
+
+/** The body stands on the floor of a 3 x 3 pool two deep: the bank is two cells above its feet. */
+const ON_THE_POOL_FLOOR = new Vec3(0.5, 63, 0.5);
+
+test("in a lava pool two deep with no blocks, the escape holds jump and does not return blocked", async () => {
+  const { bot, world, controls, physicsTicks } = burningScene({ cells: lavaPool(2), position: ON_THE_POOL_FLOOR });
+  assert.equal(isInLava(bot), true);
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await physicsTicks(20);
+  assert.equal(seen.outcome, null, "a way up exists: the escape is not over");
+  assert.equal(bot.getControlState("jump"), true, "jump is held to swim up");
+  assert.equal(anyMoveControl(controls), true, "and the body steers toward the bank");
+  bot.entity.position.set(0.5, 64.8, 0.5);
+  await physicsTicks(2);
+  assert.equal(seen.outcome, null, "the surface row is still lava");
+  bot.entity.position.set(2.5, 65, 0.5);
+  bot.entity.onGround = true;
+  await physicsTicks(2);
+  assert.equal(seen.outcome, "escaped", "on the bank");
+});
+
+/**
+ * A one-deep, two-cell pit at (0,64,0) and (1,64,0) walled around (to y 66 by default, `wallHeight` rows from y 65) up to
+ * `wallRadius` cells from the pit: no natural bank, one lava cell to step on.
+ */
+function walledTwoCellPit(wallRadius = 5, wallHeight = 2): Record<string, FakeCell> {
+  const cells: Record<string, FakeCell> = { "0,64,0": "lava", "1,64,0": "lava" };
+  for (let x = -wallRadius; x <= wallRadius; x++)
+    for (let z = -wallRadius; z <= wallRadius; z++)
+      for (let y = 65; y < 65 + wallHeight; y++) if (!(z === 0 && (x === 0 || x === 1))) cells[`${x},${y},${z}`] = "stone";
+  return cells;
+}
+
+const IN_THE_PIT = new Vec3(0.5, 64, 0.5);
+
+test("a hop that goes nowhere in lava is dropped after 2 s for a lava step, asked once", async () => {
+  // The ledge is one row over the lava top: its feet cell is two above the body's (a hop the scan admits), behind a wall.
+  const { bot, world, physicsTicks } = burningScene({ cells: walledTwoCellPit(5, 1), position: IN_THE_PIT, carried: { cobblestone: 8 } });
+  const placements = { count: 0 };
+  const placeAgainst = (bot as unknown as { _placeBlockWithOptions: (...args: unknown[]) => Promise<void> })._placeBlockWithOptions;
+  // Counts the placements through Mineflayer's internal entry point: the fake has no hook that counts `block_place`.
+  Reflect.set(bot, "_placeBlockWithOptions", (...args: unknown[]) => {
+    placements.count++;
+    return placeAgainst.apply(bot, args);
+  });
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await physicsTicks(30);
+  assert.equal(placements.count, 0, "inside the 2 s the body keeps trying the bank");
+  await physicsTicks(30);
+  assert.equal(placements.count, 1, "past 2 s without closing the distance, one lava step is placed");
+  assert.equal(seen.outcome, null, "and the escape goes on");
+  assert.equal(bot.getControlState("jump"), true);
+});
+
+test("in lava with no bank and no step, the body swims up toward the nearest bank it cannot hop to yet", async () => {
+  const { bot, world, controls, physicsTicks } = burningScene({ cells: walledTwoCellPit(3), position: IN_THE_PIT });
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await physicsTicks(10);
+  assert.equal(seen.outcome, null, "not blocked: the swim up goes on");
+  assert.equal(bot.getControlState("jump"), true);
+  assert.equal(anyMoveControl(controls), true, "steering toward the bank four cells out, beyond the wall");
+});
+
+test("a lava step whose placement gets no answer is not retried from the same cell, and jump stays held", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, server, world, physicsTicks } = burningScene({
+    cells: walledTwoCellPit(),
+    position: IN_THE_PIT,
+    clock,
+    carried: { cobblestone: 8 },
+  });
+  const attempts = { count: 0 };
+  // Counts the placements through Mineflayer's internal entry point: the fake has no hook that counts `block_place`.
+  const placeAgainst = (bot as unknown as { _placeBlockWithOptions: (...args: unknown[]) => Promise<void> })._placeBlockWithOptions;
+  Reflect.set(bot, "_placeBlockWithOptions", (...args: unknown[]) => {
+    attempts.count++;
+    return placeAgainst.apply(bot, args);
+  });
+  server.stop(); // the server answers nothing
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await physicsTicks(20);
+  assert.equal(attempts.count, 1, "the step is tried once");
+  assert.equal(bot.getControlState("jump"), true, "jump is held during the wait for the answer");
+  await clock.advance(12_000); // the 5 s wait ended with no answer, and the loop came round again
+  assert.equal(attempts.count, 1, "no second placement into the same cell from the same body cell and world");
+  assert.equal(bot.getControlState("jump"), true, "the body keeps swimming up");
+  assert.equal(seen.outcome, null);
+  await clock.advance(4_000);
+  assert.equal(seen.outcome, "timed_out", "only the 15 s wall clock ends it");
+  assert.equal(bot.getControlState("jump"), false, "controls cleared");
+});
+
+test("a swim up whose physics stops ends on the wall clock", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, world } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT, clock });
+  bot.physicsEnabled = false;
+  const started = performance.now();
+  const escaping = escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 300 });
+  await clock.advance(300);
+  assert.equal(await escaping, "timed_out");
+  assert.ok(performance.now() - started < 1_000, "returned within 1 s of wall time without one physics tick");
+  assert.equal(bot.getControlState("jump"), false, "controls cleared");
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+});
+
+test("death mid-swim ends died with the controls cleared", async () => {
+  const { bot, world, controls, physicsTicks } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT });
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await physicsTicks(5);
+  assert.equal(bot.getControlState("jump"), true, "swimming up with no bank, no step");
+  bot.health = 0;
+  bot.emit("death");
+  await physicsTicks(1);
+  assert.equal(seen.outcome, "died");
+  assert.equal(bot.getControlState("jump"), false);
+  assert.equal(anyMoveControl(controls), false);
 });

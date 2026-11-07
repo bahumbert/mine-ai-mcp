@@ -11,6 +11,7 @@ import {
   clearFireEscape,
   fireEscapeDeparture,
   fireEscapeRoute,
+  nearestDryCellToSwimTo,
   type FireEscapeDeparture,
   SIDE_STEPS,
   type FireEscapeReason,
@@ -43,12 +44,30 @@ export function lavaStepCells(bot: Bot, world: WorldView): Vec3[] {
   });
 }
 
-/** Replace adjacent lava with a solid step when there is no natural bank to climb. */
-export async function buildLavaEscapeStep(bot: Bot, world: WorldView, signal: AbortSignal): Promise<Vec3 | null> {
+/** A step tried from this body cell in this world revision: asking the server again for it cannot answer differently. */
+function triedStepKey(bot: Bot, world: WorldView, cell: Vec3): string {
+  return `${bot.entity.position.floored()}|${world.revision}|${cell}`;
+}
+
+/**
+ * Replace adjacent lava with a solid step when there is no natural bank to climb. A cell already in `tried` (this body
+ * cell, this world revision) is not asked again; each cell attempted is added, whatever the answer. `jump` is held
+ * before the first placement: the wait for the server's answer takes seconds, and a body in lava must keep swimming up.
+ */
+export async function buildLavaEscapeStep(
+  bot: Bot,
+  world: WorldView,
+  signal: AbortSignal,
+  tried: Set<string> = new Set(),
+): Promise<Vec3 | null> {
   const item = preferredScaffoldItem(bot);
   if (!item) return null;
   for (const cell of lavaStepCells(bot, world)) {
     signal.throwIfAborted();
+    const key = triedStepKey(bot, world, cell);
+    if (tried.has(key)) continue;
+    tried.add(key);
+    bot.setControlState("jump", true);
     const placed = await placeSolidBlockInto(bot, cell, item, { signal });
     if (placed.kind === "placed") return cell.offset(0.5, 1, 0.5);
   }
@@ -95,10 +114,89 @@ function steerToward(bot: Bot, target: Vec3): void {
   bot.setControlState("jump", isInLava(bot) || target.y > bot.entity.position.y + 0.1);
 }
 
+/**
+ * In lava with no hop admitted and no step to place: hold `jump`, which swims a body up in lava (Mineflayer's physics
+ * rises while it is held), and steer toward `toward` (the nearest dry cell of the scan) or, with none, not at all.
+ */
+function swimUpInLava(bot: Bot, toward: Vec3 | null): void {
+  const controls = toward && horizontalControlsToward(bot.entity, toward, 0.1);
+  for (const control of ["forward", "back", "left", "right"] as const) bot.setControlState(control, controls?.[control] ?? false);
+  bot.setControlState("jump", true);
+}
+
+/**
+ * The body's exact position and the world's revision: what a route search reads, so it is made again only when one
+ * changes. The exact position is the key because a hop is admitted or refused by where the body's width reaches, as in the
+ * reflex's availability memo (`reflexes/fire.ts`, live 2026-10-19): the reflex and the escape then agree on "a way exists".
+ */
+function searchKey(bot: Bot, world: WorldView): string {
+  return `${bot.entity.position}|${world.revision}`;
+}
+
 /** On the ground at a route cell: go on to the next cell (a new departure), or ask for a fresh route at the end. */
 function arriveAtCell(bot: Bot, world: WorldView, reason: FireEscapeReason, walk: FireWalk): FireWalk {
   if (walk.next + 1 >= walk.route.length) return newFireWalk(bot, fireEscapeRoute(bot, world, reason));
   return { ...walk, next: walk.next + 1, departure: fireEscapeDeparture(bot), best: Infinity };
+}
+
+/**
+ * The wall clock and a death end the waits even when physics ticks have stopped (as in breath's surfacing). `waits` is the
+ * signal for every wait of the escape; `outcome` says why it ended; `release` removes the timer and the listeners.
+ */
+function startEscapeClock(bot: Bot, signal: AbortSignal, maximumMs: number) {
+  const ended = new AbortController();
+  const end = () => ended.abort();
+  let timedOut = false;
+  const wallClock = setTimeout(() => {
+    timedOut = true;
+    end();
+  }, maximumMs);
+  bot.once("death", end);
+  bot.once("respawn", end);
+  return {
+    ended: ended.signal,
+    waits: AbortSignal.any([signal, ended.signal]),
+    outcome: (): FireEscapeOutcome => (bot.health <= 0 ? "died" : timedOut ? "timed_out" : "blocked"),
+    release(): void {
+      clearTimeout(wallClock);
+      bot.off("death", end);
+      bot.off("respawn", end);
+    },
+  };
+}
+
+/**
+ * What a body in lava with no way out remembers between loops: where it last looked for one (the cell it floats in and
+ * the world's revision), where to steer while it rises, and the lava steps already asked of the server.
+ */
+interface LavaSwim {
+  searchedAt: string;
+  toward: Vec3 | null;
+  readonly triedSteps: Set<string>;
+}
+
+/**
+ * A body in lava whose walk is empty: `jump` is held, a new route is searched only when its cell or the world changed
+ * (it rose a cell, or the lava moved: a bank may be in reach now), and a lava step is asked of the server once per cell.
+ */
+async function wayOutOfLava(
+  bot: Bot,
+  world: WorldView,
+  reason: FireEscapeReason,
+  waits: AbortSignal,
+  swim: LavaSwim,
+): Promise<FireWalk> {
+  bot.setControlState("jump", true);
+  let walk = newFireWalk(bot, null);
+  const at = searchKey(bot, world);
+  if (at !== swim.searchedAt) {
+    swim.searchedAt = at;
+    walk = newFireWalk(bot, fireEscapeRoute(bot, world, reason));
+    swim.toward = walk.route.length === 0 ? nearestDryCellToSwimTo(bot, world) : null;
+  }
+  if (walk.route.length > 0) return walk;
+  const step = await buildLavaEscapeStep(bot, world, waits, swim.triedSteps);
+  return newFireWalk(bot, step && [step]);
 }
 
 /** Leave the active source; residual burning must not monopolise the body without reachable water. */
@@ -112,22 +210,14 @@ export async function escapeFire(
   bot.stopDigging();
   bot.deactivateItem();
   bot.clearControlStates();
-  // The wall clock and a death end the waits even when physics ticks have stopped (as in breath's surfacing).
-  const ended = new AbortController();
-  const end = () => ended.abort();
-  let timedOut = false;
-  const wallClock = setTimeout(() => {
-    timedOut = true;
-    end();
-  }, maximumMs);
-  const endedOutcome = (): FireEscapeOutcome => (bot.health <= 0 ? "died" : timedOut ? "timed_out" : "blocked");
-  bot.once("death", end);
-  bot.once("respawn", end);
-  const waits = AbortSignal.any([signal, ended.signal]);
+  const clock = startEscapeClock(bot, signal, maximumMs);
+  const { ended, waits } = clock;
   let walk = newFireWalk(bot, fireEscapeRoute(bot, world, reason));
   let stalled = 0;
+  // No search yet from this position: the first loop in lava with an empty walk searches (and finds where to steer).
+  const swim: LavaSwim = { searchedAt: "", toward: null, triedSteps: new Set() };
   try {
-    while (bot.health > 0 && !ended.signal.aborted) {
+    while (bot.health > 0 && !ended.aborted) {
       signal.throwIfAborted();
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
@@ -139,10 +229,7 @@ export async function escapeFire(
       if (hop && !clearFireEscape(bot, world, hop, walk.departure)) walk = newFireWalk(bot, fireEscapeRoute(bot, world, reason));
       // There is no water in the Nether. Solid terrain can still replace a
       // lava cell and provide the bank the local swimming controller needs.
-      if (walk.route.length === 0 && inLava) {
-        const step = await buildLavaEscapeStep(bot, world, waits);
-        walk = newFireWalk(bot, step && [step]);
-      }
+      if (walk.route.length === 0 && inLava) walk = await wayOutOfLava(bot, world, reason, waits, swim);
       if (walk.route.length === 0 && inFire) {
         // Environmental escape has its own authority, like the lava step.
         // A sealed refuge may offer no walk out, but its occupied fire can
@@ -152,6 +239,13 @@ export async function escapeFire(
       }
       if (safeFooting && bot.entity.onGround && !routeEndsInWater(world, walk.route)) return "escaped";
       const target = walk.route[walk.next];
+      if (!target && inLava) {
+        // No bank, no step: swim up (a pool two deep ends at its surface row, where a bank or a step is in reach).
+        stalled = 0;
+        swimUpInLava(bot, swim.toward);
+        await waitForPhysicsTicks(bot, 1, waits);
+        continue;
+      }
       if (!target) return "blocked";
       const distance = bot.entity.position.distanceTo(target);
       if (distance < walk.best - 0.05) {
@@ -160,22 +254,28 @@ export async function escapeFire(
       } else stalled++;
       // Two seconds without closing distance detects an obstructed jump out
       // of liquid. Release with evidence rather than retain a dead steering loop.
-      if (stalled >= 40) return "blocked";
+      if (stalled >= 40) {
+        if (!inLava) return "blocked";
+        // In lava a stalled hop is not the end (a wall on the way to the bank): ask for a lava step once, then the loop
+        // goes on (the route is searched again, the step is not asked twice) until the 15 s wall clock.
+        const step = await buildLavaEscapeStep(bot, world, waits, swim.triedSteps);
+        walk = newFireWalk(bot, step && [step]);
+        stalled = 0;
+        continue;
+      }
       steerToward(bot, target);
       await waitForPhysicsTicks(bot, 1, waits);
       if (distance < 0.4 && bot.entity.onGround && !Reflect.get(bot.entity, "isInWater"))
         walk = arriveAtCell(bot, world, reason, walk);
     }
     signal.throwIfAborted();
-    return endedOutcome();
+    return clock.outcome();
   } catch (error) {
     signal.throwIfAborted();
-    if (!ended.signal.aborted) throw error;
-    return endedOutcome();
+    if (!ended.aborted) throw error;
+    return clock.outcome();
   } finally {
-    clearTimeout(wallClock);
-    bot.off("death", end);
-    bot.off("respawn", end);
+    clock.release();
     bot.clearControlStates();
   }
 }

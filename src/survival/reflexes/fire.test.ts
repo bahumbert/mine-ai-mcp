@@ -16,7 +16,7 @@ import {
 } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
-import { attachFireReflex } from "./fire.js";
+import { attachFireReflex, fireEscapeFacts } from "./fire.js";
 
 test("fire response selection replays from the observed escape availability", () => {
   const recorded = JSON.parse(
@@ -90,14 +90,24 @@ test("burning with no reachable water does not lock a Nether fight out of the bo
   await claim.outcome;
 });
 
+/**
+ * A body in lava with nothing around it to swim up to (nothing loaded): the escape holds jump until its 15 s wall clock
+ * ends it, which the reflex answers `no_escape`. It used to fail at once; `fire-lava-escape.md` "A body in a deep pool
+ * swims up" (plan 2026-11-07-p4-06b T1) replaced that.
+ */
+const SWIM_UP_UNTIL_THE_WALL_CLOCK_MS = 15_000;
+
 test("a failed airborne fire escape does not suppress a fresh attempt after landing", async () => {
-  const { bot, clock } = createFakeBot();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock });
   Object.assign(bot.entity, { isInLava: true, onGround: false });
   const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
   const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
   const observe = () => clock.advance(250);
+  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
   await observe();
   const first = driver.answered.snapshot()[0];
   assert.equal(first?.failure.kind, "no_escape");
@@ -105,7 +115,9 @@ test("a failed airborne fire escape does not suppress a fresh attempt after land
   assert.equal(driver.answered.snapshot()[0]?.id, first.id, "unchanged failure facts prevent repeated claims");
   bot.entity.onGround = true;
   await observe();
-  assert.notEqual(driver.answered.snapshot()[0]?.id, first.id, "landing changes the escape's physical premises");
+  assert.equal(runner.status().activeAction?.action, "fire_reflex", "landing changes the escape's physical premises: a fresh claim");
+  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+  assert.notEqual(driver.answered.snapshot()[0]?.id, first.id);
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
 });
 
@@ -375,7 +387,9 @@ test("an endangered body during the wait returns the action with the danger mess
 });
 
 test("no escape in static lava is tried again 2 s later", async () => {
-  const { bot, clock } = createFakeBot();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock });
   Object.assign(bot.entity, { isInLava: true, onGround: false });
   const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
@@ -389,7 +403,9 @@ test("no escape in static lava is tried again 2 s later", async () => {
   await clock.advance(answeredAt + 1_999 - clock.now());
   assert.equal(driver.answered.snapshot()[0]?.id, first?.id, "the same lava within 2 s: still answered");
   await clock.advance(answeredAt + 2_001 - clock.now());
-  assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "still burning in the same cells: tried again");
+  assert.equal(runner.status().activeAction?.action, "fire_reflex", "still burning in the same cells: tried again");
+  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+  assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "and the second try is answered in its turn");
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
 });
 
@@ -487,6 +503,47 @@ test("the same wait with the body off the ground is cut at 6 s without progress"
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action is not resumed");
   assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
+});
+
+test("rising in lava is progress, after sinking first", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  await using resources = new AsyncDisposableStack();
+  const scene = limitedLavaScene(resources, clock);
+  const { output } = await scene.startInterrupted();
+  const { bot } = scene;
+  const entered = bot.entity.position.y;
+  bot.physicsEnabled = true;
+  // The body sinks 1.4 blocks in the first second, as it does entering lava (no progress), then rises 0.1 every second.
+  for (let tickNumber = 1; tickNumber <= 20; tickNumber++) {
+    bot.entity.position.y = entered - (1.4 * tickNumber) / 20;
+    await clock.advance(50);
+  }
+  const lowest = bot.entity.position.y;
+  for (let second = 1; second <= 8; second++)
+    for (let tickNumber = 0; tickNumber < 20; tickNumber++) {
+      if (tickNumber === 0) bot.entity.position.y = lowest + 0.1 * second;
+      await clock.advance(50);
+    }
+  bot.physicsEnabled = false;
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "9 s in the lava, rising: the claim is kept");
+  bot.entity.position.y = entered;
+  await scene.leavePit();
+  const finished = await output;
+  assert.doesNotMatch((finished.interruptions ?? []).join("|"), /REFLEX_LIMIT/, "no limit released the body while it rose");
+  assert.equal(finished.result.status, "succeeded", "the action resumed once the body was out");
+});
+
+test("the escape facts read two rows below and three above the feet", async () => {
+  const { bot, fake } = burningBesidePit(false);
+  const before = fireEscapeFacts(bot).cells;
+  assert.equal(before.length, 9 * 9 * 6, "9 x 9 columns, y -2 to +3");
+  const origin = bot.entity.position.floored();
+  fake.setCell(origin.offset(2, 3, 0), "stone");
+  assert.notDeepEqual(fireEscapeFacts(bot).cells, before, "the row three above the feet is read");
+  const withRowThree = fireEscapeFacts(bot).cells;
+  fake.setCell(origin.offset(2, 4, 0), "stone");
+  assert.deepEqual(fireEscapeFacts(bot).cells, withRowThree, "the row four above the feet is not");
 });
 
 test("an escape with no ticks is released at 6 s", async () => {

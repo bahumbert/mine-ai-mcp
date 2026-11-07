@@ -116,6 +116,9 @@ export function clearFireHop(
   return true;
 }
 
+/** A body in lava swims up to a bank this many cells above its feet (the scan's top row). */
+export const FIRE_ESCAPE_RISE_IN_LAVA = 2;
+
 /** Immediate swimming/jumping reach; longer journeys belong to navigation. */
 export type FireEscapeReason = "contact" | "advancing_lava";
 export const FIRE_ESCAPE_RADIUS = 4;
@@ -132,15 +135,16 @@ export interface EscapeCells {
  * Scan the escape volume around the body; every read stays in the facts volume of `reflexes/fire.ts`. A dry cell is
  * safe footing: not the cell the body stands in, and not one lava can spread into on its next step
  * (`advancingLavaAt`), whatever woke the reflex; `crossSpreading` admits those cells too, the last resort of a body
- * that is in lava or fire.
+ * that is in lava or fire. `rise` is the highest row, in cells above the feet, a cell is scanned in (a body in lava
+ * passes `FIRE_ESCAPE_RISE_IN_LAVA`: it swims up to a bank two cells over its feet, not one).
  */
-export function escapeCells(bot: Bot, world: WorldView, { crossSpreading = false } = {}): EscapeCells {
+export function escapeCells(bot: Bot, world: WorldView, { crossSpreading = false, rise = 1 } = {}): EscapeCells {
   const origin = bot.entity.position.floored();
   const water: Vec3[] = [];
   const dry: Vec3[] = [];
   for (let dx = -FIRE_ESCAPE_RADIUS; dx <= FIRE_ESCAPE_RADIUS; dx++)
     for (let dz = -FIRE_ESCAPE_RADIUS; dz <= FIRE_ESCAPE_RADIUS; dz++)
-      for (let dy = -1; dy <= 1; dy++) {
+      for (let dy = -1; dy <= rise; dy++) {
         const cell = origin.offset(dx, dy, dz);
         const feet = world.blockAt(cell.x, cell.y, cell.z);
         const head = world.blockAt(cell.x, cell.y + 1, cell.z);
@@ -233,10 +237,16 @@ function ownWaterCell(bot: Bot, world: WorldView): Vec3 | null {
   return block.kind === "loaded" && block.traits.liquid === "water" ? cell.offset(0.5, 0, 0.5) : null;
 }
 
+/** The own water cell is a refuge only while no lava can flow into the body's cells there (the head cell above the water). */
 function waterRouteOver(bot: Bot, world: WorldView, cells: EscapeCells): Vec3[] | null {
   if (cells.water.length === 0) return null;
   const own = ownWaterCell(bot, world);
-  return own ? [own] : shortestWayToWater(bot, world, cells);
+  return own && !advancingLavaAt(bot, own) ? [own] : shortestWayToWater(bot, world, cells);
+}
+
+/** How far up the scan reaches: a body in lava swims up to a bank two cells over its feet, any other body one. */
+function riseOf(bot: Bot): number {
+  return isInLava(bot) ? FIRE_ESCAPE_RISE_IN_LAVA : 1;
 }
 
 /**
@@ -245,7 +255,7 @@ function waterRouteOver(bot: Bot, world: WorldView, cells: EscapeCells): Vec3[] 
  */
 export function fireWaterRoute(bot: Bot, world: WorldView, reason: FireEscapeReason): Vec3[] | null {
   if (reason !== "contact") return null;
-  return waterRouteOver(bot, world, escapeCells(bot, world));
+  return waterRouteOver(bot, world, escapeCells(bot, world, { rise: riseOf(bot) }));
 }
 
 /** Dry cells by distance; cells that tie go to the one nearer a scanned water, the bank a later route can use. */
@@ -278,9 +288,19 @@ function routeOverCells(bot: Bot, world: WorldView, reason: FireEscapeReason, ce
  * one on dry ground does not shuffle between such cells. Null: none.
  */
 export function fireEscapeRoute(bot: Bot, world: WorldView, reason: FireEscapeReason = "contact"): Vec3[] | null {
-  const safe = routeOverCells(bot, world, reason, escapeCells(bot, world));
+  const rise = riseOf(bot);
+  const safe = routeOverCells(bot, world, reason, escapeCells(bot, world, { rise }));
   if (safe || !(isInLava(bot) || isInFire(bot))) return safe;
-  return routeOverCells(bot, world, reason, escapeCells(bot, world, { crossSpreading: true }));
+  return routeOverCells(bot, world, reason, escapeCells(bot, world, { crossSpreading: true, rise }));
+}
+
+/**
+ * The dry cell nearest a body in lava that has no admitted hop to any, in the scan a swim up reads (rise 2, lava's
+ * spread allowed as the last resort): the body steers toward it while it rises, until a hop is admitted. Null: none.
+ */
+export function nearestDryCellToSwimTo(bot: Bot, world: WorldView): Vec3 | null {
+  const cells = escapeCells(bot, world, { crossSpreading: true, rise: FIRE_ESCAPE_RISE_IN_LAVA });
+  return dryCellsNearestFirst(bot, cells)[0] ?? null;
 }
 
 /** The first cell of `fireEscapeRoute`, for callers that only need to know where the body is heading. */
