@@ -22,5 +22,8 @@ export const INGREDIENT_TAG_KIND: TagKind = "item";
 export const tagFilePaths = (kind: TagKind, namespace: string, path: string): readonly string[] =>
   tagFolderNames(kind).map((folder) => `data/${namespace}/tags/${folder}/${path}.json`);
 
+/** A jar path of a damage type file (`data/minecraft/damage_type/mob_attack.json`); the capture is the type name. Damage types are data from 1.19.4 on (measured in the 1.19.4, 1.20.1 and 1.21.4 jars: `damage_type/`, singular, each file with `scaling`). */
+export const DAMAGE_TYPE_FILE = /^data\/minecraft\/damage_type\/([^/]+)\.json$/u;
+
 /** A jar path of a recipe file, either folder spelling. */
 export const RECIPE_FILE = /^data\/minecraft\/recipes?\/[^/]+\.json$/u;

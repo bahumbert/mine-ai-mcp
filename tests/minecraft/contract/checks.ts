@@ -59,6 +59,8 @@ import { respawnAfterDeath } from "./checks/respawn-after-death.ts";
 import { respawnWhileAsleep } from "./checks/respawn-while-asleep.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
 import { serverTags } from "./checks/server-tags.ts";
+import { combatDataMobs } from "./checks/combat-data-mobs.ts";
+import { COMBAT_DATA_ITEM_CHECKS } from "./checks/combat-data-items.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
@@ -122,6 +124,8 @@ export interface ContractCheck {
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   serverTags,
+  combatDataMobs,
+  ...COMBAT_DATA_ITEM_CHECKS,
   worldAgePerSecond,
   worldAgeAtSlowTick,
   waitForTicksAndAge,
