@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, realpathSync, utimesSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunResult } from "mine-labs";
 import { ClientsAhead } from "./client-ahead.ts";
@@ -71,18 +71,6 @@ test("a submit over the socket streams a result and a done, and the daemon keeps
     await submitAndCollect(socketPath, [ONE_FILE]);
     assert.equal(factory.created.filter(server => server.kind === "shared").length, 2, "one probe for the gamerule defaults and one for the key, reused by the second submit");
   });
-});
-
-test("a started daemon has the stub lshw first on its PATH, which every server JVM it spawns inherits", async () => {
-  const before = process.env.PATH;
-  process.env.PATH = "/usr/bin:/bin";
-  try {
-    await withDaemon(async () => {
-      assert.equal(process.env.PATH?.split(delimiter)[0], join(tmpdir(), "mine-ai-stubs"));
-    });
-  } finally {
-    process.env.PATH = before;
-  }
 });
 
 test("a second daemon on a live socket refuses to start", async () => {

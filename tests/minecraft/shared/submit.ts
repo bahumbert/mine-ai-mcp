@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { loadScenarioServerConfig } from "./config.ts";
 import { exchange } from "./daemon-client.ts";
 import { ensureDaemon } from "./daemon-launch.ts";
-import { putLshwStubOnPath } from "./lshw-stub.ts";
 import type { DaemonMessage } from "./protocol.ts";
 import { formatMessage, forwardedEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
 
@@ -20,7 +19,6 @@ function print(message: DaemonMessage): void {
 /** Today's path, `mine-labs run` with its own servers: the comparison and the fallback. */
 async function runIsolated(args: SubmitArgs): Promise<number> {
   const command = ["bunx", "--bun", "mine-labs", "run", ...args.paths, "--jobs", "2", "--repeat", String(args.repeat), "-o", args.out];
-  await putLshwStubOnPath(console.error);
   return new Promise(done => spawn(command[0]!, command.slice(1), { stdio: "inherit", cwd: REPO_ROOT }).once("exit", code => done(code ?? 1)));
 }
 

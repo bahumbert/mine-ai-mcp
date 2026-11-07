@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import * as mineLabs from "mine-labs";
 
@@ -32,6 +33,7 @@ type ServerOptions = { enableCommandBlocks?: boolean; maxHeap?: string; pauseWhe
 async function withUnstartedServer<T>(
   extra: ServerOptions,
   body: (server: InstanceType<typeof mineLabs.MinecraftServer>, read: () => Promise<string[]>, file: string) => Promise<T>,
+  log: (message: string) => void = () => {},
 ): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-"));
   try {
@@ -41,7 +43,7 @@ async function withUnstartedServer<T>(
         rconPassword: "test", worldType: "flat", structures: false, operators: [], ...extra,
       },
       "unused.jar",
-      () => {},
+      log,
       { gamePort: 0, rconPort: 0, release() {} },
     );
     const file = join(root, "server.properties");
@@ -186,6 +188,109 @@ test("a second start() writes the properties again", async () => {
   } finally {
     if (previous === undefined) delete process.env.JAVA_HOME;
     else process.env.JAVA_HOME = previous;
+  }
+});
+
+test("the server JVM receives the executable lshw stub first on its PATH", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "mine-labs-java-"));
+  const previous = process.env.JAVA_HOME;
+  try {
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "java"), `#!/bin/sh\nprintf '%s' "$PATH" > '${root}/path'\nexit 1\n`, { mode: 0o755 });
+    process.env.JAVA_HOME = root;
+    await withUnstartedServer({}, async server => {
+      await assert.rejects(server.start());
+    });
+    const path = await readFile(join(root, "path"), "utf8");
+    const stubDir = join(tmpdir(), "mine-ai-stubs");
+    assert.equal(path.split(delimiter)[0], stubDir);
+    assert.equal(spawnSync("lshw", [], { env: { PATH: path } }).status, 1);
+  } finally {
+    if (previous === undefined) delete process.env.JAVA_HOME;
+    else process.env.JAVA_HOME = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the JVM gets one stub directory for an empty or already-prefixed PATH", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "mine-labs-path-"));
+  const previousHome = process.env.JAVA_HOME;
+  const previousPath = process.env.PATH;
+  const stubDir = join(tmpdir(), "mine-ai-stubs");
+  try {
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "java"), `#!/bin/sh\nprintf '%s' "$PATH" > '${root}/path'\nexit 1\n`, { mode: 0o755 });
+    process.env.JAVA_HOME = root;
+    for (const path of ["", `${stubDir}${delimiter}/usr/bin`]) {
+      process.env.PATH = path;
+      await withUnstartedServer({}, async server => { await assert.rejects(server.start()); });
+      const entries = (await readFile(join(root, "path"), "utf8")).split(delimiter);
+      assert.equal(entries[0], stubDir);
+      assert.equal(entries.filter(entry => entry === stubDir).length, 1);
+      assert.ok(entries.every(Boolean));
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.JAVA_HOME; else process.env.JAVA_HOME = previousHome;
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a Windows JVM keeps its environment without installing the POSIX stub", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "mine-labs-win32-"));
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const previousHome = process.env.JAVA_HOME;
+  const previousTemp = process.env.TMPDIR;
+  const previousPath = process.env.PATH;
+  const previousMixedPath = process.env.Path;
+  try {
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "javaw.exe"), `#!/bin/sh\n/usr/bin/env > '${root}/env'\nexit 1\n`, { mode: 0o755 });
+    process.env.JAVA_HOME = root;
+    process.env.TMPDIR = root;
+    process.env.PATH = "/usr/bin:/bin";
+    process.env.Path = "windows-path";
+    await withUnstartedServer({}, async server => {
+      Object.defineProperty(process, "platform", { value: "win32" });
+      await assert.rejects(server.start());
+    });
+    const env = (await readFile(join(root, "env"), "utf8")).split("\n");
+    assert.ok(env.includes("PATH=/usr/bin:/bin"));
+    assert.ok(env.includes("Path=windows-path"));
+    await assert.rejects(readFile(join(root, "mine-ai-stubs", "lshw")), { code: "ENOENT" });
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    if (previousHome === undefined) delete process.env.JAVA_HOME; else process.env.JAVA_HOME = previousHome;
+    if (previousTemp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTemp;
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    if (previousMixedPath === undefined) delete process.env.Path; else process.env.Path = previousMixedPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stub installation failure is logged and the JVM retains its original PATH", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "mine-labs-java-failure-"));
+  const previousHome = process.env.JAVA_HOME;
+  const previousTemp = process.env.TMPDIR;
+  const previousPath = process.env.PATH;
+  const logs: string[] = [];
+  try {
+    await mkdir(join(root, "bin"));
+    await writeFile(join(root, "bin", "java"), `#!/bin/sh\nprintf '%s' "$PATH" > '${root}/path'\nexit 1\n`, { mode: 0o755 });
+    await writeFile(join(root, "not-a-directory"), "");
+    process.env.JAVA_HOME = root;
+    process.env.PATH = "/usr/bin:/bin";
+    await withUnstartedServer({}, async server => {
+      process.env.TMPDIR = join(root, "not-a-directory");
+      await assert.rejects(server.start());
+    }, message => logs.push(message));
+    assert.equal(await readFile(join(root, "path"), "utf8"), "/usr/bin:/bin");
+    assert.ok(logs.some(message => message.includes("lshw stub not installed")));
+  } finally {
+    if (previousHome === undefined) delete process.env.JAVA_HOME; else process.env.JAVA_HOME = previousHome;
+    if (previousTemp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTemp;
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(root, { recursive: true, force: true });
   }
 });
 
