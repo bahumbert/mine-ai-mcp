@@ -22,11 +22,13 @@ interface Choices {
   server?: ServerChoice;
   /** The players allowed to give chat commands; an empty list clears them. */
   commandPlayers?: string[];
+  /** Whether the start checks for a newer release (`settings.checkUpdates`). */
+  checkUpdates?: boolean;
 }
 
 /** How many values each flag takes after it. */
-export const CONFIGURE_FLAGS: Readonly<Record<string, number>> = { "--llm-local": 0, "--llm-remote": 3, "--llm-remote-saved-key": 2, "--server-none": 0, "--server-local": 0, "--server-remote": 2, "--command-players": 1 };
-const USAGE = "configure takes --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model> (keeps the saved key) and/or --server-none | --server-local | --server-remote <host> <port> and/or --command-players <name,name,...> (\"\" clears them).";
+export const CONFIGURE_FLAGS: Readonly<Record<string, number>> = { "--llm-local": 0, "--llm-remote": 3, "--llm-remote-saved-key": 2, "--server-none": 0, "--server-local": 0, "--server-remote": 2, "--command-players": 1, "--check-updates": 1 };
+const USAGE = "configure takes --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model> (keeps the saved key) and/or --server-none | --server-local | --server-remote <host> <port> and/or --command-players <name,name,...> (\"\" clears them) and/or --check-updates on|off.";
 
 function parsePort(text: string): number {
   const port = Number(text);
@@ -37,6 +39,12 @@ function parsePort(text: string): number {
 function setOnce<K extends keyof Choices>(choices: Choices, key: K, value: NonNullable<Choices[K]>): void {
   if (choices[key] !== undefined) throw new UsageError(`Give only one ${key === "commandPlayers" ? "--command-players list" : `of the --${key} choices`}. ${USAGE}`);
   choices[key] = value;
+}
+
+function checkUpdatesChoice(choices: Choices, text: string): void {
+  if (choices.checkUpdates !== undefined) throw new UsageError(`Give --check-updates only once. ${USAGE}`);
+  if (text !== "on" && text !== "off") throw new UsageError(`--check-updates takes on or off, not "${text}". ${USAGE}`);
+  choices.checkUpdates = text === "on";
 }
 
 function parseChoices(args: readonly string[]): Choices {
@@ -54,9 +62,10 @@ function parseChoices(args: readonly string[]): Choices {
     else if (flag === "--server-none") setOnce(choices, "server", { kind: "none" });
     else if (flag === "--server-local") setOnce(choices, "server", { kind: "local" });
     else if (flag === "--command-players") setOnce(choices, "commandPlayers", commandPlayers(values[0]!));
+    else if (flag === "--check-updates") checkUpdatesChoice(choices, values[0]!);
     else setOnce(choices, "server", remoteServer(values));
   }
-  if (choices.llm === undefined && choices.server === undefined && choices.commandPlayers === undefined) throw new UsageError(USAGE);
+  if (choices.llm === undefined && choices.server === undefined && choices.commandPlayers === undefined && choices.checkUpdates === undefined) throw new UsageError(USAGE);
   return choices;
 }
 
@@ -110,10 +119,11 @@ function applyChoices(settings: Settings, choices: Choices, manifest: Manifest, 
     else next.server = { kind: "local", port: settings.server.kind === "local" ? settings.server.port : DEFAULT_LOCAL_SERVER_PORT, memoryMb: serverMemoryMb(manifest, deps.totalRamBytes()) };
   }
   if (choices.commandPlayers) next.commands = { ...settings.commands, players: choices.commandPlayers };
+  if (choices.checkUpdates !== undefined) next.checkUpdates = choices.checkUpdates;
   return next;
 }
 
-/** Writes the chosen model and server into settings.json (everything else in the file is kept). Exit code 0, or 1 when the file cannot be used. */
+/** Writes the chosen model, server, command players and update check into settings.json (everything else in the file is kept). Exit code 0, or 1 when the file cannot be used. */
 export async function runConfigureCommand(args: readonly string[], context: CliContext, deps: ConfigureDeps = { totalRamBytes: totalmem }): Promise<number> {
   const choices = parseChoices(args);
   const manifest = context.loadManifest();

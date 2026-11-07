@@ -27,7 +27,8 @@ export const USAGE = `Usage: mine-ai <command>
   install endpoint-models --list <file> [--url <url>] [--key <key> | --saved-key] [--json <file>]
             (writes the models the remote endpoint lists, one per line; without --url it reads the saved settings)
   configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
-            and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)`;
+            and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)
+            and/or   --check-updates on|off   (whether each start checks GitHub for a newer release)`;
 
 const HELP_FLAGS: readonly string[] = ["--help", "-h"];
 

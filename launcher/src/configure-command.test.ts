@@ -115,6 +115,43 @@ test("--command-players with a bad name, a missing value or given twice is a usa
   assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
 });
 
+test("--check-updates on and off write settings.checkUpdates", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--check-updates", "off"], t.context), 0);
+  assert.equal(t.settings().checkUpdates, false);
+  assert.equal(await runConfigureCommand(["--check-updates", "on"], t.context), 0);
+  assert.equal(t.settings().checkUpdates, true);
+});
+
+test("--check-updates with a missing value, a value other than on or off, or given twice is a usage error naming the problem, and writes nothing", async () => {
+  const t = setup();
+  const cases: [string[], string][] = [
+    [["--check-updates"], "--check-updates needs 1 values. configure takes"],
+    [["--check-updates", "maybe"], '--check-updates takes on or off, not "maybe". configure takes'],
+    [["--check-updates", "on", "--check-updates", "off"], "Give --check-updates only once. configure takes"],
+  ];
+  for (const [args, message] of cases) {
+    await assert.rejects(runConfigureCommand(args, t.context), (error: Error) => error instanceof UsageError && error.message.startsWith(message), JSON.stringify(args));
+  }
+  assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
+});
+
+test("--llm-local, --server-none and --check-updates off in one call are all saved", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--llm-local", "--server-none", "--check-updates", "off"], t.context), 0);
+  assert.deepEqual(t.settings().llm, { kind: "local", model: loadManifest().ollama.model });
+  assert.deepEqual(t.settings().server, { kind: "none" });
+  assert.equal(t.settings().checkUpdates, false);
+});
+
+test("--check-updates off alone keeps a saved remote endpoint and its key", async () => {
+  const t = setup();
+  writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", apiKey: "sk-keep", model: "m" } }));
+  assert.equal(await runConfigureCommand(["--check-updates", "off"], t.context, { totalRamBytes: () => 8 * GIB, settings: { platform: "linux", cipher: null } }), 0);
+  assert.deepEqual(t.settings().llm, { kind: "remote", baseUrl: "https://x.test/v1", apiKey: "sk-keep", model: "m" });
+  assert.equal(t.settings().checkUpdates, false);
+});
+
 // The API key (plan 2026-11-06-installer-improvements T2, spec D3): a fake Windows with a fake cipher.
 function onWindows() {
   const t = setup();
