@@ -202,8 +202,14 @@ export interface BlockKind {
   /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's geometry. */
   readonly fullCube?: boolean;
   readonly harvest: readonly string[] | null;
-  /** The game's block tags it belongs to (`logs`, `crops`...); only a `blockKinds` lookup reports them. */
+  /** The game's block tags it belongs to (`logs`, `crops`...); a `blockKinds` lookup and a box read (`blocksIn`) report them. */
   readonly tags?: readonly string[];
+  /** The registry's break hardness; null when the block cannot be dug. Optional: an older runtime omits it. */
+  readonly hardness?: number | null;
+  /** Whether the block holds a fluid in its default state (water, lava, a water plant, a waterlogged state). Optional: an older runtime omits it. */
+  readonly fluid?: boolean;
+  /** False for the fallback kind of a name the registry does not know (an unloaded cell). Only a box read (`blocksIn`) reports it. */
+  readonly known?: boolean;
 }
 
 /** Where a block was seen: the middle of an explored chunk holding it, at the height asked from. */
@@ -427,6 +433,9 @@ const blockKindSchema = z.object({
   full_cube: z.boolean().optional(),
   harvest: z.array(z.string()).nullable().default(null),
   tags: z.array(z.string()).optional(),
+  hardness: z.number().nullable().optional(),
+  fluid: z.boolean().optional(),
+  known: z.boolean().optional(),
 }).transform(({ full_cube, ...kind }) => (full_cube === undefined ? kind : { ...kind, fullCube: full_cube }));
 
 const viewBoxSchema = z.object({

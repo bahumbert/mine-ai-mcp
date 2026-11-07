@@ -206,6 +206,19 @@ test("block and entity families: containers, chests, arrows and the other projec
   assert.deepEqual(index.entityFamilies("snowball"), []);
 });
 
+test("falling_block: the full blocks that fall when unsupported, from the vanilla override", () => {
+  const { bot } = watchedBot("1.21.4");
+  const index = familyIndexOf(bot);
+  for (const name of ["sand", "red_sand", "suspicious_sand", "gravel", "suspicious_gravel", "white_concrete_powder", "black_concrete_powder"]) {
+    assert.ok(index.itemFamilies(name).includes("falling_block"), name);
+  }
+  for (const name of ["dirt", "cobblestone", "oak_planks", "anvil", "white_concrete"]) assert.equal(index.itemFamilies(name).includes("falling_block"), false, name);
+  const members = bot.registry.itemsArray.filter((item) => index.itemFamilies(item.name).includes("falling_block"));
+  assert.equal(members.length, 21, "5 sands and gravels, 16 concrete powders");
+  const [vanilla] = loadFamilyOverrides();
+  for (const name of vanilla!.families.falling_block!) assert.ok(bot.registry.itemsByName[name], `${name} is in the 1.21.4 item registry`);
+});
+
 test("two bots, two indexes: a packet to one is not seen by the other", () => {
   const first = watchedBot();
   const second = watchedBot();

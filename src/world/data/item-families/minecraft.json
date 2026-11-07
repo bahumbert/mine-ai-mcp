@@ -13,6 +13,13 @@
     "torso_gear": ["elytra"],
     "boat": ["cherry_boat", "cherry_chest_boat", "bamboo_raft", "bamboo_chest_raft"],
     "station": ["crafting_table", "furnace"],
+    "falling_block": [
+      "sand", "red_sand", "suspicious_sand", "gravel", "suspicious_gravel",
+      "white_concrete_powder", "orange_concrete_powder", "magenta_concrete_powder", "light_blue_concrete_powder",
+      "yellow_concrete_powder", "lime_concrete_powder", "pink_concrete_powder", "gray_concrete_powder",
+      "light_gray_concrete_powder", "cyan_concrete_powder", "purple_concrete_powder", "blue_concrete_powder",
+      "brown_concrete_powder", "green_concrete_powder", "red_concrete_powder", "black_concrete_powder"
+    ],
     "avoided_food": ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken", "suspicious_stew", "chorus_fruit", "enchanted_golden_apple"],
     "container": ["chest", "trapped_chest", "barrel", "hopper", "dropper", "dispenser"],
     "chest": ["chest", "trapped_chest", "ender_chest"],
@@ -31,6 +38,7 @@
     "torso_gear": "worn on the chest but no armour: vanilla groups it in no tag of its own (enchantable/equippable also holds mob heads and every armour piece)",
     "boat": "the 1.19.4 boats tag lacks the cherry and bamboo boats that the 1.19.4 registry already holds (parity test, 2026-11-06)",
     "station": "vanilla has no tag of crafting stations",
+    "falling_block": "a full block that falls when unsupported: vanilla has no tag of them and minecraft-data has no gravity field (the other falling blocks are not full cubes)",
     "avoided_food": "the foods the hunger reflex never picks, each carrying an effect the model weighs for itself (this list is the only home of the choice: selectReflexFood, src/world/food.ts, skips the family); vanilla has no tag of them",
     "container": "vanilla has no block tag of storage containers (shulker boxes come from the shulker_boxes tag)",
     "chest": "vanilla has no block tag of chests: the chests whose lid an opaque block above stops (src/world/chest-clearance.ts)",

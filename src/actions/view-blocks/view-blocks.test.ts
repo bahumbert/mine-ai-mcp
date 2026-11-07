@@ -117,7 +117,7 @@ test("kinds give each named block's game data, harvest tools cheapest tier first
   const result = viewBlocks(fakeBot({}), request);
   assert.equal(result.status, "succeeded");
   const kinds = result.blocks.kinds!;
-  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, tags: undefined });
+  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: undefined });
   assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
   assert.ok(kinds.stone!.tags.includes("mineable/pickaxe"));
   assert.equal(kinds.stone!.tool, "pickaxe");
@@ -211,4 +211,34 @@ test("kinds say whether a block is a full cube, from the runtime's own geometry"
   const text = formatViewBlocksResult(viewBlocks(bot, request));
   assert.match(text, /- dirt: solid, full cube,/u);
   assert.match(text, /- oak_stairs: solid, not a full cube,/u);
+});
+
+test("box kinds give hardness, fluid, tags and known from game data", () => {
+  const bot = fakeBot({
+    [key(14, 64, 2)]: { name: "dirt" },
+    [key(15, 64, 2)]: { name: "bedrock" },
+    [key(14, 64, 1)]: { name: "water", properties: { level: "0" } },
+    [key(15, 64, 1)]: { name: "oak_leaves" },
+    [key(14, 64, 3)]: { name: "seagrass" },
+  });
+  const request = parseViewBlocksRequest({ box: { x: 15, y: 64, z: 2, half_width: 1, half_height: 0 } });
+  const kinds = viewBlocks(bot, request).blocks.box!.kinds;
+  assert.deepEqual([kinds.dirt!.hardness, kinds.dirt!.fluid, kinds.dirt!.known], [0.5, false, true]);
+  assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
+  assert.equal(kinds.bedrock!.hardness, null, "unbreakable: hardness -1 in the registry");
+  assert.equal(kinds.water!.fluid, true);
+  assert.ok(kinds.oak_leaves!.tags.includes("leaves"));
+  // seagrass: the runtime's own reading (navigation's holdsWater, a water plant) says it holds water.
+  assert.equal(kinds.seagrass!.fluid, true);
+  assert.deepEqual(kinds.unloaded, { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: false, tags: [], known: false });
+  assert.equal(kinds.air!.known, true, "air is a block the registry knows");
+});
+
+test("a kinds read gives the registry hardness, and a fluid is told apart by `fluid`", () => {
+  const request = parseViewBlocksRequest({ kinds: ["obsidian", "water"] });
+  const kinds = viewBlocks(fakeBot({}), request).blocks.kinds!;
+  assert.equal(kinds.obsidian!.hardness, 50);
+  // The 1.21.4 registry lists water as diggable at hardness 100: not a null hardness.
+  assert.equal(kinds.water!.hardness, 100);
+  assert.equal(kinds.water!.fluid, true);
 });

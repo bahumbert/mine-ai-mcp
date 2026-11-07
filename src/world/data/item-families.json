@@ -20,7 +20,8 @@
     "avoided_food": [],
     "bed": ["beds"],
     "boat": ["boats"],
-    "station": []
+    "station": [],
+    "falling_block": []
   },
   "block": {
     "container": ["shulker_boxes"],

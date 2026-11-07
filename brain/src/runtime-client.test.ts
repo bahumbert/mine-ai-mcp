@@ -26,6 +26,27 @@ test("a source from a runtime that names no seed still parses", async () => {
   assert.deepEqual((await runtime.blockSources(["wheat"]))["wheat"], [{ block: "wheat", chance: 1, planted: true }]);
 });
 
+function boxClient(kinds: Record<string, unknown>): ToolClient {
+  const data = { result: { blocks: { box: { layers: [{ y: 64, rows: [{ z: 0, blocks: ["dirt", "water"] }] }], kinds }, find: null } } };
+  return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
+}
+
+test("a box reply with hardness, fluid, tags and known parses into BlockArea.kinds", async () => {
+  const runtime = McpBotRuntime.over(boxClient({
+    dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
+    water: { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
+  }));
+  const area = await runtime.blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
+  assert.deepEqual(area.kinds.dirt, { tool: "shovel", solid: true, fullCube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true });
+  assert.deepEqual([area.kinds.water!.hardness, area.kinds.water!.fluid, area.kinds.water!.known], [null, true, true]);
+});
+
+test("a box reply of an older runtime, without the new kind fields, still parses", async () => {
+  const runtime = McpBotRuntime.over(boxClient({ dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null } }));
+  const area = await runtime.blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
+  assert.deepEqual(area.kinds.dirt, { tool: "shovel", solid: true, fullCube: true, harvest: null });
+});
+
 function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>)[]): ToolClient & { calls: number; closed: boolean } {
   const client = {
     calls: 0,

@@ -161,6 +161,10 @@ export const blockKindSchema = z.strictObject({
   /** Whether the block fills its whole cell (dirt, planks), unlike stairs, slabs, panes or doors; from the runtime's own geometry. */
   full_cube: z.boolean(),
   harvest: z.array(z.string()).nullable(),
+  /** The registry's `hardness`, a unitless number (dirt 0.5, obsidian 50; the break time also depends on the tool, unmeasured); null when the block cannot be dug (`diggable` false, hardness below 0 or missing). */
+  hardness: z.number().nonnegative().nullable(),
+  /** Whether the block holds a fluid in its default state: water, lava, a water plant or a waterlogged state (navigation's `holdsWater` plus `isLiquid`). */
+  fluid: z.boolean(),
 });
 
 /**
@@ -169,6 +173,14 @@ export const blockKindSchema = z.strictObject({
  */
 export const namedBlockKindSchema = blockKindSchema.extend({
   tags: z.array(z.string()),
+});
+
+/**
+ * A box's game data for one block name: the {@link namedBlockKindSchema} and whether the registry knows the name
+ * (false for the fallback kind of a cell the bot has not loaded, `"unloaded"`).
+ */
+export const boxBlockKindSchema = namedBlockKindSchema.extend({
+  known: z.boolean(),
 });
 
 export const viewBlocksReportSchema = z.strictObject({
@@ -202,7 +214,7 @@ export const viewBlocksReportSchema = z.strictObject({
         }),
       ),
       /** Game data for each block name in the box. */
-      kinds: z.record(z.string(), blockKindSchema),
+      kinds: z.record(z.string(), boxBlockKindSchema),
     })
     .nullable(),
   cells: z.array(observedBlockSchema),
@@ -214,6 +226,7 @@ export type ObservedBlock = z.output<typeof observedBlockSchema>;
 export type FoundBlock = z.output<typeof foundBlockSchema>;
 export type BlockKind = z.output<typeof blockKindSchema>;
 export type NamedBlockKind = z.output<typeof namedBlockKindSchema>;
+export type BoxBlockKind = z.output<typeof boxBlockKindSchema>;
 export type ViewBlocksReport = z.output<typeof viewBlocksReportSchema>;
 
 export const viewBlocksResultSchema = actionResultSchema({ blocks: viewBlocksReportSchema });

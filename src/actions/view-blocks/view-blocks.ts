@@ -15,6 +15,7 @@ import { Vec3 } from "vec3";
 import { observeMineflayerBlock } from "../../navigation/index.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { findLoadedBlockPositions, isLiquid } from "../../world/index.js";
+import { holdsWater } from "../../navigation/world/deep-water.js";
 import { defineAction } from "../action.js";
 import { blockMatchesSelector } from "../collect-block/collection-facts.js";
 import {
@@ -27,6 +28,7 @@ import {
   viewBlocksAnnotations,
   viewBlocksOutcomes,
   type BlockKind,
+  type BoxBlockKind,
   type NamedBlockKind,
   type FoundBlock,
   type ObservedBlock,
@@ -103,9 +105,29 @@ export function kindOf(bot: Pick<Bot, "registry">, name: string): BlockKind | nu
   // Item ids follow the game's tier order (wooden, stone, golden, iron, diamond, netherite): the lowest is the cheapest.
   const ids = Object.keys(block.harvestTools ?? {}).map(Number).sort((a, b) => a - b);
   const harvest = ids.map((id) => bot.registry.items[id]?.name).filter((item): item is string => item !== undefined);
-  const fullCube = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(block.defaultState, 0)).geometry.fullCube;
-  return { tool: toolClassOf(bot, name), solid: block.boundingBox === "block", full_cube: fullCube, harvest: harvest.length > 0 ? harvest : null };
+  const defaultState = prismarineBlock(bot.registry).fromStateId(block.defaultState, 0);
+  const fullCube = observeMineflayerBlock(defaultState).geometry.fullCube;
+  // Per name, on the default state: a waterlogged stair or slab placed in the world is a per-cell fact (`cellsAt`), not this one.
+  const fluid = isLiquid(defaultState) || holdsWater(name, (defaultState.getProperties?.() ?? {}) as Record<string, unknown>);
+  return {
+    tool: toolClassOf(bot, name),
+    solid: block.boundingBox === "block",
+    full_cube: fullCube,
+    harvest: harvest.length > 0 ? harvest : null,
+    hardness: digHardness(block),
+    fluid,
+  };
 }
+
+/** The registry's break hardness; null when the block cannot be dug (`diggable` false, hardness below 0 such as bedrock, or none listed). */
+function digHardness(block: { readonly diggable?: boolean; readonly hardness?: number | null }): number | null {
+  if (block.diggable === false) return null;
+  const hardness = block.hardness;
+  return typeof hardness === "number" && hardness >= 0 ? hardness : null;
+}
+
+/** The kind given to a cell name the registry does not know (an unloaded cell): nothing is known, so nothing is claimed. */
+const UNKNOWN_BOX_KIND: BoxBlockKind = { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: false, tags: [], known: false };
 
 function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNullable<ViewBlocksReport["box"]> {
   const layers: NonNullable<ViewBlocksReport["box"]>["layers"] = [];
@@ -126,10 +148,10 @@ function box(bot: Bot, request: NonNullable<ViewBlocksRequest["box"]>): NonNulla
     halfHeight: request.halfHeight,
     layers,
     kinds: Object.fromEntries(
-      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => [
-        name,
-        kindOf(bot, name) ?? { tool: null, solid: false, full_cube: false, harvest: null },
-      ]),
+      [...new Set(layers.flatMap((layer) => layer.rows.flatMap((row) => row.blocks)))].map((name) => {
+        const kind = kindOf(bot, name);
+        return [name, kind === null ? UNKNOWN_BOX_KIND : { ...kind, tags: [...tagsOf(name, bot.version)], known: true }];
+      }),
     ),
   };
 }
