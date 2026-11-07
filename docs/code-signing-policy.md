@@ -11,13 +11,14 @@ project is accepted; until then the setup is unsigned and its release notes say 
 
 ## What is not signed by us
 
-- `bun.exe` (Oven's Bun, MIT licence), shipped as its publisher signed it.
+- `bun.exe` (Oven's Bun), shipped as its publisher signed it.
 - The uninstaller `unins000.exe`, which is unsigned.
 
 ## Components
 
 Everything shipped is this repository (MIT), the open-source npm packages bundled into the app, `minecraft-data` (MIT,
-copied into the app as files), and `bun.exe` (Oven's Bun, MIT). The 136 bundled npm packages: 122 MIT, 6 ISC, 4
+copied into the app as files), and `bun.exe` (Oven's Bun: MIT, with JavaScriptCore and WebKit
+statically linked under LGPL-2, as Bun's own licence file says). The 136 bundled npm packages: 122 MIT, 6 ISC, 4
 BSD-3-Clause, 1 BSD-2-Clause, 2 Apache-2.0, and 1 BSD (`vec3`, which gives no version). Their notices are in
 `THIRD-PARTY-NOTICES.txt` in the install folder.
 
