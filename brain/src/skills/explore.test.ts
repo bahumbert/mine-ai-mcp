@@ -292,3 +292,10 @@ test("the explore template marks for as optional, and the refusal of a word like
   assert.equal(refused.status, "failed");
   assert.match("detail" in refused ? refused.detail : "", /leave "for" out to just explore/u);
 });
+
+test("the get_items line says it walks to the nearest known places, how many, and that it takes minutes", () => {
+  // The line promised a go_to step the bot never had: it says what the gathering does (fetch-farther.ts).
+  const usage = skillUsage("get_items", STYLES.get(DEFAULT_STYLE)!);
+  assert.ok(usage.includes("it fetches within 64 blocks, else walks to the nearest places where you saw some (up to 5) and gathers there; when it knows of none, it says so (explore for it); takes minutes"), usage);
+  assert.ok(!usage.includes("going there is a go_to step of its own"), usage);
+});

@@ -7,6 +7,7 @@ import { boatToMake } from "./boat-wood.ts";
 import { act, blocksBroken } from "./gather-action.ts";
 import type { GatherContext, GatherResult } from "./gather-materials.ts";
 import { RARE_DROP_BREAKS, type Knowledge } from "./how-to-get.ts";
+import { FAR_TRIES } from "./limits.ts";
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -40,8 +41,6 @@ export async function collectAll(context: GatherContext, targets: readonly (read
   return { status: "done", detail: done.join(", ") };
 }
 
-/** Places tried, nearest first, in one gathering. */
-const FAR_TRIES = 5;
 /** The nearest places looked at, at most, in one gathering. */
 const FAR_CANDIDATES = 256;
 /**

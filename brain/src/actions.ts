@@ -4,6 +4,7 @@ import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
 import { chooseSite, planHouse } from "./building/plan.ts";
 import type { Style } from "./building/styles.ts";
 import { FARM_SIZES } from "./farming/plot.ts";
+import { FAR_TRIES } from "./gathering/limits.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
 const minecraftId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft id such as oak_log");
@@ -147,7 +148,7 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "give_item": return `{"skill":"give_item","player":"<username>","item":"<item id>","count":<1-64>}  walk to the player and hand over items you carry`;
     case "drop_item": return `{"skill":"drop_item","items":[{"item":"<item id>","count":<n>}, ...]}  get rid of items you carry (buried in a small hole beside you, so you do not pick them up again), up to ${MAX_DROP_ITEMS} kinds in one step (no "count": all of that item), e.g. to make room: crafting and gathering stop when all 36 inventory slots are taken, and a slot is freed only when a whole stack goes, so drop all of everything you do not need at once; what you drop is lost`;
     case "craft_item": return `{"skill":"craft_item","item":"<item id>","count":<1-64>}  craft from your inventory; intermediate items (planks, sticks) are crafted automatically and a carried crafting_table is placed when needed; it never gathers missing materials`;
-    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; it fetches within 64 blocks only: when something is not near, it says where you last saw some (or that you never did), and going there is a go_to step of its own, worth it or not; takes minutes`;
+    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; it fetches within 64 blocks, else walks to the nearest places where you saw some (up to ${FAR_TRIES}) and gathers there; when it knows of none, it says so (explore for it); takes minutes`;
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
