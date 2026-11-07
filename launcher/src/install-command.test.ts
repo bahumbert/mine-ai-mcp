@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { iss } from "./build/iss-test-support.ts";
 import { UsageError } from "./cli-context.ts";
 import { cliContext, inTemporaryFolder, okInstallSteps } from "./cli-test-support.ts";
 import { diskStep, INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
@@ -203,7 +204,7 @@ test("`install gpu --json` says whether the model is on disk and which model: a 
 });
 
 test("the keys the installer script reads from `install gpu`'s file are the keys the command writes: a rename on either side fails here", async () => {
-  const script = readFileSync(new URL("../../packaging/windows/mine-ai.iss", import.meta.url), "utf8");
+  const script = iss;
   const t = setup({ gpu: async () => ({ ok: true, detail: "x", report: LOCAL_REPORT }) });
   await runInstallCommand(["gpu", "--json", t.json], t.context, t.steps, () => "D:\\Ollama\\ollama.exe", () => true);
   const output = written(t.json);

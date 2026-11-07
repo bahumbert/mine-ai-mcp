@@ -8,6 +8,13 @@ import test from "node:test";
 import { findInnoCompiler } from "./build-windows.ts";
 import { issIncludes, issPath, repoRoot } from "./iss-test-support.ts";
 
+test("launcher tests do not read the unexpanded installer script by path", () => {
+  const source = join(repoRoot, "launcher", "src");
+  const tests = readdirSync(source, { recursive: true, encoding: "utf8" }).filter((name) => name.endsWith(".test.ts"));
+  const rawReads = tests.filter((name) => /(?:readFileSync|Bun\.file)\s*\([^;]*?["'`][^"'`]*mine-ai\.iss["'`]/su.test(readFileSync(join(source, name), "utf8")));
+  assert.deepEqual(rawReads, [], "read the script through iss-test-support so includes are visible");
+});
+
 test("every #include of the script names a file next to it, and each included file starts with a comment saying what it holds", () => {
   const includes = issIncludes();
   assert.deepEqual(includes.filter((include) => !include.exists).map((include) => include.name), [], "an #include names a file that does not exist (ISCC would stop there)");

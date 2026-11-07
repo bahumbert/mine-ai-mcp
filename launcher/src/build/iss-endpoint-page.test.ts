@@ -213,8 +213,8 @@ test("the player is warned when a saved key meets another URL: only when both ho
   assert.match(note, /KeyUrlChangeTold := NewUrl;/u);
   assert.match(note, /The saved API key was made for ' \+ SavedBaseUrl/u);
   assert.match(note, /replace the dots in the API key box with that provider''s key/u);
-  // The box is honest about the key travelling: the endpoint test that follows OK sends the saved key to the new URL.
-  assert.match(note, /Setup keeps it and sends it to ' \+ Shown \+ ' in the endpoint test that follows/u);
+  // A failed configure may prevent the endpoint test from running.
+  assert.match(note, /Setup keeps it and sends it to ' \+ Shown \+ ' when it tests the endpoint/u);
   assert.match(note, /Log\('API key: /u);
   assert.match(note, /if not WizardSilent then\s+SuppressibleMsgBox\([^\n]*mbInformation, MB_OK, IDOK\);/u);
   // The silent log says the next action of a run with no key box.

@@ -17,7 +17,7 @@ function print(message: DaemonMessage): void {
 }
 
 /** Today's path, `mine-labs run` with its own servers: the comparison and the fallback. */
-async function runIsolated(args: SubmitArgs): Promise<number> {
+function runIsolated(args: SubmitArgs): Promise<number> {
   const command = ["bunx", "--bun", "mine-labs", "run", ...args.paths, "--jobs", "2", "--repeat", String(args.repeat), "-o", args.out];
   return new Promise(done => spawn(command[0]!, command.slice(1), { stdio: "inherit", cwd: REPO_ROOT }).once("exit", code => done(code ?? 1)));
 }

@@ -118,7 +118,7 @@ begin
   Shown := Trim(RemoteUrlEdit.Text);
   Log('API key: the saved key was made for ' + SavedBaseUrl + ' and is kept for ' + Shown + '. If that is another provider, run the setup again with /LLMKEY=<its key>.');
   if not WizardSilent then
-    SuppressibleMsgBox('The saved API key was made for ' + SavedBaseUrl + '. Setup keeps it and sends it to ' + Shown + ' in the endpoint test that follows.' + #13#10#13#10 + 'If ' + Shown + ' is another provider, replace the dots in the API key box with that provider''s key (if the test refuses the saved key, you stay on this page to do it).', mbInformation, MB_OK, IDOK);
+    SuppressibleMsgBox('The saved API key was made for ' + SavedBaseUrl + '. Setup keeps it and sends it to ' + Shown + ' when it tests the endpoint.' + #13#10#13#10 + 'If ' + Shown + ' is another provider, replace the dots in the API key box with that provider''s key (if the test refuses the saved key, you stay on this page to do it).', mbInformation, MB_OK, IDOK);
 end;
 
 // The text without the notice that starts it: the launcher's error and detail start with the /v1 notice, which is shown on its own.

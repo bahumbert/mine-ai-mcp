@@ -194,7 +194,7 @@ test("every command, install step and configure flag the Inno Setup script uses 
 });
 
 test("`install ollama` and `install gpu` say remote:true / ok:false the way the script reads them", () => {
-  const script = readFileSync(join(appRoot(), "packaging", "windows", "mine-ai.iss"), "utf8");
+  const script = issWithIncludes;
   assert.match(script, /JsonIsTrue\(Json, 'remote'\)/u);
   assert.match(script, /RunStepSucceeded\('install gpu'/u);
 });
