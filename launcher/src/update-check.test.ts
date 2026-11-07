@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkUpdate, isNewerVersion } from "./update-check.ts";
+import { checkUpdate, isNewerVersion, releaseVersion } from "./update-check.ts";
 
 const LATEST_URL = "https://api.example.test/releases/latest";
 
@@ -47,4 +47,25 @@ test("versions compare number by number, not as text", () => {
   assert.equal(isNewerVersion("1.10.0", "1.9.0"), true);
   assert.equal(isNewerVersion("1.9.0", "1.10.0"), false);
   assert.equal(isNewerVersion("2.0", "1.9.9"), true);
+});
+
+test("a pre-alpha tag is read as its version", () => {
+  assert.equal(releaseVersion("pre-alpha-0.2.0"), "0.2.0");
+  assert.equal(releaseVersion("v1.3.0"), "1.3.0");
+  assert.equal(releaseVersion("1.3.0"), "1.3.0");
+  assert.equal(isNewerVersion("pre-alpha-0.2.0", "0.1.0"), true);
+  assert.equal(isNewerVersion("pre-alpha-0.10.0", "0.9.0"), true);
+  assert.equal(isNewerVersion("pre-alpha-0.1.0", "0.1.0"), false);
+});
+
+for (const tag of ["nightly", "pre-alpha-", "-0.2.0", "pre-alpha-0.2.0-rc1"]) {
+  test(`the tag ${tag} is not a release version`, () => {
+    assert.equal(releaseVersion(tag), null);
+    assert.equal(isNewerVersion(tag, "0.1.0"), false);
+  });
+}
+
+test("a newer pre-alpha release is reported with its version, not its tag", async () => {
+  const { fetchImpl } = answering({ tag_name: "pre-alpha-0.2.0" });
+  assert.deepEqual(await checkUpdate("0.1.0", LATEST_URL, fetchImpl), { latest: "0.2.0" });
 });

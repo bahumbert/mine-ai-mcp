@@ -12,10 +12,19 @@ export interface AvailableUpdate {
   readonly url?: string;
 }
 
-/** `v1.3.0` and `1.3.0` both become `[1, 3, 0]`; null for a tag that is not dotted numbers (`nightly`). */
+/**
+ * The dotted number of a release tag: `v1.3.0`, `1.3.0` and `pre-alpha-1.3.0` all give `1.3.0`; null for a tag that is
+ * not a version (`nightly`, `pre-alpha-1.3.0-rc1`).
+ */
+export function releaseVersion(tag: string): string | null {
+  const match = /^(?:[A-Za-z][A-Za-z0-9-]*-)?v?(\d+(?:\.\d+)*)$/u.exec(tag.trim());
+  return match ? match[1]! : null;
+}
+
+/** `v1.3.0`, `1.3.0` and `pre-alpha-1.3.0` all become `[1, 3, 0]`; null for a tag that is not a version. */
 function versionParts(tag: string): number[] | null {
-  const match = /^v?(\d+(?:\.\d+)*)$/u.exec(tag.trim());
-  return match ? match[1]!.split(".").map(Number) : null;
+  const version = releaseVersion(tag);
+  return version === null ? null : version.split(".").map(Number);
 }
 
 /** True when `candidate` is a higher version than `current`, compared number by number (1.10 is newer than 1.9). */
@@ -39,8 +48,9 @@ export async function checkUpdate(current: string, latestUrl: string, fetchImpl:
     const response = await fetchImpl(latestUrl, { headers: { accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS) });
     if (!response.ok) return null;
     const release = releaseSchema.parse(await response.json());
-    if (!isNewerVersion(release.tag_name, current)) return null;
-    return { latest: release.tag_name.replace(/^v/u, ""), ...(release.html_url ? { url: release.html_url } : {}) };
+    const version = releaseVersion(release.tag_name);
+    if (version === null || !isNewerVersion(release.tag_name, current)) return null;
+    return { latest: version, ...(release.html_url ? { url: release.html_url } : {}) };
   } catch {
     return null;
   }
