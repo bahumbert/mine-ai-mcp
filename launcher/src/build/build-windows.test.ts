@@ -122,6 +122,21 @@ test("personas are the json files of the top level only", () => {
   }
 });
 
+test("the committed public personas hold every default bot, each a persona file with its own id", () => {
+  const repoRoot = join(import.meta.dirname, "..", "..", "..");
+  const manifest = JSON.parse(readFileSync(join(repoRoot, "packaging", "manifest.json"), "utf8")) as { defaultBots: string[] };
+  const publicPersonas = join(repoRoot, "packaging", "personas");
+  const files = listPersonaFiles(publicPersonas);
+  for (const id of manifest.defaultBots) {
+    assert.ok(files.includes(`${id}.json`), `packaging/personas has no ${id}.json for the manifest's defaultBots`);
+  }
+  for (const file of files) {
+    const persona = JSON.parse(readFileSync(join(publicPersonas, file), "utf8")) as { id?: unknown; username?: unknown };
+    assert.equal(typeof persona.username, "string", `${file} has no string username`);
+    assert.equal(persona.id, file.slice(0, -".json".length), `${file} id does not match its file name`);
+  }
+});
+
 test("the sign command becomes an Inno Setup SignTool command with its file placeholder", () => {
   assert.equal(
     toInnoSignTool('signtool sign /f "my cert.pfx" /p $ecret {file}'),
