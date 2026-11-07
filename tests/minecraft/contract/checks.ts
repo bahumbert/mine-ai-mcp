@@ -24,6 +24,8 @@ import { shieldRaised } from "./checks/shield-raised.ts";
 import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
+import { armourPointsWorn } from "./checks/armour-points-worn.ts";
+import { lightInCells } from "./checks/light-in-cells.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
@@ -178,6 +180,8 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   whisperEcho,
   respawnAfterDeath,
   respawnWhileAsleep,
+  lightInCells,
+  armourPointsWorn,
 ];
 
 /** The check of that name; throws listing the known names. */
