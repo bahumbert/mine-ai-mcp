@@ -3,6 +3,7 @@ import minecraftData from "minecraft-data";
 import { COMPASS_HEADINGS, type Step } from "../actions.ts";
 import { describeWay, FETCH_RANGE, knownPlaces } from "../gathering/fetch-farther.ts";
 import { dropSourcesNote, obtainedBy } from "../gathering/how-to-get.ts";
+import { carriesFamily } from "../inventory-room.ts";
 import { NEWEST_REGISTRY_VERSION as ENTITY_REGISTRY_VERSION } from "../newest-registry.ts";
 import type { BotSnapshot, FoundBlock, Position } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
@@ -75,7 +76,7 @@ export async function explore(context: SkillContext, step: ExploreStep, why: str
     : `; you already know of ${block} ${describeWay(start, knownBefore)}, around ${knownBefore.x} ${knownBefore.z}: get_items ${block} fetches it`;
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
-  const boat = setOut.inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+  const boat = carriesFamily(setOut.inventory, "boat");
   const radians = (COMPASS_HEADINGS[step.toward] * Math.PI) / 180;
   const [dx, dz] = [Math.sin(radians), -Math.cos(radians)];
   const way: ExploreWay = { start, dx, dz, knownNote };

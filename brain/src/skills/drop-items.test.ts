@@ -72,6 +72,17 @@ test("walking to a crafting table close by sends navigate its coordinates only, 
   assert.deepEqual(runtime.submitted.find((call) => call.tool === "navigate")?.input, { x: 3, y: 64, z: 0, range: 2 });
 });
 
+test("drop_item keeps the last item of a kept family whatever its name: a sword called obsidian_blade, a bamboo_raft (B6)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "obsidian_blade", count: 1, families: ["sword"] }, { name: "bamboo_raft", count: 1, families: ["boat"] }, { name: "dirt", count: 20, families: [] }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 20 }] });
+  const result = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "obsidian_blade" }, { item: "bamboo_raft" }, { item: "dirt" }] }), contextFor(runtime));
+  assert.deepEqual(runtime.submitted.map((call) => call.input.items), [[{ item_name: "dirt" }]], "only the dirt went to the action");
+  const detail = result.status === "done" ? result.detail : "";
+  assert.match(detail, /kept 1 obsidian_blade: your only sword/u);
+  assert.match(detail, /kept 1 bamboo_raft: your only boat/u);
+});
+
 test("drop_item keeps the last tool of a class, the last bed and the last boat (live 2026-10-10 run 8: pickaxe, axe, shovel, boat and bed dropped)", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "stone_pickaxe", count: 1 }, { name: "dirt", count: 20 }, { name: "white_bed", count: 1 }, { name: "oak_boat", count: 1 }] };

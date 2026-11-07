@@ -47,11 +47,11 @@ function keepLastOfKind(entries: readonly { item: string; count?: number }[], in
   const result = entries.map((entry) => ({ ...entry }));
   const kept: string[] = [];
   for (const kind of KEPT_KINDS) {
-    const owned = [...new Set(inventory.filter((stack) => kindOf(stack.name) === kind).map((stack) => stack.name))];
+    const owned = [...new Set(inventory.filter((stack) => kindOf(stack) === kind).map((stack) => stack.name))];
     if (owned.length === 0) continue;
     const dropping = (item: string) => { const entry = result.find((candidate) => candidate.item === item); return entry === undefined ? 0 : Math.min(entry.count ?? carried(item), carried(item)); };
     if (owned.some((item) => carried(item) - dropping(item) > 0)) continue;
-    const keep = bestTool(inventory.filter((stack) => kindOf(stack.name) === kind))!.name;
+    const keep = bestTool(inventory.filter((stack) => kindOf(stack) === kind))!.name;
     const entry = result.find((candidate) => candidate.item === keep);
     if (entry === undefined) continue;
     entry.count = Math.max(0, dropping(keep) - 1);
@@ -98,7 +98,7 @@ export async function dropItems(context: SkillContext, step: Extract<Step, { ski
   const kept = [...own.kept];
   const entries = own.entries.filter((entry) => {
     // A tool, bed or boat asked to go is a copy: the last of the class was kept above.
-    if (!needed.has(entry.item) || kindOf(entry.item) !== null) return true;
+    if (!needed.has(entry.item) || before.inventory.some((stack) => stack.name === entry.item && kindOf(stack) !== null)) return true;
     const all = before.inventory.filter((stack) => stack.name === entry.item).reduce((sum, stack) => sum + stack.count, 0);
     kept.push(`kept all ${Math.min(entry.count ?? all, all)} ${entry.item}: your current work needs them`);
     return false;

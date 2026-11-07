@@ -460,6 +460,13 @@ test("a fetch stays within 64 blocks and, finding nothing, says where she last s
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_boat", count: 1 }] };
   const boat = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
   assert.match(boat.status === "failed" ? boat.detail : "", /go_to there crosses by boat \(you carry one\)/u);
+  // The boat is whatever carried item has the boat family, a raft or a modded skiff too; a name alone is no boat.
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "mythril_skiff", count: 1, families: ["boat"] }] };
+  const skiff = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
+  assert.match(skiff.status === "failed" ? skiff.detail : "", /go_to there crosses by boat \(you carry one\)/u);
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "paper_boat", count: 1, families: [] }] };
+  const paper = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
+  assert.match(paper.status === "failed" ? paper.detail : "", /take a boat \(get_items oak_boat\) and go_to there/u);
   runtime.water = {};
   runtime.seen = { dark_oak_log: { dimension: "the_nether", x: 40, z: -8 } };
   const nether = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
@@ -839,6 +846,28 @@ test("a pickaxe that broke and cannot be made again ends a fetch of stone at onc
   assert.equal(result.status, "failed");
   assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 1, runtime.submitted.map(describeCall).join(" | "));
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1);
+});
+
+test("a harvest tool that broke and cannot be made again ends the fetch at once, whatever the tool is called: its class comes from the block, not the item's name", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, mythril_digger: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+  runtime.harvestTools = { stone: ["mythril_digger"], cobblestone: ["mythril_digger"] };
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "mythril_digger", count: 1, families: ["pickaxe"] }] };
+  runtime.failNext.collect_block = {
+    error: "[TOOL_TIER_LOST] mythril_digger was lost; family: pickaxe; no pickaxe remains.",
+    result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: "mythril_digger", class: "pickaxe" } } },
+    effect: () => {
+      runtime.addItem("cobblestone", 15);
+      runtime.addItem("mythril_digger", -1);
+    },
+  };
+  runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
+  const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
+  // The fetch ends with the craft's own failure at once (stone drops nothing without the tool); a class read from the item's name
+  // ("digger") would not match the lost "pickaxe" and the gathering would go on to one more round.
+  assert.deepEqual(result, { status: "failed", detail: "[CRAFT_FAILED] no recipe works here" });
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1, runtime.submitted.map(describeCall).join(" | "));
 });
 
 test("a stripped log makes its tree's boat with one planner call, none for another tree's boat", async () => {

@@ -1,6 +1,7 @@
 // Collecting a block, and going to the nearest place she saw it when none is near; the words for a collect that found none.
 import type { ActOutcome } from "../body.ts";
 import { sameDimension } from "../bot-data-sql.ts";
+import { carriesFamily } from "../inventory-room.ts";
 import { errorCode, type BotRuntime, type Position, type SeenBlock } from "../runtime-client.ts";
 import { boatToMake } from "./boat-wood.ts";
 import { act, blocksBroken } from "./gather-action.ts";
@@ -110,7 +111,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
   }
   let last = failed;
   let acrossWater = 0;
-  const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+  const boat = carriesFamily((await context.runtime.status()).inventory, "boat");
   let tries = 0;
   for (const seen of places) {
     if (context.signal.aborted || tries >= FAR_TRIES) break;
@@ -175,7 +176,7 @@ export async function notNear(context: Pick<GatherContext, "runtime">, block: st
   // Across water she knows (the explored chunks on the straight way are mostly water): a trip by boat (spec 2026-10-04).
   const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
   if (water !== null && water.share > 0.5) {
-    const boat = (await context.runtime.status()).inventory.some((stack) => stack.name.endsWith("_boat") || stack.name.endsWith("_raft"));
+    const boat = carriesFamily((await context.runtime.status()).inventory, "boat");
     const trip = boat ? "go_to there crosses by boat (you carry one)" : `take a boat (get_items ${await boatToMake(context.runtime)}) and go_to there`;
     return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
   }

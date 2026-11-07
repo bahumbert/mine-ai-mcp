@@ -1,6 +1,8 @@
 // Making a zone flat at a walking level: the protection of its margin, the plan, the tools and fill, the batches.
 import { SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "../building/terrain.ts";
 import { lostToolClass, ToolLosses, toolToMake } from "../building/tool-loss.ts";
+import type { Stacks } from "../gathering/stacks.ts";
+import { carriesFamily } from "../inventory-room.ts";
 import { areaKey, errorCode, type BotRuntime } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
 import { getItems } from "./get-items.ts";
@@ -105,7 +107,7 @@ async function readLevelArea(context: SkillContext, min: LevelBox["min"], max: L
 }
 
 /** How many of an item the stacks hold beyond the blocks reserved for what comes next. */
-function spareOf(stacks: readonly { readonly name: string; readonly count: number }[], reserved: Reserved): (item: string) => number {
+function spareOf(stacks: Stacks, reserved: Reserved): (item: string) => number {
   // What it may spend: never the blocks reserved for what comes next (the house's own cobblestone).
   return (item: string) =>
     stacks.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0) - (reserved.find((entry) => entry.item === item)?.count ?? 0);
@@ -124,10 +126,10 @@ function cellCount(batches: Batches): number {
 }
 
 /** The tool of each class the plan's dig needs and the stacks do not hold: stone when the cobblestone is spare, else wood. */
-function toolsMissing(plan: LevelPlan, stacks: readonly { readonly name: string; readonly count: number }[], reserved: Reserved): { item: string; count: number }[] {
+function toolsMissing(plan: LevelPlan, stacks: Stacks, reserved: Reserved): { item: string; count: number }[] {
   const has = spareOf(stacks, reserved);
   return plan.tools
-    .filter((tool) => !stacks.some((stack) => stack.name.endsWith(`_${tool}`)))
+    .filter((tool) => !carriesFamily(stacks, tool))
     .map((tool) => ({ item: toolToMake(tool, has), count: 1 }));
 }
 

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bestTool, consumedBy, junkHint, junkStacks, neededItems } from "./inventory-room.ts";
-import { FakeRuntime } from "./testing.ts";
+import { bestTool, consumedBy, junkHint, junkStacks, kindOf, neededItems } from "./inventory-room.ts";
+import { FakeRuntime, vanillaItemFamilies } from "./testing.ts";
 
-const stack = (name: string, count: number) => ({ name, count });
-const worn = (name: string, remaining: number, maximum: number) => ({ name, count: 1, durability: { remaining, maximum } });
-const snapshot = (inventory: { name: string; count: number }[], foods: string[] = []) => ({ inventory, foods: foods.map((name) => ({ name, hunger: 4, count: 1 })) }) as never;
+const stack = (name: string, count: number) => ({ name, count, families: vanillaItemFamilies(name) });
+const worn = (name: string, remaining: number, maximum: number) => ({ name, count: 1, durability: { remaining, maximum }, families: vanillaItemFamilies(name) });
+const snapshot = (inventory: { name: string; count: number; families?: string[] }[], foods: string[] = []) => ({ inventory, foods: foods.map((name) => ({ name, hunger: 4, count: 1 })) }) as never;
 
 test("neededItems: tools, armour, stations, foods, the house bill and the items being fetched", () => {
   const carried = snapshot([stack("stone_pickaxe", 1), stack("iron_boots", 1), stack("crafting_table", 1), stack("bread", 3), stack("snowball", 90), stack("oak_planks", 40)], ["bread"]);
@@ -91,7 +91,7 @@ test("with equal maxima the tool with more durability left is the one kept", () 
 });
 
 test("a tool reporting no durability ranks last, and a lone one is still kept", () => {
-  const older = { name: "wooden_pickaxe", count: 1 };
+  const older = stack("wooden_pickaxe", 1);
   assert.equal(bestTool([older, worn("golden_pickaxe", 5, 32)])?.name, "golden_pickaxe");
   assert.deepEqual([...neededItems(snapshot([older]))], ["wooden_pickaxe"]);
   assert.equal(bestTool([]), undefined);
@@ -100,4 +100,33 @@ test("a tool reporting no durability ranks last, and a lone one is still kept", 
 test("two stacks of one tool with different wear are one name: that name is kept once", () => {
   const carried = snapshot([worn("iron_axe", 10, 250), worn("iron_axe", 200, 250), worn("wooden_axe", 59, 59)]);
   assert.deepEqual([...neededItems(carried)], ["iron_axe"]);
+});
+
+const familied = (name: string, families: string[], count = 1) => ({ name, count, families });
+
+test("the last sword is kept, whatever its name: the stack's family decides, not the id's last word", () => {
+  assert.deepEqual([...neededItems(snapshot([familied("obsidian_blade", ["sword"])]))], ["obsidian_blade"]);
+  assert.equal(neededItems(snapshot([familied("obsidian_blade", ["sword"]), familied("wooden_sword", ["sword"])])).size, 1, "one sword of the class is kept");
+});
+
+test("B6: bamboo_raft is kept as the boat, and a second boat of any wood is a copy", () => {
+  assert.deepEqual([...neededItems(snapshot([familied("bamboo_raft", ["boat"])]))], ["bamboo_raft"]);
+  assert.equal(neededItems(snapshot([familied("bamboo_raft", ["boat"]), familied("cherry_boat", ["boat"])])).size, 1);
+  const twoRafts = snapshot([familied("bamboo_raft", ["boat"]), familied("bamboo_raft", ["boat"])]);
+  assert.deepEqual(junkStacks(twoRafts, new Set(["bamboo_raft"])), [{ name: "bamboo_raft", count: 1, slots: 1, stacks: [1] }], "the second raft is a copy");
+});
+
+test("armour is needed by family: a helmet, a chestplate, leggings and boots are never junk, nor is a station", () => {
+  const carried = snapshot([
+    familied("mythril_cap", ["helmet"]), familied("mythril_vest", ["chestplate"]), familied("mythril_legs", ["leggings"]), familied("mythril_shoes", ["boots"]),
+    familied("forge", ["station"]), familied("granite", []),
+  ]);
+  assert.deepEqual([...neededItems(carried)].sort(), ["forge", "mythril_cap", "mythril_legs", "mythril_shoes", "mythril_vest"]);
+});
+
+test("a family-less stack from an older runtime falls back to empty families: nothing is kept by its name", () => {
+  const olderRuntime = (name: string) => ({ name, count: 1 });
+  const carried = snapshot(["stone_pickaxe", "iron_boots", "crafting_table", "oak_boat"].map(olderRuntime));
+  assert.deepEqual([...neededItems(carried)], []);
+  assert.equal(kindOf(olderRuntime("stone_pickaxe")), null);
 });

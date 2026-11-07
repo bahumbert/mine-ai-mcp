@@ -217,6 +217,19 @@ test("with a boat, explore sets off over the water: one leg to the whole distanc
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input), [{ x: 8, z: -56, near_y: 64, range: 4 }]);
 });
 
+test("the boat is a carried item of the boat family (B6: a bamboo_raft is one), and a name ending in _boat with no family is none", async () => {
+  const sail = async (inventory: { name: string; count: number; families: string[] }[]) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, position: { x: 8, y: 64, z: 8 }, inventory };
+    runtime.walkOnNavigate = true;
+    runtime.water = { "0,-1": 0.9, "0,-2": 0.95, "0,-3": 0.95, "0,-4": 0.9 };
+    return runStep(stepSchema.parse({ skill: "explore", toward: "north" }), contextFor(runtime));
+  };
+  assert.equal((await sail([{ name: "bamboo_raft", count: 1, families: ["boat"] }])).status, "done");
+  const none = await sail([{ name: "paper_boat", count: 1, families: [] }]);
+  assert.match(none.status === "failed" ? none.detail : "", /^north is water as far as you have seen/u);
+});
+
 test("out on the water, explore names the nearest land instead of another way", async () => {
   // Live 2026-10-04: Vex, 104 blocks out over water, was refused all eight ways, fifteen steps in a row.
   const runtime = new FakeRuntime();

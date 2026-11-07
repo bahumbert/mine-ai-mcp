@@ -1,6 +1,7 @@
 // Plans one round of a gathering: what to collect, hunt, craft and smelt, and which tools to make first.
 import { describeMaterials } from "../building/blueprint.ts";
 import { toolToMake } from "../building/tool-loss.ts";
+import { carriesFamily } from "../inventory-room.ts";
 import { stackSizeOf } from "../newest-registry.ts";
 import type { BotRuntime, ItemCount, SmeltingRecipe } from "../runtime-client.ts";
 import { gatherFrom, howToGet, isOre, nearbyWoods, notDropped, unknownItem, type Knowledge } from "./how-to-get.ts";
@@ -32,6 +33,8 @@ export interface Round {
   readonly tableFirst: boolean;
   /** The harvest tool to craft before some block to collect drops anything (a wooden pickaxe for stone). */
   readonly toolFirst: string | null;
+  /** The tool class (`pickaxe`...) of {@link toolFirst} as the game data names it for the block it opens (a lost class is `knowledge.lost`'s); null when none. */
+  readonly toolFirstKind: string | null;
   readonly craft: readonly ItemCount[];
   readonly smelt: readonly SmeltJob[];
 }
@@ -96,11 +99,13 @@ export async function planRound(runtime: BotRuntime, missing: readonly ItemCount
   // nothing new comes up.
   let craftedSeen = "";
   let toolsSeen = "";
+  let missingToolList: MissingTool[] = [];
   let tools: string[] = [];
   for (let pass = 0; pass < 8; pass += 1) {
     const jobProblem = await addSmeltJobs(tally, inventory, missing);
     if (jobProblem !== null) return jobProblem;
-    tools = await missingTools(runtime, [...tally.collect.keys(), ...tally.leaves.keys()], inventory, knowledge);
+    missingToolList = await missingTools(runtime, [...tally.collect.keys(), ...tally.leaves.keys()], inventory, knowledge);
+    tools = missingToolList.map(({ item }) => item);
     if (pass > 0 && tally.jobs.size >= tally.smelts.size && craftedSeen === signature(tally.crafted) && toolsSeen === tools.join(",")) break;
     craftedSeen = signature(tally.crafted);
     toolsSeen = tools.join(",");
@@ -110,6 +115,7 @@ export async function planRound(runtime: BotRuntime, missing: readonly ItemCount
   for (const [block, count] of tally.leaves) tally.collect.set(block, (tally.collect.get(block) ?? 0) + count);
   for (const [item, { mob, count }] of tally.huntedLeaves) tally.hunt.set(item, { mob, count: (tally.hunt.get(item)?.count ?? 0) + count });
   const toolFirst = await chooseTool(runtime, tools);
+  const toolFirstKind = missingToolList.find(({ item }) => item === toolFirst)?.kind ?? null;
   // A placed table she would walk to is used instead of making one (live 2026-10-07: a table was crafted, and lost,
   // beside one already standing).
   const tableFirst = (toolFirst !== null || tally.crafted.size > 0) && carried(inventory, TABLE.item) === 0
@@ -119,6 +125,7 @@ export async function planRound(runtime: BotRuntime, missing: readonly ItemCount
     hunt: tally.hunt,
     tableFirst,
     toolFirst,
+    toolFirstKind,
     craft: [...tally.crafted].map(([item, count]) => ({ item, count })),
     smelt: [...tally.jobs.values()],
   };
@@ -219,7 +226,7 @@ export function toolMissing(block: string, inventory: Stacks, knowledge: Knowled
   // A tool that broke on the way is made again for the blocks of its class, even those a hand digs (live run 13: the
   // wooden shovel, then dirt by hand): the best the materials allow, as a level's tool is chosen.
   const kind = knowledge.toolClass.get(block) ?? null;
-  if (kind === null || !knowledge.lost.has(kind) || inventory.some((stack) => stack.name.endsWith(`_${kind}`))) return null;
+  if (kind === null || !knowledge.lost.has(kind) || carriesFamily(inventory, kind)) return null;
   return toolToMake(kind, (item) => carried(inventory, item));
 }
 
@@ -229,8 +236,14 @@ export function requiresTool(block: string, inventory: Stacks, knowledge: Knowle
   return harvest !== null && !harvest.some((tool) => carried(inventory, tool) > 0);
 }
 
+/** A harvest tool still to make, and the tool class (game data) of the block that needs it. */
+interface MissingTool {
+  readonly item: string;
+  readonly kind: string | null;
+}
+
 /** The harvest tools still to make for `blocks`, learning each block's harvest tools from game data once. */
-async function missingTools(runtime: BotRuntime, blocks: readonly string[], inventory: Stacks, knowledge: Knowledge): Promise<string[]> {
+async function missingTools(runtime: BotRuntime, blocks: readonly string[], inventory: Stacks, knowledge: Knowledge): Promise<MissingTool[]> {
   const unknown = [...new Set(blocks)].filter((block) => !knowledge.harvest.has(block));
   if (unknown.length > 0) {
     const kinds = await runtime.blockKinds(unknown);
@@ -240,8 +253,11 @@ async function missingTools(runtime: BotRuntime, blocks: readonly string[], inve
       knowledge.toolClass.set(block, kinds[block]?.tool ?? null);
     }
   }
-  const tools = blocks.map((block) => toolMissing(block, inventory, knowledge)).filter((tool): tool is string => tool !== null);
-  return [...new Set(tools)];
+  const tools = blocks.flatMap((block) => {
+    const item = toolMissing(block, inventory, knowledge);
+    return item === null ? [] : [{ item, kind: knowledge.toolClass.get(block) ?? null }];
+  });
+  return tools.filter((tool, index) => tools.findIndex(({ item }) => item === tool.item) === index);
 }
 
 /**

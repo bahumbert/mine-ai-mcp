@@ -80,10 +80,23 @@ test("a tool worn out while leveling is made again and the batch done again, not
   runtime.world.set("2,64,2", "gold_block");
   runtime.world.set("6,64,5", "gold_block");
   runtime.world.set("4,64,3", "grass_block");
-  runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 4,64,3; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
+  runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 4,64,3; family: shovel; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
   const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
   assert.deepEqual(result, { status: "done", detail: "leveled 5x4 at y 64: dug 1, filled 0" });
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft wooden_shovel at table", "build_structure"]);
+});
+
+test("a shovel carried under another name is found by its family: none is made for the digging", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "mythril_digger", count: 1, families: ["shovel"] }, { name: "oak_planks", count: 8 }, { name: "crafting_table", count: 1 }] };
+  runtime.world.set("2,64,2", "gold_block");
+  runtime.world.set("6,64,5", "gold_block");
+  runtime.world.set("4,64,3", "grass_block");
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item").map(describeCall), []);
 });
 
 test("a shovel that breaks with no digging left in the level is not made again, the filling goes on", async () => {
@@ -99,7 +112,7 @@ test("a shovel that breaks with no digging left in the level is not made again, 
   // The shovel goes with the last batch (the hole), after every block to dig is dug.
   runtime.submit = async (tool, input, ...rest) => {
     if (tool === "build_structure" && builds(runtime).length === 1) {
-      runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 5,64,4; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
+      runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 5,64,4; family: shovel; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
     }
     return submit(tool, input, ...rest);
   };

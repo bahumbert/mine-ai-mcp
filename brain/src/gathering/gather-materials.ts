@@ -227,7 +227,7 @@ async function afterFailedRound(outcome: RoundOutcome): Promise<"continue" | Gat
     return { status: "failed", detail: `${worn}: stopping here; ${step.detail}` };
   }
   // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
-  const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
+  const remade = plan.toolFirstKind;
   if (remade !== null && knowledge.lost.delete(remade) && step.status === "failed") {
     // A block that drops nothing without the tool cannot go on without it: the gather ends here, not a round later.
     const now = (await context.runtime.status()).inventory;
