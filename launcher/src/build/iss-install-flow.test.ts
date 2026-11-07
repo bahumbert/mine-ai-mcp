@@ -82,6 +82,28 @@ test("an update says 'update or repair' on the Ready page and 'Updating' while c
   assert.match(functionBody("IsUpdate"), /PrevAppDir <> ''/u);
 });
 
+// T20 (wizard walk of build 1f2b723, F2): Inno's Ready line says "Click Install ... or click Back", but the update's button is "Update" and Ready is its first page.
+test("the update's Ready page line names the Update button and no Back; a first install keeps Inno's line", () => {
+  const say = functionBody("SayUpdateOnPage");
+  // Only the Ready branch: from `wpReady then` to the `end` before `else if CurPageID = wpInstalling`.
+  const readyBranch = /CurPageID = wpReady then([\s\S]*?)\n  end\n  else if CurPageID = wpInstalling/u.exec(say)?.[1] ?? "";
+  const caption = /WizardForm\.ReadyLabel\.Caption := '([^']*)';/u.exec(readyBranch)?.[1];
+  assert.notEqual(caption, undefined, "SayUpdateOnPage does not set the Ready line");
+  assert.match(caption!, /Update/u);
+  assert.doesNotMatch(caption!, /Back|Install/u);
+  // After the early Exit of a first install: only an update sets it.
+  assert.ok(say.indexOf("ReadyLabel.Caption") > say.indexOf("if not IsUpdate() then"), "the Ready line is set before the first-install exit: a first install would lose Inno's line");
+});
+
+// T20 (F3): the "Disk room" line of the Ready memo ran off to the right under a horizontal scroll bar.
+test("the Ready memo wraps its lines and scrolls vertically only, set once for a first install and an update alike", () => {
+  const init = functionBody("InitializeWizard");
+  assert.match(init, /WizardForm\.ReadyMemo\.WordWrap := True;/u);
+  assert.match(init, /WizardForm\.ReadyMemo\.ScrollBars := ssVertical;/u);
+  assert.doesNotMatch(init, /IsUpdate\(\)[^\n]*\n[^\n]*ReadyMemo/u);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("ReadyMemo.")).map(([name]) => name), ["InitializeWizard"]);
+});
+
 // Finding 6b: the Ready page showed only the destination.
 test("the Ready summary lists the folders, and the model and server of an update read from settings.json by the helper the pages use", () => {
   const memo = functionBody("UpdateReadyMemo");

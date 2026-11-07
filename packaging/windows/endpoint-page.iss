@@ -17,6 +17,8 @@ var
   // The endpoint page's own step status and gauge (the model page keeps ModelStepStatus and ModelGauge), the list's status and
   // the info and count texts of the model list.
   EndpointStepStatus, ListStatus, FilterCountText, ModelInfoText: TNewStaticText;
+  // The label above the key box: ShowKeyLabel says there whether the box holds the mark of a saved key.
+  KeyLabel: TNewStaticText;
   EndpointGauge: TNewProgressBar;
   // The lines `<id>#9<info>` of the last `install endpoint-models` list (empty before one, and after a list that failed).
   ModelListLines: TArrayOfString;
@@ -56,11 +58,24 @@ begin
     Result := 'The URL has no spaces and no field contains a double quote.';
 end;
 
+// The caption above the key box says a saved key is kept while the box holds its mark (19 dots look like a typed key). "Replace the
+// dots" is the wording of SAVED_KEY_UNUSABLE_TEXT and NoteSavedKeyKeptForOtherUrl: a character typed after a click inside the dots is
+// added to the mark and sent as is. At most as long as the page's longest one-line label (55 characters): a second line would hide
+// under the box (iss-endpoint-page.test.ts holds the length). The text is a fixed caption: the box's text is never put in a Log line.
+procedure ShowKeyLabel();
+begin
+  if KeyWasSaved and (RemoteKeyEdit.Text = SAVED_KEY_MARK) then
+    KeyLabel.Caption := 'API key: saved key kept (replace the dots to change it)'
+  else
+    KeyLabel.Caption := 'API key (empty for an endpoint that needs none)';
+end;
+
 // Any edit of the key box (a typed key, a cleared box, a fill button) means the saved key is no longer the one to keep, unless the edits
 // brought the box back to the mark (a typed character, then Backspace): then the saved key is the one to keep, and the mark of a saved key is never sent as a key.
 procedure RemoteKeyChanged(Sender: TObject);
 begin
   KeySaved := KeyWasSaved and (RemoteKeyEdit.Text = SAVED_KEY_MARK);
+  ShowKeyLabel();
 end;
 
 // The key part of `install endpoint-models`: the saved key stays in the settings (`--saved-key`), a typed one is given (`--key`, empty
@@ -327,7 +342,7 @@ begin
   OllamaOtherPcButton.OnClick := @FillOllamaOnAnotherPc;
   OllamaHelpButton := AddButton(EndpointPage, 'Help...', 46, 148, 75);
   OllamaHelpButton.OnClick := @ShowOllamaHelp;
-  AddText(EndpointPage, 'API key (empty for an endpoint that needs none)', 76, 14);
+  KeyLabel := AddText(EndpointPage, 'API key (empty for an endpoint that needs none)', 76, 14);
   RemoteKeyEdit := TPasswordEdit.Create(EndpointPage);
   RemoteKeyEdit.Parent := EndpointPage.Surface;
   RemoteKeyEdit.Left := 0;

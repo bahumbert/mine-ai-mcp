@@ -155,7 +155,7 @@ Ollama has no password: use this only on a network you trust. Without the settin
 ### Your API key
 
 The key is stored in `settings.json` encrypted for your Windows user (`apiKeyProtected`); it does not appear in clear in
-the file. When you run the installer again over settings that hold a key, the key box shows dots and Mine AI keeps the
+the file. When you run the installer again over settings that hold a key, the key box shows dots (the label above it then reads "saved key kept") and Mine AI keeps the
 saved key unless you type another one; the saved key goes to whatever URL is in the URL box, so type the key again when
 you change to another service. To remind you, the installer shows a message when you press **Next** with a saved key
 and a URL that differs from the saved one (a trailing `/` does not count): it names the URL the key was saved for and

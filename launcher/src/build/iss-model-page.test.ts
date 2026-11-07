@@ -73,6 +73,83 @@ test("the room warning has its own place on the model page: under the remote cho
   assert.ok(gauge.top <= 270, "the model page goes lower than the endpoint page's gauge");
 });
 
+// ---------- T19 (wizard walk of build 1f2b723, F1): one writer of the model radios, written once on the verdict ----------
+// The model page opened on the remote radio although the local one was checked from code: the checked-from-code radio did not hold the
+// focus, and the focused one re-checked itself when the window got its focus back. The choice is written once (ApplyModelChoice, on the
+// verdict) and a visit to a page only moves the focus to the radio already checked (FocusCheckedRadio, never a write).
+
+const MODEL_RADIO_WRITE = /\bModel(?:Local|Remote)Radio\.Checked\s*:=/u;
+/** The routines that may write the two model radios: the one writer, the radio's creation default, a new verdict, and the silent path's parameters. */
+const MODEL_RADIO_WRITERS = ["ApplyModelChoice", "ApplySilentParameters", "SilentLocalModelFailure", "SilentSetupFailure", "SwitchToRemoteAfterOllama", "CreateModelPage"];
+
+test("only ApplyModelChoice, a new verdict, the silent path and the radios' creation write the model radios; a page change never writes a .Checked", () => {
+  const writers = [...codeFunctions()].filter(([, body]) => MODEL_RADIO_WRITE.test(body)).map(([name]) => name);
+  assert.ok(writers.includes("ApplyModelChoice"), "no ApplyModelChoice writes the radios");
+  assert.deepEqual(writers.filter((name) => !MODEL_RADIO_WRITERS.includes(name)), [], "a function outside the writers' list assigns a model radio's .Checked");
+  assert.doesNotMatch(functionBody("CurPageChanged"), /\.Checked\s*:=/u);
+});
+
+test("ApplyModelChoice: local when the verdict allows it and the saved kind is not remote, remote otherwise; both radios set, focus moved, the Ollama folder row updated", () => {
+  const apply = functionBody("ApplyModelChoice");
+  assert.match(apply, /ModelLocalRadio\.Enabled and \(not PreviousLlmWasRemote\)/u);
+  assert.match(apply, /ModelLocalRadio\.Checked := Local;/u);
+  assert.match(apply, /ModelRemoteRadio\.Checked := not Local;/u);
+  assert.match(apply, /FocusCheckedRadio\(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil\);/u);
+  assert.match(apply, /ModelChoiceChanged\(nil\);/u);
+  assert.ok(apply.indexOf("FocusCheckedRadio(") > apply.indexOf("Checked :="), "the focus moves before the radios are set: it would go to a radio about to be unchecked");
+});
+
+test("FocusCheckedRadio moves the focus to the radio already checked when its page is the current page, and never writes a .Checked", () => {
+  const focus = functionBody("FocusCheckedRadio");
+  assert.match(focus, /WizardForm\.CurPageID <> Page\.ID then\s+Exit;/u);
+  // All three radios are looked at: dropping the third leaves the server page's "use an existing server" unfocused.
+  assert.match(focus, /if First\.Checked then\s+Checked := First\s+else if Second\.Checked then\s+Checked := Second\s+else if \(Third <> nil\) and Third\.Checked then\s+Checked := Third;/u);
+  assert.match(focus, /WizardForm\.ActiveControl := Checked;/u);
+  // A disabled control cannot take the focus (Delphi raises): the local radio is disabled when the verdict is remote.
+  assert.match(focus, /Checked\.Enabled/u);
+  assert.doesNotMatch(focus, /\.Checked\s*:=/u);
+});
+
+test("CheckGpuOnce makes the choice once, in each branch, before the disk text runs while the window answers clicks; it no longer reads the saved kind", () => {
+  const gpu = functionBody("CheckGpuOnce");
+  const calls = [...gpu.matchAll(/ApplyModelChoice\(\);/gu)].map((match) => match.index!);
+  assert.equal(calls.length, 2, "ApplyModelChoice is not called once in each branch");
+  const failed = gpu.indexOf("GpuProblem := StepFailureText(Json);");
+  assert.ok(calls[0]! < failed && calls[1]! > failed, "the two calls are not one in each branch");
+  assert.ok(calls[1]! < gpu.indexOf("ShowDiskSpace()"), "the choice is made after the disk text starts: a click on remote during it would be overwritten");
+  assert.doesNotMatch(gpu, /PreviousLlmWasRemote/u);
+  assert.match(gpu, /if GpuChecked then\s+Exit;/u);
+});
+
+test("a visit to the model page or the server page only moves the focus to the radio already checked", () => {
+  const changed = functionBody("CurPageChanged");
+  assert.match(changed, /CheckGpuOnce\(\);\s+FocusCheckedRadio\(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil\);/u);
+  assert.match(changed, /FocusCheckedRadio\(ServerPage, ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio\);/u);
+});
+
+test("PrefillFromSettings resets what it may not set before it reads the file, and finishes the same way whether or not a file was found", () => {
+  const prefill = functionBody("PrefillFromSettings");
+  const read = prefill.indexOf("ReadSettingsSections(");
+  assert.ok(read > 0);
+  for (const reset of ["PreviousLlmWasRemote := False;", "RemoteUrlEdit.Text := '';", "RemoteModelCombo.Text := '';", "ServerNoneRadio.Checked := True;", "ServerHostEdit.Text := '';", "ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);"]) {
+    const at = prefill.indexOf(reset);
+    assert.ok(at >= 0 && at < read, `${reset} is not before the file is read`);
+  }
+  // No early Exit: a missing file leaves the creation defaults, with the server boxes enabled to match and the key caption set.
+  assert.doesNotMatch(prefill, /\bExit;/u);
+  for (const finish of ["ServerChoiceChanged(nil);", "ShowKeyLabel();"]) assert.ok(prefill.lastIndexOf(finish) > read, `${finish} does not run after the read`);
+  assert.match(prefill, /if ReadSettingsSections\(Llm, Server\) then\s+begin/u);
+  assert.match(prefill, /end;\s+ServerChoiceChanged\(nil\);\s+ShowKeyLabel\(\);\s+end;\s*$/u);
+});
+
+test("the server port's default is one constant: the server page, the prefill's reset and the configure fallback share it", () => {
+  assert.match(code, /DEFAULT_SERVER_PORT = 25565;/u);
+  // The text of JoinText ("normally 25565") is words for the player, not a default.
+  assert.doesNotMatch(code, /'25565'|StrToIntDef\([^\n]*, 25565\)/u, "a default port is spelled outside the constant");
+  assert.match(functionBody("CreateServerPage"), /ServerPortEdit\.Text := IntToStr\(DEFAULT_SERVER_PORT\);/u);
+  assert.match(functionBody("ConfigureArguments"), /StrToIntDef\(Trim\(ServerPortEdit\.Text\), DEFAULT_SERVER_PORT\)/u);
+});
+
 test("the doc's disk part says the same as the wizard: the setup counts downloads and installs, Ollama's installer needs room on C:, the bots' memories grow", () => {
   const section = doc.slice(doc.indexOf("## Disk space"), doc.indexOf("## The Minecraft server"));
   assert.ok(section.length > 0, "the doc has no section \"Disk space\" before \"The Minecraft server\"");

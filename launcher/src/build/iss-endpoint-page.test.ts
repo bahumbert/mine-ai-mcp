@@ -130,7 +130,7 @@ test("the setup never reads a key: apiKey and apiKeyProtected are read in Prefil
   assert.ok(mark > read && flag > mark && wasFlag > read, "KeySaved is set before the mark is in the box, or KeyWasSaved before the file is read");
   assert.match(prefill, /JsonString\(Llm, 'apiKeyProtected'\) <> ''/u);
   // The mark is the box's text and nothing else: it is read back by the prefill and the box's change handler, and the mark of a saved key reaches no launcher call (KeySaved gates the sending).
-  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("SAVED_KEY_MARK")).map(([name]) => name).sort(), ["PrefillFromSettings", "RemoteKeyChanged"]);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("SAVED_KEY_MARK")).map(([name]) => name).sort(), ["PrefillFromSettings", "RemoteKeyChanged", "ShowKeyLabel"]);
 });
 
 test("a key typed in the box is sent; a key the setup did not touch is never on a command line: the box text goes to the launcher only behind a KeySaved test, in RemoteLlmArguments and ListKeyArguments", () => {
@@ -147,13 +147,47 @@ test("a key typed in the box is sent; a key the setup did not touch is never on 
 test("the key box means the saved key only while it holds the mark of a key the prefill saw: KeySaved is KeyWasSaved and the mark text, attached after the first prefill; a silent /LLMKEY= forgets the saved key; no other place writes or reads KeyWasSaved", () => {
   const touching = (pattern: RegExp): string[] => [...codeFunctions()].filter(([, body]) => pattern.test(body)).map(([name]) => name).sort();
   assert.deepEqual(touching(/KeyWasSaved :=/u), ["ApplySilentParameters", "PrefillFromSettings"]);
-  assert.deepEqual(touching(/KeyWasSaved\b(?! :=)/u), ["RemoteKeyChanged"]);
+  assert.deepEqual(touching(/KeyWasSaved\b(?! :=)/u), ["RemoteKeyChanged", "ShowKeyLabel"]);
   assert.match(functionBody("RemoteKeyChanged"), /^\s*KeySaved := KeyWasSaved and \(RemoteKeyEdit\.Text = SAVED_KEY_MARK\);\s*$/mu);
   assert.doesNotMatch(functionBody("RemoteKeyChanged"), /KeySaved := False;/u);
   const init = functionBody("InitializeWizard");
   const attached = init.indexOf("RemoteKeyEdit.OnChange := @RemoteKeyChanged;");
   assert.ok(attached > init.indexOf("ApplySilentParameters()") && attached > init.indexOf("PrefillFromSettings()"), "the handler is attached before the first prefill");
   assert.match(functionBody("ApplySilentParameters"), /if ParamGiven\('LLMKEY'\) then\s+begin\s+RemoteKeyEdit\.Text := Param\('LLMKEY', ''\);\s+KeySaved := False;\s+KeyWasSaved := False;\s+end;/u);
+});
+
+// T21 (wizard walk of build 1f2b723, F4): the saved key showed as 19 dots that look like a typed key; nothing said a key is saved and kept.
+const DEFAULT_KEY_CAPTION = "API key (empty for an endpoint that needs none)";
+const SAVED_KEY_CAPTION = "API key: saved key kept (replace the dots to change it)";
+
+test("the label above the key box is a variable that says a saved key is kept while the box holds its mark, and is the old text otherwise", () => {
+  assert.match(functionBody("CreateEndpointPage"), new RegExp(`KeyLabel := AddText\\(EndpointPage, '${DEFAULT_KEY_CAPTION.replace(/[()]/gu, "\\$&")}', 76, 14\\);`, "u"));
+  const show = functionBody("ShowKeyLabel");
+  assert.match(show, /KeyWasSaved and \(RemoteKeyEdit\.Text = SAVED_KEY_MARK\)/u);
+  // The saved caption is the `then` branch (no `;` before `else`), the default the `else` branch.
+  assert.match(show, new RegExp(`then\\s+KeyLabel\\.Caption := '${SAVED_KEY_CAPTION.replace(/[()]/gu, "\\$&")}'\\s+else\\s+KeyLabel\\.Caption := '${DEFAULT_KEY_CAPTION.replace(/[()]/gu, "\\$&")}';`, "u"));
+  // It only sets the caption: the key, its flags and the box stay as they are.
+  assert.doesNotMatch(show, /KeySaved :=|KeyWasSaved :=|RemoteKeyEdit\.Text :=/u);
+});
+
+test("the saved-key caption in the script fits on one line: no longer than the longest one-line label of the endpoint page (a second line would hide under the key box)", () => {
+  const captions = [...functionBody("ShowKeyLabel").matchAll(/KeyLabel\.Caption := '([^']*)'/gu)].map((match) => match[1]!);
+  assert.equal(captions.length, 2, "ShowKeyLabel does not set exactly the saved and the default caption");
+  const labels = [...functionBody("CreateEndpointPage").matchAll(/AddText\(EndpointPage, '([^']*)', \d+, 14\)/gu)].map((match) => match[1]!);
+  // The page's own one-line labels (the key label included, at its default text) set the width a caption may reach.
+  const longest = Math.max(...labels.map((text) => text.length));
+  const urlLabel = "Endpoint URL (for example https://openrouter.ai/api/v1)";
+  assert.ok(labels.includes(urlLabel) && longest === urlLabel.length, "the longest one-line label is no longer the endpoint URL label");
+  for (const caption of captions) assert.ok(caption.length <= longest, `"${caption}" (${caption.length}) is longer than the longest one-line label (${longest})`);
+});
+
+test("the key label follows the key box: the prefill sets it on every path and a change of the box sets it again, so a typed character brings the default back and Backspace the saved text", () => {
+  const changed = functionBody("RemoteKeyChanged");
+  assert.match(changed, /KeySaved := KeyWasSaved and \(RemoteKeyEdit\.Text = SAVED_KEY_MARK\);\s+ShowKeyLabel\(\);/u);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => /\bKeyLabel\b/u.test(body)).map(([name]) => name).sort(), ["CreateEndpointPage", "ShowKeyLabel"]);
+  assert.deepEqual([...codeFunctions()].filter(([, body]) => body.includes("ShowKeyLabel(")).map(([name]) => name).sort(), ["PrefillFromSettings", "RemoteKeyChanged"]);
+  // No Log line prints the key box's text or the caption built from it.
+  assert.doesNotMatch(code, /Log\([^\n]*(?:RemoteKeyEdit|KeyLabel)/u);
 });
 
 test("a saved key that cannot be used is told in the setup's words, never the launcher's usage text, for the endpoint page's save and the progress page's save", () => {

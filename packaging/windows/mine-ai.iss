@@ -101,6 +101,8 @@ Type: filesandordirs; Name: "{app}"
 const
   MINECRAFT_EULA_URL = 'https://aka.ms/MinecraftEULA';
   PROGRESS_STEPS = 1000;
+  // The port of the server page's box at creation, of the prefill's reset and of the configure fallback.
+  DEFAULT_SERVER_PORT = 25565;
   // The default of a silent parameter that was not given; no real value looks like it.
   PARAM_UNSET = '(not given)';
   // Setup's own exit codes are 0-8; a silent setup whose steps failed returns this one.
@@ -857,7 +859,7 @@ begin
   AddText(ServerPage, 'Address', 72, 14);
   ServerHostEdit := AddEdit(ServerPage, 86, 0, PortLeft - ScaleX(8));
   ServerPortEdit := AddEdit(ServerPage, 86, PortLeft, ServerPage.SurfaceWidth - PortLeft);
-  ServerPortEdit.Text := '25565';
+  ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
   AddText(ServerPage, 'An existing server must be vanilla Minecraft 1.21.4 with online-mode=false (the bots join without a Minecraft account). Mine AI checks it before starting any bot.', 124, 60);
   ServerNoneRadio.Checked := True;
   ServerNoneRadio.OnClick := @ServerChoiceChanged;
@@ -962,7 +964,9 @@ end;
 // An update (or a second run) starts from the settings.json of the data folder, so it never resets a server or an endpoint.
 // The key: an encrypted one (apiKeyProtected) is never decrypted here; the box shows the mark and the launcher keeps the key
 // (KeySaved). A clear one (an install before the encryption) fills the box as before and is encrypted by the first save.
-// This also runs on the data page's Next: the key box and its flags are emptied first, so a Back to another data folder keeps no key of the last.
+// This also runs on the data page's Next: everything the file may set (the key box and its flags, the endpoint, the server choice,
+// host and port, PreviousLlmWasRemote) goes back to the creation values first, so a Back to another data folder, or a missing file,
+// keeps nothing of the last file.
 procedure PrefillFromSettings();
 var
   Llm, Server, Kind: String;
@@ -973,38 +977,49 @@ begin
   ClearKeyMigrated := False;
   SavedBaseUrl := '';
   KeyUrlChangeTold := '';
-  if not ReadSettingsSections(Llm, Server) then
-    Exit;
-  if JsonString(Llm, 'kind') = 'remote' then
+  // What the file may not set goes back to the pages' creation values: a second prefill (Back to another data folder) or a missing
+  // file must not keep the last file's remote kind, endpoint or server (F1: PreviousLlmWasRemote was a latch that never reset).
+  PreviousLlmWasRemote := False;
+  RemoteUrlEdit.Text := '';
+  RemoteModelCombo.Text := '';
+  ServerNoneRadio.Checked := True;
+  ServerHostEdit.Text := '';
+  ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
+  if ReadSettingsSections(Llm, Server) then
   begin
-    PreviousLlmWasRemote := True;
-    SavedBaseUrl := JsonString(Llm, 'baseUrl');
-    RemoteUrlEdit.Text := SavedBaseUrl;
-    if JsonString(Llm, 'apiKeyProtected') <> '' then
+    if JsonString(Llm, 'kind') = 'remote' then
     begin
-      // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
-      RemoteKeyEdit.Text := SAVED_KEY_MARK;
-      KeySaved := True;
-      KeyWasSaved := True;
-    end
-    else if JsonString(Llm, 'apiKey') <> '' then
-    begin
-      RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
-      ClearKeyMigrated := True;
+      PreviousLlmWasRemote := True;
+      SavedBaseUrl := JsonString(Llm, 'baseUrl');
+      RemoteUrlEdit.Text := SavedBaseUrl;
+      if JsonString(Llm, 'apiKeyProtected') <> '' then
+      begin
+        // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
+        RemoteKeyEdit.Text := SAVED_KEY_MARK;
+        KeySaved := True;
+        KeyWasSaved := True;
+      end
+      else if JsonString(Llm, 'apiKey') <> '' then
+      begin
+        RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
+        ClearKeyMigrated := True;
+      end;
+      RemoteModelCombo.Text := JsonString(Llm, 'model');
     end;
-    RemoteModelCombo.Text := JsonString(Llm, 'model');
+    Kind := JsonString(Server, 'kind');
+    if Kind = 'local' then
+      ServerLocalRadio.Checked := True
+    else if Kind = 'remote' then
+    begin
+      ServerRemoteRadio.Checked := True;
+      ServerHostEdit.Text := JsonString(Server, 'host');
+      if JsonNumber(Server, 'port') <> '' then
+        ServerPortEdit.Text := JsonNumber(Server, 'port');
+    end;
   end;
-  Kind := JsonString(Server, 'kind');
-  if Kind = 'local' then
-    ServerLocalRadio.Checked := True
-  else if Kind = 'remote' then
-  begin
-    ServerRemoteRadio.Checked := True;
-    ServerHostEdit.Text := JsonString(Server, 'host');
-    if JsonNumber(Server, 'port') <> '' then
-      ServerPortEdit.Text := JsonNumber(Server, 'port');
-  end;
+  // On every path, a missing file included: the server boxes match the radio, and the key caption matches the box.
   ServerChoiceChanged(nil);
+  ShowKeyLabel();
 end;
 
 // A second run over an install: Ready is then the first page (DisableDirPage=auto), and the folders are the first install's.
@@ -1070,6 +1085,9 @@ end;
 
 procedure InitializeWizard();
 begin
+  // The Ready list's long lines (the disk room warning) wrapped to the right under a horizontal scroll bar (F3).
+  WizardForm.ReadyMemo.WordWrap := True;
+  WizardForm.ReadyMemo.ScrollBars := ssVertical;
   CreateDataPage();
   CreateModelPage();
   CreateEndpointPage();
@@ -1120,6 +1138,41 @@ begin
     DiskStatus.Caption := '';
 end;
 
+// Moves the focus to the radio of the group that is already checked, when Page is the page on screen. It never writes a .Checked: a
+// radio checked from code while another radio of its group keeps the focus is re-checked by the focused one when the window gets
+// its focus back (F1), so the checked one must hold the focus. Third is nil for a group of two.
+procedure FocusCheckedRadio(Page: TWizardPage; First, Second, Third: TNewRadioButton);
+var
+  Checked: TNewRadioButton;
+begin
+  if WizardForm.CurPageID <> Page.ID then
+    Exit;
+  Checked := nil;
+  if First.Checked then
+    Checked := First
+  else if Second.Checked then
+    Checked := Second
+  else if (Third <> nil) and Third.Checked then
+    Checked := Third;
+  // A disabled control cannot take the focus (the local radio is disabled when the verdict is remote).
+  if (Checked <> nil) and Checked.Enabled then
+    WizardForm.ActiveControl := Checked;
+end;
+
+// The one place the model page's choice is written from the gpu verdict, once (CheckGpuOnce runs once): local when this PC can run
+// the model and the saved settings are not a remote endpoint, remote otherwise. Both radios are set, so the group never holds two
+// or none. A later visit to the page does not call it: a pick of the player (remote, then Back from the endpoint page) stays.
+procedure ApplyModelChoice();
+var
+  Local: Boolean;
+begin
+  Local := ModelLocalRadio.Enabled and (not PreviousLlmWasRemote);
+  ModelLocalRadio.Checked := Local;
+  ModelRemoteRadio.Checked := not Local;
+  FocusCheckedRadio(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil);
+  ModelChoiceChanged(nil);
+end;
+
 // `install gpu`: ok means this PC can run the model; not ok means remote only, with the reason on the page.
 procedure CheckGpuOnce();
 var
@@ -1151,8 +1204,7 @@ begin
       else
         ModelLocalRadio.Caption := 'On this PC (uses the Ollama already installed; downloads the AI model if it is missing)';
     end;
-    if not PreviousLlmWasRemote then
-      ModelLocalRadio.Checked := True;
+    ApplyModelChoice();
   end
   else
   begin
@@ -1163,11 +1215,11 @@ begin
       GpuReason := GpuProblem;
     GpuVerdictIsRemote := JsonIsTrue(Json, 'remote');
     ModelStatus.Caption := GpuProblem;
-    ModelRemoteRadio.Checked := True;
+    ApplyModelChoice();
   end;
+  // After the choice: ShowDiskSpace keeps the window answering clicks, and a click on remote during it must stand.
   if not WizardSilent then
     ShowDiskSpace();
-  ModelChoiceChanged(nil);
   ModelStepStatus.Caption := '';
   ModelGauge.Position := 0;
   WizardForm.NextButton.Enabled := True;
@@ -1355,7 +1407,7 @@ begin
   if ServerLocalRadio.Checked then
     Result := Result + ' --server-local'
   else if ServerRemoteRadio.Checked then
-    Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), 25565))
+    Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), DEFAULT_SERVER_PORT))
   else
     Result := Result + ' --server-none';
 end;
@@ -1609,6 +1661,8 @@ begin
     WizardForm.PageNameLabel.Caption := 'Ready to update or repair';
     WizardForm.PageDescriptionLabel.Caption := 'Setup will update Mine AI and repair any missing file. Your data folder, worlds and bots stay as they are; the AI model and server settings are set again on the next pages.';
     WizardForm.NextButton.Caption := 'Update';
+    // Inno's line says "Click Install ... or click Back", and Ready is the first page of an update: there is no Back to name.
+    WizardForm.ReadyLabel.Caption := 'Click Update to continue.';
   end
   else if CurPageID = wpInstalling then
     WizardForm.PageNameLabel.Caption := 'Updating';
@@ -1618,9 +1672,15 @@ procedure CurPageChanged(CurPageID: Integer);
 begin
   SayUpdateOnPage(CurPageID);
   if CurPageID = ModelPage.ID then
-    CheckGpuOnce()
+  begin
+    CheckGpuOnce();
+    FocusCheckedRadio(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil);
+  end
   else if CurPageID = ServerPage.ID then
-    ServerDownloadText.Caption := 'A server on this PC downloads Java (from Adoptium) and the Minecraft server (from Mojang, after you accept the EULA) into your data folder, ' + DataDir('') + '. Nothing else is installed.'
+  begin
+    ServerDownloadText.Caption := 'A server on this PC downloads Java (from Adoptium) and the Minecraft server (from Mojang, after you accept the EULA) into your data folder, ' + DataDir('') + '. Nothing else is installed.';
+    FocusCheckedRadio(ServerPage, ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio);
+  end
   else if CurPageID = EulaPage.ID then
     WizardForm.NextButton.Enabled := EulaCheck.Checked
   else if CurPageID = StepsPage.ID then
