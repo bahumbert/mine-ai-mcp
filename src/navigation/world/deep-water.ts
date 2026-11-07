@@ -8,7 +8,7 @@
  */
 
 import { OPEN_COLUMN_REACH } from "./swimming.js";
-import type { BlockPosition, WorldView } from "./world.js";
+import type { BlockPosition, LoadedBlock, WorldView } from "./world.js";
 
 /** The cell and the two below it: deeper than a bot can stand up in. */
 export const DEEP_WATER_DEPTH = 3;
@@ -103,6 +103,11 @@ function roofedOver(read: WorldView["blockAt"], water: WaterAt, feet: BlockPosit
 export function waterAtOf(read: WorldView["blockAt"]): WaterAt {
   return (x, y, z) => {
     const block = read(x, y, z);
-    return block.kind === "loaded" && (block.traits.liquid === "water" || block.traits.waterlogged);
+    return block.kind === "loaded" && cellHoldsWater(block);
   };
+}
+
+/** Whether one observed cell is liquid water (a water plant's included) or holds water in a block. */
+export function cellHoldsWater(block: LoadedBlock): boolean {
+  return block.traits.liquid === "water" || block.traits.waterlogged;
 }

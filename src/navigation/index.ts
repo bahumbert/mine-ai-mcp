@@ -69,13 +69,14 @@ export {
   occupyGoal,
   safeFromEntitiesGoal,
 } from "./goals/index.js";
-export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
+export { packKey, type BlockPosition, type LoadedBlock, type WorldView } from "./world/world.js";
 
 // Movement policy: what a route may do, and what it costs.
 export { STANDARD_SCAFFOLD_ITEMS, TERRAIN_BREAK_PENALTY } from "./mineflayer/movement-policy.js";
 export { longestBreakDurationMs } from "./mineflayer/break-duration.js";
 export { SWIM_UP_TICKS } from "./world/swimming.js";
 export { liveBlockReader, observeMineflayerBlock } from "./mineflayer/world.js";
+export { cellHoldsWater, waterAtOf } from "./world/deep-water.js";
 export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";

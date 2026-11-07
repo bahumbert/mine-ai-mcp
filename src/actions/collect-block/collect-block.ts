@@ -30,6 +30,7 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
 import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
 import { findLoadedBlockPositions } from "../../world/index.js";
+import { situationReader } from "../../world/target-situation.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
@@ -55,6 +56,7 @@ import {
   type BrokenCell,
   type CollectBlockRequest,
   type CollectBlockResult,
+  type NearestBeyondRange,
 } from "./contract.js";
 
 const sumValues = (record: Record<string, number>): number => Object.values(record).reduce((total, n) => total + n, 0);
@@ -420,12 +422,29 @@ function withinRange(request: CollectBlockRequest, start: Vec3, position: { read
   return request.maxDistance === null || Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z) <= request.maxDistance;
 }
 
-/** The nearest loaded matching block beyond the range, and its horizontal distance from the start. */
-function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3) {
-  const positions = findLoadedBlockPositions(bot, { center: start, stateIds: collectionTarget(bot, request).blockStateIds, limit: 256 });
-  const beyond = positions.find((position) => !withinRange(request, start, position));
-  if (beyond === undefined) return null;
-  return { position: { x: beyond.x, y: beyond.y, z: beyond.z }, distance: Math.round(Math.hypot(beyond.x + 0.5 - start.x, beyond.z + 0.5 - start.z)) };
+/** The scan's limit: how many loaded matches `nearestBeyondRange` looks at. */
+const NEAREST_BEYOND_SCAN_LIMIT = 256;
+
+/**
+ * The nearest loaded matching block beyond the range, its horizontal distance from the start, and how it lies
+ * (`targetSituation`). A nearest one under water or roofed over comes with the nearest beyond the range that is in the
+ * open, when the scan holds one: nothing is hidden, the model is told which one is worth the trip.
+ */
+function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3): NearestBeyondRange | null {
+  const stateIds = collectionTarget(bot, request).blockStateIds;
+  const positions = findLoadedBlockPositions(bot, { center: start, stateIds, limit: NEAREST_BEYOND_SCAN_LIMIT });
+  const beyond = positions.filter((position) => !withinRange(request, start, position));
+  const first = beyond[0];
+  if (first === undefined) return null;
+  const told = (position: Vec3) => ({
+    position: { x: position.x, y: position.y, z: position.z },
+    distance: Math.round(Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z)),
+  });
+  const situationAt = situationReader(bot, stateIds);
+  const situation = situationAt(first);
+  if (situation === "open") return { ...told(first), situation };
+  const openOne = beyond.slice(1).find((position) => situationAt(position) === "open");
+  return { ...told(first), situation, open: openOne === undefined ? null : told(openOne), capped: positions.length >= NEAREST_BEYOND_SCAN_LIMIT };
 }
 
 /** Why the mine process stopped, in the words of the request that asked for it. */

@@ -65,6 +65,28 @@ export function decimal(value: number): number {
   return Number(value.toFixed(1));
 }
 
+/**
+ * The nearest loaded match beyond `max_distance`. `situation` (absent: open) says when it lies under water or roofed
+ * over; then `open` is the nearest beyond the range that does not (null: none of the `capped ? 256 : all` scanned),
+ * so the model learns where the nearest is and what the nearest usable one is.
+ */
+export interface NearestBeyondRange {
+  readonly position: Position3;
+  readonly distance: number;
+  readonly situation?: "open" | "under_water" | "roofed";
+  readonly open?: { readonly position: Position3; readonly distance: number } | null;
+  /** The scan stopped at its limit of 256: more matches may be loaded than it looked at. */
+  readonly capped?: boolean;
+}
+
+function nearestBeyondRangeWords(nearest: NearestBeyondRange): string {
+  const where = `the nearest loaded one is at ${cellLabel(nearest.position)}, ${nearest.distance} blocks from the start`;
+  if (nearest.situation === undefined || nearest.situation === "open") return `${where}.`;
+  const how = nearest.situation === "under_water" ? "under water" : "roofed over";
+  if (nearest.open) return `${where} (${how}); the nearest not under water or roofed over is at ${cellLabel(nearest.open.position)}, ${nearest.open.distance} blocks.`;
+  return `${where} (${how}); none ${nearest.capped ? "of the nearest 256 loaded" : "loaded"} is in the open.`;
+}
+
 /** The items a capacity refusal was about: named when few, counted when the selector matched many. */
 function describeItems(itemNames: readonly string[]): string {
   const names = [...new Set(itemNames)].sort();
@@ -95,9 +117,9 @@ export const outcomes = {
   targetsUnreachable: (selector: string, reason: string) =>
     `[NO_REACHABLE_MATCHING_TARGETS] Every loaded ${selector} block was found but none could be reached. Last routing stop: ${reason}`,
   noLoadedTargets: (selector: string) => `[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded ${selector} blocks.`,
-  noTargetInRange: (selector: string, range: number, nearest: { readonly position: Position3; readonly distance: number } | null) =>
+  noTargetInRange: (selector: string, range: number, nearest: NearestBeyondRange | null) =>
     `[NO_TARGET_IN_RANGE] No ${selector} block left within ${range} blocks of where the run started; ` +
-    (nearest === null ? "none is loaded farther either." : `the nearest loaded one is at ${cellLabel(nearest.position)}, ${nearest.distance} blocks from the start.`),
+    (nearest === null ? "none is loaded farther either." : nearestBeyondRangeWords(nearest)),
   unmineable: (blockName: string, position: Position3, reason: string) =>
     `[TARGET_UNMINEABLE] ${blockName} at ${cellLabel(position)} cannot be broken: ${reason}.`,
   dropAttemptsExhausted: (mined: number, collected: number, requested: number) =>

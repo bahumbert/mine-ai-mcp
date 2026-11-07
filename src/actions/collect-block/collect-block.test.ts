@@ -208,6 +208,51 @@ test("max_distance bounds the run and its stop names the nearest block beyond th
   assert.match(result.error ?? "", /^\[NO_TARGET_IN_RANGE\] No dark_oak_log block left within 64 blocks of where the run started; none is loaded farther either\./u);
 });
 
+/** The stop text of a `max_distance` run that found nothing in range, for a world of named cells and the nearest block beyond. */
+function stopBeyondRange(blockName: string, cells: NonNullable<Parameters<typeof createFakeBot>[0]>["cells"], range = 64): string {
+  const request = parseCollectBlockRequest({ block_name: blockName, count: 1, max_distance: range });
+  const { bot } = createFakeBot({ cells, groundY: null });
+  const result = settle(bot, request, {}, new Set([blockName]), new Vec3(0, 64, 0), { status: "no_targets", broken: [], reason: null });
+  assert.equal(result.status, "failed");
+  return result.error ?? "";
+}
+
+/** Live 2026-11-07, run 34: the "nearest oak_log" was a log 66 blocks under the sea; the model walked there and drowned its step. */
+test("the hint says the nearest lies under water and names the nearest in the open", () => {
+  const cells = {
+    "80,64,0": "oak_log", "80,65,0": "water", "80,66,0": "water", "80,67,0": "water", "80,68,0": "water", "80,69,0": "water",
+    "120,64,0": "oak_log",
+  };
+  assert.match(
+    stopBeyondRange("oak_log", cells),
+    /the nearest loaded one is at 80,64,0, 81 blocks from the start \(under water\); the nearest not under water or roofed over is at 120,64,0, 121 blocks\. Broke 0/u,
+  );
+});
+
+test("an ore's and a Nether stem's hints name the nearest, roofed over, and say none is in the open", () => {
+  assert.match(
+    stopBeyondRange("coal_ore", { "100,20,0": "coal_ore", "100,21,0": "stone", "100,22,0": "stone" }),
+    /the nearest loaded one is at 100,20,0, 101 blocks from the start \(roofed over\); none loaded is in the open\. Broke 0/u,
+  );
+  assert.match(
+    stopBeyondRange("crimson_stem", { "100,60,0": "crimson_stem", "100,61,0": "nether_wart_block" }),
+    /the nearest loaded one is at 100,60,0, 101 blocks from the start \(roofed over\); none loaded is in the open\. Broke 0/u,
+  );
+});
+
+test("a capped scan says of the nearest 256 loaded", () => {
+  const cells: Record<string, string> = {};
+  for (let x = 100; x < 357; x++) {
+    cells[`${x},64,0`] = "oak_log";
+    cells[`${x},65,0`] = "water";
+  }
+  assert.match(stopBeyondRange("oak_log", cells), /\(under water\); none of the nearest 256 loaded is in the open\. Broke 0/u);
+});
+
+test("an open nearest block keeps today's words", () => {
+  assert.match(stopBeyondRange("oak_log", { "80,64,0": "oak_log", "81,64,0": "oak_leaves" }), /the nearest loaded one is at 80,64,0, 81 blocks from the start\. Broke 0/u);
+});
+
 /** Live run 13: a shovel that broke while collecting dirt was only a sentence in the stop reason, and the fetch went on by hand. */
 test("a tool that broke during the run is reported as a field of the result, not only in the stop reason", () => {
   const request = parseCollectBlockRequest({ block_name: "dirt", count: 4 });
