@@ -8,6 +8,7 @@ import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { parseHuntMobRequest, type HuntMobRequest } from "./contract.js";
 import { huntMob, huntMobDependencies } from "./hunt-mob.js";
+import { shieldRefusal } from "./shield-gate.js";
 import { died, dependencies, pursueLoaded, fakeCombat, huntBot, harnesses, mob, fakeNavigation, unseen } from "./hunt-mob-fixtures.test.js";
 
 // The shield gate. The refusal's whole value is that it lands before the bot
@@ -68,6 +69,49 @@ test("a carried shield the policy forbids is refused on the same terms as no shi
   assert.equal(result.termination, "shield_required");
   assert.match(result.error, /HUNT_NO_SHIELD/);
   assert.match(result.error, /set_survival_policy/, "a forbidden shield names the policy that forbade it");
+});
+
+test("the shield refusal names missing ingredients and the species damage", async () => {
+  const inventory = { count: 0 };
+  const bot = huntBot([mob(7, minecraftData("1.21.4").entitiesByName.zombie.id, "zombie", 3, "Hostile mobs")], inventory);
+  carriedCountField(harnesses.get(bot)!, "oak_planks").count = 6;
+  const result = await huntMob(bot, huntRequest("zombie"), {}, dependencies(bot, inventory, []));
+  assert.notEqual(result.status, "succeeded");
+  if (result.status === "succeeded") throw new Error("expected refusal");
+  assert.match(result.error ?? "", /iron_ingot/);
+  assert.match(result.error ?? "", /zombie hits for ~3/);
+  assert.doesNotMatch(result.error ?? "", /Craft or fetch/);
+});
+
+test("a species with varying damage gives no hit estimate", async () => {
+  const inventory = { count: 0 };
+  const bot = huntBot([mob(7, minecraftData("1.21.4").entitiesByName.hoglin.id, "hoglin", 3, "Hostile mobs")], inventory);
+  const result = await huntMob(bot, huntRequest("hoglin"), {}, dependencies(bot, inventory, []));
+  assert.notEqual(result.status, "succeeded");
+  if (result.status === "succeeded") throw new Error("expected refusal");
+  assert.doesNotMatch(result.error ?? "", /hits for ~/);
+});
+
+test("a hostile species absent from combat data gives no hit estimate", () => {
+  const bot = huntBot([], { count: 0 });
+  const name = "unmeasured_hostile";
+  const registry = bot.registry.entitiesByName;
+  registry[name] = { ...registry.zombie!, name };
+  try {
+    const error = shieldRefusal(bot, huntRequest(name), () => true);
+    assert.match(error ?? "", /HUNT_NO_SHIELD/);
+    assert.doesNotMatch(error ?? "", /hits for ~/);
+  } finally {
+    delete registry[name];
+  }
+});
+
+test("the shield refusal counts mixed planks toward the recipe", () => {
+  const bot = huntBot([], { count: 0 });
+  carriedCountField(harnesses.get(bot)!, "oak_planks").count = 3;
+  carriedCountField(harnesses.get(bot)!, "birch_planks").count = 3;
+  const error = shieldRefusal(bot, huntRequest("zombie"), () => true) ?? "";
+  assert.match(error, /needs iron_ingot x1 \(carried:/);
 });
 
 test("a carried, permitted shield admits the hostile hunt without the override", async () => {

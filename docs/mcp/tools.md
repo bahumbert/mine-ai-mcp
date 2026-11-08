@@ -830,6 +830,9 @@ and whether pickup was observed. Failed crafting also attempts pickup. If
 pickup fails, the call cannot succeed and reports `WORKSTATION_NOT_RECOVERED`.
 Cancellation releases control promptly and can leave the table behind.
 
+A temporary furnace also requires a carried harvest tool; otherwise
+`WORKSTATION_NO_HARVEST_TOOL` refuses before placement.
+
 Use `craft_item` to craft finished goods through the recursive recipe
 planner. The argument is `items`, a list of target item names and counts. When
 a recipe needs a crafting table and none is within reach, a carried table is
@@ -845,6 +848,9 @@ Defined in
 [src/actions/craft-item/contract.ts](../../src/actions/craft-item/contract.ts).
 
 ### `smelt_item`
+
+An input without a shipped furnace recipe is refused with `SMELT_NOT_SMELTABLE`;
+if it is a smelting output, the refusal lists its recipe inputs.
 
 Use `smelt_item` to smelt raw ores or cook food inside an empty furnace.
 Arguments are `item_name`, input `count`, `fuel_item_name`, and furnace

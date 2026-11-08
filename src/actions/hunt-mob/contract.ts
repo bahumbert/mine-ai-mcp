@@ -197,9 +197,9 @@ export const huntMobOutcomes = {
    * cannot act on is a stop it will retry unchanged, and it says what the
    * override costs so that granting it stays a decision rather than a reflex.
    */
-  shieldNotCarried: (mob: string) =>
-    `[HUNT_NO_SHIELD] Refused before approaching: ${mob} is a hostile mob and no shield is carried. ` +
-    `Craft or fetch a shield and equip it, or repeat this request with allow_without_shield: true to accept unblocked hits from this species.`,
+  shieldNotCarried: (mob: string, facts: string) =>
+    `[HUNT_NO_SHIELD] Refused before approaching: ${mob} is a hostile mob and no shield is carried; ${facts}; ` +
+    `allow_without_shield: true accepts unblocked hits.`,
   shieldNotPermitted: (mob: string) =>
     `[HUNT_NO_SHIELD] Refused before approaching: ${mob} is a hostile mob and, though a shield is carried, the combat policy forbids shield use, so the fight would be unshielded. ` +
     `Permit shields with set_survival_policy, or repeat this request with allow_without_shield: true to accept unblocked hits from this species.`,

@@ -39,6 +39,21 @@ test("a named furnace and a temporary one are exclusive, and a temporary one mus
 
 const registry = minecraftData("1.21.4");
 
+test("a non-smeltable input is refused before any insert and an output names its inputs", async () => {
+  for (const itemName of ["stick", "iron_ingot"]) {
+    const { bot, dependencies } = smeltingBot();
+    let opened = false;
+    const result = await smeltItem(bot, navigation, { itemName, count: 1, fuelItemName: "coal", x: 2, y: 64, z: 0 }, {}, {
+      ...dependencies, openFurnace: async (...args) => { opened = true; return dependencies.openFurnace(...args); },
+    });
+    assert.notEqual(result.status, "succeeded");
+    if (result.status === "succeeded") throw new Error("expected refusal");
+    assert.match(result.error ?? "", /SMELT_NOT_SMELTABLE/);
+    if (itemName === "iron_ingot") assert.match(result.error ?? "", /raw_iron/);
+    assert.equal(opened, false);
+  }
+});
+
 /** A mocked clock the test installs: the smelt's waits for the server (world age, wall bound) run on it. */
 const mockedClock = () => createFakeClock({ mode: "mocked" });
 

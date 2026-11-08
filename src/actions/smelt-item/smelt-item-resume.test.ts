@@ -264,6 +264,7 @@ test("a temporary furnace placed by an aborted attempt is reused, never placed t
   using _installed = clock.install();
   const fixture = sticksFurnace(clock);
   carriedFurnaces(fixture).count = 1;
+  carriedCountField(fixture.harness, "wooden_pickaxe").count = 1;
   const calls: string[] = [];
   const first = new AbortController();
   const run = beginSmeltItem(

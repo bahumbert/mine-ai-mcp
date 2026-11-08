@@ -6,7 +6,7 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest, RequestEvidence } from "../../session/request.js";
 import { carriedCount, settledNow, settleInventoryCount, settleInventoryMinimum } from "../../world/inventory-count.js";
 import { startOwnPlacement } from "../../world/own-placement.js";
-import { cookingTicksOf, fuelCapacity, STANDARD_COOK_TICKS } from "../../world/smelting.js";
+import { cookingTicksOf, fuelCapacity, recipesFor, smeltingData, STANDARD_COOK_TICKS } from "../../world/smelting.js";
 import { SMELTING_STATION } from "../../world/workstations.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -239,6 +239,10 @@ function checkSupplies(bot: Bot, request: SmeltItemRequest, progress: SmeltProgr
   const fuel = bot.registry.itemsByName[request.fuelItemName];
   if (!input) return refuse(smeltItemOutcomes.unknownItem(request.itemName));
   if (!fuel) return refuse(smeltItemOutcomes.unknownItem(request.fuelItemName));
+  if (smeltingData(bot.version) && cookingTicksOf(request.itemName, bot.version) === null) {
+    const inputs = [...new Set(recipesFor(request.itemName, bot.version).flatMap((recipe) => recipe.inputs))];
+    return refuse(smeltItemOutcomes.notSmeltable(request.itemName, inputs));
+  }
   const capacity = fuelCapacity(request.fuelItemName, bot.version, cookTicksFor(bot, request.itemName));
   if (capacity === 0) return refuse(smeltItemOutcomes.unsupportedFuel(request.fuelItemName));
   const remaining = request.count - progress.produced;

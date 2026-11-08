@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { z } from "zod";
 import { createMovements, exactBlockGoal, type NavigationRuntime } from "../navigation/index.js";
 import { carriedCount } from "../world/inventory-count.js";
+import { SMELTING_STATION } from "../world/workstations.js";
 import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement, type OwnPlacement } from "../world/own-placement.js";
 import {
   findStandingSpot,
@@ -133,6 +134,13 @@ async function setWorkstationDown(
   const held = await heldWorkstation(bot, name, hold, context.signal);
   if (held !== null) return held;
   if (carriedCount(bot, name) < 1) return `[WORKSTATION_NOT_CARRIED] No ${name} is carried for temporary use.`;
+  if (name === SMELTING_STATION) {
+    const tools = bot.registry.blocksByName[name]?.harvestTools;
+    if (tools && !bot.inventory.items().some((item) => Object.hasOwn(tools, item.type))) {
+      const names = Object.keys(tools).map((id) => bot.registry.items[Number(id)]?.name).filter(Boolean);
+      return `[WORKSTATION_NO_HARVEST_TOOL] A ${name} needs a harvest tool (${names.join(", ")}) to pick up again; carry one before placing it.`;
+    }
+  }
   // Picking it back up needs a free slot: the slot it leaves may fill with what it makes (live 2026-10-02: a full
   // inventory left a furnace inside the house being built, a cell the build may not dig).
   if (bot.inventory.emptySlotCount?.() === 0) {
