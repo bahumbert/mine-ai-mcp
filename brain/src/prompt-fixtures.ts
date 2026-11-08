@@ -140,7 +140,24 @@ function manyPlaces(): KnownPlace[] {
 
 /** 36 distinct items, 20 players with positions (Player4 is the requester, the 4th nearest), 30 areas, 13 places. */
 function crowdedSnapshotAndAreas() {
-  return { snapshot: snapshotWith(distinctItems(36), players(20)), areas: Array.from({ length: 30 }, (_, index) => area(index + 1, 30 + index * 50)), places: manyPlaces() };
+  const item = (index: number) => `long_item_${index}`.padEnd(20, "x");
+  const snapshot: BotSnapshot = {
+    ...snapshotWith(distinctItems(36), players(20)),
+    health: 2.7, food: 12, saturation: 0.5,
+    foods: [{ name: "food", count: 3, points: 6, saturation: 1 }],
+    armourPoints: 20, armourToughness: 8, burn: { ticks: 70, hp: 3 },
+    armour: {
+      worn: ["head", "torso", "legs", "feet"].map((slot, index) => ({ slot, item: item(index) })),
+      carried: Array.from({ length: 12 }, (_, index) => ({ item: item(index), count: 2 })),
+    },
+    combat: { melee: item(0), bow: item(1), arrows: 128, shield: item(2) },
+    clock: { phase: "day", minutesUntilChange: 4.2 },
+    light: { sky: 0, block: 0, openSkyAbove: 85 },
+    gear: { tools: Array.from({ length: 12 }, (_, index) => ({ class: `class_${index}`, item: item(index) })), armour: [] },
+    respawn: { kind: "world_spawn", position: { x: 912, y: 64, z: 0 }, distance: 912 },
+    lastDeath: { dimension: "the_nether", position: { x: -645, y: 53, z: -27 }, observedAt: "2026-11-07T10:00:00Z", minutesAgo: 12, cause: filler(120, "death") },
+  };
+  return { snapshot, areas: Array.from({ length: 30 }, (_, index) => area(index + 1, 30 + index * 50)), places: manyPlaces() };
 }
 
 /** The work tier's worst case (spec D5): 10 steps and 8 failures (2 refused) of 700 characters, 4 paused. */

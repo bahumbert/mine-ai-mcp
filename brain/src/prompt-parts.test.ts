@@ -9,7 +9,7 @@ import { HINTS, PROMPT_BUDGET, fitPrompt, reservedTokens, type PromptPart } from
 import { goalParts, narrateParts, SHRINK_ORDER, workParts } from "./prompt-parts.ts";
 import { area, chatP50, chatWorst, goalP50, goalWorst, hints, narrateWorst, players, snapshotWith, workLarge, workP50, workWorst } from "./prompt-fixtures.ts";
 
-const golden = (name: string) => readFileSync(new URL(`./fixtures/prompts-before/${name}.txt`, import.meta.url), "utf8");
+const golden = (name: string) => readFileSync(new URL(`./fixtures/prompts-before/${name}.txt`, import.meta.url), "utf8").replace(/\r?\n$/u, "");
 const part = (parts: readonly PromptPart[], key: string): PromptPart => {
   const found = parts.find((candidate) => candidate.key === key);
   assert.ok(found, `part ${key}`);
@@ -55,6 +55,15 @@ test("the worst case of every tier fits its budget with the room still reserved"
   for (const [tier, system, parts] of cases) {
     const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], PROMPT_BUDGET[tier] - reservedTokens(tier), 3.4);
     assert.equal(fitted.overBudget, false, `${tier}: ${fitted.estimated} tokens estimated, shrunk ${fitted.shrunk.join(" | ")}`);
+  }
+});
+
+test("the condition line is never shrunk", () => {
+  for (const [tier, parts] of [["work", workParts(workWorst())], ["goal", goalParts(goalWorst())], ["chat", chatParts(chatWorst(), true)]] as const) {
+    const condition = part(parts, "condition");
+    assert.equal(condition.maxLevel, 0);
+    const text = fitPrompt("", parts, SHRINK_ORDER[tier], 1, 3.4).text;
+    assert.ok(text.includes(`- Position 0 64 0.\n${condition.render(0)}\n- Inventory:`));
   }
 });
 

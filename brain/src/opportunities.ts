@@ -196,7 +196,7 @@ function missingTools(facts: OpportunityFacts): Opportunity[] {
 
 /**
  * The gear she has, once she has tools at all (owner, 2026-10-07: Vex carried 100 raw iron and fought with a stone
- * sword, never thinking of better gear): what each first tool and armour piece is, from the runtime's view of her
+ * sword, never thinking of better gear): what each first tool is, from the runtime's view of her
  * inventory; the model sees what she carries and judges whether better is within reach.
  */
 function gear(facts: OpportunityFacts): Opportunity[] {
@@ -207,7 +207,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
   const named = (entries: readonly { readonly class: string; readonly item: string | null }[]) => entries.map((entry) => entry.item ?? `no ${entry.class}`).join(", ");
   return [{
     activities: ["crafting"],
-    text: `your gear: ${named(tools)}; armour: ${named(gearSeen.armour)} (better tools and armour are crafted from what you mine and smelt)`,
+    text: `your gear: ${named(tools)} (better tools are crafted from what you mine and smelt)`,
   }];
 }
 

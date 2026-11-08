@@ -37,7 +37,6 @@ export interface Reservation {
  * needing more than its row changes `PROMPT_BUDGET` in its own commit, visibly. Token figures are estimates.
  */
 export const RESERVED: readonly Reservation[] = [
-  { feature: "P4-03 condition line", tiers: ["chat", "work", "goal"], tokens: 100 },
   { feature: "P4-13 what is where", tiers: ["work", "goal"], tokens: 150 },
   { feature: "P4-14 long-goal progress", tiers: ["goal"], tokens: 150 },
 ];

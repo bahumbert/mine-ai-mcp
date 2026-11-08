@@ -69,6 +69,17 @@ export interface BotSnapshot {
   readonly dimension: string;
   readonly health: number;
   readonly food: number;
+  readonly saturation?: number;
+  readonly armourPoints?: number | null;
+  readonly armourToughness?: number | null;
+  readonly burn?: { readonly ticks: number; readonly hp: number } | null;
+  readonly armour?: {
+    readonly worn: readonly { readonly slot: string; readonly item: string | null }[];
+    readonly carried: readonly { readonly item: string; readonly count: number }[];
+  };
+  readonly light?: { readonly sky: number | null; readonly block: number | null; readonly openSkyAbove: number | null };
+  readonly combat?: { readonly melee: string | null; readonly bow: string | null; readonly arrows: number; readonly shield: string | null };
+  readonly respawn?: { readonly kind: "bed" | "world_spawn"; readonly position: Position; readonly distance: number | null } | null;
   /** The server difficulty (`peaceful`...); `unknown` or unset when the runtime did not say. */
   readonly difficulty?: string;
   readonly inventory: readonly CarriedStack[];
@@ -81,7 +92,7 @@ export interface BotSnapshot {
   readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[] } | null;
   /** The overworld's day or night (null elsewhere) and minutes until it changes; unset when the runtime did not say. */
   readonly clock?: { readonly phase: "day" | "night" | null; readonly minutesUntilChange: number | null };
-  /** Her best carried tool and worn armour per class (`view_status` tools; item null: none); unset when not reported. */
+  /** Her best carried tool and armour per class, worn or not (`view_status` tools; item null: none). */
   readonly gear?: {
     readonly tools: readonly { readonly class: string; readonly item: string | null }[];
     readonly armour: readonly { readonly class: string; readonly item: string | null }[];
@@ -379,7 +390,16 @@ const viewStatusSchema = z.object({
       difficulty: z.string().optional(),
       observedAt: z.string().optional(),
       lastDeath: z.unknown().optional(),
-      vitals: z.object({ health: z.number(), food: z.number() }),
+      vitals: z.object({
+        health: z.number(), food: z.number(), saturation: z.number().optional(),
+        armour: z.number().nullable().optional(), armourToughness: z.number().nullable().optional(),
+        burn: z.object({ ticks: z.number(), hp: z.number() }).nullable().optional(),
+      }),
+      armourWorn: z.array(z.object({ slot: z.string(), item: z.string().nullable() })).nullable().optional(),
+      armourCarried: z.array(z.object({ item: z.string(), count: z.number() })).nullable().optional(),
+      light: z.object({ sky: z.number().nullable(), block: z.number().nullable(), openSkyAbove: z.number().nullable() }).nullable().optional(),
+      combat: z.object({ melee: z.string().nullable(), bow: z.string().nullable(), arrows: z.number(), shield: z.string().nullable() }).nullable().optional(),
+      respawn: z.object({ kind: z.enum(["bed", "world_spawn"]), position: positionSchema, distance: z.number().nullable() }).nullable().optional(),
       inventory: z.object({
         stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null), families: z.array(z.string()).default([]) })),
         foods: z.array(z.object({ name: z.string(), count: z.number(), points: z.number(), saturation: z.number() })).default([]),
@@ -608,6 +628,14 @@ export class McpBotRuntime implements BotRuntime {
       dimension: situation.dimension,
       health: situation.vitals.health,
       food: situation.vitals.food,
+      ...(situation.vitals.saturation === undefined ? {} : { saturation: situation.vitals.saturation }),
+      ...(situation.vitals.armour === undefined ? {} : { armourPoints: situation.vitals.armour }),
+      ...(situation.vitals.armourToughness === undefined ? {} : { armourToughness: situation.vitals.armourToughness }),
+      ...(situation.vitals.burn === undefined ? {} : { burn: situation.vitals.burn }),
+      ...(situation.armourWorn == null || situation.armourCarried == null ? {} : { armour: { worn: situation.armourWorn, carried: situation.armourCarried } }),
+      ...(situation.light == null ? {} : { light: situation.light }),
+      ...(situation.combat == null ? {} : { combat: situation.combat }),
+      ...(situation.respawn === undefined ? {} : { respawn: situation.respawn }),
       difficulty: situation.difficulty,
       inventory: situation.inventory.stacks.map(({ name, count, durability, families }) => ({ name, count, durability, families })),
       foods: situation.inventory.foods,

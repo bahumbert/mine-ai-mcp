@@ -1,5 +1,6 @@
 Situation:
-- Position 0 64 0; health 20/20; food 20/20.
+- Position 0 64 0.
+- Condition: health 20/20, food 20/20, no food carried; home: "the small medieval house you built for yourself".
 - Inventory: 1 item_number_1, 2 item_number_2, 3 item_number_3, 4 item_number_4, 5 item_number_5, 6 item_number_6, 7 item_number_7, 8 item_number_8, 9 item_number_9, 10 item_number_10, 11 item_number_11, 12 item_number_12, 13 item_number_13, 14 item_number_14, 15 item_number_15, 16 item_number_16, 17 item_number_17, 18 item_number_18, 19 item_number_19, 20 item_number_20 (20 of 36 slots used).
 - Players online: Player1 (11 blocks, at 10 64 5), Player2 (21 blocks, at 20 64 5), Player3 (30 blocks, at 30 64 5), Player4 (40 blocks, at 40 64 5), Player5 (50 blocks, at 50 64 5), Player6 (60 blocks, at 60 64 5), Player7 (far away), Player8 (80 blocks, at 80 64 5), Player9 (90 blocks, at 90 64 5), Player10 (100 blocks, at 100 64 5), Player11 (110 blocks, at 110 64 5), Player12 (120 blocks, at 120 64 5), Player13 (130 blocks, at 130 64 5), Player14 (far away), Player15 (150 blocks, at 150 64 5), Player16 (160 blocks, at 160 64 5), Player17 (170 blocks, at 170 64 5), Player18 (180 blocks, at 180 64 5), Player19 (190 blocks, at 190 64 5), Player20 (200 blocks, at 200 64 5).
 - Places you know: the small medieval house you built for yourself (door -1204 76 803 facing north); a farm of wheat (around 40 64 -20); note: iron seen (at 300 20 -45).

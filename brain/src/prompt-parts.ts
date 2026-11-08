@@ -1,5 +1,6 @@
 // The work, goal and narrate tiers' user messages (and the chat situation block) as parts with shrink levels.
 import type { MindTier } from "./brain-log.ts";
+import { conditionLine } from "./condition.ts";
 import { describeActivity } from "./activities.ts";
 import { MAX_STEP_FAILURES, type ChatLine, type EarlierFailure, type GoalInput, type KnownPlace, type NarrateInput, type StepRecord, type WorkInput } from "./mind.ts";
 import { describeOpportunities, drawnFirst, opportunityLine, type Opportunity } from "./opportunities.ts";
@@ -140,7 +141,8 @@ function fixedPart(key: string, text: string, before = "\n"): PromptPart {
 export function situationParts(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[], keepPlayers: readonly string[]): PromptPart[] {
   const { x, y, z } = snapshot.position;
   return [
-    fixedPart("position", `Situation:\n- Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}; health ${Math.round(snapshot.health)}/20; food ${snapshot.food}/20.`, "\n\n"),
+    fixedPart("position", `Situation:\n- Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}.`, "\n\n"),
+    fixedPart("condition", conditionLine(snapshot, places)),
     fixedPart("inventory", `- Inventory: ${describeInventory(snapshot)}.`),
     playersPart(snapshot, keepPlayers),
     fixedPart("places", `- Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.`),

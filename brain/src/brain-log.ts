@@ -41,6 +41,8 @@ export interface ModelCall {
   readonly contextTokens?: number | null;
   /** The prompt budget the first turn was fitted to (spec 2026-11-06-p4-02a-prompt-budget); absent in older logs. */
   readonly budget?: PromptBudgetUse;
+  /** The first turn's condition line; absent for narrate calls and older logs. */
+  readonly condition?: string;
   /** The decision read from the last reply, or why none could be. */
   readonly result?: unknown;
   readonly error?: string;

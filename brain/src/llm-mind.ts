@@ -42,6 +42,7 @@ const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for wha
   animals (cow, pig, chicken, sheep), cooked with get_items (cooked_beef, cooked_porkchop...).
 - Deep water (the sea, wide lakes) is never swum: it is crossed by boat, which go_to does by itself when you carry
   one (get_items oak_boat: 5 planks of one wood); without one, go another way over land.
+- Light: sky light is 15 under the open sky and 0 where no sky reaches; monsters spawn where block light is 0 and it is dark (at night, in caves, under a roof without torches).
 - Items named "unknown" are things this world adds that you cannot use: ignore them; drop_item unknown only when you
   need the room.`;
 
@@ -102,8 +103,9 @@ export class LlmMind implements Mind {
     const tokens = budgetFor(tier, this.calibration.window(model.name));
     const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], tokens, this.calibration.charsPerToken(model.name));
     const budget: PromptBudgetUse = { tokens, estimated: fitted.estimated, shrunk: fitted.shrunk, overBudget: fitted.overBudget };
+    const condition = parts.find((part) => part.key === "condition")?.render(0);
     const learn = (promptTokens: number | null, contextTokens: number | null) => this.calibration.learn(model.name, system.length + fitted.text.length, promptTokens, contextTokens);
-    return ask(model, system, fitted.text, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget }), learn);
+    return ask(model, system, fitted.text, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget, ...(condition === undefined ? {} : { condition }) }), learn);
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {

@@ -311,6 +311,30 @@ function statusClient(situation: Record<string, unknown>): ToolClient {
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
+test("status reads the condition facts", async () => {
+  const worn = [{ slot: "head", item: "iron_helmet" }, { slot: "torso", item: null }];
+  const carried = [{ item: "iron_chestplate", count: 2 }];
+  const light = { sky: 0, block: null, openSkyAbove: 85 };
+  const combat = { melee: "iron_sword", bow: "bow", arrows: 12, shield: "shield" };
+  const respawn = { kind: "bed", position: { x: 100, y: 64, z: 0 }, distance: null };
+  const burn = { ticks: 70, hp: 3 };
+  const result = await McpBotRuntime.over(statusClient({ vitals: { health: 6.5, food: 8, saturation: 0.5, armour: 7, armourToughness: 8, burn }, armourWorn: worn, armourCarried: carried, light, combat, respawn })).status();
+  assert.deepEqual({ saturation: result.saturation, armourPoints: result.armourPoints, armourToughness: result.armourToughness, burn: result.burn, armour: result.armour, light: result.light, combat: result.combat, respawn: result.respawn }, { saturation: 0.5, armourPoints: 7, armourToughness: 8, burn, armour: { worn, carried }, light, combat, respawn });
+});
+
+test("an older view_status parses; nullable condition facts stay unknown", async () => {
+  const older = await McpBotRuntime.over(statusClient({})).status();
+  for (const field of ["saturation", "armourPoints", "armourToughness", "burn", "armour", "light", "combat", "respawn"]) assert.equal(field in older, false, field);
+  const unknown = await McpBotRuntime.over(statusClient({ vitals: { health: 20, food: 20, armour: null, armourToughness: null, burn: null }, armourWorn: null, armourCarried: null, light: null, combat: null, respawn: null })).status();
+  assert.equal(unknown.armourPoints, null);
+  assert.equal(unknown.armourToughness, null);
+  assert.equal(unknown.burn, null);
+  assert.equal(unknown.respawn, null);
+  assert.equal(unknown.armour, undefined);
+  assert.equal(unknown.light, undefined);
+  assert.equal(unknown.combat, undefined);
+});
+
 test("families parse from the runtime's stacks; a runtime that sends none means empty", async () => {
   const stacks = [{ name: "diamond_sword", count: 1, families: ["sword"] }, { name: "cobblestone", count: 3 }];
   const status = await McpBotRuntime.over(statusClient({ inventory: { stacks } })).status();

@@ -101,9 +101,9 @@ test("budgetFor takes the table value, cut by the window minus the reply room, n
 });
 
 test("reservedTokens sums the rows of a tier", () => {
-  assert.equal(reservedTokens("chat"), 100);
-  assert.equal(reservedTokens("work"), 250);
-  assert.equal(reservedTokens("goal"), 400);
+  assert.equal(reservedTokens("chat"), 0);
+  assert.equal(reservedTokens("work"), 150);
+  assert.equal(reservedTokens("goal"), 300);
   assert.equal(reservedTokens("narrate"), 0);
 });
 

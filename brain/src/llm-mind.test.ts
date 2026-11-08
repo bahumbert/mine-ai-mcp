@@ -290,6 +290,20 @@ test("every model call is reported with its tier, prompt, raw replies and decisi
   assert.match(calls[1]?.error ?? "", /^\[LLM_BAD_REPLY\]/u);
 });
 
+test("a work call logs its condition line; a narrate call logs none", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.action.reply({ done: "finished" });
+  await mind.next(workInput("work", { snapshot: { ...new FakeRuntime().snapshot, health: 2.7 } }), signal);
+  assert.equal(calls[0]?.condition, "- Condition: health 2.7/20, food 20/20, no food carried; no home.");
+  assert.ok(calls[0]?.turns[1]?.content.includes(calls[0].condition!));
+  assert.ok(calls[0]?.turns[0]?.content.includes("Light: sky light is 15 under the open sky and 0 where no sky reaches; monsters spawn where block light is 0 and it is dark (at night, in caves, under a roof without torches)."));
+  models.chat.reply({ say: "done" });
+  await mind.narrate({ persona: testPersona(), history: [], objective: "work", outcome: "done", detail: "finished" }, signal);
+  assert.equal("condition" in calls[1]!, false);
+});
+
 test("a character with preferences names the kind of work a request is before answering; one without is never asked", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const input = (persona: ReturnType<typeof testPersona>): ChatInput => ({
