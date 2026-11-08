@@ -1,5 +1,12 @@
 # Mine AI MCP
 
+> **This repository is a fork** of [aibengineering/mine-ai-mcp](https://github.com/aibengineering/mine-ai-mcp),
+> "Mine AI MCP" by AI Bengineering. The introduction below and the Ender Dragon run it describes are the original
+> project's. The run was made with the original repository: this fork has changed since, and replaying the run with it
+> is not guaranteed. To replay it, use the original repository. What this fork adds is in
+> [This fork: AI players that build together](#this-fork-ai-players-that-build-together). The fork will take a name of
+> its own before a stable release.
+
 Batteries-included MCP runtime for letting AI play Minecraft.
 Mine AI MCP provides external AI agents with reliable, observable tools to
 inspect, navigate, and act in Minecraft. Every tool reports what was directly
@@ -14,15 +21,22 @@ server logs, and the seed prompt — are published as a
 [video]: https://www.youtube.com/watch?v=ZjtwWEfFVFY
 [dataset]: https://huggingface.co/datasets/aibengineering/beat-the-game-minecraft
 
-## Download and code signing policy
+## This fork: AI players that build together
 
-Mine AI runs companion and rival AI players for Minecraft Java 1.21.4. Each player is run by an AI model of the
-player's choice, local or remote. For Windows, get the setup from the
-[releases page](https://github.com/bahumbert/mine-ai-mcp/releases) and follow the
+This fork builds on the runtime above to run several independent AI players in one Minecraft Java 1.21.4 world, as
+companions or as rivals. Each one gathers, crafts, builds shelters and settles with the others, toward a small
+civilisation. Each player is run by an AI model of your choice, local (through Ollama) or remote, and its persona
+decides what it does: its choices are not scripted.
+
+### Download for Windows and code signing policy
+
+Get the setup from the [releases page](https://github.com/bahumbert/mine-ai-mcp/releases) and follow the
 [Windows guide](docs/install/windows.md). The setup is signed through SignPath Foundation once the project is
 accepted; until then the setup is unsigned and its release notes say so. See the
 [code signing policy](docs/code-signing-policy.md), and what the program sends over the network in
 [docs/privacy.md](docs/privacy.md).
+
+The quick start below runs the original package (`github:aibengineering/mine-ai-mcp`), not this fork.
 
 ## Quick start: use an existing Minecraft server
 
