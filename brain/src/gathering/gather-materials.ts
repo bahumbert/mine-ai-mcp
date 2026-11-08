@@ -168,7 +168,15 @@ async function gatherRounds(
     if (typeof stepped === "string") return { status: "failed", detail: stepped };
     if (stepped.status === "stopped") return stepped;
     const next = await afterFailedRound({ context, step: stepped, plan, state, bill, keep, missing, knowledge });
-    if (next === "continue") continue;
+    if (next === "continue") {
+      // Slow progress needs a new decision even when this round gained items (P4-02c T3b, 2026-11-08).
+      if (stepped.status === "failed" && errorCode(stepped.detail) === "NAVIGATION_SLOW") {
+        const now = (await context.runtime.status()).inventory;
+        const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
+        return { status: "failed", detail: `${stepped.detail} (carried now: ${carriedNow || "none of the requested items"}).` };
+      }
+      continue;
+    }
     if (next !== null) return next;
     state.actions.push(stepped.detail);
   }

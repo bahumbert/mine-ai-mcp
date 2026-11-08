@@ -131,6 +131,8 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     const there = await act(context, "navigate", { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
     context.heading?.(null);
     if (there !== null) {
+      // A slow walk is about her tools or depth, not the place (spec P4-02c D4, 2026-11-07).
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_SLOW") return there;
       // A place that could not be reached is not offered again by the next round.
       tried.add(`${seen.x},${seen.z}`);
       last = there;

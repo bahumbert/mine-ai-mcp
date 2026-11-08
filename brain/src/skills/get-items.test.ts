@@ -714,6 +714,30 @@ test("a far place whose walk failed is not walked to again by the next round, an
   assert.match(told.status === "failed" ? told.detail : "", /the oak_log you know of is across the water: take a boat/u);
 });
 
+for (const [name, gained] of [
+  ["a slow walk to a far place ends the fetch at once", 0],
+  ["a slow walk after a partial gain ends the step", 1],
+] as const) {
+  test(name, async () => {
+    const runtime = new FakeRuntime();
+    const absent = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
+    runtime.failures.collect_block = absent;
+    if (gained > 0) runtime.failNext.collect_block = { error: absent, effect: () => runtime.addItem("oak_log", gained) };
+    const slow = "[NAVIGATION_SLOW] Got 3 blocks nearer in 120 s (1.5 blocks a minute); 297 blocks left. On the way: no navigation dig attempts recorded. Feet at 3,64,0. The leg needed 12 blocks nearer in 120 s. Try a different route or improve the tools you carry.";
+    runtime.failures.navigate = slow;
+    runtime.seen = { oak_log: { dimension: "overworld", x: 300, z: 8 } };
+    runtime.alsoSeen = { oak_log: [{ dimension: "overworld", x: 400, z: 8 }] };
+
+    const first = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+    assert.ok(first.status === "failed" && first.detail.includes(slow));
+    if (gained > 0) assert.match(first.detail, /carried now: 1 oak_log/u);
+    assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input.x), [300]);
+
+    await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+    assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input.x), [300, 300], "a later step can offer the same place again");
+  });
+}
+
 test("a far walk that failed on deep water ends the fetch with the boat hint, no walk to the next far place across the same water", async () => {
   const runtime = new FakeRuntime();
   runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
