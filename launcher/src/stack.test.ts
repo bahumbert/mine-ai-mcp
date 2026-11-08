@@ -101,6 +101,21 @@ test("a brain gets the other-agents file and no --other-agent, and takes the man
   assert.equal(env.MINE_AI_LLM_MODEL, fixture.settings.llm.model);
 });
 
+for (const [label, server] of [
+  ["no server set", { kind: "none" }],
+  ["a remote server", { kind: "remote", host: "far.example", port: 25_565 }],
+] as const) {
+  test(`a remote endpoint whose saved key cannot be read fails the start first, with ${label}: the text, no process, no request`, async () => {
+    const fixture = stackFixture((settings) => ({ ...settings, server, llm: { kind: "remote", baseUrl: "https://api.example.test/v1", apiKey: "", apiKeyProtected: "QUJD", keyUnreadable: true, model: "m" } }));
+    const state = await startStack(fixture.settings, fixture.manifest, fixture.children, fixture.root, fixture.deps);
+    assert.equal(state.phase, "failed");
+    assert.equal(state.problem, `The API key in ${join(fixture.root, "settings.json")} was saved by another Windows user or on another PC and cannot be read here. Enter it again: run the Mine AI setup again, or mine-ai configure --llm-remote <url> <key> <model>.`);
+    assert.deepEqual(fixture.children.spawns, []);
+    assert.deepEqual(fixture.network.requests, []);
+    assert.ok(fixture.said.includes(state.problem!), "the console shows it");
+  });
+}
+
 test("a remote endpoint gives the brain its URL, key and model, and Ollama is never started", async () => {
   const { fixture } = await startedFixture((settings) => ({ ...settings, llm: { kind: "remote", baseUrl: "https://api.example.test/v1", apiKey: "sk-1", model: "big-model" } }));
   const env = fixture.children.optionsOf("brain-ayla").env;

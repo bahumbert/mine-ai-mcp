@@ -1,9 +1,13 @@
-// `mine-ai install <step> [--accept-eula] [--dir <folder>] [--json <file>]`: the installer's way into the install steps
-// (spec D2, D3). `--dir` is for `install ollama` only: the folder Ollama's setup installs into when Ollama is missing.
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, posix } from "node:path";
+// `mine-ai install <step> [--accept-eula] [--dir <folder>] [--no-model] [--json <file>]`: the installer's way into the
+// install steps (spec D2, D3). `--dir` is for `install ollama` and `install disk`: the folder Ollama's setup installs
+// into when Ollama is missing. `--no-model` is for `install disk` only: the GPU verdict is remote, so no model line.
+// `install endpoint-models [--url <url>] [--key <key> | --saved-key] --list <file>` writes the endpoint's model list.
+import { writeFileSync } from "node:fs";
+import { posix } from "node:path";
 import { parseArgs } from "node:util";
 import { UsageError, type CliContext } from "./cli-context.ts";
+import { diskReport, realDiskReportDeps, type DiskReport, type DiskReportDeps } from "./install/disk-report.ts";
+import { endpointModels, type EndpointModelsOptions } from "./install/endpoint-models.ts";
 import { endpointTest } from "./install/endpoint.ts";
 import { gpu, type GpuReport } from "./install/gpu.ts";
 import { java } from "./install/java.ts";
@@ -12,18 +16,29 @@ import { ollama, ollamaExeFor, ollamaRemove } from "./install/ollama.ts";
 import { server } from "./install/server.ts";
 import { stepFailure, type InstallContext, type StepResult } from "./install/step.ts";
 import type { Manifest } from "./manifest.ts";
+import { ensureParentDir } from "./paths.ts";
 import { loadSettings } from "./settings.ts";
 
-export const INSTALL_STEP_NAMES = ["gpu", "ollama", "ollama-remove", "model", "model-remove", "java", "server", "endpoint-test"] as const;
+export const INSTALL_STEP_NAMES = ["gpu", "disk", "ollama", "ollama-remove", "model", "model-remove", "java", "server", "endpoint-test", "endpoint-models"] as const;
 export type InstallStepName = (typeof INSTALL_STEP_NAMES)[number];
 
-/** What a step returns: a plain `StepResult`, or one carrying the GPU report (`gpu`, and `ollama` after its stage 2). */
-type StepOutput = StepResult | { readonly ok: true; readonly detail: string; readonly report: GpuReport };
-/** `dir`: the `--dir` folder, given to `ollama` only (any other step is refused it before it runs). */
-export type InstallSteps = Record<InstallStepName, (ctx: InstallContext, acceptEula: boolean, dir?: string) => Promise<StepOutput>>;
+/** What a step returns: a plain `StepResult`, or one carrying the GPU report (`gpu`, and `ollama` after its stage 2) or the disk report (`disk`). */
+type StepOutput = StepResult | DiskReport | { readonly ok: true; readonly detail: string; readonly report: GpuReport };
+/**
+ * `dir`: the `--dir` folder, given to `ollama` and `disk` only; `noModel`: `--no-model`, `disk` only; `models`: the
+ * `--url`, `--key`, `--saved-key` and `--list` options, `endpoint-models` only (any other step is refused them before it runs).
+ */
+export type InstallSteps = Record<InstallStepName, (ctx: InstallContext, acceptEula: boolean, dir?: string, noModel?: boolean, models?: EndpointModelsOptions) => Promise<StepOutput>>;
+
+/** `install disk` with the dependencies `depsFor` gives (the real ones unless a test gives its own). */
+export const diskStep =
+  (depsFor: (ctx: InstallContext) => DiskReportDeps = realDiskReportDeps): InstallSteps["disk"] =>
+  (ctx, _acceptEula, dir, noModel) =>
+    diskReport(ctx, { dir, noModel: noModel === true }, depsFor(ctx));
 
 export const realInstallSteps: InstallSteps = {
   gpu: (ctx) => gpu(ctx),
+  disk: diskStep(),
   ollama: (ctx, _acceptEula, dir) => ollama(ctx, undefined, dir === undefined ? {} : { dir }),
   "ollama-remove": (ctx) => ollamaRemove(ctx),
   model: (ctx) => model(ctx),
@@ -31,6 +46,10 @@ export const realInstallSteps: InstallSteps = {
   java: (ctx) => java(ctx),
   server: (ctx, acceptEula) => server(ctx, acceptEula),
   "endpoint-test": (ctx) => endpointTest(ctx),
+  "endpoint-models": (ctx, _acceptEula, _dir, _noModel, models) => {
+    if (models === undefined) throw new Error("install endpoint-models needs its --list option.");
+    return endpointModels(ctx, models);
+  },
 };
 
 /**
@@ -60,15 +79,46 @@ interface InstallArguments {
   step: InstallStepName;
   acceptEula: boolean;
   dir: string | undefined;
+  noModel: boolean;
+  models: EndpointModelsOptions | undefined;
   json: string | undefined;
 }
 
+/** The options only `install endpoint-models` takes. */
+const ENDPOINT_MODELS_FLAGS = ["url", "key", "saved-key", "list"] as const;
+
+/** The options of `install endpoint-models`: `--list` is required, and the key is typed (`--key`) or the settings' (`--saved-key`), never both. Absent options stay absent. */
+function endpointModelsOptions(values: { url?: string; key?: string; "saved-key"?: boolean; list?: string }): EndpointModelsOptions {
+  if (values.list === undefined) throw new UsageError("install endpoint-models needs --list <file>: where the model list is written.");
+  if (values.key !== undefined && values["saved-key"] === true) throw new UsageError("install endpoint-models takes --key <key> or --saved-key, not both.");
+  return { ...(values.url === undefined ? {} : { url: values.url }), ...(values.key === undefined ? {} : { key: values.key }), savedKey: values["saved-key"] === true, listFile: values.list };
+}
+
+/** `--key -abc` as `--key=-abc`: `parseArgs` takes a value starting with a dash for another option, and a base64url key can start with one. */
+function withKeyValueJoined(args: readonly string[]): string[] {
+  const joined: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i + 1];
+    if (args[i] === "--key" && value !== undefined && !value.startsWith("--")) joined.push(`--key=${args[++i]}`);
+    else joined.push(args[i]!);
+  }
+  return joined;
+}
+
 function parseInstallArguments(args: readonly string[]): InstallArguments {
-  const { values, positionals } = parseArgs({ args: [...args], allowPositionals: true, options: { "accept-eula": { type: "boolean" }, dir: { type: "string" }, json: { type: "string" } } });
+  const { values, positionals } = parseArgs({
+    args: withKeyValueJoined(args),
+    allowPositionals: true,
+    options: { "accept-eula": { type: "boolean" }, dir: { type: "string" }, "no-model": { type: "boolean" }, url: { type: "string" }, key: { type: "string" }, "saved-key": { type: "boolean" }, list: { type: "string" }, json: { type: "string" } },
+  });
   const step = positionals[0];
   if (!INSTALL_STEP_NAMES.includes(step as InstallStepName)) throw new UsageError(`install needs one step: ${INSTALL_STEP_NAMES.join(", ")}.`);
-  if (values.dir !== undefined && step !== "ollama") throw new UsageError(`--dir is for \`install ollama --dir <folder>\` only; \`install ${step}\` does not take it.`);
-  return { step: step as InstallStepName, acceptEula: values["accept-eula"] === true, dir: values.dir === undefined ? undefined : checkedFolder(values.dir), json: values.json };
+  if (values.dir !== undefined && step !== "ollama" && step !== "disk") throw new UsageError(`--dir is for \`install ollama --dir <folder>\` and \`install disk --dir <folder>\` only; \`install ${step}\` does not take it.`);
+  if (values["no-model"] === true && step !== "disk") throw new UsageError(`--no-model is for \`install disk --no-model\` only; \`install ${step}\` does not take it.`);
+  const refused = ENDPOINT_MODELS_FLAGS.find((flag) => values[flag] !== undefined);
+  if (refused !== undefined && step !== "endpoint-models") throw new UsageError(`--${refused} is for \`install endpoint-models\` only; \`install ${step}\` does not take it.`);
+  const models = step === "endpoint-models" ? endpointModelsOptions(values) : undefined;
+  return { step: step as InstallStepName, acceptEula: values["accept-eula"] === true, dir: values.dir === undefined ? undefined : checkedFolder(values.dir), noModel: values["no-model"] === true, models, json: values.json };
 }
 
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/u;
@@ -84,11 +134,11 @@ function checkedFolder(dir: string): string {
   return ROOT_FOLDER.test(dir) ? dir : dir.replace(/[\\/]+$/u, "");
 }
 
-async function runStep({ step, acceptEula, dir }: InstallArguments, context: CliContext, steps: InstallSteps): Promise<StepOutput> {
+async function runStep({ step, acceptEula, dir, noModel, models }: InstallArguments, context: CliContext, steps: InstallSteps): Promise<StepOutput> {
   try {
     const manifest = context.loadManifest();
     const settings = loadSettings(context.root, manifest);
-    return await steps[step]({ manifest, settings, root: context.root, onProgress: progressPrinter(context.out) }, acceptEula, dir);
+    return await steps[step]({ manifest, settings, root: context.root, onProgress: progressPrinter(context.out) }, acceptEula, dir, noModel, models);
   } catch (error) {
     return stepFailure(error, "Run the installer again to resume: the steps that are done are not repeated. If it repeats, `mine-ai doctor` lists the last errors.");
   }
@@ -134,7 +184,7 @@ export async function runInstallCommand(
   const result = parsed.step === "gpu" ? { ...output, ollamaExe: ollamaExeOrNull(findOllama, context.root), ...modelHint(context, modelPresent) } : output;
   const { json } = parsed;
   if (json !== undefined) {
-    mkdirSync(dirname(json), { recursive: true });
+    ensureParentDir(json);
     writeFileSync(json, JSON.stringify(result));
   } else context.out(result.ok === true ? String(result.detail) : `${String(result.error)} ${String(result.hint)}`.trim());
   return result.ok === true ? 0 : 1;

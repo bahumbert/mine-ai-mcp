@@ -10,11 +10,13 @@
   },
   "java": {
     "url": "https://api.adoptium.net/v3/binary/version/jdk-21.0.13%2B9/windows/x64/jre/hotspot/normal/eclipse",
-    "sha256": "2332c0b4cff6bed722da3567c91d5e47568bcba863fa4945d0a8d6fc76158628"
+    "sha256": "2332c0b4cff6bed722da3567c91d5e47568bcba863fa4945d0a8d6fc76158628",
+    "installedBytes": 151829892
   },
   "ollama": {
     "url": "https://github.com/ollama/ollama/releases/download/v0.35.0/OllamaSetup.exe",
     "sha256": "92e45c3518daf7d4ea60480896ee7bdb1bed71381593cfc9f2d7c1ceb941efde",
+    "installedBytes": 2963753072,
     "minVersion": "0.35.0",
     "port": 11435,
     "env": {
@@ -48,5 +50,6 @@
     "modelPullIdleMs": 300000
   },
   "release": { "latestUrl": "https://api.github.com/repos/bahumbert/mine-ai-mcp/releases/latest" },
+  "disk": { "reserveBytes": 1073741824 },
   "commands": { "cooldownMs": 2000, "refusalEveryMs": 600000, "pollMs": 1000, "maxAgeMs": 60000, "listenerAfterMs": 10000, "answerWaitMs": 20000 }
 }

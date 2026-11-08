@@ -1,5 +1,5 @@
 ; Mine AI installer (Inno Setup 6.4 or later: ExecAndLogOutput), built by launcher/src/build/build-windows.ts, which passes:
-;   /DStageDir=<staged package> /DOutputDir=<folder for the setup exe> /DAppVersion=<manifest version>
+;   /DStageDir=<staged package> /DOutputDir=<folder for the setup exe> /DAppVersion=<the tag's version, or the manifest's for a local build>
 ;   and, for a signed build, /DSign=1 /SMineAiSign=<sign command with $f>.
 ; The pages after the file copy ask the questions: the GPU check, the endpoint test and the downloads are
 ; `bun.exe launcher\src\main.js install <step>` (the launcher's own tested code, bundled), and the launcher is on disk only after
@@ -8,14 +8,16 @@
 ; Silent install (/SILENT or /VERYSILENT): one command-line parameter per wizard choice, read by `Param()` below and
 ; listed in docs/install/windows.md (launcher/src/build/iss-launcher-calls.test.ts keeps the two in step):
 ;   /LLM=local|remote /LLMURL= /LLMKEY= /LLMMODEL= /SERVER=none|local|remote /SERVERHOST= /SERVERPORT=
-;   /DATADIR= /OLLAMADIR= /EULA=accept /STARTNOW=0|1; uninstall: /DELETEDATA=0|1.
+;   /DATADIR= /OLLAMADIR= /EULA=accept /CHECKUPDATES=0|1 /STARTNOW=0|1; uninstall: /DELETEDATA=0|1.
 ; The app folder is Inno's own /DIR=; the data folder (/DATADIR=) and the Ollama folder (/OLLAMADIR=) are asked by pages of
 ; this script. The folders chosen at the first install are kept by every update; the uninstaller removes them.
 ; A parameter not given keeps the choice saved in settings.json by an earlier install, else the first value listed.
 ; Setup runs the same code as the progress page (AllSetupStepsSucceed); a failed step ends the setup with a non-zero exit
 ; code (7 for a wrong parameter, 100 for a failed step) and the error and hint in the /LOG= file. Pass /SUPPRESSMSGBOXES
 ; too: Setup's own error boxes are not silent without it.
-; Not compiled by tests: ISCC compiles it in the master's build, W5 walks every page.
+; iss-compile.test.ts compiles it with ISCC (a stand-in stage folder) when Inno Setup is installed; W5 walks every page.
+; The [Code] section is split in two files: this one, and endpoint-page.iss (the endpoint page and its key box), pulled in by `#include`
+; where its code used to stand. ISCC reads the included file from this file's folder; the tests read the two as one (iss-test-support.ts).
 
 #ifndef StageDir
   #error StageDir is not defined: build with launcher/src/build/build-windows.ts.
@@ -24,6 +26,8 @@
 ; the same file in the version before the bundle, which an update meets in {app} until its copy has run.
 #define LauncherScript "launcher\src\main.js"
 #define SourceLauncherScript "launcher\src\main.ts"
+; The privacy page the update-check box and the Ready list point to (SignPath asks for the privacy policy at install, spec D5).
+#define PrivacyUrl "https://github.com/bahumbert/mine-ai-mcp/blob/main/docs/privacy.md"
 #ifndef OutputDir
   #error OutputDir is not defined: build with launcher/src/build/build-windows.ts.
 #endif
@@ -37,6 +41,12 @@ AppId={{6D0F3C2A-8B1E-4F57-9A64-2E7C5B91D3A8}
 AppName=Mine AI
 AppVersion={#AppVersion}
 AppPublisher=AI Bengineering
+; The version resource of the setup file. SignPath's artifact configuration restricts the product name and version (rule "product name
+; and version"), so the product name is written here and does not follow a later AppName change; Inno's defaults give the file
+; description "Mine AI Setup" (iss-compile.test.ts compiles the script).
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductName=Mine AI
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\MineAI
 DefaultGroupName=Mine AI
@@ -62,6 +72,11 @@ SignedUninstaller=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+; The tasks page shows at a first install only (ShouldSkipPage); an update keeps what settings.json says (SavedCheckUpdates).
+; The box is checked by default, unless the data folder's settings already turned the check off (CurPageChanged sets it).
+Name: "checkupdates"; Description: "Check for a newer Mine AI at each start (one request for the latest release on GitHub: GitHub sees this PC's address, nothing else is sent). Privacy: {#PrivacyUrl}"
 
 [Dirs]
 ; The data folder is the player's choice (DataDir in [Code]); the uninstaller deletes it by itself, and only on request.
@@ -99,19 +114,34 @@ Type: filesandordirs; Name: "{app}"
 const
   MINECRAFT_EULA_URL = 'https://aka.ms/MinecraftEULA';
   PROGRESS_STEPS = 1000;
+  // The port of the server page's box at creation, of the prefill's reset and of the configure fallback.
+  DEFAULT_SERVER_PORT = 25565;
   // The default of a silent parameter that was not given; no real value looks like it.
   PARAM_UNSET = '(not given)';
   // Setup's own exit codes are 0-8; a silent setup whose steps failed returns this one.
   SILENT_FAILURE_EXIT_CODE = 100;
   // `mine-ai stop` ends 3 when the launcher is still starting, does not answer or did not finish stopping (control-commands.ts, kept equal by
-  // iss-launcher-calls.test.ts); any other non-zero code (a stop that throws, a bundle Bun cannot load: 1) is a stop that failed, not a refusal.
+  // iss-install-flow.test.ts); any other non-zero code (a stop that throws, a bundle Bun cannot load: 1) is a stop that failed, not a refusal.
   // RunLauncherAndWait gives LAUNCHER_NOT_STARTED when bun.exe or the launcher is missing or cannot start: that is no refusal to stop either.
   STOP_REFUSED_EXIT_CODE = 3;
   LAUNCHER_NOT_STARTED = -1;
+  // The launcher's exit code for arguments it cannot use (main.ts runCli; iss-launcher-calls.test.ts runs it). `configure
+  // --llm-remote-saved-key` ends with it when the settings hold no key it can read: another Windows user's or PC's blob, or none.
+  USAGE_EXIT_CODE = 2;
+  // The key box shows this (masked) while the settings hold an encrypted key: the setup never decrypts, so it has no key to show. The
+  // mark of a saved key reaches no launcher call (KeyWasSaved and the mark in the box make KeySaved); a mark typed with no saved key is a typed key.
+  SAVED_KEY_MARK = 'saved-key-unchanged';
+  KEY_ENCRYPTED_NOTICE = 'Your API key is now stored encrypted for this Windows user; it no longer appears in clear in settings.json.';
+  // What the free-space figures (`install disk`) leave out (owner 2026-11-06: no measure of Ollama's own temporary files, only this warning).
+  // The model page, the Ready list and the silent log say it.
+  ROOM_WARNING_TEXT = 'The setup counts the downloads and installs only. Ollama''s own installer also needs temporary room on the Windows drive (C:) while it runs, and the bots'' memories and worlds grow as they play: keep several GB free.';
+  SAVED_KEY_UNUSABLE_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Type the key again in the API key box, replacing the dots (silent install: /LLMKEY=).';
+  // The same cause for a silent run, which has no key box: the next action is the parameter.
+  SAVED_KEY_UNUSABLE_SILENT_TEXT = 'The API key saved earlier cannot be used: it was saved by another Windows user or on another PC, or settings.json no longer holds it. Run the setup again with /LLMKEY=<the key>.';
   // What the player does by hand when a removal asked for at uninstall did not happen: {app} is gone by then, so no "run this step again".
   OLLAMA_REMOVE_BY_HAND = 'Remove Ollama yourself: Windows Settings > Apps > Installed apps > Ollama > Uninstall.';
   // Setup stores the data folder under this name (GetPreviousData/SetPreviousData); the uninstaller reads it back from the
-  // uninstall key of this script's AppId (the test in iss-launcher-calls.test.ts keeps the two in step) as the value
+  // uninstall key of this script's AppId (the test in iss-install-flow.test.ts keeps the two in step) as the value
   // "Inno Setup CodeFile: DataDir".
   DATA_DIR_KEY = 'DataDir';
   UNINSTALL_KEY = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6D0F3C2A-8B1E-4F57-9A64-2E7C5B91D3A8}_is1';
@@ -123,12 +153,12 @@ const
 
 var
   DataPage: TInputDirWizardPage;
+  // The endpoint page's variables are in endpoint-page.iss.
   ModelPage, ServerPage, EulaPage, StepsPage: TWizardPage;
-  ModelStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  ModelStatus, DiskStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
   ModelLocalRadio, ModelRemoteRadio: TNewRadioButton;
-  OllamaDirEdit, RemoteUrlEdit, RemoteModelEdit: TEdit;
+  OllamaDirEdit: TEdit;
   OllamaBrowseButton: TButton;
-  RemoteKeyEdit: TPasswordEdit;
   ModelGauge: TNewProgressBar;
   ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio: TNewRadioButton;
   ServerHostEdit, ServerPortEdit: TEdit;
@@ -139,6 +169,12 @@ var
   ActiveGauge: TNewProgressBar;
   ActiveStatus: TNewStaticText;
   GpuChecked, GpuVerdictIsRemote, OllamaFolderNeeded, OllamaReady, SetupDone, PreviousLlmWasRemote, SilentWantsLocalModel: Boolean;
+  // The update check the saved settings.json holds (PrefillFromSettings); an update keeps it, a first install asks (CheckUpdatesWanted);
+  // the box starts checked, unless the data folder's settings already turned the check off.
+  // SavedCheckUpdatesKnown: the file holds the key at all (a first install that ended before its configure leaves none).
+  SavedCheckUpdates, SavedCheckUpdatesKnown: Boolean;
+  // The data folder (DataDir('')) the tasks-page box was last set for from its settings.json; '' until the page first shows.
+  TasksBoxFolder: String;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
@@ -745,15 +781,23 @@ begin
   Result.Max := PROGRESS_STEPS;
 end;
 
+function AddButton(Page: TWizardPage; const Caption: String; Top, Left, Width: Integer): TButton;
+begin
+  Result := TButton.Create(Page);
+  Result.Parent := Page.Surface;
+  Result.Caption := Caption;
+  Result.Left := ScaleX(Left);
+  Result.Top := ScaleY(Top);
+  Result.Width := ScaleX(Width);
+  Result.Height := ScaleY(23);
+end;
+
 // The Ollama folder is asked only when this setup is going to install Ollama: the local model is chosen and `install gpu`
 // found no Ollama (OllamaFolderNeeded). Ollama that is already there stays where it is.
 procedure ModelChoiceChanged(Sender: TObject);
 var
   AskOllamaFolder: Boolean;
 begin
-  RemoteUrlEdit.Enabled := ModelRemoteRadio.Checked;
-  RemoteKeyEdit.Enabled := ModelRemoteRadio.Checked;
-  RemoteModelEdit.Enabled := ModelRemoteRadio.Checked;
   AskOllamaFolder := ModelLocalRadio.Checked and OllamaFolderNeeded;
   OllamaDirLabel.Visible := AskOllamaFolder;
   OllamaDirEdit.Visible := AskOllamaFolder;
@@ -787,39 +831,34 @@ begin
   ShellExec('open', MINECRAFT_EULA_URL, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
+#include "endpoint-page.iss"
+
+// ---------- page creation ----------
+
 procedure CreateModelPage();
 begin
   ModelPage := CreateCustomPage(wpInfoAfter, 'AI model', 'Where should the bots'' AI model run?');
   ModelStatus := AddText(ModelPage, '', 0, 46);
+  // The free space of the drives the local model needs (ShowDiskSpace, wizard only).
+  // Room for about four lines: a short drive adds a warning sentence to the drive lines (disk-report.ts).
+  DiskStatus := AddText(ModelPage, '', 48, 60);
   // What the local choice does is set by CheckGpuOnce once it knows whether Ollama is already installed.
-  ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 50);
+  ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 112);
   // One row: the label, the folder and Browse; shown only when this setup will install Ollama (ModelChoiceChanged).
-  OllamaDirLabel := AddText(ModelPage, 'Install Ollama in', 76, 14);
+  OllamaDirLabel := AddText(ModelPage, 'Install Ollama in', 138, 14);
   OllamaDirLabel.Left := ScaleX(16);
   OllamaDirLabel.Width := ScaleX(90);
-  OllamaBrowseButton := TButton.Create(ModelPage);
-  OllamaBrowseButton.Parent := ModelPage.Surface;
-  OllamaBrowseButton.Caption := 'Browse...';
-  OllamaBrowseButton.Width := ScaleX(75);
+  OllamaBrowseButton := AddButton(ModelPage, 'Browse...', 134, 0, 75);
   OllamaBrowseButton.Left := ModelPage.SurfaceWidth - OllamaBrowseButton.Width;
-  OllamaBrowseButton.Top := ScaleY(72);
-  OllamaBrowseButton.Height := ScaleY(23);
   OllamaBrowseButton.OnClick := @BrowseOllamaFolder;
-  OllamaDirEdit := AddEdit(ModelPage, 73, ScaleX(110), OllamaBrowseButton.Left - ScaleX(110) - ScaleX(8));
+  OllamaDirEdit := AddEdit(ModelPage, 135, ScaleX(110), OllamaBrowseButton.Left - ScaleX(110) - ScaleX(8));
   OllamaDirEdit.Text := ExpandConstant('{localappdata}\Programs\Ollama');
-  ModelRemoteRadio := AddRadio(ModelPage, 'On a remote OpenAI-compatible API (OpenRouter, your own server...)', 102);
-  AddText(ModelPage, 'Endpoint URL (for example https://openrouter.ai/api/v1)', 126, 14);
-  RemoteUrlEdit := AddEdit(ModelPage, 140, 0, ModelPage.SurfaceWidth);
-  AddText(ModelPage, 'API key', 166, 14);
-  RemoteKeyEdit := TPasswordEdit.Create(ModelPage);
-  RemoteKeyEdit.Parent := ModelPage.Surface;
-  RemoteKeyEdit.Left := 0;
-  RemoteKeyEdit.Top := ScaleY(180);
-  RemoteKeyEdit.Width := ModelPage.SurfaceWidth;
-  AddText(ModelPage, 'Model name', 206, 14);
-  RemoteModelEdit := AddEdit(ModelPage, 220, 0, ModelPage.SurfaceWidth);
-  ModelStepStatus := AddText(ModelPage, '', 250, 28);
-  ModelGauge := AddGauge(ModelPage, 280);
+  // The endpoint's URL, key and model are asked on the next page (CreateEndpointPage), which a local choice skips.
+  ModelRemoteRadio := AddRadio(ModelPage, 'On a remote OpenAI-compatible API (OpenRouter, your own server...)', 166);
+  // What the disk text above does not count (T11): three lines with a line to spare; the step status and the gauge sit below, within the endpoint page's depth.
+  AddText(ModelPage, ROOM_WARNING_TEXT, 190, 44);
+  ModelStepStatus := AddText(ModelPage, '', 236, 28);
+  ModelGauge := AddGauge(ModelPage, 266);
   ModelLocalRadio.OnClick := @ModelChoiceChanged;
   ModelRemoteRadio.OnClick := @ModelChoiceChanged;
   ModelLocalRadio.Enabled := False;
@@ -831,7 +870,7 @@ procedure CreateServerPage();
 var
   PortLeft: Integer;
 begin
-  ServerPage := CreateCustomPage(ModelPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
+  ServerPage := CreateCustomPage(EndpointPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
   ServerNoneRadio := AddRadio(ServerPage, 'No server for now (I will set one in settings.json)', 0);
   ServerLocalRadio := AddRadio(ServerPage, 'Install a Minecraft server on this PC (only this PC can join, by default)', 24);
   ServerRemoteRadio := AddRadio(ServerPage, 'Use an existing server', 48);
@@ -839,7 +878,7 @@ begin
   AddText(ServerPage, 'Address', 72, 14);
   ServerHostEdit := AddEdit(ServerPage, 86, 0, PortLeft - ScaleX(8));
   ServerPortEdit := AddEdit(ServerPage, 86, PortLeft, ServerPage.SurfaceWidth - PortLeft);
-  ServerPortEdit.Text := '25565';
+  ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
   AddText(ServerPage, 'An existing server must be vanilla Minecraft 1.21.4 with online-mode=false (the bots join without a Minecraft account). Mine AI checks it before starting any bot.', 124, 60);
   ServerNoneRadio.Checked := True;
   ServerNoneRadio.OnClick := @ServerChoiceChanged;
@@ -941,31 +980,87 @@ begin
     Server := 'none (set one in settings.json)';
 end;
 
+// The update check of the saved settings.json: False only when the file says `"checkUpdates": false`. A missing file, key or
+// unreadable value is True, the launcher's own default (settings.ts). Known: the file holds the key (only a configure writes it).
+function SavedCheckUpdatesValue(var Known: Boolean): Boolean;
+var
+  Raw: AnsiString;
+  Settings: String;
+  P: Integer;
+begin
+  Result := True;
+  Known := False;
+  if not LoadStringFromFile(DataDir('') + '\settings.json', Raw) then
+    Exit;
+  Settings := UTF8Decode(Raw);
+  P := JsonValueStart(Settings, 'checkUpdates');
+  Known := P > 0;
+  if Known and (Copy(Settings, P, 5) = 'false') then
+    Result := False;
+end;
+
 // An update (or a second run) starts from the settings.json of the data folder, so it never resets a server or an endpoint.
+// The key: an encrypted one (apiKeyProtected) is never decrypted here; the box shows the mark and the launcher keeps the key
+// (KeySaved). A clear one (an install before the encryption) fills the box as before and is encrypted by the first save.
+// This also runs on the data page's Next: everything the file may set (the key box and its flags, the endpoint, the server choice,
+// host and port, PreviousLlmWasRemote) goes back to the creation values first, so a Back to another data folder, or a missing file,
+// keeps nothing of the last file.
 procedure PrefillFromSettings();
 var
   Llm, Server, Kind: String;
 begin
-  if not ReadSettingsSections(Llm, Server) then
-    Exit;
-  if JsonString(Llm, 'kind') = 'remote' then
+  RemoteKeyEdit.Text := '';
+  KeySaved := False;
+  KeyWasSaved := False;
+  ClearKeyMigrated := False;
+  SavedBaseUrl := '';
+  KeyUrlChangeTold := '';
+  // What the file may not set goes back to the pages' creation values: a second prefill (Back to another data folder) or a missing
+  // file must not keep the last file's remote kind, endpoint or server (F1: PreviousLlmWasRemote was a latch that never reset).
+  PreviousLlmWasRemote := False;
+  RemoteUrlEdit.Text := '';
+  RemoteModelCombo.Text := '';
+  ServerNoneRadio.Checked := True;
+  ServerHostEdit.Text := '';
+  ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
+  SavedCheckUpdates := True;
+  SavedCheckUpdatesKnown := False;
+  if ReadSettingsSections(Llm, Server) then
   begin
-    PreviousLlmWasRemote := True;
-    RemoteUrlEdit.Text := JsonString(Llm, 'baseUrl');
-    RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
-    RemoteModelEdit.Text := JsonString(Llm, 'model');
+    SavedCheckUpdates := SavedCheckUpdatesValue(SavedCheckUpdatesKnown);
+    if JsonString(Llm, 'kind') = 'remote' then
+    begin
+      PreviousLlmWasRemote := True;
+      SavedBaseUrl := JsonString(Llm, 'baseUrl');
+      RemoteUrlEdit.Text := SavedBaseUrl;
+      if JsonString(Llm, 'apiKeyProtected') <> '' then
+      begin
+        // The mark first, the flag after: an OnChange fired by the assignment cannot leave the flag cleared.
+        RemoteKeyEdit.Text := SAVED_KEY_MARK;
+        KeySaved := True;
+        KeyWasSaved := True;
+      end
+      else if JsonString(Llm, 'apiKey') <> '' then
+      begin
+        RemoteKeyEdit.Text := JsonString(Llm, 'apiKey');
+        ClearKeyMigrated := True;
+      end;
+      RemoteModelCombo.Text := JsonString(Llm, 'model');
+    end;
+    Kind := JsonString(Server, 'kind');
+    if Kind = 'local' then
+      ServerLocalRadio.Checked := True
+    else if Kind = 'remote' then
+    begin
+      ServerRemoteRadio.Checked := True;
+      ServerHostEdit.Text := JsonString(Server, 'host');
+      if JsonNumber(Server, 'port') <> '' then
+        ServerPortEdit.Text := JsonNumber(Server, 'port');
+    end;
   end;
-  Kind := JsonString(Server, 'kind');
-  if Kind = 'local' then
-    ServerLocalRadio.Checked := True
-  else if Kind = 'remote' then
-  begin
-    ServerRemoteRadio.Checked := True;
-    ServerHostEdit.Text := JsonString(Server, 'host');
-    if JsonNumber(Server, 'port') <> '' then
-      ServerPortEdit.Text := JsonNumber(Server, 'port');
-  end;
+  // On every path, a missing file included: the server boxes match the radio, and the key caption matches the box.
   ServerChoiceChanged(nil);
+  ShowKeyLabel();
 end;
 
 // A second run over an install: Ready is then the first page (DisableDirPage=auto), and the folders are the first install's.
@@ -974,11 +1069,39 @@ begin
   Result := WizardForm.PrevAppDir <> '';
 end;
 
+// Whether Mine AI checks for a newer release at each start: /CHECKUPDATES= when given in a silent setup (like every other parameter,
+// it is read only there: a wizard shows its box and reports that box), else the tasks-page box at a first install, else the value
+// the settings.json of the update holds. Inno's stored task value is used at an update only when that file holds no key: it would
+// switch back on a check the player turned off in settings.json, but a first install that ended after the copy and before its
+// configure left no key and Inno stored the box chosen then (UsePreviousTasks), which the rerun, an update, must keep. An install
+// from before this setup has neither, and WizardIsTaskSelected then gives the box's default (checked) = the launcher's default.
+function CheckUpdatesWanted(): Boolean;
+begin
+  if WizardSilent and ParamGiven('CHECKUPDATES') then
+    Result := Param('CHECKUPDATES', '') = '1'
+  else if not IsUpdate() then
+    Result := WizardIsTaskSelected('checkupdates')
+  else if SavedCheckUpdatesKnown then
+    Result := SavedCheckUpdates
+  else
+    Result := WizardIsTaskSelected('checkupdates');
+end;
+
+// ' --check-updates on|off' for every configure the setup runs: a configure saves the whole file (the default `checkUpdates: true`
+// included), so one without it would turn a saved "no" back to yes.
+function CheckUpdatesArgument(): String;
+begin
+  if CheckUpdatesWanted() then
+    Result := ' --check-updates on'
+  else
+    Result := ' --check-updates off';
+end;
+
 // The Ready page's list (Inno's default shows the destination only). The model and server pages come after the copy, because
 // they run the launcher, so a first install cannot list them yet and says why; an update lists the saved ones.
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 var
-  Model, Server: String;
+  Model, Server, CheckAnswer: String;
 begin
   Result := MemoDirInfo + NewLine + NewLine + 'Data folder:' + NewLine + Space + DataDir('');
   if IsUpdate() and SettingsSummary(Model, Server) then
@@ -986,6 +1109,12 @@ begin
   else
     // A first install, or an update that finds no settings.json: the pages after the copy still ask both.
     Result := Result + NewLine + NewLine + 'AI model and Minecraft server: chosen on the next pages, after the files are copied (the setup checks this PC''s graphics card there).';
+  Result := Result + NewLine + NewLine + 'Disk room:' + NewLine + Space + ROOM_WARNING_TEXT;
+  if CheckUpdatesWanted() then
+    CheckAnswer := 'yes'
+  else
+    CheckAnswer := 'no';
+  Result := Result + NewLine + NewLine + 'Check for updates at each start: ' + CheckAnswer + ' (privacy: {#PrivacyUrl})';
 end;
 
 // ---------- silent install: the wizard's choices from command-line parameters ----------
@@ -995,6 +1124,8 @@ procedure ApplySilentParameters();
 var
   Server: String;
 begin
+  // No page is shown: the room warning of the model page and the Ready list goes to the log.
+  Log('Disk room: ' + ROOM_WARNING_TEXT);
   // At a first install only: an update keeps its data folder, and a different /DATADIR= is refused (SilentFolderProblem).
   if ParamGiven('DATADIR') and (PreviousDataDir() = '') then
     DataPage.Values[0] := Param('DATADIR', '');
@@ -1005,9 +1136,13 @@ begin
   if ParamGiven('LLMURL') then
     RemoteUrlEdit.Text := Param('LLMURL', '');
   if ParamGiven('LLMKEY') then
+  begin
     RemoteKeyEdit.Text := Param('LLMKEY', '');
+    KeySaved := False;
+    KeyWasSaved := False;
+  end;
   if ParamGiven('LLMMODEL') then
-    RemoteModelEdit.Text := Param('LLMMODEL', '');
+    RemoteModelCombo.Text := Param('LLMMODEL', '');
   Server := Param('SERVER', PARAM_UNSET);
   if Server = 'none' then
     ServerNoneRadio.Checked := True
@@ -1024,8 +1159,12 @@ end;
 
 procedure InitializeWizard();
 begin
+  // The Ready list's long lines (the disk room warning) wrapped to the right under a horizontal scroll bar (F3).
+  WizardForm.ReadyMemo.WordWrap := True;
+  WizardForm.ReadyMemo.ScrollBars := ssVertical;
   CreateDataPage();
   CreateModelPage();
+  CreateEndpointPage();
   CreateServerPage();
   CreateEulaPage();
   CreateStepsPage();
@@ -1033,6 +1172,8 @@ begin
     ApplySilentParameters()
   else
     PrefillFromSettings();
+  // After the first prefill: its own assignments are not edits by the player. A silent /LLMKEY= clears KeySaved itself.
+  RemoteKeyEdit.OnChange := @RemoteKeyChanged;
 end;
 
 // Silent Setup still clicks through every page that is not skipped once the files are copied (measured with a probe
@@ -1040,14 +1181,74 @@ end;
 // The data page shows at a first install only: an update keeps the first folder.
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-  Result := WizardSilent and ((PageID = DataPage.ID) or (PageID = ModelPage.ID) or (PageID = ServerPage.ID) or (PageID = EulaPage.ID) or (PageID = StepsPage.ID));
+  Result := WizardSilent and ((PageID = DataPage.ID) or (PageID = ModelPage.ID) or (PageID = EndpointPage.ID) or (PageID = ServerPage.ID) or (PageID = EulaPage.ID) or (PageID = StepsPage.ID));
   if PageID = DataPage.ID then
     Result := Result or (PreviousDataDir() <> '');
+  // The endpoint is asked only for the remote choice (the local model needs no URL, key or model name).
+  if PageID = EndpointPage.ID then
+    Result := Result or (not ModelRemoteRadio.Checked);
   if PageID = EulaPage.ID then
     Result := Result or (not ServerLocalRadio.Checked);
+  // The update-check box is asked at a first install only: an update opens on Ready and keeps what settings.json says.
+  if PageID = wpSelectTasks then
+    Result := Result or IsUpdate();
 end;
 
 // ---------- AI model page ----------
+
+// `install disk` (spec D2): the free space of each drive the downloads go to and what they need, under the GPU text. The local model's
+// needs are left out when the local choice is not offered (--no-model). A run that failed (an older launcher, a crash) shows nothing:
+// the steps' own guards still hold. Wizard only: nobody reads it in a silent install, and it asks the network.
+procedure ShowDiskSpace();
+var
+  Json, Args: String;
+  Succeeded: Boolean;
+begin
+  DiskStatus.Caption := 'Checking disk space...';
+  Args := 'install disk';
+  if not ModelLocalRadio.Enabled then
+    Args := Args + ' --no-model';
+  Succeeded := RunStepSucceeded(Args, ModelGauge, ModelStepStatus, Json);
+  if Succeeded and (JsonString(Json, 'detail') <> '') then
+    DiskStatus.Caption := JsonString(Json, 'detail')
+  else
+    DiskStatus.Caption := '';
+end;
+
+// Moves the focus to the radio of the group that is already checked, when Page is the page on screen. It never writes a .Checked: a
+// radio checked from code while another radio of its group keeps the focus is re-checked by the focused one when the window gets
+// its focus back (F1), so the checked one must hold the focus. Third is nil for a group of two.
+procedure FocusCheckedRadio(Page: TWizardPage; First, Second, Third: TNewRadioButton);
+var
+  Checked: TNewRadioButton;
+begin
+  if WizardForm.CurPageID <> Page.ID then
+    Exit;
+  Checked := nil;
+  if First.Checked then
+    Checked := First
+  else if Second.Checked then
+    Checked := Second
+  else if (Third <> nil) and Third.Checked then
+    Checked := Third;
+  // A disabled control cannot take the focus (the local radio is disabled when the verdict is remote).
+  if (Checked <> nil) and Checked.Enabled then
+    WizardForm.ActiveControl := Checked;
+end;
+
+// The one place the model page's choice is written from the gpu verdict, once (CheckGpuOnce runs once): local when this PC can run
+// the model and the saved settings are not a remote endpoint, remote otherwise. Both radios are set, so the group never holds two
+// or none. A later visit to the page does not call it: a pick of the player (remote, then Back from the endpoint page) stays.
+procedure ApplyModelChoice();
+var
+  Local: Boolean;
+begin
+  Local := ModelLocalRadio.Enabled and (not PreviousLlmWasRemote);
+  ModelLocalRadio.Checked := Local;
+  ModelRemoteRadio.Checked := not Local;
+  FocusCheckedRadio(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil);
+  ModelChoiceChanged(nil);
+end;
 
 // `install gpu`: ok means this PC can run the model; not ok means remote only, with the reason on the page.
 procedure CheckGpuOnce();
@@ -1080,8 +1281,7 @@ begin
       else
         ModelLocalRadio.Caption := 'On this PC (uses the Ollama already installed; downloads the AI model if it is missing)';
     end;
-    if not PreviousLlmWasRemote then
-      ModelLocalRadio.Checked := True;
+    ApplyModelChoice();
   end
   else
   begin
@@ -1092,9 +1292,11 @@ begin
       GpuReason := GpuProblem;
     GpuVerdictIsRemote := JsonIsTrue(Json, 'remote');
     ModelStatus.Caption := GpuProblem;
-    ModelRemoteRadio.Checked := True;
+    ApplyModelChoice();
   end;
-  ModelChoiceChanged(nil);
+  // After the choice: ShowDiskSpace keeps the window answering clicks, and a click on remote during it must stand.
+  if not WizardSilent then
+    ShowDiskSpace();
   ModelStepStatus.Caption := '';
   ModelGauge.Position := 0;
   WizardForm.NextButton.Enabled := True;
@@ -1102,27 +1304,53 @@ end;
 
 function RemoteFieldProblem(): String;
 begin
-  Result := '';
-  if (Pos('http://', RemoteUrlEdit.Text) <> 1) and (Pos('https://', RemoteUrlEdit.Text) <> 1) then
-    Result := 'The endpoint URL must start with http:// or https://.'
-  else if Trim(RemoteModelEdit.Text) = '' then
+  Result := RemoteUrlProblem();
+  if Result <> '' then
+    Exit;
+  if Trim(RemoteModelCombo.Text) = '' then
     Result := 'Enter the model name the endpoint serves.'
-  else if (Pos('"', RemoteUrlEdit.Text + RemoteKeyEdit.Text + RemoteModelEdit.Text) > 0) or (Pos(' ', Trim(RemoteUrlEdit.Text)) > 0) then
+  else if Pos('"', RemoteModelCombo.Text) > 0 then
     Result := 'The URL has no spaces and no field contains a double quote.';
 end;
 
+// Why a `configure` of the remote endpoint failed (Lead says what did not happen). When the key is the saved one and the launcher ended with
+// its usage code, the saved key is what it could not use: its own text names the usage line and "run the setup again", which is no help
+// inside the setup, so the setup says what to do here.
+function ConfigureFailure(const Lead: String; Code: Integer): String;
+begin
+  if KeySaved and ModelRemoteRadio.Checked and (Code = USAGE_EXIT_CODE) then
+  begin
+    if WizardSilent then
+      Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_SILENT_TEXT
+    else
+      Result := Lead + #13#10 + SAVED_KEY_UNUSABLE_TEXT;
+  end
+  else
+    Result := Lead + #13#10 + LastLogTail;
+end;
+
 // Saves the endpoint, then makes one test call with the brain's own parameters (`install endpoint-test`); Failure says why not.
+// A URL the test corrected (it added /v1) is put in the URL box and told once; the failure text then leaves the notice out.
 function SaveAndTestEndpoint(var Failure: String): Boolean;
 var
   Json: String;
+  Code: Integer;
 begin
   Result := False;
-  if RunLauncher('configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelEdit.Text)), False, ModelGauge, ModelStepStatus, Json) <> 0 then
-    Failure := 'Mine AI could not save the endpoint.' + #13#10 + LastLogTail
-  else if RunStepSucceeded('install endpoint-test', ModelGauge, ModelStepStatus, Json) then
-    Result := True
+  NoteSavedKeyKeptForOtherUrl();
+  Code := RunLauncher('configure ' + RemoteLlmArguments() + CheckUpdatesArgument(), False, EndpointGauge, EndpointStepStatus, Json);
+  if Code <> 0 then
+    Failure := ConfigureFailure('Mine AI could not save the endpoint.', Code)
   else
-    Failure := 'The endpoint did not accept the test call.' + #13#10#13#10 + StepFailureText(Json);
+  begin
+    NoteClearKeyMigrated();
+    Result := RunStepSucceeded('install endpoint-test', EndpointGauge, EndpointStepStatus, Json);
+    ApplyEndpointCorrection(Json);
+    if Result then
+      Log('Endpoint test: ' + WithoutNotice(JsonString(Json, 'detail'), JsonString(Json, 'notice')))
+    else
+      Failure := 'The endpoint did not accept the test call.' + #13#10#13#10 + WithoutNotice(StepFailureText(Json), JsonString(Json, 'notice'));
+  end;
 end;
 
 function AcceptRemoteEndpoint(): Boolean;
@@ -1137,11 +1365,14 @@ begin
     Exit;
   end;
   WizardForm.NextButton.Enabled := False;
-  ModelStepStatus.Caption := 'Testing the endpoint...';
+  SetEndpointControlsEnabled(False);
+  EndpointStepStatus.Caption := 'Testing the endpoint...';
   Result := SaveAndTestEndpoint(Failure);
   if not Result then
     MsgBox(Failure, mbError, MB_OK);
-  ModelStepStatus.Caption := '';
+  EndpointStepStatus.Caption := '';
+  EndpointGauge.Position := 0;
+  SetEndpointControlsEnabled(True);
   WizardForm.NextButton.Enabled := True;
 end;
 
@@ -1154,6 +1385,8 @@ begin
   ModelRemoteRadio.Checked := True;
   ModelChoiceChanged(nil);
   ModelStatus.Caption := StepFailureText(Json);
+  // The disk text listed the local model's needs, which this PC no longer has.
+  DiskStatus.Caption := '';
   if InstallStateHas('"ollama":"installed"') then
   begin
     if SuppressibleMsgBox('This PC cannot run the model, so the Ollama that was just installed is not needed. Remove it now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
@@ -1245,15 +1478,16 @@ end;
 function ConfigureArguments(): String;
 begin
   if ModelRemoteRadio.Checked then
-    Result := 'configure --llm-remote ' + Quoted(Trim(RemoteUrlEdit.Text)) + ' ' + Quoted(RemoteKeyEdit.Text) + ' ' + Quoted(Trim(RemoteModelEdit.Text))
+    Result := 'configure ' + RemoteLlmArguments()
   else
     Result := 'configure --llm-local';
   if ServerLocalRadio.Checked then
     Result := Result + ' --server-local'
   else if ServerRemoteRadio.Checked then
-    Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), 25565))
+    Result := Result + ' --server-remote ' + Quoted(Trim(ServerHostEdit.Text)) + ' ' + IntToStr(StrToIntDef(Trim(ServerPortEdit.Text), DEFAULT_SERVER_PORT))
   else
     Result := Result + ' --server-none';
+  Result := Result + CheckUpdatesArgument();
 end;
 
 // One line on the progress page and in the setup log (/LOG=).
@@ -1281,15 +1515,17 @@ end;
 function RunConfigure(): Boolean;
 var
   Ignored: String;
+  Code: Integer;
 begin
   StepsStatus.Caption := 'Saving your choices...';
-  Result := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored) = 0;
+  Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  Result := Code = 0;
   if Result then
     NoteSetup('OK   settings saved in ' + DataDir('') + '\settings.json')
   else
   begin
-    SetupFailure := 'Mine AI could not save your choices in settings.json. ' + LastLogTail;
-    NoteSetup('FAIL settings: ' + LastLogTail);
+    SetupFailure := ConfigureFailure('Mine AI could not save your choices in settings.json.', Code);
+    NoteSetup('FAIL settings: ' + SetupFailure);
   end;
 end;
 
@@ -1369,27 +1605,33 @@ end;
 // runs every call on the launcher's CLI and checks these lines against this code and docs/install/windows.md;
 // <url> <key> <model> <host> <port> <ollamadir> stand for the values given. Each `install` call also gets `--json <file>`.
 // `install ollama` gets `--dir` only when /OLLAMADIR= is given and `install gpu` found no Ollama (the wizard: its folder field).
-//   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none; install model
-//   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none; install model
-//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port>
-//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local; install model; install java; install server --accept-eula
-//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model>; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none
+// Every final `configure` ends with `--check-updates on` (the default when /CHECKUPDATES= is not given) or `off`.
+//   CALLS /LLM=local /SERVER=none: install gpu; install ollama; configure --llm-local --server-none --check-updates on; install model
+//   CALLS /LLM=local /SERVER=none /CHECKUPDATES=0: install gpu; install ollama; configure --llm-local --server-none --check-updates off; install model
+//   CALLS /LLM=local /SERVER=none /OLLAMADIR=<ollamadir>: install gpu; install ollama --dir <ollamadir>; configure --llm-local --server-none --check-updates on; install model
+//   CALLS /LLM=remote /SERVER=remote: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=remote /SERVER=remote (key-saved): configure --llm-remote-saved-key <url> <model> --check-updates on; install endpoint-test; configure --llm-remote-saved-key <url> <model> --server-remote <host> <port> --check-updates on
+//   CALLS /LLM=local /SERVER=local /EULA=accept: install gpu; install ollama; configure --llm-local --server-local --check-updates on; install model; install java; install server --accept-eula
+//   CALLS /LLM=remote /SERVER=none: configure --llm-remote <url> <key> <model> --check-updates on; install endpoint-test; configure --llm-remote <url> <key> <model> --server-none --check-updates on
 //   CALLS /DELETEDATA=1 (uninstall): stop; install model-remove; install ollama-remove
 // What is wrong with the silent parameters, before any file is copied (Setup then exits with code 7); '' when all is well.
 function SilentParameterProblem(): String;
 var
-  Llm, Server, StartNow: String;
+  Llm, Server, StartNow, CheckUpdates: String;
 begin
   Result := '';
   Llm := Param('LLM', 'local');
   Server := Param('SERVER', 'none');
   StartNow := Param('STARTNOW', '0');
+  CheckUpdates := Param('CHECKUPDATES', '1');
   if (Llm <> 'local') and (Llm <> 'remote') then
     Result := '/LLM= must be local or remote.'
   else if (Server <> 'none') and (Server <> 'local') and (Server <> 'remote') then
     Result := '/SERVER= must be none, local or remote.'
   else if (StartNow <> '0') and (StartNow <> '1') then
     Result := '/STARTNOW= must be 0 or 1.'
+  else if (CheckUpdates <> '0') and (CheckUpdates <> '1') then
+    Result := '/CHECKUPDATES= must be 0 or 1.'
   else if (not SilentWantsLocalModel) and (RemoteFieldProblem() <> '') then
     Result := 'With /LLM=remote: ' + RemoteFieldProblem() + ' Give /LLMURL=, /LLMKEY= (may be empty) and /LLMMODEL=.'
   else if ServerFieldProblem() <> '' then
@@ -1467,6 +1709,7 @@ end;
 procedure ShowFinishText();
 var
   I: Integer;
+  Line: String;
 begin
   if not SetupDone then
   begin
@@ -1476,7 +1719,12 @@ begin
     WizardForm.RunList.Visible := False;
     Exit;
   end;
-  WizardForm.FinishedLabel.Caption := 'Mine AI is installed.' + #13#10#13#10 +
+  // "Up to date", not "updated": IsUpdate() is also true for a first install run again after its steps failed, where nothing was updated.
+  if IsUpdate() then
+    Line := 'Mine AI is up to date.'
+  else
+    Line := 'Mine AI is installed.';
+  WizardForm.FinishedLabel.Caption := Line + #13#10#13#10 +
     JoinText() + #13#10#13#10 +
     'Program: ' + ExpandConstant('{app}') + #13#10 +
     'Settings: ' + DataDir('') + '\settings.json' + #13#10 +
@@ -1502,20 +1750,57 @@ begin
     WizardForm.PageNameLabel.Caption := 'Ready to update or repair';
     WizardForm.PageDescriptionLabel.Caption := 'Setup will update Mine AI and repair any missing file. Your data folder, worlds and bots stay as they are; the AI model and server settings are set again on the next pages.';
     WizardForm.NextButton.Caption := 'Update';
+    // Inno's line says "Click Install ... or click Back", and Ready is the first page of an update: there is no Back to name.
+    WizardForm.ReadyLabel.Caption := 'Click Update to continue.';
   end
   else if CurPageID = wpInstalling then
+  begin
     WizardForm.PageNameLabel.Caption := 'Updating';
+    WizardForm.PageDescriptionLabel.Caption := 'Please wait while Setup updates Mine AI on your computer.';
+  end
+  else if CurPageID = wpPreparing then
+  begin
+    // Shown only when the stop of a running Mine AI is refused (PrepareToInstall returns the reason and the update is cancelled).
+    WizardForm.PageNameLabel.Caption := 'Preparing to update';
+    WizardForm.PageDescriptionLabel.Caption := 'Setup is preparing to update Mine AI on your computer.';
+  end;
+end;
+
+// Inno's exit box says "the program will not be installed": false on an update, where the old install stays. Only before the copy is
+// "stays as it was" true (Ready, Preparing; Cancel is off while copying): the model, server, EULA and steps pages come after it. A first
+// install and those later pages keep Inno's box (Confirm untouched).
+procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+begin
+  if IsUpdate() and ((CurPageID = wpReady) or (CurPageID = wpPreparing)) then
+  begin
+    Confirm := False;
+    Cancel := SuppressibleMsgBox('Stop the update? Mine AI stays as it was before this update; run the setup again to update it.', mbConfirmation, MB_YESNO, IDNO) = IDYES;
+  end;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
   SayUpdateOnPage(CurPageID);
   if CurPageID = ModelPage.ID then
-    CheckGpuOnce()
+  begin
+    CheckGpuOnce();
+    FocusCheckedRadio(ModelPage, ModelLocalRadio, ModelRemoteRadio, nil);
+  end
   else if CurPageID = ServerPage.ID then
-    ServerDownloadText.Caption := 'A server on this PC downloads Java (from Adoptium) and the Minecraft server (from Mojang, after you accept the EULA) into your data folder, ' + DataDir('') + '. Nothing else is installed.'
+  begin
+    ServerDownloadText.Caption := 'A server on this PC downloads Java (from Adoptium) and the Minecraft server (from Mojang, after you accept the EULA) into your data folder, ' + DataDir('') + '. Nothing else is installed.';
+    FocusCheckedRadio(ServerPage, ServerNoneRadio, ServerLocalRadio, ServerRemoteRadio);
+  end
   else if CurPageID = EulaPage.ID then
     WizardForm.NextButton.Enabled := EulaCheck.Checked
+  else if (CurPageID = wpSelectTasks) and (not WizardSilent) and (TasksBoxFolder <> DataDir('')) then
+  begin
+    // A first install over a data folder whose settings.json says "checkUpdates": false opens the box unchecked (the prefill on the
+    // data page's Next has read that file). Once per folder: a box the player changed stays as changed on Back/Next with the same
+    // folder, and another folder on Back sets it again. The list has one task. A silent setup keeps /TASKS= and /MERGETASKS=.
+    WizardForm.TasksList.Checked[0] := (not SavedCheckUpdatesKnown) or SavedCheckUpdates;
+    TasksBoxFolder := DataDir('');
+  end
   else if CurPageID = StepsPage.ID then
     RunSetupSteps()
   else if CurPageID = wpFinished then
@@ -1562,11 +1847,12 @@ begin
       MsgBox(DataFolderFailure, mbError, MB_OK);
       Result := False;
     end
-    else if ModelRemoteRadio.Checked then
-      Result := AcceptRemoteEndpoint()
-    else
+    // The remote choice goes on to the endpoint page, which saves and tests the endpoint on its own Next.
+    else if not ModelRemoteRadio.Checked then
       Result := AcceptLocalModel();
   end
+  else if CurPageID = EndpointPage.ID then
+    Result := AcceptRemoteEndpoint()
   else if CurPageID = ServerPage.ID then
   begin
     Problem := ServerFieldProblem();

@@ -3,6 +3,9 @@
 Mine AI puts one or more AI players (bots) into a Minecraft Java 1.21.4 server. The installer sets up everything the
 bots need; you do not need a terminal, WSL, Git or administrator rights.
 
+See also the [code signing policy](../code-signing-policy.md) (who signs the installer, and what is signed) and the
+[privacy page](../privacy.md) (every network contact Mine AI makes, and who chooses it).
+
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
@@ -26,6 +29,13 @@ file) before anything runs. A file that fails the check is deleted and the step 
 | Minecraft server 1.21.4 | local Minecraft server chosen, after you accept the Minecraft EULA | Mojang (`minecraft.jar.url`) |
 
 Bun, the bots and their AI code come inside the installer. The installer never ships the Minecraft server.
+
+## Disk space
+
+The AI model page shows the free space of each drive the downloads go to and what they need. The setup counts the
+downloads and installs only. Ollama's own installer also needs temporary room on the Windows drive (C:) while it runs,
+and the bots' memories and worlds grow as they play, so keep several GB free beyond the figures shown. The setup says
+the same on the AI model page and on the Ready page, and writes it in its log in a silent install.
 
 ## The Minecraft server
 
@@ -62,6 +72,7 @@ Who may type them:
 - **Any other server**, or a local server that listens on more than this PC: only the names in `commands.players`.
   Add them with `mine-ai configure --command-players Tom,Dara` (an empty value clears the list). Anyone else is
   told once that they may not, then ignored.
+- The update check has the same kind of switch: `mine-ai configure --check-updates on` or `off` (see "Updating").
 - With no names listed on such a server the commands are off, and the start window says so.
 
 On a server where no bot of yours is playing, Mine AI joins with a plain client named by `commands.listenerName`
@@ -96,7 +107,7 @@ place from `data-root.txt` in the program folder, or from the `MINE_AI_DATA_ROOT
 
 | Path | Holds |
 |---|---|
-| `settings.json` | the AI model, the Minecraft server and the bots to start |
+| `settings.json` | the AI model (a remote endpoint's API key is stored encrypted for your Windows user, as `apiKeyProtected`), the Minecraft server and the bots to start |
 | `personas\` | one `.json` file per bot; your edits survive updates |
 | `bot-data\` | what the bots remember |
 | `server\` | the local Minecraft server and its world |
@@ -105,6 +116,59 @@ place from `data-root.txt` in the program folder, or from the `MINE_AI_DATA_ROOT
 The program itself is in the program folder (`%LOCALAPPDATA%\Programs\MineAI\` by default). Updating or removing it never
 touches your data folder. Mine AI puts a small file, `mine-ai-data.txt`, in the data folder: the uninstaller deletes the
 folder only when that file is there. To change the server or the AI model later, edit `settings.json` and start Mine AI again, or run the installer again.
+
+## A remote AI endpoint
+
+Choose "On a remote OpenAI-compatible API" on the AI model page and the next page, "AI endpoint", asks for the endpoint's
+URL (for example `https://openrouter.ai/api/v1`), its API key (empty for an endpoint that needs none) and the model name.
+**Next** saves them and sends one short test message to the model; it stops there if the endpoint does not answer.
+
+### Listing the models
+
+**List models** asks the endpoint which models it serves and fills the model box, so you can pick one instead of typing
+it; the filter box narrows the list, and the line under the box shows the model's context size, its price per million
+tokens and any setting Mine AI sends that the model does not list. The list is one request (`GET <URL>/models`) that
+generates no text, so it costs nothing, and it runs only when you press the button. **Next** costs a little: its test
+message is one short chat completion, a few tens of tokens for a usual model (a model that reasons first may write
+more), once per press of **Next**. An endpoint that gives no list (a service without `/models`) is not an error: type the
+model name.
+
+### The /v1 correction
+
+Many services want `/v1` at the end of the URL. When the URL you typed answers "not found" and the same URL with `/v1`
+added answers like an OpenAI-compatible API, Mine AI uses the URL with `/v1`, saves it, and tells you in a message and in
+the setup log (`The endpoint URL was changed from ... to .../v1`). If the URL really was right and `/v1` was a wrong guess,
+type the URL again: a URL that already ends in `/v1`, and an address that answers with a web page instead of an API
+answer, are never changed.
+
+### Ollama on another PC
+
+To use the Ollama of another PC on your network, press **Ollama on another PC**: it fills `http://<IP>:11434/v1`, empties
+the key (Ollama has none) and selects `<IP>`; type that PC's address (for example `192.168.1.20`). **Help...** shows the
+steps. On the PC that runs Ollama, set `OLLAMA_HOST=0.0.0.0:11434` (Windows Settings > System > About > Advanced system
+settings > Environment Variables), restart Ollama, and allow TCP port 11434 in Windows Firewall for Private networks only.
+An administrator can add the firewall rule in an administrator PowerShell on that PC:
+
+```
+New-NetFirewallRule -DisplayName "Ollama" -Direction Inbound -Protocol TCP -LocalPort 11434 -Profile Private -Action Allow
+```
+
+Ollama has no password: use this only on a network you trust. Without the settings above the test ends with "Cannot reach
+..." because Ollama listens on that PC only.
+
+### Your API key
+
+The key is stored in `settings.json` encrypted for your Windows user (`apiKeyProtected`); it does not appear in clear in
+the file. When you run the installer again over settings that hold a key, the key box shows dots (the label above it then reads "saved key kept") and Mine AI keeps the
+saved key unless you type another one; the saved key goes to whatever URL is in the URL box, so type the key again when
+you change to another service. To remind you, the installer shows a message when you press **Next** with a saved key
+and a URL that differs from the saved one (a trailing `/` does not count): it names the URL the key was saved for and
+asks you to replace the dots with the new provider's key if it is another service. It changes nothing: the saved key
+stays until you type another one (silent install: a line in the setup log, and `/LLMKEY=` to give the new key). A key
+saved by an older version in clear is encrypted by the first save, and the
+installer tells you so. A key saved by another Windows user or on another PC (a copied data folder) cannot be read here:
+the installer says so; type the key again (silent install: `/LLMKEY=`). When you type a key, the installer hands it
+to Mine AI on a command line for a moment, so it is visible to your own processes in Task Manager for that moment.
 
 ## Ollama you already have
 
@@ -120,8 +184,13 @@ Run a newer installer: it installs over the old version, in the same folders, an
 before; the button is **Update**. Running the same version again repairs: any missing file comes back, and your data
 folder, worlds and bots stay as they are (the AI model and server settings are set again on the pages after the copy). At a first install the Ready page lists the two folders and says that the AI model
 and the server are chosen on the next pages, after the files are copied (the graphics card check happens there). Mine AI checks once at start whether a
-newer release exists and tells you; it never downloads one by itself. Switch the check off with
-`"checkUpdates": false` in `settings.json`.
+newer release exists and tells you; it never downloads one by itself. The check is one request for the latest release on
+GitHub (GitHub sees this PC's address, nothing else is sent; see the [privacy page](../privacy.md)). A first install asks
+in a box on the setup's tasks page, checked by default unless the data folder's settings already turned the check
+off, and the Ready page repeats the answer. An update does not ask
+again: it keeps what `settings.json` says, so a check you switched off stays off. Switch it off or on later with
+`mine-ai configure --check-updates off` (or `on`), or with `"checkUpdates": false` in `settings.json`. A silent
+install chooses with `/CHECKUPDATES=0` or `/CHECKUPDATES=1` (see "Silent install").
 
 ## Uninstalling
 
@@ -150,12 +219,13 @@ you leave out keeps the choice saved by an earlier install, else the first value
 |---|---|---|
 | `/LLM=` | `local` or `remote` | Where the AI model runs. `local` fails the install when this PC cannot run it (no fallback to a remote endpoint). |
 | `/LLMURL=` | URL | The remote endpoint, for example `https://host/v1`. |
-| `/LLMKEY=` | text | Its API key; may be empty. |
+| `/LLMKEY=` | text | Its API key; may be empty (an empty one removes the saved key). Leave it out to keep the key an earlier install saved. |
 | `/LLMMODEL=` | name | The model name the endpoint serves. |
 | `/SERVER=` | `none`, `local` or `remote` | Which Minecraft server the bots join. |
 | `/SERVERHOST=` | address | The existing server (`/SERVER=remote`). |
 | `/SERVERPORT=` | number | Its port (default 25565). |
 | `/EULA=` | `accept` | Accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA). A local server (`/SERVER=local`) fails the install without it. |
+| `/CHECKUPDATES=` | `0` or `1` | Whether Mine AI checks for a newer release at each start. Left out: the saved choice at an update, on at a first install. |
 | `/STARTNOW=` | `0` or `1` | Start Mine AI when the install ends (default `0`). |
 | `/DATADIR=` | folder | Where Mine AI keeps your data (default `%LOCALAPPDATA%\MineAI`). |
 | `/OLLAMADIR=` | folder | Where Ollama is installed when this setup installs it (default: Ollama's own folder). |
@@ -163,12 +233,12 @@ you leave out keeps the choice saved by an earlier install, else the first value
 
 The program folder is Inno Setup's own `/DIR=`, not in the table. Folders are full paths (`D:\Games\Mine AI`); an update
 refuses a `/DATADIR=` that differs from the folder of the first install (exit code 7, with the folder it keeps in the log).
-Put a value with spaces in quotes: `/LLMKEY="my key"`. Add `/LOG="C:\path\setup.log"` to get a log file.
+Put a value with spaces in quotes: `/LLMKEY="my key"`. Add `/LOG="C:\path\setup.log"` to get a log file; Setup records its own command line there, so a key given as `/LLMKEY=` is in that log in clear (the example below leaves `/LOG=` out for that reason). Leave `/LLMKEY=` out of an update to keep the key already saved.
 
 Example, a remote model, a local server and chosen folders:
 
 ```
-MineAI-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /LOG="%TEMP%\mine-ai-setup.log" /LLM=remote /LLMURL=https://api.example.test/v1 /LLMKEY=sk-123 /LLMMODEL=big-model /SERVER=local /EULA=accept /DIR="D:\Games\Mine AI" /DATADIR="D:\Games\Mine AI data"
+MineAI-Setup-0.1.0.exe /VERYSILENT /SUPPRESSMSGBOXES /LLM=remote /LLMURL=https://api.example.test/v1 /LLMKEY=sk-123 /LLMMODEL=big-model /SERVER=local /EULA=accept /DIR="D:\Games\Mine AI" /DATADIR="D:\Games\Mine AI data"
 ```
 
 The installer runs the same steps as the wizard's progress page. A wrong parameter, or a folder the installer refuses

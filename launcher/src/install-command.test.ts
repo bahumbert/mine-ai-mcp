@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { iss } from "./build/iss-test-support.ts";
 import { UsageError } from "./cli-context.ts";
-import { cliContext, okInstallSteps } from "./cli-test-support.ts";
-import { INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
+import { cliContext, inTemporaryFolder, okInstallSteps } from "./cli-test-support.ts";
+import { diskStep, INSTALL_STEP_NAMES, runInstallCommand, type InstallSteps } from "./install-command.ts";
+import type { DiskReportDeps } from "./install/disk-report.ts";
 import type { GpuReport } from "./install/gpu.ts";
 
 const REMOTE_REPORT: GpuReport = { adapters: [], compute: null, ramBytes: 8 * 1024 ** 3, choice: { kind: "remote", reason: "This PC has 2.0 GiB of video memory; the local model needs 10.", hint: "Use a remote endpoint." } };
-const LOCAL_REPORT: GpuReport = { adapters: [{ bytes: 24 * 1024 ** 3 }], compute: null, ramBytes: 64 * 1024 ** 3, choice: { kind: "local", model: "gemma4:12b" } };
+const LOCAL_REPORT: GpuReport = { adapters: [{ name: "AMD Radeon RX 7900 XTX", bytes: 24 * 1024 ** 3 }], compute: null, ramBytes: 64 * 1024 ** 3, choice: { kind: "local", model: "gemma4:12b" } };
 
 function setup(steps: Partial<InstallSteps> = {}) {
   const { root, out, context } = cliContext("install");
@@ -105,6 +107,16 @@ test("without --json the result is printed as one line", async () => {
   assert.ok(t.out.includes("java done"));
 });
 
+test("--json with a bare file name or ./sub/x.json is written relative to the working folder (Windows Bun throws EEXIST on mkdir of \".\")", async () => {
+  const t = setup();
+  await inTemporaryFolder(async (folder) => {
+    assert.equal(await runInstallCommand(["java", "--json", "step.json"], t.context, t.steps), 0);
+    assert.deepEqual(written(join(folder, "step.json")), { ok: true, detail: "java done" });
+    assert.equal(await runInstallCommand(["java", "--json", "./sub/other.json"], t.context, t.steps), 0);
+    assert.deepEqual(written(join(folder, "sub", "other.json")), { ok: true, detail: "java done" });
+  });
+});
+
 test("an unknown step or none is a usage error that lists the steps", async () => {
   const t = setup();
   for (const args of [["warp"], [], ["--json", t.json]]) {
@@ -121,9 +133,9 @@ test("--dir reaches the ollama step as the folder to install Ollama into, and it
   assert.deepEqual(seen, ["D:\\Programmes Perso\\Ollama é", undefined]);
 });
 
-test("--dir on any step but `install ollama` is a usage error naming the step that takes it, and nothing runs", async () => {
+test("--dir on any step but `install ollama` and `install disk` is a usage error naming the step that takes it, and nothing runs", async () => {
   const t = setup();
-  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "ollama")) {
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "ollama" && name !== "disk")) {
     await assert.rejects(runInstallCommand([step, "--dir", "D:\\Apps", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install ollama --dir"), step);
   }
   assert.deepEqual(t.calls, []);
@@ -192,7 +204,7 @@ test("`install gpu --json` says whether the model is on disk and which model: a 
 });
 
 test("the keys the installer script reads from `install gpu`'s file are the keys the command writes: a rename on either side fails here", async () => {
-  const script = readFileSync(new URL("../../packaging/windows/mine-ai.iss", import.meta.url), "utf8");
+  const script = iss;
   const t = setup({ gpu: async () => ({ ok: true, detail: "x", report: LOCAL_REPORT }) });
   await runInstallCommand(["gpu", "--json", t.json], t.context, t.steps, () => "D:\\Ollama\\ollama.exe", () => true);
   const output = written(t.json);
@@ -201,4 +213,102 @@ test("the keys the installer script reads from `install gpu`'s file are the keys
     assert.ok(key in output, `install gpu writes '${key}'`);
   }
   assert.equal(output.model, "gemma4:12b", "the wizard prints this name in 'The AI model <name> is already installed.'");
+});
+
+test("`install disk --json` writes the report as the step gave it: ok, detail, short and drives; a short drive is still ok:true and exit 0", async () => {
+  const report = { ok: true as const, detail: "D: 2.0 GB free. The local AI model needs 2.8 GB here.", short: true, drives: [{ drive: "D:", freeBytes: 2 * 1024 ** 3, needs: [{ what: "Ollama", bytes: 2963753072 }] }] };
+  const t = setup({ disk: async () => report });
+  assert.equal(await runInstallCommand(["disk", "--json", t.json], t.context, t.steps), 0);
+  assert.deepEqual(written(t.json), JSON.parse(JSON.stringify(report)));
+});
+
+test("`install disk` prints its detail when there is no --json, and an unreadable disk is exit 1 with the error and the hint", async () => {
+  const t = setup({ disk: async () => ({ ok: true, detail: "C: 10.0 GB free.", short: false, drives: [] }) });
+  await runInstallCommand(["disk"], t.context, t.steps);
+  assert.deepEqual(t.out, ["C: 10.0 GB free."]);
+  const failing = setup({ disk: async () => ({ ok: false, error: "The drive of X:\\a does not exist.", hint: "Choose another folder." }) });
+  assert.equal(await runInstallCommand(["disk", "--json", failing.json], failing.context, failing.steps), 1);
+  assert.equal(written(failing.json).hint, "Choose another folder.");
+});
+
+test("--dir and --no-model reach the disk step, each absent by default; --dir is checked like the one of `install ollama`: absolute, trailing separator dropped", async () => {
+  const seen: [string | undefined, boolean | undefined][] = [];
+  const t = setup({ disk: async (_ctx, _accept, dir, noModel) => (seen.push([dir, noModel]), { ok: true, detail: "x", short: false, drives: [] }) });
+  await runInstallCommand(["disk", "--dir", "D:\\Jeux é\\", "--no-model", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["disk", "--json", t.json], t.context, t.steps);
+  assert.deepEqual(seen, [["D:\\Jeux é", true], [undefined, false]]);
+  await assert.rejects(runInstallCommand(["disk", "--dir", "Ollama", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("absolute"));
+});
+
+test("the real disk step passes --dir and --no-model to the report: the Ollama folder's drive is listed, and not with --no-model", async () => {
+  const GIB = 1024 ** 3;
+  const noBody = (async () => new Response(null, { headers: { "content-length": "1000" } })) as unknown as typeof fetch;
+  const deps = (): DiskReportDeps => ({
+    disk: { platform: "win32", exists: (path) => /^[CD]:\\$/u.test(path), statfs: async () => ({ bavail: BigInt(50 * GIB), bsize: 1n }), dev: () => "0" },
+    fetchImpl: noBody,
+    modelStoreDeps: { fetchImpl: noBody, exists: () => false, readText: async () => "", listDir: async () => [] },
+    ollamaExe: () => null,
+    modelOnDisk: () => false,
+    modelStore: () => "C:\\MineAI\\models",
+    pinnedJreInstalled: async () => false,
+    defaultOllamaFolder: "C:\\Ollama",
+  });
+  const drivesFor = async (args: string[]) => {
+    const { context, json, steps } = setup();
+    await runInstallCommand(["disk", ...args, "--json", json], { ...context, root: "C:\\MineAI" }, { ...steps, disk: diskStep(deps) });
+    return (written(json).drives as { drive: string }[]).map((drive) => drive.drive);
+  };
+  assert.deepEqual(await drivesFor([]), ["C:"]);
+  assert.deepEqual(await drivesFor(["--dir", "D:\\Apps\\Ollama"]), ["C:", "D:"]);
+  assert.deepEqual(await drivesFor(["--dir", "D:\\Apps\\Ollama", "--no-model"]), ["C:"]);
+});
+
+test("--no-model on any step but `install disk` is a usage error naming the step that takes it, and nothing runs", async () => {
+  const t = setup();
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "disk")) {
+    await assert.rejects(runInstallCommand([step, "--no-model", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install disk"), step);
+  }
+  assert.deepEqual(t.calls, []);
+});
+
+function endpointModelsCalls() {
+  const seen: unknown[] = [];
+  const t = setup({ "endpoint-models": async (_ctx, _accept, _dir, _noModel, models) => (seen.push(models), { ok: true, detail: "3 models listed." }) });
+  return { ...t, seen };
+}
+
+test("`install endpoint-models` passes --url, --key (a key starting with a dash too), --saved-key and --list to the step as they are, and the step's result goes to --json", async () => {
+  const t = endpointModelsCalls();
+  const list = join(t.context.root, "lists", "models.txt");
+  assert.equal(await runInstallCommand(["endpoint-models", "--url", "https://api.example.test/v1", "--key", "sk-typed", "--list", list, "--json", t.json], t.context, t.steps), 0);
+  assert.deepEqual(written(t.json), { ok: true, detail: "3 models listed." });
+  // util.parseArgs refuses `--key -abc` as an ambiguous option; a base64url key can start with a dash
+  await runInstallCommand(["endpoint-models", "--key", "-dash-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--key=-equals-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--url", "http://pc:11434", "--saved-key", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  await runInstallCommand(["endpoint-models", "--list", "l.txt", "--json", t.json], t.context, t.steps);
+  assert.deepEqual(t.seen, [
+    { url: "https://api.example.test/v1", key: "sk-typed", savedKey: false, listFile: list },
+    { key: "-dash-key", savedKey: false, listFile: "l.txt" },
+    { key: "-equals-key", savedKey: false, listFile: "l.txt" },
+    { url: "http://pc:11434", savedKey: true, listFile: "l.txt" },
+    { savedKey: false, listFile: "l.txt" },
+  ]);
+});
+
+test("`install endpoint-models` needs --list, refuses --key together with --saved-key, and nothing runs", async () => {
+  const t = endpointModelsCalls();
+  await assert.rejects(runInstallCommand(["endpoint-models", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("--list"));
+  await assert.rejects(runInstallCommand(["endpoint-models", "--key", "k", "--saved-key", "--list", "l.txt", "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("--saved-key") && error.message.includes("--key"));
+  assert.deepEqual(t.seen, []);
+});
+
+test("--url, --key, --saved-key and --list on any step but `install endpoint-models` are usage errors naming the step that takes them", async () => {
+  const t = setup();
+  for (const step of INSTALL_STEP_NAMES.filter((name) => name !== "endpoint-models")) {
+    for (const flag of [["--url", "x"], ["--key", "x"], ["--saved-key"], ["--list", "x"]]) {
+      await assert.rejects(runInstallCommand([step, ...flag, "--json", t.json], t.context, t.steps), (error: Error) => error instanceof UsageError && error.message.includes("install endpoint-models"), `${step} ${flag[0]}`);
+    }
+  }
+  assert.deepEqual(t.calls, []);
 });

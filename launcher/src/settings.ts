@@ -1,6 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { dpapiCipher, type KeyCipher } from "./dpapi.ts";
+import { keyMigrationLine, llmForFile, llmFromFile } from "./secret.ts";
 
 const port = z.number().int().min(1).max(65_535);
 /** A persona id names `<root>/personas/<id>.json`: no folder part, no hidden file. */
@@ -19,9 +22,24 @@ const commandPlayer = z.string().regex(COMMAND_PLAYER_NAME, "a player name is 3 
 const commandPrefix = z.string().regex(/^[^\s/§\p{Cc}\p{L}\p{N}]{1,3}$/u, "the prefix is 1 to 3 symbols: no letter, no digit, no space, no control character, not / and not §");
 
 /** Every object is loose: a key this version does not know (a newer launcher's, a note of the player) is kept on save. */
+const localLlmSchema = z.looseObject({ kind: z.literal("local"), model: z.string().min(1) });
+const remoteLlmShape = { kind: z.literal("remote"), baseUrl: z.string().min(1), model: z.string().min(1) };
+/** `llm` as settings.json holds it: a remote key is clear (`apiKey`) or encrypted (`apiKeyProtected`), or neither (spec D3 "Two types"). */
+const llmFileSchema = z.discriminatedUnion("kind", [
+  localLlmSchema,
+  z.looseObject({ ...remoteLlmShape, apiKey: z.string().optional(), apiKeyProtected: z.string().optional() }),
+]);
+/** `llm` in memory: a remote key is always the clear string, so the brain's environment and the endpoint test need no change. */
 const llmSchema = z.discriminatedUnion("kind", [
-  z.looseObject({ kind: z.literal("local"), model: z.string().min(1) }),
-  z.looseObject({ kind: z.literal("remote"), baseUrl: z.string().min(1), apiKey: z.string(), model: z.string().min(1) }),
+  localLlmSchema,
+  z.looseObject({
+    ...remoteLlmShape,
+    apiKey: z.string(),
+    apiKeyProtected: z.string().optional(),
+    loadedKey: z.string().optional(),
+    keyUnreadable: z.boolean().optional(),
+    clearKeyInFile: z.boolean().optional(),
+  }),
 ]);
 const serverSchema = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("none") }),
@@ -37,16 +55,30 @@ const commandsSchema = z.looseObject({
   listenerName: commandPlayer.default("MineAI"),
 });
 
-export const settingsSchema = z.looseObject({
-  llm: llmSchema,
+const settingsShape = {
   server: serverSchema,
   bots: z.array(personaId),
   hostBasePort: port,
   controlPort: port,
   checkUpdates: z.boolean(),
   commands: commandsSchema.prefault({}),
-});
+};
+/** The file form: what `loadSettings` parses. */
+const settingsFileSchema = z.looseObject({ llm: llmFileSchema, ...settingsShape });
+/** The in-memory form every other module gets (`Settings`). */
+const settingsSchema = z.looseObject({ llm: llmSchema, ...settingsShape });
 export type Settings = z.infer<typeof settingsSchema>;
+
+/** How the key is protected: the OS (`platform` decides the file mode) and the cipher for it, or none. Tests pass fakes. */
+export interface SettingsOptions {
+  readonly platform: NodeJS.Platform;
+  readonly cipher: KeyCipher | null;
+}
+
+/** DPAPI on Windows; elsewhere no cipher: the key stays in clear and the file is mode 600 (spec D3, Open choice 2). */
+export function realSettingsOptions(): SettingsOptions {
+  return { platform: process.platform, cipher: process.platform === "win32" ? dpapiCipher() : null };
+}
 
 /** What the settings defaults need from the manifest (`manifest.ts` satisfies it). */
 export interface ManifestDefaults {
@@ -82,9 +114,10 @@ function invalidFile(file: string, reason: string): Error {
 /**
  * The settings in `<root>/settings.json`; keys the file lacks take the defaults (bots and model from the manifest).
  * A missing file gives the defaults and writes nothing. A file that does not parse or fails the schema throws with its
- * path and the first issue, and is never replaced.
+ * path and the first issue, and is never replaced. A remote key comes back clear; one that cannot be decrypted (another
+ * Windows user or PC) comes back empty with `keyUnreadable`, never as an error.
  */
-export function loadSettings(root: string, manifest: ManifestDefaults): Settings {
+export function loadSettings(root: string, manifest: ManifestDefaults, options: SettingsOptions = realSettingsOptions()): Settings {
   const file = settingsPath(root);
   const defaults = defaultSettings(manifest);
   if (!settingsFileExists(root)) return defaults;
@@ -95,19 +128,32 @@ export function loadSettings(root: string, manifest: ManifestDefaults): Settings
     throw invalidFile(file, `not valid JSON (${(error as Error).message})`);
   }
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw invalidFile(file, "it must hold a JSON object");
-  const parsed = settingsSchema.safeParse({ ...defaults, ...raw });
+  const parsed = settingsFileSchema.safeParse({ ...defaults, ...raw });
   if (!parsed.success) {
     const issue = parsed.error.issues[0]!;
     throw invalidFile(file, `${issue.path.join(".") || "(root)"}: ${issue.message}`);
   }
-  return parsed.data;
+  return { ...parsed.data, llm: llmFromFile(parsed.data.llm, options.cipher) };
 }
 
-/** Writes the settings whole (unknown keys included) through a temporary file, so a crash never leaves half a file. */
-export function saveSettings(root: string, settings: Settings): void {
+/**
+ * Writes the settings whole (unknown keys included) through a temporary file, so a crash never leaves half a file.
+ * On Windows the remote key is written encrypted; elsewhere in clear, and the file is mode 600 (a temporary file made
+ * with it, and `chmod` after the rename for a file that was wider before).
+ */
+export function saveSettings(root: string, settings: Settings, options: SettingsOptions = realSettingsOptions()): void {
   mkdirSync(root, { recursive: true });
   const file = settingsPath(root);
   const temporary = `${file}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(settings, null, 2)}\n`);
+  const text = `${JSON.stringify({ ...settings, llm: llmForFile(settings.llm, options.cipher) }, null, 2)}\n`;
+  const ownerOnly = options.platform !== "win32";
+  writeFileSync(temporary, text, ownerOnly ? { mode: 0o600 } : undefined);
   renameSync(temporary, file);
+  if (ownerOnly) chmodSync(file, 0o600);
+}
+
+/** The line to say after a save encrypted a key that was in clear (these settings, as loaded, carry `clearKeyInFile`), else null. */
+export function clearKeyMigrationLine(root: string, settings: Settings): string | null {
+  if (settings.llm.kind !== "remote" || settings.llm.clearKeyInFile !== true) return null;
+  return keyMigrationLine(settingsPath(root), userInfo().username);
 }

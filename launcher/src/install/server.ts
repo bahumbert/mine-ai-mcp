@@ -4,7 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Manifest } from "../manifest.ts";
+import type { DiskDeps } from "./disk.ts";
 import { downloadFailureHint, downloadVerified } from "./download.ts";
+import { freeSpaceHint, guardDownload, spaceGuardFor } from "./space-guard.ts";
 import { failure, stepFailure, type InstallContext, type StepResult } from "./step.ts";
 
 const EULA_URL = "https://aka.ms/MinecraftEULA";
@@ -38,6 +40,8 @@ async function isEulaAccepted(eulaPath: string): Promise<boolean> {
 
 export interface ServerDeps {
   readonly fetchImpl?: typeof fetch;
+  /** The free-space reads of the guard; the real disk when absent. */
+  readonly disk?: DiskDeps;
 }
 
 /**
@@ -56,8 +60,13 @@ export async function server(ctx: InstallContext, acceptEula: boolean, deps: Ser
     return failure("EULA not accepted.", `Read the Minecraft EULA (${EULA_URL}) and run this step with --accept-eula; the installer asks for it on its server page.`);
   }
   await mkdir(dir, { recursive: true });
+  const jar = join(dir, "server.jar");
+  const jarGuard = spaceGuardFor(ctx, deps.disk, freeSpaceHint(), (downloadBytes) => [{ what: "the Minecraft server", folder: dir, bytes: downloadBytes }]);
   try {
-    await downloadVerified(ctx.manifest.minecraft.jar.url, join(dir, "server.jar"), { sha1: ctx.manifest.minecraft.jar.sha1 }, (fraction) => ctx.onProgress(fraction * 0.95, "Downloading the Minecraft server"), deps.fetchImpl);
+    const noRoom = await guardDownload(jarGuard, existsSync(jar), (beforeBody) =>
+      downloadVerified(ctx.manifest.minecraft.jar.url, jar, { sha1: ctx.manifest.minecraft.jar.sha1 }, (fraction) => ctx.onProgress(fraction * 0.95, "Downloading the Minecraft server"), deps.fetchImpl, undefined, { beforeBody }),
+    );
+    if (noRoom !== null) return noRoom;
   } catch (error) {
     return stepFailure(error, downloadFailureHint(error));
   }

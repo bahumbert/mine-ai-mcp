@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { after } from "node:test";
 import { DownloadError } from "./download.ts";
 import { fakeOllama, type FakeOllamaOptions } from "./fixtures/fake-ollama.ts";
-import { tempDataRoot, testContext, testManifest } from "./fixtures/install-test-support.ts";
-import { defaultStoreWithModels, ollama, ollamaExe, ollamaRemove, parseOllamaVersion, runCommand, type OllamaDeps } from "./ollama.ts";
+import { diskWithRoomForAnything, twoDrives, type FakeDisk } from "./fixtures/fake-disk.ts";
+import { MEASURED_DXGI_ADAPTERS, tempDataRoot, testContext, testManifest } from "./fixtures/install-test-support.ts";
+import { displayAdapters } from "./gpu.ts";
+import { defaultOllamaFolder, defaultStoreWithModels, ollama, ollamaExe, ollamaRemove, parseOllamaVersion, runCommand, type OllamaDeps } from "./ollama.ts";
 import { loadInstallState, saveInstallState } from "./state.ts";
 
 const GIB = 1024 ** 3;
@@ -27,7 +29,13 @@ type Scenario = FakeOllamaOptions & {
   setupCode?: number | null;
   /** The default model store of Ollama holds models: the folder, or null (none). */
   defaultStore?: string | null;
+  /** The disk the free-space guard reads; the default has room for everything, on the data root's drive. */
+  disk?: FakeDisk;
+  /** The `Content-Length` of the setup download: the guard's hook is called with it (no value: the server announced none). */
+  setupBytes?: number;
 };
+
+const SETUP_BYTES = 1.5 * GIB;
 
 /** Deps for the `ollama` and `ollamaRemove` steps; `exe` appears after the setup ran when it was absent before. */
 function scenario(options: Scenario = {}) {
@@ -48,14 +56,18 @@ function scenario(options: Scenario = {}) {
       exe = OLD_EXE; // the setup put ollama.exe in place
       return { code: options.setupCode ?? 0, output: options.setupCode ? "setup failed: disk full" : "" };
     },
-    async downloadVerified(url, dest, hash, onProgress) {
+    async downloadVerified(url, dest, hash, onProgress, _fetchImpl, _idleTimeoutMs, downloadOptions) {
       downloads.push({ url, dest, hash });
+      // as the real one: a setup file already there with the right hash makes no request, so the hook never runs
+      if (options.setupBytes !== undefined && !deps.fileExists(dest)) await downloadOptions?.beforeBody?.(options.setupBytes, 0);
       onProgress?.(0.5);
     },
+    disk: options.disk ?? diskWithRoomForAnything(),
+    defaultFolder: () => join(dir.root, "Programs", "Ollama"),
     fileExists: () => true,
     defaultStoreWithModels: () => options.defaultStore ?? null,
     removeFile: (path) => removed.push(path),
-    gpuFacts: { readRegistry: async () => fixture("reg-vram.txt"), totalRamBytes: () => 64 * GIB },
+    gpuFacts: { listAdapters: async () => displayAdapters(MEASURED_DXGI_ADAPTERS), totalRamBytes: () => 64 * GIB },
   };
   return { deps, serve, ran, downloads, removed, stateWhenSetupRan, useRoot: (r: string) => (root = r) };
 }
@@ -84,7 +96,7 @@ test("stage 2 reads the GPU Ollama reports from our serve", async () => {
   assert.equal(result.report.compute?.[0].library, "rocm");
 });
 
-test("stage 2: Ollama running on the cpu only is a remote answer even with a big card in the registry", async () => {
+test("stage 2: Ollama running on the cpu only is a remote answer even with a big card in DXGI's list", async () => {
   const { s, ctx } = context({ output: CPU_ONLY_LOG });
   const result = await ollama(ctx, s.deps);
   assert.ok(result.ok && "report" in result);
@@ -235,6 +247,99 @@ test("something already answering on our port stops stage 2 with a hint instead 
   assert.equal(s.serve.killed, 0);
 });
 
+// Free-space guard (plan T1b). Sizes: the setup is 1.5 GiB (its Content-Length), Ollama 2963753072 bytes installed (the
+// manifest's measured value), Mine AI keeps 1 GiB free per drive: a first install on one drive needs 5.26 GiB, an upgrade 2.5.
+const SETUP_FILE_NAME = "OllamaSetup.exe";
+const setupFileGone = (s: ReturnType<typeof scenario>) => (s.deps.fileExists = (path) => !path.endsWith(SETUP_FILE_NAME));
+const wasSetupRun = (s: ReturnType<typeof scenario>) => s.ran.some((call) => call.args[0] !== "--version");
+
+test("a first install on a drive too small for the setup and Ollama together fails before anything is downloaded or run, naming the drive, both needs and the folder to change", async () => {
+  const { disk } = twoDrives(dir.root, { data: 5 * GIB, other: 1000 * GIB });
+  const { root, s, ctx } = context({ exe: null, setupBytes: SETUP_BYTES, disk });
+  setupFileGone(s);
+  const result = await ollama(ctx, s.deps);
+  assert.ok(!result.ok);
+  assert.match(result.error, /^Not enough free space on \S+ for Ollama's setup and Ollama: it needs 5\.3 GB \(including the 1\.0 GB Mine AI keeps free\) and \S+ has 5\.0 GB free\.$/u);
+  assert.match(result.hint, /Free some space on \S+, or choose another Ollama folder, then run the step again\./u);
+  assert.equal(wasSetupRun(s), false);
+  assert.deepEqual(loadInstallState(root), {}, "nothing is recorded as installed");
+});
+
+test("an Ollama folder on another drive is counted there, the setup on the data drive: the short drive is the one named, each drive keeps its own reserve", async () => {
+  const short = twoDrives(dir.root, { data: 1000 * GIB, other: 3 * GIB });
+  const { s, ctx } = context({ exe: null, setupBytes: SETUP_BYTES, disk: short.disk });
+  setupFileGone(s);
+  const folder = short.otherFolder("Ollama");
+  const result = await ollama(ctx, s.deps, { dir: folder });
+  assert.ok(!result.ok);
+  assert.match(result.error, /for Ollama: it needs 3\.8 GB .* has 3\.0 GB free\.$/u);
+  assert.equal(wasSetupRun(s), false);
+
+  const fits = twoDrives(dir.root, { data: 3 * GIB, other: 4 * GIB });
+  const second = context({ exe: null, setupBytes: SETUP_BYTES, disk: fits.disk });
+  setupFileGone(second.s);
+  assert.equal((await ollama(second.ctx, second.s.deps, { dir: fits.otherFolder("Ollama") })).ok, true, "2.5 GB on the data drive and 3.8 GB on the other both fit");
+});
+
+test("the hint offers another Ollama folder only when the drive of that folder is the short one: a short data drive is not helped by it", async () => {
+  const short = twoDrives(dir.root, { data: 1.5 * GIB, other: 1000 * GIB });
+  const { s, ctx } = context({ exe: null, setupBytes: SETUP_BYTES, disk: short.disk });
+  setupFileGone(s);
+  const result = await ollama(ctx, s.deps, { dir: short.otherFolder("Ollama") });
+  assert.ok(!result.ok);
+  assert.match(result.error, /for Ollama's setup: it needs 2\.5 GB/u, "only the setup is short, on the data drive");
+  assert.match(result.hint, /^Free some space on \S+, then run the step again\.$/u);
+});
+
+test("an upgrade of our Ollama counts the setup only (the old folder is overwritten): it fits where a first install does not", async () => {
+  const disk = () => twoDrives(dir.root, { data: 3 * GIB, other: 0 }).disk;
+  const upgrade = context({ versionOutput: "ollama version is 0.20.1\n", setupBytes: SETUP_BYTES, disk: disk() });
+  saveInstallState(upgrade.root, { ollama: "installed" });
+  setupFileGone(upgrade.s);
+  assert.equal((await ollama(upgrade.ctx, upgrade.s.deps)).ok, true);
+  assert.equal(upgrade.s.downloads.length, 1);
+
+  const first = context({ exe: null, setupBytes: SETUP_BYTES, disk: disk() });
+  setupFileGone(first.s);
+  assert.equal((await ollama(first.ctx, first.s.deps)).ok, false, "the same 3 GB cannot hold a first install");
+
+  const tooSmall = context({ versionOutput: "ollama version is 0.20.1\n", setupBytes: SETUP_BYTES, disk: twoDrives(dir.root, { data: 2 * GIB, other: 0 }).disk });
+  saveInstallState(tooSmall.root, { ollama: "installed" });
+  setupFileGone(tooSmall.s);
+  const short = await ollama(tooSmall.ctx, tooSmall.s.deps);
+  assert.ok(!short.ok);
+  assert.match(short.error, /for Ollama's setup: it needs 2\.5 GB/u);
+  assert.doesNotMatch(short.hint, /folder/u, "an upgrade has no folder to choose");
+  assert.match(short.hint, /Free some space on \S+, then run the step again\./u);
+});
+
+test("a setup file already there with the right hash is checked before the download with 0 download bytes, the installed bytes still counted", async () => {
+  const tight = twoDrives(dir.root, { data: 3.5 * GIB, other: 0 });
+  const blocked = context({ exe: null, disk: tight.disk });
+  const result = await ollama(blocked.ctx, blocked.s.deps);
+  assert.ok(!result.ok);
+  assert.match(result.error, /for Ollama: it needs 3\.8 GB .* has 3\.5 GB free\./u, "no setup bytes: Ollama's folder only");
+  assert.equal(blocked.s.downloads.length, 0, "no download is started for a failure that is known already");
+
+  const roomy = context({ exe: null, setupBytes: undefined, disk: twoDrives(dir.root, { data: 4 * GIB, other: 0 }).disk });
+  assert.equal((await ollama(roomy.ctx, roomy.s.deps)).ok, true, "4 GB holds the installed Ollama and the reserve; the 5.3 GB a download would need is not asked");
+});
+
+test("a preexisting Ollama is never checked: the disk is not even read", async () => {
+  const { disk } = twoDrives(dir.root, { data: 0, other: 0 });
+  const { s, ctx } = context({ disk });
+  assert.equal((await ollama(ctx, s.deps)).ok, true);
+  assert.deepEqual(disk.statfsCalls, []);
+});
+
+test("a download whose size is not announced goes on without a check (the download's own error stays the guard)", async () => {
+  const { disk } = twoDrives(dir.root, { data: 0, other: 0 });
+  const { s, ctx } = context({ exe: null, disk, setupBytes: undefined });
+  setupFileGone(s);
+  assert.equal((await ollama(ctx, s.deps)).ok, true);
+  assert.deepEqual(disk.statfsCalls, []);
+});
+
 for (const [origin, state] of [["preexisting", { ollama: "preexisting" }], ["never recorded", {}]] as const) {
   test(`ollamaRemove keeps an Ollama whose origin is ${origin}: no uninstaller runs`, async () => {
     const { root, s, ctx } = context();
@@ -289,7 +394,8 @@ test("ollamaRemove runs the uninstaller next to ollama.exe silently for an Ollam
   saveInstallState(root, { ollama: "installed", modelPulledByUs: true });
   const result = await ollamaRemove(ctx, s.deps);
   assert.equal(result.ok, true);
-  assert.deepEqual(s.ran, [{ exe: "C:/Users/p/AppData/Local/Programs/Ollama/unins000.exe", args: ["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"] }]);
+  // the step joins with the platform's separator (backslashes under Windows Bun, where the real exe path has them too), so the expectation joins the same way
+  assert.deepEqual(s.ran, [{ exe: join(dirname(OLD_EXE), "unins000.exe"), args: ["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"] }]);
   assert.deepEqual(loadInstallState(root), { modelPulledByUs: true });
 });
 
@@ -317,6 +423,17 @@ test("the version is read from the client line when a running Ollama adds a warn
   assert.equal(parseOllamaVersion("ollama version is 0.35.0\n"), "0.35.0");
   assert.equal(parseOllamaVersion("ollama version is 0.36.0-rc1\n"), "0.36.0");
   assert.equal(parseOllamaVersion("nothing here"), null);
+});
+
+test("defaultOllamaFolder is the per-user folder of Ollama's own setup: LOCALAPPDATA, else the home's AppData\\Local; elsewhere the data root's", () => {
+  assert.equal(defaultOllamaFolder({ LOCALAPPDATA: "D:\\Local" }, "win32", "C:\\Users\\me", "C:\\MineAI"), "D:\\Local\\Programs\\Ollama");
+  assert.equal(defaultOllamaFolder({}, "win32", "C:\\Users\\me", "C:\\MineAI"), "C:\\Users\\me\\AppData\\Local\\Programs\\Ollama");
+  assert.equal(defaultOllamaFolder({}, "linux", "/home/me", "/data/mine-ai"), "/data/mine-ai");
+});
+
+test("ollamaExe looks in the per-user folder of Ollama's setup even when LOCALAPPDATA is not set (the home's AppData\\Local), as the default folder says", () => {
+  const exe = "C:\\Users\\me\\AppData\\Local\\Programs\\Ollama\\ollama.exe";
+  assert.equal(ollamaExe({}, "win32", (path) => path === exe, undefined, "C:\\Users\\me"), exe);
 });
 
 test("ollamaExe finds the per-user install first, then a PATH entry, else null", () => {

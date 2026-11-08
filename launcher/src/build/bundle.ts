@@ -7,6 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { writeThirdPartyNotices } from "./third-party-notices.ts";
 
 /** Programs a process of the package starts with `bun.exe <file>`, as repository paths; each is bundled to the same path with `.js`. */
 export const ENTRY_POINTS = [
@@ -52,14 +53,18 @@ const files = Object.keys(req.cache).map((file) => path.relative(root, path.reso
 console.log(JSON.stringify([...new Set([...files.map((file) => file.split(path.sep).join("/")), "package.json"])].sort()));
 `;
 
-/** One `Bun.build` of `entries` (repository paths) into `appDir`: at their own paths, or in `folder` when given. */
-export async function bundleEntries(stageDir: string, appDir: string, entries: readonly string[], folder?: string): Promise<void> {
+/**
+ * One `Bun.build` of `entries` (repository paths) into `appDir`: at their own paths, or in `folder` when given. Returns the
+ * metafile's input keys (the files the bundle took, relative to the build's working folder), for the licence notices.
+ */
+export async function bundleEntries(stageDir: string, appDir: string, entries: readonly string[], folder?: string): Promise<string[]> {
   const result = await Bun.build({
     entrypoints: entries.map((entry) => join(stageDir, entry)),
     root: stageDir,
     outdir: appDir,
     target: "bun",
     external: EXTERNAL_PACKAGES,
+    metafile: true,
     // Linked maps: Bun reads them, so a stack trace in a log names the source lines, not the bundle's.
     sourcemap: "linked",
     naming: { entry: folder === undefined ? "[dir]/[name].[ext]" : `${folder}/[name].[ext]` },
@@ -68,12 +73,14 @@ export async function bundleEntries(stageDir: string, appDir: string, entries: r
   if (!result.success || errors.length > 0) {
     throw new Error(`[BUILD_BUNDLE] Bun could not bundle ${entries.join(", ")}: ${errors.map((log) => log.message).join("; ")}`);
   }
+  return Object.keys(result.metafile?.inputs ?? {});
 }
 
-/** The program entry points and the workers, built into `appDir`. */
-export async function bundleApp(stageDir: string, appDir: string): Promise<void> {
-  await bundleEntries(stageDir, appDir, ENTRY_POINTS);
-  await bundleEntries(stageDir, appDir, WORKER_ENTRY_POINTS, WORKER_FOLDER);
+/** The program entry points and the workers, built into `appDir`; returns the metafile input keys of both builds. */
+export async function bundleApp(stageDir: string, appDir: string): Promise<string[]> {
+  const programs = await bundleEntries(stageDir, appDir, ENTRY_POINTS);
+  const workers = await bundleEntries(stageDir, appDir, WORKER_ENTRY_POINTS, WORKER_FOLDER);
+  return [...programs, ...workers];
 }
 
 /** The files of the `minecraft-data` package under `folder`'s `node_modules` that loading the data of `version` reads, relative to the package. */
@@ -110,8 +117,10 @@ export async function copyMinecraftData(stageDir: string, appDir: string, versio
 
 /** The whole app folder the setup packs: the bundles, the trimmed Minecraft data and the assets, from the staged package. */
 export async function packageApp(stageDir: string, appDir: string, minecraftVersion: string, bunProgram: string, assets: readonly string[] = APP_ASSETS): Promise<void> {
-  await bundleApp(stageDir, appDir);
+  const bundledInputs = await bundleApp(stageDir, appDir);
   await copyMinecraftData(stageDir, appDir, minecraftVersion, bunProgram);
+  // Straight into the app folder: never into the stage (a test packs the checkout as its stage) and not an asset.
+  writeThirdPartyNotices(stageDir, appDir, bundledInputs, [join(stageDir, "node_modules", MINECRAFT_DATA_PACKAGE)]);
   copyAssets(stageDir, appDir, assets);
 }
 

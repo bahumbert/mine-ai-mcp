@@ -4,7 +4,7 @@
  *   bun launcher/src/build/build-windows.ts --personas <dir> --out <dir> [--sign-command "<cmd with {file}>"] [--version <x.y.z>]
  */
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -27,7 +27,7 @@ export interface BuildOptions {
   readonly personasDir: string;
   readonly outDir: string;
   readonly signCommand?: string;
-  /** Must equal the manifest's version when given (the release script passes the tag's). */
+  /** The version of the setup and of the shipped manifest when given (the tag's, passed by the release script and the workflow); else the manifest's. */
   readonly version?: string;
 }
 
@@ -129,11 +129,16 @@ export function parseBuildArgs(argv: readonly string[]): { personasDir: string; 
   return { personasDir: values.personas, outDir: values.out, signCommand: values["sign-command"], version: values.version };
 }
 
-/** The version is a check against the manifest, which the launcher reads as its own version (update check, doctor): a setup named otherwise would announce an update forever. */
-function requireManifestVersion(deps: BuildDeps, version: string | undefined): void {
-  if (version !== undefined && version !== deps.manifest.version) {
-    throw new Error(`[BUILD_VERSION] The tag says ${version} but packaging/manifest.json says ${deps.manifest.version}: bump the manifest, commit, tag again.`);
-  }
+/**
+ * The tag is the version (owner 2026-11-07): the installed launcher reads its own version from the shipped manifest (update
+ * check, `doctor`), so the staged copy takes the given version, and only that key changes (same order, 2-space layout, final
+ * newline). The repository's own `packaging/manifest.json` is never written.
+ */
+function setStagedManifestVersion(stageDir: string, version: string): void {
+  const file = join(stageDir, "packaging", "manifest.json");
+  const manifest = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  manifest.version = version;
+  writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 function copyInto(fromRoot: string, toRoot: string, relativePaths: readonly string[]): void {
@@ -183,7 +188,7 @@ function compilerArguments(options: BuildOptions, deps: BuildDeps, appDir: strin
   return [
     `/DStageDir=${appDir}`,
     `/DOutputDir=${options.outDir}`,
-    `/DAppVersion=${deps.manifest.version}`,
+    `/DAppVersion=${options.version ?? deps.manifest.version}`,
     ...signing,
     join(options.repoRoot, "packaging", "windows", "mine-ai.iss"),
   ];
@@ -193,7 +198,6 @@ function compilerArguments(options: BuildOptions, deps: BuildDeps, appDir: strin
 export async function buildWindows(given: BuildOptions, deps: BuildDeps): Promise<void> {
   // Absolute: ISCC resolves a relative define from the script's folder, not from where the build was started.
   const options = { ...given, outDir: resolve(given.outDir) };
-  requireManifestVersion(deps, options.version);
   const personaFiles = listPersonaFiles(options.personasDir);
   requireDefaultPersonas(deps, personaFiles);
   const stageDir = join(options.outDir, "stage");
@@ -201,6 +205,7 @@ export async function buildWindows(given: BuildOptions, deps: BuildDeps): Promis
   rmSync(stageDir, { recursive: true, force: true });
   rmSync(appDir, { recursive: true, force: true });
   copyInto(options.repoRoot, stageDir, listStagedFiles(options.repoRoot));
+  if (options.version !== undefined) setStagedManifestVersion(stageDir, options.version);
   copyInto(options.personasDir, join(stageDir, "personas"), personaFiles);
   await deps.run(deps.bunProgram, ["install", "--frozen-lockfile", "--production"], stageDir);
   await stageBun(deps, options.outDir, stageDir);

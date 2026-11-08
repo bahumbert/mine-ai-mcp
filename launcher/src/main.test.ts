@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { iss as issWithIncludes } from "./build/iss-test-support.ts";
 import { cliContext, okInstallSteps } from "./cli-test-support.ts";
 import { CONFIGURE_FLAGS } from "./configure-command.ts";
 import { STOP_REFUSED_EXIT_CODE } from "./control-commands.ts";
@@ -17,6 +18,7 @@ import { COMMANDS, runCli, USAGE, type CliDeps } from "./main.ts";
 const setup = () => cliContext("main", appRoot());
 
 const doctorDeps: DoctorDeps = {
+  diskLines: async () => [],
   bunVersion: "1.4.2",
   platform: "win32 x64",
   ollamaVersion: async () => "0.35.0",
@@ -167,7 +169,8 @@ test("`configure` then `stop` as the installer runs them: settings are written a
   const configured = await runLikeTheInstaller(["configure", "--llm-remote", "https://x.test/v1", "key with space", "model-1", "--server-remote", "10.0.0.5", "25565"]);
   assert.equal(configured.code, 0, configured.stderr);
   const saved = JSON.parse(readFileSync(join(configured.dataFolder, process.platform === "win32" ? "MineAI" : "mine-ai", "settings.json"), "utf8"));
-  assert.equal(saved.llm.apiKey, "key with space");
+  if (process.platform === "win32") assert.equal(typeof saved.llm.apiKeyProtected, "string"); // encrypted for the Windows user
+  else assert.equal(saved.llm.apiKey, "key with space");
   assert.equal(saved.server.host, "10.0.0.5");
   const stopped = await runLikeTheInstaller(["stop"]);
   assert.equal(stopped.code, 0, stopped.stderr);
@@ -175,21 +178,23 @@ test("`configure` then `stop` as the installer runs them: settings are written a
 });
 
 test("every command, install step and configure flag the Inno Setup script uses exists", () => {
-  const script = readFileSync(join(appRoot(), "packaging", "windows", "mine-ai.iss"), "utf8");
+  // The script with its #include files (the endpoint page's `--llm-remote*` flags and `install endpoint-models` are in endpoint-page.iss).
+  const script = issWithIncludes;
+  assert.match(script, /--llm-remote-saved-key/u, "the endpoint page's flags are not in the script read here");
   assert.ok(existsSync(MAIN));
   const stepNames = [...script.matchAll(/(?:RunSetupStep|RunInstallStepWithRetry)\('([a-z-]+)/gu), ...script.matchAll(/'install ([a-z-]+)/gu)].map((match) => match[1]);
   assert.ok(stepNames.length >= 6, `found ${stepNames.length} install steps in the script`);
   for (const step of stepNames) assert.ok((INSTALL_STEP_NAMES as readonly (string | undefined)[]).includes(step), `${step} is not an install step`);
   const code = script.split("\n").filter((line) => !/^\s*(\/\/|;)/u.test(line)).join("\n");
   const literals = [...code.matchAll(/'([^'\n]*)'/gu)].map((match) => match[1]!);
-  const flags = literals.flatMap((literal) => [...literal.matchAll(/--[a-z]+(?:-[a-z]+)*/gu)].map((match) => match[0])).filter((flag) => !["--json", "--accept-eula", "--dir"].includes(flag)); // flags of `install <step>`, not of configure (`iss-launcher-calls.test.ts` runs `install ollama --dir`)
+  const flags = literals.flatMap((literal) => [...literal.matchAll(/--[a-z]+(?:-[a-z]+)*/gu)].map((match) => match[0])).filter((flag) => !["--json", "--accept-eula", "--dir", "--no-model", "--url", "--key", "--saved-key", "--list"].includes(flag)); // flags of `install <step>`, not of configure (`iss-launcher-calls.test.ts` runs `install ollama --dir`; `install disk --no-model` and `install endpoint-models --url --key --list` are the wizard's alone, `install-command.test.ts` holds their options)
   assert.ok(flags.length >= 4, `found ${flags.length} configure flags in the script`);
   for (const flag of flags) assert.ok(flag in CONFIGURE_FLAGS, `${flag} is not a configure flag`);
   for (const command of [...script.matchAll(/RunLauncherAndWait\('([a-z]+)/gu)].map((match) => match[1]!)) assert.ok((COMMANDS as readonly string[]).includes(command), `${command} is not a command`);
 });
 
 test("`install ollama` and `install gpu` say remote:true / ok:false the way the script reads them", () => {
-  const script = readFileSync(join(appRoot(), "packaging", "windows", "mine-ai.iss"), "utf8");
+  const script = issWithIncludes;
   assert.match(script, /JsonIsTrue\(Json, 'remote'\)/u);
   assert.match(script, /RunStepSucceeded\('install gpu'/u);
 });

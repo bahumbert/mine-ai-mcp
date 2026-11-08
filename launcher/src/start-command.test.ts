@@ -4,11 +4,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { attach, cliContext, POST, until } from "./cli-test-support.ts";
 import { launcherLockFile } from "./control.ts";
-import { saveSettings } from "./settings.ts";
+import { fakeKeyCipher } from "./key-cipher-test-support.ts";
+import { saveSettings, type Settings } from "./settings.ts";
 import { hostHealth, stackFixture, type StackFixture } from "./stack-test-support.ts";
 import { runStartCommand, type StartDeps } from "./start-command.ts";
 
 const CONTROL_PORT = 26_400;
+const NO_CIPHER = { platform: "linux", cipher: null } as const;
 
 interface Launch {
   fixture: StackFixture;
@@ -23,7 +25,7 @@ interface Launch {
 
 function launch(change: Parameters<typeof stackFixture>[0] = (settings) => settings, share?: Launch): Launch {
   const fixture = share?.fixture ?? stackFixture((settings) => change({ ...settings, controlPort: CONTROL_PORT }));
-  if (!share) saveSettings(fixture.root, fixture.settings);
+  if (!share) saveSettings(fixture.root, fixture.settings, NO_CIPHER); // the key as a player's hand-edited file holds it, on any system the tests run on
   const { out, context } = cliContext("start", fixture.root, fixture.root);
   let signalHandler: (signal: string) => void = () => {};
   const result: Launch = {
@@ -51,6 +53,7 @@ function launch(change: Parameters<typeof stackFixture>[0] = (settings) => setti
       signalHandler = handler;
       return () => {};
     },
+    settings: NO_CIPHER,
   };
   return result;
 }
@@ -237,4 +240,39 @@ test("a settings file that is invalid stops the start with its path, before any 
   assert.match(run.out.join("\n"), /settings\.json is invalid/u);
   assert.equal(existsSync(launcherLockFile(run.fixture.root)), false);
   assert.deepEqual(run.fixture.children.spawns, []);
+});
+
+// The API key (plan 2026-11-06-installer-improvements T2, spec D3): a fake Windows with a fake cipher.
+const withClearKey = (settings: Settings): Settings => ({ ...settings, llm: { kind: "remote", baseUrl: "https://api.test/v1", apiKey: "sk-old", model: "m" } });
+const MIGRATION_LINE = /is now encrypted for the Windows user/u;
+
+/** A launcher a console started and none attached to: it runs the whole start and stops by itself, so the test sees every line. */
+async function startOnce(run: Launch): Promise<number> {
+  hostHealth(run.fixture, 25_575);
+  return await runStartCommand(run.context, run.deps, { expectConsole: true });
+}
+
+test("a start on Windows encrypts a key found in clear, says so once, and the second start says nothing", async () => {
+  const first = launch(withClearKey);
+  const cipher = fakeKeyCipher();
+  first.deps = { ...first.deps, settings: { platform: "win32", cipher } };
+  assert.equal(await startOnce(first), 0);
+  const file = join(first.fixture.root, "settings.json");
+  assert.equal(readFileSync(file, "utf8").includes("sk-old"), false);
+  assert.equal(first.out.filter((line) => MIGRATION_LINE.test(line)).length, 1);
+  assert.equal(launcherLogLines(first.fixture.root).filter((line) => MIGRATION_LINE.test(line)).length, 1, "the log keeps it too");
+  const second = launch((settings) => settings, first);
+  second.deps = { ...second.deps, settings: { platform: "win32", cipher } };
+  assert.equal(await startOnce(second), 0);
+  assert.equal(second.out.some((line) => MIGRATION_LINE.test(line)), false);
+});
+
+test("a save that fails is said with the file, and the start goes on with the key it read", async () => {
+  const run = launch(withClearKey);
+  const cipher = { ...fakeKeyCipher(), protect: () => { throw new Error("CryptProtectData failed (error 5)"); } };
+  run.deps = { ...run.deps, settings: { platform: "win32", cipher } };
+  assert.equal(await startOnce(run), 0);
+  assert.ok(run.out.some((line) => line.includes("Could not encrypt the API key") && line.includes("CryptProtectData failed (error 5)") && line.includes("settings.json")), run.out.join(" | "));
+  assert.equal(run.out.some((line) => line.includes("could not start")), false);
+  assert.ok(run.fixture.children.spawns.length > 0, "the stack started");
 });

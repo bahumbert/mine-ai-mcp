@@ -4,10 +4,12 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { monotonicNow } from "../clocks.ts";
+import type { DiskDeps } from "./disk.ts";
 import { downloadFailureHint, downloadVerified } from "./download.ts";
 import { assessGpu, parseOllamaCompute, remoteVerdictText, type ComputeDevice, type GpuFacts, type GpuStepResult } from "./gpu.ts";
 import { listModelNames, logTail, realServeDeps, ServeUnavailableError, withLatestTag, withOurOllamaServe, type OurServe, type ServeDeps } from "./ollama-serve.ts";
 import { loadInstallState, saveInstallState, type InstallState } from "./state.ts";
+import { freeSpaceHint, guardDownload, spaceGuardFor, type SpaceGuard } from "./space-guard.ts";
 import { failure, type InstallContext, type StepFailure, type StepResult } from "./step.ts";
 
 const SETUP_FLAGS = ["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"];
@@ -17,6 +19,8 @@ const UNINSTALLER_FILE = "unins000.exe";
 const COMPUTE_POLL_MS = 250;
 const COMPUTE_SETTLE_MS = 500;
 const DOWNLOAD_SHARE = 0.8;
+/** The name of the installed-Ollama need in a space check: the hint tells the shortfalls that hold it from the setup file's. */
+const INSTALLED_OLLAMA_NEED = "Ollama";
 
 export interface OllamaDeps extends ServeDeps {
   ollamaExe(): string | null;
@@ -26,6 +30,10 @@ export interface OllamaDeps extends ServeDeps {
   /** The folder of Ollama's default model store when it holds a model, else null (the player's own models). */
   defaultStoreWithModels(): string | null;
   removeFile(path: string): void;
+  /** Where Ollama's own setup installs without `/DIR=`: the folder a first install is counted in. */
+  defaultFolder(): string;
+  /** The free-space reads of the guard; the real disk when absent. */
+  disk?: DiskDeps;
   gpuFacts?: GpuFacts;
 }
 
@@ -37,15 +45,24 @@ export type OllamaStepResult = GpuStepResult | StepFailure;
  * per-user install folder of Ollama's own setup, then the PATH. A player's Ollama is found the same way as ours, which
  * is why `install-state.json` records who installed it.
  */
-export function ollamaExe(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, exists: (path: string) => boolean = existsSync, recorded?: string): string | null {
+export function ollamaExe(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, exists: (path: string) => boolean = existsSync, recorded?: string, home: string = homedir()): string | null {
   const path = platform === "win32" ? win32 : posix;
   const file = platform === "win32" ? OLLAMA_FILE : "ollama";
   const candidates = [
     ...(recorded ? [recorded] : []),
-    ...(platform === "win32" && env.LOCALAPPDATA ? [path.join(env.LOCALAPPDATA, "Programs", "Ollama", file)] : []),
+    ...(platform === "win32" ? [path.join(defaultOllamaFolder(env, platform, home, ""), file)] : []),
     ...(env.PATH ?? "").split(path.delimiter).filter(Boolean).map((folder) => path.join(folder, file)),
   ];
   return candidates.find(exists) ?? null;
+}
+
+/**
+ * Ollama's per-user install folder (`%LOCALAPPDATA%\Programs\Ollama`, else the home's `AppData\Local`), where its own setup
+ * puts it without `/DIR=` and where `ollamaExe` looks first; off Windows there is no such folder, so `root` stands in.
+ */
+export function defaultOllamaFolder(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home: string, root: string): string {
+  if (platform !== "win32") return root;
+  return win32.join(env.LOCALAPPDATA || win32.join(home, "AppData", "Local"), "Programs", "Ollama");
 }
 
 /** `ollamaExe` for the Ollama this data root's install recorded; the one lookup every real dependency uses. */
@@ -100,7 +117,7 @@ type EnsuredOllama = { ok: true; exe: string; existed: boolean } | StepFailure;
 
 async function ensureOllama(ctx: InstallContext, deps: OllamaDeps, dir: string | undefined): Promise<EnsuredOllama> {
   const existing = deps.ollamaExe();
-  if (existing === null) return await installOurOllama(ctx, deps, dir);
+  if (existing === null) return await installOurOllama(ctx, deps, dir, false);
   const output = (await deps.run(existing, ["--version"])).output;
   const version = parseOllamaVersion(output);
   const state = loadInstallState(ctx.root);
@@ -122,16 +139,32 @@ async function ensureOllama(ctx: InstallContext, deps: OllamaDeps, dir: string |
 /** Our own install is updated where it stands: the folder recorded when the player chose one, else Ollama's default. */
 async function upgradeOurOllama(ctx: InstallContext, deps: OllamaDeps): Promise<EnsuredOllama> {
   const recorded = loadInstallState(ctx.root).ollamaPath;
-  const installed = await installOurOllama(ctx, deps, recorded === undefined ? undefined : dirname(recorded));
+  const installed = await installOurOllama(ctx, deps, recorded === undefined ? undefined : dirname(recorded), true);
   return installed.ok ? { ...installed, existed: true } : installed;
 }
 
-async function installOurOllama(ctx: InstallContext, deps: OllamaDeps, dir: string | undefined): Promise<EnsuredOllama> {
+/**
+ * What the setup puts on the disk: the setup file in `<root>\runtime` (until it ran), and, on a first install, Ollama in its
+ * folder. An upgrade overwrites a folder that already holds the old version, so it counts the setup only.
+ */
+function ollamaSpaceGuard(ctx: InstallContext, deps: OllamaDeps, dir: string | undefined, upgrade: boolean): SpaceGuard {
+  // another Ollama folder helps only when the short drive is the folder's: a short data drive holds the setup file
+  const hint: SpaceGuard["hint"] = (short) => freeSpaceHint(!upgrade && short.whats.includes(INSTALLED_OLLAMA_NEED) ? "choose another Ollama folder" : undefined)(short);
+  return spaceGuardFor(ctx, deps.disk, hint, (downloadBytes) => [
+    { what: "Ollama's setup", folder: join(ctx.root, "runtime"), bytes: downloadBytes },
+    ...(upgrade ? [] : [{ what: INSTALLED_OLLAMA_NEED, folder: dir ?? deps.defaultFolder(), bytes: ctx.manifest.ollama.installedBytes }]),
+  ]);
+}
+
+async function installOurOllama(ctx: InstallContext, deps: OllamaDeps, dir: string | undefined, upgrade: boolean): Promise<EnsuredOllama> {
   const { url, sha256 } = ctx.manifest.ollama;
   const setup = join(ctx.root, "runtime", SETUP_FILE);
   mkdirSync(dirname(setup), { recursive: true });
   try {
-    await deps.downloadVerified(url, setup, { sha256 }, (fraction) => ctx.onProgress(fraction * DOWNLOAD_SHARE, "Downloading Ollama"));
+    const noRoom = await guardDownload(ollamaSpaceGuard(ctx, deps, dir, upgrade), deps.fileExists(setup), (beforeBody) =>
+      deps.downloadVerified(url, setup, { sha256 }, (fraction) => ctx.onProgress(fraction * DOWNLOAD_SHARE, "Downloading Ollama"), undefined, undefined, { beforeBody }),
+    );
+    if (noRoom !== null) return noRoom;
   } catch (error) {
     return failure(error instanceof Error ? error.message : String(error), downloadFailureHint(error));
   }
@@ -155,7 +188,7 @@ async function installOurOllama(ctx: InstallContext, deps: OllamaDeps, dir: stri
 
 const onlyIfThere = (exe: string, deps: OllamaDeps): string | null => (deps.fileExists(exe) ? exe : null);
 
-/** Stage 2: our serve reports the GPUs it can run on, which the registry alone cannot tell (ROCm card, dropped iGPU). */
+/** Stage 2: our serve reports the GPUs it can run on, which DXGI alone cannot tell (ROCm card, dropped iGPU). */
 async function discoverCompute(ctx: InstallContext, exe: string, deps: OllamaDeps): Promise<OllamaStepResult> {
   ctx.onProgress(0.9, "Asking Ollama which GPU it can use");
   try {
@@ -255,5 +288,6 @@ export function realOllamaDeps(root: string): OllamaDeps {
     fileExists: existsSync,
     defaultStoreWithModels: () => defaultStoreWithModels(),
     removeFile: (path) => rmSync(path, { force: true }),
+    defaultFolder: () => defaultOllamaFolder(process.env, process.platform, homedir(), root),
   };
 }

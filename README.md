@@ -14,6 +14,16 @@ server logs, and the seed prompt — are published as a
 [video]: https://www.youtube.com/watch?v=ZjtwWEfFVFY
 [dataset]: https://huggingface.co/datasets/aibengineering/beat-the-game-minecraft
 
+## Download and code signing policy
+
+Mine AI runs companion and rival AI players for Minecraft Java 1.21.4. Each player is run by an AI model of the
+player's choice, local or remote. For Windows, get the setup from the
+[releases page](https://github.com/bahumbert/mine-ai-mcp/releases) and follow the
+[Windows guide](docs/install/windows.md). The setup is signed through SignPath Foundation once the project is
+accepted; until then the setup is unsigned and its release notes say so. See the
+[code signing policy](docs/code-signing-policy.md), and what the program sends over the network in
+[docs/privacy.md](docs/privacy.md).
+
 ## Quick start: use an existing Minecraft server
 
 Run it straight from the public repository with Bun. The package executes its
@@ -175,6 +185,8 @@ do not assume Claude's `timeout` field works in another client's schema.
 
 ## Documentation pages
 
+- [Code signing policy](docs/code-signing-policy.md): What the Windows setup is signed for, its components and team roles.
+- [Privacy](docs/privacy.md): Every network contact Mine AI makes, and who chooses each one.
 - [Overview](docs/mcp/README.md): Quick start, host startup flags, and making a first call.
 - [Async actions](docs/mcp/async-actions.md): Submit work, inspect progress, retrieve typed results, before starting the next objective.
 - [Concepts](docs/mcp/concepts.md): Quality standard, five-layer architecture, foreground locking, and lifecycle.

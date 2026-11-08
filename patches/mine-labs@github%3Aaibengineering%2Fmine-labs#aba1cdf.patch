@@ -551,10 +551,24 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
        if (!succeeded && !options.acceptedNoOp?.test(output)) {
          throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
 diff --git a/src/server/server.ts b/src/server/server.ts
-index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d1e6ba168 100644
+index 51aeb8961776014337dacca592d98d9d0d3889a7..a16f58828ce7dff08ff9f42ac02f890d0f290f1f 100644
 --- a/src/server/server.ts
 +++ b/src/server/server.ts
-@@ -94,6 +94,42 @@ export interface ServerConfig {
+@@ -19,10 +19,11 @@
+ 
+ import { spawn } from "node:child_process";
+ import type { ChildProcess } from "node:child_process";
+-import { link, mkdir, rm, writeFile } from "node:fs/promises";
++import { link, mkdir, rename, rm, writeFile } from "node:fs/promises";
+ import { randomUUID } from "node:crypto";
+ import { existsSync } from "node:fs";
+-import { join } from "node:path";
++import { tmpdir } from "node:os";
++import { delimiter, join } from "node:path";
+ import { Rcon } from "./rcon.js";
+ import { mineLabsHome, writeTextFile, delay } from "../util/fs.js";
+ import { reserveFreePortPair, type PortPairLease } from "./ports.js";
+@@ -94,6 +95,64 @@ export interface ServerConfig {
    structures: boolean;
    operators: OperatorProfile[];
    maxPlayers?: number;
@@ -594,10 +608,32 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
 +/** The arguments `java` is started with: heap bounds, then the server jar. */
 +export function serverJavaArgs(cfg: Pick<ServerConfig, "maxHeap">, jar: string): string[] {
 +  return ["-Xms512M", `-Xmx${cfg.maxHeap ?? DEFAULT_MAX_HEAP}`, "-jar", jar, "nogui"];
++}
++
++/** Put the hardware-probe stub on the JVM's PATH without changing the parent environment. */
++async function serverEnvironment(log: (message: string) => void): Promise<NodeJS.ProcessEnv> {
++  const env = { ...process.env };
++  if (process.platform === "win32") return env;
++  try {
++    const dir = join(tmpdir(), "mine-ai-stubs");
++    await mkdir(dir, { recursive: true });
++    const partial = join(dir, `lshw.${randomUUID()}.tmp`);
++    try {
++      await writeFile(partial, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
++      await rename(partial, join(dir, "lshw"));
++    } finally {
++      await rm(partial, { force: true });
++    }
++    const entries = (env.PATH ?? "").split(delimiter).filter(Boolean);
++    env.PATH = (entries[0] === dir ? entries : [dir, ...entries]).join(delimiter);
++  } catch (error) {
++    log(`lshw stub not installed (${error instanceof Error ? error.message : String(error)}): server JVMs may stall on oshi's lshw, see knowledge/05-testing-and-ops.md "WSL clock and VM stalls"`);
++  }
++  return env;
  }
  
  export class MinecraftServer {
-@@ -135,10 +171,16 @@ export class MinecraftServer {
+@@ -135,10 +194,16 @@ export class MinecraftServer {
      seed?: number | string;
      structures?: boolean;
      maxPlayers?: number;
@@ -614,7 +650,7 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
      await linkServerRuntime(opts.root, opts.version);
      const host = opts.host ?? "127.0.0.1";
      const ports = await reserveFreePortPair(opts.preferPort ?? 25565, host);
-@@ -153,6 +195,10 @@ export class MinecraftServer {
+@@ -153,6 +218,10 @@ export class MinecraftServer {
        seed: opts.seed,
        structures: opts.structures ?? false,
        maxPlayers: opts.maxPlayers,
@@ -625,7 +661,7 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
        operators: [...operators, ...(opts.spectatorNames ?? []).map((name): OperatorProfile => ({
          name, uuid: offlinePlayerUuid(name), level: 2, bypassesPlayerLimit: true,
        }))],
-@@ -205,9 +251,11 @@ export class MinecraftServer {
+@@ -205,9 +274,11 @@ export class MinecraftServer {
        "view-distance=8",
        "simulation-distance=8",
        `max-players=${this.cfg.maxPlayers ?? 10}`,
@@ -638,15 +674,17 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
      // The vanilla server gates on eula.txt, not the server.properties key.
      await writeTextFile(join(root, "eula.txt"), "eula=true\n");
      await writeTextFile(join(root, "ops.json"), `${JSON.stringify(this.cfg.operators, null, 2)}\n`);
-@@ -221,7 +269,7 @@ export class MinecraftServer {
+@@ -221,8 +292,9 @@ export class MinecraftServer {
      const javaName = process.platform === "win32" ? "javaw.exe" : "java";
      const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", javaName) : javaName;
      this.log(`starting ${this.cfg.version} server on ${this.cfg.host}:${this.cfg.gamePort} (rcon :${this.cfg.rconPort})`);
 -    this.proc = spawn(java, ["-Xms512M", "-Xmx2G", "-jar", this.jar, "nogui"], {
 +    this.proc = spawn(java, serverJavaArgs(this.cfg, this.jar), {
        cwd: root,
++      env: await serverEnvironment(this.log),
        stdio: ["ignore", "pipe", "pipe"],
        windowsHide: true,
+     });
 diff --git a/node_modules/mine-labs/src/trial/arena.ts b/src/trial/arena.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..02bc518048e62b92393e1c15e73b0cd555dc8637

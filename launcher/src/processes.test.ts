@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { monotonicNow } from "./clocks.ts";
 import type { ProcessInfo } from "./process-list.ts";
 import { Children, cleanupStale, runnersLeftBy, type SpawnedProcess, type SpawnProcess } from "./processes.ts";
 
@@ -169,13 +170,20 @@ test("stop with a graceful step that works does not kill", async () => {
   assert.equal(calls[0]!.process.killed, false);
 });
 
-test("stop kills a child that ignores the graceful step once timeoutMs has passed", async () => {
+test("stop kills a child that ignores the graceful step once timeoutMs has passed, measured on the monotonic clock while the wall clock steps back", async () => {
   const { children, calls, root } = newChildren();
   children.spawn("server", "java", [], { env: {}, cwd: root, logFile: join(root, "logs", "s.log") });
-  const started = Date.now();
-  await children.stop("server", { graceful: async () => {}, timeoutMs: 60 });
-  assert.equal(calls[0]!.process.killed, true);
-  assert.ok(Date.now() - started >= 50, "waited for the timeout first");
+  const realNow = Date.now;
+  const started = monotonicNow();
+  try {
+    // WSL steps its wall clock back about 2.5 s every 30 s: the elapsed measure of this assert must not read it.
+    Date.now = () => realNow() - 2_500;
+    await children.stop("server", { graceful: async () => {}, timeoutMs: 60 });
+    assert.equal(calls[0]!.process.killed, true);
+    assert.ok(monotonicNow() - started >= 50, "waited for the timeout first");
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test("the wait for a child to save is not cut short when the wall clock jumps forward mid-wait", async () => {
