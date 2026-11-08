@@ -3,6 +3,7 @@ import { viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { handOverRolesOf, handOverRolesSchema } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
+import { traceToss } from "./toss-trace.ts";
 
 const paramsSchema = z.strictObject({
   /** Places in the scenario's `players` list. */
@@ -12,6 +13,8 @@ const paramsSchema = z.strictObject({
   aim_height: z.number(),
   /** How long the receiver watches its inventory after the toss (ticks): past the 40-tick pickup delay. */
   receiver_wait_ticks: z.number().int().positive().default(160),
+  /** The giver adds `TOSS_TRACE` lines (its feet, velocity and look, the items near it, who collected one) from the toss to 60 ticks after the walk-off (`toss-trace.ts`). */
+  trace: z.boolean().default(false),
 });
 
 type Params = z.output<typeof paramsSchema>;
@@ -38,12 +41,19 @@ async function toss(context: ScenarioContext, params: Params): Promise<ClientCom
   const stack = bot.inventory.items().find((item) => item.name === params.item_name);
   if (!stack) return { status: "failed", detail: `No ${params.item_name} carried.` };
   const reach = Math.hypot(receiver.position.x - bot.entity.position.x, receiver.position.z - bot.entity.position.z);
-  await bot.toss(stack.type, null, 1);
-  // As a hand-over does: a giver left standing beside its own toss picks it back up (B2, 2026-10-19).
   const at = bot.entity.position.floored();
-  await context.call("navigate", { x: at.x - 4, y: at.y, z: at.z, range: 1, dig: false, scaffold: false });
+  const tossAndWalkOff = async () => {
+    await bot.toss(stack.type, null, 1);
+    // As a hand-over does: a giver left standing beside its own toss picks it back up (B2, 2026-10-19).
+    await context.call("navigate", { x: at.x - 4, y: at.y, z: at.z, range: 1, dig: false, scaffold: false });
+  };
+  const traced: { value: void; lines: string[] } = params.trace
+    ? await traceToss({ bot, waitForTicks: (ticks) => context.waitForTicks(ticks) }, tossAndWalkOff)
+    : { value: await tossAndWalkOff(), lines: [] };
+  const { lines } = traced;
   await context.waitForTicks(params.receiver_wait_ticks + 20);
-  return { status: "succeeded", detail: `Tossed at reach ${reach.toFixed(2)} from (${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}) at the receiver ${receiver.position.x.toFixed(2)}, ${receiver.position.y.toFixed(2)}, ${receiver.position.z.toFixed(2)}.` };
+  const tossed = `Tossed at reach ${reach.toFixed(2)} from (${bot.entity.position.x.toFixed(2)}, ${bot.entity.position.y.toFixed(2)}, ${bot.entity.position.z.toFixed(2)}) at the receiver ${receiver.position.x.toFixed(2)}, ${receiver.position.y.toFixed(2)}, ${receiver.position.z.toFixed(2)}.`;
+  return { status: "succeeded", detail: [tossed, ...lines].join("\n") };
 }
 
 async function watch(context: ScenarioContext, params: Params): Promise<ClientCompletion> {

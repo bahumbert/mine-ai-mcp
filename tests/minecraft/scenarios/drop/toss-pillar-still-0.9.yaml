@@ -1,0 +1,21 @@
+template: ../../templates/toss-to-ledge.yaml
+
+name: toss-pillar-still-0.9
+tags: [reliability]
+description: >-
+  Measurement, not a test (plan 2026-11-08-trading-p2-fixes Task 3.1, spec D5, hypothesis H1): the s3r toss without the climb. The giver
+  stands still on the top of a 3x3 stone pillar one block high, 0.9 blocks from the receiver on the same top, and tosses one bread
+  aimed as a hand-over aims at that reach. No stair, no climb, no walking before the toss: if this is taken where the hand-over
+  variants are not, the toss from a giver still settling after its climb (H1) or the geometry of the approach is the cause. The
+  receiver's line LEDGE_TOSS says whether it took the bread or where it rests.
+geometry:
+  - { fill: { block: stone, from: [-1, -60, -1], to: [1, -60, 1] } }
+players:
+  - name: Giver
+    pos: [-0.4, -59, 0.5]
+    inventory:
+      - { item: bread, count: 3 }
+  - name: Receiver
+    pos: [0.5, -59, 0.5]
+# aim_height = tossAimHeight(0.9) = 1.62 - 0.9 * tan((90 - 21 * 0.9) deg) = -1.0087 (drop-item/hand-over.ts).
+params: { giver: 0, receiver: 1, item_name: bread, aim_height: -1.0087, trace: true }
