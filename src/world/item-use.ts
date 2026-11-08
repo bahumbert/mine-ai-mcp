@@ -17,6 +17,7 @@ import { raceSignal } from "../utils/race-signal.js";
 import { waitForTicksOrCancel } from "../utils/physics-ticks.js";
 import type { InventoryItem, WorldBlock } from "./placement.js";
 import { carriedCount } from "./inventory-count.js";
+import { foreignRegionAt, regionRefusalText } from "./protected-regions.js";
 import { waitForWorldAge, type WorldAgeOptions } from "./world-age.js";
 
 /** A cell that should read as `matches` once the use has taken effect. */
@@ -43,6 +44,8 @@ export interface ItemUse {
   /** Called right before the use packet is sent: an abort after it may still leave the world changed. */
   readonly onSent?: () => void;
   readonly signal?: AbortSignal;
+  /** A reflex saving the body (a water bucket under a fall): allowed inside another owner's protected region, as in `BlockPlacement`. */
+  readonly lifeSaving?: true;
 }
 
 export type ItemUseResult = { kind: "used" } | { kind: "failed"; error: string; /** Set when the use went out and the wait ended with the expected change not seen (not a thrown error): how many ticks the server clock (`bot.time.age`) advanced since the use, 0 when unknown. */ serverTicksWaited?: number; /** Set when a server wait ended on the wall clock with the world age not moved far enough: the server's answer is unknown. */ timedOut?: true };
@@ -74,8 +77,23 @@ function observed(bot: Bot, use: ItemUse): string {
   return [...cells, ...hand].join(", ");
 }
 
+/** The refusal for a use that would change a cell of someone else's protected region (ADR-012), or null: the block it acts on and each cell it should change are checked. */
+function regionRefusal(bot: Bot, use: ItemUse): string | null {
+  if (use.lifeSaving) return null;
+  const cells = [...(use.on ? [use.on.block.position] : []), ...(use.expectedCells ?? []).map((cell) => asVec3(cell.position))];
+  for (const cell of cells) {
+    const region = foreignRegionAt(bot, cell);
+    if (region !== null) {
+      return `Use of ${use.item.name} at cell (${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}: use it elsewhere or ask its owner.`;
+    }
+  }
+  return null;
+}
+
 /** Equip, look, use, and confirm the expected cells and hand; the item is released whatever happens. */
 export async function useItemAt(bot: Bot, use: ItemUse): Promise<ItemUseResult> {
+  const refusal = regionRefusal(bot, use);
+  if (refusal !== null) return { kind: "failed", error: refusal };
   const timeoutTicks = use.timeoutTicks ?? DEFAULT_TIMEOUT_TICKS;
   const gain = use.expectedInventoryGain;
   let timedOut = false;

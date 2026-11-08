@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { familyIndexOf } from "../../world/item-families.js";
+import { regionChangeRefusal } from "../../world/protected-regions.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import {
@@ -159,6 +160,12 @@ async function look(
   }
 }
 
+/** A raw dig or placement is a world change outside every route: it obeys other owners' protected regions too (ADR-012). */
+function refuseForeignRegion(bot: Bot, cell: Vec3, change: "dig" | "placement"): void {
+  const refusal = regionChangeRefusal(bot, cell, change);
+  if (refusal !== null) throw new Error(`[RAW_REGION_PROTECTED] ${refusal}`);
+}
+
 async function dig(
   bot: Bot,
   request: Extract<RawActionRequest, { operation: "dig" }>,
@@ -178,6 +185,7 @@ async function dig(
     );
   if (!block)
     throw new Error("[RAW_TARGET_UNLOADED] The requested block is not loaded.");
+  refuseForeignRegion(bot, evidence.target, "dig");
   if (!blockWithinReach(bot, evidence.target))
     throw new Error(
       `[RAW_OUT_OF_REACH] Target is beyond the ${BLOCK_REACH}-block interaction reach.`,
@@ -226,6 +234,7 @@ async function place(
     .find((candidate) => candidate.name === request.blockName);
   if (!item)
     throw new Error(`[RAW_ITEM_MISSING] Bot carries no ${request.blockName}.`);
+  refuseForeignRegion(bot, evidence.target, "placement");
   await ownedOperation(
     () => bot.equip(item, "hand"),
     context.signal,

@@ -7,6 +7,7 @@ import {
   describeProtectedRegion,
   foreignRegionAt,
   protectedRegionAt,
+  regionChangeRefusal,
   regionRefusalText,
   setProtectedRegionsProvider,
   type ProtectedRegion,
@@ -54,6 +55,15 @@ test("anyRegionAt finds the bot's own region too, and a refusal names the region
   assert.equal(anyRegionAt(botWith([house]), insideHouse), house);
   assert.equal(anyRegionAt(botWith([]), insideHouse), null);
   assert.equal(regionRefusalText(toms), "inside protected region #2 'Tom's place' (owner Tom)");
+});
+
+test("regionChangeRefusal names the cell and the region for a dig and for a placement, and is null for the bot's own region", () => {
+  const dig = regionChangeRefusal(botWith([toms]), insideHouse, "dig");
+  assert.equal(dig, "Dig cell (3, 65, 2) is inside protected region #2 'Tom's place' (owner Tom): dig elsewhere or ask its owner.");
+  const place = regionChangeRefusal(botWith([toms]), insideHouse, "placement");
+  assert.equal(place, "Placement cell (3, 65, 2) is inside protected region #2 'Tom's place' (owner Tom): build elsewhere or ask its owner.");
+  assert.equal(regionChangeRefusal(botWith([house]), insideHouse, "dig"), null);
+  assert.equal(regionChangeRefusal(botWith([toms]), { x: 30, y: 65, z: 2 }, "dig"), null);
 });
 
 test("cells outside every region come first, the bot's own region's next, a foreign one's last", () => {

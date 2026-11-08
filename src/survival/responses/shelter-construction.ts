@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { monotonicNow } from "../../utils/index.js";
 import { findPlacementSupport } from "../../world/index.js";
+import { foreignRegionAt, regionRefusalText } from "../../world/protected-regions.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
 import {
@@ -65,12 +66,33 @@ function slowShaftCellFailure(build: ShelterBuild, block: DigBlock): StepFailure
   const diggingMs = build.bot.digTime(block);
   const leftMs = Math.max(0, build.constructionDeadline - monotonicNow());
   if (diggingMs <= leftMs) return null;
-  const dug = build.dug > 0 ? `; ${build.dug} shaft ${build.dug === 1 ? "cell" : "cells"} already dug, the bot stands in them` : "";
   return {
     kind: "failed",
     error:
-      `shaft cell ${block.name} digs in ${seconds(diggingMs)} s, ${seconds(leftMs)} s left${dug}. ` +
+      `shaft cell ${block.name} digs in ${seconds(diggingMs)} s, ${seconds(leftMs)} s left${shaftAlreadyDug(build)}. ` +
       `A faster tool, another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
+  };
+}
+
+/** What the failure of a shaft cell says about the cells before it: the bot stands in them. */
+function shaftAlreadyDug(build: ShelterBuild): string {
+  return build.dug > 0 ? `; ${build.dug} shaft ${build.dug === 1 ? "cell" : "cells"} already dug, the bot stands in them` : "";
+}
+
+/**
+ * The failure that stops the shaft before a cell inside another owner's protected region, or null (ADR-012; the bot's own
+ * regions never refuse). Like a slow cell, skipping the cell leaves no shelter: the hide ends here, with the cells already
+ * dug named, and the decision answers with the next response.
+ */
+function foreignRegionShaftFailure(build: ShelterBuild, block: DigBlock): StepFailure | null {
+  const region = foreignRegionAt(build.bot, block.position);
+  if (region === null) return null;
+  const { x, y, z } = block.position;
+  return {
+    kind: "failed",
+    error:
+      `shaft cell ${block.name} at (${x}, ${y}, ${z}) is ${regionRefusalText(region)}${shaftAlreadyDug(build)}. ` +
+      `Another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
   };
 }
 
@@ -82,6 +104,8 @@ async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocke
   const below = bot.blockAt(standing.offset(0, -1, 0));
   const under = bot.blockAt(standing.offset(0, -2, 0));
   if (!diggable(below) || !solid(under)) return "blocked";
+  const foreign = foreignRegionShaftFailure(build, below);
+  if (foreign) return foreign;
   const centered = await centerShelterCell(build, standing);
   if (shelterIntruder(bot, threatContext)) return "again";
   if (!centered) return { kind: "failed", error: "The bot could not centre over the shelter shaft" };

@@ -76,6 +76,20 @@ export function regionRefusalText(region: ProtectedRegion): string {
 }
 
 /**
+ * The refusal text for a dig or a placement at a cell inside someone else's region, or null when the cell is free to
+ * change (outside every region, or in the bot's own). The one wording every world change outside navigation's routes
+ * uses (plan 2026-11-07-p4-06a-threat T5b), so a model reads the same words wherever the change was refused.
+ */
+export function regionChangeRefusal(bot: Bot, cell: BlockCorner, change: "dig" | "placement"): string | null {
+  const region = foreignRegionAt(bot, cell);
+  if (region === null) return null;
+  const where = `(${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}`;
+  return change === "dig"
+    ? `Dig cell ${where}: dig elsewhere or ask its owner.`
+    : `Placement cell ${where}: build elsewhere or ask its owner.`;
+}
+
+/**
  * The cells in the order a chooser should try them: outside every region, then in the bot's own, then in someone
  * else's (which the placement core refuses). Stable inside each group.
  */

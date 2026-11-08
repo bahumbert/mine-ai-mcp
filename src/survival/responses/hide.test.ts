@@ -7,9 +7,12 @@ import {
   type FakeBotOptions,
   type FakeCell,
   type FakeEntitySpec,
+  type FakeServer,
   createFakeBot,
   createFakeClock,
 } from "../../test-support/fake-bot/index.js";
+import { regionRefusalText, setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
+import { observeHostileResponse } from "../control/combat/observation.js";
 import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { hideInPlace } from "./hide.js";
@@ -775,6 +778,52 @@ test("a first shaft cell that digs slower than the time left fails the hide nami
     "no dig was started",
   );
   assert.equal(bot.blockAt(new Vec3(0, 63, 0))!.name, "deepslate");
+});
+
+/** A region of `owner` holding the shaft cells from y 60 to 63 under the bot (plan 2026-11-07-p4-06a-threat T5b). */
+const shaftRegionOf = (owner: string, topY = 63): ProtectedRegion => ({
+  regionId: 4, dimension: "overworld", owner, label: "Tom's cellar", min: { x: -1, y: 58, z: -1 }, max: { x: 1, y: topY, z: 1 },
+});
+const digsStarted = (server: FakeServer) =>
+  server.packets.filter(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0).length;
+
+test("a foreign-region shaft cell fails the hide and the decision evades", async () => {
+  const { bot, clock, server } = scene({ health: 20, cells: shaftOf("dirt"), mockedClock: true });
+  setProtectedRegionsProvider(bot, () => [shaftRegionOf("Tom")]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.ok(result.error?.includes(regionRefusalText(shaftRegionOf("Tom"))), result.error);
+  assert.match(result.error ?? "", /\(0, 63, 0\)/u, "names the cell");
+  assert.equal(result.dug, 0);
+  assert.equal(digsStarted(server), 0, "no dig was started");
+  assert.equal(bot.blockAt(new Vec3(0, 63, 0))!.name, "dirt");
+  // The failed hide is on record (`blocked`): the wounded bot's next answer is to evade.
+  const wounded = scene({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, entities: { 7: { name: "zombie", kind: "Hostile mobs", metadata: [], position: new Vec3(3.5, 64, 0.5) } } }).bot;
+  const directive = observeHostileResponse(wounded, {
+    resolvedIds: new Set(), attackerIds: new Set([7]), unreachableIds: new Set(), blockedResponses: new Set(["hide"]),
+  });
+  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
+});
+
+test("a foreign-region third shaft cell leaves the dug part whole, names the region and the cells already dug", async () => {
+  const { bot, clock } = scene({ health: 20, cells: shaftOf("dirt", "dirt", "stone", "stone"), mockedClock: true, simulatePhysics: true });
+  setProtectedRegionsProvider(bot, () => [{ ...shaftRegionOf("Tom"), min: { x: -1, y: 58, z: -1 }, max: { x: 1, y: 61, z: 1 } }]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.dug, 2, "the two cells outside the region were dug");
+  assert.ok(result.error?.includes("inside protected region #4 'Tom's cellar' (owner Tom)"), result.error);
+  assert.match(result.error ?? "", /2 shaft cells already dug/);
+  assert.equal(bot.blockAt(new Vec3(0, 61, 0))!.name, "stone", "the foreign cell was left whole");
+});
+
+test("a shaft in the bot's own region is dug", async () => {
+  const { bot, clock } = scene({ health: 20, cells: shaftOf("dirt", "dirt", "dirt"), mockedClock: true, simulatePhysics: true });
+  setProtectedRegionsProvider(bot, () => [shaftRegionOf(bot.username)]);
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.ok(result.dug >= 1, `dug ${result.dug}: ${result.error ?? ""}`);
 });
 
 test("a slow third cell leaves the dug part and names it", async () => {

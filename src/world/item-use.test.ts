@@ -5,6 +5,7 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
 import { useItemAt } from "./item-use.js";
+import { regionRefusalText, setProtectedRegionsProvider, type ProtectedRegion } from "./protected-regions.js";
 
 /** One client tick, in ms of clock. */
 const TICK_MS = 50;
@@ -281,6 +282,52 @@ test("a server wait on a frozen world age ends on the wall clock and says it tim
 
   assert.equal(result.kind === "failed" ? result.timedOut : null, true);
   assert.equal(world.bot.usingHeldItem, false);
+});
+
+/** Protected regions at item uses (plan 2026-11-07-p4-06a-threat T5b, ADR-012): the cells a use changes are checked before the packet. */
+const regionAtWater = (owner: string): ProtectedRegion => ({
+  regionId: 5, dimension: "overworld", owner, label: "Tom's pond", min: { x: 2, y: 62, z: -1 }, max: { x: 4, y: 64, z: 1 },
+});
+const bucketUse = (world: ReturnType<typeof usingBot>, extra: Partial<Parameters<typeof useItemAt>[1]> = {}): Parameters<typeof useItemAt>[1] => ({
+  item: world.stack("bucket"),
+  lookAt: { x: 3.5, y: 63.9, z: 0.5 },
+  expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+  expectedHeldItem: "water_bucket",
+  ...extra,
+});
+const usePackets = (world: ReturnType<typeof usingBot>) => world.server.packets.filter((packet) => packet.name === "use_item").length;
+
+test("a use whose cell lies in another owner's region is refused naming the region, before the hand or the packet", async () => {
+  const world = usingBot(3);
+  setProtectedRegionsProvider(world.bot, () => [regionAtWater("Tom")]);
+  const result = await world.clock.settle(useItemAt(world.bot, bucketUse(world)), 4 * TICK_MS);
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") return;
+  assert.ok(result.error.includes(regionRefusalText(regionAtWater("Tom"))), result.error);
+  assert.equal(result.serverTicksWaited, undefined, "nothing was sent, so no server clock was watched");
+  assert.deepEqual(world.calls, [], "no equip, look or use");
+  assert.equal(usePackets(world), 0);
+  assert.equal(world.bot.blockAt(world.target)?.name, "water");
+});
+
+test("a use on a block of another owner's region is refused even when the cell it should change lies outside", async () => {
+  const world = usingBot(3);
+  setProtectedRegionsProvider(world.bot, () => [regionAtWater("Tom")]);
+  const result = await world.clock.settle(useItemAt(world.bot, bucketUse(world, {
+    on: { block: world.obsidian, face: { x: 0, y: 1, z: 0 } },
+    expectedCells: [{ position: { x: 9, y: 63, z: 9 }, matches: () => true }],
+  })), 4 * TICK_MS);
+  assert.equal(result.kind, "failed");
+  assert.deepEqual(world.calls, []);
+});
+
+test("a use in the bot's own region, or a life-saving use in another's, goes ahead", async () => {
+  const own = usingBot(3);
+  setProtectedRegionsProvider(own.bot, () => [regionAtWater(own.bot.username)]);
+  assert.deepEqual(await own.clock.settle(useItemAt(own.bot, bucketUse(own)), 4 * TICK_MS), { kind: "used" });
+  const lifeSaving = usingBot(3);
+  setProtectedRegionsProvider(lifeSaving.bot, () => [regionAtWater("Tom")]);
+  assert.deepEqual(await lifeSaving.clock.settle(useItemAt(lifeSaving.bot, bucketUse(lifeSaving, { lifeSaving: true })), 4 * TICK_MS), { kind: "used" });
 });
 
 test("a server wait frozen 10 s then moving again still sees a change that arrives late", async () => {

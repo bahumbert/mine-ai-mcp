@@ -14,6 +14,7 @@ import { ripeState, seedOf } from "../../world/block-drops.js";
 import { tagsOf } from "../../world/block-tags.js";
 import { droppedItemName, isItemEntity, pickupObservedItem, snapshotEntityIds } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
+import { regionChangeRefusal } from "../../world/protected-regions.js";
 import { snapshotTools } from "../../world/tool-tiers.js";
 import type { TendCropsRequest } from "./contract.js";
 import type { CellBlock, PlotFacts, FarmBody, FarmCell, TillFailure } from "./tend-plot.js";
@@ -125,6 +126,59 @@ export function cellBlockOf(block: NonNullable<ReturnType<Bot["blockAt"]>>, regi
   };
 }
 
+/**
+ * The sweep of the items the request dropped on its plot: walk to the nearest, again after each pickup, until a few quiet
+ * looks find none; what is left (a full inventory, no route) is named.
+ */
+async function collectPlotDrops(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: TendCropsRequest,
+  movements: () => ReturnType<typeof createMovements>,
+  drops: DropLedger,
+  signal?: AbortSignal,
+): Promise<{ left: string[] }> {
+  const inPlot = (position: Vec3) =>
+    position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
+    position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
+    position.y >= request.y - 1 && position.y <= request.y + 3;
+  const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && isItemEntity(entity) && inPlot(entity.position));
+  // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
+  // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
+  // 2 picked up; the rest lay on the plot).
+  let quiet = 0;
+  while (quiet < QUIET_LOOKS) {
+    signal?.throwIfAborted();
+    const target = dropped()
+      .filter((entity) => !drops.leftBehind.has(entity.id) && droppedItemName(entity) !== null)
+      .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+    if (target === undefined) {
+      quiet += 1;
+      await waitForTicksOrCancel(bot, QUIET_LOOK_TICKS, signal);
+      continue;
+    }
+    quiet = 0;
+    let collected = false;
+    const onCollect: BotEvents["playerCollect"] = (collector, item) => {
+      if (collector.id === bot.entity.id && item.id === target.id) collected = true;
+    };
+    bot.on("playerCollect", onCollect);
+    try {
+      const result = await pickupObservedItem(bot, {
+        entityId: target.id,
+        navigate: navigation.navigate,
+        movements: movements(),
+        hasArrived: () => collected,
+        ...(signal && { signal }),
+      });
+      if (result.kind !== "collected") drops.leftBehind.add(target.id);
+    } finally {
+      bot.off("playerCollect", onCollect);
+    }
+  }
+  return { left: dropped().map((entity) => droppedItemName(entity) ?? "an item not identified yet") };
+}
+
 export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, request: TendCropsRequest, signal?: AbortSignal, drops = dropLedger(bot)): FarmBody {
   const vec = (cell: FarmCell) => new Vec3(cell.x, cell.y, cell.z);
   // Routes never dig the farmland they work, nor drop scaffold onto the plot.
@@ -169,6 +223,8 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
     async breakBlock(cell) {
       const block = bot.blockAt(vec(cell));
       if (block === null) return "the cell is not loaded";
+      const refusal = regionChangeRefusal(bot, block.position, "dig");
+      if (refusal !== null) return refusal;
       try {
         await bot.dig(block, true);
       } catch (cause) {
@@ -191,47 +247,7 @@ export function mineflayerFarmBody(bot: Bot, navigation: NavigationRuntime, requ
       return seeds === null ? `no ${item} is carried` : (await useOnTop(soil, seeds, { x: soil.x, y: soil.y + 1, z: soil.z }))?.error ?? null;
     },
 
-    async collectDrops() {
-      const inPlot = (position: Vec3) =>
-        position.x >= request.min.x - DROP_MARGIN && position.x <= request.max.x + 1 + DROP_MARGIN &&
-        position.z >= request.min.z - DROP_MARGIN && position.z <= request.max.z + 1 + DROP_MARGIN &&
-        position.y >= request.y - 1 && position.y <= request.y + 3;
-      const dropped = () => Object.values(bot.entities).filter((entity) => !drops.baseline.has(entity.id) && isItemEntity(entity) && inPlot(entity.position));
-      // Nearest first, asked again after each pickup: the walk changes what is nearest. A drop whose item is not known
-      // yet looks like nothing, so the sweep ends only after a few quiet looks (live 2026-10-03: 14 wheat harvested,
-      // 2 picked up; the rest lay on the plot).
-      let quiet = 0;
-      while (quiet < QUIET_LOOKS) {
-        signal?.throwIfAborted();
-        const target = dropped()
-          .filter((entity) => !drops.leftBehind.has(entity.id) && droppedItemName(entity) !== null)
-          .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-        if (target === undefined) {
-          quiet += 1;
-          await waitForTicksOrCancel(bot, QUIET_LOOK_TICKS, signal);
-          continue;
-        }
-        quiet = 0;
-        let collected = false;
-        const onCollect: BotEvents["playerCollect"] = (collector, item) => {
-          if (collector.id === bot.entity.id && item.id === target.id) collected = true;
-        };
-        bot.on("playerCollect", onCollect);
-        try {
-          const result = await pickupObservedItem(bot, {
-            entityId: target.id,
-            navigate: navigation.navigate,
-            movements: movements(),
-            hasArrived: () => collected,
-            ...(signal && { signal }),
-          });
-          if (result.kind !== "collected") drops.leftBehind.add(target.id);
-        } finally {
-          bot.off("playerCollect", onCollect);
-        }
-      }
-      return { left: dropped().map((entity) => droppedItemName(entity) ?? "an item not identified yet") };
-    },
+    collectDrops: () => collectPlotDrops(bot, navigation, request, movements, drops, signal),
 
     carried: (item) => bot.inventory.items().filter((candidate) => candidate.name === item).reduce((sum, candidate) => sum + candidate.count, 0),
     hasHoe: () => hoe() !== null,

@@ -5,6 +5,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { Item } from "prismarine-item";
 import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
+import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 import { buildCrystalStaircase, pillarShortfall, planCrystalStaircase, staircaseShortfall } from "./crystal-staircase.js";
 
 /** A native spike: obsidian strictly below the bedrock pedestal, the crystal one above it, and only the two narrow towers caged. */
@@ -74,4 +75,34 @@ for (const radius of [2, 3, 5]) test(`radius ${radius} staircase preserves its l
   assert.match(staircaseShortfall(bot, rebuilt)!, /2 end_stone blocks still needed; carrying 0/);
   carry(2);
   assert.equal(staircaseShortfall(bot, rebuilt), null);
+});
+
+/** Protected regions at the staircase's treads (plan 2026-11-07-p4-06a-threat T5b, ADR-012): the placement core refuses a tread inside another's region. */
+function oneTreadPlan(owner: string | "own") {
+  const harness = createFakeBot({ position: new Vec3(0.5, 64, 0.5), carried: { end_stone: 4 }, cells: { "1,63,0": "end_stone" } });
+  const regionOwner = owner === "own" ? harness.bot.username : owner;
+  setProtectedRegionsProvider(harness.bot, () => [
+    { regionId: 12, dimension: "overworld", owner: regionOwner, label: "Tom's tower", min: { x: 1, y: 64, z: 0 }, max: { x: 1, y: 64, z: 0 } },
+  ]);
+  const plan = {
+    cells: [{ position: { x: 1, y: 64, z: 0 }, blockName: "end_stone" }],
+    stance: new Vec3(1, 65, 0), covered: false, pedestal: new Vec3(0, 70, 0), tower: [], pillarBlocks: 0,
+  };
+  return { ...harness, plan };
+}
+
+test("a tread inside another owner's region is not built: the build names the region and sends no placement", async () => {
+  const { bot, clock, server, plan } = oneTreadPlan("Tom");
+  const result = await clock.settle(buildCrystalStaircase(bot, {} as NavigationRuntime, DEFAULT_SURVIVAL_POLICY, plan, new AbortController().signal), 30_000);
+  assert.match(result ?? "", /CRYSTAL_STAIRCASE_INCOMPLETE/);
+  assert.ok(result?.includes("(owner Tom)"), String(result));
+  assert.equal(server.packets.filter((packet) => packet.name === "block_place").length, 0);
+  assert.equal(bot.blockAt(new Vec3(1, 64, 0))?.name, "air");
+});
+
+test("a tread inside the bot's own region is built", async () => {
+  const { bot, clock, plan } = oneTreadPlan("own");
+  const result = await clock.settle(buildCrystalStaircase(bot, {} as NavigationRuntime, DEFAULT_SURVIVAL_POLICY, plan, new AbortController().signal), 30_000);
+  assert.equal(result, null);
+  assert.equal(bot.blockAt(new Vec3(1, 64, 0))?.name, "end_stone");
 });

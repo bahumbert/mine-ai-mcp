@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
-import { boatUnderFeet, carriesBoat, crossByBoat, deepWaterOnTheWay, lowBankAlong } from "./boat-crossing.js";
+import { boatUnderFeet, carriesBoat, crossByBoat, cutStep, deepWaterOnTheWay, launchBoat, lowBankAlong } from "./boat-crossing.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
@@ -480,6 +481,39 @@ test("a crossing that starts seated and reaches the far bank takes the same boat
   assert.deepEqual(hitBoats(world), [boat.id], "the boat she rode is broken at the bank");
   assert.equal(boatsCarried(world), 2, "the boat she carried and the one she rode");
   assert.equal(world.bot.vehicle, null);
+});
+
+/** Protected regions at the boat crossing's own digs (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+const regionOver = (owner: string, min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }) => ({
+  regionId: 11, dimension: "overworld", owner, label: "Tom's bank", min, max,
+});
+const BANK = { min: { x: 41, y: 50, z: -3 }, max: { x: 47, y: 70, z: 3 } };
+const digPackets = (world: FakeHarness) => world.server.packets.filter((packet) => packet.name === "block_dig").length;
+
+test("the step cut into a bank of another owner's region is refused naming it: nothing dug, the crossing told why", async () => {
+  const world = farBankSea(200);
+  setProtectedRegionsProvider(world.bot, () => [regionOver("Tom", BANK.min, BANK.max)]);
+  const cut = await settled(world, cutStep(world.bot, { x: 39.5, z: 0.5 }, { x: 1, z: 0 }, 62));
+  assert.match(cut, /^the bank ahead \(dirt\) cannot be cut: Dig cell \(41, 64, 0\) is inside protected region #11 'Tom's bank' \(owner Tom\)/u);
+  assert.equal(digPackets(world), 0);
+  assert.equal(world.bot.blockAt(new Vec3(41, 64, 0))?.name, "dirt");
+});
+
+test("the step cut into a bank of the bot's own region is dug", async () => {
+  const world = farBankSea(200);
+  setProtectedRegionsProvider(world.bot, () => [regionOver(world.bot.username, BANK.min, BANK.max)]);
+  const cut = await settled(world, cutStep(world.bot, { x: 39.5, z: 0.5 }, { x: 1, z: 0 }, 62));
+  assert.equal(cut, "");
+  assert.equal(world.bot.blockAt(new Vec3(41, 64, 0))?.name, "air");
+});
+
+test("a plant at the feet in another owner's region is left standing by the launch, one outside it is cleared", async () => {
+  const foreign = shoreSea({ carried: { oak_boat: 1 }, mocked: true, cells: { "0,63,0": "short_grass", "0,64,0": "short_grass" } });
+  setProtectedRegionsProvider(foreign.bot, () => [regionOver("Tom", { x: 0, y: 63, z: 0 }, { x: 0, y: 63, z: 0 })]);
+  using _timers = foreign.clock.install();
+  await settled(foreign, launchBoat(foreign.bot, foreign.bot.inventory.items()[0]!, { x: 1, z: 0 }));
+  assert.equal(foreign.bot.blockAt(new Vec3(0, 63, 0))?.name, "short_grass", "the plant in the region stays");
+  assert.equal(foreign.bot.blockAt(new Vec3(0, 64, 0))?.name, "air", "the plant at the head, outside the region, was cleared");
 });
 
 test("a boat taken back is swum after when its item floated off, though another boat is carried", async () => {

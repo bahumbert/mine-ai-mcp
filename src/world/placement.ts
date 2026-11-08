@@ -8,7 +8,7 @@ import { carriedCount, settleInventoryCount } from "./inventory-count.js";
 import { SERVER_ANSWER_TICKS, waitForServerAnswer } from "./world-age.js";
 import { recordCombatResourceReceipt } from "../runtime/combat-resource-receipts.js";
 import { recordLifeSavingPlacement } from "./life-saving-placements.js";
-import { foreignRegionAt, regionRefusalText } from "./protected-regions.js";
+import { regionChangeRefusal } from "./protected-regions.js";
 import type { BlockHalf } from "./block-states.js";
 
 export type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
@@ -84,14 +84,8 @@ export type BlockPlacementResult =
 function regionRefusal(bot: Bot, placement: BlockPlacement): BlockPlacementResult | null {
   if (placement.lifeSaving) return null;
   for (const cell of placement.expectedCells) {
-    const region = foreignRegionAt(bot, cell);
-    if (region) {
-      return {
-        kind: "failed",
-        error: `Placement cell (${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}: build elsewhere or ask its owner.`,
-        cause: "policy",
-      };
-    }
+    const refusal = regionChangeRefusal(bot, cell, "placement");
+    if (refusal !== null) return { kind: "failed", error: refusal, cause: "policy" };
   }
   return null;
 }

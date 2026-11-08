@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { mineflayerFarmBody, plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
 import { Vec3 } from "vec3";
 import { PLOT_FACTS, cutAfter, FakeFarm } from "../../test-support/fake-farm.js";
@@ -92,6 +93,40 @@ test("a cancel ends the quiet look for dropped items at once when physics has st
   clock.after(100, () => stop.abort(new Error("bot died")));
   await assert.rejects(clock.settle(body.collectDrops(), 1_000), /bot died/);
   assert.equal(farmer.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+});
+
+/** Protected regions at the farm's own digs and tills (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+function farmerIn(owner: string | null, cells: Record<string, string>, carried: Record<string, number> = {}) {
+  const harness = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells, carried });
+  const region = (name: string) => ({
+    regionId: 3, dimension: "overworld", owner: name, label: "Tom's farm", min: { x: 0, y: 62, z: -1 }, max: { x: 2, y: 66, z: 1 },
+  });
+  setProtectedRegionsProvider(harness.bot, () => (owner === null ? [] : [region(owner === "own" ? harness.bot.username : owner)]));
+  return { ...harness, body: mineflayerFarmBody(harness.bot, {} as NavigationRuntime, wheatPlot()) };
+}
+
+test("clearing a cell in another owner's region is refused naming the region, and the block stays", async () => {
+  const { body, bot, server } = farmerIn("Tom", { "1,65,0": "short_grass" });
+  const failed = await body.breakBlock({ x: 1, y: 65, z: 0 });
+  assert.ok(failed?.includes("inside protected region #3 'Tom's farm' (owner Tom)"), String(failed));
+  assert.equal(bot.blockAt(new Vec3(1, 65, 0))?.name, "short_grass");
+  assert.equal(server.packets.filter((packet) => packet.name === "block_dig").length, 0);
+});
+
+test("clearing a cell in the bot's own region proceeds", async () => {
+  const { body, bot, clock } = farmerIn("own", { "1,65,0": "short_grass" });
+  const clearing = body.breakBlock({ x: 1, y: 65, z: 0 });
+  await clock.advance(10_000);
+  assert.equal(await clearing, null);
+  assert.equal(bot.blockAt(new Vec3(1, 65, 0))?.name, "air");
+});
+
+test("tilling soil in another owner's region is an error naming the region, with no use packet", async () => {
+  const { body, server } = farmerIn("Tom", { "1,63,0": "dirt" }, { wooden_hoe: 1 });
+  const result = await body.till({ x: 1, y: 63, z: 0 });
+  assert.equal(result?.kind, "error");
+  assert.ok(result?.kind === "error" && result.error.includes("(owner Tom)"), JSON.stringify(result));
+  assert.equal(server.packets.filter((packet) => packet.name === "block_place" || packet.name === "use_item").length, 0);
 });
 
 test("a failed hoe use is unchanged only when the server clock moved 20 ticks and the hoe is still carried", () => {

@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { createFakeClock } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
 import { waterFixture } from "../../test-support/water.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { Budgets } from "../state/budgets.js";
 import { surface } from "./breath.js";
 
@@ -245,6 +246,29 @@ test("a roof dig that would outlast the air and half the health is not started: 
   assert.equal(outcome.kind, "stuck");
   assert.equal(outcome.roofDig, "too_slow");
   assert.deepEqual(world.held(), []);
+});
+
+/** A region of `owner` over the whole scene (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+const sceneRegionOf = (owner: string): ProtectedRegion => ({
+  regionId: 6, dimension: "overworld", owner, label: "Tom's lake house",
+  min: { x: BOX.x[0], y: BOX.y[0], z: BOX.z[0] }, max: { x: BOX.x[1], y: BOX.y[1], z: BOX.z[1] },
+});
+
+test("a roof in another owner's region is not dug: the ways are asked again, the attempt ends stuck naming `refused`, controls released", async (t) => {
+  const world = swimWorld(t, leavesRoofed(sealedPocket("stone")), new Vec3(0.5, 0.2, 0.5));
+  setProtectedRegionsProvider(world.bot, () => [sceneRegionOf("Tom")]);
+  const { outcome, digs } = await world.run(300, 200);
+  assert.deepEqual(digs, [], "no dig was started");
+  assert.equal(outcome.kind, "stuck");
+  assert.equal(outcome.roofDig, "refused");
+  assert.deepEqual(world.held(), []);
+});
+
+test("a roof in the bot's own region is dug as before", async (t) => {
+  const world = swimWorld(t, leavesRoofed(sealedPocket("stone")), new Vec3(0.5, 0.2, 0.5));
+  setProtectedRegionsProvider(world.bot, () => [sceneRegionOf(world.bot.username)]);
+  const { digs } = await world.run(300, 200);
+  assert.deepEqual(digs, ["roof"]);
 });
 
 /** The pocket under a leaves roof whose dig hangs until it is stopped; counts the stops. */

@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { z } from "zod";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { createFakeBot, type FakeBot, type FakeHarness } from "../../test-support/fake-bot/index.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
 
@@ -165,6 +166,59 @@ test("a native call that synchronously aborts is stopped and drained", async () 
     /disconnect during dig start/,
   );
   assert.equal(stopped, 1);
+});
+
+/** Protected regions at raw digs and placements (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
+const regionAround = (owner: string, cell: { x: number; y: number; z: number }): ProtectedRegion => ({
+  regionId: 9, dimension: "overworld", owner, label: "Tom's place",
+  min: { x: cell.x - 1, y: cell.y - 1, z: cell.z - 1 }, max: { x: cell.x + 1, y: cell.y + 1, z: cell.z + 1 },
+});
+const digPackets = (harness: FakeHarness) => harness.server.packets.filter((packet) => packet.name === "block_dig").length;
+
+test("raw_action dig of a cell in another owner's region is refused naming the region, with no dig packet", async () => {
+  const harness = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: { "1,64,0": "stone" } });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround("Tom", { x: 1, y: 64, z: 0 })]);
+  const result = await executeRawAction(harness.bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail();
+  assert.match(result.error, /RAW_REGION_PROTECTED/);
+  assert.ok(result.error.includes("inside protected region #9 'Tom's place' (owner Tom)"), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(digPackets(harness), 0);
+  assert.equal(result.afterBlock, "stone");
+});
+
+test("raw_action dig of a cell in the bot's own region proceeds", async () => {
+  const harness = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: { "1,64,0": "pointed_dripstone" } });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround(harness.bot.username, { x: 1, y: 64, z: 0 })]);
+  const running = executeRawAction(harness.bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+  await harness.clock.advance(10_000);
+  const result = await running;
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.afterBlock, "air");
+});
+
+test("raw_action place into another owner's region is refused naming the region, with no placement packet", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const harness = placingBot("barrel", { placement: "server" });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround("Tom", { x: 1, y: 65, z: 0 })]);
+  const result = await runRawAction(harness, rawPlace("barrel"), data);
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail();
+  assert.match(result.error, /RAW_REGION_PROTECTED/);
+  assert.ok(result.error.includes("inside protected region #9 'Tom's place' (owner Tom)"), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(harness.server.packets.filter((packet) => packet.name === "block_place").length, 0);
+  assert.equal(harness.bot.blockAt(new Vec3(1, 65, 0))?.name, "air");
+  assert.deepEqual(rawPlacedContainers(data), []);
+});
+
+test("raw_action place into the bot's own region proceeds", async (t) => {
+  const data = temporaryBotData({ closeAfter: t });
+  const harness = placingBot("barrel", { placement: "server" });
+  setProtectedRegionsProvider(harness.bot, () => [regionAround(harness.bot.username, { x: 1, y: 65, z: 0 })]);
+  const result = await runRawAction(harness, rawPlace("barrel"), data);
+  assert.equal(result.status, "succeeded");
 });
 
 /** Record every control the action sets, then let the fake apply it as before; `onSet` may react to one. */

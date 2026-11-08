@@ -22,6 +22,7 @@ import { getOff } from "./boat-get-off.js";
 import { type BoatLeft, boatLeftAfter, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import { MOUNT_WALL_MS, mountBoat } from "./boat-mount.js";
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
+import { foreignRegionAt, regionChangeRefusal } from "../../world/protected-regions.js";
 import { currentVehicle, ridersOf } from "./vehicle-sync.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
@@ -247,11 +248,13 @@ export interface CrossingTiming {
  * blocks out or more (closer, it would touch the shore), the way on first, then turning away from it as the shore
  * allows (live 2026-10-04: straight on was the shore bend).
  */
-async function launchBoat(bot: Bot, item: Item, heading: { readonly x: number; readonly z: number }): Promise<Entity | null> {
+export async function launchBoat(bot: Bot, item: Item, heading: { readonly x: number; readonly z: number }): Promise<Entity | null> {
   await bot.equip(item, "hand");
   // A plant at the feet or the head stops the server look ray: cleared first.
   for (const dy of [0, 1]) {
     const plant = bot.blockAt(bot.entity.position.floored().offset(0, dy, 0));
+    // A plant in another owner's region stays (ADR-012): the launch looks for another heading, as with any plant left.
+    if (plant !== null && foreignRegionAt(bot, plant.position) !== null) continue;
     if (plant !== null && !isAir(plant.name) && plant.name !== "water" && plant.boundingBox === "empty") await bot.dig(plant, true).catch(() => undefined);
   }
   await bot.equip(item, "hand");
@@ -519,12 +522,14 @@ function climbable(bot: Bot, x: number, z: number, surface: number): boolean {
  * so its top is a step up. A ledge over the water (nothing under it at the water's level, live 2026-10-04: grass over a
  * gap) is dug open and the column behind it is the bank. "" when done or nothing was needed, else why not.
  */
-async function cutStep(bot: Bot, from: { readonly x: number; readonly z: number }, heading: { readonly x: number; readonly z: number }, surface: number): Promise<string> {
+export async function cutStep(bot: Bot, from: { readonly x: number; readonly z: number }, heading: { readonly x: number; readonly z: number }, surface: number): Promise<string> {
   const dig = async (x: number, z: number): Promise<string> => {
     for (const y of [surface + 2, surface + 3]) {
       const block = bot.blockAt(new Vec3(x, y, z));
       if (block === null || block.boundingBox === "empty") continue;
       if (!bot.canDigBlock(block)) return `the bank ahead (${block.name}) cannot be dug from the boat`;
+      const refusal = regionChangeRefusal(bot, block.position, "dig");
+      if (refusal !== null) return `the bank ahead (${block.name}) cannot be cut: ${refusal}`;
       try {
         await bot.dig(block, true);
       } catch (error) {
