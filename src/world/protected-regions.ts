@@ -4,6 +4,7 @@
  * per-bot provider, like the navigation policy, so every route, collect and automatic response obeys the same list.
  */
 import type { Bot } from "mineflayer";
+import { isRecordedLifeSavingBlock } from "./life-saving-placements.js";
 
 export interface BlockCorner {
   readonly x: number;
@@ -81,6 +82,7 @@ export function regionRefusalText(region: ProtectedRegion): string {
  * uses (plan 2026-11-07-p4-06a-threat T5b), so a model reads the same words wherever the change was refused.
  */
 export function regionChangeRefusal(bot: Bot, cell: BlockCorner, change: "dig" | "placement"): string | null {
+  if (change === "dig" && isRecordedLifeSavingBlock(bot, cell)) return null;
   const region = foreignRegionAt(bot, cell);
   if (region === null) return null;
   const where = `(${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}`;

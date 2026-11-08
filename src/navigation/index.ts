@@ -88,3 +88,5 @@ export { canOccupyWater } from "./mineflayer/water.js";
 
 export { canAccessLiquid, liquidAccessGoal } from "./goals/liquid-access.js";
 export { dryLandGoal } from "./goals/dry-land.js";
+export { DIG_REACH } from "./movements/excavation.js";
+export { watchServerChange } from "./mineflayer/server-block-changes.js";

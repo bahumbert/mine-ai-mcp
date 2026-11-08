@@ -420,7 +420,7 @@ export async function createMinecraftRuntime(
   // The incident observer is built after the runner and reads it: the runner records through this until it exists.
   const bodyIncidents: BodyIncidents = { physicsStalled: () => {}, reflexLimit: () => {} };
   const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, bodyIncidents);
-  const reflexes = resources.use(new ReflexDriver(bot, runner));
+  const reflexes = resources.use(new ReflexDriver(bot, runner, { lifeSaving: { data: botData, navigate: (route) => navigation.navigate(route) } }));
   const navigation = resources.use(createNavigationRuntime(bot, { routes }));
   installMinecraftKnowledge(botData, bot.registry);
   const frontier = resources.use(attachSessionFrontier(bot, botData));
