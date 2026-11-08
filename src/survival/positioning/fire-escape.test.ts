@@ -15,7 +15,22 @@ import {
   fireWaterRoute,
   nearbyFireEscape,
   nearestDryCellToSwimTo,
+  lethalRouteBlocks,
 } from "./fire-escape.js";
+
+test("the lethal burn route is limited by remaining health and capped", () => {
+  const { bot } = createFakeBot();
+  for (const [health, expected] of [[4, 8.634], [3, 4.317], [2, 0], [10, 16]] as const) {
+    bot.health = health;
+    assert.ok(Math.abs(lethalRouteBlocks(bot) - expected) < 0.001);
+  }
+});
+
+test("the widened lethal scan does not route through unloaded cells", () => {
+  const { bot, world } = sceneAt({ "5,65,0": "water" }, new Vec3(0.5, 65, 0.5), ["1,65,0", "1,66,0", "0,65,1", "0,66,1", "0,65,-1", "0,66,-1", "-1,65,0", "-1,66,0"]);
+  bot.health = 8;
+  assert.equal(fireWaterRoute(bot, world, "lethal_burn"), null);
+});
 
 test("a newly burning occupied cell has a dry escape through navigation's observed geometry", () => {
   const { bot, world: game } = createFakeBot({ cells: { "0,64,0": "soul_fire", "1,64,0": "fire", "-1,64,0": "cactus" } });

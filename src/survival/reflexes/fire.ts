@@ -5,10 +5,12 @@ import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.j
 import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
+import { burnLeft, recordFireContact } from "../perception/burn.js";
 import { decideFireResponse, type FireFacts } from "../policy/environment.js";
 import {
   FIRE_ESCAPE_RADIUS,
   FIRE_ESCAPE_RISE_IN_LAVA,
+  FIRE_LETHAL_WATER_RADIUS,
   nearbyFireEscape,
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
@@ -23,7 +25,7 @@ import { escapeThenSettle, type EscapeAndSettle } from "../responses/lava-settle
 function escapeAvailability(bot: Bot, world: WorldView) {
   let memo: { key: string; available: boolean } | null = null;
   return (reason: FireEscapeReason, inLava: boolean, inFire: boolean): boolean => {
-    const key = `${bot.entity.position}|${world.revision}|${reason}|${inLava}|${inFire}`;
+    const key = `${bot.entity.position}|${world.revision}|${reason}|${inLava}|${inFire}|${reason === "lethal_burn" ? bot.health : ""}`;
     if (memo?.key !== key) memo = { key, available: nearbyFireEscape(bot, world, reason) !== null };
     return memo.available;
   };
@@ -33,8 +35,8 @@ function escapeAvailability(bot: Bot, world: WorldView) {
 export function fireEscapeFacts(bot: Bot) {
   const origin = bot.entity.position.floored();
   const cells: (number | null)[] = [];
-  for (let x = -FIRE_ESCAPE_RADIUS; x <= FIRE_ESCAPE_RADIUS; x++)
-    for (let z = -FIRE_ESCAPE_RADIUS; z <= FIRE_ESCAPE_RADIUS; z++)
+  for (let x = -FIRE_LETHAL_WATER_RADIUS; x <= FIRE_LETHAL_WATER_RADIUS; x++)
+    for (let z = -FIRE_LETHAL_WATER_RADIUS; z <= FIRE_LETHAL_WATER_RADIUS; z++)
       for (let y = -2; y <= FIRE_ESCAPE_RISE_IN_LAVA + 1; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
   return {
     cells,
@@ -144,14 +146,22 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
       const burning = isBurning(bot);
+      if (inLava) recordFireContact(bot, "lava", bot.time.age);
+      if (inFire) recordFireContact(bot, "fire", bot.time.age);
+      const burn = burnLeft(bot);
+      const lethalBurn = burning && bot.health <= burn.hp;
       if (!lava.advancing && !inLava && !inFire && !burning) return null;
-      const reason: FireEscapeReason = lava.advancing ? "advancing_lava" : "contact";
+      const reason: FireEscapeReason = lava.advancing ? "advancing_lava" : lethalBurn && !inLava && !inFire ? "lethal_burn" : "contact";
       const facts: FireFacts = {
         reason,
         advancing: lava.advancing,
         inLava,
         inFire,
         burning,
+        lethalBurn,
+        waterBucket: false,
+        health: bot.health,
+        burnTicks: burn.ticks,
         escapeAvailable: escapeAvailable(reason, inLava, inFire),
       };
       return { kind: "observed", danger: facts, evidence: { ...facts } };

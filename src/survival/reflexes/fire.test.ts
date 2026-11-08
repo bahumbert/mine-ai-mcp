@@ -17,6 +17,21 @@ import {
 import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
 import { attachFireReflex, fireEscapeFacts } from "./fire.js";
+import { recordFireContact } from "../perception/burn.js";
+
+test("health at or under the burn left is lethal", async () => {
+  const { bot, clock, world } = burningBesidePit(true, { startAge: 1100 });
+  recordFireContact(bot, "lava", 1000);
+  bot.health = 8;
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, stillRunner(), { now: clock.now }));
+  resources.use(attachFireReflex(bot, driver, world));
+  await clock.advance(50);
+  assert.equal(JSON.parse(JSON.stringify(driver.snapshot().find((entry) => entry.name === "fire_reflex")!.danger)).lethalBurn, true);
+  bot.health = 15;
+  await clock.advance(50);
+  assert.equal(JSON.parse(JSON.stringify(driver.snapshot().find((entry) => entry.name === "fire_reflex")!.danger)).lethalBurn, false);
+});
 
 test("fire response selection replays from the observed escape availability", () => {
   const recorded = JSON.parse(
@@ -37,6 +52,17 @@ test("fire response selection replays from the observed escape availability", ()
     "respond",
     "active fire cannot be mistaken for residual burning",
   );
+  const lethal = { ...recorded, reason: "lethal_burn" as const, lethalBurn: true, waterBucket: false, health: 8, burnTicks: 200 };
+  const response = decideFireResponse({ ...lethal, escapeAvailable: true });
+  assert.equal(response.kind, "respond");
+  if (response.kind === "respond") assert.equal(response.response, "lethal_burn");
+  const decision = decideFireResponse(lethal);
+  assert.equal(decision.kind, "stand_down");
+  if (decision.kind === "stand_down") {
+    const excluded = decision.candidates[0]!.excluded;
+    assert.equal(excluded.kind, "infeasible_now");
+    if (excluded.kind === "infeasible_now") assert.match(excluded.premise, /Burning with 8 HP and about 10 s of burn left/);
+  }
 });
 
 
@@ -537,7 +563,7 @@ test("rising in lava is progress, after sinking first", async () => {
 test("the escape facts read two rows below and three above the feet", async () => {
   const { bot, fake } = burningBesidePit(false);
   const before = fireEscapeFacts(bot).cells;
-  assert.equal(before.length, 9 * 9 * 6, "9 x 9 columns, y -2 to +3");
+  assert.equal(before.length, 17 * 17 * 6, "17 x 17 columns, y -2 to +3");
   const origin = bot.entity.position.floored();
   fake.setCell(origin.offset(2, 3, 0), "stone");
   assert.notDeepEqual(fireEscapeFacts(bot).cells, before, "the row three above the feet is read");

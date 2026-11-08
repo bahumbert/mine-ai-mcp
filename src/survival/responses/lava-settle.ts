@@ -4,6 +4,7 @@ import type { WorldView } from "../../navigation/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt, lavaFlowDelayTicks } from "../../world/lava-flow.js";
 import { airSupplyPoints, isBurning, isInFire, isInLava } from "../perception/body.js";
+import { burnLeft } from "../perception/burn.js";
 import type { FireEscapeReason } from "../positioning/fire-escape.js";
 import { escapeFire, type FireEscapeOutcome } from "./fire.js";
 
@@ -105,6 +106,13 @@ export interface EscapeAndSettle {
   readonly settle: Exclude<LavaSettle, "advancing"> | null;
 }
 
+/** Select the current danger for an escape restarted by the settle wait. */
+export function rerunFireReason(bot: Bot): FireEscapeReason {
+  if (advancingLavaAt(bot)) return "advancing_lava";
+  if (!isInLava(bot) && !isInFire(bot) && isBurning(bot) && bot.health <= burnLeft(bot).hp) return "lethal_burn";
+  return "contact";
+}
+
 /**
  * Leave the fire, then wait for nearby lava to settle. Lava that moves at the body during the wait (the settle says
  * `advancing`) runs the escape again, with the reason read from the cells now, inside the same hold and the same
@@ -128,7 +136,7 @@ export async function escapeThenSettle(
     if (settle !== "advancing") return { escape, settle };
     const leftToEscape = deadline - performance.now();
     if (leftToEscape <= 0) return { escape, settle: "spreading" };
-    escape = await escapeFire(bot, world, signal, advancingLavaAt(bot) ? "advancing_lava" : "contact", {
+    escape = await escapeFire(bot, world, signal, rerunFireReason(bot), {
       maximumMs: leftToEscape,
     });
   }

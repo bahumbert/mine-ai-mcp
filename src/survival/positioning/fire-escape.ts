@@ -120,8 +120,15 @@ export function clearFireHop(
 export const FIRE_ESCAPE_RISE_IN_LAVA = 2;
 
 /** Immediate swimming/jumping reach; longer journeys belong to navigation. */
-export type FireEscapeReason = "contact" | "advancing_lava";
+export type FireEscapeReason = "contact" | "advancing_lava" | "lethal_burn";
 export const FIRE_ESCAPE_RADIUS = 4;
+export const FIRE_LETHAL_WATER_RADIUS = 8;
+/** Walking speed in blocks per second, derived from prismarine-physics/index.js:569-570, 743-744. */
+const WALK_BLOCKS_PER_SECOND = 4.317;
+/** Distance safely reachable before a lethal burn consumes the remaining health. */
+export function lethalRouteBlocks(bot: Bot): number {
+  return Math.min(16, WALK_BLOCKS_PER_SECOND * Math.max(0, bot.health - 2));
+}
 /** The longest way round to water: walked in under 2 s, while lava burns for 15 s and a fire block for 8 s. */
 export const FIRE_WATER_ROUTE_BLOCKS = 8;
 
@@ -138,12 +145,12 @@ export interface EscapeCells {
  * that is in lava or fire. `rise` is the highest row, in cells above the feet, a cell is scanned in (a body in lava
  * passes `FIRE_ESCAPE_RISE_IN_LAVA`: it swims up to a bank two cells over its feet, not one).
  */
-export function escapeCells(bot: Bot, world: WorldView, { crossSpreading = false, rise = 1 } = {}): EscapeCells {
+export function escapeCells(bot: Bot, world: WorldView, { crossSpreading = false, rise = 1, radius = FIRE_ESCAPE_RADIUS } = {}): EscapeCells {
   const origin = bot.entity.position.floored();
   const water: Vec3[] = [];
   const dry: Vec3[] = [];
-  for (let dx = -FIRE_ESCAPE_RADIUS; dx <= FIRE_ESCAPE_RADIUS; dx++)
-    for (let dz = -FIRE_ESCAPE_RADIUS; dz <= FIRE_ESCAPE_RADIUS; dz++)
+  for (let dx = -radius; dx <= radius; dx++)
+    for (let dz = -radius; dz <= radius; dz++)
       for (let dy = -1; dy <= rise; dy++) {
         const cell = origin.offset(dx, dy, dz);
         const feet = world.blockAt(cell.x, cell.y, cell.z);
@@ -191,6 +198,7 @@ function openHopsFrom(
   standable: ReadonlyMap<string, Vec3>,
   shortest: Map<string, number>,
   open: RouteNode[],
+  limit: number,
 ): void {
   const cell = node.point.floored();
   for (const [dx, dz] of SIDE_STEPS)
@@ -199,7 +207,7 @@ function openHopsFrom(
       if (!next) continue;
       const length = node.length + node.point.distanceTo(next);
       const key = cellKeyOf(next);
-      if (length > FIRE_WATER_ROUTE_BLOCKS || length >= (shortest.get(key) ?? Infinity)) continue;
+      if (length > limit || length >= (shortest.get(key) ?? Infinity)) continue;
       if (!clearFireHop(bot, world, node.point, next, node.departure)) continue;
       shortest.set(key, length);
       open.push({ point: next, departure: { position: next, inLava: false }, length, before: node });
@@ -210,7 +218,7 @@ function openHopsFrom(
  * Dijkstra on hop length over the scanned cells, to the nearest water cell. A hop is tested only when its start is
  * the cheapest open cell, so the reads are bounded by the scan's size and the length bound.
  */
-function shortestWayToWater(bot: Bot, world: WorldView, cells: EscapeCells): Vec3[] | null {
+function shortestWayToWater(bot: Bot, world: WorldView, cells: EscapeCells, limit: number): Vec3[] | null {
   const standable = new Map<string, Vec3>();
   for (const point of [...cells.water, ...cells.dry]) standable.set(cellKeyOf(point), point);
   const waterKeys = new Set(cells.water.map(cellKeyOf));
@@ -225,7 +233,7 @@ function shortestWayToWater(bot: Bot, world: WorldView, cells: EscapeCells): Vec
     if (closed.has(key)) continue;
     closed.add(key);
     if (node.before && waterKeys.has(key)) return pointsOfRoute(node);
-    openHopsFrom(bot, world, node, standable, shortest, open);
+    openHopsFrom(bot, world, node, standable, shortest, open, limit);
   }
   return null;
 }
@@ -238,10 +246,10 @@ function ownWaterCell(bot: Bot, world: WorldView): Vec3 | null {
 }
 
 /** The own water cell is a refuge only while no lava can flow into the body's cells there (the head cell above the water). */
-function waterRouteOver(bot: Bot, world: WorldView, cells: EscapeCells): Vec3[] | null {
+function waterRouteOver(bot: Bot, world: WorldView, cells: EscapeCells, limit: number): Vec3[] | null {
   if (cells.water.length === 0) return null;
   const own = ownWaterCell(bot, world);
-  return own && !advancingLavaAt(bot, own) ? [own] : shortestWayToWater(bot, world, cells);
+  return own && !advancingLavaAt(bot, own) ? [own] : shortestWayToWater(bot, world, cells, limit);
 }
 
 /** How far up the scan reaches: a body in lava swims up to a bank two cells over its feet, any other body one. */
@@ -254,8 +262,9 @@ function riseOf(bot: Bot): number {
  * scan holds no water or no admitted way reaches it. Only for fire contact: advancing lava has its own dry escape.
  */
 export function fireWaterRoute(bot: Bot, world: WorldView, reason: FireEscapeReason): Vec3[] | null {
-  if (reason !== "contact") return null;
-  return waterRouteOver(bot, world, escapeCells(bot, world, { rise: riseOf(bot) }));
+  if (reason === "advancing_lava") return null;
+  const lethal = reason === "lethal_burn";
+  return waterRouteOver(bot, world, escapeCells(bot, world, { rise: riseOf(bot), radius: lethal ? FIRE_LETHAL_WATER_RADIUS : FIRE_ESCAPE_RADIUS }), lethal ? lethalRouteBlocks(bot) : FIRE_WATER_ROUTE_BLOCKS);
 }
 
 /** Dry cells by distance; cells that tie go to the one nearer a scanned water, the bank a later route can use. */
@@ -271,8 +280,9 @@ function dryCellsNearestFirst(bot: Bot, cells: EscapeCells): Vec3[] {
 
 /** The walk over `cells`: the way to water, else the nearest straight-line water, else (when one is needed) the nearest dry bank. */
 function routeOverCells(bot: Bot, world: WorldView, reason: FireEscapeReason, cells: EscapeCells): Vec3[] | null {
-  const route = reason === "contact" ? waterRouteOver(bot, world, cells) : null;
+  const route = reason !== "advancing_lava" ? waterRouteOver(bot, world, cells, reason === "lethal_burn" ? lethalRouteBlocks(bot) : FIRE_WATER_ROUTE_BLOCKS) : null;
   if (route) return route;
+  if (reason === "lethal_burn") return null;
   const needsDryEscape = reason === "advancing_lava" || isInLava(bot) || isInFire(bot) || advancingLavaAt(bot);
   const here = bot.entity.position;
   const water = [...cells.water].sort((a, b) => a.distanceTo(here) - b.distanceTo(here));
@@ -289,7 +299,7 @@ function routeOverCells(bot: Bot, world: WorldView, reason: FireEscapeReason, ce
  */
 export function fireEscapeRoute(bot: Bot, world: WorldView, reason: FireEscapeReason = "contact"): Vec3[] | null {
   const rise = riseOf(bot);
-  const safe = routeOverCells(bot, world, reason, escapeCells(bot, world, { rise }));
+  const safe = routeOverCells(bot, world, reason, escapeCells(bot, world, { rise, radius: reason === "lethal_burn" ? FIRE_LETHAL_WATER_RADIUS : FIRE_ESCAPE_RADIUS }));
   if (safe || !(isInLava(bot) || isInFire(bot))) return safe;
   return routeOverCells(bot, world, reason, escapeCells(bot, world, { crossSpreading: true, rise }));
 }

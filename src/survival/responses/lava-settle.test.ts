@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
-import { awaitLavaSettled, LAVA_SETTLE_MAXIMUM_MS, type LavaSettle } from "./lava-settle.js";
+import { awaitLavaSettled, LAVA_SETTLE_MAXIMUM_MS, rerunFireReason, type LavaSettle } from "./lava-settle.js";
+import { recordFireContact } from "../perception/burn.js";
+
+test("an advancing re-run keeps lethal_burn while the burn is lethal", () => {
+  const scene = settleScene();
+  scene.metadata[scene.sharedFlagsIndex] = 1;
+  scene.bot.health = 8;
+  recordFireContact(scene.bot, "lava", scene.bot.time.age);
+  assert.equal(rerunFireReason(scene.bot), "lethal_burn");
+});
 
 /** A bot standing on dry ground; `lastChange` is the world age of the last lava change the reflex heard of. */
 function settleScene(options: { dimension?: string; lavaBeside?: boolean; attacker?: boolean } = {}) {

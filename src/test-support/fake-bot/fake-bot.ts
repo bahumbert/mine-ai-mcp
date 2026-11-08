@@ -22,6 +22,7 @@ import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-slee
 import { attachFakeUse } from "./fake-bot-use.js";
 import { type FakeCombat, attachFakeCombat } from "./fake-bot-combat.js";
 import { attachFakeBoatDamage } from "./fake-bot-boat-damage.js";
+import { attachFakeFire } from "./fake-bot-fire.js";
 import { attachFakeArmour } from "./fake-bot-armour.js";
 import { attachFakeSwing } from "./fake-bot-swing.js";
 import { attachFakeVehicle, seatStartingPassengers } from "./fake-bot-vehicle.js";
@@ -232,6 +233,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   attachFakePlacement(bot, { clock, server, world, inventory, windows });
   const combat = attachFakeCombat(bot, { server, inventory, entities: serverEntities, swing });
   attachFakeLavaFlow({ server, world });
+  attachFakeFire(bot, server);
   attachFakeFindBlocks(bot);
   const breath = attachFakeBreath(bot, { server });
   attachFakeSleep(bot, { server, world, combat });

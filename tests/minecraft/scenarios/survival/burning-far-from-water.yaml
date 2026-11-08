@@ -1,0 +1,35 @@
+template: ../../templates/flat-single-action.yaml
+name: burning-far-from-water
+tags: [regression]
+description: >-
+  A lethal residual burn after lava contact must walk to water seven cells away rather than stand down on dry ground.
+world:
+  type: flat
+  difficulty: peaceful
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: true
+    randomTickSpeed: 0
+reset:
+  - "fill -12 -63 -12 12 -40 12 air"
+geometry:
+  - fill: { block: stone, from: [-10, -63, -10], to: [10, -61, 10] }
+  - fill: { block: lava, from: [-5, -60, 0], to: [-5, -60, 0] }
+  - fill: { block: water, from: [7, -61, 0], to: [7, -61, 0] }
+players:
+  - { name: Actor, pos: [0.5, -60, 0.5], op: true }
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/burning-far-from-water.ts]
+params:
+  contact: [-4.5, -60, 0.5]
+  start: [0.5, -60, 0.5]
+goal:
+  kind: all
+  timeout: 40
+  goals:
+    - { kind: completion, who: Actor }

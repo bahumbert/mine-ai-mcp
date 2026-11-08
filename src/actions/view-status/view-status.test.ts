@@ -6,6 +6,18 @@ import { temporaryBotData } from "../../test-support/bot-data.js";
 import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fixtures.test.js";
 import { emitFakeTags } from "../../test-support/fake-bot/fake-bot-tags.js";
 import { watchServerTags } from "../../world/server-tags.js";
+import { recordFireContact } from "../../survival/perception/burn.js";
+
+test("status reports the burn estimate only while burning", (t) => {
+  const bot = liveBot();
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  const index = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags");
+  Reflect.set(bot.entity.metadata, index, 1);
+  recordFireContact(bot, "lava", bot.time.age);
+  assert.deepEqual(observeLiveSituation(bot, data, idleActivity).vitals.burn, { ticks: 300, hp: 15 });
+  Reflect.set(bot.entity.metadata, index, 0);
+  assert.equal(observeLiveSituation(bot, data, idleActivity).vitals.burn, null);
+});
 test("reports the observed clock without predicting daylight outside the Overworld", (t) => {
   // Servers may supply a custom dimension beyond Mineflayer's built-in union.
   for (const dimension of ["the_nether", "the_end", "custom_dimension"]) {
@@ -50,7 +62,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
   const situation = observeLiveSituation(liveBot(), data, idleActivity);
 
   assert.equal(situation.botId, "TestBot");
-  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null, armour: null, armourToughness: null });
+  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null, burn: null, armour: null, armourToughness: null });
   assert.deepEqual(situation.clock, {
     timeOfDay: 13826,
     phase: "night",

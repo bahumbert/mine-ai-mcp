@@ -169,6 +169,7 @@ for (const { file, driver, run, name } of scenarios.filter(({ driver }) => !OWN_
  */
 const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "arrow-reservation.ts": "runs single-action.ts; the scenario's action input holds no x or z",
+  "burning-far-from-water.ts": "teleports by chat using arenaPoint; the action reads events without coordinates",
   "death-is-read.ts": "no action; the death is made by a chat command on the actor itself (@s)",
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",

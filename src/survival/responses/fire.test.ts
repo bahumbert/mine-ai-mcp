@@ -106,6 +106,22 @@ test("a burning bot on the bank keeps going while water is reachable", async () 
   assert.equal(seen.outcome, "escaped");
 });
 
+test("a lethal burn walks to water seven blocks away", async () => {
+  const { bot, world, controls, physicsTicks } = burningScene({ position: new Vec3(0.5, 65, 0.5), cells: { "7,65,0": "water" } });
+  for (let x = -9; x <= 9; x++) for (let z = -9; z <= 9; z++) for (let y = 62; y <= 68; y++) {
+    const at = new Vec3(x, y, z);
+    world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
+  }
+  bot.health = 8;
+  const seen = watch(escapeFire(bot, world, new AbortController().signal, "lethal_burn"));
+  await physicsTicks(3);
+  assert.equal(seen.outcome, null);
+  assert.equal(anyMoveControl(controls), true);
+  bot.entity.position.set(7.5, 65, 0.5);
+  await physicsTicks(2);
+  assert.equal(seen.outcome, "escaped");
+});
+
 test("fire out before arriving ends the escape", async () => {
   const { bot, world, controls, cleared, physicsTicks } = burningOnTheBank();
   const escape = new AbortController();

@@ -17,6 +17,8 @@ import {
 import { waterLandingSupply } from "../../navigation/mineflayer/water-landing.js";
 import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies, observeHostileContact } from "../../survival/perception/combat/threats.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
+import { isBurning } from "../../survival/perception/body.js";
+import { burnLeft } from "../../survival/perception/burn.js";
 import type { Position3 } from "../../utils/index.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
 import { readDragonClouds } from "../../world/dragon-hazards.js";
@@ -87,6 +89,7 @@ export function observeLiveSituation(
       saturation: round(snapshot.saturation, 1),
       airSupplyTicks: air,
       burning: flags === null ? null : (flags & 1) !== 0,
+      burn: isBurning(bot) ? burnLeft(bot) : null,
       ...armourVitals,
     },
     ...conditionFacts,

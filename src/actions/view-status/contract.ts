@@ -165,6 +165,7 @@ export const liveSituationSchema = z.strictObject({
       .nullable()
       .describe("Own entity air_supply metadata in ticks; null until observed. May be negative during drowning."),
     burning: z.boolean().nullable().describe("Own entity burning flag; null until observed."),
+    burn: z.strictObject({ ticks: z.number(), hp: z.number() }).nullable(),
     armour: z.number().nullable().describe("Armour points the server counts (generic.armor); 0 with no piece worn; null when a piece is worn and the server told none."),
     armourToughness: z.number().nullable().describe("Armour toughness (generic.armor_toughness); same null rule as armour."),
   }),

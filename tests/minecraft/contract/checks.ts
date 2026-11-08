@@ -23,6 +23,7 @@ import { explosionKnockback } from "./checks/explosion-knockback.ts";
 import { shieldRaised } from "./checks/shield-raised.ts";
 import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
+import { waterExtinguishesBurning } from "./checks/water-extinguishes-burning.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
 import { armourPointsWorn } from "./checks/armour-points-worn.ts";
 import { heightmapInChunkPacket } from "./checks/heightmap-in-chunk-packet.ts";
@@ -152,6 +153,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,
+  waterExtinguishesBurning,
   bedSleepAndWake,
   bedRefusedMonsterNear,
   rainAndThunderState,
