@@ -46,6 +46,7 @@ import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
+import { lavaBesideHead } from "./checks/lava-beside-head.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { lavaOverPassable } from "./checks/lava-over-passable.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
@@ -181,6 +182,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackMobKnockbackSprint,
   bucketPourAndFill,
   placeBlockWithOptions,
+  lavaBesideHead,
   lavaOverHole,
   lavaOverPassable,
   whisperEcho,

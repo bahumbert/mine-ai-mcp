@@ -41,28 +41,49 @@ test("a source on a floor fills the open cell beside it with a level 2 after 30 
   assert.deepEqual([1, 2, 3].map((x) => nameAt(harness, x, LAVA_Y)), ["lava 2", "lava 4", "stone"]);
 });
 
-test("a level 2 with air under it pours a falling column and fills nothing beside it; with lava under it nothing happens beside it either", async () => {
-  const overAir = rowBot({ [key(1, FLOOR_Y, 0)]: "air" });
-  overAir.world.setCell(new Vec3(1, LAVA_Y, 0), lava(2));
-  await overAir.clock.advance(FLOW_TICKS * 3 * TICK_MS);
-  assert.equal(nameAt(overAir, 1, FLOOR_Y), "lava 8");
-  assert.deepEqual([0, 2].map((x) => nameAt(overAir, x, LAVA_Y)), ["air", "air"]);
+test("a flowing level 2, 4 or 6 with air under it pours a falling column and fills nothing beside it; with lava under it nothing happens beside it either", async () => {
+  for (const level of [2, 4, 6]) {
+    const overAir = rowBot({ [key(1, FLOOR_Y, 0)]: "air" });
+    overAir.world.setCell(new Vec3(1, LAVA_Y, 0), lava(level));
+    await overAir.clock.advance(FLOW_TICKS * 3 * TICK_MS);
+    assert.equal(nameAt(overAir, 1, FLOOR_Y), "lava 8", `level ${level}`);
+    assert.deepEqual([0, 2].map((x) => nameAt(overAir, x, LAVA_Y)), ["air", "air"], `level ${level}`);
+  }
   const overLava = rowBot({ [key(1, FLOOR_Y, 0)]: lava(8) });
   overLava.world.setCell(new Vec3(1, LAVA_Y, 0), lava(2));
   await overLava.clock.advance(FLOW_TICKS * 3 * TICK_MS);
   assert.deepEqual([0, 2].map((x) => nameAt(overLava, x, LAVA_Y)), ["air", "air"]);
 });
 
-test("a source over air pours a falling column after 30 ticks and that column goes on down one cell every 30 ticks; the cells beside the source stay air (not measured)", async () => {
+test("a source over air pours a falling column after 30 ticks, fills the air beside it with a level 2 at its next turn 30 ticks later (contract check lava-beside-head), and the column goes on down one cell every 30 ticks", async () => {
   const harness = rowBot({ [key(1, FLOOR_Y, 0)]: "air", [key(1, FLOOR_Y - 1, 0)]: "air" });
   harness.world.setCell(new Vec3(1, LAVA_Y, 0), lava(0));
   await harness.clock.advance((FLOW_TICKS - 1) * TICK_MS);
   assert.equal(nameAt(harness, 1, FLOOR_Y), "air", "not before 30 ticks");
   await harness.clock.advance(TICK_MS);
   assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 1, FLOOR_Y - 1)], ["lava 8", "air"]);
+  assert.deepEqual([0, 2].map((x) => nameAt(harness, x, LAVA_Y)), ["air", "air"], "the cells beside the source wait for its second turn");
   await harness.clock.advance(FLOW_TICKS * TICK_MS);
   assert.deepEqual([nameAt(harness, 1, FLOOR_Y), nameAt(harness, 1, FLOOR_Y - 1)], ["lava 8", "lava 8"]);
-  assert.deepEqual([0, 2].map((x) => nameAt(harness, x, LAVA_Y)), ["air", "air"]);
+  assert.deepEqual([0, 2].map((x) => nameAt(harness, x, LAVA_Y)), ["lava 2", "lava 2"], "the source spread sideways once its column stood");
+});
+
+test("a falling column on a floor fills the air beside it with a level 2 30 ticks after it stands: flowing lava over a hole beside the body's head cell reaches the feet cell that way (contract check lava-beside-head)", async () => {
+  const harness = rowBot({ [key(0, FLOOR_Y, 0)]: "air", [key(1, FLOOR_Y, 0)]: "air", [key(2, FLOOR_Y, 0)]: "air" });
+  harness.world.setCell(new Vec3(1, LAVA_Y, 0), lava(4));
+  await harness.clock.advance(FLOW_TICKS * 2 * TICK_MS);
+  assert.deepEqual([0, 1, 2].map((x) => nameAt(harness, x, FLOOR_Y)), ["lava 2", "lava 8", "lava 2"]);
+});
+
+test("a flowing level 6 on a floor has no level left for a sideways step; a flowing level 2 under lava becomes a falling column", async () => {
+  const onFloor = rowBot();
+  onFloor.world.setCell(new Vec3(1, LAVA_Y, 0), lava(6));
+  await onFloor.clock.advance(FLOW_TICKS * 3 * TICK_MS);
+  assert.deepEqual([0, 2].map((x) => nameAt(onFloor, x, LAVA_Y)), ["air", "air"]);
+  const overFlowing = rowBot({ [key(1, FLOOR_Y, 0)]: lava(2) });
+  overFlowing.world.setCell(new Vec3(1, LAVA_Y, 0), lava(2));
+  await overFlowing.clock.advance(FLOW_TICKS * TICK_MS);
+  assert.equal(nameAt(overFlowing, 1, FLOOR_Y), "lava 8");
 });
 
 /** Contract check `lava-over-passable` (T7e5a, 2026-10-24): lava over these blocks stays where it is and the block stays. */
