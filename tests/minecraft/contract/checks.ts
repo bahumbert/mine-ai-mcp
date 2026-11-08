@@ -25,6 +25,7 @@ import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
 import { armourPointsWorn } from "./checks/armour-points-worn.ts";
+import { heightmapInChunkPacket } from "./checks/heightmap-in-chunk-packet.ts";
 import { lightInCells } from "./checks/light-in-cells.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
@@ -125,6 +126,7 @@ export interface ContractCheck {
 }
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
+  heightmapInChunkPacket,
   serverTags,
   combatDataMobs,
   ...COMBAT_DATA_ITEM_CHECKS,

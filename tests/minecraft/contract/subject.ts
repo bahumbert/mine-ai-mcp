@@ -17,6 +17,8 @@ export type ContractBot = Bot & { vehicle?: Entity | null };
 
 export interface ContractSubject {
   readonly bot: ContractBot;
+  /** The shared fake has no chunk-packet loading; a server subject can request a reload by teleport. */
+  readonly chunkPackets: "not-simulated" | "server";
   /** Where an arena-local point is in the world this subject runs in: a check names every cell and position through it, so one check runs in any lane. */
   world(local: LocalPoint): Vec3;
   /** Let `ms` pass: real time on a server, `clock.advance` on the fake. */
@@ -272,6 +274,7 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     return answered.value;
   };
   return {
+    chunkPackets: "not-simulated",
     bot,
     world: (local) => new Vec3(...arena.world(local)),
     wait,
@@ -354,6 +357,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
   const wait = (ms: number) => delay(ms);
   const now = () => performance.now();
   return {
+    chunkPackets: "server",
     bot,
     world,
     wait,

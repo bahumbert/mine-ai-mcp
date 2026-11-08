@@ -15,6 +15,7 @@ import {
 import { snapshotInventory } from "../bot-data/bot-status.js";
 import type { SourceIdentity } from "../diagnostics/incident-recorder.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecraft-runtime.js";
+import { watchHeightHints } from "../world/height-hints.js";
 import type { HostOptions } from "./config.js";
 import { sendMessage } from "../actions/send-message/send-message.js";
 import { handleChatCommandRoute } from "./chat-commands-route.js";
@@ -112,6 +113,7 @@ function createWatchedBot(configuration: HostOptions): Bot {
     ...BOT_PHYSICS_OPTIONS,
   });
   watchServerTags(bot);
+  watchHeightHints(bot);
   return bot;
 }
 

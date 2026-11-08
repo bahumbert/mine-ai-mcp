@@ -46,7 +46,7 @@ export function targetSituation(
 }
 
 /** Whether a state is a tree part: the game's `logs` or `leaves` tag on its block name. */
-function treePartTest(bot: Bot): (block: LoadedBlock) => boolean {
+export function treePartTest(bot: Bot): (block: LoadedBlock) => boolean {
   const known = new Map<number, boolean>();
   return (block) => {
     let treePart = known.get(block.stateId);
