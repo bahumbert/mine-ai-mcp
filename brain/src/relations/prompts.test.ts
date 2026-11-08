@@ -67,6 +67,12 @@ test("tradeInstructions say that agreeing to an offer heard in a line is accept,
   assert.doesNotMatch(text, /answers a "propose" you heard/u, "the model hears chat lines, never a propose");
 });
 
+test("tradeInstructions say that a spoken yes to my unanswered proposal is accept, and an agreed trade needs none", () => {
+  const text = tradeInstructions();
+  assert.match(text, /agrees in words to a proposal of yours that your "Open:" line shows with no answer yet, answer "accept"/u);
+  assert.match(text, /"give" is what you offered, "get" what you asked for; a trade already agreed needs no new "accept"/u);
+});
+
 test("parseGistPartners keeps good entries and drops bad ones", () => {
   const parsed = parseGistPartners([
     { name: "Theo", nudge: 2.5, why: "paid back", has: ["iron_ingot"], needs: ["white_wool"] },
