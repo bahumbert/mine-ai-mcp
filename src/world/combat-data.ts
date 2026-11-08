@@ -77,6 +77,16 @@ export function itemAttack(item: string | null, version: string): ItemAttack {
   return (item === null ? undefined : file.items[item]) ?? file.bareHand;
 }
 
+/** Damage per second of an attack: `attackDamage × attackSpeed`. */
+export function attackDps(attack: ItemAttack): number {
+  return attack.attackDamage * attack.attackSpeed;
+}
+
+/** The best melee damage per second among the shipped items (the netherite sword's 8 × 1.6 in 1.21.4). */
+export function bestMeleeDps(version: string): number {
+  return Math.max(...Object.values(forVersion(version).items).map(attackDps));
+}
+
 /** How the difficulty scales a hit of this damage type (`mob_attack`, `explosion`), or null when the data does not know the type. */
 export function damageScaling(type: string, version: string): DamageScaling | null {
   const scaling = forVersion(version).damageTypes[type]?.scaling;
