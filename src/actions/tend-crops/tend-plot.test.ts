@@ -5,7 +5,7 @@ import { parseTendCropsRequest } from "./contract.js";
 import { block, PLOT_FACTS, cutAfter, cutBefore, FakeFarm } from "../../test-support/fake-farm.js";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import blockTags from "../../world/data/block-tags/1.21.4.json" with { type: "json" };
-import { isGroundCover } from "./farm-body.js";
+import { isGroundCover, plotFacts } from "./farm-body.js";
 import { beginTendPlot, decideCell, tendPlot } from "./tend-plot.js";
 
 const registry = minecraftData(DEFAULT_MINECRAFT_VERSION);
@@ -131,7 +131,8 @@ test("a mixed plot farms what it can and says why it left the rest", async () =>
   assert.deepEqual([evidence.tilled, evidence.planted], [1, 1]);
   // Only the stone, which a hoe was used on and did not change, is untillable; the unreachable cell is not.
   assert.deepEqual(evidence.untillable, { stone: [{ x: 0, z: 0 }] });
-  assert.deepEqual(evidence.after, { crops: { "wheat age 4": 1, "wheat age 0": 1 }, emptyFarmland: 0, dryFarmland: 0, water: 1 });
+  assert.deepEqual(evidence.after, { crops: { "wheat age 4": 1, "wheat age 0": 1 }, ripeAge: { wheat: 7 }, emptyFarmland: 0, dryFarmland: 0, water: 1 });
+  assert.deepEqual(evidence.before, { crops: { "wheat age 4": 1 } });
 });
 
 test("running out of seeds leaves the last farmland empty, said as such", async () => {
@@ -365,6 +366,57 @@ test("a tend that already finished answers a second attempt with the same eviden
   assert.equal(farm.calls.length, callsAfterFirst, "no gesture on the second attempt");
   assert.deepEqual({ ...again.evidence, skipped: {} }, { ...first.evidence, skipped: {} }, "the whole request totals, not zero");
   assert.deepEqual(Object.keys(again.evidence.skipped), ["growing"], "the crops it planted are growing, which a farm should be");
+});
+
+// Ripe age and the plot before the tend (spec 2026-11-07 p4-08b, section 4): what the brain needs to say when a crop can be ripe.
+// The real plot facts, on the shared fake's registry: the loot tables and the registry's age states answer, not a test table.
+const realFacts = (farm: FakeFarm) => plotFacts(farm.harness.bot);
+
+test("after reports the ripe age of each crop standing: the loot table's age, else the last age", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 3);
+  farm.set(1, 0, "farmland", "beetroots", 1);
+  farm.set(2, 0, "farmland", "nether_wart", 1);
+  const { evidence } = await tendPlot(plot({ x2: 2 }), farm, realFacts(farm));
+  assert.deepEqual(evidence.after.ripeAge, { wheat: 7, beetroots: 3, nether_wart: 3 });
+  assert.deepEqual(evidence.after.crops, { "wheat age 3": 1, "beetroots age 1": 1, "nether_wart age 1": 1 });
+});
+
+test("no crop standing gives an empty ripeAge", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland");
+  farm.set(1, 0, "farmland", "short_grass");
+  const { evidence } = await tendPlot(plot({ till: false }), farm, realFacts(farm));
+  assert.deepEqual(evidence.after.ripeAge, {});
+  assert.deepEqual(evidence.before, { crops: {} });
+});
+
+test("before holds the crops read at the start: two ripe wheat harvested and replanted", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  const { evidence } = await tendPlot(plot({}), farm, realFacts(farm));
+  assert.deepEqual(evidence.before, { crops: { "wheat age 7 ripe": 2 } });
+  assert.deepEqual(evidence.after.crops, { "wheat age 0": 2 });
+});
+
+test("a resumed attempt keeps the first before, read before the harvest of the cut attempt", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  farm.set(1, 0, "farmland", "wheat", 7);
+  cutBefore(farm, "collectDrops");
+  const run = beginTendPlot(plot({}), farm, realFacts(farm));
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.deepEqual(evidence.before, { crops: { "wheat age 7 ripe": 2 } }, "the second attempt found the plot already harvested");
+  assert.deepEqual(evidence.after.crops, { "wheat age 0": 2 });
+});
+
+test("a plot with an unloaded cell reads its crops from the loaded ones", async () => {
+  const farm = new FakeFarm();
+  farm.set(0, 0, "farmland", "wheat", 7);
+  const { evidence } = await tendPlot(plot({ x2: 1, harvest: false }), farm, realFacts(farm));
+  assert.deepEqual(evidence.before, { crops: { "wheat age 7 ripe": 1 } });
 });
 
 test("the hoe broken before the request began stays 'no hoe', not 'no hoe left', across the attempts", async () => {

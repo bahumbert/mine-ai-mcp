@@ -809,8 +809,11 @@ are the caller's: a cell that is not soil is reported, not changed. Its routes
 never dig farmland or crops and place no scaffold. Success means no cell was
 left for a reason other than growing crops or water; the result counts what was
 harvested, cleared, tilled and planted, the items gained, the cells skipped by
-reason, and the plot afterwards (crops by block and age, empty farmland,
-farmland not hydrated, water). `[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
+reason, the plot as it was found (`before.crops`, read once at the start of
+the call, by block and age) and the plot afterwards (`after`: crops by block and
+age, `ripeAge` — the age each standing crop block is ripe at, from its loot
+table or else its last age —, empty farmland, farmland not hydrated, water).
+`[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
 refuse before any work; `[TEND_STALLED]` ends a run where no cell changed for
 180 s. Defined in
 [src/actions/tend-crops/contract.ts](../../src/actions/tend-crops/contract.ts).

@@ -21,6 +21,8 @@ export interface CellBlock {
 export interface PlotFacts {
   /** Whether the crop is ripe; null when the block is not a crop. */
   isRipe(block: CellBlock): boolean | null;
+  /** The age a crop block is ripe at (the loot table's, else its last age); null when the block is not a crop. */
+  ripeAge(blockName: string): number | null;
   /** The item a crop is planted from (an unripe crop's drop); null when not a crop. */
   seedOf(blockName: string): string | null;
   /** Whether a player clears this plant off soil (the game's replaceable plants and flowers, never a sapling). */
@@ -111,6 +113,8 @@ interface TendState {
   readonly observe: (progress: TendProgress) => void;
   readonly counts: { harvested: number; cleared: number; tilled: number; planted: number };
   readonly hoeCarriedAtStart: boolean;
+  /** The crops standing when the request began, read once here: a resumed attempt finds the plot already worked on. */
+  readonly before: TendEvidence["before"];
   readonly tilledSoil: Record<string, number>;
   readonly till: { hoeGone: boolean; untillable: Record<string, TendCell[]> };
   /** The first carried count of each item the request touched, so `gained` covers every attempt. */
@@ -163,6 +167,7 @@ function evidenceOf(a: TendAttempt): TendEvidence {
     gained: Object.fromEntries([...state.inventoryBefore].map(([item, before]) => [item, body.carried(item) - before]).filter(([, change]) => change !== 0)),
     skipped: state.skipped,
     dropsLeft: [...state.dropsLeft],
+    before: state.before,
     after: plotAfter(state.request, state.cells, body, state.facts),
   };
 }
@@ -177,11 +182,12 @@ export function beginTendPlot(
   facts: PlotFacts,
   observe: (progress: TendProgress) => void = () => {},
 ): { attempt(body: FarmBody, stop?: () => string | null): Promise<TendOutcome> } {
+  const cells = serpentine(request);
   const state: TendState = {
-    request, facts, observe,
-    cells: serpentine(request),
+    request, facts, observe, cells,
     counts: { harvested: 0, cleared: 0, tilled: 0, planted: 0 },
     hoeCarriedAtStart: body.hasHoe(),
+    before: { crops: cropsOf(request, cells, body, facts).crops },
     tilledSoil: {},
     till: { hoeGone: false, untillable: {} },
     inventoryBefore: new Map(),
@@ -410,9 +416,29 @@ async function tillCell(body: FarmBody, soil: FarmCell, needsTill: () => boolean
   return needsTill() ? (failure ?? { kind: "unchanged" }) : null;
 }
 
-/** The plot as it stands now: crops by block and age, empty and dry farmland, water. */
+/**
+ * The crops standing on the plot's farmland by `<block> age <n>` (`ripe` appended when ripe), and the age each crop
+ * block is ripe at. One reading for the plot before the tend and the plot after it, so their keys are the same.
+ */
+function cropsOf(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, facts: PlotFacts): { crops: Record<string, number>; ripeAge: Record<string, number> } {
+  const standing = { crops: {} as Record<string, number>, ripeAge: {} as Record<string, number> };
+  for (const cell of cells) {
+    const soil = body.read(cell.x, request.y, cell.z);
+    const above = body.read(cell.x, request.y + 1, cell.z);
+    if (soil === null || above === null || !facts.isTilledSoil(soil)) continue;
+    const ripe = facts.isRipe(above);
+    if (ripe === null) continue;
+    const key = `${above.name} age ${String(above.properties.age)}${ripe ? " ripe" : ""}`;
+    standing.crops[key] = (standing.crops[key] ?? 0) + 1;
+    const ripeAge = facts.ripeAge(above.name);
+    if (ripeAge !== null) standing.ripeAge[above.name] = ripeAge;
+  }
+  return standing;
+}
+
+/** The plot as it stands now: crops by block and age with their ripe ages, empty and dry farmland, water. */
 function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: FarmBody, facts: PlotFacts): TendEvidence["after"] {
-  const after = { crops: {} as Record<string, number>, emptyFarmland: 0, dryFarmland: 0, water: 0 };
+  const after = { ...cropsOf(request, cells, body, facts), emptyFarmland: 0, dryFarmland: 0, water: 0 };
   for (const cell of cells) {
     const soil = body.read(cell.x, request.y, cell.z);
     const above = body.read(cell.x, request.y + 1, cell.z);
@@ -420,13 +446,7 @@ function plotAfter(request: TendCropsRequest, cells: readonly TendCell[], body: 
     if (soil.liquid) after.water += 1;
     if (!facts.isTilledSoil(soil)) continue;
     if (Number(soil.properties.moisture ?? 7) < 7) after.dryFarmland += 1;
-    const ripe = facts.isRipe(above);
-    if (ripe === null) {
-      if (!above.breakable) after.emptyFarmland += 1;
-      continue;
-    }
-    const key = `${above.name} age ${String(above.properties.age)}${ripe ? " ripe" : ""}`;
-    after.crops[key] = (after.crops[key] ?? 0) + 1;
+    if (facts.isRipe(above) === null && !above.breakable) after.emptyFarmland += 1;
   }
   return after;
 }

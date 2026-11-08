@@ -28,9 +28,21 @@ test("a crop is ripe in the state its loot table drops the crop in, and planted 
   assert.equal(crops.seedOf("short_grass"), "wheat_seeds");
 });
 
+test("a crop's ripe age is the age its loot table drops it in, else its last age, null for a block that is no crop", () => {
+  const crops = plotFacts(bot);
+  assert.equal(crops.ripeAge("wheat"), 7);
+  assert.equal(crops.ripeAge("beetroots"), 3);
+  assert.equal(crops.ripeAge("nether_wart"), 3);
+  assert.equal(crops.ripeAge("short_grass"), null);
+  assert.equal(crops.ripeAge("somemod_unknown_crop"), null);
+  // The ripe age and `isRipe` agree for a crop whose ripe state is its age alone.
+  for (const name of ["wheat", "beetroots", "nether_wart"]) assert.equal(crops.isRipe(crop(name, crops.ripeAge(name)!)), true, name);
+});
+
 const evidence = (overrides: Partial<TendEvidence> = {}): TendEvidence => ({
   cells: 4, harvested: 0, cleared: 0, tilled: 0, tilledSoil: {}, untillable: {}, planted: 0, gained: {}, skipped: {}, dropsLeft: [],
-  after: { crops: {}, emptyFarmland: 0, dryFarmland: 0, water: 0 }, ...overrides,
+  before: { crops: {} },
+  after: { crops: {}, ripeAge: {}, emptyFarmland: 0, dryFarmland: 0, water: 0 }, ...overrides,
 });
 
 test("growing crops and water are a farm as it should be; other skipped cells make the run partial, or failed with no work", () => {
@@ -48,7 +60,8 @@ test("tend_crops presents what each cell became and what was left, with why", ()
   const text = formatTendCropsResult(settleTend(evidence({
     harvested: 2, planted: 3, gained: { wheat: 2, wheat_seeds: 1 },
     skipped: { "no wheat_seeds left": [{ x: 3, z: 0 }] },
-    after: { crops: { "wheat age 0": 3 }, emptyFarmland: 1, dryFarmland: 0, water: 0 },
+    before: { crops: { "wheat age 7 ripe": 2 } },
+    after: { crops: { "wheat age 0": 3 }, ripeAge: { wheat: 7 }, emptyFarmland: 1, dryFarmland: 0, water: 0 },
   }), null, null));
   assert.match(text, /harvested 2, cleared 0, tilled 0, planted 3/u);
   assert.match(text, /Items gained: wheat 2, wheat_seeds 1/u);
@@ -57,11 +70,17 @@ test("tend_crops presents what each cell became and what was left, with why", ()
   assert.match(text, /Observed stop:.*TEND_INCOMPLETE/su);
 });
 
-test("the tend result schema carries the untillable cells by block name", () => {
-  const parsed = tendEvidenceSchema.parse(evidence({ untillable: { podzol: [{ x: 2, z: 3 }] } }));
-  assert.deepEqual(parsed.untillable, { podzol: [{ x: 2, z: 3 }] });
+test("the tend result schema carries the untillable cells by block name, each crop's ripe age and the crops before the tend", () => {
+  const parsed = tendEvidenceSchema.parse(evidence({
+    untillable: { podzol: [{ x: 2, z: 3 }] },
+    before: { crops: { "wheat age 7 ripe": 2 } },
+    after: { crops: { "wheat age 3": 1 }, ripeAge: { wheat: 7 }, emptyFarmland: 0, dryFarmland: 0, water: 0 },
+  }));
+  assert.deepEqual([parsed.untillable, parsed.before, parsed.after.ripeAge], [{ podzol: [{ x: 2, z: 3 }] }, { crops: { "wheat age 7 ripe": 2 } }, { wheat: 7 }]);
   assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: { podzol: [{ x: 2 }] } }));
   assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), untillable: undefined }));
+  assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), before: undefined }));
+  assert.throws(() => tendEvidenceSchema.parse({ ...evidence(), after: { ...evidence().after, ripeAge: { wheat: -1 } } }));
 });
 
 test("a cancel ends the quiet look for dropped items at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {

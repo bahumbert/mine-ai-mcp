@@ -36,6 +36,8 @@ export const block = (name: string, properties: CellBlock["properties"] = {}, tr
 export const PLOT_FACTS: PlotFacts = {
   // A live block gives its age as the registry lists the value (`"7"`, Prismarine `propValue`); `block()` takes a number.
   isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? String(cell.properties.age) === "7" : null),
+  // Ripe at age 7 for both, the loot tables' `age` condition (`src/world/block-drops.test.ts`).
+  ripeAge: (name) => (name === "wheat" || name === "carrots" ? 7 : null),
   seedOf: (name) => ({ wheat: "wheat_seeds", carrots: "carrot" })[name] ?? null,
   isGroundCover: (name) => isGroundCover(name, "1.21.4"),
   isTilledSoil,

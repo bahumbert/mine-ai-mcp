@@ -54,15 +54,22 @@ export function tilledSoilNames(bot: Pick<Bot, "registry">): string[] {
 
 /** The plot as the game data describes it: crops ripe in the state their crop drops in and planted from their unripe drop, ground cover by tag, tilled soil by state. */
 export function plotFacts(bot: Pick<Bot, "registry" | "version">): PlotFacts {
+  /** The loot table's `age` condition when it names one, else (nether wart drops the same at any age) the block's last age state; null with no age state. */
+  const ripeAge = (name: string): number | null => {
+    const age = Number(ripeState(name, bot.version)?.age);
+    if (Number.isInteger(age)) return age;
+    const ages = bot.registry.blocksByName[name]?.states?.find((state) => state.name === "age")?.num_values;
+    return ages === undefined ? null : ages - 1;
+  };
   return {
     isRipe(block) {
       if (block.properties.age === undefined) return null;
       const ripe = ripeState(block.name, bot.version);
       if (ripe !== null) return Object.entries(ripe).every(([key, value]) => String(block.properties[key]) === value);
-      // No loot condition to read (nether wart drops the same at any age): ripe at its last age.
-      const ages = bot.registry.blocksByName[block.name]?.states?.find((state) => state.name === "age")?.num_values;
-      return ages !== undefined && Number(block.properties.age) === ages - 1;
+      const last = ripeAge(block.name);
+      return last !== null && Number(block.properties.age) === last;
     },
+    ripeAge,
     seedOf: (name) => seedOf(name, bot.version),
     isGroundCover: (name) => isGroundCover(name, bot.version),
     isTilledSoil,

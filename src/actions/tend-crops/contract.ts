@@ -67,9 +67,16 @@ export const tendEvidenceSchema = z.strictObject({
   skipped: z.record(z.string(), z.array(cellSchema)),
   /** Drops left on the ground it could not pick up (a full inventory, no route), by item name. */
   dropsLeft: z.array(z.string()),
+  /** The plot as the call found it, read once at the start and kept across a reflex's resumed attempts: what was standing, so a harvest tend can be told from a plant-only one. */
+  before: z.strictObject({
+    /** Crops standing then, keyed as `after.crops`. */
+    crops: z.record(z.string(), z.number().int().nonnegative()),
+  }),
   after: z.strictObject({
     /** Crops standing on the plot, by `<block> age <n>` (`ripe` appended when ripe). */
     crops: z.record(z.string(), z.number().int().nonnegative()),
+    /** The age each standing crop block is ripe at, by block name (the loot table's age, else the last age); `{}` with no crop. */
+    ripeAge: z.record(z.string(), z.number().int().nonnegative()),
     emptyFarmland: z.number().int().nonnegative(),
     /** Farmland not hydrated (moisture below 7): crops on it grow slowly and bare farmland turns back to dirt. */
     dryFarmland: z.number().int().nonnegative(),
