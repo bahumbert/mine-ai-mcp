@@ -25,6 +25,32 @@ const viewOf = (bot: ReturnType<typeof createFakeBot>["bot"]) => ({
   revision: 0, subscribe: () => () => {},
 });
 
+test("a pond-edge log is mineable only drained, and a refused in-water target is marked underWater", () => {
+  const { bot } = createFakeBot({ groundY: 63, cells: { "0,64,0": "oak_log", "-1,64,0": "water" } });
+  const target = bot.blockAt(new Vec3(0, 64, 0))!;
+  const world = viewOf(bot);
+  const policy = createMineflayerMovementPolicy(bot);
+  const accepted = evaluateMineTarget(bot, policy, target, world, 1);
+  assert.equal(accepted.kind, "mineable");
+  if (accepted.kind !== "mineable") throw new Error("expected a drainable log");
+  assert.equal(accepted.routeMayBreak, false);
+  assert.ok(accepted.drained?.wetStances.some((cell) => cell.x === -1 && cell.y === 64 && cell.z === 0));
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
+    kind: "prohibited", underWater: true, reason: "in water: draining it takes 1 block to place, 0 carried",
+  });
+});
+
+test("stone under a seabed with no wet face decides as today, and lava over a block is no underWater", () => {
+  const { bot, world } = createFakeBot({ groundY: 63, cells: { "0,64,0": "stone", "0,65,0": "stone", "0,66,0": "water" } });
+  const policy = createMineflayerMovementPolicy(bot);
+  const target = bot.blockAt(new Vec3(0, 64, 0))!;
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 0), { kind: "mineable", routeMayBreak: true });
+  world.setCell(new Vec3(0, 65, 0), "lava");
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 16), { kind: "prohibited", reason: BREAK_UNDER_WATER });
+  world.setCell(new Vec3(0, 65, 0), "water");
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 16), { kind: "prohibited", reason: BREAK_UNDER_WATER, underWater: true });
+});
+
 test("lava preparation counts permitted building material, not reserved inventory", () => {
   const { bot } = createFakeBot({ carried: { oak_log: 64 }, groundY: null, cells: { "0,64,0": "oak_log", "1,64,0": "lava" } });
   const target = bot.blockAt(new Vec3(0, 64, 0))!;
@@ -40,21 +66,24 @@ test("lava preparation counts permitted building material, not reserved inventor
   });
 });
 
-test("missing isolation material rejects a dry water barrier but retains a swimmer's approach", () => {
+test("water-face isolation needs building material even when the miner is already swimming", () => {
   const { bot, world: gameWorld } = createFakeBot({ groundY: 62, cells: { "2,64,0": "water", "1,64,0": "stone" } });
   const world = viewOf(bot);
   const policy = createMineflayerMovementPolicy(bot);
   const target = bot.blockAt(new Vec3(1, 64, 0))!;
   assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
-    kind: "prohibited", reason: "liquid isolation needs a permitted building block or an empty bucket",
+    kind: "prohibited", reason: "in water: draining it takes 1 block to place, 0 carried", underWater: true,
   });
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 1), { kind: "mineable", routeMayBreak: false });
+  const prepared = evaluateMineTarget(bot, policy, target, world, 1);
+  assert.equal(prepared.kind === "mineable" && prepared.drained !== undefined && !prepared.routeMayBreak, true);
   Reflect.set(bot.entity, "isInWater", true);
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "mineable", routeMayBreak: false });
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
+    kind: "prohibited", reason: "in water: draining it takes 1 block to place, 0 carried", underWater: true,
+  });
   Reflect.set(bot.entity, "isInWater", false);
   gameWorld.setCell(new Vec3(1, 65, 0), "water");
   // Owner, 2026-10-02: never mine under water, whatever the occasion; a submerged block is reached from the land below.
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "prohibited", reason: BREAK_UNDER_WATER },
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "prohibited", reason: BREAK_UNDER_WATER, underWater: true },
     "a submerged target is never mined, not even from the shore");
 });
 

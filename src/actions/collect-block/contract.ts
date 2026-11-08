@@ -116,6 +116,8 @@ export const outcomes = {
     `[COLLECT_TARGET_MISMATCH] The requested cell at ${cellLabel(position)} is ${observedName}, not ${selector}.`,
   targetsUnreachable: (selector: string, reason: string) =>
     `[NO_REACHABLE_MATCHING_TARGETS] Every loaded ${selector} block was found but none could be reached. Last routing stop: ${reason}`,
+  targetsUnderWater: (selector: string, summary: string) =>
+    `[TARGETS_UNDER_WATER] Every ${selector} block found lies in water and none can be drained first from dry ground with the blocks you carry, so none was walked to: ${summary}.`,
   noLoadedTargets: (selector: string) => `[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded ${selector} blocks.`,
   noTargetInRange: (selector: string, range: number, nearest: NearestBeyondRange | null) =>
     `[NO_TARGET_IN_RANGE] No ${selector} block left within ${range} blocks of where the run started; ` +

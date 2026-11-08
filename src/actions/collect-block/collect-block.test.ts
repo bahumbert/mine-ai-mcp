@@ -8,7 +8,9 @@ import type { MineResult } from "../../navigation/processes/mining/mine-process.
 import { sourcesOf } from "../../world/block-drops.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
-import { type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { liveBlockReader } from "../../navigation/mineflayer/world.js";
+import { mine } from "../../navigation/processes/mining/mine-process.js";
 
 /** Rewrite how many of `name` the harness's window carries, as the server's slot updates would. */
 function carry(harness: FakeHarness, name: string, total: number): void {
@@ -285,6 +287,61 @@ test("max_breaks caps the break budget whatever the drop chance asks for", () =>
 const untouchedNavigation = new Proxy({}, {
   get: (_target, property) => { throw new Error(`the refusal reached navigation.${String(property)}`); },
 }) as unknown as NavigationRuntime;
+
+/** Keep the real scan and preparation; navigation is forbidden until the refusal has been decided. */
+function shoreNavigation(harness: FakeHarness): NavigationRuntime {
+  return new Proxy(untouchedNavigation, {
+    get: (navigation, property) => {
+      if (property === "world") return { blockAt: liveBlockReader(harness.bot), revision: 0, subscribe: () => () => {} };
+      return Reflect.get(navigation, property);
+    },
+  });
+}
+
+test("a sea-only area says TARGETS_UNDER_WATER and walks nowhere", async () => {
+  const cells: Record<string, string> = {};
+  for (let x = 0; x <= 2; x++) for (let y = 64; y <= 66; y++) for (let z = -1; z <= 1; z++) cells[`${x},${y},${z}`] = "water";
+  cells["1,64,0"] = "oak_log";
+  cells["1,65,0"] = "oak_log";
+  const harness = createFakeBot({ groundY: 63, cells, carried: { cobblestone: 16 }, position: new Vec3(-4.5, 64, 0.5) });
+  const start = harness.bot.entity.position.clone();
+  const result = await collectBlock(harness.bot, shoreNavigation(harness), parseCollectBlockRequest({ block_name: "oak_log", count: 1, max_distance: 16 }), {});
+  assert.equal(result.status, "failed");
+  assert.match(result.error ?? "", /^\[TARGETS_UNDER_WATER\]/u);
+  assert.deepEqual(harness.bot.entity.position, start);
+});
+
+test("given the blocks it named, the next collect mines it; an exact in-water cell is TARGET_UNMINEABLE in water", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const harness = createFakeBot({ clock, groundY: 63, cells: { "1,64,0": "oak_log", "2,64,0": "water" }, position: new Vec3(0.5, 64, 0.5) });
+  const navigation = shoreNavigation(harness);
+  const request = parseCollectBlockRequest({ block_name: "oak_log", count: 1, max_distance: 16 });
+  const refused = await clock.settle(collectBlock(harness.bot, navigation, request, {}), 5_000);
+  assert.match("error" in refused ? refused.error : "", /TARGETS_UNDER_WATER.*takes 1 block to place, 0 carried/u);
+  const exactRequest = parseCollectBlockRequest({ block_name: "oak_log", x: 1, y: 64, z: 0 });
+  const exact = await clock.settle(collectBlock(harness.bot, navigation, exactRequest, {}), 5_000);
+  assert.match("error" in exact ? exact.error : "", /TARGET_UNMINEABLE.*in water:/u);
+  carry(harness, "cobblestone", 1);
+  // The server-confirmed cell and slot changes are the boundary; the live drain placement is proved by drowned-trunk-drained.
+  const perform: MineRun = (bot, mining) => mine(bot, {
+    ...mining,
+    placeInto: async (_bot, cell) => {
+      harness.world.setCell(new Vec3(cell.x, cell.y, cell.z), "cobblestone");
+      carry(harness, "cobblestone", 0);
+      return { kind: "placed", block: bot.blockAt(new Vec3(cell.x, cell.y, cell.z))! };
+    },
+    breakInPlace: async ({ position }) => {
+      harness.world.setCell(new Vec3(position.x, position.y, position.z), "air");
+      carry(harness, "oak_log", 1);
+      return { status: "broken" };
+    },
+  });
+  const collected = await clock.settle(collectBlock(harness.bot, navigation, request, {}, undefined, perform), 5_000);
+  assert.equal(collected.status, "succeeded");
+  assert.equal(collected.collected.gained, 1);
+  assert.equal(harness.bot.blockAt(new Vec3(2, 64, 0))?.name, "cobblestone");
+});
 
 /** `version` only sets the string the tag lookups read: the shared fake builds no registry older than 1.19.4. */
 function refusedBot(version = "1.21.4") {

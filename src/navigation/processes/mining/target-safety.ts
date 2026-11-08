@@ -31,6 +31,9 @@ import { plausibleToBreak } from "../../../world/block-classification.js";
 import { waterMiningStance } from "../../world/water.js";
 import { isDryAir, isLava } from "../../world/block-geometry.js";
 import { liveBlockReader } from "../../mineflayer/world.js";
+import { cellHoldsWater } from "../../world/deep-water.js";
+import { breakRefusalCause } from "../../movements/policy.js";
+import { drownedVerdict } from "./drowned-target.js";
 import { MAXIMUM_BUCKET_DROP } from "../../mineflayer/movement-policy.js";
 import {
   observeMineflayerBlock,
@@ -60,8 +63,9 @@ export type MineTargetDecision =
        * the live world, and breaks it in place.
        */
       readonly routeMayBreak: boolean;
+      readonly drained?: { readonly wetStances: readonly BlockPosition[] };
     }
-  | { readonly kind: "prohibited"; readonly reason: string };
+  | { readonly kind: "prohibited"; readonly reason: string; readonly underWater?: true };
 
 /** Every neighbouring cell of `position` that holds lava right now. */
 export function lavaFacesOf(bot: Bot, position: BlockPosition): BlockPosition[] {
@@ -192,12 +196,18 @@ export function evaluateMineTarget(
   const evaluation = movements.evaluateBreak(observeMineflayerBlock(block), position, world);
   const decision = evaluation.decision;
   const floodRule = decision.kind === "prohibited" && decision.cause === "opens_into_liquid";
-  if (decision.kind === "prohibited" && !floodRule) return { kind: "prohibited", reason: decision.reason };
+  if (decision.kind === "prohibited" && !floodRule) {
+    const above = world.blockAt(position.x, position.y + 1, position.z);
+    return { kind: "prohibited", reason: decision.reason,
+      ...(breakRefusalCause(decision) === "under_water" && above.kind === "loaded" && cellHoldsWater(above) && { underWater: true as const }) };
+  }
   const below = world.blockAt(position.x, position.y - 1, position.z);
   const needsIsolation = floodRule || (below.kind === "loaded" && below.traits.liquid === "water");
 
   const lavaFaces = lavaFacesOf(bot, position).length;
   const closures = lavaClosuresOf(bot, position).length;
+  const drowned = drownedVerdict(bot, world, position, availableBlocks, closures);
+  if (drowned.kind === "refused") return { kind: "prohibited", reason: drowned.reason, underWater: true };
   if (closures > availableBlocks) {
     const floor = closures > lavaFaces ? "a floor over lava" : null;
     const needed = lavaFaces === 0 ? floor : floor === null ? plural(lavaFaces, "lava face")
@@ -217,5 +227,6 @@ export function evaluateMineTarget(
   }
   const falling = fallingColumnStop(bot, movements, position, world);
   if (falling !== null) return { kind: "prohibited", reason: falling };
+  if (drowned.kind === "drainable") return { kind: "mineable", routeMayBreak: false, drained: { wetStances: drowned.wetStances } };
   return { kind: "mineable", routeMayBreak: !needsIsolation && closures === 0 };
 }

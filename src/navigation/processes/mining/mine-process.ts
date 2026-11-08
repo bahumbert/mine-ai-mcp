@@ -40,6 +40,7 @@ import { carriesWaterBucket, CAST_REACH, castOntoPool } from "./cast-obsidian.js
 import { CastTargets } from "./cast-targets.js";
 import { DROP_PICKUP_TIMEOUT_MS, MineDropTracker, type DropLossObserver } from "./mine-drops.js";
 import { clearMiningWater } from "./mining-water.js";
+import { hasWetFace, IN_WATER_PREFIX, WORKING_OFFSETS } from "./drowned-target.js";
 import { waterMiningStance } from "../../world/water.js";
 import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
 
@@ -96,6 +97,7 @@ export interface MineBlockTarget {
    * walks into reach, closes the lava faces, and breaks it in place.
    */
   readonly routeMayBreak: boolean;
+  readonly drained?: true;
   readonly excludedStances: ReadonlySet<string>;
 }
 
@@ -223,6 +225,7 @@ export type MineResult = {
   /** Cells of matching blocks that stopped matching while this process was running, in the order observed. */
   readonly broken: readonly BlockPosition[];
   readonly reason: string | null;
+  readonly underWater?: true;
 };
 
 function targetIdentity(target: MineTarget): string {
@@ -256,21 +259,9 @@ function isDropTarget(
 function workingCells(bot: Bot, target: MineBlockTarget, movements: MovementPolicy): readonly BlockPosition[] {
   const position = target.position;
   const read = liveBlockReader(bot);
-  return [
-    { x: position.x + 1, y: position.y - 1, z: position.z },
-    { x: position.x - 1, y: position.y - 1, z: position.z },
-    { x: position.x, y: position.y - 1, z: position.z + 1 },
-    { x: position.x, y: position.y - 1, z: position.z - 1 },
-    { x: position.x + 1, y: position.y, z: position.z },
-    { x: position.x - 1, y: position.y, z: position.z },
-    { x: position.x, y: position.y, z: position.z + 1 },
-    { x: position.x, y: position.y, z: position.z - 1 },
-    { x: position.x, y: position.y + 1, z: position.z },
-    { x: position.x + 1, y: position.y + 1, z: position.z },
-    { x: position.x - 1, y: position.y + 1, z: position.z },
-    { x: position.x, y: position.y + 1, z: position.z + 1 },
-    { x: position.x, y: position.y + 1, z: position.z - 1 },
-  ].filter((cell) => {
+  return WORKING_OFFSETS.map((offset) => ({
+    x: position.x + offset.x, y: position.y + offset.y, z: position.z + offset.z,
+  })).filter((cell) => {
     // Obsidian takes longer than a breath when the eye is submerged. A pickup
     // may dip into its hole; the next mining stance must return to the surface.
     const head = read(cell.x, cell.y + 1, cell.z);
@@ -301,6 +292,7 @@ interface MineScan {
   readonly targets: readonly MineTarget[];
   /** How many loaded matching blocks were rejected, by the reason each was rejected for. */
   readonly rejections: ReadonlyMap<string, number>;
+  readonly underWaterRejections: number;
 }
 
 function rejectionSummary(rejections: ReadonlyMap<string, number>): string {
@@ -332,6 +324,7 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
       });
   const blocks: MineBlockTarget[] = [];
   const rejections = new Map<string, number>();
+  let underWaterRejections = 0;
   for (const position of positions) {
     const key = cellKey(position);
     if (blacklist.blockCells.has(key)) continue;
@@ -340,12 +333,15 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
     const decision = request.canMine(block);
     if (decision.kind !== "mineable") {
       rejections.set(decision.reason, (rejections.get(decision.reason) ?? 0) + 1);
+      if (decision.underWater) underWaterRejections += 1;
       continue;
     }
     // The block under the bot's feet stays a target; only its top cell stops being a stance to work it from.
     const excludedStances = new Set(blacklist.blockStances.get(key));
+    for (const stance of decision.drained?.wetStances ?? []) excludedStances.add(cellKey(stance));
     if (standsOnBlock(bot, block.position)) excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
-    blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances });
+    blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances,
+      ...(decision.drained && { drained: true as const }) });
     if (blocks.length === MAX_MINE_TARGETS) break;
   }
 
@@ -367,7 +363,7 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
     })
     .sort((left, right) => feet.distanceSquared(asVec3(left.position)) - feet.distanceSquared(asVec3(right.position)))
     .slice(0, MAX_MINE_TARGETS);
-  return { targets, rejections };
+  return { targets, rejections, underWaterRejections };
 }
 
 /** Cast from above the source, after climbing out of any preceding mining hole. */
@@ -497,9 +493,15 @@ async function breakTargetInPlace(
   signal?: AbortSignal,
 ): Promise<void> {
   const workingFeet = bot.entity.position.floored();
+  targeting.attemptedWork = true;
   if (await castTouchingSources(bot, request, targeting, target.position, signal)) return;
   const water = await clearMiningWater(bot, target.position, request.placeInto, request.cast, signal);
   if (water !== null) {
+    const world = { blockAt: liveBlockReader(bot), revision: 0, subscribe: () => () => {} };
+    if (target.kind === "block" && target.drained && hasWetFace(world, target.position)) {
+      targeting.blacklist(target, `${IN_WATER_PREFIX}the drain failed: ${water}`);
+      return;
+    }
     // Preparation can move the bot in a current. Reject the stance we tried,
     // not the lower cell it sank into while the water was being isolated.
     if (target.kind === "block") targeting.excludeBlockStance(target, workingFeet);
@@ -678,6 +680,9 @@ class MineTargeting {
   #announced = "";
   /** Why each loaded matching block the last scan saw could not be a target, and how many were rejected for it. */
   rejections: ReadonlyMap<string, number> = new Map();
+  underWaterRejections = 0;
+  /** A previous approach or in-place break makes "none was walked to" false, even when it succeeded. */
+  attemptedWork = false;
   readonly broken: BlockPosition[] = [];
   lastReason: string | null = null;
   /** Whether a just-broken source is still awaiting its item entity. */
@@ -868,6 +873,7 @@ class MineTargeting {
     });
     const found = [...scanResult.targets];
     this.rejections = scanResult.rejections;
+    this.underWaterRejections = scanResult.underWaterRejections;
     const tracked = this.#drops.update(found, now);
     // An item the bot stands in that never enters the inventory is one the
     // inventory cannot take. Give it up now rather than when the server
@@ -945,7 +951,8 @@ class MineTargeting {
    * fresh look at the world, so a route already running walks on to whatever is
    * cheapest now instead of being torn down and replanned from scratch.
    */
-  goal(): Goal {
+  routeGoal(): Goal {
+    this.attemptedWork = true;
     return {
       resolve: (observation) => {
         const targets = this.targets();
@@ -961,6 +968,19 @@ async function waitForProcessTick(bot: Bot, signal?: AbortSignal): Promise<void>
   signal?.throwIfAborted();
   await waitForTicksOrCancel(bot, 1, signal);
   signal?.throwIfAborted();
+}
+
+/** Preserve an attempted drain's failure; only a wholly unattempted drowned scan gets the special refusal. */
+function rejectedTargetsResult(targeting: MineTargeting): MineResult {
+  const summary = rejectionSummary(targeting.rejections);
+  targeting.lastReason = targeting.blacklisted > 0 && targeting.lastReason
+    ? `${targeting.lastReason}; ${summary}` : summary;
+  const total = [...targeting.rejections.values()].reduce((sum, count) => sum + count, 0);
+  const satisfied = targeting.isSatisfied();
+  return {
+    status: satisfied ? "satisfied" : "unreachable", broken: targeting.broken, reason: targeting.lastReason,
+    ...(!satisfied && !targeting.attemptedWork && targeting.blacklisted === 0 && targeting.underWaterRejections === total && { underWater: true as const }),
+  };
 }
 
 export async function mine(bot: Bot, request: MineRequest): Promise<MineResult> {
@@ -991,8 +1011,7 @@ export async function mine(bot: Bot, request: MineRequest): Promise<MineResult> 
       if (targeting.rejections.size > 0) {
         // The specific reasons, not "the movement policy": a model reading
         // "3 lava faces, 1 block carried" knows to collect cobblestone first.
-        targeting.lastReason = rejectionSummary(targeting.rejections);
-        return settle("unreachable");
+        return rejectedTargetsResult(targeting);
       }
       if (targeting.explorationFailure !== null) return settle("stopped");
       if (!targeting.exploring) return settle(targeting.blacklisted > 0 ? "unreachable" : "no_targets");
@@ -1081,7 +1100,7 @@ async function runRoute(
   try {
     return await drive({
       movements: request.movements,
-      goal: targeting.goal(),
+      goal: targeting.routeGoal(),
       onArrival: async ({ signal }) => {
         if (targeting.isSatisfied() || targeting.broken.length >= request.maximumBreaks) return { kind: "completed" };
 

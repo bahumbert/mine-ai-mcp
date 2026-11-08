@@ -20,7 +20,7 @@ params:
   collect: 1
   # Never mine under water (owner 2026-10-02): the sand under the pond is refused, and none is mined.
   reject: true
-  refusal: ["[NO_REACHABLE_MATCHING_TARGETS]", "never mines under water"]
+  refusal: ["[TARGETS_UNDER_WATER]", "never mines under water"]
 
 goal:
   kind: all

@@ -543,7 +543,7 @@ is reached, collection releases navigation and reports partial gains with
 drop the bot has stood in for three seconds without an inventory gain is given
 up rather than held until the server despawns it.
 
-A target with water beside or above it is mined; a target with lava against it
+A target touching water needs a drainable face, dry working ground and enough carried building blocks before any walk; water directly above remains refused. `[TARGETS_UNDER_WATER]` means every match was refused in water and none was walked to; carry the named blocks or choose another area. A target with lava against it
 is mined once each lava face has been closed with a carried block, so
 collecting obsidian means carrying a stack of cobblestone. A target that cannot
 be taken says why in numbers — `3 lava faces, 1 block carried` — rather than

@@ -53,7 +53,7 @@ const triedPlaces = new WeakMap<BotRuntime, Set<string>>();
 function noneUsableNear(detail: string): boolean {
   const code = errorCode(detail);
   return code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS" ||
-    (code === "NO_REACHABLE_MATCHING_TARGETS" && !/no carried tool/u.test(detail));
+    ((code === "NO_REACHABLE_MATCHING_TARGETS" || code === "TARGETS_UNDER_WATER") && !/no carried tool/u.test(detail));
 }
 
 /**
@@ -102,7 +102,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
   const start = (await context.runtime.status()).position;
   const code = failed.status === "failed" ? errorCode(failed.detail) : null;
   // Trees near that none could be reached are as good as none (live 2026-10-10: the same unreachable trees, round after round).
-  if (code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS" || code === "NO_REACHABLE_MATCHING_TARGETS") await forgetEmptyNear(context.runtime, block, start);
+  if (code === "NO_TARGET_IN_RANGE" || code === "NO_LOADED_MATCHING_TARGETS" || code === "NO_REACHABLE_MATCHING_TARGETS" || code === "TARGETS_UNDER_WATER") await forgetEmptyNear(context.runtime, block, start);
   const places = await knownPlaces(context.runtime, block, start);
   if (places.length === 0) {
     const why = failed.status === "failed" ? ` (${failed.detail})` : "";

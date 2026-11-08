@@ -1,0 +1,27 @@
+template: ../../templates/flat-single-action.yaml
+name: drowned-log-refused
+tags: [regression]
+description: >-
+  Run 34 in-range targets caused dives. A trunk on the sea floor has no dry stance
+  to drain it from, so collect refuses before any walk and leaves both logs standing.
+geometry:
+  - fill: { block: stone, from: [2, -60, -6], to: [14, -55, 6] }
+  - fill: { block: water, from: [3, -59, -5], to: [13, -55, 5] }
+  - setblock: { block: oak_log, at: [8, -59, 0] }
+  - setblock: { block: oak_log, at: [8, -58, 0] }
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory: [{ item: iron_axe, count: 1 }, { item: cobblestone, count: 16 }]
+params:
+  action: collect_block
+  input: { block_name: oak_log, count: 1, max_distance: 16 }
+  expect: { status: failed, errorContains: "[TARGETS_UNDER_WATER]" }
+goal:
+  kind: all
+  timeout: 30
+  goals:
+    - { kind: blocksAt, block: oak_log, positions: [[8, -59, 0], [8, -58, 0]] }
+    - { kind: reach, who: Actor, pos: [0.5, -59, 0.5], radius: 1.5 }
+    - { kind: health, who: Actor, health: 20 }
+    - { kind: completion }

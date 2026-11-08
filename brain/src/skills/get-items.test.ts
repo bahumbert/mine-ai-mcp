@@ -725,6 +725,17 @@ test("a far walk that failed on deep water ends the fetch with the boat hint, no
   assert.match(told.status === "failed" ? told.detail : "", /take a boat \(get_items oak_boat\)/u);
 });
 
+test("a near area all in water fetches farther and forgets the unusable near place", async () => {
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[TARGETS_UNDER_WATER] Every oak_log block found lies in water.";
+  runtime.seen = { oak_log: { dimension: "overworld", x: 20, z: 8 } };
+  runtime.alsoSeen = { oak_log: [{ dimension: "overworld", x: 300, z: 8 }] };
+  await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
+  const walks = runtime.submitted.filter((call) => call.tool === "navigate");
+  assert.ok(walks.some((call) => call.input.x === 300));
+  assert.ok(!walks.some((call) => call.input.x === 20));
+});
+
 test("near trees none could be reached are not offered again, and a fetch failing after a partial gather says what it got", async () => {
   const runtime = new FakeRuntime();
   runtime.failures.collect_block = "[NO_REACHABLE_MATCHING_TARGETS] Every loaded oak_log block was found but none could be reached.";

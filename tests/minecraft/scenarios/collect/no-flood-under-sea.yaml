@@ -32,7 +32,9 @@ params:
     block_name: dirt
     count: 1
     scaffold: true
-  expect: { status: failed, errorContains: "[NO_REACHABLE_MATCHING_TARGETS]" }
+    # The flat world's dirt outside the knoll is dry; this request tests only the drowned wall.
+    max_distance: 4
+  expect: { status: failed, errorContains: "[TARGETS_UNDER_WATER]" }
 
 goal:
   kind: all
@@ -40,5 +42,5 @@ goal:
   goals:
     # The wall between the pocket and the sea (east face at x 2) is never broken through.
     - { kind: blocksAt, block: dirt, positions: [[1, -55, 0], [1, -54, 0]] }
-    - { kind: survive, who: DrainMiner, seconds: 1 }
+    - { kind: health, who: DrainMiner, health: 20 }
     - { kind: completion, who: DrainMiner }

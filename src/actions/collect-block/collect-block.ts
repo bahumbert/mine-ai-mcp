@@ -456,7 +456,8 @@ function stopReason(bot: Bot, request: CollectBlockRequest, start: Vec3, result:
       if (request.maxDistance !== null) return outcomes.noTargetInRange(request.selector, request.maxDistance, nearestBeyondRange(bot, request, start));
       return outcomes.noLoadedTargets(request.selector);
     case "unreachable":
-      return outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
+      return result.underWater ? outcomes.targetsUnderWater(request.selector, result.reason ?? "")
+        : outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
     case "exhausted":
       return outcomes.dropAttemptsExhausted(result.broken.length, gained, request.requested);
     case "stopped":

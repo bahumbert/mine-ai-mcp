@@ -15,7 +15,7 @@ const DRAIN_TICKS = 40;
 /** Longest wall-clock wait for that drain, whatever the server's clock does. */
 const DRAIN_WALL_MS = 5_000;
 
-const touching = (cell: Vec3) => [
+export const touching = (cell: Vec3) => [
   cell.offset(0, 1, 0),
   cell.offset(0, -1, 0),
   ...HORIZONTAL.map((offset) => cell.plus(offset)),

@@ -763,6 +763,128 @@ test("failed water preparation excludes the attempted working cell even after th
   assert.equal(inspected, true);
 });
 
+test("a drained target's goal has no wet stance", async () => {
+  const target = new Vec3(1, 64, 0);
+  const wet = new Vec3(2, 64, 0);
+  using scene = mineScene({ blocks: [target], water: [wet], feet: new Vec3(8.5, 64, 0.5) });
+  let inspected = false;
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [wet] } }),
+    isSatisfied: () => inspected,
+    route: async ({ goal }) => {
+      const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+      assert.equal(resolved.kind, "active");
+      if (resolved.kind !== "active") throw new Error("expected a dry working stance");
+      const at = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+      assert.equal(resolved.isSatisfied(at(wet), goalTestWorld), false);
+      assert.equal(resolved.isSatisfied(at(new Vec3(0, 64, 0)), goalTestWorld), true);
+      inspected = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+});
+
+test("a drained target whose drain fails with water left is blacklisted once and keeps its reason beside a drowned top", async () => {
+  for (const top of [false, true]) {
+    const target = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [target, ...(top ? [target.offset(0, 1, 0)] : [])], water: [new Vec3(2, 64, 0)] });
+    const result = await runMine(scene, {
+      canMine: (block) => block.position.y === 65
+        ? { kind: "prohibited", reason: "the block is under water", underWater: true }
+        : { kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } },
+      placeInto: async () => ({ kind: "failed", error: "placement refused" }),
+      breakInPlace: async () => { throw new Error("a failed drain must never mine wet"); },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, undefined);
+    assert.match(result.reason ?? "", /in water: the drain failed:.*placement refused/);
+  }
+});
+
+test("a drain that fails with the faces dry tries another stance", async () => {
+  const target = new Vec3(1, 64, 0);
+  const face = new Vec3(2, 64, 0);
+  using scene = mineScene({ blocks: [target], water: [face], isInWater: true });
+  let inspected = false;
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+    isSatisfied: () => inspected,
+    placeInto: async () => {
+      scene.world.setCell(face, "air");
+      return { kind: "failed", error: "a late placement answer" };
+    },
+    route: async ({ goal }) => {
+      const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+      assert.equal(resolved.kind, "active");
+      if (resolved.kind !== "active") throw new Error("the target must remain available");
+      const at = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+      assert.equal(resolved.isSatisfied(at(new Vec3(0, 64, 0)), goalTestWorld), false);
+      assert.equal(resolved.isSatisfied(at(face), goalTestWorld), true);
+      inspected = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+});
+
+test("only in-water targets settle unreachable with underWater and no route; mixed refusals do not", async () => {
+  for (const mixed of [false, true]) {
+    using scene = mineScene({ blocks: [new Vec3(1, 64, 0), new Vec3(2, 64, 0)] });
+    const result = await runMine(scene, {
+      canMine: (block) => mixed && block.position.x === 2
+        ? { kind: "prohibited", reason: "protected region" }
+        : { kind: "prohibited", reason: "in water: no dry ground beside it to drain it from", underWater: true },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, mixed ? undefined : true);
+  }
+});
+
+test("a target refresh that satisfies the request settles satisfied despite its remaining water rejections", async () => {
+  using scene = mineScene({ blocks: [new Vec3(1, 64, 0)] });
+  let satisfied = false;
+  const result = await runMine(scene, {
+    isSatisfied: () => satisfied,
+    canMine: () => {
+      satisfied = true;
+      return { kind: "prohibited", reason: "in water: no dry ground", underWater: true };
+    },
+    route: noRouteNeeded,
+  });
+  assert.equal(result.status, "satisfied");
+  assert.equal(result.underWater, undefined);
+});
+
+test("remaining water refusals never claim no target was walked to after a dry route, pickup or in-place break", async () => {
+  for (const work of ["route", "pickup", "break"]) {
+    const dry = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [...(work === "pickup" ? [] : [dry]), new Vec3(3, 64, 0)], drops: work === "pickup" ? [dry] : [], feet: new Vec3(0.5, 64, 0.5) });
+    let gained = 0;
+    const removeDry = () => scene.world.setCell(dry, "air");
+    const result = await runMine(scene, {
+      observedInventoryGain: () => gained,
+      canMine: (block) => block.position.x === 1
+        ? { kind: "mineable", routeMayBreak: work === "route" }
+        : { kind: "prohibited", reason: "in water: no dry ground", underWater: true },
+      route: async () => {
+        if (work === "pickup") { scene.entities.remove(dropId(0)); gained = 1; }
+        else removeDry();
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: async () => {
+        removeDry();
+        return { status: "broken" };
+      },
+    });
+    assert.equal(result.status, "unreachable");
+    assert.equal(result.underWater, undefined);
+    assert.deepEqual(result.broken, work === "pickup" ? [] : [dry]);
+  }
+});
+
 test("a collected item disappearing from a route does not blacklist its remaining block target", async () => {
   const target = new Vec3(5, 64, 0);
   using scene = mineScene({ blocks: [target] });
