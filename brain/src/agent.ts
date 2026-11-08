@@ -33,6 +33,7 @@ import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortf
 import { shelterForNight, underCover } from "./night-shelter.ts";
 import { personaSkills, type Persona } from "./persona.ts";
 import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
+import { BodyDown, bodyDownState, bodyDownWait } from "./body-down.ts";
 import type { EveryoneLines } from "./everyone-lines.ts";
 import { TillFacts } from "./farming/site.ts";
 import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
@@ -258,6 +259,8 @@ export class Agent {
   private nightCheckedAt = Number.NEGATIVE_INFINITY;
   /** Calls of any tier in a row that found the model server away (reset by any answer): sets how long the next wait is. */
   private modelFailures = 0;
+  /** The work loop showed "my body is down…" and no call has gone through since (see {@link workLoop}). */
+  private bodyDownShown = false;
   /** Wakes the chat loop when a line arrives (it sleeps until the burst window of the last one ends). */
   private wakeChat: (() => void) | null = null;
 
@@ -802,6 +805,7 @@ export class Agent {
         if (work !== undefined) await (work.objective.handoff === undefined ? this.advance(work) : this.handoffStep(work, work.objective.handoff));
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
         repeated = { error: "", count: 0 };
+        this.clearBodyDown();
       } catch (error) {
         if (signal.aborted) break;
         if (error instanceof ModelUnavailable) {
@@ -812,9 +816,30 @@ export class Agent {
         repeated = text === repeated.error ? { error: text, count: repeated.count + 1 } : { error: text, count: 1 };
         if (Number.isInteger(Math.log10(repeated.count))) this.options.log(`work loop error${repeated.count > 1 ? ` (${repeated.count} times)` : ""}: ${text}`);
         const poll = this.options.pollMs ?? DEFAULT_POLL_MS;
-        await this.idle(Math.min(poll * 2 ** (repeated.count - 1), Math.max(poll, MAX_ERROR_WAIT_MS)));
+        const usual = Math.min(poll * 2 ** (repeated.count - 1), Math.max(poll, MAX_ERROR_WAIT_MS));
+        // Only a call that went through ends "my body is down": a 503 while it starts leaves the state.
+        if (error instanceof BodyDown) {
+          this.showBodyDown(error);
+          await this.idle(bodyDownWait(usual, error.restart, poll, Date.now()));
+          continue;
+        }
+        if (text.includes("[BODY_RESTARTED]")) this.clearBodyDown();
+        await this.idle(usual);
       }
     }
+  }
+
+  /** The supervisor keeps the body down: the monitor shows when it starts again. */
+  private showBodyDown(error: BodyDown): void {
+    this.bodyDownShown = true;
+    this.journalState(bodyDownState(error.restart, Date.now()));
+  }
+
+  /** A call went through, or the body restarted under it: "my body is down…" is no longer true. */
+  private clearBodyDown(): void {
+    if (!this.bodyDownShown) return;
+    this.bodyDownShown = false;
+    this.journalState(null);
   }
 
   /**
@@ -885,6 +910,8 @@ export class Agent {
         ...(this.relations !== null && { owed: () => this.relations!.trades.owed() }),
       });
     } catch (error) {
+      // A body the supervisor keeps down is no failed shelter: the work loop waits for it and the night goes on.
+      if (error instanceof BodyDown) throw error;
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       this.sheltering = null;
@@ -1024,6 +1051,8 @@ export class Agent {
       const held = [...heldKinds(this.relations?.trades.owed() ?? [], snapshot.inventory)];
       result = await withMaterialsKept(this.options.runtime, held, () => runStep(decision.step, this.stepContext(work, controller, gain, started, phases)));
     } catch (error) {
+      // A body the supervisor keeps down is no failed step: nothing is recorded or remembered; the work loop waits.
+      if (error instanceof BodyDown) throw error;
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       gain.stop();
@@ -1201,6 +1230,9 @@ export class Agent {
         limits: { openingDistance: persona.settings.conversation.openingDistance, talkRange, maxMinutes: persona.settings.conversation.maxMinutes },
       });
     } catch (error) {
+      // A body the supervisor keeps down is no failed conversation: the work loop waits for it.
+      // A body the supervisor keeps down is no failed conversation: the work loop waits for it.
+      if (error instanceof BodyDown) throw error;
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       work.step = null;

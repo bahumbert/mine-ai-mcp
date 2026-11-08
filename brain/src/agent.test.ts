@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Step } from "./actions.ts";
 import { Agent, type AgentOptions } from "./agent.ts";
+import { BodyDown } from "./runtime-client.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
 import { ConversationBudget, type ConversationController } from "./conversation/controller.ts";
 import { INSTANT_TYPING } from "./body.ts";
@@ -2996,6 +2997,156 @@ test("an order taken while the agent waits for the model starts at once", async 
   await agent.handle(say("Bob", "get me 3 sand"));
   await until(() => action.requests.length >= 2, 1_000);
   assert.match(action.requests[1]?.[1]?.content ?? "", /collect 3 sand/u);
+});
+
+// Plan 2026-11-08-runtime-restart-recovery Task 3: a body the supervisor keeps down shows in the journal state.
+function bodyDownAt(msAhead: number, attempt = 2): BodyDown {
+  return new BodyDown({ at: new Date(Date.now() + msAhead).toISOString(), attempt, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
+}
+
+/** The states the monitor was shown, in order (`null` = nothing running). */
+function shownSteps(events: readonly BrainEvent[]): (string | null)[] {
+  return events.flatMap((event) => event.kind === "state" ? [event.step] : []);
+}
+
+/** The next status reads, once the agent listens, throw these errors in turn; `calls` counts every read after that. */
+function failStatusReads(runtime: FakeRuntime, logs: readonly string[], errors: Error[], onRead: (call: number) => void = () => undefined): { readonly calls: number } {
+  const original = runtime.status.bind(runtime);
+  const seen = { calls: 0 };
+  runtime.status = async () => {
+    if (!logs.some((line) => line.startsWith("listening as"))) return original();
+    seen.calls += 1;
+    onRead(seen.calls);
+    const error = errors.shift();
+    if (error !== undefined) throw error;
+    return original();
+  };
+  return seen;
+}
+
+test("a body that is down shows when it comes back and the state clears once a call goes through", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const at = new Date(Date.now() + 30_000).toISOString();
+  const down = () => new BodyDown({ at, attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
+  failStatusReads(runtime, logs, [down(), down()]);
+  const { events, planner, action } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line) });
+  planner.reply({ objective: "collect 2 dirt" });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  const shown = shownSteps(events);
+  const downText = `my body is down; it starts again at ${at.slice(11, 16)}Z (try 2 of 6)`;
+  const from = shown.indexOf(downText);
+  assert.ok(from >= 0, "the monitor was shown when the body comes back");
+  const cleared = shown.indexOf(null, from);
+  assert.ok(cleared > from, "the state clears once a call goes through");
+  assert.ok(shown.slice(from, cleared).every((step) => step === downText), "and stays until then");
+});
+
+test("a body down met inside a step is not a failed step", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const submit = runtime.submit.bind(runtime);
+  let thrown = false;
+  runtime.submit = async (tool, input) => {
+    if (tool === "collect_block" && !thrown) {
+      thrown = true;
+      throw bodyDownAt(30_000);
+    }
+    return submit(tool, input);
+  };
+  const { events, planner, action } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line) });
+  planner.reply({ objective: "collect 2 dirt" });
+  action.reply(DIRT, DIRT, { done: "collected 2 dirt" });
+  await until(() => events.some((event) => event.kind === "objective" && event.event === "finished"));
+  assert.deepEqual(events.filter((event) => event.kind === "step" && event.outcome === "failed"), [], "no failed step is recorded");
+  assert.ok(shownSteps(events).some((step) => step?.startsWith("my body is down; it starts again at")), "the monitor was shown the body down");
+  assert.doesNotMatch(JSON.stringify(action.requests[1]), /RUNTIME_UNRESPONSIVE/u, "the model is not told its step failed");
+});
+
+test("a body down met by the night shelter is not a failed shelter", async (t) => {
+  const runtime = new FakeRuntime();
+  const submit = runtime.submit.bind(runtime);
+  let thrown = false;
+  runtime.submit = async (tool, input) => {
+    if (tool === "raw_action" && !thrown) {
+      thrown = true;
+      throw bodyDownAt(30_000);
+    }
+    return submit(tool, input);
+  };
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0, y: 64, z: 0 }, clock: { ...runtime.snapshot.clock!, phase: "night" } };
+  const { events } = journaledAgent(t, runtime);
+  await until(() => thrown);
+  await until(() => shownSteps(events).some((step) => step?.startsWith("my body is down; it starts again at")));
+  assert.deepEqual(events.filter((event) => event.kind === "step" && event.outcome === "failed"), [], "no failed shelter is recorded");
+});
+
+test("a 503 while the body starts leaves the body-down state", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const events: BrainEvent[] = [];
+  let shownBeforeThirdRead: (string | null)[] = [];
+  const reads = failStatusReads(runtime, logs, [bodyDownAt(30_000), new Error("Streamable HTTP error: Error POSTing to endpoint: 503")], (call) => {
+    if (call === 3) shownBeforeThirdRead = shownSteps(events);
+  });
+  const { planner, action } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 2 dirt" });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await until(() => reads.calls >= 3);
+  const downAt = shownBeforeThirdRead.findIndex((step) => step?.startsWith("my body is down; it starts again at"));
+  assert.ok(downAt >= 0, "the body-down state was shown");
+  assert.ok(shownBeforeThirdRead.slice(downAt).every((step) => step !== null), "the 503 that followed did not clear it");
+});
+
+test("a body that restarted under a call clears the body-down state, whatever error follows", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const events: BrainEvent[] = [];
+  let shownAtThirdRead: (string | null)[] = [];
+  failStatusReads(runtime, logs, [bodyDownAt(30_000), new Error("[BODY_RESTARTED] the body restarted: view_status was not done"), new Error("Streamable HTTP error: Error POSTing to endpoint: 503")], (call) => {
+    if (call === 3) shownAtThirdRead = shownSteps(events);
+  });
+  const { planner, action } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), journal: (event) => events.push(event) });
+  planner.reply({ objective: "collect 2 dirt" });
+  action.reply(DIRT, { done: "collected 2 dirt" });
+  await until(() => shownAtThirdRead.length > 0);
+  const downAt = shownAtThirdRead.findIndex((step) => step?.startsWith("my body is down; it starts again at"));
+  assert.ok(downAt >= 0 && shownAtThirdRead.indexOf(null, downAt) > downAt, "the restarted body is no longer shown as down");
+});
+
+test("a body down met by a conversation routine is not a failed conversation", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
+  const submit = runtime.submit.bind(runtime);
+  let thrown = false;
+  runtime.submit = async (tool, input) => {
+    if (tool === "navigate" && !thrown) {
+      thrown = true;
+      throw bodyDownAt(30_000);
+    }
+    return submit(tool, input);
+  };
+  const events: BrainEvent[] = [];
+  const { planner, chat } = agentFor(t, runtime, { goal: "Live well and be friendly." }, talkOptions({ journal: (event) => events.push(event), otherAgents: others("Vex") }));
+  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+  chat.reply({ open: true, to: ["Vex"], topic: "the village", length: "long", say: "Vex! Walk with me?" });
+  await until(() => thrown);
+  await until(() => shownSteps(events).some((step) => step?.startsWith("my body is down; it starts again at")));
+  assert.deepEqual(events.filter((event) => event.kind === "step" && event.outcome === "failed"), [], "no failed step is recorded");
+});
+
+test("a body that comes back at a known time is asked again within a poll of it", async (t) => {
+  const runtime = new FakeRuntime();
+  const logs: string[] = [];
+  const started = monotonicNow();
+  const at = new Date(Date.now() + 2_000).toISOString();
+  const errors = Array.from({ length: 5 }, () => new BodyDown({ at, attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent")));
+  const reads = failStatusReads(runtime, logs, errors);
+  journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), pollMs: 100 });
+  await until(() => reads.calls >= 6, 4_000);
+  // Without the cap the five failures wait 100 + 200 + 400 + 800 + 1600 ms: the sixth read comes after 3.1 s.
+  assert.ok(monotonicNow() - started < 2_500, `the sixth read came after ${Math.round(monotonicNow() - started)} ms`);
 });
 
 test("a chat line whose call finds the model unavailable once is answered after the wait, and is in the history once", async (t) => {

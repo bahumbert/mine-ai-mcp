@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
+import { BodyDown } from "../body-down.ts";
 import { FakeRuntime, movedClocks, scriptedMind, testPersona, until } from "../testing.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
@@ -676,6 +677,34 @@ test("a get-back keeps a minute of the trade's clock for the give: with less lef
   assert.equal(end.outcome, "items_gone");
   assert.match(end.detail, /clock ran out/u);
   assert.equal(h.runtime.submitted.some((call) => call.tool === "drop_item"), false);
+});
+
+test("a give met by a body the supervisor keeps down is not a failed give: the hand-off throws and the trade stays open", async (t) => {
+  const h = await tableOwedAndGone(t);
+  const submit = h.runtime.submit.bind(h.runtime);
+  let asked = false;
+  h.runtime.submit = async (tool, input) => {
+    if (tool !== "craft_item") return submit(tool, input);
+    asked = true;
+    throw new BodyDown(null, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
+  };
+  await assert.rejects(h.relations.runHandoff(h.give, h.context), BodyDown);
+  assert.ok(asked, "the body was asked to get the item back");
+  assert.equal(h.relations.trades.closedAs(h.give.tradeId), null, "no failed give is counted against the trade");
+});
+
+test("a wait for the partner's side whose walk to them meets a body the supervisor keeps down throws it, and the wait is not ended", async (t) => {
+  const h = relationsOverTime(t);
+  const theirs = { action: "accept" as const, give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "them" as const };
+  await h.relations.trades.onDecision(theirs, "Theo", h.runtime.snapshot);
+  const id = h.trade()!.id;
+  h.runtime.snapshot = { ...h.runtime.snapshot, players: [{ username: "Theo", position: { x: 60, y: 64, z: 0 } }] };
+  h.runtime.submit = async () => {
+    throw new BodyDown(null, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
+  };
+  const context = { runtime: h.runtime, body: new Body(h.runtime, () => undefined), signal: new AbortController().signal };
+  await assert.rejects(h.relations.runHandoff({ kind: "await", tradeId: id, partner: "Theo" }, context), BodyDown);
+  assert.equal(h.relations.trades.awaits(id), true, "the trade still waits for their side");
 });
 
 test("B3: a wait for the partner's side whose trade I cancelled ends failed and says how it ended", async (t) => {

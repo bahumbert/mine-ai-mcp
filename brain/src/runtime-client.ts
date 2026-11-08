@@ -3,8 +3,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { bodyDownIfSupervisor, supervisorFailureOf } from "./body-down.ts";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
 import { readEventPages, type RuntimeEvents } from "./runtime-events.ts";
+
+export { BodyDown, type BodyRestart } from "./body-down.ts";
 
 export type { HurtBy, RuntimeEvents } from "./runtime-events.ts";
 
@@ -776,18 +779,22 @@ export class McpBotRuntime implements BotRuntime {
 
   /** Calls a tool in JSON mode and returns `response.data`; refused and failed results are data, not exceptions. */
   private async call(name: string, args: Readonly<Record<string, unknown>>, rationale: string): Promise<unknown> {
-    if (this.lost !== null && !(await this.reconnect())) throw this.lost;
+    if (this.lost !== null && !(await this.reconnect())) throw bodyDownIfSupervisor(this.lost);
     try {
       return await this.callOnce(name, args, rationale);
     } catch (error) {
-      if (!(error instanceof LostSession)) throw error;
+      if (!(error instanceof LostSession)) throw error instanceof Error ? bodyDownIfSupervisor(error) : error;
       this.lost = error.cause;
       if (await this.reconnect()) throw new Error(`[BODY_RESTARTED] the body restarted: ${name} was not done`);
-      throw error.cause;
+      throw bodyDownIfSupervisor(this.lost);
     }
   }
 
-  /** Opens a new session after a lost one (the runtime was restarted); false while it is not reachable. */
+  /**
+   * Opens a new session after a lost one (the runtime was restarted); false while it is not reachable. A refusal that
+   * is the supervisor's own failure replaces the error the brain keeps (it names the latest restart time); any other
+   * error leaves it as it was.
+   */
   private async reconnect(): Promise<boolean> {
     try {
       const fresh = await this.reopen();
@@ -796,7 +803,8 @@ export class McpBotRuntime implements BotRuntime {
       this.toolSchemas = null;
       this.lost = null;
       return true;
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && supervisorFailureOf(error) !== null) this.lost = error;
       return false;
     }
   }

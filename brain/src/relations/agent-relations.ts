@@ -1,5 +1,6 @@
 // What an agent holds for relations: the book (saved as notes), the trade controller, and the calls the agent makes into them.
 import type { Body } from "../body.ts";
+import { BodyDown } from "../body-down.ts";
 import type { ConversationRelations } from "../conversation/controller.ts";
 import { manhattan } from "../conversation/state.ts";
 import { realClock, type Clock } from "../conversation/socialise.ts";
@@ -304,6 +305,10 @@ export class AgentRelations {
       // What the partner took counts even when the rest was not taken: the retake gives only what is left.
       if (taken.length > 0) await this.trades.tookInHandoff(h.tradeId, taken);
     } catch (error) {
+      // A body the supervisor keeps down is no failed give: the trade keeps its attempts and the work loop retries when it is back.
+      // A body the supervisor keeps down is no failed give: the trade keeps its attempts and the work loop retries when it is back.
+      // A body the supervisor keeps down is no failed give: the trade keeps its attempts and the work loop retries when it is back.
+      if (error instanceof BodyDown) throw error;
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       this.trades.giveRunning(h.tradeId, false);
@@ -330,6 +335,7 @@ export class AgentRelations {
         askedToCome: () => this.trades.askedToCome(tradeId),
       }));
     } catch (error) {
+      if (error instanceof BodyDown) throw error;
       end = { outcome: "failed", detail: error instanceof Error ? error.message : String(error) };
     }
     // A dropped wait may only be set aside below a give or a collect: the controller learns it left the stack from the agent's next look.

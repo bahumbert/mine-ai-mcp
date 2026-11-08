@@ -3,7 +3,7 @@ import test, { mock } from "node:test";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { sameDimensionSql } from "./bot-data-sql.ts";
-import { McpBotRuntime, type ToolClient } from "./runtime-client.js";
+import { BodyDown, McpBotRuntime, type ToolClient } from "./runtime-client.js";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 
@@ -107,6 +107,61 @@ test("a refused connection whose reconnect also fails throws the original error,
   });
   await assert.rejects(runtime.blockSources(["wheat"]), /fetch failed/u);
   assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
+});
+
+// Plan 2026-11-08-runtime-restart-recovery Task 3: the supervisor's saved failure rides in the JSON-RPC error's `data`.
+const supervisorFailure = (restart: unknown) =>
+  new McpError(ErrorCode.InternalError, "[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent; this runtime has been stopped", { code: "RUNTIME_UNRESPONSIVE", observedAt: "2026-11-08T10:00:00.000Z", ...(restart === undefined ? {} : { restart }) });
+const restartAt = (attempt: number) => ({ at: "2026-11-08T10:00:30.000Z", attempt, of: 6 });
+const thrownBy = (promise: Promise<unknown>): Promise<unknown> => promise.then(() => null, (thrown: unknown) => thrown);
+
+test("a reconnect refused by the supervisor throws BodyDown with the latest restart time", async () => {
+  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(supervisorFailure(restartAt(1)))]), async () => {
+    throw supervisorFailure(restartAt(2));
+  });
+  const error = await thrownBy(runtime.blockSources(["wheat"]));
+  assert.ok(error instanceof BodyDown, "the call says the body is down");
+  assert.deepEqual(error.restart, restartAt(2));
+  assert.match(error.message, /\[RUNTIME_UNRESPONSIVE\]/u);
+});
+
+for (const [name, restart] of [["a supervisor that gave up", null], ["an older host without restart data", undefined]] as const) {
+  test(`${name} gives BodyDown with no restart`, async () => {
+    const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(supervisorFailure(restart))]), async () => {
+      throw supervisorFailure(restart);
+    });
+    const error = await thrownBy(runtime.blockSources(["wheat"]));
+    assert.ok(error instanceof BodyDown);
+    assert.equal(error.restart, null);
+  });
+}
+
+test("a reconnect refused by the network keeps the supervisor's earlier failure", async () => {
+  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(supervisorFailure(restartAt(1)))]), async () => {
+    throw new Error("connection refused");
+  });
+  const error = await thrownBy(runtime.blockSources(["wheat"]));
+  assert.ok(error instanceof BodyDown, "the first error was the supervisor's");
+  assert.deepEqual(error.restart, restartAt(1));
+});
+
+test("a restart the supervisor could not spawn answers BodyDown with no restart, without reopening the session", async () => {
+  let reopened = 0;
+  const failed = new McpError(ErrorCode.InternalError, "[RUNTIME_RESTART_FAILED] spawn failed", { code: "RUNTIME_RESTART_FAILED" });
+  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(failed)]), async () => {
+    reopened++;
+    return sessionClient([]);
+  });
+  const error = await thrownBy(runtime.blockSources(["wheat"]));
+  assert.ok(error instanceof BodyDown);
+  assert.equal(error.restart, null);
+  assert.equal(reopened, 0, "not a lost session");
+});
+
+test("a 503 while the supervisor starts the body stays a plain error", async () => {
+  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(new StreamableHTTPError(503, "starting"))]), async () => sessionClient([]));
+  const error = await thrownBy(runtime.blockSources(["wheat"]));
+  assert.ok(error instanceof Error && !(error instanceof BodyDown));
 });
 
 test("a rationale longer than the contract's 200 characters is cut before it is sent", async () => {
