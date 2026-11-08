@@ -103,8 +103,9 @@ function raiseWall(world: FakeWorld, height: "full" | "low" | "none"): void {
 }
 
 /**
- * Every cell the bot reads reports this sky light. The shared fake's blocks are always unlit (Prismarine's default);
- * this stays until a contract check measures sky light per cell (asked of the master, plan 2026-10-21-shared-fake-bot M3).
+ * Every cell the bot reads reports this sky light. The shared fake answers sky light only for the measured shapes (15 in
+ * open air, 0 in a closed box: `fake-world-light.ts`, contract check `light-in-cells`); the threshold levels of the
+ * spider rule are between them and unmeasured, so a test sets the level it needs.
  */
 function lightBySky(bot: Bot, skyLight: number): void {
   const read = bot.blockAt.bind(bot);

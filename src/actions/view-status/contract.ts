@@ -11,6 +11,7 @@ export const VIEW_STATUS_DESCRIPTION =
   "the ticks until that changes, and whether the bot is asleep or it is raining; exact position, dimension, footing, " +
   "and compass heading; every carried stack with its slot, the free slot count, the held item, and worn equipment; " +
   "each carried food with the hunger points and saturation one restores; " +
+  "the armour points, the armour worn per slot and carried unworn, the light at the feet with the open sky above, the fight reflex's gear, and the respawn point; " +
   "remaining item durability, best carried tool and armour (item, rank in its family, durability), bucket kinds, observed air supply in ticks, burning and lava contact, and current physical ownership/action; " +
   "which movements the inventory unlocks: no carried water bucket caps every route at a three-block fall and disarms the emergency fall save, and pillaring and bridging need a carried scaffold block; " +
   "the players and hostile mobs nearby; every loaded dropped item, nearest first; and every loaded mob species and observed age group with its count, whether it is hostile, and the " +
@@ -164,7 +165,34 @@ export const liveSituationSchema = z.strictObject({
       .nullable()
       .describe("Own entity air_supply metadata in ticks; null until observed. May be negative during drowning."),
     burning: z.boolean().nullable().describe("Own entity burning flag; null until observed."),
+    armour: z.number().nullable().describe("Armour points the server counts (generic.armor); 0 with no piece worn; null when a piece is worn and the server told none."),
+    armourToughness: z.number().nullable().describe("Armour toughness (generic.armor_toughness); same null rule as armour."),
   }),
+  armourWorn: z
+    .array(z.strictObject({ slot: z.enum(["head", "torso", "legs", "feet"]), item: z.string().nullable() }))
+    .describe("The four armour slots as worn, an empty one with item null."),
+  armourCarried: z
+    .array(z.strictObject({ item: z.string(), count: z.number().int().positive(), slot: z.enum(["head", "torso", "legs", "feet"]) }))
+    .describe("Armour pieces in the main inventory and hotbar (not worn), summed per item, each with the slot it is for."),
+  light: z
+    .strictObject({
+      sky: z.number().int().nullable().describe("Sky light at the feet cell (15 under open sky by day); null where the client holds no light data."),
+      block: z.number().int().nullable().describe("Block light at the feet cell; null where the client holds no light data."),
+      openSkyAbove: z.number().int().positive().nullable().describe("Blocks up to the first cell with sky light 15 when the feet cell is below 15; null when the feet are under open sky, or a cell on the way has no light data, or none is found."),
+    })
+    .describe("The light at the bot's feet, as the chunk data the server sent."),
+  combat: z
+    .strictObject({
+      melee: z.string().nullable().describe("The melee weapon the fight reflex picks; null: bare hands."),
+      bow: z.string().nullable().describe("The best carried bow, with or without arrows."),
+      arrows: z.number().int().nonnegative().describe("Arrows carried, the off-hand included."),
+      shield: z.string().nullable(),
+    })
+    .describe("What the fight reflex has to work with."),
+  respawn: z
+    .strictObject({ kind: z.enum(["bed", "world_spawn"]), position: positionSchema, distance: z.number().nonnegative().nullable() })
+    .nullable()
+    .describe("Where the bot would wake after dying: a bed slept in this session, else the world spawn; distance null in another dimension."),
   mobility: z
     .strictObject({
       maximumDrop: z

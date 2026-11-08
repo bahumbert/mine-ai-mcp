@@ -6,6 +6,7 @@ import { type CombatContact } from "../../policy/combat/decision.js";
 import type { HostileThreat } from "../../policy/combat/response.js";
 import { bowDrawAimedAtBot, lookingAtBot } from "./attention.js";
 import { type CombatPerception } from "./observations.js";
+import { lightAt } from "../../../world/light.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -89,14 +90,16 @@ function angryEndermanLookingAtBot(bot: Bot, entity: Entity): boolean {
  * cell lit by the sky at the level at which spiders stop attacking on sight.
  *
  * Sky light rather than the combined light level, because a torch does not
- * make a spider passive and daylight is the whole of the rule. Mineflayer
- * reports `skyLight` per cell from the same chunk data the server sent, so a
+ * make a spider passive and daylight is the whole of the rule. `skyLight` per
+ * cell is the chunk data the server sent (contract check `light-in-cells`;
+ * right only with the bun patch `patches/prismarine-chunk@1.41.0.patch`:
+ * unpatched, prismarine-chunk permuted the nibbles inside each x row), so a
  * spider under a roof or down a shaft at noon stays a threat.
  */
 function passiveInDaylight(bot: Bot, entity: Entity): boolean {
   if (entity.name !== "spider") return false;
   if (dayPhase(bot.time.timeOfDay) !== "day") return false;
-  return (bot.blockAt(entity.position)?.skyLight ?? 0) >= SPIDER_PASSIVE_SKY_LIGHT;
+  return (lightAt(bot, entity.position).sky ?? 0) >= SPIDER_PASSIVE_SKY_LIGHT; // no light data reads as a threat, as before
 }
 
 /** Players, passive mobs and species that may be neutral must not be swept into another target's fight. */

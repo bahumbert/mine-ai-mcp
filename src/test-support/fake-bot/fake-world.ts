@@ -20,6 +20,7 @@ import {
   createLoadedChunks,
   lazyRange,
 } from "./fake-world-columns.js";
+import { createFakeWorldLight, giveBlockItsLight } from "./fake-world-light.js";
 
 /** A block by name, by name with state properties, by state id, or `"void"`: a cell in a chunk the bot has not loaded. */
 export type FakeCell =
@@ -63,6 +64,8 @@ export interface FakeWorld {
   getBlockStateId(cell: Vec3): number;
   /** `bot.world.getColumn` (`worldsync.js:81`): the chunk's Prismarine column, undefined where `blockAt` answers null. */
   getColumn(chunkX: number, chunkZ: number): FakeColumn | undefined;
+  /** `bot.world.getColumnAt` (`worldsync.js:86`, `world.js:206-210`): the loaded column holding the point. The fake's columns hold no light sections: the light is on the blocks (`fake-world-light.ts`). */
+  getColumnAt(point: Vec3): FakeColumn | undefined;
   /** `bot.world.getColumns` (`worldsync.js:78`): every loaded column, its coordinates as strings. */
   getColumns(): ListedColumn[];
   /** Change a cell and emit `blockUpdate` and `blockUpdate:(x, y, z)` with the old and the new block. */
@@ -143,18 +146,19 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
   const columns = createFakeColumns(registry, loaded, { range, groundY, groundStateId: stone, namedCells: cells.inChunk });
 
   // Where the server sent no chunk the cell is VOID; past the dimension's floor and height the game keeps nothing: air.
-  const stateAt = (cell: Vec3): CellState => {
-    const x = Math.floor(cell.x);
-    const y = Math.floor(cell.y);
-    const z = Math.floor(cell.z);
+  const stateAtXYZ = (x: number, y: number, z: number): CellState => {
     if (!loaded.has(x >> 4, z >> 4)) return VOID;
     const { minY, height } = range();
     if (y < minY || y >= minY + height) return air;
     return cells.get(`${x},${y},${z}`) ?? (groundY !== null && y <= groundY ? stone : air);
   };
+  const stateAt = (cell: Vec3): CellState => stateAtXYZ(Math.floor(cell.x), Math.floor(cell.y), Math.floor(cell.z));
+  // The light of the measured shapes (`fake-world-light.ts`).
+  const worldLight = createFakeWorldLight({ registry, cells, groundY, range, stateAt: stateAtXYZ });
   const placed = (stateId: number, cell: Vec3) => {
     const block = Block.fromStateId(stateId, 0);
     block.position = cell.floored();
+    giveBlockItsLight(block, stateId, worldLight);
     return block;
   };
   const read = (cell: Vec3) => {
@@ -173,12 +177,14 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
       return stateId === VOID ? 0 : stateId;
     },
     getColumn: columns.getColumn,
+    getColumnAt: (point) => columns.getColumn(Math.floor(point.x / 16), Math.floor(point.z / 16)),
     getColumns: columns.getColumns,
     setCell(cell, block) {
       const before = read(cell);
       const state = stateIdOf(registry, Block, block);
       assertWithinRange(range(), cellKey(cell));
       cells.set(cellKey(cell), state);
+      worldLight.cellChanged();
       // The server had not sent this chunk; a test that sets a block in it is staging a chunk it did send, with its event
       // (`worldsync.js` `setColumn` emits `chunkColumnLoad` at the column's corner, which Mineflayer forwards to the bot).
       const sent = state !== VOID && loaded.add(chunkIndexOf(cell.x), chunkIndexOf(cell.z));

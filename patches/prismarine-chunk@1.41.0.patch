@@ -1,0 +1,18 @@
+diff --git a/src/pc/1.18/ChunkColumn.js b/src/pc/1.18/ChunkColumn.js
+index 5f50220a1e040c66dc5af015f5cd407e17b3d668..2e1cf8c830f576b383251201262c4a096d73dd52 100644
+--- a/src/pc/1.18/ChunkColumn.js
++++ b/src/pc/1.18/ChunkColumn.js
+@@ -279,7 +279,12 @@ module.exports = (Block, mcData) => {
+
+           if (!isEmpty) {
+             const sectionReader = Buffer.from(data[currentSectionIndex++])
+-            bitArray.readBuffer(SmartBuffer.fromBuffer(sectionReader))
++            // mine-ai patch: a light array is 4096 nibbles, two to a byte, the low nibble first (the game's DataLayer), so its bytes are read as little-endian 32-bit words
++            // in order, which is how BitArray.get indexes them. BitArray.readBuffer reads the big-endian longs of palette data, which permutes the nibbles inside each 8-byte group.
++            const lightBytes = SmartBuffer.fromBuffer(sectionReader)
++            for (let word = 0; word < bitArray.data.length; word++) {
++              bitArray.data[word] = lightBytes.readUInt32LE()
++            }
+           }
+         }
+       }

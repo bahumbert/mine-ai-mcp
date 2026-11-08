@@ -137,6 +137,17 @@ prints it as "Item families: server tags (1.21.4) + override minecraft". The
 same data is in `bot_inventory.families` (JSON array) and
 `bot_status.item_families_json`.
 
+The condition facts (plan p4-03) are read in the game, never advice. `vitals.armour` and
+`vitals.armourToughness` are the server's armour points (0 with no piece worn, null when a piece is worn and
+the server told none). `armourWorn` is the four slots (`head`, `torso`, `legs`, `feet`) with the item or null;
+`armourCarried` lists the armour pieces carried in the inventory and hotbar, not worn, summed per item with the
+slot each is for (`gear`/`tools.armour` is the best carried piece, worn or not: not "worn"). `light` is the
+sky and block light at the feet and, when the feet are below full sky light, `openSkyAbove`, the blocks up to the first cell of
+full sky light; each is null where the client holds no light data (never 0 for unknown). `combat` is the fight
+reflex's gear: `melee` (null: bare hands), the best `bow` with or without arrows, the `arrows` carried and the
+`shield`. `respawn` is the bed slept in this session, else the world spawn, with its distance (null in another
+dimension). The text carries them as one `Condition facts:` line under the best tools.
+
 The `mobility` section answers what the carried inventory unlocks, which the
 stack list alone does not say: a route falls at most three blocks unassisted,
 a longer descent is planned only as a water-bucket drop of up to eighty blocks

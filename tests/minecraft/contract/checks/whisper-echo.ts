@@ -31,6 +31,8 @@ export const whisperEcho: ContractCheck = {
     const { bot } = subject;
     const heard: Heard[] = [];
     const onMessage = (message: unknown, position: string): void => {
+      // Lanes share one server: another lane's bot joining or leaving is a `system` line every client hears (2026-11-08: "ActorL4003 left the game" read as an extra line, 2 of 5 concurrent runs). A whisper echo is `chat`.
+      if (position !== "chat") return;
       const line = message as { translate?: string; with?: { toString(): string }[]; toString(): string };
       heard.push({ position, translate: line.translate, args: (line.with ?? []).map((part) => part.toString()), text: line.toString() });
     };

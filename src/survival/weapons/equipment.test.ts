@@ -5,7 +5,7 @@ import test, { mock } from "node:test";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { createFamilyIndex, familyIndexOf } from "../../world/item-families.js";
 import { watchServerTags } from "../../world/server-tags.js";
-import { equipCombatLoadout, readCombatItems, selectCombatLoadout, selectMeleeLoadout } from "./equipment.js";
+import { combatReadout, equipCombatLoadout, readCombatItems, selectCombatLoadout, selectMeleeLoadout } from "./equipment.js";
 
 const registry = minecraftData("1.21.4");
 // The package exports a CommonJS loader; its default declaration is not callable under NodeNext.
@@ -181,4 +181,15 @@ test("revision change re-reads: an item a tags packet adds to swords is the next
   const after = choose();
   assert.equal(after.weapon?.name, "stick");
   assert.equal(after.cooldownTicks, 13, "the sword family's cooldown");
+});
+
+test("combatReadout gives the reflex's melee, a bow without arrows, the arrow count and the shield", () => {
+  const empty = combatReadout(createFakeBot({ carried: { iron_sword: 1, bow: 1, shield: 1 } }).bot);
+  assert.deepEqual(empty, { melee: "iron_sword", bow: "bow", arrows: 0, shield: "shield" }, "a bow with no arrows is still reported, with 0 arrows");
+  assert.deepEqual(combatReadout(createFakeBot().bot), { melee: null, bow: null, arrows: 0, shield: null }, "bare hands: nothing");
+  // The held stack is read twice by `readCombatItems` (hand, then inventory): the count must not double it.
+  const inHand = combatReadout(createFakeBot({ slots: { 36: { name: "arrow", count: 12 }, 9: { name: "bow" } } }).bot);
+  assert.equal(inHand.arrows, 12, "12 arrows in the held slot are 12, not 24");
+  const offHand = combatReadout(createFakeBot({ slots: { 45: { name: "arrow", count: 7 }, 10: { name: "spectral_arrow", count: 5 } } }).bot);
+  assert.equal(offHand.arrows, 12, "the off-hand and a carried stack of another arrow kind add up, each slot once");
 });

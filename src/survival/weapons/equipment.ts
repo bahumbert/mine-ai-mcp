@@ -133,6 +133,26 @@ export function carriesCombatWeapon(bot: Bot): boolean {
   return selectMeleeWeapon(index, carried) !== null || usableBow(index, carried) !== null;
 }
 
+/**
+ * What the fight reflex has to work with, for the model's condition line: the melee weapon it picks (null: bare hands), the best bow
+ * whether or not arrows are carried, the arrows carried (a slot counted once, the off-hand included) and the best shield.
+ */
+export function combatReadout(bot: Bot): { melee: string | null; bow: string | null; arrows: number; shield: string | null } {
+  const index = familyIndexOf(bot);
+  const carried = readCombatItems(bot);
+  // `readCombatItems` lists the held stack again among the inventory's: count by window slot.
+  const arrowSlots = new Map<number, number>();
+  for (const stack of [...bot.inventory.items(), bot.inventory.slots[OFF_HAND_SLOT]]) {
+    if (stack && index.itemFamilies(stack.name).includes("arrow")) arrowSlots.set(stack.slot, stack.count);
+  }
+  return {
+    melee: selectMeleeLoadout(index, carried).weapon?.name ?? null,
+    bow: bestOfFamily(index, carried, "bow")?.name ?? null,
+    arrows: [...arrowSlots.values()].reduce((total, count) => total + count, 0),
+    shield: bestOfFamily(index, carried, "shield")?.name ?? null,
+  };
+}
+
 /** Whether the bot can deal damage from beyond a creeper's fuse. */
 export function carriesRangedWeapon(bot: Bot): boolean {
   return usableBow(familyIndexOf(bot), readCombatItems(bot)) !== null;

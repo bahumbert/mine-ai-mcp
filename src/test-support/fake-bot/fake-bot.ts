@@ -210,7 +210,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
     players: { ...playersOf(world, entities, feet, options.players), [username]: { username, uuid: offlineUuidOf(username), ping: 0, gamemode: 0, displayName: undefined, entity: self } },
     inventory,
     blockAt: (point: Vec3) => world.blockAt(point),
-    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumns: world.getColumns },
+    world: { getBlockStateId: world.getBlockStateId, getBlock: world.blockAt, raycast: world.raycast, getColumn: world.getColumn, getColumnAt: world.getColumnAt, getColumns: world.getColumns },
     supportFeature: registry.supportFeature,
   });
   world.getBlockStateId(feet); // the first read checks every named cell against the dimension's heights, now the bot's `game` exists

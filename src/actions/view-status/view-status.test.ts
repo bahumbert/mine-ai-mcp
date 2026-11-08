@@ -50,7 +50,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
   const situation = observeLiveSituation(liveBot(), data, idleActivity);
 
   assert.equal(situation.botId, "TestBot");
-  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null });
+  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null, armour: null, armourToughness: null });
   assert.deepEqual(situation.clock, {
     timeOfDay: 13826,
     phase: "night",

@@ -31,6 +31,7 @@ import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../
 import { isItemEntity } from "../../world/item-pickup.js";
 import { observeMobAge } from "../../world/mob-age.js";
 import { currentVehicle } from "../navigate/vehicle-sync.js";
+import { conditionFactsLine, observeConditionFacts } from "./condition-facts.js";
 import { defineAction } from "../action.js";
 import {
   DRAGON_PHASE_NAMES,
@@ -66,6 +67,7 @@ export function observeLiveSituation(
     phase === null ? null : phase === "night" ? ticksUntilDay(snapshot.timeOfDay) : ticksUntilNight(snapshot.timeOfDay);
   const carried = carriedStacks(snapshot.inventory);
   const lastDeath = readLastDeath(data, bot.username);
+  const { vitals: armourVitals, ...conditionFacts } = observeConditionFacts(bot);
   return {
     botId: snapshot.botId,
     observedAt: snapshot.updatedAt ?? new Date().toISOString(),
@@ -85,7 +87,9 @@ export function observeLiveSituation(
       saturation: round(snapshot.saturation, 1),
       airSupplyTicks: air,
       burning: flags === null ? null : (flags & 1) !== 0,
+      ...armourVitals,
     },
+    ...conditionFacts,
     mobility: observeMobility(bot),
     clock: {
       timeOfDay: snapshot.timeOfDay,
@@ -361,7 +365,7 @@ function round(value: number, digits: number): number {
 
 export function formatViewStatusResult(result: ViewStatusResult): string {
   const { situation } = result;
-  const { vitals, mobility, clock, position, inventory, nearby, tools } = situation;
+  const { vitals, mobility, clock, position, inventory, nearby } = situation;
   const yesNo = (value: boolean | null) => (value === null ? "unknown" : value ? "yes" : "no");
   const phaseChange =
     clock.phase === "night"
@@ -407,9 +411,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     `- Last death: ${situation.lastDeath ? `${at(situation.lastDeath.position)} in \`${situation.lastDeath.dimension}\` at ${situation.lastDeath.observedAt}${situation.lastDeath.cause ? ` (${situation.lastDeath.cause})` : ""}` : "none recorded"}`,
     "",
     ...inventoryLines(inventory, situation.item_families),
-    "",
-    "### Best tools and armour",
-    ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.item ? `${entry.item} (slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : "none"}`),
+    ...bestToolsLines(situation),
     "",
     `### Nearby (within ${nearby.rangeBlocks} blocks)`,
     `- Players: ${
@@ -447,6 +449,18 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
   ];
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");
+}
+
+/** The best carried tool per class, then the one line of condition facts (armour, light, fight gear, respawn). */
+function bestToolsLines(situation: LiveSituation): string[] {
+  const entries = [...situation.tools.tools, ...situation.tools.armour];
+  const facts = conditionFactsLine(situation);
+  return [
+    "",
+    "### Best tools and armour",
+    ...entries.map((entry) => `- ${entry.class}: ${entry.item ? `${entry.item} (slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : "none"}`),
+    ...(facts === null ? [] : [facts]),
+  ];
 }
 
 /**

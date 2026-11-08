@@ -82,13 +82,22 @@ function startRefusalsBeside(edit: (world: MemoryWorld, bot: FakeBot) => void) {
 test("a passable side neighbour whose step the policy refuses for lava spread counts under that reason, level, one up and one down", () => {
   const cases = [
     ["side cell", (world: MemoryWorld, bot: FakeBot) => loadNamedBlock(world, bot, { x: 2, y: 63, z: 0 }, "lava")],
-    ["step-up cell, lava on its feet row", (world: MemoryWorld, bot: FakeBot) => loadNamedBlock(world, bot, { x: 2, y: 64, z: 0 }, "lava")],
+    // The lava stands on a floor: the settled stream beside a step (a head-height lava over an open cell would also refuse the level cell, next test).
+    ["step-up cell, lava on its feet row", (world: MemoryWorld, bot: FakeBot) => {
+      world.load({ x: 2, y: 63, z: 0 }, { stateId: 1 });
+      loadNamedBlock(world, bot, { x: 2, y: 64, z: 0 }, "lava");
+    }],
     ["step-down cell, the floor dug out", (world: MemoryWorld, bot: FakeBot) => {
       world.load({ x: 1, y: 62, z: 0 }, { stateId: 0 });
       loadNamedBlock(world, bot, { x: 2, y: 62, z: 0 }, "lava");
     }],
   ] as const;
   for (const [name, edit] of cases) assert.equal(startRefusalsBeside(edit)[LAVA_SPREAD_REASON], 1, name);
+});
+
+test("lava over an open cell beside the head of a side cell refuses that cell too, as the step-up cell under it (T3a, contract check lava-beside-head)", () => {
+  const refusals = startRefusalsBeside((world, bot) => loadNamedBlock(world, bot, { x: 2, y: 64, z: 0 }, "lava"));
+  assert.equal(refusals[LAVA_SPREAD_REASON], 2, "the level cell (lava beside its head, over air) and the step-up cell (lava on its feet row)");
 });
 
 test("a side cell with no lava, or a solid one (judged by the dig rules, not as a step), counts no lava refusal", () => {
