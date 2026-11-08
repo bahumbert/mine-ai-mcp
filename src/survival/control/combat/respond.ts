@@ -18,6 +18,15 @@ import {
 } from "./response-result.js";
 import { responseScope } from "./scopes/response.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
+
+/**
+ * Consecutive physics ticks a melee target may stay out of defensive reach before the fight ends as `contact_ended`.
+ * A knockback flight lasts about 0.6 s (12 ticks, `facts/runtime-pitfalls.md` "a `/damage` attributed to an entity
+ * knocks the bot back"); 20 ticks is one second, above it. The count lives on physics ticks only: with no tick the
+ * fight's 30 s no-progress limit bounds it.
+ */
+export const CONTACT_GRACE_TICKS = 20;
+
 async function fight(
   bot: Bot,
   controller: CombatController,
@@ -29,12 +38,16 @@ async function fight(
   const contactEnded = new AbortController();
   const policyRevision = controller.policy.snapshot().revision;
   const target = bot.entities[request.targetId];
+  // Consecutive reads (physics ticks, and the synchronous one below) with the target out of defensive reach.
+  let readsOutOfReach = 0;
   const observeContact = () => {
     const { perception } = context;
     const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
+    // The count runs while a fuse holds the owner too: the contact then ends the tick the clearance is discharged.
+    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target)) readsOutOfReach += 1;
+    else readsOutOfReach = 0;
     if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
-    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target))
-      contactEnded.abort("Melee target left defensive reach.");
+    if (readsOutOfReach >= CONTACT_GRACE_TICKS) contactEnded.abort("Melee target left defensive reach.");
   };
   bot.on("physicsTick", observeContact);
   let result: CombatOutcome;

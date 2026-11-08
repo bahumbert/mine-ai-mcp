@@ -16,7 +16,7 @@ import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { observeHostileResponse } from "../control/combat/observation.js";
-import { executeHostileResponse } from "../control/combat/respond.js";
+import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import { attachHostileReflex } from "./hostile.js";
@@ -651,7 +651,7 @@ test("the reflex awaits combat recovery and records its capability limit", async
   fixture.data.close();
 });
 
-test("melee contact ending releases the reflex without marking the target unreachable", async () => {
+test("melee contact ending after 20 ticks out of reach releases the reflex without marking the target unreachable", async () => {
   let engaging = false;
   const fixture = reflexFixture(
     (targetId, signal, movement) =>
@@ -664,7 +664,7 @@ test("melee contact ending releases the reflex without marking the target unreac
   fixture.tick();
   assert.ok(await until(() => engaging));
   fixture.bot.entities[7]!.position.y = 58;
-  fixture.tick();
+  for (let tick = 0; tick < CONTACT_GRACE_TICKS; tick += 1) fixture.tick();
   assert.ok(await until(() => !fixture.runner.status().busy));
   assert.deepEqual(fixture.recorded(), ["fight -> contact_ended"]);
   assert.equal(fixture.observer.threats.unreachableIds.has(7), false);
@@ -687,7 +687,8 @@ test("ending the original melee contact cannot drop the owner while another fuse
   Reflect.set(creeper.metadata, swell, 1);
   fixture.perception.creeperClearance.require(fixture.perception.creeperClearance.observe(fixture.perception.tick, new Set()));
   fixture.bot.entities[7]!.position.y = 58;
-  fixture.tick();
+  // The grace has run out while the fuse holds the owner: the contact ends the tick the clearance is discharged.
+  for (let tick = 0; tick < CONTACT_GRACE_TICKS; tick += 1) fixture.tick();
   assert.equal(await until(() => !fixture.runner.status().busy, 5), false);
   fixture.entities.remove(8);
   fixture.tick();
@@ -698,6 +699,95 @@ test("ending the original melee contact cannot drop the owner while another fuse
   assert.deepEqual(fixture.recorded(), ["fight -> contact_ended"]);
   await fixture.observer.close();
   fixture.data.close();
+});
+
+/** A zombie in reach, a fight claimed that waits for its abort: `ticksOut` puts it out of reach for that many physics ticks, `ticksIn` in reach (a knockback flight and its landing). */
+async function contactScene() {
+  let engaged = false;
+  let aborted = false;
+  const fixture = reflexFixture(
+    (targetId, signal) =>
+      new Promise((resolve) => {
+        engaged = true;
+        signal.addEventListener("abort", () => { aborted = true; resolve({ ...died(targetId), kind: "cancelled" }); }, { once: true });
+      }), undefined, { entities: { 7: hostile("zombie", 2) } },
+  );
+  fixture.tick();
+  assert.ok(await until(() => engaged), "the fight is claimed");
+  const zombie = fixture.bot.entities[7]!;
+  const ticksOut = (count: number) => {
+    zombie.position.x = 12;
+    for (let tick = 0; tick < count; tick += 1) fixture.tick();
+  };
+  const ticksIn = (count: number) => {
+    zombie.position.x = 2;
+    for (let tick = 0; tick < count; tick += 1) fixture.tick();
+  };
+  const close = async () => {
+    fixture.runner.cancelActive("Test completed");
+    await fixture.observer[Symbol.asyncDispose]();
+    fixture.data.close();
+  };
+  /** The encounters recorded once the fight settled (or after the turns given: a fight that goes on records none). */
+  const settled = async () => {
+    await until(() => fixture.recorded().length > 0, 30);
+    return fixture.recorded();
+  };
+  return { ...fixture, ticksOut, ticksIn, settled, fighting: () => !aborted && fixture.runner.status().busy, close };
+}
+
+test("a knockback that carries the bot out of reach for 12 ticks keeps the fight", async () => {
+  const scene = await contactScene();
+  try {
+    scene.ticksOut(12);
+    scene.ticksIn(1);
+    assert.deepEqual(await scene.settled(), [], "the flight of about 0.6 s does not end the fight");
+    assert.equal(scene.fighting(), true);
+  } finally {
+    await scene.close();
+  }
+});
+
+// The 20th tick ending it (`contact_ended`) is held by the renamed pin above ("ending after 20 ticks out of reach").
+test("19 ticks out of reach then back keeps fighting", async () => {
+  const scene = await contactScene();
+  try {
+    scene.ticksOut(19); // a literal: the rule is "20 ticks", a lowered constant must fail here
+    scene.ticksIn(1);
+    assert.deepEqual(await scene.settled(), []);
+    assert.equal(scene.fighting(), true);
+  } finally {
+    await scene.close();
+  }
+});
+
+test("one tick back in reach restarts the count", async () => {
+  const scene = await contactScene();
+  try {
+    scene.ticksOut(15);
+    scene.ticksIn(1);
+    scene.ticksOut(15);
+    assert.deepEqual(await scene.settled(), [], "15 + 15 ticks out with one in between is not 20 in a row");
+    assert.equal(scene.fighting(), true);
+  } finally {
+    await scene.close();
+  }
+});
+
+test("with physics stopped the grace does not count and the 30 s no-progress limit ends the fight", async () => {
+  const scene = await contactScene();
+  try {
+    scene.bot.physicsEnabled = false; // a chunk unloaded under the bot: the client runs no tick
+    scene.bot.entities[7]!.position.x = 12;
+    await scene.clock.advance(25_000);
+    assert.equal(scene.fighting(), true, "no tick, no grace: 25 s later the fight is still held");
+    await scene.clock.advance(6_000);
+    await until(() => !scene.fighting());
+    assert.equal(scene.fighting(), false, "the 30 s no-progress limit ended it");
+    assert.equal(scene.driver.answered.snapshot()[0]?.failure.kind, "reflex_limit", "a limit, not contact_ended");
+  } finally {
+    await scene.close();
+  }
 });
 
 test("damage below the hide threshold does not stop an already admitted escape", async () => {
