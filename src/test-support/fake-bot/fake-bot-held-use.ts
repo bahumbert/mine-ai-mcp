@@ -2,9 +2,9 @@
  * What the fake server does with an item the hand uses (contract checks `bow-draw-and-release`, `shield-raised`,
  * `consume-food`, `unequip-hand`, Mine Labs 1.21.4, 2026-10-23): the use sets the hand-in-use bit of the bot's living-entity
  * flags (bit 0, bit 1 for the off hand), the release (`block_dig` status 5) clears bit 0, a bow released after 3 or more
- * ticks shoots an arrow from the eye (0.1 below it) and spends one, and food bitten for 32 ticks is eaten: the stack loses
- * one, the effects come, `entity_status` 9 ends the use and `update_health` follows when the food changed. Bread at food 20
- * is not taken. Also `unequip`, as `simple_inventory.js:43-79` has it.
+ * ticks shoots an arrow from the eye (0.1 below it) and spends one, and food bitten for 32 ticks is eaten: `entity_status` 9
+ * ends the use first, then (`AFTER_BITE_TICKS` later) the stack loses one, the effects come and `update_health` follows when
+ * the food changed (`AFTER_BITE_TICKS` says what is measured). Bread at food 20 is not taken. Also `unequip`, as `simple_inventory.js:43-79` has it.
  * Not modelled: a crossbow, a trident, potions, the other foods' eating times and effects, the bow's power and the arrow's
  * flight, the item's damage, a creative bot keeps its stacks (modelled) but is never refused food (vanilla: it is not refused).
  */
@@ -36,6 +36,13 @@ const FOOD_EFFECTS: Readonly<Record<string, readonly { readonly effect: string; 
     { effect: "Absorption", amplifier: 0, duration: 2_400 },
   ],
 };
+/**
+ * Server ticks between `entity_status` 9 and the stack, the effects and the health. Measured (contract check `consume-food`,
+ * Mine Labs 1.21.4, 2026-10-23, the comment "The stack, the bit and the effects come after the resolution", the `consume`
+ * promise resolving on the status): the stack and the effects are seen after the status. Not measured: the one-tick gap, the
+ * order of the stack, the effects and the health among themselves, and the bit (the fake clears it with the status).
+ */
+const AFTER_BITE_TICKS = 1;
 /** `entity_status` that ends a bite (`inventory.js:55-62`). */
 const FINISHED_EATING = 9;
 /** Hotbar before main, the order an arrow is looked for after the off hand (`Inventory.findProjectile`: unmeasured). */
@@ -106,18 +113,21 @@ export function attachFakeHeldUse(bot: FakeBot, parts: HeldUseParts): void {
   const eaten = (use: Use) => {
     if (using !== use) return;
     const food = bot.registry.foodsByName[use.item.name]!;
-    spendOne(bot, parts, use.offHand ? EQUIPMENT_SLOTS["off-hand"] : use.item.slot);
-    for (const { effect, amplifier, duration } of FOOD_EFFECTS[use.item.name] ?? []) {
-      const id = Object.values(bot.registry.effects).find(({ name }) => name === effect)!.id;
-      parts.hear("entity_effect", { entityId: bot.entity.id, effectId: id, amplifier, duration });
-      bot.entity.effects[id] = { id, amplifier, duration };
-      bot.emit("entityEffect", bot.entity, bot.entity.effects[id]);
-    }
     stopUsing();
     parts.hear("entity_status", { entityId: bot.entity.id, entityStatus: FINISHED_EATING });
     bot.usingHeldItem = false;
-    const nextFood = Math.min(FOOD_FULL, bot.food + food.foodPoints);
-    if (nextFood !== bot.food) parts.sendHealth(bot.health, nextFood);
+    parts.afterTicks(AFTER_BITE_TICKS, () => {
+      const slot = use.offHand ? EQUIPMENT_SLOTS["off-hand"] : use.item.slot;
+      if (bot.inventory.slots[slot]?.type === use.item.type) spendOne(bot, parts, slot);
+      for (const { effect, amplifier, duration } of FOOD_EFFECTS[use.item.name] ?? []) {
+        const id = Object.values(bot.registry.effects).find(({ name }) => name === effect)!.id;
+        parts.hear("entity_effect", { entityId: bot.entity.id, effectId: id, amplifier, duration });
+        bot.entity.effects[id] = { id, amplifier, duration };
+        bot.emit("entityEffect", bot.entity, bot.entity.effects[id]);
+      }
+      const nextFood = Math.min(FOOD_FULL, bot.food + food.foodPoints);
+      if (nextFood !== bot.food) parts.sendHealth(bot.health, nextFood);
+    });
   };
 
   /** Whether the server lets the hand begin using `item`: a bow with an arrow behind it, a shield, food that is wanted. */

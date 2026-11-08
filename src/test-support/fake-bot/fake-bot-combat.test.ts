@@ -237,6 +237,20 @@ test("a bite of Mineflayer's own consume keeps usingHeldItem when another slot c
   assert.equal(harness.bot.usingHeldItem, true);
 });
 
+test("a bite ends with entity_status 9 while the stack is whole; the effects and the health come after the stack drops (contract check consume-food: stack and effects after the status)", async () => {
+  const harness = fight({ food: 10, slots: { 36: { name: "golden_apple", count: 2 } } });
+  const { bot } = harness;
+  const heard: string[] = [];
+  const applesNow = () => bot.inventory.count(bot.registry.itemsByName.golden_apple!.id, null);
+  bot._client.on("entity_status", (packet: { entityStatus: number }) => void (packet.entityStatus === 9 && heard.push(`status 9 with ${applesNow()} apples`)));
+  bot._client.on("entity_effect", () => void heard.push(`effect with ${applesNow()} apples`));
+  bot._client.on("update_health", () => void heard.push(`health with ${applesNow()} apples`));
+  void bot.consume().catch(() => undefined);
+  await harness.clock.advance(2_000);
+  assert.equal(heard[0], "status 9 with 2 apples", "the end of the bite comes before the stack changes");
+  assert.ok(heard.length > 1 && heard.slice(1).every((text) => text.endsWith("with 1 apples")), `the effects and the health after the stack: ${heard.join("; ")}`);
+});
+
 test("a creature the fixture or the server spawns has its full health in its metadata, as the server's spawn data gives it", () => {
   const harness = fight();
   assert.equal(healthOf(harness, ZOMBIE_ID), 20);
