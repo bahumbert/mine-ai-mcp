@@ -41,6 +41,7 @@ function burningScene(
     entities?: Record<number, FakeEntitySpec>;
     clock?: FakeClock;
     carried?: Record<string, number>;
+    simulatePhysics?: boolean;
   } = {},
 ) {
   const harness = createFakeBot({
@@ -50,6 +51,7 @@ function burningScene(
     entities: options.entities,
     clock: options.clock,
     carried: options.carried,
+    simulatePhysics: options.simulatePhysics,
   });
   const { bot } = harness;
   const controls = bot.controlState;
@@ -71,6 +73,9 @@ function burningScene(
     harness.world.setCell(new Vec3(x, y, z), cell);
     load(x, y, z);
   };
+  bot.on("blockUpdate", (_before, after) => {
+    if (after) load(after.position.x, after.position.y, after.position.z);
+  });
   /** Client ticks one at a time, letting the escape's waits settle between them. */
   const physicsTicks = (count: number) => harness.clock.advance(50 * count);
   return { bot, clock: harness.clock, server: harness.server, world, controls, cleared, setCell, physicsTicks };
@@ -120,6 +125,53 @@ test("a lethal burn walks to water seven blocks away", async () => {
   bot.entity.position.set(7.5, 65, 0.5);
   await physicsTicks(2);
   assert.equal(seen.outcome, "escaped");
+});
+
+test("extinguishing during an unanswered pour releases the body before the receipt deadline", async () => {
+  const { bot, world, clock } = burningScene({ cells: {}, carried: { water_bucket: 1 }, clock: createFakeClock({ mode: "mocked" }) });
+  using _installed = clock.install();
+  let issued = false;
+  bot.activateItem = () => { issued = true; };
+  const seen = watch(escapeFire(bot, world, new AbortController().signal, "lethal_burn", { maximumMs: 300 }));
+  await clock.advance(50);
+  assert.equal(issued, true);
+  assert.equal(seen.outcome, null);
+  setBurning(bot, false);
+  await clock.advance(100);
+  assert.equal(seen.outcome, "escaped");
+  assert.equal(anyMoveControl(bot.controlState), false);
+});
+
+test("in the Nether the bucket is not poured", async () => {
+  const { bot, world } = burningScene({ cells: {}, carried: { water_bucket: 1 } });
+  bot.game.dimension = "the_nether";
+  let poured = false;
+  bot.activateItem = () => { poured = true; };
+  await escapeFire(bot, world, new AbortController().signal, "lethal_burn");
+  assert.equal(poured, false);
+  assert.equal(bot.inventory.items().find(item => item.name === "water_bucket")?.count, 1);
+});
+
+test("death mid-pour ends died, controls cleared", async () => {
+  const { bot, world, physicsTicks } = burningScene({ cells: {}, carried: { water_bucket: 1 } });
+  bot.lookAt = async () => { bot.health = 0; bot.emit("death"); };
+  const pending = escapeFire(bot, world, new AbortController().signal, "lethal_burn");
+  await physicsTicks(2);
+  assert.equal(await pending, "died");
+  assert.equal(anyMoveControl(bot.controlState), false);
+  assert.equal(bot.inventory.items().find(item => item.name === "water_bucket")?.count, 1);
+});
+
+test("an abort between the pour and the step in leaves the controls clear", async () => {
+  const { bot, world, physicsTicks } = burningScene({ cells: {}, carried: { water_bucket: 1 } });
+  const abort = new AbortController();
+  bot.on("blockUpdate", (_before, after) => { if (after?.name === "water") abort.abort(new Error("cancel after pour")); });
+  const pending = escapeFire(bot, world, abort.signal, "lethal_burn");
+  const result = pending.then(() => null, (error: Error) => error);
+  await physicsTicks(3);
+  assert.match((await result)?.message ?? "resolved", /cancel after pour/);
+  assert.equal(bot.inventory.items().find(item => item.name === "bucket")?.count, 1);
+  assert.equal(anyMoveControl(bot.controlState), false);
 });
 
 test("fire out before arriving ends the escape", async () => {

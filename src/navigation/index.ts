@@ -42,6 +42,7 @@ export { createNavigationRuntime, createMovements } from "./runtime.js";
 export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
+export { bucketAvailable, placeWaterInto, waterLandingSupply, waterableLanding } from "./mineflayer/water-landing.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
 export { hasSupportedCorridor, heldByBlockAt } from "./world/block-geometry.js";
 export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";

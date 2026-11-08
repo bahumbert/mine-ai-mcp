@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import type { WorldView } from "../../navigation/index.js";
+import { bucketAvailable, waterLandingSupply, type WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
 import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
 import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
@@ -159,7 +159,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
         inFire,
         burning,
         lethalBurn,
-        waterBucket: false,
+        waterBucket: bucketAvailable(bot) && waterLandingSupply(bot).dimensionHoldsWater,
         health: bot.health,
         burnTicks: burn.ticks,
         escapeAvailable: escapeAvailable(reason, inLava, inFire),

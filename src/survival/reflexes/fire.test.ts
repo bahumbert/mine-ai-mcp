@@ -33,6 +33,68 @@ test("health at or under the burn left is lethal", async () => {
   assert.equal(JSON.parse(JSON.stringify(driver.snapshot().find((entry) => entry.name === "fire_reflex")!.danger)).lethalBurn, false);
 });
 
+test("the fire reflex sees a water bucket only in a dimension that holds water", async () => {
+  for (const dimension of ["overworld", "the_nether"]) {
+    const { bot, clock } = createFakeBot({ dimension, carried: { water_bucket: 1 }, health: 8 });
+    setBurning(bot, true);
+    recordFireContact(bot, "lava", bot.time.age);
+    await using resources = new AsyncDisposableStack();
+    const driver = resources.use(new ReflexDriver(bot, stillRunner(), { now: clock.now }));
+    resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
+    await clock.advance(50);
+    const danger = JSON.parse(JSON.stringify(driver.snapshot().find(entry => entry.name === "fire_reflex")!.danger));
+    assert.equal(danger.waterBucket, dimension === "overworld");
+  }
+});
+
+test("a bucket burn escape resumes the interrupted action beside its placed source", async () => {
+  for (const side of [false, true]) {
+    const { bot, clock } = createFakeBot({
+      carried: { water_bucket: 1 }, health: 8, simulatePhysics: true,
+      cells: side ? { "0,63,0": "oak_leaves" } : {},
+      entities: side ? { 2: { name: "player", position: new Vec3(1.5, 64, 0.5) } } : {},
+    });
+    const world = new MemoryWorld();
+    for (let x = -8; x <= 8; x++) for (let z = -8; z <= 8; z++) for (let y = 62; y <= 67; y++) {
+      const at = new Vec3(x, y, z);
+      world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
+    }
+    bot.on("blockUpdate", (_before, after) => { if (after) world.load(after.position, observeMineflayerBlock(after)); });
+    const source = bot.entity.position.floored().offset(side ? -1 : 0, 0, 0);
+    await using resources = new AsyncDisposableStack();
+    const runner = stillRunner();
+    const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+    resources.use(attachFireReflex(bot, driver, world));
+    let attempts = 0;
+    const interrupted = defineAction({
+      name: "work_beside_water", description: "Resume the next step with the poured source still present.",
+      inputSchema: z.object({}), resultSchema: actionResultSchema({}), formatResult: result => result.status,
+      execution: { kind: "resumable_task" }, parse: () => ({}),
+      begin: () => async context => {
+        if (++attempts > 1) {
+          assert.equal(bot.blockAt(source)?.name, "water");
+          assert.equal(Reflect.get(bot.entity, "isInWater"), true);
+          return { status: "succeeded" as const };
+        }
+        const signal = context.signal;
+        assert.ok(signal);
+        await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+        throw signal.reason;
+      },
+    });
+    const output = runner.run(interrupted, {});
+    await flush();
+    setBurning(bot, true);
+    recordFireContact(bot, "lava", bot.time.age);
+    await clock.advance(2_500);
+    assert.equal((await output).result.status, "succeeded");
+    assert.equal(attempts, 2);
+    assert.equal(bot.inventory.items().filter(item => item.name === "water_bucket").length, 0);
+    assert.equal(bot.inventory.items().find(item => item.name === "bucket")?.count, 1);
+    assert.equal(Object.values(bot.controlState).some(Boolean), false);
+  }
+});
+
 test("fire response selection replays from the observed escape availability", () => {
   const recorded = JSON.parse(
     JSON.stringify({

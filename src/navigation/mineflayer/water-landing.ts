@@ -8,6 +8,7 @@ import { liveBlockReader } from "./world.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { timeoutSignal } from "../../utils/wall-timers.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
+import { bucketItem } from "../../world/buckets.js";
 /** Stop waiting for an unavailable server; every continuation rechecks ownership before issuing another effect. */
 function whileOwned<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -50,6 +51,36 @@ export function bucketAvailable(bot: Bot): boolean {
 }
 function view(bot: Bot): Pick<WorldView, "blockAt"> {
   return { blockAt: liveBlockReader(bot) };
+}
+/** Select a carried bucket with one atomic swap, so an abort cannot queue inventory clicks. */
+async function selectBucket(bot: Bot, full: boolean, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  const name = bucketItem("water", full);
+  if (bot.currentWindow || bot.inventory.selectedItem) throw new Error("Water landing requires a closed, clear inventory cursor.");
+  const item = bot.inventory.items().find(item => item.name === name);
+  if (!item) throw new Error(`The reserved ${name} is unavailable.`);
+  if (item.slot >= 36 && item.slot <= 44) {
+    bot.setQuickBarSlot(item.slot - 36);
+    return;
+  }
+  if (item.slot < 9 || item.slot > 35) throw new Error("The bucket is outside carried storage or the hotbar.");
+  await whileOwned(() => bot.clickWindow(item.slot, bot.quickBarSlot, 2), signal);
+  signal.throwIfAborted();
+  bot.updateHeldItem();
+}
+
+/** Issue a source pour into an open cell; the caller observes the server's source and inventory receipts. */
+export async function placeWaterInto(bot: Bot, cell: BlockPosition, signal: AbortSignal, permitted: () => boolean = () => true): Promise<boolean> {
+  signal.throwIfAborted();
+  if (!bucketAvailable(bot) || !permitted() || !waterableLanding(view(bot), cell)) return false;
+  await selectBucket(bot, true, signal);
+  await whileOwned(() => bot.lookAt(new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5), true), signal);
+  signal.throwIfAborted();
+  if (!permitted() || bot.heldItem?.name !== bucketItem("water", true) || !waterableLanding(view(bot), cell)) return false;
+  const point = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5);
+  if (bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0).distanceTo(point) > 4.5) return false;
+  bot.activateItem();
+  return true;
 }
 /** One already-admitted body owner owns equip, aim, controls, placement and recovery through settlement. */
 export async function saveWaterLanding(bot: Bot, options: {
@@ -97,35 +128,15 @@ export async function saveWaterLanding(bot: Bot, options: {
     if (!options.permitted()) throw new Error("Water landing permission was revoked.");
     if (!issued && waterCount() < fullBefore) throw new Error("The reserved water bucket was lost before placement.");
   };
-  const selectBucket = async (name: "water_bucket" | "bucket") => {
-    check();
-    if (bot.currentWindow || bot.inventory.selectedItem) throw new Error("Water landing requires a closed, clear inventory cursor.");
-    const item = bot.inventory.items().find(item => item.name === name);
-    if (!item) throw new Error(`The reserved ${name} is unavailable.`);
-    if (item.slot >= 36 && item.slot <= 44) {
-      bot.setQuickBarSlot(item.slot - 36);
-      return;
-    }
-    if (item.slot < 9 || item.slot > 35) throw new Error("The bucket is outside carried storage or the hotbar.");
-    // Unlike equip -> moveSlotItem, this is one atomic number-key swap.
-    // The pinned Mineflayer clickWindow writes storage-slot clicks before its
-    // first await, so cancellation cannot leave queued follow-up clicks.
-    await whileOwned(() => bot.clickWindow(item.slot, bot.quickBarSlot, 2), signal);
-    check();
-    bot.updateHeldItem();
-  };
   const aimAndPour = async (cell: BlockPosition) => {
     aiming = true;
     try {
-      await whileOwned(() => bot.lookAt(new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5), true), signal);
-      check();
-      // physicsTick fires before Mineflayer sends position. This microtask runs
-      // after that packet, so the server's bucket ray starts at the observed eye.
-      const latest = predictWaterLanding(bot.entity.position, bot.entity.velocity, world);
-      if (bot.heldItem?.name !== "water_bucket" || !waterableLanding(world, cell) || !latest || latest.ticks > 2 ||
-        latest.cell.x !== cell.x || latest.cell.y !== cell.y || latest.cell.z !== cell.z)
-        return;
-      bot.activateItem();
+      const poured = await placeWaterInto(bot, cell, signal, () => {
+        check();
+        const latest = predictWaterLanding(bot.entity.position, bot.entity.velocity, world);
+        return !!latest && latest.ticks <= 2 && latest.cell.x === cell.x && latest.cell.y === cell.y && latest.cell.z === cell.z;
+      });
+      if (!poured) return;
       issued = true;
       evidence.pours++;
       evidence.pouredTick = tickNumber;
@@ -273,7 +284,7 @@ export async function saveWaterLanding(bot: Bot, options: {
     check();
     bot.clearControlStates();
     bot.deactivateItem();
-    await selectBucket("water_bucket");
+    await selectBucket(bot, true, signal);
     check();
     bot.on("physicsTick", tick);
     bot._client?.on("entity_velocity", launched);
@@ -300,7 +311,7 @@ export async function saveWaterLanding(bot: Bot, options: {
           const empty = bot.inventory.items().find(item => item.name === "bucket");
           if (!empty)
             return fail("No empty bucket remained for recovery.");
-          await selectBucket("bucket");
+          await selectBucket(bot, false, signal);
           check();
           if (landingEpoch !== recoveryEpoch) continue;
           await whileOwned(() => bot.lookAt(new Vec3(cell.x + 0.5, cell.y + 0.1, cell.z + 0.5), true), signal);

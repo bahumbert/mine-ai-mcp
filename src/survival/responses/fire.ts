@@ -1,10 +1,11 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { horizontalControlsToward, isHeadPassable, isPassable, type WorldView } from "../../navigation/index.js";
+import { bucketAvailable, horizontalControlsToward, isHeadPassable, isPassable, placeWaterInto, waterableLanding, type WorldView } from "../../navigation/index.js";
 import { preferredScaffoldItem } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt } from "../../world/lava-flow.js";
 import { occupiedCell, placeSolidBlockInto } from "../../world/placement.js";
+import { bucketItem } from "../../world/buckets.js";
 import { fireContactCells, isBurning, isInFire, isInLava } from "../perception/body.js";
 import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import {
@@ -199,6 +200,23 @@ async function wayOutOfLava(
   return newFireWalk(bot, step && [step]);
 }
 
+/** Make a refuge for a lethal burn, keeping the pour and its receipts inside the escape's body lifetime. */
+async function pourBurnRefuge(bot: Bot, world: WorldView, signal: AbortSignal): Promise<FireWalk> {
+  const feet = bot.entity.position.floored();
+  const free = (cell: Vec3) => waterableLanding(world, cell) && !occupiedCell(bot, cell, bot.entity.id);
+  const cell = [feet, ...SIDE_STEPS.map(([dx, dz]) => feet.offset(dx, 0, dz))].find(free);
+  if (!cell || !await placeWaterInto(bot, cell, signal, () => free(cell))) return newFireWalk(bot, null);
+  // A sent use_item is not a source receipt (bucket-pour-and-fill, 2026-10-23).
+  while (true) {
+    signal.throwIfAborted();
+    if (hasNothingLeftToEscape(bot, isOnSafeFooting(bot, isInLava(bot), isInFire(bot)))) return newFireWalk(bot, null);
+    const source = world.blockAt(cell.x, cell.y, cell.z);
+    if (source.kind === "loaded" && source.traits.liquid === "water" && source.traits.liquidSource && bot.heldItem?.name === bucketItem("water", false))
+      return newFireWalk(bot, [cell.offset(0.5, 0, 0.5)]);
+    await waitForPhysicsTicks(bot, 1, signal);
+  }
+}
+
 /** Leave the active source; residual burning must not monopolise the body without reachable water. */
 export async function escapeFire(
   bot: Bot,
@@ -217,27 +235,26 @@ export async function escapeFire(
   // No search yet from this position: the first loop in lava with an empty walk searches (and finds where to steer).
   const swim: LavaSwim = { searchedAt: "", toward: null, triedSteps: new Set() };
   try {
+    if (reason === "lethal_burn" && walk.route.length === 0 && bucketAvailable(bot))
+      walk = await pourBurnRefuge(bot, world, waits);
     while (bot.health > 0 && !ended.aborted) {
       signal.throwIfAborted();
       const inLava = isInLava(bot);
       const inFire = isInFire(bot);
       const safeFooting = isOnSafeFooting(bot, inLava, inFire);
       if (hasNothingLeftToEscape(bot, safeFooting)) return "escaped";
-      // Keep the admitted departure through the jump. Being momentarily above
-      // lava is not a landing, and must not invalidate the bank we are climbing.
+      // Retain the departure through a jump: above lava is not a landing (2026-11-07).
       const hop = walk.route[walk.next];
       if (hop && !clearFireEscape(bot, world, hop, walk.departure)) walk = newFireWalk(bot, fireEscapeRoute(bot, world, reason));
       // There is no water in the Nether. Solid terrain can still replace a
       // lava cell and provide the bank the local swimming controller needs.
       if (walk.route.length === 0 && inLava) walk = await wayOutOfLava(bot, world, reason, waits, swim);
       if (walk.route.length === 0 && inFire) {
-        // Environmental escape has its own authority, like the lava step.
-        // A sealed refuge may offer no walk out, but its occupied fire can
-        // still be extinguished without excavating any of the refuge's walls.
+        // Environmental authority permits extinguishing occupied fire in a sealed refuge (2026-11-07).
         for (const cell of fireContactCells(bot)) await extinguishFireAt(bot, cell, waits, true);
         if (!isInFire(bot)) continue;
       }
-      if (safeFooting && bot.entity.onGround && !routeEndsInWater(world, walk.route)) return "escaped";
+      if (reason !== "lethal_burn" && safeFooting && bot.entity.onGround && !routeEndsInWater(world, walk.route)) return "escaped";
       const target = walk.route[walk.next];
       if (!target && inLava) {
         // No bank, no step: swim up (a pool two deep ends at its surface row, where a bank or a step is in reach).
