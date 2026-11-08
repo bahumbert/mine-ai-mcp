@@ -1,5 +1,6 @@
 // Crafting and smelting at the site's workstations: walking to a placed table or furnace, or setting a carried one down.
 import { describeMaterials } from "../building/blueprint.ts";
+import { MOSTLY_WATER } from "../bot-data-sql.ts";
 import type { FoundBlock, ItemCount, Position, BotRuntime } from "../runtime-client.ts";
 import { act } from "./gather-action.ts";
 import type { GatherContext, GatherResult, Spent } from "./gather-materials.ts";
@@ -8,10 +9,28 @@ import { MAX_SMELT, type SmeltJob } from "./plan-round.ts";
 /** Farther than this from home, the bot walks back before setting its crafting table or furnace down. */
 const HOME_RANGE = 3;
 
-/** Walks back near `home` when farther than {@link HOME_RANGE}; null when there (or back). */
-async function goHome(context: GatherContext, home: Position, purpose: string, work: string): Promise<GatherResult | null> {
+/** Feet or floor holding water makes a wet site; an unloaded feet cell uses the explored chunk's share. */
+export async function isWetSite(runtime: BotRuntime, position: Position): Promise<boolean> {
+  try {
+    const feet = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+    const cells = await runtime.cellsAt([feet, { ...feet, y: feet.y - 1 }]);
+    if (cells.some((cell) => cell.holdsWater)) return true;
+    return cells[0]?.loaded === false && (await runtime.chunkWater(position) ?? 0) > MOSTLY_WATER;
+  } catch {
+    return false;
+  }
+}
+
+/** Walks back to a distant site, or moves a wet site onto the dry ground reached by gathering. */
+async function goHome(context: GatherContext, site: Site, purpose: string, work: string): Promise<GatherResult | null> {
+  const home = site.home;
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - home.x, here.y - home.y, here.z - home.z) <= HOME_RANGE) return null;
+  if (await isWetSite(context.runtime, home) && !await isWetSite(context.runtime, here)) {
+    context.progress?.("the site where this step started is in water: crafting here");
+    site.home = here;
+    return null;
+  }
   const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 };
   return act(context, "navigate", target, `Go back to the site to ${work} for ${purpose}.`);
 }
@@ -25,7 +44,7 @@ export interface Site {
 export async function craftAtHome(context: GatherContext, items: readonly ItemCount[], purpose: string, site: Site, spent: Spent): Promise<GatherResult> {
   // A table close by is used where it stands, as a player would (owner, 2026-10-02: "check first if one is close").
   if ((await walkToStation(context, "crafting_table")) !== null) return craft(context, items, purpose, false, spent);
-  const back = await goHome(context, site.home, purpose, "craft");
+  const back = await goHome(context, site, purpose, "craft");
   if (back !== null) return back;
   // Back at the site, a table close to it counts too (live 2026-10-02: one 6 blocks from the site went unused
   // because she looked from where the logs were).
@@ -66,7 +85,7 @@ export async function smeltAtHome(context: GatherContext, job: SmeltJob, purpose
   // A furnace still holding someone's items refuses the load: then her own, as if there were none.
   if (furnace !== null && (await act(context, "smelt_item", { ...load, ...furnace }, rationale)) === null) return done;
   if (context.signal.aborted) return { status: "stopped" };
-  const back = await goHome(context, site.home, purpose, "smelt");
+  const back = await goHome(context, site, purpose, "smelt");
   if (back !== null) return back;
   const atHome = furnace === null ? await walkToStation(context, "furnace") : null;
   if (atHome !== null && (await act(context, "smelt_item", { ...load, ...atHome }, rationale)) === null) return done;

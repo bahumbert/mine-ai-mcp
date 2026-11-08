@@ -1,6 +1,6 @@
 // Collecting a block, and going to the nearest place she saw it when none is near; the words for a collect that found none.
 import type { ActOutcome } from "../body.ts";
-import { sameDimension } from "../bot-data-sql.ts";
+import { MOSTLY_WATER, sameDimension } from "../bot-data-sql.ts";
 import { carriesFamily } from "../inventory-room.ts";
 import { errorCode, type BotRuntime, type Position, type SeenBlock } from "../runtime-client.ts";
 import { boatToMake } from "./boat-wood.ts";
@@ -110,15 +110,22 @@ async function fetchFarther(context: GatherContext, block: string, count: number
   }
   let last = failed;
   let acrossWater = 0;
+  let wet = 0;
+  let nearestWet: SeenBlock | undefined;
   const boat = carriesFamily((await context.runtime.status()).inventory, "boat");
   let tries = 0;
   for (const seen of places) {
     if (context.signal.aborted || tries >= FAR_TRIES) break;
+    if (seen.waterShare !== undefined && seen.waterShare > MOSTLY_WATER) {
+      wet += 1;
+      nearestWet ??= seen;
+      continue;
+    }
     const here = (await context.runtime.status()).position;
     // Across deep water with no boat the walk fails: not tried, and not marked either (a boat may come).
     if (!boat) {
       const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
-      if (water !== null && water.share > 0.5) {
+      if (water !== null && water.share > MOSTLY_WATER) {
         acrossWater += 1;
         continue;
       }
@@ -146,8 +153,14 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
     tried.add(`${seen.x},${seen.z}`);
   }
+  if (tries === 0 && wet > 0 && nearestWet !== undefined) return { status: "failed", detail: wetPlacesHint(block, wet, nearestWet, failed) };
   if (tries === 0 && acrossWater > 0) return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
   return last;
+}
+
+/** Wet places remain visible to the model, which can choose to travel there itself. */
+function wetPlacesHint(block: string, wet: number, nearest: SeenBlock, failed: GatherResult): string {
+  return `the ${block} you know of farther away lies in chunks that are mostly water (${wet} place${wet === 1 ? "" : "s"}), nearest around ${nearest.x} ${nearest.z}: go_to there yourself if it is worth the trip, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
 }
 
 /** What a fetch tells when the places it knows lie across deep water and no boat is carried. */
@@ -176,12 +189,13 @@ export async function notNear(context: Pick<GatherContext, "runtime">, block: st
   if (!sameDimension(seen.dimension, dimension)) return `${near}; you saw some in ${seen.dimension.replaceAll("_", " ")} around ${seen.x} ${seen.z} (${detail})`;
   // Across water she knows (the explored chunks on the straight way are mostly water): a trip by boat (spec 2026-10-04).
   const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
-  if (water !== null && water.share > 0.5) {
+  if (water !== null && water.share > MOSTLY_WATER) {
     const boat = carriesFamily((await context.runtime.status()).inventory, "boat");
     const trip = boat ? "go_to there crosses by boat (you carry one)" : `take a boat (get_items ${await boatToMake(context.runtime)}) and go_to there`;
-    return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
+    return `${near}; you saw some ${describeWay(here, seen)}, across the water, around ${seen.x} ${seen.z}: ${trip} if it is worth the trip, use another material, or say so (${detail})`;
   }
-  return `${near}; you saw some ${describeWay(here, seen)}, around ${seen.x} ${Math.floor(here.y)} ${seen.z}: go_to there yourself if it is worth the trip, use another material, or say so (${detail})`;
+  const wet = seen.waterShare !== undefined && seen.waterShare > MOSTLY_WATER ? ", in a chunk that is mostly water" : "";
+  return `${near}; you saw some ${describeWay(here, seen)}, around ${seen.x} ${seen.z}${wet}: go_to there yourself if it is worth the trip, use another material, or say so (${detail})`;
 }
 
 /** "18 blocks south-west": how far `to` is from `from` across the ground, and which way. */

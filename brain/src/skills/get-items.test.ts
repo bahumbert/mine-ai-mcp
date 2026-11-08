@@ -33,6 +33,14 @@ function smeltCalls(runtime: FakeRuntime) {
   return runtime.submitted.filter((call) => call.tool === "smelt_item").map((call) => call.input);
 }
 
+/** A gather that ends on ground thirty blocks from the step's start, as a successful collect can. */
+function gatherAwayFromHome(runtime: FakeRuntime): void {
+  runtime.walkOnNavigate = true;
+  runtime.succeedEffects.collect_block = () => {
+    runtime.snapshot = { ...runtime.snapshot, position: { x: 30, y: 64, z: 0 } };
+  };
+}
+
 /** The fuel table the brain gets from the runtime: `view_smelting_recipes`' `fuels` (`fuelsOf`), as `runtime-client.ts` reads it. */
 const RUNTIME_FUELS_1_21_4: Readonly<Record<string, number>> = Object.fromEntries(fuelsOf(Object.keys(minecraftData("1.21.4").itemsByName), "1.21.4").map(({ item, itemsSmelted }) => [item, itemsSmelted]));
 
@@ -70,17 +78,102 @@ function pickaxeLost(runtime: FakeRuntime, stone: number, then?: () => void) {
 
 test("a carried crafting table with no dry cell around is set down on the nearest land she has seen", async () => {
   // Live 2026-10-07: at the water's edge, "crafting_table: no_cell", and the boat she needed was never crafted.
+  for (const wetStart of [false, true]) {
+    const runtime = new FakeRuntime();
+    runtime.recipes = HOUSE_RECIPES;
+    runtime.simulateInventory = true;
+    runtime.walkOnNavigate = true;
+    runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 4 }, { name: "crafting_table", count: 1 }] };
+    runtime.water = { "0,0": 1, "2,0": 0 };
+    if (wetStart) runtime.waterCells.add("0,64,0");
+    runtime.failNext.craft_item = { error: "[WORKSTATION_PLACEMENT_FAILED] crafting_table: no_cell (no dry, clear cell with something solid to set it on within reach: in water, a tunnel or a crowded spot); move to open dry ground first." };
+    const result = await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime));
+    assert.equal(result.status, "done", JSON.stringify(result));
+    assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x]).filter(([tool]) => tool !== "collect_block"), [
+      ["craft_item", undefined], ["navigate", 40], ["craft_item", undefined], ...(wetStart ? [] : [["navigate", 0]]),
+    ]);
+  }
+});
+
+test("home in water, bot on dry land: crafts where she stands and does not walk back; dry and unknown homes still are walked to", async () => {
+  for (const home of ["feet", "floor", "dry", "snow", "stone_slab", "farmland", "unloaded-unknown", "unloaded-wet", "read-error"] as const) {
+    const runtime = new FakeRuntime();
+    runtime.recipes = HOUSE_RECIPES;
+    runtime.simulateInventory = true;
+    runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }] };
+    gatherAwayFromHome(runtime);
+    if (home === "feet") runtime.waterCells.add("0,64,0");
+    if (home === "floor") runtime.waterCells.add("0,63,0");
+    if (["snow", "stone_slab", "farmland"].includes(home)) runtime.world.set("0,63,0", home);
+    if (home.startsWith("unloaded")) runtime.unloadedCells.add("0,64,0");
+    if (home === "unloaded-wet") runtime.water = { "0,0": 0.9 };
+    if (home === "read-error") runtime.cellsAt = async () => { throw new Error("view_blocks unavailable"); };
+    const result = await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime));
+    assert.equal(result.status, "done", `${home}: ${JSON.stringify(result)}`);
+    const wet = home === "feet" || home === "floor" || home === "unloaded-wet";
+    assert.equal(runtime.submitted.some((call) => call.tool === "navigate" && call.input.x === 0), !wet, home);
+    assert.ok(runtime.submitted.some((call) => call.tool === "craft_item"), home);
+    assert.equal(runtime.snapshot.position.x, wet ? 30 : 0, home);
+    if (wet) assert.match("detail" in result ? result.detail : "", /stayed on dry land: where the fetch started is in water/u);
+  }
+});
+
+test("home wet and bot wet: the no_cell net walks to the nearest land", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
   runtime.simulateInventory = true;
-  runtime.walkOnNavigate = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 4 }, { name: "crafting_table", count: 1 }] };
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }] };
+  gatherAwayFromHome(runtime);
+  runtime.waterCells = new Set(["0,64,0", "30,64,0"]);
   runtime.water = { "0,0": 1, "2,0": 0 };
-  runtime.failNext.craft_item = { error: "[WORKSTATION_PLACEMENT_FAILED] crafting_table: no_cell (no dry, clear cell with something solid to set it on within reach: in water, a tunnel or a crowded spot); move to open dry ground first." };
-  const result = await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime));
+  runtime.failNext.craft_item = { error: "[WORKSTATION_PLACEMENT_FAILED] crafting_table: no_cell" };
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime))).status, "done");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input.x), [0, 40]);
+});
+
+test("smelting uses dry ground away from a wet home, including the next round and the next fetch", async () => {
+  const runtime = smeltRuntime([{ name: "oak_planks", count: 2 }, { name: "sand", count: 3 }, { name: "furnace", count: 1 }, { name: "crafting_table", count: 1 }]);
+  gatherAwayFromHome(runtime);
+  runtime.waterCells.add("0,64,0");
+  const result = await runStep({ skill: "get_items", items: [{ item: "glass", count: 3 }, { item: "oak_planks", count: 2 }] }, contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
-  // Then back to where the step started, as every get_items does.
-  assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.x]).filter(([tool]) => tool !== "collect_block"), [["craft_item", undefined], ["navigate", 40], ["craft_item", undefined], ["navigate", 0]]);
+  assert.ok(runtime.submitted.filter((call) => call.tool === "craft_item").length >= 2, "the spent fuel planks are crafted again in the next round");
+  assert.ok(runtime.submitted.some((call) => call.tool === "smelt_item"));
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate"), []);
+  assert.equal(runtime.snapshot.position.x, 30);
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "oak_door", count: 3 }] }, contextFor(runtime))).status, "done");
+  assert.equal(runtime.snapshot.position.x, 30);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate"), []);
+});
+
+test("smeltAtHome does not return to water after gathering its input on dry ground", async () => {
+  const runtime = smeltRuntime([{ name: "coal", count: 1 }, { name: "furnace", count: 1 }]);
+  gatherAwayFromHome(runtime);
+  runtime.waterCells.add("0,64,0");
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "glass", count: 3 }] }, contextFor(runtime))).status, "done");
+  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["collect_block", "smelt_item"]);
+  assert.equal(runtime.snapshot.position.x, 30);
+});
+
+test("a cancel or death during the wet-site reads stops the fetch instead of reporting carried items", async () => {
+  for (const abortAt of [1, 2]) {
+    const runtime = new FakeRuntime();
+    const controller = new AbortController();
+    runtime.simulateInventory = true;
+    runtime.succeedEffects.collect_block = () => { runtime.snapshot = { ...runtime.snapshot, position: { x: 30, y: 64, z: 0 } }; };
+    runtime.waterCells.add("0,64,0");
+    const cellsAt = runtime.cellsAt.bind(runtime);
+    let reads = 0;
+    runtime.cellsAt = async (positions) => {
+      if (++reads === abortAt) {
+        controller.abort();
+        if (abortAt === 2) runtime.snapshot = { ...runtime.snapshot, inventory: [] };
+      }
+      return cellsAt(positions);
+    };
+    const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, contextFor(runtime, { signal: controller.signal }));
+    assert.equal(result.status, "stopped", JSON.stringify(result));
+  }
 });
 
 test("get_items fetches items like a player: logs, a table to carry, a wooden pickaxe for stone, then the crafts", async () => {
@@ -212,13 +305,17 @@ test("get_items gathers an item from the block that drops it, from game data: wh
   assert.deepEqual(runtime.submitted.map((call) => [call.tool, call.input.block_name, call.input.count]), [["collect_block", "short_grass", 8]]);
 });
 
-test("among equally likely sources, the nearest loaded one is broken", async () => {
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.world.set("2,64,0", "fern");
-  runtime.world.set("30,64,0", "short_grass");
-  await runStep({ skill: "get_items", items: [{ item: "wheat_seeds", count: 2 }] }, contextFor(runtime));
-  assert.deepEqual(runtime.submitted.map((call) => call.input.block_name), ["fern"]);
+test("among equally likely sources, the nearest open hit is broken before a drowned one", async () => {
+  for (const drowned of [false, true]) {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    runtime.world.set("2,64,0", "fern");
+    runtime.world.set("30,64,0", "short_grass");
+    runtime.world.set("50,64,0", "fern");
+    if (drowned) runtime.situations = { "2,64,0": "under_water" };
+    await runStep({ skill: "get_items", items: [{ item: "wheat_seeds", count: 2 }] }, contextFor(runtime));
+    assert.deepEqual(runtime.submitted.map((call) => call.input.block_name), [drowned ? "short_grass" : "fern"]);
+  }
 });
 
 test("the iron for a bucket is mined as iron ore (raw iron is its drop), then smelted and crafted", async () => {
@@ -297,16 +394,6 @@ test("a full bucket is filled only with a liquid the use_bucket contract lists: 
   const listed = await runStep({ skill: "get_items", items: [{ item: "lava_bucket", count: 1 }] }, contextFor(runtime));
   assert.equal(listed.status, "done", JSON.stringify(listed));
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "use_bucket").map((call) => call.input), [{ action: "fill", liquid: "lava" }]);
-});
-
-test("a water bucket without a bucket crafts one from iron first, then fills it", async () => {
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "crafting_table", count: 1 }, { name: "iron_ingot", count: 3 }] };
-  runtime.recipes = { bucket: { makes: 1, needs: [{ item: "iron_ingot", count: 3 }] } };
-  const result = await runStep({ skill: "get_items", items: [{ item: "water_bucket", count: 1 }] }, contextFor(runtime));
-  assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(runtime.submitted.map((call) => call.tool), ["craft_item", "use_bucket"]);
 });
 
 test("get_items of a water bucket with no bucket carried makes the bucket first, then fills it", async () => {
@@ -433,6 +520,44 @@ test("get_items with none near she may take goes to the nearest place she saw it
   assert.deepEqual(guarded.submitted.filter((call) => call.tool === "navigate"), []);
 });
 
+test("a far place in a chunk mostly water is not walked to by the fetch, but is named and not forgotten", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_boat", count: 1 }] };
+  runtime.simulateInventory = true;
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = { "43,0": 0.9 };
+  runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] none near" };
+  const wet = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, contextFor(runtime));
+  assert.equal(wet.status, "failed");
+  assert.match("detail" in wet ? wet.detail : "", /mostly water \(1 place\), nearest around 700 8/u);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate"), []);
+  runtime.water = { "43,0": 0.2 };
+  runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] none near" };
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, contextFor(runtime))).status, "done");
+  assert.ok(runtime.submitted.some((call) => call.tool === "navigate" && call.input.x === 700));
+});
+
+test("a shore and a chunk exactly half water are still walked to", async () => {
+  for (const share of [0.4, 0.5]) {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+    runtime.water = { "43,0": share };
+    runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] none near" };
+    assert.equal((await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, contextFor(runtime))).status, "done");
+    assert.ok(runtime.submitted.some((call) => call.tool === "navigate" && call.input.x === 700), String(share));
+  }
+});
+
+test("a swamp far place is named with its water when collect_block leaves the trip to the model", async () => {
+  const runtime = new FakeRuntime();
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = { "1,0": 0, "43,0": 0.9 };
+  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] none near";
+  const result = await runStep({ skill: "collect_block", block: "oak_log", count: 1 }, contextFor(runtime));
+  assert.match("detail" in result ? result.detail : "", /around 700 8, in a chunk that is mostly water/u);
+});
+
 test("a fetch tells where it is travelling to before the walk and that it arrived after it", async () => {
   const runtime = new FakeRuntime();
   runtime.walkOnNavigate = true;
@@ -452,11 +577,11 @@ test("a fetch stays within 64 blocks and, finding nothing, says where she last s
   runtime.seen = { dark_oak_log: { dimension: "overworld", x: 700, z: 8 } };
   const result = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
   assert.equal(runtime.submitted[0]?.input.max_distance, 64);
-  assert.match(result.status === "failed" ? result.detail : "", /^no dark_oak_log within 64 blocks; you saw some 700 blocks east, around 700 64 8: go_to there yourself if it is worth the trip/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^no dark_oak_log within 64 blocks; you saw some 700 blocks east, around 700 8: go_to there yourself if it is worth the trip/u);
   // Across the sea she knows: a trip by boat, with one carried or to get first.
   runtime.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
   const across = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
-  assert.match(across.status === "failed" ? across.detail : "", /you saw some 700 blocks east, across the water, around 700 64 8: take a boat \(get_items oak_boat\) and go_to there/u);
+  assert.match(across.status === "failed" ? across.detail : "", /you saw some 700 blocks east, across the water, around 700 8: take a boat \(get_items oak_boat\) and go_to there/u);
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_boat", count: 1 }] };
   const boat = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
   assert.match(boat.status === "failed" ? boat.detail : "", /go_to there crosses by boat \(you carry one\)/u);
@@ -685,14 +810,17 @@ test("a crafting table close by is walked to and used; a far one is not, her own
   assert.deepEqual(none.submitted.filter((call) => call.tool === "navigate" || call.tool === "craft_item").map((call) => call.tool === "navigate" ? `walk to ${call.input.x} ${call.input.z}` : describeCall(call)), ["walk to 40 3", "craft wooden_pickaxe"]);
 });
 
-test("get_items plans recipes that take any wood with the woods growing nearby, nearest first", async () => {
-  const runtime = new FakeRuntime();
-  runtime.recipes = HOUSE_RECIPES;
-  runtime.world.set("3,64,0", "birch_log");
-  runtime.world.set("9,64,0", "oak_log");
-  runtime.world.set("5,64,0", "birch_log");
-  await runStep({ skill: "get_items", items: [{ item: "stick", count: 4 }] }, contextFor(runtime));
-  assert.ok(runtime.preferences.some((prefer) => prefer.join(",") === "birch_log,oak_log"), JSON.stringify(runtime.preferences));
+test("wood recipes prefer the nearest open logs, before nearer drowned logs and without duplicate woods", async () => {
+  for (const drownedOak of [false, true]) {
+    const runtime = new FakeRuntime();
+    runtime.recipes = HOUSE_RECIPES;
+    runtime.world.set("3,64,0", "birch_log");
+    runtime.world.set("5,64,0", "birch_log");
+    runtime.world.set(drownedOak ? "2,60,0" : "9,64,0", "oak_log");
+    if (drownedOak) runtime.situations = { "2,60,0": "under_water" };
+    await runStep({ skill: "get_items", items: [{ item: "stick", count: 4 }] }, contextFor(runtime));
+    assert.ok(runtime.preferences.some((prefer) => prefer.join(",") === "birch_log,oak_log"), JSON.stringify(runtime.preferences));
+  }
 });
 
 test("a far place whose walk failed is not walked to again by the next round, and one across the sea without a boat is not walked to", async () => {
@@ -1016,5 +1144,5 @@ test("in the Nether, logs seen in the overworld are named as the overworld's, no
   assert.match(elsewhere.status === "failed" ? elsewhere.detail : "", /you saw some in overworld around 700 8/u);
   runtime.seen = { dark_oak_log: { dimension: "the_nether", x: 700, z: 8 } };
   const here = await runStep({ skill: "collect_block", block: "dark_oak_log", count: 3 }, contextFor(runtime));
-  assert.match(here.status === "failed" ? here.detail : "", /you saw some 700 blocks east, around 700 64 8: go_to there yourself/u);
+  assert.match(here.status === "failed" ? here.detail : "", /you saw some 700 blocks east, around 700 8: go_to there yourself/u);
 });

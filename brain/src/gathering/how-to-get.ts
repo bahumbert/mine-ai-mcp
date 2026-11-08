@@ -33,7 +33,7 @@ export interface Knowledge {
   readonly mob: Map<string, MobSource | null>;
   /** Items that only come from crops someone grows (wheat): a farm, not gathering, gets them. */
   readonly cropOnly: Set<string>;
-  /** The woods growing nearby, nearest first, looked up once: recipes that take any wood are planned with them. */
+  /** Nearby woods, open logs first then other hits, nearest within each group; looked up once for any-wood recipes. */
   woods: readonly string[] | null;
   /** Per block fetched for a rare drop, what it is fetched for and the breaks so far without gaining it. */
   readonly rare: Map<string, RareFetch>;
@@ -91,12 +91,15 @@ export async function obtainedBy(runtime: BotRuntime, item: string): Promise<Obt
 const WOOD_SCAN = 48;
 
 /**
- * The logs loaded nearby, nearest first, once per gathering: what a player chops for sticks, a table or wooden tools.
+ * Loaded logs, open hits first then other hits, nearest within each group, once per gathering for wooden crafts.
  * Carrying no wood, the crafting planner otherwise named the first wood in registry order (live 2026-10-03: Vex walked
  * 900 blocks, across an ocean, for pale oak, with oak and birch all around).
  */
 export async function nearbyWoods(runtime: BotRuntime, knowledge: Knowledge): Promise<readonly string[]> {
-  knowledge.woods ??= [...new Set((await runtime.findBlocks("logs", WOOD_SCAN)).map((found) => found.name))];
+  if (knowledge.woods === null) {
+    const found = await runtime.findBlocks("logs", WOOD_SCAN);
+    knowledge.woods = [...new Set([...found.filter((block) => block.situation === undefined), ...found].map((block) => block.name))];
+  }
   return knowledge.woods;
 }
 
@@ -216,7 +219,8 @@ async function sourceBlock(runtime: BotRuntime, item: string, knowledge: Knowled
     const at = (await runtime.status()).position;
     let nearest = Number.POSITIVE_INFINITY;
     for (const candidate of tied) {
-      const found = (await runtime.findBlocks(candidate, 1))[0];
+      const entries = await runtime.findBlocks(candidate, 8);
+      const found = entries.find((entry) => entry.situation === undefined) ?? entries[0];
       const distance = found === undefined ? Number.POSITIVE_INFINITY : Math.hypot(found.x - at.x, found.y - at.y, found.z - at.z);
       if (distance < nearest) [nearest, block] = [distance, candidate];
     }

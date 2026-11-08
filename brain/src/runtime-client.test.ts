@@ -92,6 +92,19 @@ function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>
   return client;
 }
 
+test("findBlocks carries under-water and roofed situations and leaves an open entry unchanged", async () => {
+  const listed = [
+    { x: 1, y: 60, z: 0, name: "oak_log", situation: "under_water" },
+    { x: 2, y: 60, z: 0, name: "oak_log", situation: "roofed" },
+    { x: 3, y: 64, z: 0, name: "oak_log" },
+  ];
+  const client: ToolClient = {
+    callTool: async () => ({ structuredContent: { response: { format: "json", data: { result: { blocks: { box: null, find: [{ listed }] } } } } } }),
+    close: async () => {},
+  };
+  assert.deepEqual(await McpBotRuntime.over(client).findBlocks("oak_log", 8), listed);
+});
+
 // check-reads: src/bot-data/bot-data.sql
 const dropsReply = () => ({ structuredContent: { response: { format: "json", data: { result: { drops: { items: [{ item: "wheat", sources: [], mobs: [] }], blocks: [] } } } } } });
 const lost = () => Promise.reject(new Error("Streamable HTTP error: 404 session not found"));
@@ -405,7 +418,7 @@ function worldClient(dimension: string, answer: (sql: string) => readonly (reado
 const ORIGIN = { x: 0, y: 64, z: 0 };
 const FAR = { x: 200, y: 64, z: 0 };
 
-test("the five frontier-map queries ask the dimension the bot is in, never a literal overworld (T6 of the review #8 pattern)", async () => {
+test("the six frontier-map queries ask the dimension the bot is in, never a literal overworld (T6 of the review #8 pattern)", async () => {
   for (const [dimension, bare] of [["the_nether", "the_nether"], ["minecraft:overworld", "overworld"], ["overworld", "overworld"]] as const) {
     const client = worldClient(dimension, () => []);
     const runtime = McpBotRuntime.over(client);
@@ -414,7 +427,8 @@ test("the five frontier-map queries ask the dimension the bot is in, never a lit
     await runtime.waterAlong(ORIGIN, FAR);
     await runtime.unseenAlong(ORIGIN, FAR);
     await runtime.nearestLand(ORIGIN);
-    assert.equal(client.queries.length, 5, dimension);
+    await runtime.chunkWater(ORIGIN);
+    assert.equal(client.queries.length, 6, dimension);
     for (const sql of client.queries) {
       const asksIt = sql.includes(`replace(c.dimension, 'minecraft:', '') = '${bare}'`) || sql.includes(`replace(dimension, 'minecraft:', '') = '${bare}'`);
       assert.ok(asksIt, `${dimension}: ${sql}`);
@@ -442,13 +456,19 @@ test("the frontier-map queries run on the real bot-data schema, each in the dime
   chunk("the_nether", 4, 0, 0.0, []);
   const asked = (dimension: string) => McpBotRuntime.over(worldClient(dimension, (sql) => database.prepare(sql).all().map((row) => Object.values(row).map((cell) => (typeof cell === "bigint" ? Number(cell) : (cell as string | number | null))))));
   const overworld = asked("minecraft:overworld");
-  assert.deepEqual((await overworld.seenPlaces("oak_log", ORIGIN, 0, 5)).map(({ x }) => x), [88, 200], "both spellings stored, nearest first");
+  assert.equal(await overworld.chunkWater({ x: 88, y: -20, z: 8 }), 0.9);
+  assert.equal(await overworld.chunkWater(ORIGIN), null, "no explored chunk is unknown, not dry");
+  assert.deepEqual(await overworld.seenPlaces("oak_log", ORIGIN, 0, 5), [
+    { dimension: "overworld", x: 88, z: 8, waterShare: 0.9 },
+    { dimension: "overworld", x: 200, z: 8, waterShare: 0.1 },
+  ], "seenPlaces carries the chunk's surface water share, both dimension spellings, nearest first");
   assert.deepEqual(await overworld.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5), [], "a nether record is not an overworld place");
   assert.equal((await overworld.waterAlong(ORIGIN, { x: 120, y: 64, z: 8 }))?.share, 0.9);
   assert.equal(await overworld.waterAlong(ORIGIN, { x: 50, y: 64, z: 8 }), null, "chunks 0-3 of the overworld were never explored; the nether's are not counted");
   assert.deepEqual(await overworld.nearestLand(ORIGIN), { x: 200, z: 8 });
   assert.equal(await overworld.unseenAlong({ x: 90, y: 64, z: 8 }, { x: 150, y: 64, z: 8 }), 30, "chunk 7 of the overworld (30 blocks on) is the first one never seen");
   const nether = asked("the_nether");
+  assert.equal(await nether.chunkWater({ x: 56, y: 64, z: 8 }), 0, "zero is known dry ground");
   assert.deepEqual((await nether.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5)).map(({ x }) => x), [56]);
   assert.deepEqual(await nether.seenPlaces("oak_log", ORIGIN, 0, 5), [], "an overworld record is not a nether place");
   assert.deepEqual(await nether.seenAt("oak_log", ORIGIN, 0), { dimension: "overworld", x: 88, z: 8 }, "seen only in another dimension: that one, named");

@@ -1,11 +1,12 @@
 // Walking one compass way to see new land and find a block or creature (explore), in legs, with its refusals and report.
 import minecraftData from "minecraft-data";
 import { COMPASS_HEADINGS, type Step } from "../actions.ts";
+import { MOSTLY_WATER } from "../bot-data-sql.ts";
 import { describeWay, FETCH_RANGE, knownPlaces } from "../gathering/fetch-farther.ts";
 import { dropSourcesNote, obtainedBy } from "../gathering/how-to-get.ts";
 import { carriesFamily } from "../inventory-room.ts";
 import { NEWEST_REGISTRY_VERSION as ENTITY_REGISTRY_VERSION } from "../newest-registry.ts";
-import type { BotSnapshot, FoundBlock, Position } from "../runtime-client.ts";
+import type { BotSnapshot, FoundBlock, Position, SeenBlock } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
 import { EXPLORE_REACH, OPEN_SEA_NEAR, onWater, openSeaWays, unseenWayList, unseenWays } from "./explore-ways.ts";
 
@@ -16,8 +17,6 @@ import { EXPLORE_REACH, OPEN_SEA_NEAR, onWater, openSeaWays, unseenWayList, unse
 const EXPLORE_LEG = 96;
 /** A leg that ends over known water is shortened to this, so the land before the shore is still walked. */
 const SHORE_LEG = 32;
-/** Above this share of water in the explored ground of the next leg, the walk does not go on. */
-const MOSTLY_WATER = 0.5;
 /**
  * How far around her she sees, in blocks: chunks within it are already in her map from where she stands (the server's
  * view distance, 10 chunks, less a margin), so the walk to new land stops this short of it.
@@ -68,12 +67,12 @@ export async function explore(context: SkillContext, step: ExploreStep, why: str
   // made both bots ask for the same explore again and again, each one walking nowhere (live 2026-10-07, free time).
   const knownBefore = block === undefined
     ? undefined
-    : (await nearestFree(context, block)) ?? (await knownPlaces(context.runtime, block, start))[0];
+    : await knownBlocks(context, block, start);
   // A refused walk names what she already knows of it (live 2026-10-07: Ayla tried explore for oak_log six ways in a
   // row, all seen or water, while she knew of oak 45 blocks off).
-  const knownNote = knownBefore === undefined || block === undefined
+  const knownNote = knownBefore?.nearest === undefined || block === undefined
     ? ""
-    : `; you already know of ${block} ${describeWay(start, knownBefore)}, around ${knownBefore.x} ${knownBefore.z}: get_items ${block} fetches it`;
+    : `; ${blockHint(block, start, knownBefore, true)}`;
   // With a boat, water ahead is no reason to stop: the leg goes on to the far side and `navigate` crosses by boat (live
   // 2026-10-04: Vex made a boat to explore south-east, then was refused "water as far as you have seen" again).
   const boat = carriesFamily(setOut.inventory, "boat");
@@ -167,7 +166,7 @@ interface ExploreWalk extends ExploreWay {
 interface Walked {
   readonly here: Position;
   readonly stop: string | null;
-  readonly found?: FoundBlock;
+  readonly found?: FreeBlocks;
   readonly sighted?: { readonly mob: BotSnapshot["mobs"][number]; readonly from: Position };
 }
 
@@ -196,7 +195,7 @@ async function waterAheadRefusal(context: SkillContext, start: Position, ahead: 
   const atSea = await context.runtime.waterAlong({ x: start.x - 16, y: start.y, z: start.z }, start).catch(() => null);
   if (atSea !== null && atSea.share > MOSTLY_WATER && await onWater(context.runtime, start)) {
     const land = await context.runtime.nearestLand(start).catch(() => null);
-    const back = land === null ? "you know of no land near" : `the nearest land you have seen is ${describeWay(start, land)}, around ${land.x} ${Math.floor(start.y)} ${land.z}: go_to there first`;
+    const back = land === null ? "you know of no land near" : `the nearest land you have seen is ${describeWay(start, land)}, around ${land.x} ${land.z}: go_to there first`;
     return { status: "failed", detail: `you are out on the water, and ${ahead}; ${back}` };
   }
   // Unseen land may lie only across water (live 2026-10-07: every way from Ayla's coast was seen or water, and she
@@ -209,7 +208,7 @@ async function walkLegs(context: SkillContext, step: ExploreStep, why: string, w
   const { start, total, boat, creature, block, knownNote } = walk;
   let here = start;
   let stop: string | null = null;
-  let found: FoundBlock | undefined;
+  let found: FreeBlocks | undefined;
   let sighted: { readonly mob: BotSnapshot["mobs"][number]; readonly from: Position } | undefined;
   for (let walked = 0; walked < total;) {
     const { leg, target, water } = await nextLeg(context, walk, here, total - walked);
@@ -245,7 +244,7 @@ async function walkLegs(context: SkillContext, step: ExploreStep, why: string, w
     }
     if (block !== undefined) {
       const nearest = await nearestFree(context, block);
-      if (nearest !== undefined && Math.hypot(nearest.x - here.x, nearest.z - here.z) <= FETCH_RANGE) {
+      if (nearest.open !== undefined && Math.hypot(nearest.open.x - here.x, nearest.open.z - here.z) <= FETCH_RANGE) {
         found = nearest;
         break;
       }
@@ -255,7 +254,7 @@ async function walkLegs(context: SkillContext, step: ExploreStep, why: string, w
 }
 
 /** What explore tells after its walk: where she ended, the water crossed, what she looked for, and the unseen land left. */
-async function exploreReport(context: SkillContext, step: ExploreStep, looked: { readonly start: Position; readonly creature: string | undefined; readonly block: string | undefined; readonly knownBefore: { readonly x: number; readonly z: number } | undefined }, { here, stop, found, sighted }: Walked): Promise<SkillResult> {
+async function exploreReport(context: SkillContext, step: ExploreStep, looked: { readonly start: Position; readonly creature: string | undefined; readonly block: string | undefined; readonly knownBefore: FreeBlocks | undefined }, { here, stop, found, sighted }: Walked): Promise<SkillResult> {
   const { start, creature, block, knownBefore } = looked;
   const crossed = await context.runtime.waterAlong(start, here).catch(() => null);
   const parts = [
@@ -266,10 +265,10 @@ async function exploreReport(context: SkillContext, step: ExploreStep, looked: {
     parts.push(sighted === undefined ? `no ${creature} seen on the way` : `found ${creature} ${creatureWhere(sighted.from, sighted.mob)}: ${CREATURE_TAIL}`);
   } else if (block !== undefined) {
     const nearest = found ?? await nearestFree(context, block);
-    const known = nearest ?? knownBefore;
-    parts.push(known === undefined
+    const known = nearest.nearest === undefined ? knownBefore : nearest;
+    parts.push(known?.nearest === undefined
       ? `no ${block} seen on the way`
-      : `the nearest ${block} you know of is ${describeWay(here, known)}, around ${known.x} ${known.z}: get_items ${block} goes there and gathers it`);
+      : blockHint(block, here, known));
   }
   parts.push(`unseen land from here: ${await unseenWays(context, here)}`);
   const noLand = /no land within (\d+) blocks/u.exec(stop ?? "");
@@ -287,9 +286,39 @@ const FREE_SCAN = 64;
  * The nearest block of this name outside every protected area: one she may take (live 2026-10-04: "the nearest
  * oak_log is 22 blocks" was a wall of her own house; all 48 logs near were, and she walked to them for 40 steps).
  */
-async function nearestFree(context: SkillContext, name: string): Promise<FoundBlock | undefined> {
+async function nearestFree(context: SkillContext, name: string): Promise<FreeBlocks> {
   const areas = context.areas ?? [];
   const inside = (block: FoundBlock) => areas.some((area) =>
     block.x >= area.min.x && block.x <= area.max.x && block.y >= area.min.y && block.y <= area.max.y && block.z >= area.min.z && block.z <= area.max.z);
-  return (await context.runtime.findBlocks(name, FREE_SCAN)).find((block) => !inside(block));
+  const found = (await context.runtime.findBlocks(name, FREE_SCAN)).filter((block) => !inside(block));
+  return { nearest: found[0], open: found.find((block) => block.situation === undefined) };
+}
+
+/** Nearest known block and the first one in the open, retaining non-open facts for the model. */
+interface FreeBlocks {
+  readonly nearest: FoundBlock | SeenBlock | undefined;
+  readonly open: FoundBlock | SeenBlock | undefined;
+}
+
+/** Loaded observations first, otherwise a frontier place with no known height or loaded situation. */
+async function knownBlocks(context: SkillContext, block: string, from: Position): Promise<FreeBlocks> {
+  const loaded = await nearestFree(context, block);
+  if (loaded.nearest !== undefined) return loaded;
+  const place = (await knownPlaces(context.runtime, block, from))[0];
+  return { nearest: place, open: place?.waterShare !== undefined && place.waterShare > MOSTLY_WATER ? undefined : place };
+}
+
+/** A non-open nearest is named as such; only an open entry is offered as an automatic fetch. */
+function blockHint(block: string, from: Position, known: FreeBlocks, before = false): string {
+  const { nearest, open } = known;
+  if (nearest === undefined) return `no ${block} seen on the way`;
+  if ("waterShare" in nearest && nearest.waterShare !== undefined && nearest.waterShare > MOSTLY_WATER) {
+    return `the nearest ${block} you know of was seen in a chunk that is mostly water, around ${nearest.x} ${nearest.z}: go_to there yourself if it is worth the trip, use another material, or say so`;
+  }
+  const trip = open === undefined ? "" : `${describeWay(from, open)}, around ${open.x} ${open.z}: get_items ${block} ${before ? "fetches it" : "goes there and gathers it"}`;
+  if ("situation" in nearest && nearest.situation !== undefined) {
+    const situation = nearest.situation === "under_water" ? "under water" : "roofed over";
+    return `the nearest ${block} you know of lies ${situation} at ${nearest.x} ${nearest.y} ${nearest.z}${open === undefined ? "" : `; the nearest in the open is ${trip}`}`;
+  }
+  return before ? `you already know of ${block} ${trip}` : `the nearest ${block} you know of is ${trip}`;
 }

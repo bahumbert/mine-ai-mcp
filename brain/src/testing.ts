@@ -4,7 +4,7 @@ import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
-import { sameDimension } from "./bot-data-sql.ts";
+import { MOSTLY_WATER, sameDimension } from "./bot-data-sql.ts";
 import familyMap from "#src/world/data/item-families.json" with { type: "json" };
 import vanillaOverride from "#src/world/data/item-families/minecraft.json" with { type: "json" };
 import { itemTagsOf } from "#src/world/item-tags.ts";
@@ -270,6 +270,10 @@ export class FakeRuntime implements BotRuntime {
   /** Surface water share of explored chunks, by "chunkX,chunkZ" (others: never explored). */
   water: Readonly<Record<string, number>> = {};
 
+  async chunkWater(position: Position): Promise<number | null> {
+    return this.water[`${Math.floor(position.x / 16)},${Math.floor(position.z / 16)}`] ?? null;
+  }
+
   async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
     const known = chunksAlong(from, to).map(([x, z]) => this.water[`${x},${z}`]).filter((share) => share !== undefined);
     return known.length === 0 ? null : { chunks: known.length, share: known.reduce((sum, share) => sum + share, 0) / known.length };
@@ -283,7 +287,7 @@ export class FakeRuntime implements BotRuntime {
   }
 
   async nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null> {
-    const land = Object.entries(this.water).filter(([, share]) => share < 0.5)
+    const land = Object.entries(this.water).filter(([, share]) => share < MOSTLY_WATER)
       .map(([key]) => { const [x, z] = key.split(",").map(Number) as [number, number]; return { x: x * 16 + 8, z: z * 16 + 8 }; })
       .sort((a, b) => Math.hypot(a.x - from.x, a.z - from.z) - Math.hypot(b.x - from.x, b.z - from.z));
     return land[0] ?? null;
@@ -292,7 +296,11 @@ export class FakeRuntime implements BotRuntime {
   async seenPlaces(block: string, from: Position, beyond: number, limit: number): Promise<readonly SeenBlock[]> {
     const seen = this.seen[block];
     const places = [...(seen === undefined ? [] : [seen]), ...(this.alsoSeen[block] ?? [])];
-    return places.filter((place) => sameDimension(place.dimension, this.snapshot.dimension) && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit);
+    return places.filter((place) => sameDimension(place.dimension, this.snapshot.dimension) && Math.hypot(place.x - from.x, place.z - from.z) > beyond).slice(0, limit)
+      .map((place) => {
+        const share = this.water[`${Math.floor(place.x / 16)},${Math.floor(place.z / 16)}`];
+        return { ...place, ...(share !== undefined && { waterShare: share }) };
+      });
   }
 
   async seenAt(block: string, from: Position, beyond: number): Promise<SeenBlock | null> {
@@ -313,12 +321,19 @@ export class FakeRuntime implements BotRuntime {
     return { tool: this.toolClasses[name] ?? null, solid, fullCube: solid && !/_(stairs|slab|door|pane)$/u.test(name), harvest: this.harvestTools[name] ?? null };
   }
 
+  /** Non-open situations reported by view_blocks find (water-targets T2); absent means open. */
+  situations: Readonly<Record<string, "under_water" | "roofed">> = {};
+
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const at = this.snapshot.position;
     // The runtime's `logs` selector matches every wood's log.
     const matches = (block: string) => block === name || (name === "logs" && block.endsWith("_log"));
     return [...this.world].filter(([, block]) => matches(block))
-      .map(([key, block]) => { const [x, y, z] = key.split(",").map(Number) as [number, number, number]; return { x, y, z, name: block }; })
+      .map(([key, block]) => {
+        const [x, y, z] = key.split(",").map(Number) as [number, number, number];
+        const situation = this.situations[key];
+        return { x, y, z, name: block, ...(situation !== undefined && { situation }) };
+      })
       .sort((a, b) => Math.hypot(a.x - at.x, a.y - at.y, a.z - at.z) - Math.hypot(b.x - at.x, b.y - at.y, b.z - at.z))
       .slice(0, limit);
   }

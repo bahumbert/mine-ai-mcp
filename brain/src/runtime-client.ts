@@ -236,16 +236,18 @@ export interface BlockCell {
   readonly loaded: boolean;
 }
 
-/** Where a block was seen: the middle of an explored chunk holding it, at the height asked from. */
+/** Where a block was seen: the middle of an explored chunk holding it, with no known height. */
 export interface SeenBlock {
   readonly dimension: string;
   readonly x: number;
   readonly z: number;
+  readonly waterShare?: number;
 }
 
 /** A block found by name or selector: where, and which block it is. */
 export interface FoundBlock extends Position {
   readonly name: string;
+  readonly situation?: "under_water" | "roofed";
 }
 
 /** The blocks of a box as read by the runtime: name by position, and what each name is. */
@@ -329,6 +331,8 @@ export interface BotRuntime {
    * (0..1, the bot data's frontier map); null when it crosses none it has explored.
    */
   waterAlong(from: Position, to: Position): Promise<WaterShare | null>;
+  /** Surface water share of this position's explored chunk, null when unknown. */
+  chunkWater(position: Position): Promise<number | null>;
   /** The middle of the nearest explored chunk (in the dimension she is in) whose surface is mostly land; null when it knows none. */
   nearestLand(from: Position): Promise<{ readonly x: number; readonly z: number } | null>;
   /**
@@ -482,7 +486,7 @@ const viewBoxSchema = z.object({
         layers: z.array(z.object({ y: z.number(), rows: z.array(z.object({ z: z.number(), blocks: z.array(z.string()) })) })),
         kinds: z.record(z.string(), blockKindSchema).default({}),
       }).nullable(),
-      find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string() })) })).nullable(),
+      find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string(), situation: z.enum(["under_water", "roofed"]).optional() })) })).nullable(),
       kinds: z.record(z.string(), blockKindSchema).optional(),
       cells: z.array(positionSchema.extend({ name: z.string(), holds_water: z.literal(true).optional() })).default([]),
     }).optional(),
@@ -733,7 +737,7 @@ export class McpBotRuntime implements BotRuntime {
 
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {
     const read = viewBoxSchema.parse(await this.call("view_blocks", { find: { block_names: [name], limit } }, `Find ${name}.`)).result.blocks;
-    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z, name: found }) => ({ x, y, z, name: found }));
+    return (read?.find?.[0]?.listed ?? []).map(({ x, y, z, name: found, situation }) => ({ x, y, z, name: found, ...(situation !== undefined && { situation }) }));
   }
 
   /** The dimension she is in now (read fresh: a portal changes it between two steps), as the frontier map's queries need it. */
@@ -751,7 +755,7 @@ export class McpBotRuntime implements BotRuntime {
     const dimension = await this.dimensionNow();
     const sql = seenPlacesSql(block, from, beyond, limit, dimension);
     const rows = sql === null ? [] : await this.queryBotData(sql);
-    return rows.map((row) => ({ dimension: dimension.replace(/^minecraft:/u, ""), x: Number(row[0]), z: Number(row[1]) }));
+    return rows.map((row) => ({ dimension: dimension.replace(/^minecraft:/u, ""), x: Number(row[0]), z: Number(row[1]), ...(row[2] !== undefined && row[2] !== null && { waterShare: Number(row[2]) }) }));
   }
 
   async waterAlong(from: Position, to: Position): Promise<WaterShare | null> {
@@ -759,6 +763,12 @@ export class McpBotRuntime implements BotRuntime {
     const sql = chunks.length === 0 ? null : waterShareSql(chunks, await this.dimensionNow());
     const [count, share] = (sql === null ? undefined : (await this.queryBotData(sql))[0]) ?? [0, null];
     return Number(count) === 0 || share === null ? null : { chunks: Number(count), share: Number(share) };
+  }
+
+  async chunkWater(position: Position): Promise<number | null> {
+    const sql = waterShareSql([[Math.floor(position.x / 16), Math.floor(position.z / 16)]], await this.dimensionNow());
+    const [count, share] = (sql === null ? undefined : (await this.queryBotData(sql))[0]) ?? [0, null];
+    return Number(count) === 0 || share === null ? null : Number(share);
   }
 
   async unseenAlong(from: Position, to: Position): Promise<number | null> {

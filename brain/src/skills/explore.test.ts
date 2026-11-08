@@ -11,6 +11,47 @@ import { contextFor } from "./skill-fixtures.test.ts";
 /** An explore result without its closing list of how far unseen land is each way. */
 const withoutWays = (detail: string) => detail.split("; unseen land from here: ")[0]!;
 
+test("explore names a drowned or roofed nearest log and offers only the open one as the trip", async () => {
+  for (const situation of ["under_water", "roofed"] as const) for (const open of [true, false]) {
+    const runtime = new FakeRuntime();
+    runtime.walkOnNavigate = true;
+    runtime.world.set("80,60,0", "oak_log");
+    runtime.situations = { "80,60,0": situation };
+    if (open) runtime.world.set("120,64,0", "oak_log");
+    const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", chunks: 8, for: "oak_log" }), contextFor(runtime));
+    const detail = "detail" in result ? result.detail : "";
+    assert.match(detail, new RegExp(`the nearest oak_log you know of lies ${situation === "under_water" ? "under water" : "roofed over"} at 80 60 0`, "u"));
+    if (open) assert.match(detail, /the nearest in the open is .*around 120 0: get_items oak_log goes there/u);
+    else assert.doesNotMatch(detail, /get_items oak_log.*(?:goes there|fetches it)/u);
+    assert.equal(runtime.snapshot.position.x, open ? 96 : 128, "only an open hit ends the walk early");
+  }
+});
+
+test("a refused explore names drowned logs without offering them as a get_items trip", async () => {
+  const runtime = new FakeRuntime();
+  runtime.world.set("10,60,0", "oak_log");
+  runtime.situations = { "10,60,0": "under_water" };
+  runtime.unseenAlong = async () => null;
+  const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "oak_log" }), contextFor(runtime));
+  assert.match("detail" in result ? result.detail : "", /lies under water at 10 60 0/u);
+  assert.doesNotMatch("detail" in result ? result.detail : "", /get_items oak_log.*fetches it/u);
+});
+
+test("explore leaves a wet frontier trip to go_to because the next fetch refuses to walk there", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
+  runtime.water = { "43,0": 0.9 };
+  runtime.unseenAlong = async () => null;
+  const explored = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "oak_log" }), contextFor(runtime));
+  runtime.failNext.collect_block = { error: "[NO_TARGET_IN_RANGE] none near" };
+  assert.equal((await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, contextFor(runtime))).status, "failed");
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate"), []);
+  const detail = "detail" in explored ? explored.detail : "";
+  assert.doesNotMatch(detail, /get_items oak_log.*(?:fetches it|goes there)/u);
+  assert.match(detail, /mostly water.*around 700 8.*go_to/u);
+});
+
 /** A fake whose snapshot lists these mobs once the bot stands at or past `fromX` (what loads as she walks on). */
 class MobsLoadAt extends FakeRuntime {
   constructor(private readonly fromX: number, private readonly mobs: BotSnapshot["mobs"]) { super(); }
@@ -237,7 +278,7 @@ test("out on the water, explore names the nearest land instead of another way", 
   runtime.water = { "0,0": 1, "-1,0": 1, "1,0": 1, "2,0": 1, "0,-1": 1, "0,-2": 1, "-3,0": 0.1 };
   runtime.world.set("8,61,8", "water");
   const result = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
-  assert.deepEqual(result, { status: "failed", detail: "you are out on the water, and east is water as far as you have seen (100% of the next 2 chunks); the nearest land you have seen is 48 blocks west, around -40 62 8: go_to there first" });
+  assert.deepEqual(result, { status: "failed", detail: "you are out on the water, and east is water as far as you have seen (100% of the next 2 chunks); the nearest land you have seen is 48 blocks west, around -40 8: go_to there first" });
   // On dry ground by the sea (live 2026-10-07: Ayla on a hill), the chunk's water is no reason to say so.
   runtime.world.set("8,61,8", "stone");
   const ashore = await runStep(stepSchema.parse({ skill: "explore", toward: "east" }), contextFor(runtime));
