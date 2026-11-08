@@ -22,6 +22,19 @@ export interface GainWatchDeps {
   readonly log: (line: string) => void;
   readonly minutes: number;
   readonly sampleMs: number;
+  /** Told of every status sample the watch takes (the death watch is one, spec P4-02c D2); a throwing one is logged. */
+  readonly onSnapshot?: readonly ((snapshot: BotSnapshot) => void)[];
+}
+
+/** Every listener gets the snapshot; one that throws is logged and never stops the others or the watch. */
+function tellListeners(listeners: readonly ((snapshot: BotSnapshot) => void)[], snapshot: BotSnapshot, log: (line: string) => void): void {
+  for (const listener of listeners) {
+    try {
+      listener(snapshot);
+    } catch (error) {
+      log(`a status listener failed during a step: ${String(error)}`);
+    }
+  }
 }
 
 /**
@@ -34,7 +47,7 @@ export interface GainWatchDeps {
  * whether or not the inventory read answers. `view_status` only reads, so the inventory is looked at while
  * the action runs. `stalled` says why it was stopped.
  */
-export function watchGain(step: Step, before: BotSnapshot, controller: AbortController, { runtime, log, minutes, sampleMs }: GainWatchDeps): GainWatch {
+export function watchGain(step: Step, before: BotSnapshot, controller: AbortController, { runtime, log, minutes, sampleMs, onSnapshot = [] }: GainWatchDeps): GainWatch {
   const targets = targetItems(step);
   const carried = (snapshot: BotSnapshot, item: string) => snapshot.inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
   const totals = (snapshot: BotSnapshot) => {
@@ -58,7 +71,8 @@ export function watchGain(step: Step, before: BotSnapshot, controller: AbortCont
   let seen = signature(before);
   let anchor = before.position;
   const stall = () => {
-    if (stalled !== null || performance.now() - lastGainAt < minutes * 60_000) return;
+    // Another abort (a death, an order) came first: the step is no longer waiting for a gain, and its reason stays.
+    if (stalled !== null || controller.signal.aborted || performance.now() - lastGainAt < minutes * 60_000) return;
     stalled = targets.length === 0
       ? `the action gave no sign of life for ${minutes} minutes`
       : `nothing gained in ${minutes} minutes: ${targets.map(({ item, count }) => `${Math.max(0, carried(latest, item) - (start.get(item) ?? 0))} of ${count} ${item}`).join(", ")} so far (the rest is in your inventory)`;
@@ -66,11 +80,13 @@ export function watchGain(step: Step, before: BotSnapshot, controller: AbortCont
   };
   const timer = setInterval(() => {
     stall();
-    if (sampling || stalled !== null) return;
+    if (sampling || stalled !== null || controller.signal.aborted) return;
     sampling = true;
     runtime.status().then((snapshot) => {
+      if (controller.signal.aborted) return;
       const now = performance.now();
       latest = snapshot;
+      tellListeners(onSnapshot, snapshot, log);
       for (const [item, have] of totals(snapshot)) {
         if (have > (best.get(item) ?? 0)) {
           best.set(item, have);

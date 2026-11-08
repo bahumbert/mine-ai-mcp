@@ -51,6 +51,8 @@ export interface StepRun {
   readonly phases: readonly ActivityPhase[];
   /** Why the no-gain watch stopped the step, or null. */
   readonly stalled: string | null;
+  /** Why the death watch ended the step (`you died during this step at x y z (cause)`), or null. */
+  readonly died: string | null;
 }
 
 /** What is carried, as `name:count` sorted (totals per name): compared to tell whether the inventory changed. */

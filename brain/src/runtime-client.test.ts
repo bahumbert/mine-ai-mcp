@@ -289,6 +289,15 @@ test("status carries the dimension view_status names; a runtime that names none 
   assert.equal((await McpBotRuntime.over(statusClient({})).status()).dimension, "minecraft:overworld");
 });
 
+test("status carries view_status's lastDeath with its age; null stays null; a runtime that sends none leaves it unset (plan 2026-11-07-p4-02c T2)", async () => {
+  const lastDeath = { dimension: "overworld", position: { x: 1, y: 70, z: -2 }, observedAt: "2026-11-07T10:00:00.000Z", cause: "Zombie" };
+  const died = await McpBotRuntime.over(statusClient({ observedAt: "2026-11-07T10:07:30.000Z", lastDeath })).status();
+  assert.deepEqual(died.lastDeath, { ...lastDeath, minutesAgo: 7 });
+  assert.equal((await McpBotRuntime.over(statusClient({ lastDeath: null })).status()).lastDeath, null);
+  const older = await McpBotRuntime.over(statusClient({})).status();
+  assert.equal("lastDeath" in older, false, "no key: the death watch stays off");
+});
+
 test("knownContainers' SQL runs on the real bot-data schema: placed, never opened, another bot's, opened only, in an own region, other dimension", async () => {
   // A stub `call` cannot see a typo in the SQL (review 2026-10-18 #4: a regex typo passed every test and killed the deposit live).
   const database = new DatabaseSync(":memory:");

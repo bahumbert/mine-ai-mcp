@@ -115,6 +115,22 @@ export class FakeRuntime implements BotRuntime {
     return { ...this.snapshot, inventory };
   }
 
+  private deaths = 0;
+
+  /**
+   * The bot dies where it stands: `view_status` reports a new `lastDeath` from then on, and the runtime cancels the
+   * running action (`src/runtime/minecraft-runtime.ts:398`, `cancelActive(reason, { kind: "death" })`; the action
+   * then ends `cancelled`, measured for the body and item actions in `src/runtime/death-mid-action-body.test.ts:271`;
+   * the brain's own cancel list stays as it was). `cancelRunning: false` is a death with no action running. Until a
+   * test sets `snapshot.lastDeath` (null: never died), the fake sends none, as an older runtime. The fake hands the
+   * brain's `LastDeath` shape directly: `parseLastDeath` is tested on its own (`last-death.test.ts`), not through here.
+   */
+  die(cause: string | null, { cancelRunning = true }: { readonly cancelRunning?: boolean } = {}): void {
+    this.deaths += 1;
+    this.snapshot = { ...this.snapshot, lastDeath: { dimension: "overworld", position: this.snapshot.position, observedAt: `death-${this.deaths}`, minutesAgo: 0, cause } };
+    if (cancelRunning) for (const action of this.actions.values()) action.cancelled = true;
+  }
+
   async say(message: string, to?: string): Promise<{ readonly status: "succeeded"; readonly error: null }> {
     this.submitted.push({ tool: "send_message", input: { message, ...(to !== undefined && { to }) } });
     return { status: "succeeded", error: null };

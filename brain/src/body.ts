@@ -68,18 +68,23 @@ export const INSTANT_TYPING: TypingPace = { msPerChar: 0, maxMs: 0 };
 export class Body {
   private queue: Promise<unknown> = Promise.resolve();
   private speech: Promise<unknown> = Promise.resolve();
-  /** Told about every foreground action once it ends, with how long it ran (the time per activity counts it). */
-  onAction: ((tool: ForegroundTool, input: Readonly<Record<string, unknown>>, ms: number) => void) | null = null;
+  /**
+   * Told about every foreground action once it ends, with how long it ran (the time per activity counts it) and how it
+   * ended (null: the run threw; the death watch reads a `cancelled` one).
+   */
+  onAction: ((tool: ForegroundTool, input: Readonly<Record<string, unknown>>, ms: number, outcome: ActOutcome | null) => void) | null = null;
 
   constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void, private readonly typing: TypingPace = HUMAN_TYPING, private readonly pace: StopPace = { recancelMs: RECANCEL_MS, giveUpMs: STOP_GIVE_UP_MS }) {}
 
   act(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions = {}): Promise<ActOutcome> {
     return this.exclusive(async () => {
       const started = monotonicNow();
+      let outcome: ActOutcome | null = null;
       try {
-        return await this.run(tool, input, rationale, options);
+        outcome = await this.run(tool, input, rationale, options);
+        return outcome;
       } finally {
-        this.onAction?.(tool, input, elapsedSince(started));
+        this.onAction?.(tool, input, elapsedSince(started), outcome);
       }
     });
   }

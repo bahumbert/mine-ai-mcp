@@ -3,6 +3,7 @@ import { describeStep, stepKey, targetItems } from "../actions.ts";
 import type { AgentOptions } from "../agent.ts";
 import type { ActionTime, ActivityPhase } from "../activities.ts";
 import type { Body } from "../body.ts";
+import { watchDeath } from "../death-watch.ts";
 import type { HouseSize } from "../building/house.ts";
 import { planHouse, styleOrDefault } from "../building/plan.ts";
 import type { TillFacts } from "../farming/site.ts";
@@ -59,9 +60,13 @@ export class StepRunner {
     work.refused.delete(stepKey(decision.step));
     for (const { item } of targetItems(decision.step)) work.wanted.add(item);
     if (decision.step.skill === "collect_block") await this.wantMinedDrops(work, decision.step.block);
-    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }) });
-    body.onAction = (tool, input, ms) => {
+    // A death during the model call is not "during this step": the baseline is read now, not taken from the decision.
+    const baseline = await options.runtime.status().then((current) => current.lastDeath, () => snapshot.lastDeath);
+    const death = watchDeath({ baseline, controller, status: () => options.runtime.status(), log: options.log });
+    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }), onSnapshot: [death.sample] });
+    body.onAction = (tool, input, ms, outcome) => {
       gain.alive();
+      death.actionEnded(outcome);
       if (tool !== "note_save" && tool !== "note_delete") actions.push({ tool, input, ms, ended: monotonicNow() });
     };
     const phases: ActivityPhase[] = [];
@@ -75,7 +80,7 @@ export class StepRunner {
       work.step = null;
       body.onAction = null;
     }
-    return { label, result, started, actions, phases, stalled: gain.stalled() };
+    return { label, result, started, actions, phases, stalled: gain.stalled(), died: death.died() };
   }
 
   /** What a skill gets to run `work`'s step: the runtime, the body, what the agent knows and keeps, and the signals it reports back through. */
@@ -122,7 +127,7 @@ export class StepRunner {
    */
   async recordStep(work: Work, decision: StepDecision, run: StepRun, snapshot: BotSnapshot): Promise<StepRecord | null> {
     const { options, memory } = this.host;
-    const { label, result, started, stalled } = run;
+    const { label, result, started, stalled, died } = run;
     const ended = monotonicNow();
     const endedAt = new Date().toISOString();
     const ms = Math.round(ended - started);
@@ -133,12 +138,15 @@ export class StepRunner {
     const { purpose } = work;
     for (const span of spans) memory.spent({ activity: span.activity, ...(purpose !== null && { purpose }), ended: endedAt, minutes: span.ms / 60_000 }, span.ms >= MIN_RECORDED_MS);
     if (memory.activityNotesDue()) await memory.rotateActivityNotes();
-    // Stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
-    let record: StepRecord = stalled !== null && result.status !== "done"
-      ? { step: label, outcome: "failed", detail: stalled }
-      : result.status === "stopped"
-        ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
-        : { step: label, outcome: result.status, detail: result.detail };
+    // A death ended the step: interrupted, not failed (it is not the step's fault, the same step may be sent again at once).
+    // Else stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
+    let record: StepRecord = died !== null && result.status !== "done"
+      ? { step: label, outcome: "interrupted", detail: died }
+      : stalled !== null && result.status !== "done"
+        ? { step: label, outcome: "failed", detail: stalled }
+        : result.status === "stopped"
+          ? { step: label, outcome: "interrupted", detail: "set aside for something more urgent, or stopped" }
+          : { step: label, outcome: result.status, detail: result.detail };
     // A full inventory names what to drop, with whole counts, and spares what the work needs (live 2026-10-10/11).
     if (record.outcome === "failed" && room !== null && FULL_INVENTORY.test(record.detail)) record = { ...record, detail: `${record.detail}; ${junkHint(room, this.neededFor(room, work))}` };
     work.steps.push(record);

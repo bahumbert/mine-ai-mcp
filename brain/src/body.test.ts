@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, INSTANT_TYPING, REFLEX_WAIT_MS, toChatLines } from "./body.ts";
+import { Body, INSTANT_TYPING, REFLEX_WAIT_MS, toChatLines, type ActOutcome } from "./body.ts";
 import { FakeRuntime, steppedClocks, until } from "./testing.ts";
 
 test("chat lines are single-line, never commands, and fit the 256-character limit", () => {
@@ -120,6 +120,24 @@ test("every foreground action is reported once it ends, with how long it ran, fa
   await body.act("craft_item", { items: [] }, "test");
   assert.deepEqual(seen.map(([tool, input]) => [tool, input]), [["collect_block", { block_name: "stone", count: 1 }], ["craft_item", { items: [] }]]);
   assert.ok(seen.every(([, , ms]) => ms >= 0));
+});
+
+test("onAction gets the outcome: a cancelled action says so, a thrown run gives null (plan 2026-11-07-p4-02c T2)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 1_000;
+  runtime.throwNext.craft_item = "[BODY_RESTARTED] the body restarted";
+  const body = new Body(runtime, () => undefined);
+  const outcomes: (ActOutcome | null)[] = [];
+  body.onAction = (_tool, _input, _ms, outcome) => outcomes.push(outcome);
+  const controller = new AbortController();
+  const collecting = body.act("collect_block", { block_name: "oak_log" }, "test", { signal: controller.signal });
+  await until(() => runtime.submitted.length === 1);
+  controller.abort();
+  await collecting;
+  await assert.rejects(body.act("craft_item", { items: [] }, "test"), /BODY_RESTARTED/u);
+  assert.equal(outcomes.length, 2);
+  assert.deepEqual([outcomes[0]?.status, outcomes[0]?.preempted], ["cancelled", false]);
+  assert.equal(outcomes[1], null);
 });
 
 // Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock; the typing pace and the reflex wait are durations.

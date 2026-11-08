@@ -6,6 +6,7 @@ import type { JsonSchemaValidator, jsonSchemaValidator } from "@modelcontextprot
 import { z } from "zod";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
 import type { CarriedStack } from "./carried-stack.ts";
+import { parseLastDeath, type LastDeath } from "./last-death.ts";
 
 export interface Position {
   readonly x: number;
@@ -85,6 +86,8 @@ export interface BotSnapshot {
     readonly tools: readonly { readonly class: string; readonly item: string | null }[];
     readonly armour: readonly { readonly class: string; readonly item: string | null }[];
   };
+  /** Null: never died; unset: an older runtime sends none. */
+  readonly lastDeath?: LastDeath | null;
 }
 
 export interface PlayerMessage {
@@ -362,6 +365,8 @@ const viewStatusSchema = z.object({
       position: positionSchema,
       dimension: z.string().default("minecraft:overworld"),
       difficulty: z.string().optional(),
+      observedAt: z.string().optional(),
+      lastDeath: z.unknown().optional(),
       vitals: z.object({ health: z.number(), food: z.number() }),
       inventory: z.object({
         stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null), families: z.array(z.string()).default([]) })),
@@ -597,6 +602,7 @@ export class McpBotRuntime implements BotRuntime {
       players: situation.nearby.players,
       ...(situation.clock === undefined ? {} : { clock: situation.clock }),
       ...(situation.tools === undefined ? {} : { gear: situation.tools }),
+      ...(situation.lastDeath === undefined ? {} : { lastDeath: parseLastDeath(situation.lastDeath, situation.observedAt) }),
       policy: data.survivalPolicy === undefined
         ? null
         : {
