@@ -108,7 +108,7 @@ const eatScene: SceneFactory = (clock, index) => {
   bot.consume = bite.held;
   const evidence = (carried: number) => ({ before: carried, after: carried - 1 });
   return {
-    harness, actionName: "eat_food", input: { food_name: "cooked_beef" }, boundMs: 2_500, // CONSUMPTION_SETTLE_MS, eat-food.ts:24
+    harness, actionName: "eat_food", input: { food_name: "cooked_beef" }, boundMs: 2_500, // this test's own bound on the held bite (eat-food's old 2.5 s settle is gone: it waits on server ticks now)
     reachedWait: bite.reached, proceed: bite.proceed,
     restock: () => carry(harness, { cooked_beef: 5 + index }),
     report: (result) => ({ before: resultOf({ result }).eating.inventoryBefore, after: resultOf({ result }).eating.inventoryAfter }),

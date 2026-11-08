@@ -3,7 +3,7 @@ import test from "node:test";
 import { ActionRunner } from "../../session/action-runner.js";
 import { ReflexDriver } from "../control/driver.js";
 import { SurvivalPolicyState } from "../state/survival-policy.js";
-import { type FakeHarness, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { attachHungerReflex } from "./hunger.js";
 
 test("wounded hunger becomes eligible between fights without taking an active combat controller's body", async () => {
@@ -142,6 +142,28 @@ test("revoking raw food releases the active bite without waiting for its native 
     assert.equal(bot.inventory.count(bot.registry.itemsByName.beef!.id, null), 3);
     assert.equal(driver.snapshot()[0]?.response, null);
     assert.deepEqual(driver.answered.snapshot(), [], "policy cancellation is not a failed capability");
+  } finally {
+    await reflex[Symbol.asyncDispose]();
+    await driver[Symbol.asyncDispose]();
+  }
+});
+
+test("on a server at 5 ticks a second the reflex's meal is eaten, past Mineflayer's 2.5 s bound", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot } = createFakeBot({ clock, food: 6, carried: { cooked_beef: 3 }, server: { ticksPerSecond: 5 } });
+  bot.foodSaturation = 0;
+  const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
+  const beef = bot.registry.itemsByName.cooked_beef!.id;
+  /** What each meal's outcome said, and how much beef was left when it did (the reflex eats again while still hungry). */
+  const meals: { kind?: string; carried: number }[] = [];
+  driver.onTransition((event) => {
+    if (event.kind === "outcome") meals.push({ kind: (event.evidence as { outcome: { kind?: string } }).outcome.kind, carried: bot.inventory.count(beef, null) });
+  });
+  const reflex = attachHungerReflex(bot, driver, { activeEngagement: () => null }, new SurvivalPolicyState(bot));
+  try {
+    await clock.advance(15_000);
+    assert.deepEqual(meals[0], { kind: "ate", carried: 2 });
   } finally {
     await reflex[Symbol.asyncDispose]();
     await driver[Symbol.asyncDispose]();
