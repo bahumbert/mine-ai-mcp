@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { areaKey, type BlockArea, type BlockKind, type ProtectedArea } from "../runtime-client.ts";
-import { coverOver, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, type ShelterSpot, type SpotReason } from "./spot.ts";
+import { coverOver, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotReason } from "./spot.ts";
 
 const solid = (hardness: number | null, extra: Partial<BlockKind> = {}): BlockKind =>
   ({ tool: null, solid: true, fullCube: true, harvest: null, hardness, fluid: false, known: true, tags: [], ...extra });
@@ -201,6 +201,16 @@ test("rock or a roof over her head is cover; open sky, leaves by tag or a block 
   assert.equal(coverOver(cells({ 66: "air", 72: "oak_leaves" }), over), false);
   assert.equal(coverOver(cells({ 66: "air", 80: "oak_planks" }), over), true);
   assert.equal(coverOver(cells({ 95: "stone" }), over), false);
+});
+
+test("spotCells: the three dug cells and the four neighbours of each, 15 cells, none twice", () => {
+  const spot: ShelterSpot = { x: 0, y: 64, z: 0, support: { x: 1, y: 63, z: 0 }, face: "west", dug: 0, cost: 0 };
+  const cells = spotCells(spot);
+  assert.equal(cells.length, 15);
+  assert.equal(new Set(cells.map(({ x, y, z }) => areaKey(x, y, z))).size, 15);
+  assert.deepEqual(cells.filter(({ x, z }) => x === 0 && z === 0).map(({ y }) => y), [63, 62, 61]);
+  assert.ok(cells.some(({ x, y, z }) => x === 1 && y === 63 && z === 0), "the roof cell's support side");
+  assert.ok(cells.every(({ y }) => y >= 61 && y <= 63), "no cell above the roof cell or under the floor");
 });
 
 test("isInHole: the column and the depth, not a neighbour column, not the surface", () => {

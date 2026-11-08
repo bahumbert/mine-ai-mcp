@@ -2,8 +2,9 @@
 import type { AgentOptions } from "../agent.ts";
 import type { Body } from "../body.ts";
 import { elapsedSince, monotonicNow } from "../monotonic-clock.ts";
-import { shelterForNight, underCover } from "../night-shelter.ts";
 import type { ProtectedArea } from "../runtime-client.ts";
+import { digShelterFlow } from "../shelter/dig-in.ts";
+import { underCover } from "../shelter/spot.ts";
 import type { SkillResult } from "../skills.ts";
 import type { Work } from "./work.ts";
 
@@ -43,7 +44,7 @@ export class StepGuards {
   }
 
   /**
-   * TEMPORARY night measure (see night-shelter.ts): at nightfall, a step of its own goal is set aside (the objective
+   * TEMPORARY night measure (see shelter/dig-in.ts): at nightfall, a step of its own goal is set aside (the objective
    * stays on the stack and resumes in the morning). Looked at every {@link NIGHT_CHECK_MS}.
    */
   async stopOwnStepAtNightfall(): Promise<void> {
@@ -64,7 +65,7 @@ export class StepGuards {
   }
 
   /**
-   * TEMPORARY night measure (see night-shelter.ts): at night, unless working on an order, it digs in and waits for the
+   * TEMPORARY night measure (see shelter/dig-in.ts): at night, unless working on an order, it digs in and waits for the
    * day. True when it took the turn (sheltered, or tried to); a shelter that could not be made is not tried again for
    * {@link SHELTER_RETRY_MS}, so it goes on with its work meanwhile.
    */
@@ -82,7 +83,7 @@ export class StepGuards {
     const started = monotonicNow();
     let result: SkillResult;
     try {
-      result = await shelterForNight({
+      result = await digShelterFlow({
         runtime,
         body: this.host.body,
         signal: AbortSignal.any([controller.signal, this.host.runSignal()]),

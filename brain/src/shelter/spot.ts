@@ -187,7 +187,6 @@ function spotOrReason(input: SearchInput, x: number, z: number): ShelterSpot | S
   return { x, y: feet, z, ...supportOf(column)!, dug: dugCount(column), cost: walk + digSeconds(column) };
 }
 
-// Used from 05a T3a: until then the live night flow keeps the pre-T2 spot choice (night-shelter.ts `legacyShelterSpot`).
 /**
  * The best places within {@link SEARCH_RADIUS} of `from` to dig a hole {@link DEPTH} deep that stays closed, cheapest
  * first (estimated seconds, then distance), and for the columns that do not qualify the first rule each failed.
@@ -267,6 +266,18 @@ export async function underCover(runtime: BotRuntime, at: Position): Promise<boo
   const z = Math.floor(at.z);
   const head = Math.floor(at.y) + 1;
   return coverOver(await runtime.blocksIn({ x, y: head + 1, z }, { x, y: head + COVER_HEIGHT, z }), at);
+}
+
+/**
+ * The cells whose state decides whether the hole stays closed and dry: the {@link DEPTH} dug cells and the four
+ * neighbours of each. The flow reads them one by one before walking to the spot (`cellsAt`: a waterlogged block shows
+ * only per cell, never in a box's per-name kinds).
+ */
+export function spotCells(spot: Position): readonly Position[] {
+  return Array.from({ length: DEPTH }, (_, index) => spot.y - 1 - index).flatMap((y) => [
+    { x: spot.x, y, z: spot.z },
+    ...NEIGHBOURS.map(([dx, dz]) => ({ x: spot.x + dx, y, z: spot.z + dz })),
+  ]);
 }
 
 /** Whether `position` is in the shelter's hole: its column, with her feet in the dug cells. */

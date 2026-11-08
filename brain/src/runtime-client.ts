@@ -215,6 +215,16 @@ export interface BlockKind {
   readonly known?: boolean;
 }
 
+/** The name `view_blocks` gives a cell in a chunk that is not loaded (`src/actions/view-blocks/view-blocks.ts`). */
+const UNLOADED_CELL = "unloaded";
+
+/** One exact cell, read by `cellsAt`: what it is, whether it holds water (liquid, a water plant, a waterlogged block) and whether its chunk was loaded. */
+export interface BlockCell {
+  readonly name: string;
+  readonly holdsWater: boolean;
+  readonly loaded: boolean;
+}
+
 /** Where a block was seen: the middle of an explored chunk holding it, at the height asked from. */
 export interface SeenBlock {
   readonly dimension: string;
@@ -315,6 +325,8 @@ export interface BotRuntime {
    * chunk's middle); null when every chunk on the line is explored.
    */
   unseenAlong(from: Position, to: Position): Promise<number | null>;
+  /** Exact cells (`view_blocks` cells, at most 32), in the order asked: a waterlogged block is a per-cell fact the per-name kinds cannot see. */
+  cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]>;
   /** Game data of these block names (`view_blocks` kinds); a name Minecraft has no block for is left out. */
   blockKinds(names: readonly string[]): Promise<Readonly<Record<string, BlockKind>>>;
   /** One public chat line; runs beside the foreground action (chat does not take the body). */
@@ -452,6 +464,7 @@ const viewBoxSchema = z.object({
       }).nullable(),
       find: z.array(z.object({ listed: z.array(positionSchema.extend({ name: z.string() })) })).nullable(),
       kinds: z.record(z.string(), blockKindSchema).optional(),
+      cells: z.array(positionSchema.extend({ name: z.string(), holds_water: z.literal(true).optional() })).default([]),
     }).optional(),
   }),
 });
@@ -679,6 +692,15 @@ export class McpBotRuntime implements BotRuntime {
       });
     }
     return { blocks, kinds };
+  }
+
+  async cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]> {
+    const read = viewBoxSchema.parse(await this.call("view_blocks", { cells: positions.map(({ x, y, z }) => ({ x, y, z })) }, "Look at these exact cells.")).result.blocks;
+    const answered = new Map((read?.cells ?? []).map((cell) => [areaKey(cell.x, cell.y, cell.z), cell]));
+    return positions.map(({ x, y, z }) => {
+      const cell = answered.get(areaKey(x, y, z));
+      return { name: cell?.name ?? UNLOADED_CELL, holdsWater: cell?.holds_water === true, loaded: cell !== undefined && cell.name !== UNLOADED_CELL };
+    });
   }
 
   async findBlocks(name: string, limit: number): Promise<readonly FoundBlock[]> {

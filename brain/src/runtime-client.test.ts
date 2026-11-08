@@ -47,6 +47,39 @@ test("a box reply of an older runtime, without the new kind fields, still parses
   assert.deepEqual(area.kinds.dirt, { tool: "shovel", solid: true, fullCube: true, harvest: null });
 });
 
+/** A client that records the `view_blocks` input and answers with `cells` (the order the runtime reads them in). */
+function cellsClient(cells: readonly Record<string, unknown>[]): ToolClient & { inputs: unknown[] } {
+  const client = {
+    inputs: [] as unknown[],
+    callTool: async (request: { arguments?: Record<string, unknown> }) => {
+      client.inputs.push(request.arguments);
+      return { structuredContent: { response: { format: "json", data: { result: { blocks: { box: null, find: null, cells } } } } } };
+    },
+    close: async () => {},
+  };
+  return client;
+}
+
+test("cellsAt reads the exact cells and says per cell whether it holds water and whether it is loaded", async () => {
+  const client = cellsClient([
+    { x: 1, y: 61, z: 0, name: "oak_stairs", shape: "solid", waterlogged: true, holds_water: true },
+    { x: 0, y: 61, z: 0, name: "dirt", shape: "solid" },
+    { x: 2, y: 61, z: 0, name: "unloaded", shape: "open" },
+  ]);
+  const cells = await McpBotRuntime.over(client).cellsAt([{ x: 0, y: 61, z: 0 }, { x: 1, y: 61, z: 0 }, { x: 2, y: 61, z: 0 }]);
+  assert.deepEqual(cells, [
+    { name: "dirt", holdsWater: false, loaded: true },
+    { name: "oak_stairs", holdsWater: true, loaded: true },
+    { name: "unloaded", holdsWater: false, loaded: false },
+  ], "in the order asked, whatever order the runtime answers in");
+  assert.match(JSON.stringify(client.inputs), /"cells":\[\{"x":0,"y":61,"z":0\},\{"x":1,"y":61,"z":0\},\{"x":2,"y":61,"z":0\}\]/u);
+});
+
+test("cellsAt: a cell the runtime does not answer is not loaded", async () => {
+  const cells = await McpBotRuntime.over(cellsClient([])).cellsAt([{ x: 0, y: 61, z: 0 }]);
+  assert.deepEqual(cells, [{ name: "unloaded", holdsWater: false, loaded: false }]);
+});
+
 function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>)[]): ToolClient & { calls: number; closed: boolean } {
   const client = {
     calls: 0,

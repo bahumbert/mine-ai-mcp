@@ -89,7 +89,7 @@ export const personaSchema = z.strictObject({
     digStraightDown: z.boolean().default(false),
     /**
      * TEMPORARY (owner, 2026-10-07, until real night awareness): at night, unless on an order, it digs a roofed hole
-     * and waits there for the day (brain/src/night-shelter.ts).
+     * and waits there for the day (brain/src/shelter/dig-in.ts).
      */
     shelterAtNight: z.boolean().default(true),
     /**

@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import familyMap from "#src/world/data/item-families.json" with { type: "json" };
@@ -222,6 +222,22 @@ export class FakeRuntime implements BotRuntime {
     }
     const kinds = Object.fromEntries([...new Set(blocks.values())].map((name): [string, BlockKind] => [name, this.kindOf(name)]));
     return { blocks, kinds };
+  }
+
+  /** Cells ("x,y,z") that hold water (a waterlogged block, a water plant) on a `cellsAt` read, whatever block `world` names there. */
+  waterCells = new Set<string>();
+  /** Cells ("x,y,z") in a chunk that is not loaded: a `cellsAt` read answers the name "unloaded", as the runtime does. */
+  unloadedCells = new Set<string>();
+  /** Every `cellsAt` read, in order (a read is not a foreground call: `submitted` does not list it). */
+  readonly cellsRead: (readonly Position[])[] = [];
+
+  async cellsAt(positions: readonly Position[]): Promise<readonly BlockCell[]> {
+    this.cellsRead.push(positions);
+    return positions.map(({ x, y, z }) => {
+      const key = `${x},${y},${z}`;
+      if (this.unloadedCells.has(key)) return { name: "unloaded", holdsWater: false, loaded: false };
+      return { name: this.world.get(key) ?? (y <= this.groundTop ? "dirt" : "air"), holdsWater: this.waterCells.has(key), loaded: true };
+    });
   }
 
   /** Tools without which a block drops nothing, cheapest first, per block name (others: drops by hand). */
