@@ -1,4 +1,5 @@
 // The steps of building a shelter: the shaft, the ring, the cap, one pass at a time.
+import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { monotonicNow } from "../../utils/index.js";
@@ -15,6 +16,7 @@ import {
   shelterHazard,
   shelterLiquidFailure,
   type StepEnd,
+  type StepFailure,
   waitForShelterTicks,
 } from "./shelter-build.js";
 import { diggable, enclosedInPlace, shelterFeet, shelterIntruder, SIDES, sidesByThreat, solid } from "./shelter-cells.js";
@@ -32,6 +34,46 @@ export const WALL_IN_BLOCKS = 10;
 const DESCENT_TICKS = 20;
 
 
+type DigBlock = Parameters<Bot["dig"]>[0];
+
+/**
+ * Dig `block` with the hide's signal tied to the dig: an abort ends the pending dig (`stopDigging`, as
+ * `positioning/fire-clearance.ts`), so a cancelled hide never leaves the bot digging on. The look comes first and apart:
+ * a `stopDigging` during Mineflayer's own look is a no-op and the dig would start after it.
+ */
+async function digUntilAborted(bot: Bot, block: DigBlock, signal: AbortSignal): Promise<void> {
+  await bot.lookAt(block.position.offset(0.5, 0.5, 0.5), true);
+  signal.throwIfAborted();
+  const stopDigging = () => bot.stopDigging();
+  signal.addEventListener("abort", stopDigging, { once: true });
+  try {
+    await bot.dig(block, "ignore");
+  } finally {
+    signal.removeEventListener("abort", stopDigging);
+  }
+}
+
+const seconds = (ms: number) => (ms / 1000).toFixed(1);
+
+/**
+ * The failure that stops the shaft before a cell the bot cannot dig in the time the hide has left, or null. The shaft is
+ * dug only when too few blocks are carried to wall in (`WALL_IN_BLOCKS`), so skipping a cell leaves no shelter: the hide
+ * ends here, with the cells already dug named, and the decision answers with the next response. The time is the game's
+ * own dig time for the held tool (`bot.digTime`), no table of blocks.
+ */
+function slowShaftCellFailure(build: ShelterBuild, block: DigBlock): StepFailure | null {
+  const diggingMs = build.bot.digTime(block);
+  const leftMs = Math.max(0, build.constructionDeadline - monotonicNow());
+  if (diggingMs <= leftMs) return null;
+  const dug = build.dug > 0 ? `; ${build.dug} shaft ${build.dug === 1 ? "cell" : "cells"} already dug, the bot stands in them` : "";
+  return {
+    kind: "failed",
+    error:
+      `shaft cell ${block.name} digs in ${seconds(diggingMs)} s, ${seconds(leftMs)} s left${dug}. ` +
+      `A faster tool, another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
+  };
+}
+
 /** Dig one cell of the shaft and drop into it: "dug", "blocked" when the ground will not take it. */
 async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocked" | StepEnd> {
   const { bot, options, itemUse } = build;
@@ -48,15 +90,17 @@ async function digShelterShaftCell(build: ShelterBuild): Promise<"dug" | "blocke
   if (tool && bot.heldItem?.name !== tool.name) await bot.equip(tool, "hand");
   signal.throwIfAborted();
   if (constructionChanged(build, standing)) return "again";
+  const slow = slowShaftCellFailure(build, below);
+  if (slow) return slow;
   try {
-    await bot.dig(below, true);
+    await digUntilAborted(bot, below, signal);
   } catch {
     signal.throwIfAborted();
     return "blocked";
   }
   const landedBelow = () => bot.entity.onGround && bot.entity.position.y <= standing.y - 0.5;
   for (let waited = 0; waited < DESCENT_TICKS && !landedBelow(); waited += 1) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
   }
   build.dug += 1;
   if (!landedBelow()) {
@@ -241,7 +285,7 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   // Knockback can change both the occupied cell and its floor. Pick the
   // construction origin only after the body has landed, then recheck it.
   if (!bot.entity.onGround) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
     return "again";
   }
   const sides = options.firstWallDirection
@@ -272,7 +316,7 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
     shelterHazard(build) === null &&
     monotonicNow() < build.constructionDeadline
   ) {
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, "construction");
     return "again";
   }
   return "built";

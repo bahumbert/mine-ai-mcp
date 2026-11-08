@@ -568,6 +568,17 @@ test("a wounded enderman encounter evades after the same hide attempt failed", (
   assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
 });
 
+test("after the slow-shaft failure the decision evades", () => {
+  // A hide that stopped before a shaft cell it could not finish in time is a failed hide on record (`blocked`): the
+  // wounded bot gets the next answer, which is to evade.
+  const directive = observeHostileResponse(
+    botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, mobs: [{ id: 7, name: "zombie", x: 3 }] }),
+    context({ blocked: ["hide"], attackers: [7] }),
+  );
+
+  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
+});
+
 test("enderman shelter does not change healthy fights, neutral encounters, or distant observation", () => {
   const metadata = Array.from(ENDERMAN_METADATA_KEYS, (_, index) => index === CREEPY);
   const angry = { id: 7, name: "enderman", x: 4, metadata };

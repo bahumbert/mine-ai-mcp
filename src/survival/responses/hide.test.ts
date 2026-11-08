@@ -658,3 +658,137 @@ test("a stopped physics stream bounds a wait by the monotonic deadline, though t
   const tookMs = clock.now() - started;
   assert.ok(tookMs >= 3_000 && tookMs < 3_200, `the hide ended after ${tookMs} ms of clock, not at its 3000 ms deadline`);
 });
+
+/**
+ * The clock moves in slices shorter than a tick: a 0 ms timer (a bound already past) then fires before the next tick, as it
+ * does live (a slice of a whole tick delivers the tick first and hides a wait that ended early).
+ */
+const GUARD_SLICE_MS = 10;
+
+/** A bot with an iron sword and a shield beside a live wither skeleton in its cell column; the hide has `maximumMs` of construction. */
+function guardedHide(maximumMs: number) {
+  const harness = scene({
+    health: 20,
+    carried: { iron_sword: 1, shield: 1, cobblestone: 32 },
+    entities: { 2: closeMob("wither_skeleton") },
+    mockedClock: true,
+  });
+  const { bot, server } = harness;
+  const equip = bot.equip;
+  // The tools equip as the game does; only the construction's block is refused, so the hide ends after the contact.
+  bot.equip = async (item, destination) => {
+    if (typeof item === "number") throw new Error("Fixture expects a resolved item.");
+    if (item.name === "cobblestone") throw new Error("construction boundary");
+    return equip(item, destination);
+  };
+  const ticks = { count: 0, shieldRaisedAt: undefined as number | undefined, attackedAt: undefined as number | undefined };
+  bot.on("physicsTick", () => void (ticks.count += 1));
+  server.onPacket("use_item", () => void (ticks.shieldRaisedAt ??= ticks.count));
+  onAttack(server, () => void (ticks.attackedAt ??= ticks.count));
+  return { ...harness, ticks, result: () => hide(bot, new Set(), maximumMs) };
+}
+
+test("past the construction deadline a shield is still held SHIELD_READY_TICKS before it counts, and the repel swing waits its cooldown", async () => {
+  // 1 ms of construction: the first pass starts inside it and the repel's waits all fall after it.
+  const { clock, ticks, result } = guardedHide(1);
+  using _installed = clock.install();
+  await clock.settle(result(), HIDE_LIMIT_MS, GUARD_SLICE_MS);
+  assert.ok(ticks.shieldRaisedAt !== undefined && ticks.attackedAt !== undefined, "the shield went up and the swing came");
+  assert.ok(ticks.attackedAt - ticks.shieldRaisedAt >= 5, `the swing came ${ticks.attackedAt - ticks.shieldRaisedAt} ticks after the shield went up`);
+  // The swing's own cooldown is held before the pass hands back (an iron sword recharges in 12.5 ticks).
+  assert.ok(ticks.count - ticks.attackedAt >= 12, `${ticks.count - ticks.attackedAt} ticks after the swing`);
+});
+
+test("a guard hold ends at its wall twin when physics stops, not at the construction deadline", async () => {
+  const { bot, clock, result } = guardedHide(1);
+  using _installed = clock.install();
+  bot.physicsEnabled = false; // the client runs no tick
+  const started = clock.now();
+  await clock.settle(result(), HIDE_LIMIT_MS, GUARD_SLICE_MS);
+  const tookMs = clock.now() - started;
+  // The shield hold (5 ticks) and the cooldown hold (13) each end at 2 x ticks x 50 ms: 0.5 s and 1.3 s.
+  assert.ok(tookMs >= 500 && tookMs <= 2_500, `the hide took ${tookMs} ms of clock with physics stopped`);
+});
+
+test("an abort mid-dig stops digging", async () => {
+  const abort = new AbortController();
+  const { bot, clock, server } = scene({ health: 20 });
+  const pending = hideInPlace(bot, {
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() },
+    signal: abort.signal,
+    recoverTo: 18,
+    maximumMs: 60_000,
+  });
+  const rejected = assert.rejects(pending, /hide cancelled/);
+  await clock.advance(1_000);
+  assert.ok(bot.targetDigBlock, "the dig is under way (bare hand on stone takes seconds)");
+  abort.abort(new Error("hide cancelled"));
+  await rejected;
+  assert.equal(bot.targetDigBlock, null, "the pending dig ended");
+  assert.ok(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 1),
+    "the server was told the dig stopped",
+  );
+});
+
+test("an abort during the look before the dig starts no dig", async () => {
+  const abort = new AbortController();
+  const { bot, clock, server } = scene({
+    health: 20,
+    // Scripted: the cancel lands while the bot turns to the shaft cell (the first look of a hide with no intruder).
+    overrides: { lookAt: async () => abort.abort(new Error("hide cancelled")) },
+  });
+  const pending = hideInPlace(bot, {
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() },
+    signal: abort.signal,
+    recoverTo: 18,
+    maximumMs: 60_000,
+  });
+  await clock.settle(assert.rejects(pending, /hide cancelled/), HIDE_LIMIT_MS);
+  assert.equal(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0),
+    false,
+    "no dig was started",
+  );
+});
+
+/** A shaft of `cells` (top first) under a bot standing at (0.5, 64, 0.5) on stone. */
+function shaftOf(...cells: FakeCell[]): Record<string, FakeCell> {
+  return Object.fromEntries(cells.map((cell, index) => [`0,${63 - index},0`, cell]));
+}
+
+test("a first shaft cell that digs slower than the time left fails the hide naming the block and both times", async () => {
+  const { bot, clock, server } = scene({ health: 20, cells: shaftOf("deepslate"), mockedClock: true });
+  using _installed = clock.install();
+  const slow = bot.blockAt(new Vec3(0, 63, 0))!;
+  assert.equal(slow.name, "deepslate");
+  const digMs = bot.digTime(slow);
+  assert.ok(digMs > 2_000, `by hand a deepslate cell takes ${digMs} ms, more than the 2 s left`);
+  const result = await clock.settle(hide(bot, new Set(), 2_000), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", new RegExp(`shaft cell deepslate digs in ${(digMs / 1000).toFixed(1)} s, [0-2]\\.\\d s left`));
+  assert.equal(result.dug, 0);
+  // Status 0 starts a dig; the hide's own item releases are status 5.
+  assert.equal(
+    server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0),
+    false,
+    "no dig was started",
+  );
+  assert.equal(bot.blockAt(new Vec3(0, 63, 0))!.name, "deepslate");
+});
+
+test("a slow third cell leaves the dug part and names it", async () => {
+  const { bot, clock } = scene({
+    health: 20,
+    cells: shaftOf("dirt", "dirt", "deepslate", "stone"),
+    mockedClock: true,
+    simulatePhysics: true,
+  });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, new Set(), 6_000), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.dug, 2, "the two quick cells were dug");
+  assert.match(result.error ?? "", /shaft cell deepslate digs in \d+\.\d s, \d\.\d s left/);
+  assert.match(result.error ?? "", /2 shaft cells already dug/);
+  assert.equal(bot.blockAt(new Vec3(0, 61, 0))!.name, "deepslate", "the slow cell was left whole");
+});

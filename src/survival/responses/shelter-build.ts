@@ -5,6 +5,7 @@ import { centerOnCell, steeringPortFor } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import type { ResponseContext } from "../control/combat/context.js";
+import { tickBudgetWallMs } from "../control/combat/progress.js";
 import { isInLava, isInWater } from "../perception/body.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { buildProtection } from "../positioning/combat/build-protection.js";
@@ -78,32 +79,44 @@ export function shelterLiquidFailure(bot: Bot): StepFailure | null {
 }
 
 /**
- * Wait `ticks` physics ticks, but never past the construction deadline: the
- * wall clock bounds a physics stream that has stopped (a lagging server), so
- * the pass that follows reaches its deadline check instead of hanging.
+ * What ends a wait of the shelter build besides its ticks: `"construction"` is the construction deadline (a construction
+ * step must not outlive the hide); `{ wallDeadline }` is a monotonic time of the wait's own (a guard hold, `holdShelterGuard`),
+ * so a guard still waits its ticks late in a hide, after the construction deadline.
  */
-export async function waitForShelterTicks(build: ShelterBuild, ticks: number): Promise<void> {
+export type ShelterWaitBound = "construction" | { readonly wallDeadline: number };
+
+/**
+ * Wait `ticks` physics ticks, but never past `bound`: the wall clock ends a physics stream that has stopped (a lagging
+ * server), so the pass that follows reaches its own check instead of hanging.
+ */
+export async function waitForShelterTicks(build: ShelterBuild, ticks: number, bound: ShelterWaitBound): Promise<void> {
   const { bot, options } = build;
-  const bound = new AbortController();
-  const timer = setTimeout(() => bound.abort(), Math.max(0, build.constructionDeadline - monotonicNow()));
+  const deadline = bound === "construction" ? build.constructionDeadline : bound.wallDeadline;
+  const ended = new AbortController();
+  const timer = setTimeout(() => ended.abort(), Math.max(0, deadline - monotonicNow()));
   try {
-    await waitForPhysicsTicks(bot, ticks, AbortSignal.any([options.signal, bound.signal]));
+    await waitForPhysicsTicks(bot, ticks, AbortSignal.any([options.signal, ended.signal]));
   } catch (cause) {
     options.signal.throwIfAborted();
-    if (!bound.signal.aborted) throw cause;
+    if (!ended.signal.aborted) throw cause;
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Wait `ticks` physics ticks, turning the shield toward an intruder in the shelter shell on each. */
+/**
+ * Wait `ticks` physics ticks, turning the shield toward an intruder in the shelter shell on each. The hold ends at its wall
+ * twin (`tickBudgetWallMs`), counted from its start for all its ticks: a shield is held its `SHIELD_READY_TICKS` and a swing
+ * waits its cooldown even after the construction deadline, and a stopped physics stream still ends the hold.
+ */
 export async function holdShelterGuard(build: ShelterBuild, ticks: number): Promise<void> {
   const { bot, options } = build;
+  const bound = { wallDeadline: monotonicNow() + tickBudgetWallMs(ticks) };
   for (let tick = 0; tick < ticks; tick++) {
     options.signal.throwIfAborted();
     const intruder = shelterIntruder(bot, options.threatContext);
     if (intruder) await bot.lookAt(shieldFacing(bot, intruder, options.threatContext.resolvedIds), true);
-    await waitForShelterTicks(build, 1);
+    await waitForShelterTicks(build, 1, bound);
   }
 }
 
@@ -119,7 +132,7 @@ export async function centerShelterCell(build: ShelterBuild, cell: Vec3): Promis
     return await centerOnCell(
       {
         ...steeringPortFor(bot, (control, state) => bot.setControlState(control, state)),
-        waitForTick: () => waitForShelterTicks(build, 1),
+        waitForTick: () => waitForShelterTicks(build, 1, "construction"),
       },
       cell,
       AbortSignal.any([options.signal, interrupted.signal]),
