@@ -51,6 +51,12 @@ test("stone high above a column of air is roofed", () => {
   assert.equal(situation(column(64, "oak_log", "air", "air", "air", "air", "stone")), "roofed");
 });
 
+test("lava above is no roof: the fluid is passed as water is, and the block is open", () => {
+  // `view_blocks find` of obsidian under a lava pool must not say "roofed over" (view-blocks.test.ts, the obsidian and lava find).
+  assert.equal(situation(column(64, "obsidian", { name: "lava", properties: { level: "0" } }, "air"), "obsidian"), "open");
+  assert.equal(situation(column(64, "obsidian", { name: "lava", properties: { level: "0" } }, "stone"), "obsidian"), "roofed");
+});
+
 test("an unloaded cell above is open, whatever lies beyond it", () => {
   assert.equal(situation({ ...column(64, "oak_log"), "0,65,0": "void", "0,66,0": "stone" }), "open");
 });

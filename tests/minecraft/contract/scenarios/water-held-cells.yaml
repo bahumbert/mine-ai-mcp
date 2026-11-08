@@ -1,0 +1,53 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-water-held-cells
+tags:
+  - contract
+description: view_blocks cells say holds_water for kelp, seagrass and a waterlogged block (each walled in stone, for each is a
+  source that spreads), and not for stone or air. Contract check tests/minecraft/contract/checks/water-held-cells.ts, also
+  run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: water-held-cells
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -5 -60 1 stone
+  - setblock -5 -60 3 stone
+  - setblock -5 -60 2 stone
+  - setblock -4 -60 1 stone
+  - setblock -4 -60 3 stone
+  - setblock -3 -60 1 stone
+  - setblock -3 -60 3 stone
+  - setblock -3 -60 2 stone
+  - setblock -2 -60 1 stone
+  - setblock -2 -60 3 stone
+  - setblock -1 -60 1 stone
+  - setblock -1 -60 3 stone
+  - setblock -1 -60 2 stone
+  - setblock 0 -60 1 stone
+  - setblock 0 -60 3 stone
+  - setblock 1 -60 1 stone
+  - setblock 1 -60 3 stone
+  - setblock 1 -60 2 stone
+  - setblock -4 -60 2 kelp
+  - setblock -2 -60 2 seagrass
+  - setblock 0 -60 2 oak_stairs[waterlogged=true]
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

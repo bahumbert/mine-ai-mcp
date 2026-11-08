@@ -65,6 +65,7 @@ import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
 import { waitForTicksAndAge } from "./checks/wait-for-ticks-and-age.ts";
+import { waterHeldCells } from "./checks/water-held-cells.ts";
 import { worldAgeAtSlowTick } from "./checks/world-age-at-slow-tick.ts";
 import { worldAgePerSecond } from "./checks/world-age-per-second.ts";
 
@@ -130,6 +131,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   worldAgeAtSlowTick,
   waitForTicksAndAge,
   thinBlockShapes,
+  waterHeldCells,
   stateIdAgrees,
   itemsMatchSlots,
   equipHandAndOffHand,

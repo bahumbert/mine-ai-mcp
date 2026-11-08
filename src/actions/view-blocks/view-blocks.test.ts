@@ -163,42 +163,65 @@ test("a box is drawn top layer first as one grid per layer with a legend", () =>
   assert.match(markdown, /Legend: \. air \(24\), A stone \(2\), ~ water \(1\)/);
 });
 
-test("cells report shape, liquid level, and waterlogging", () => {
+test("cells report shape, liquid level, waterlogging, and whether they hold water (the key is absent, never false)", () => {
   const bot = fakeBot({
     [key(1, 64, 1)]: { name: "water", properties: { level: 0 } },
     [key(2, 64, 1)]: { name: "water", properties: { level: 3 } },
     [key(3, 64, 1)]: { name: "oak_slab", properties: { waterlogged: true, type: "bottom" } },
     [key(4, 64, 1)]: { name: "stone" },
+    [key(6, 64, 1)]: { name: "kelp" },
     [key(40, 64, 1)]: { name: "void" },
   });
   const result = viewBlocks(bot, {
     find: null,
     box: null,
-    cells: [
-      { x: 1, y: 64, z: 1 },
-      { x: 2, y: 64, z: 1 },
-      { x: 3, y: 64, z: 1 },
-      { x: 4, y: 64, z: 1 },
-      { x: 5, y: 64, z: 1 },
-      { x: 40, y: 64, z: 1 },
-    ],
+    cells: [1, 2, 3, 4, 5, 6, 40].map((x) => ({ x, y: 64, z: 1 })),
   });
   assert.equal(result.status, "succeeded");
   assert.deepEqual(
-    result.blocks.cells.map((cell) => [cell.name, cell.shape, cell.level, cell.waterlogged]),
+    result.blocks.cells.map((cell) => [cell.name, cell.shape, cell.level, cell.waterlogged, "holds_water" in cell ? cell.holds_water : "absent"]),
     [
-      ["water", "liquid", 0, undefined],
-      ["water", "liquid", 3, undefined],
-      ["oak_slab", "solid", undefined, true],
-      ["stone", "solid", undefined, undefined],
-      ["air", "open", undefined, undefined],
-      ["unloaded", "open", undefined, undefined],
+      ["water", "liquid", 0, undefined, true],
+      ["water", "liquid", 3, undefined, true],
+      ["oak_slab", "solid", undefined, true, true],
+      ["stone", "solid", undefined, undefined, "absent"],
+      ["air", "open", undefined, undefined, "absent"],
+      ["kelp", "open", undefined, undefined, true],
+      ["unloaded", "open", undefined, undefined, "absent"],
     ],
   );
   const markdown = formatViewBlocksResult(result);
-  assert.match(markdown, /- 1, 64, 1: water \(source\)/);
+  assert.match(markdown, /- 1, 64, 1: water \(source\)\n/, "a liquid says it is water already");
   assert.match(markdown, /- 2, 64, 1: water \(flowing level 3\)/);
-  assert.match(markdown, /- 3, 64, 1: oak_slab \(solid, waterlogged\)/);
+  assert.match(markdown, /- 3, 64, 1: oak_slab \(solid, waterlogged\)\n/, "waterlogged says it once");
+  assert.match(markdown, /- 6, 64, 1: kelp \(open, holds water\)/, "a water plant is no liquid and says so");
+});
+
+test("find says a block under water or roofed over so; an open one, and the water itself, have no situation key", () => {
+  const bot = fakeBot({
+    [key(3, 64, 0)]: { name: "oak_log" },
+    [key(3, 65, 0)]: { name: "water", properties: { level: 0 } },
+    [key(5, 64, 0)]: { name: "oak_log" },
+    [key(5, 66, 0)]: { name: "stone" },
+    [key(7, 64, 0)]: { name: "oak_log" },
+    [key(9, 64, 0)]: { name: "oak_stairs", properties: { waterlogged: true } },
+  });
+  const find = (blockName: string) => viewBlocks(bot, { find: { blockNames: [blockName], limit: 12 }, box: null, cells: [] });
+  const logs = find("oak_log");
+  assert.equal(logs.status, "succeeded");
+  assert.deepEqual(
+    logs.blocks.find![0]!.listed.map((hit) => [hit.x, "situation" in hit ? hit.situation : "absent"]),
+    [[3, "under_water"], [5, "roofed"], [7, "absent"]],
+  );
+  const markdown = formatViewBlocksResult(logs);
+  assert.match(markdown, /- oak_log at 3, 64, 0, 3 blocks away \(solid, under water\); above water/);
+  assert.match(markdown, /- oak_log at 5, 64, 0, 5 blocks away \(solid, roofed over\); above air/);
+  assert.match(markdown, /- oak_log at 7, 64, 0, 7 blocks away \(solid\); above air/);
+  assert.match(formatViewBlocksResult(find("oak_stairs")), /- oak_stairs at 9, 64, 0, 9 blocks away \(solid, waterlogged, under water\)/);
+  // The water block is the water, not a block under it: no "under water" on a line that says "source".
+  const [water] = find("water").blocks.find![0]!.listed;
+  assert.deepEqual([water!.shape, "situation" in water!], ["liquid", false]);
+  assert.match(formatViewBlocksResult(find("water")), /- water at 3, 65, 0, 3\.2 blocks away \(source\); above air/);
 });
 
 test("kinds say whether a block is a full cube, from the runtime's own geometry", () => {

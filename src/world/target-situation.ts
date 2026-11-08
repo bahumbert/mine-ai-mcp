@@ -13,8 +13,8 @@ export type TargetSituation = "open" | "under_water" | "roofed";
 /**
  * Walk up the column over `position` until the answer is known:
  * - the block's own cell holds water, or the first cell over the stack of targets holds water: `under_water`;
- * - above that, water cells are passed; a loaded cell that is not passable and is neither a tree part nor a target
- *   (a stone, a plank, a wart block) is a roof: `roofed`;
+ * - above that, water and lava cells are passed (neither covers anything); a loaded cell that is not passable and is
+ *   neither a tree part nor a target (a stone, a plank, a wart block) is a roof: `roofed`;
  * - an unloaded cell, or reaching `topY` (exclusive; the world top, where prismarine reads air), leaves it `open`.
  * Only an open column is read to the top; the other answers stop within a few cells.
  */
@@ -37,6 +37,8 @@ export function targetSituation(
     }
     if (stacked && isTarget(block)) continue;
     stacked = false;
+    // Lava is not passable (it burns) yet it covers nothing: it is no roof, as water is none (view_blocks' obsidian under lava).
+    if (block.traits.liquid === "lava") continue;
     if (isTarget(block) || isTreePart(block) || isPassable(block)) continue;
     return "roofed";
   }
