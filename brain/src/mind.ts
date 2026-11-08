@@ -141,6 +141,8 @@ export interface Objective {
   readonly place?: Place;
   /** A trade's hand-off (spec 2026-10-19-relations-trading-design): a code routine, its own decision, never an order. */
   readonly handoff?: Handoff;
+  /** Taken from a line whose propose or accept was refused: its gives to the requester are refused (spec 2026-11-08-trading-p2-fixes D2). */
+  readonly tradeCameToNothing?: true;
 }
 
 /** One step already taken for the current objective, as the work tier sees it. */

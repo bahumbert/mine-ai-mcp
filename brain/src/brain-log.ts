@@ -56,6 +56,8 @@ export type BrainEvent =
     readonly requester: string | null;
     readonly outcome?: "done" | "failed";
     readonly detail?: string;
+    /** For an order taken during a trade (spec 2026-11-08-trading-p2-fixes D3b): the trade's id, or `came to nothing` when the line's propose or accept was refused. */
+    readonly duringTrade?: string;
     /** For its own objectives: the opportunities and the last hour's time the goal tier saw when it chose this one. */
     readonly opportunities?: readonly Opportunity[];
     readonly time?: readonly ActivityTotal[];

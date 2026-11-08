@@ -16,6 +16,7 @@ import { resendRefusedTrade, type CheckedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, type PartnerWitness, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
+import { GIVE_OUTSIDE_TRADE } from "./order-refusal.ts";
 import { notObeyingLine, openingRelationLines, tooFarLine } from "./prompts.ts";
 import { expireRequests, heardFrom, openRequest, answerRequest, requestLines, withExpiredRequests } from "./requests.ts";
 import type { DecisionSeen } from "./checks.ts";
@@ -143,6 +144,21 @@ export class AgentRelations {
   tradeOpenWith(speaker: string): string | null {
     const { board, persona } = this.deps;
     return this.trades.openWith(speaker)?.id ?? board?.offerFrom(speaker, persona.username)?.id ?? board?.offerFrom(persona.username, speaker)?.id ?? null;
+  }
+
+  /**
+   * Why a `give_item` of `count` `item` to the requester `player` must not run now, else null: it is no part of any trade
+   * (spec 2026-11-08-trading-p2-fixes D2). It runs when an agreed trade still owes that much of the item, or a held trade awaits it;
+   * with a trade or offer open it is refused (its hand-off is how items move); `cameToNothing` (the order's line carried a trade
+   * that the checks refused) refuses it too when nothing is open.
+   */
+  giveOutsideTrade(player: string, item: string, count: number, cameToNothing: boolean): string | null {
+    const target = this.trades.outsideGiveTarget(player, item, true);
+    const left = target === undefined ? 0 : this.trades.leftToGive(target.id)?.find((g) => g.item === item)?.count ?? 0;
+    if (left >= count || this.trades.heldAwaits(player, item)) return null;
+    const open = this.tradeOpenWith(player);
+    if (open !== null) return `${GIVE_OUTSIDE_TRADE} not given: ${player} and I have trade ${open} open; its hand-off is how items move between us${left > 0 && left < count ? `, which owes ${left} ${item} more` : ""}`;
+    return cameToNothing ? `${GIVE_OUTSIDE_TRADE} not given: the trade ${player} spoke of with this order came to nothing; a give outside a trade is no part of it` : null;
   }
 
   /** A reply that carries a trade: the trade is checked on the world as it is now, and sent back once when the checks refuse it; the snapshot of the last check comes with it. */

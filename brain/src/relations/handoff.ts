@@ -30,6 +30,9 @@ export type Handoff =
 export const handoffKey = (h: Handoff): string => (h.kind === "await" ? awaitKey(h.tradeId) : h.tradeId);
 export const awaitKey = (tradeId: string): string => `await:${tradeId}`;
 
+/** Whether `h` is my give for a trade with `name` (any case): the hand-off an order of theirs, let through by that trade, waits below or goes under (spec 2026-11-08-trading-p2-fixes D3). */
+export const isGiveTo = (h: Handoff | undefined, name: string | null): boolean => h?.kind === "give" && name !== null && h.partner.toLowerCase() === name.toLowerCase();
+
 /** The objective text of a hand-off, as the monitor and the logs show it. */
 export function describeHandoff(h: Handoff): string {
   if (h.kind === "await") return `wait for ${h.partner} to give their side (trade)`;

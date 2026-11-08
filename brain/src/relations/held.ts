@@ -24,13 +24,23 @@ export async function countLateToss(book: RelationBook, trade: Trade, taken: rea
   return true;
 }
 
+/** The trades with `partner` that still hold their payment, oldest end first: the ones a give outside any open trade is matched against. */
+function heldTradesWith(trades: readonly Trade[], partner: string, within: HeldWindow): Trade[] {
+  return trades.filter((t) => t.partner.toLowerCase() === partner.toLowerCase() && heldPayment(t, within).length > 0)
+    .sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+}
+
+/** Whether `giveToHeldTrades` would count a give of `item` to `partner`: their payment of it is held (given back), or my own side owes it (paid late). Reads only. */
+export function heldAwaits(trades: readonly Trade[], partner: string, item: string, within: HeldWindow): boolean {
+  return heldTradesWith(trades, partner, within).some((t) => giveBack(t, item, 1).used > 0 || giveLate(t, [{ item, count: 1 }], null).used.length > 0);
+}
+
 /**
  * A `give_item` to `partner` outside any open trade, matched against the trades that still hold their payment (oldest end first):
  * their payment goes back, else an item of my own side is paid late. Returns how many of the count matched none (it goes to the earlier ledger).
  */
 export async function giveToHeldTrades(book: RelationBook, partner: string, item: string, count: number, within: HeldWindow, log: (line: string) => void): Promise<number> {
-  const held = book.trades().filter((t) => t.partner.toLowerCase() === partner.toLowerCase() && heldPayment(t, within).length > 0)
-    .sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+  const held = heldTradesWith(book.trades(), partner, within);
   let left = count;
   for (const trade of held) {
     if (left <= 0) break;

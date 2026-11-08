@@ -8,7 +8,8 @@ import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
 import { EARLIER_GAIN_MS, EARLIER_GIVE_MS } from "./earlier.ts";
 import { obeyChance } from "./obey.ts";
 import { TradeBoard } from "./board.ts";
-import { newRelation } from "./record.ts";
+import { GIVE_OUTSIDE_TRADE } from "./order-refusal.ts";
+import { newRelation, withTrade } from "./record.ts";
 import type { RelationEvent } from "./types.ts";
 
 function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
@@ -717,4 +718,75 @@ test("B3: a wait for the partner's side whose trade I cancelled ends failed and 
   const end = await h.relations.runHandoff({ kind: "await", tradeId: id, partner: "Theo" }, context);
   assert.equal(end.outcome, "failed");
   assert.match(end.detail, /the trade ended \(cancelled: I cancelled\) before Theo gave/u);
+});
+
+/** An agreed trade with Theo in which I give 5 bread (and get 5 iron ingots), and the refusal text `giveOutsideTrade` gives for it. */
+async function agreedBreadTrade(t: TestContext) {
+  const h = relationsOverTime(t);
+  await h.relations.trades.onDecision({ ...IRON_TRADE, first: "me" }, "Theo", h.runtime.snapshot);
+  const open = (extra = "") => `${GIVE_OUTSIDE_TRADE} not given: Theo and I have trade ${h.trade()!.id} open; its hand-off is how items move between us${extra}`;
+  return { ...h, open };
+}
+
+const CAME_TO_NOTHING = `${GIVE_OUTSIDE_TRADE} not given: the trade Theo spoke of with this order came to nothing; a give outside a trade is no part of it`;
+
+test("giveOutsideTrade lets a give the agreed trade still owes run", async (t) => {
+  const h = await agreedBreadTrade(t);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), null);
+  assert.equal(h.relations.giveOutsideTrade("theo", "bread", 3, true), null, "another case of the name, and the came-to-nothing mark: the agreed trade counts the give");
+});
+
+test("giveOutsideTrade refuses more than the agreed trade owes", async (t) => {
+  const h = await agreedBreadTrade(t);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 20, false), h.open(", which owes 5 bread more"));
+});
+
+test("giveOutsideTrade refuses once the side was credited", async (t) => {
+  const h = await agreedBreadTrade(t);
+  await h.relations.trades.gaveOutside("Theo", "bread", 5);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 1, false), h.open());
+});
+
+test("giveOutsideTrade refuses an item the trade does not owe", async (t) => {
+  const h = await agreedBreadTrade(t);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "oak_log", 1, false), h.open());
+});
+
+test("giveOutsideTrade refuses a give before a proposal is agreed", async (t) => {
+  const h = relationsOverTime(t);
+  await h.relations.trades.onDecision({ action: "propose", give: [{ item: "bread", count: 5 }], get: [], first: "me" }, "Theo", h.runtime.snapshot);
+  assert.equal(h.trade()?.state, "proposed");
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), `${GIVE_OUTSIDE_TRADE} not given: Theo and I have trade ${h.trade()!.id} open; its hand-off is how items move between us`);
+});
+
+test("giveOutsideTrade refuses while only the speaker's board offer stands", () => {
+  const board = new TradeBoard();
+  const h = relationsWithClock({ board });
+  board.post({ id: "Theo-Ayla-1", proposer: "Theo", partner: "Ayla", give: [{ item: "bread", count: 5 }], get: [], first: "me", postedAt: 1 });
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), `${GIVE_OUTSIDE_TRADE} not given: Theo and I have trade Theo-Ayla-1 open; its hand-off is how items move between us`);
+});
+
+test("giveOutsideTrade lets a held trade's awaited item go", async (t) => {
+  const h = relationsOverTime(t);
+  await h.relations.trades.onDecision({ ...IRON_TRADE, first: "me" }, "Theo", h.runtime.snapshot);
+  const agreed = h.trade()!;
+  // Their iron was credited, then my give failed: the trade ended with my side not given and their payment held.
+  await h.relations.book.update("Theo", (r) => withTrade(r, { ...agreed, state: "broken", brokenBy: "me", received: [{ item: "iron_ingot", count: 5 }], endedAt: Date.now() }));
+  assert.equal(h.relations.tradeOpenWith("Theo"), null);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), null, "my own side, paid late");
+  assert.equal(h.relations.giveOutsideTrade("Theo", "iron_ingot", 5, false), null, "their payment, given back");
+  assert.equal(h.relations.giveOutsideTrade("Theo", "oak_log", 1, true), CAME_TO_NOTHING, "an item no held trade awaits is no part of it");
+});
+
+test("giveOutsideTrade marks a give after a line's trade came to nothing", () => {
+  const h = relationsWithClock();
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 1, false), null);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 1, true), CAME_TO_NOTHING);
+});
+
+test("giveOutsideTrade lets a give run once the trade is done", async (t) => {
+  const h = await agreedBreadTrade(t);
+  await h.relations.book.update("Theo", (r) => withTrade(r, { ...h.trade()!, state: "done", endedAt: Date.now() }));
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), null);
+  assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, true), CAME_TO_NOTHING, "the mark alone keeps a give refused once nothing counts it");
 });

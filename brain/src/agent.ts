@@ -20,10 +20,10 @@ import { CHAT_RETRY_MS, MAX_ERROR_WAIT_MS, modelRetryDelay } from "./model-wait.
 import { elapsedSince, monotonicNow, wallTimeOf } from "./monotonic-clock.ts";
 import { FAILED_STEP_MINUTES, MOVED_BLOCKS, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ConversationFacts, type EarlierFailure, type KnownPlace, type Mind, type Objective, type StepRecord, type WorkDecision } from "./mind.ts";
 import { AgentRelations } from "./relations/agent-relations.ts";
-import { orderRefusal } from "./relations/order-refusal.ts";
+import { GIVE_OUTSIDE_TRADE, orderVerdict, stepGiveRefusal } from "./relations/order-refusal.ts";
 import type { TradeBoard } from "./relations/board.ts";
 import { describeLacks, itemsYieldedBy } from "./relations/chat-trade.ts";
-import { describeHandoff, handoffKey, type Handoff } from "./relations/handoff.ts";
+import { describeHandoff, handoffKey, isGiveTo, type Handoff } from "./relations/handoff.ts";
 import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.ts";
 import { heldKinds, owedUsed } from "./relations/items.ts";
 import { OwnWork } from "./relations/own-work.ts";
@@ -496,23 +496,22 @@ export class Agent {
     // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
     // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     // The speaker is the requester: their authority is the order's.
+    if (routed !== "act" && routed !== "later") return;
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work), ...(decision.place !== undefined && { place: decision.place }) };
     // No trade errand across the map: a bot out of reach is told to come (relations block); players are obeyed at any distance.
-    if ((routed === "act" || routed === "later") && asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, checked ?? snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
+    if (asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, checked ?? snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
       log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
       return;
     }
-    const refusal = routed === "act" || routed === "later" ? orderRefusal(this.relations, decision, message.username) : null;
-    if (refusal !== null) {
-      log(refusal);
-      return;
-    }
-    if ((routed === "act" || routed === "later") && this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) {
-      log(`already on "${asked.text}" for ${asked.requester}`);
-      return;
-    }
-    if (routed === "act") this.take(asked, whisperTo);
-    if (routed === "later") this.takeAfterOwnGoal(asked, whisperTo);
+    const verdict = orderVerdict(this.relations, decision, message.username, asked.purpose, tradeId);
+    if (verdict.kind === "refused") return void log(verdict.log);
+    if (this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) return void log(`already on "${asked.text}" for ${asked.requester}`);
+    if (verdict.log !== undefined) log(verdict.log);
+    const order: Objective = verdict.tradeCameToNothing === true ? { ...asked, tradeCameToNothing: true } : asked;
+    // The partner's give runs first: the order was let through because of the trade (spec 2026-11-08-trading-p2-fixes D3).
+    if (verdict.duringTrade !== undefined && isGiveTo(this.stack.at(-1)?.objective.handoff, message.username)) this.queue(order, whisperTo, verdict.duringTrade);
+    else if (routed === "act") this.take(order, whisperTo, verdict.duringTrade);
+    else this.takeAfterOwnGoal(order, whisperTo, verdict.duringTrade);
   }
 
   /** The line answers a state that is gone and is dropped, but a stop is not: it was meant, and the newer line (read next) does not take it back; so is a bot's accept or decline of the offer it read, while that offer stands (a player's, a propose and a cancel are dropped: owner 2026-10-31). */
@@ -530,13 +529,13 @@ export class Agent {
   }
 
   /** A "later" request: taken at once over the character's own goal, queued behind work done for someone. */
-  private takeAfterOwnGoal(objective: Objective, whisperTo: string | null): void {
+  private takeAfterOwnGoal(objective: Objective, whisperTo: string | null, duringTrade?: string): void {
     // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
     // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
     // only waits behind work done for someone.
     const top = this.stack.at(-1);
-    if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
-    else this.queue(objective, whisperTo);
+    if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo, duringTrade);
+    else this.queue(objective, whisperTo, duringTrade);
   }
 
   /** Whether the message's speaker went on, or in a conversation any member spoke, since it was taken (its reply answers a state that is gone). */
@@ -725,24 +724,22 @@ export class Agent {
   }
 
   /** Puts something the character took on above what it was doing, which is set aside (its step stopped) and resumes later. */
-  private take(objective: Objective, whisperTo: string | null = null): void {
+  private take(objective: Objective, whisperTo: string | null = null, duringTrade?: string): void {
     // A member's request is worked on while the conversation goes on, as a chance conversation does; anything else takes the body.
     if (objective.requester === null || this.memberBeforeLine.get(objective.requester.toLowerCase()) !== true) this.talks?.end("taken_over", this.runSignal);
     const current = this.stack.at(-1);
     current?.step?.abort();
     this.sheltering?.abort();
     this.stack.push(newWork(objective, whisperTo));
-    this.journalObjective("taken", objective);
+    this.journalObjective("taken", objective, duringTrade);
     this.wake?.();
   }
 
-  /** A trade's hand-off goes on top of what it does, like an order that takes the body; its own decision, so no authority is asked. A player's running order is not interrupted: the hand-off waits just below it. */
+  /** A trade's hand-off goes on top of what it does, like an order that takes the body; its own decision, so no authority is asked. A player's running order is not interrupted: the hand-off waits just below it, except the give for that player's own trade, which goes on top of the order it let through (the order's step is set aside and resumes). */
   private takeHandoff(h: Handoff): void {
     const objective = { text: describeHandoff(h), requester: null, purpose: null, handoff: h };
-    if (this.stack.at(-1)?.objective.requester != null) {
-      this.queue(objective);
-      return;
-    }
+    const running = this.stack.at(-1)?.objective.requester ?? null;
+    if (running !== null && !isGiveTo(h, running)) return this.queue(objective);
     this.stack.at(-1)?.step?.abort();
     this.sheltering?.abort();
     this.stack.push(newWork(objective));
@@ -785,11 +782,11 @@ export class Agent {
   }
 
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
-  private queue(objective: Objective, whisperTo: string | null = null): void {
+  private queue(objective: Objective, whisperTo: string | null = null, duringTrade?: string): void {
     const work = newWork(objective, whisperTo);
     if (this.stack.length === 0) this.stack.push(work);
     else this.stack.splice(this.stack.length - 1, 0, work);
-    this.journalObjective("queued", objective);
+    this.journalObjective("queued", objective, duringTrade);
     this.wake?.();
   }
 
@@ -1028,6 +1025,8 @@ export class Agent {
   private async runChosenStep(work: Work, decision: StepDecision, snapshot: BotSnapshot): Promise<StepRun> {
     const label = describeStep(decision.step);
     this.options.log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
+    const refused = stepGiveRefusal(this.relations, work.objective, decision.step);
+    if (refused !== null) return { label, result: { status: "failed", detail: refused }, started: monotonicNow(), actions: [], phases: [], stalled: null };
     const controller = new AbortController();
     this.startStep(work, controller, decision.step);
     this.journalState(label);
@@ -1131,7 +1130,7 @@ export class Agent {
     work.steps.push(record);
     work.carried.push(carried);
     const restarted = record.outcome === "failed" && record.detail.includes(BODY_RESTARTED);
-    if (record.outcome === "failed" && !restarted) this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
+    if (record.outcome === "failed" && !restarted && !record.detail.startsWith(GIVE_OUTSIDE_TRADE)) this.rememberFailedStep(work.objective, label, stepKey(decision.step), record.detail, carried, position);
     this.options.journal?.({ kind: "step", objective: work.objective.text, requester: work.objective.requester, step: label, input: decision.step, thought: decision.thought, outcome: record.outcome, detail: record.detail, ms, activity, times: spans, purpose });
     this.journalState(null);
     // A give made by any objective but the trade's own hand-off still counts for the trade with that player (B1).
@@ -1590,8 +1589,8 @@ export class Agent {
     }
   }
 
-  private journalObjective(event: "taken" | "queued" | "own", objective: Objective): void {
-    this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester, purpose: objective.purpose });
+  private journalObjective(event: "taken" | "queued" | "own", objective: Objective, duringTrade?: string): void {
+    this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester, purpose: objective.purpose, ...(duringTrade !== undefined && { duringTrade }) });
     this.journalState(null);
   }
 

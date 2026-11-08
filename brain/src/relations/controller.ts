@@ -19,7 +19,7 @@ import { boardPeerHandlers } from "./peer.ts";
 import { OwnProposals } from "./proposals.ts";
 import { PartnerRecord } from "./partner-record.ts";
 import { relationsBlock } from "./prompts.ts";
-import { countLateToss, giveToHeldTrades, heldOwed } from "./held.ts";
+import { countLateToss, giveToHeldTrades, heldAwaits, heldOwed } from "./held.ts";
 import { heldWindow, withTrade } from "./record.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
 import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, giverFirst, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
@@ -194,7 +194,7 @@ export class TradeController implements BoardPeer {
   /** A `give_item` the partner took, outside the trade's hand-off, counts toward my side of the oldest open trade with them whose side has the item (a proposed one too; capped at what is lacking); the side covered and agreed, the trade is given. */
   gaveOutside(partner: string, item: string, count: number): Promise<void> {
     return this.exclusive(async () => {
-      const trade = this.deps.book.trades().filter((t) => same(t.partner, partner) && (t.state === "proposed" || t.state === "agreed" || t.state === "they_gave") && t.gaveAt === null && t.give.some((g) => g.item === item)) .sort((a, b) => a.createdAt - b.createdAt)[0];
+      const trade = this.outsideGiveTarget(partner, item, false);
       if (trade === undefined) {
         const left = await giveToHeldTrades(this.deps.book, partner, item, count, this.heldWindow(), this.deps.log);
         if (left <= 0) return;
@@ -205,6 +205,19 @@ export class TradeController implements BoardPeer {
       await this.giveIfCovered(trade, partner);
     });
   }
+
+  /**
+   * The oldest trade with `partner` whose side of mine has `item` still to give, where a `give_item` outside the hand-off is counted:
+   * a proposed one too, unless `due` (the give is asked to run now, so only a trade that is agreed counts).
+   */
+  outsideGiveTarget(partner: string, item: string, due: boolean): Trade | undefined {
+    const states: readonly TradeState[] = due ? ["agreed", "they_gave"] : ["proposed", "agreed", "they_gave"];
+    return this.deps.book.trades().filter((t) => same(t.partner, partner) && states.includes(t.state) && t.gaveAt === null && t.give.some((g) => g.item === item))
+      .sort((a, b) => a.createdAt - b.createdAt)[0];
+  }
+
+  /** Whether a held trade with `partner` still awaits `item` from me or from them (`giveToHeldTrades` would count the give). */
+  heldAwaits(partner: string, item: string): boolean { return heldAwaits(this.deps.book.trades(), partner, item, this.heldWindow()); }
 
   /** My side was all given before it was due: the trade is given at once (done when they gave too), with no hand-off. Proposed trades wait for the agreement. */
   private async giveIfCovered(trade: Trade, partner: string): Promise<boolean> {
