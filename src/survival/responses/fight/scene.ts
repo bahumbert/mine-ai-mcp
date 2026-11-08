@@ -19,6 +19,7 @@ import { decideFightBoundary, type FightBoundaryDecision } from "../../policy/co
 import { CombatPosition } from "../../positioning/combat/position.js";
 import { SurvivalPolicyState } from "../../state/survival-policy.js";
 import { type SurvivalResources } from "../../state/resources.js";
+import { TargetMotion } from "../../weapons/target-motion.js";
 import { FootingRecovery } from "../footing.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
 
@@ -48,6 +49,8 @@ export class FightScene implements Disposable {
   readonly dead = new Set<number>();
   readonly stylesUsed = new Set<CombatStyle>();
   readonly weaponsUsed = new Set<string>();
+  /** The observed movement of every target this fight has focused on, for the bow's lead. */
+  readonly targetMotion = new TargetMotion();
   readonly tactics: CombatTactics;
   get signal(): AbortSignal { return this.tactics.signal; }
   readonly position: CombatPosition;
@@ -193,6 +196,11 @@ export class FightScene implements Disposable {
     if (decision.kind === "recover") this.recoveryTarget = decision.health;
     if (decision.kind === "respond") this.responseRequired.abort("The shared decision selected a different response.");
   };
+  /** One physics tick of the fight went by: count it and record where the focused target stands. */
+  countTick(): void {
+    this.elapsedTicks++;
+    this.targetMotion.observe(this.target, this.elapsedTicks);
+  }
   readonly settled = (): boolean => this.observed !== null || !this.requestedTarget.isValid;
   readonly reportProgress = (
     state: "started" | "ended" | CombatProgressChange,

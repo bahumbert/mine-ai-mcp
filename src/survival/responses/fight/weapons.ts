@@ -283,7 +283,11 @@ export class FightWeapons {
     });
   readonly clearShot = (feet = this.scene.bot.entity.position) => {
     const eye = feet.offset(0, observedEyeHeight(this.scene.bot.entity), 0);
-    const trajectory = bowTrajectory(eye.offset(0, -0.1, 0), aimPoint(this.scene.bot, this.scene.target));
+    const trajectory = bowTrajectory(
+      eye.offset(0, -0.1, 0),
+      aimPoint(this.scene.bot, this.scene.target),
+      this.scene.targetMotion.velocity(this.scene.target.id),
+    );
     return trajectory &&
       clearBowTrajectory(trajectory, (from, direction, distance) =>
         this.scene.bot.world.raycast(from, direction, distance),

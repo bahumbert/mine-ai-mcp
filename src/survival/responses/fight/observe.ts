@@ -43,7 +43,7 @@ export function observeFight(
     scene.tactics.observe(scene, weapons);
     scene.observeBoundary();
     if (dragonDanger(scene.bot)) scene.dragonDefense.abort("Dragon hazard requires immediate evasion.");
-    scene.elapsedTicks++;
+    scene.countTick();
     scene.execution.tick();
     if (canMeleeTarget(scene.bot, scene.target))
       scene.execution.progress.milestone("attack_position", String(scene.target.id));
