@@ -57,7 +57,70 @@ function dependencies(
   };
 }
 
-const fakeNavigation = { cancel: () => undefined } as unknown as NavigationRuntime;
+const fakeNavigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
+
+test("a navigate that barely moves ends NAVIGATION_SLOW", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ stopSignal }) => {
+    const movement = setInterval(() => { bot.entity.position.x += 1; }, 60_000);
+    try {
+      await new Promise<void>((resolve) => stopSignal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped", reason: "stopped", elapsedMs: 120_000 };
+    } finally { clearInterval(movement); }
+  }));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 40, y: 64, z: 0 }), 122_000, 1000);
+  assert.equal(output.result.status, "failed");
+  assert.match("error" in output.result ? output.result.error : "", /^\[NAVIGATION_SLOW\]/u);
+  assert.ok("navigation" in output.result && output.result.navigation.digs);
+});
+
+test("a 150-second reflex suspension does not trip a resumed navigate", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async ({ signal }) => {
+    if (++calls === 1) {
+      started();
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped", reason: "reflex", elapsedMs: 1 };
+    }
+    bot.entity.position.set(40.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 1 };
+  }));
+  const runner = new ActionRunner();
+  const pending = runner.run(action, { x: 40, y: 64, z: 0, range: 0 });
+  await entered;
+  runner.claim("hunger_reflex", "ate bread", async () => {
+    await clock.sleep(150_000);
+    return { value: null, continuation: { kind: "resume" as const } };
+  });
+  const output = await clock.settle(pending, 152_000, 1000);
+  assert.equal(output.result.status, "succeeded");
+});
+
+test("a climb-out leg and the onward route have separate windows", async () => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  bot.entity.position.set(0.5, 40, 0.5);
+  let calls = 0;
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    await clock.sleep(100_000);
+    calls++;
+    if (calls === 1) return { status: "stopped", reason: "stalled", elapsedMs: 100_000 };
+    if (calls === 2) bot.entity.position.set(0.5, 64, 0.5);
+    else bot.entity.position.set(30.5, 64, 0.5);
+    return { status: "completed", elapsedMs: 100_000 };
+  }));
+  const output = await clock.settle(new ActionRunner().run(action, { x: 30, y: 64, z: 0, dig: true, range: 0 }), 305_000, 1000);
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(calls, 3);
+});
 
 /** Dependencies whose movement policy prices every break with the diamond pickaxe, so losing it ends a dig route. */
 function toolLossDeps(bot: Bot, run: NavigateDependencies["navigate"]): NavigateDependencies {

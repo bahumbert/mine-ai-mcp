@@ -1,0 +1,39 @@
+template: ../../templates/flat-single-action.yaml
+
+name: slow-walk-by-hand
+tags: [regression]
+description: >-
+  A long sealed deepslate tunnel slows a bare-handed actor below the navigation floor. The actor returns, collects a
+  stone pickaxe, and digs an ordinary stone tunnel to the next target.
+
+geometry:
+  - fill: { block: bedrock, from: [-27, -61, -1], to: [41, -61, 1] }
+  - fill: { block: bedrock, from: [-27, -60, -1], to: [41, -58, -1] }
+  - fill: { block: bedrock, from: [-27, -60, 1], to: [41, -58, 1] }
+  - fill: { block: bedrock, from: [-27, -58, 0], to: [41, -58, 0] }
+  - fill: { block: bedrock, from: [-27, -60, 0], to: [-27, -59, 0] }
+  - fill: { block: bedrock, from: [41, -60, 0], to: [41, -59, 0] }
+  - fill: { block: deepslate, from: [1, -60, 0], to: [40, -59, 0] }
+  - fill: { block: stone, from: [-26, -60, 0], to: [-5, -59, 0] }
+
+entities:
+  - type: item
+    pos: [-3.5, -60, 0.5]
+    nbt: '{Item:{id:"minecraft:stone_pickaxe",count:1},PickupDelay:0s}'
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/slow-walk-by-hand.ts]
+params:
+  slow: { x: 40, y: -60, z: 0, range: 0, dig: true, scaffold: false }
+  back: { x: -3, y: -60, z: 0, range: 0, dig: true, scaffold: false }
+  equipped: { x: -25, y: -60, z: 0, range: 0, dig: true, scaffold: false }
+goal:
+  kind: all
+  timeout: 300
+  goals:
+    - { kind: reach, who: Actor, pos: [-24.5, -60, 0.5], radius: 2 }
+    - { kind: completion, who: Actor }

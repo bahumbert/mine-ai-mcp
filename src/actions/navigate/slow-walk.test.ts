@@ -3,9 +3,118 @@ import test from "node:test";
 import { reportNavigationDig } from "../../navigation/index.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { digCounter, digCounterOf, slowWalkText, toolFamiliesOf, type DigFacts } from "./slow-walk.js";
+import * as slowWalk from "./slow-walk.js";
+import type { StallClock } from "../stall-watch.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
 
 const NO_DIGS: DigFacts = { count: 0, ms: 0, byHand: 0, byHandMs: 0, byHandBlocks: [], fasterWith: [] };
 const STONE_PICKAXE_TYPE = 700; // any item type: the counter only tests it against null
+
+function steppedClock(): StallClock & { advance: (ms: number) => void } {
+  let now = 0;
+  let tick = () => {};
+  return { now: () => now, every: (fn) => { tick = fn; return () => { tick = () => {}; }; },
+    advance: (ms) => { for (let i = 0; i < ms; i += 1000) { now += 1000; tick(); } } };
+}
+
+test("under the progress floor stops a leg at the window", () => {
+  const clock = steppedClock();
+  const { bot } = createFakeBot();
+  let distance = 46;
+  const lifetime = new AbortController();
+  const window = slowWalk.slowWalkWindowOf(lifetime.signal, { bot, distance: () => distance, clock });
+  window.resetLeg(distance, 1);
+  clock.advance(60_000);
+  distance = 41;
+  clock.advance(60_000);
+  assert.equal(window.signal.aborted, true);
+  assert.match(window.reason() ?? "", /^\[NAVIGATION_SLOW\] Got 5 blocks nearer in 120 s \(2\.5 blocks a minute\); 41 blocks left/u);
+  assert.match(window.reason() ?? "", /needed 12 blocks.*[Tt]ry/u);
+  window.close();
+});
+
+test("a short stalled leg reports its own smaller floor", () => {
+  const f = windowFixture(1.5);
+  f.clock.advance(120_000);
+  assert.match(f.window.reason() ?? "", /needed 1 block\b/u);
+  f.window.close();
+});
+
+function windowFixture(initial: number | null, range = 1) {
+  const clock = steppedClock();
+  const { bot } = createFakeBot();
+  let distance = initial;
+  let listener: Parameters<NavigationRuntime["onEvent"]>[0] = () => {};
+  const events: Pick<NavigationRuntime, "onEvent"> = { onEvent: (fn) => { listener = fn; return () => { listener = () => {}; }; } };
+  const lifetime = new AbortController();
+  const window = slowWalk.slowWalkWindowOf(lifetime.signal, { bot, distance: () => distance, clock, events });
+  window.resetLeg(distance, range);
+  return { clock, window, setDistance: (value: number | null) => { distance = value; },
+    emit: (kind: "escape_relaxed" | "own_regions_opened") => listener(kind === "escape_relaxed"
+      ? { kind, runId: "test", atMs: 0, relaxed: [] }
+      : { kind, runId: "test", atMs: 0, start: { x: 0, y: 0, z: 0 } }) };
+}
+
+test("steady progress and a detour that comes back do not trip the window", () => {
+  const f = windowFixture(100);
+  for (let i = 1; i <= 60; i++) { f.setDistance(100 - i); f.clock.advance(10_000); }
+  assert.equal(f.window.reason(), null);
+  f.window.resetLeg(100, 1);
+  f.setDistance(110); f.clock.advance(60_000);
+  f.setDistance(90); f.clock.advance(50_000);
+  assert.equal(f.window.reason(), null);
+  f.window.close();
+});
+
+test("short legs require only their available distance, with a one-block minimum", () => {
+  for (const [initial, gain] of [[3, 2], [1.5, 1]] as const) {
+    const f = windowFixture(initial);
+    f.clock.advance(100_000); f.setDistance(initial - gain); f.clock.advance(20_000);
+    assert.equal(f.window.reason(), null);
+    f.window.close();
+  }
+});
+
+test("unknown distance starts the window only when it becomes known", () => {
+  const f = windowFixture(null);
+  f.clock.advance(100_000); f.setDistance(40); f.clock.advance(120_000);
+  assert.equal(f.window.reason(), null);
+  f.clock.advance(1000); assert.ok(f.window.signal.aborted);
+  f.window.close();
+});
+
+test("pause excludes elapsed time and ignores escape events", () => {
+  const f = windowFixture(40);
+  f.clock.advance(100_000); f.window.pause(); f.emit("escape_relaxed");
+  f.clock.advance(150_000); f.window.resume(); f.clock.advance(100_000);
+  assert.equal(f.window.reason(), null);
+  f.clock.advance(20_000); assert.ok(f.window.signal.aborted);
+  f.window.close();
+});
+
+test("an escape and a sufficiently fast onward route do not trip", () => {
+  for (const kind of ["escape_relaxed", "own_regions_opened"] as const) {
+    const f = windowFixture(1.5);
+    f.window.resetLeg(100, 4); f.setDistance(100); f.clock.advance(60_000);
+    f.emit(kind); f.setDistance(106); f.clock.advance(40_000);
+    // G=12: in the 80 s left, 20 blocks repay the six-block escape debt and clear the floor.
+    for (let i = 1; i <= 75; i++) { f.setDistance(106 - i); f.clock.advance(4_000); }
+    assert.equal(f.window.reason(), null, kind);
+    f.window.close();
+  }
+});
+
+test("an escape and an onward route below the floor trip at the event window", () => {
+  for (const kind of ["escape_relaxed", "own_regions_opened"] as const) {
+    const f = windowFixture(100, 4);
+    f.clock.advance(60_000); f.emit(kind); f.setDistance(106); f.clock.advance(40_000);
+    for (let i = 1; i <= 7; i++) { f.setDistance(106 - i); f.clock.advance(10_000); }
+    assert.equal(f.window.reason(), null, kind);
+    f.setDistance(98); f.clock.advance(10_000);
+    assert.match(f.window.reason() ?? "", /^\[NAVIGATION_SLOW\]/u, kind);
+    f.window.close();
+  }
+});
 
 /** 12 blocks by hand (stone 8, deepslate 4, 7 s each) and 2 with a tool (6 s each): 96 s in all. */
 function reportTheSlowCorridor(bot: Parameters<typeof reportNavigationDig>[0]) {
@@ -60,40 +169,35 @@ test("digCounterOf gives one counter per lifetime and stops with it", () => {
 const sampleFacts = (digs: DigFacts, carried: (family: string) => boolean) => ({
   gained: 5,
   seconds: 120,
+  required: 12,
+  windowSeconds: 120,
   left: 41,
   feet: { x: -534, y: -21, z: 121 },
   digs,
   carried,
 });
 
-test("slowWalkText names the blocks dug by hand and the tool that would be faster", () => {
+test("slowWalkText names the hand-dug blocks and whether the faster tool is carried", () => {
   const { bot } = createFakeBot();
   const counter = digCounter(bot);
   reportTheSlowCorridor(bot);
-  assert.equal(
-    slowWalkText(sampleFacts(counter.facts(), () => false)),
-    "[NAVIGATION_SLOW] Got 5 blocks nearer in 120 s (2.5 blocks a minute); 41 blocks left. On the way: 14 blocks broken " +
-      "in 96 s, 12 of them by hand (stone 8, deepslate 4: mined faster with a pickaxe, none carried). Feet at -534,-21,121.",
-  );
+  for (const hasPickaxe of [false, true]) {
+    const text = slowWalkText(sampleFacts(counter.facts(), (family) => hasPickaxe && family === "pickaxe"));
+    assert.ok(text.includes("14 dig attempts in 96 s, 12 of them by hand (stone 8, deepslate 4: mined faster with a pickaxe"), text);
+    assert.equal(text.includes("none carried"), !hasPickaxe);
+    assert.ok(text.includes("Feet at -534,-21,121."), text);
+  }
   counter.close();
 });
 
-test("slowWalkText does not say none carried when the tool is carried", () => {
-  const { bot } = createFakeBot();
-  const counter = digCounter(bot);
-  reportTheSlowCorridor(bot);
-  const text = slowWalkText(sampleFacts(counter.facts(), (family) => family === "pickaxe"));
-  assert.ok(text.includes("(stone 8, deepslate 4: mined faster with a pickaxe)"), text);
-  assert.ok(!text.includes("none carried"), text);
-  counter.close();
-});
-
-test("slowWalkText with no digs says the way itself is slow", () => {
-  assert.equal(
-    slowWalkText(sampleFacts(NO_DIGS, () => false)),
-    "[NAVIGATION_SLOW] Got 5 blocks nearer in 120 s (2.5 blocks a minute); 41 blocks left. On the way: no blocks broken: " +
-      "the way itself is slow (water, climbing, detours). Feet at -534,-21,121.",
-  );
+test("slowWalkText distinguishes no recorded digs from tool-only attempts", () => {
+  for (const [facts, expected] of [
+    [NO_DIGS, "no navigation dig attempts recorded"],
+    [{ ...NO_DIGS, count: 3, ms: 9000 }, "3 dig attempts in 9 s, none by hand"],
+  ] as const) {
+    const text = slowWalkText(sampleFacts(facts, () => true));
+    assert.ok(text.includes(`On the way: ${expected}. Feet at`), text);
+  }
 });
 
 test("slowWalkText says an axe, not a axe, and joins two families", () => {
@@ -104,12 +208,6 @@ test("slowWalkText says an axe, not a axe, and joins two families", () => {
   };
   const text = slowWalkText(sampleFacts(facts, () => false));
   assert.ok(text.includes("mined faster with an axe or a pickaxe, none carried)"), text);
-});
-
-test("slowWalkText with every dig made with a tool says none by hand", () => {
-  const facts: DigFacts = { ...NO_DIGS, count: 3, ms: 9000 };
-  const text = slowWalkText(sampleFacts(facts, () => true));
-  assert.ok(text.includes("On the way: 3 blocks broken in 9 s, none by hand. Feet at"), text);
 });
 
 test("slowWalkText with an unknown distance left says so, and lists at most 5 hand-dug blocks", () => {

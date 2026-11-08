@@ -15,7 +15,7 @@ import { createNavigateAction, formatNavigateResult, type NavigateDependencies }
 import type { NavigateResult } from "./contract.js";
 
 const AHEAD = { x: 0, z: 1 };
-const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
+const navigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
 const SHIFT_RELEASE = 1;
 
 /** A sea with the far land at z 40, one boat carried; the boat, once she is off it, floats where the ride stopped. */
@@ -130,6 +130,29 @@ async function navigateAcrossTheSea(world: FakeHarness, onward: () => void): Pro
 }
 
 const boatLeftOf = (result: NavigateResult) => ("navigation" in result ? result.navigation.boatLeft : undefined);
+
+test("a boat ride held for 150 seconds does not trip the navigate walking window", async () => {
+  const world = crossingWorld();
+  using _timers = world.clock.install();
+  let mounted!: () => void;
+  const seat = new Promise<void>((resolve) => { mounted = resolve; });
+  world.bot.once("mount", mounted);
+  let legs = 0;
+  const dependencies: NavigateDependencies = {
+    createMovements: (() => ({ name: "standard" })) as never,
+    navigate: async () => {
+      if (++legs === 1) return { status: "stopped", reason: "no path", elapsedMs: 1 };
+      world.bot.entity.position.set(0.5, 63, 41.5);
+      return { status: "completed", elapsedMs: 1 };
+    },
+  };
+  const pending = new ActionRunner().run(createNavigateAction(world.bot, navigation, dependencies),
+    { x: 0, y: 63, z: 41, range: 5 });
+  await world.clock.settle(seat, 10_000);
+  await world.clock.advance(150_000, 150_000);
+  const output = await world.clock.settle(pending, 60_000);
+  assert.equal(output.result.status, "succeeded");
+});
 
 // She stands on the boat the take-back could not break; the onward leg would route from on top of it (Dirk's "succeeded" with a distance of 1).
 test("a boat still under her after the crossing is taken back before the onward leg, and the result has no boat left", async () => {
