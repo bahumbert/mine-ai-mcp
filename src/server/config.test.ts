@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { DEFAULT_DATA_ROOT, parseHostOptions } from "./config.js";
+import { RUNTIME_RESTART } from "./runtime-liveness.js";
 
 test("defaults to persistent personal bot data, and to no unrestricted JavaScript execution", () => {
   const options = parseHostOptions([]);
@@ -55,4 +56,36 @@ test("the chat command prefix is off unless given, and a prefix that is not one 
       JSON.stringify(refused),
     );
   }
+});
+
+test("the restart settings default to the runtime's", () => {
+  assert.deepEqual(parseHostOptions([]).restart, RUNTIME_RESTART);
+});
+
+test("restart flags set the delays, attempts and reset time", () => {
+  const { restart } = parseHostOptions([
+    "--restart-delays-ms", "0-0,1000-2000",
+    "--restart-attempts", "3",
+    "--restart-reset-after-ms", "60000",
+  ]);
+  assert.deepEqual(restart, {
+    delays: [{ minMs: 0, maxMs: 0 }, { minMs: 1000, maxMs: 2000 }],
+    attempts: 3,
+    healthyMs: 60000,
+  });
+});
+
+test("bad restart flags are refused at start, naming the flag", () => {
+  // 2147483648 does not fit a timer: the runtime would restart after 1 ms while the failure promised a date years away.
+  for (const refused of ["5000-0", "abc", "", "0-5000,", "-1-5", "1.5-2", "0-2147483648"]) {
+    assert.throws(
+      () => parseHostOptions([`--restart-delays-ms=${refused}`]),
+      (error: Error) =>
+        /--restart-delays-ms must be a comma list of <min>-<max> whole milliseconds with min <= max/.test(error.message) &&
+        error.message.includes(`received ${JSON.stringify(refused)}`),
+      JSON.stringify(refused),
+    );
+  }
+  assert.throws(() => parseHostOptions(["--restart-attempts", "0"]), /--restart-attempts must be a positive integer/);
+  assert.throws(() => parseHostOptions(["--restart-reset-after-ms=-1"]), /--restart-reset-after-ms must be a positive integer/);
 });

@@ -54,6 +54,9 @@ The host accepts configuration flags for connection, storage, and debugging:
 | `--bot-data-persistence <mode>` | `persistent`          | Storage mode: `persistent` SQLite file or `temporary` in-memory database. |
 | `--bot-data-scope <scope>`      | `bot`                 | Database isolation: `bot` for one player UUID or `shared` for the world.  |
 | `--chat-command-prefix <text>`  | off                   | Keeps incoming `<text>bot` / `<text>bots` chat lines out of the event log and serves them at `/chat-commands` (1-3 characters, no whitespace, not `/`). |
+| `--restart-delays-ms <ranges>`  | `0-5000,15000-30000,60000-120000,240000-480000,300000-600000,300000-600000` | Wait before each restart of a killed runtime: a comma list of `<min>-<max>` whole milliseconds, one range per attempt in a row, a random time inside it. A list shorter than `--restart-attempts` repeats its last range; extra ranges are unused. Each max is at most 2147483647. |
+| `--restart-attempts <n>`        | `6`                   | Restarts of a killed runtime in a row before it stays down until the host is restarted. |
+| `--restart-reset-after-ms <ms>` | `600000`              | Play time after a restart (`ready`) that makes the next failure the first of a new streak. |
 | `--debug-execute-javascript`    | `false`               | Publishes unrestricted debug tools when set.                              |
 
 The host runs until stopped with `SIGINT` or `SIGTERM`. It disconnects cleanly
@@ -74,8 +77,17 @@ If code bypasses checkpoints and its event loop stops responding for five
 seconds, the supervising host terminates its owned runtime and returns a
 JSON-RPC `-32603` error with `data.code: RUNTIME_UNRESPONSIVE` and an incident
 receipt. An unexpected runtime exit returns `RUNTIME_EXITED`. Pending and later
-MCP calls receive this error; `/health` reports `runtime.state: failed` and the
-same receipt. The host remains available until explicitly stopped or restarted.
+MCP calls receive this error while the runtime is down; `/health` reports
+`runtime.state: failed` and the same receipt while a restart waits (`starting`
+once the runtime is spawned again). The host starts the runtime again
+after the delay of its attempt (`--restart-delays-ms`), up to `--restart-attempts`
+times in a row without `--restart-reset-after-ms` of play. The error's
+`data.restart` is `{ attempt, of, at }` (`at`: when it starts again, ISO time)
+or `null` when the runtime stays down until the host is restarted ("restart the
+host"). A restarted runtime is a new MCP session. The host prints a
+`[minecraft-supervisor] {"event":"restart_scheduled",…}` line with the machine's
+load for each scheduled restart and a `{"event":"runtime_ready",…}` line when the
+restarted runtime is ready. The host remains available until explicitly stopped.
 It never retries the interrupted action or claims its physical outcome.
 
 Host incidents live under `<data-root>/host-incidents/<encoded-instance-id>/`,

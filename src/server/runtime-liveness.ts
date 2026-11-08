@@ -12,12 +12,41 @@ export const RUNTIME_UNRESPONSIVE_MS = 5_000;
  * 5 s, while its module graph loaded). After `ready`, {@link RUNTIME_UNRESPONSIVE_MS} applies.
  */
 export const RUNTIME_STARTUP_MS = 30_000;
+/** A random wait between `minMs` and `maxMs` before a restart, so runtimes that failed together do not start together. */
+export interface RestartDelay {
+  readonly minMs: number;
+  readonly maxMs: number;
+}
+export interface RestartSettings {
+  /** The delay range of each attempt in a row; past the list the last range repeats. At least one; `minMs <= maxMs`. */
+  readonly delays: readonly RestartDelay[];
+  /** Failed attempts in a row after which the runtime stays down for good (a crash loop is not hidden behind restarts). */
+  readonly attempts: number;
+  /** Play time after `ready` that starts a new streak at the next failure. */
+  readonly healthyMs: number;
+}
 /**
- * A killed runtime is started again once per this window: a second failure inside it stays down, so a crash loop is
- * not hidden behind restarts (a frozen runtime costs its bot a few seconds out of the world, not the whole session).
+ * A killed runtime is started again after a growing, random delay, up to `attempts` times in a row. The host flags
+ * `--restart-delays-ms`, `--restart-attempts` and `--restart-reset-after-ms` override these.
+ * - delay 1, 0-5 s: run 34 restarted 8 runtimes in the same 6 s; one runtime alone loses at most 5 s more.
+ * - delay 2, 15-30 s: after the machine's 30 s start-up allowance, not into the same stall.
+ * - delays 3 and 4, 1-2 min and 4-8 min: growing by four, a longer stall is waited out, not hammered.
+ * - delays 5 and 6, 5-10 min: never more than 10 min between tries.
+ * - `attempts` 6: the six delays are ~15-31 min of tries, then down.
+ * - `healthyMs` 10 min: 10 min of play resets the streak.
  */
-export const RUNTIME_RESTART_WINDOW_MS = 10 * 60_000;
-
+export const RUNTIME_RESTART: RestartSettings = {
+  delays: [
+    { minMs: 0, maxMs: 5_000 },
+    { minMs: 15_000, maxMs: 30_000 },
+    { minMs: 60_000, maxMs: 120_000 },
+    { minMs: 240_000, maxMs: 480_000 },
+    { minMs: 300_000, maxMs: 600_000 },
+    { minMs: 300_000, maxMs: 600_000 },
+  ],
+  attempts: 6,
+  healthyMs: 600_000,
+};
 const ownerSchema = z.object({
   bot: z.string(),
   operation: z.string(),

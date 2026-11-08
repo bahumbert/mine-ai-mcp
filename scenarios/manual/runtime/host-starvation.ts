@@ -12,14 +12,13 @@ import { incidentReferenceSchema } from "../../../src/bot-data/incident-log.ts";
 
 const fault = z.enum(["synchronous", "microtask"]).parse(process.argv[2]);
 const healthSchema = z.object({ minecraft: z.object({ connected: z.boolean() }) });
-const failedHealthSchema = z.object({
-  runtime: z.object({
-    state: z.literal("failed"),
-    failure: z.object({
-      code: z.literal("RUNTIME_UNRESPONSIVE"),
-      incident: incidentReferenceSchema,
-    }),
-  }),
+// The killed runtime is started again after a delay of 0-5 s: right after the failure `/health` says `failed` (the
+// restart waits) or `starting`, and only the error's own data still holds the failure.
+const downHealthSchema = z.object({ runtime: z.object({ state: z.enum(["failed", "starting"]) }) });
+const failureDataSchema = z.object({
+  code: z.literal("RUNTIME_UNRESPONSIVE"),
+  incident: incidentReferenceSchema,
+  restart: z.object({ attempt: z.number(), of: z.number(), at: z.string() }).nullable(),
 });
 
 await runNodeClient(async (session) => {
@@ -95,8 +94,10 @@ await runNodeClient(async (session) => {
     assert.ok(failureMs < 10_000, "Failure must arrive well before Minecraft's 30-second keepalive timeout.");
     const health = await fetch(`${base}/health`);
     assert.equal(health.status, 503);
-    const status = failedHealthSchema.parse(await health.json());
-    const reference = status.runtime.failure.incident;
+    const status = downHealthSchema.parse(await health.json());
+    const failureData = failureDataSchema.parse(failure.data);
+    assert.ok(failureData.restart, "The first failure of a runtime schedules a restart.");
+    const reference = failureData.incident;
     assert.equal(reference.artifact.kind, "written");
     if (reference.artifact.kind !== "written") throw new Error("Missing saved incident.");
     const incident = await readFile(reference.artifact.path, "utf8");
@@ -108,6 +109,7 @@ await runNodeClient(async (session) => {
       healthyMs,
       failureMs,
       error: { code: failure.code, message: failure.message, data: failure.data },
+      restart: failureData.restart,
       health: status,
     };
     await writeFile(path.join(artifacts, "host-starvation.json"), JSON.stringify(evidence, null, 2));

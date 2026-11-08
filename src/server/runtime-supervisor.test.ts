@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { blockThread } from "../test-support/block-thread.js";
-import { RUNTIME_RESTART_WINDOW_MS } from "./runtime-liveness.js";
+import type { RestartSettings } from "./runtime-liveness.js";
 import { INCIDENT_HISTORY_MS } from "../diagnostics/incident-recorder.js";
 import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervisor.js";
 
@@ -24,9 +24,11 @@ async function supervised(
   instanceId: string,
   launch?: (directory: string) => { executable: string; args: string[] },
   deadlines?: McpSupervisorOptions["deadlines"],
-  restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
+  restart: RestartSettings | null = null, // The older tests look at the failed state, so they run without a restart.
   incidentHistoryMs?: number,
 ) {
+  /** Every `[minecraft-supervisor] …` line the supervisor prints: tests read the failure and the restart events from here. */
+  const lines: string[] = [];
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
   // The child's own property descriptors, so a launch with a getter is read again at every start, as a real option is.
@@ -38,8 +40,11 @@ async function supervised(
       source: { kind: "unavailable", reason: "test fixture" },
       incidents: { directory, retention: { days: 1, maxBytes: 1024 * 1024 } },
       deadlines,
-      restartWindowMs,
+      restart,
       incidentHistoryMs,
+      log: (line: string): void => {
+        lines.push(line);
+      },
     },
     Object.getOwnPropertyDescriptors(child),
   ) as McpSupervisorOptions;
@@ -50,8 +55,17 @@ async function supervised(
   });
   const address = supervisor.server.address();
   assert.ok(address && typeof address !== "string");
-  return { supervisor, url: `http://127.0.0.1:${address.port}`, directory };
+  return { supervisor, url: `http://127.0.0.1:${address.port}`, directory, lines };
 }
+
+/** Restarts in milliseconds: the first at once, the second 100-200 ms later, two in a row, a minute of play resets. */
+const fastRestart: RestartSettings = { delays: [{ minMs: 0, maxMs: 0 }, { minMs: 100, maxMs: 200 }], attempts: 2, healthyMs: 60_000 };
+
+/** The event lines (`restart_scheduled`, `runtime_ready`) among the supervisor's lines, parsed, in order. */
+const eventsOf = (lines: readonly string[]): Record<string, unknown>[] =>
+  lines
+    .map((line) => JSON.parse(line.slice("[minecraft-supervisor] ".length)) as Record<string, unknown>)
+    .filter((row) => "event" in row);
 
 /** The wedged runtime with child-side waits shortened (`--pause-ms=<ms>`, `--slow-ms=<ms>`). */
 const wedgedWith = (...waits: string[]) => (): { executable: string; args: string[] } => ({ executable, args: [...args, ...waits] });
@@ -187,7 +201,7 @@ test(
       "attribution",
       wedgedWith(`--history-ms=${SHORT_HISTORY_MS}`),
       fastDeadlines,
-      0,
+      null,
       SHORT_HISTORY_MS,
     );
     await whenHealthy(url);
@@ -322,32 +336,95 @@ const mcpCall = (url: string, id: number, tool: string) =>
   });
 const stateOf = async (url: string): Promise<string> => (await (await fetch(`${url}/diagnostics/runtime`)).json()).state;
 
-test("a runtime killed as unresponsive is started again and answers", { timeout: 25_000 }, async (t) => {
-  const { url } = await supervised(t, "restart", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
-  await whenHealthy(url);
-  assert.match(await (await mcpCall(url, 90, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
+/** Polls until the supervisor answers `/health` 200 (state `ready`); bounded by the test's own timeout. */
+async function whenReady(url: string): Promise<void> {
   while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
+}
+
+test("a runtime killed as unresponsive is started again; a second failure inside healthyMs restarts it again and answers", { timeout: 25_000 }, async (t) => {
+  const { supervisor, url, lines } = await supervised(t, "restart-twice", undefined, fastDeadlines, fastRestart);
+  await whenHealthy(url);
+  const firstPid = supervisor.child.pid;
+  assert.match(await (await mcpCall(url, 91, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
+  await whenReady(url);
+  assert.notEqual(supervisor.child.pid, firstPid, "the restarted child is a new process");
+  const reply = await (await mcpCall(url, 92, "hang")).text();
+  // Read from the reply, not from /health: the wait is 100-200 ms. The first child's exit, seen while the supervisor
+  // was failed, did not count as a failure: this one is attempt 2, not a give-up.
+  assert.match(reply, /starts again at .* \(restart 2 of 2\)/);
+  const { data } = JSON.parse(reply).error;
+  assert.equal(data.restart.attempt, 2);
+  // server-metrics.py parses `"code":"RUNTIME_UNRESPONSIVE","observedAt"` from the printed failure.
+  const keys = Object.keys(data);
+  assert.deepEqual(keys[0] === "actionId" ? keys.slice(1, 3) : keys.slice(0, 2), ["code", "observedAt"]);
+  assert.equal(keys.at(-1), "restart", "restart is the last field");
+
+  await whenReady(url);
   assert.equal(await stateOf(url), "ready");
+  const events = eventsOf(lines);
+  assert.deepEqual(
+    events.map((row) => `${row.event}:${row.attempt}`),
+    ["restart_scheduled:1", "runtime_ready:1", "restart_scheduled:2", "runtime_ready:2"],
+  );
+  const [scheduled] = events;
+  assert.deepEqual(Object.keys(scheduled!), [
+    "event", "observedAt", "attempt", "of", "delayMs", "supervisorTickDelayMs", "maxTickDelayMs", "loadavg", "hostFreeMemMB",
+  ]);
+  assert.deepEqual(Object.keys(events[1]!), ["event", "observedAt", "attempt"]);
+  assert.equal(scheduled!.of, 2);
+  assert.equal((scheduled!.loadavg as number[]).length, 3);
+  assert.ok((scheduled!.hostFreeMemMB as number) > 0);
+  assert.ok(Number.isFinite(Date.parse(scheduled!.observedAt as string)));
 });
 
-test("a second failure inside the restart window stays down and says it restarted before", { timeout: 25_000 }, async (t) => {
-  const { url } = await supervised(t, "restart-twice", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+test("a failure past the attempts stays down and says so", { timeout: 40_000 }, async (t) => {
+  const { url } = await supervised(t, "restart-given-up", undefined, fastDeadlines, fastRestart, 120_000);
   await whenHealthy(url);
-  await mcpCall(url, 91, "hang");
-  while ((await fetch(`${url}/health`)).status !== 200) await delay(50);
-  assert.match(await (await mcpCall(url, 92, "hang")).text(), /RUNTIME_UNRESPONSIVE/);
-  await delay(1_500);
-  const health = await fetch(`${url}/health`);
-  assert.equal(health.status, 503);
-  const status = await health.json();
+  await mcpCall(url, 94, "hang");
+  await whenReady(url);
+  await mcpCall(url, 95, "hang");
+  await whenReady(url);
+  const reply = JSON.parse(await (await mcpCall(url, 96, "hang")).text());
+  assert.match(reply.error.message, /stays down after 2 restarts in a row without 1 min of play: restart the host/);
+  assert.equal(reply.error.data.restart, null);
+
+  await delay(1_000);
+  const status = await (await fetch(`${url}/health`)).json();
   assert.equal(status.runtime.state, "failed");
-  assert.match(await readFile(status.runtime.failure.incident.artifact.path, "utf8"), /runtime_restarted/);
+  const records = (await readFile(status.runtime.failure.incident.artifact.path, "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(records.filter((row) => row.kind === "runtime_restarted").length, 2);
+  // The next call is answered with the failure, not hung.
   const afterwards = await fetch(`${url}/mcp`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 93, method: "tools/list" }),
   });
-  assert.match(await afterwards.text(), /RUNTIME_UNRESPONSIVE/);
+  assert.match(await afterwards.text(), /stays down after 2 restarts/);
+});
+
+test("no restart option never restarts", { timeout: 15_000 }, async (t) => {
+  const { url, lines } = await supervised(t, "restart-null", undefined, fastDeadlines, null);
+  await whenHealthy(url);
+  const reply = JSON.parse(await (await mcpCall(url, 97, "hang")).text());
+  assert.match(reply.error.message, /runtime has been stopped and requires a restart\./);
+  assert.equal(reply.error.data.restart, null);
+  await delay(1_000);
+  assert.equal(await stateOf(url), "failed");
+  assert.deepEqual(eventsOf(lines), []);
+});
+
+test("a supervisor closed while a restart waits spawns nothing", { timeout: 25_000 }, async (t) => {
+  const waiting: RestartSettings = { ...fastRestart, delays: [{ minMs: 0, maxMs: 0 }, { minMs: 2_000, maxMs: 2_000 }] };
+  const { supervisor, url } = await supervised(t, "restart-close-waiting", undefined, fastDeadlines, waiting);
+  await whenHealthy(url);
+  await mcpCall(url, 101, "hang");
+  await whenReady(url);
+  assert.match(await (await mcpCall(url, 102, "hang")).text(), /\(restart 2 of 2\)/);
+  const killed = supervisor.child;
+  await supervisor.close();
+  await delay(2_500);
+  assert.equal(supervisor.child, killed, "no child was spawned after close");
 });
 
 /** A runtime that reports ready on a port nobody serves and then ignores SIGTERM, as a runtime whose own close hangs. */
@@ -376,12 +453,36 @@ test("the watchdog judges the runtime only on its own ticks, every heartbeatMs",
 });
 
 test("a supervisor stopped during a restart leaves no runtime behind", { timeout: 25_000 }, async (t) => {
-  const { supervisor, url } = await supervised(t, "restart-stop", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
+  const { supervisor, url } = await supervised(t, "restart-stop", undefined, fastDeadlines, fastRestart);
   await whenHealthy(url);
   await mcpCall(url, 95, "hang");
+  // Right after the hang reply `supervisor.child` is still the killed one: close only once the restarted child spawned.
+  while (!["starting", "ready"].includes(await stateOf(url))) await delay(20);
   const restarted = supervisor.child;
   await supervisor.close();
   assert.ok(restarted.exitCode !== null || restarted.signalCode !== null, "close must reap the restarted runtime");
+});
+
+test("a restarted runtime that misses its start-up deadline is restarted again", { timeout: 40_000 }, async (t) => {
+  // Run 34 (Tom, Vex): the restarted runtime was silent 30073 / 30022 ms, the start-up deadline, and stayed down.
+  let starts = 0;
+  const slowArgs = slowStart(15_000)().args;
+  const { url, lines } = await supervised(
+    t,
+    "restart-startup-miss",
+    () => ({
+      executable,
+      // Start 0 is the wedged runtime, start 1 blocks past the start-up deadline, start 2 is the wedged runtime again.
+      get args() { return starts++ === 1 ? slowArgs : args; },
+    }),
+    { startupMs: 6_000, unresponsiveMs: 1_000 },
+    { ...fastRestart, attempts: 4 },
+  );
+  await whenHealthy(url);
+  await mcpCall(url, 103, "hang");
+  while (starts < 3 || (await stateOf(url)) !== "ready") await delay(100);
+  assert.equal(starts, 3);
+  assert.ok(eventsOf(lines).some((row) => row.event === "restart_scheduled" && row.attempt === 2), "the start-up miss was attempt 2");
 });
 
 const faultingRuntime = (...mode: string[]) => (): { executable: string; args: string[] } => ({
@@ -480,16 +581,17 @@ test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RES
       args,
     }),
     fastDeadlines,
-    RUNTIME_RESTART_WINDOW_MS,
+    fastRestart,
   );
   await whenHealthy(url);
   assert.match(await (await mcpCall(url, 96, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
 
+  // The first `failed` is the scheduled wait; the spawn that throws comes after it.
   let body: string;
   do {
     await delay(50);
     body = await (await fetch(`${url}/health`)).text();
-  } while (body.includes('"state":"failing"') || body.includes('"state":"starting"'));
+  } while (!body.includes("RUNTIME_RESTART_FAILED"));
   assert.match(body, /"state":"failed"/);
   assert.match(body, /RUNTIME_RESTART_FAILED/);
   const afterwards = await fetch(`${url}/mcp`, {

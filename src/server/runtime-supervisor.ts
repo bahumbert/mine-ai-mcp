@@ -1,6 +1,7 @@
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, request as httpRequest, type ClientRequest, type ServerResponse } from "node:http";
+import os from "node:os";
 import { z } from "zod";
 import { writeIncidentArtifact, type IncidentReference, type IncidentRetention } from "../bot-data/incident-log.js";
 import {
@@ -10,12 +11,14 @@ import {
   type SourceIdentity,
 } from "../diagnostics/incident-recorder.js";
 import type { ProcessFault } from "./process-faults.js";
+import { decideRestart, NO_STREAK, readyAgain, type RestartDecision, type RestartStreak } from "./restart-policy.js";
 import {
   RUNTIME_HEARTBEAT_MS,
+  RUNTIME_RESTART,
   RUNTIME_UNRESPONSIVE_MS,
-  RUNTIME_RESTART_WINDOW_MS,
   RUNTIME_STARTUP_MS,
   runtimeMessageSchema,
+  type RestartSettings,
   type RuntimeActivity,
 } from "./runtime-liveness.js";
 
@@ -42,6 +45,8 @@ interface RuntimeFailure {
   readonly message: string;
   readonly incident: IncidentReference;
   readonly activity: RuntimeActivity | null;
+  /** When the supervisor starts the runtime again (`at`: display only) or `null` when it stays down; last field. */
+  readonly restart: { readonly attempt: number; readonly of: number; readonly at: string } | null;
 }
 type RuntimeState =
   | { kind: "starting" }
@@ -68,8 +73,13 @@ export interface McpSupervisorOptions {
     readonly heartbeatMs?: number;
     readonly killGraceMs?: number;
   };
-  /** One restart of a killed runtime per this window (default {@link RUNTIME_RESTART_WINDOW_MS}); 0 never restarts. For tests. */
-  readonly restartWindowMs?: number;
+  /**
+   * How a killed runtime is started again (default {@link RUNTIME_RESTART}; the host passes its flags); `null` never
+   * restarts, which is not the same as leaving it out.
+   */
+  readonly restart?: RestartSettings | null;
+  /** Receives the failure and restart event lines, `[minecraft-supervisor] …` (default `console.error`), so tests read them. */
+  readonly log?: (line: string) => void;
   /** How far back the supervisor's incident ring keeps rows (default {@link INCIDENT_HISTORY_MS}); a test shortens it to see rows age out. */
   readonly incidentHistoryMs?: number;
 }
@@ -93,10 +103,16 @@ interface SupervisorState {
   watchdogDelayMs: number;
   stopping: boolean;
   child: ChildProcess | null;
-  lastRestartAt: number | null;
+  /** The failures in a row since the runtime last played `healthyMs` (see {@link decideRestart}). */
+  streak: RestartStreak;
+  /** The wait before a scheduled restart; the runtime is `failed` while it runs. */
+  restartTimer: NodeJS.Timeout | null;
+  /** The watchdog's lateness over the last {@link TICK_HISTORY_MS}, for the restart line. */
+  tickDelays: { readonly at: number; readonly delayMs: number }[];
   activity: RuntimeActivity | null;
   heartbeat: HeartbeatMessage | null;
 }
+const TICK_HISTORY_MS = 60_000;
 
 /** The supervisor's own incident recorder: artifacts go to the options' directory, history age from {@link incidentHistoryBudget}. */
 const supervisorIncidentRecorder = (options: McpSupervisorOptions) =>
@@ -133,38 +149,26 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     watchdogDelayMs: 0,
     stopping: false,
     child: null,
-    lastRestartAt: null,
+    streak: NO_STREAK,
+    restartTimer: null,
+    tickDelays: [],
     activity: null,
     heartbeat: null,
   };
 
-  const answerFailure = (response: ServerResponse, id: string | number | null, failure: RuntimeFailure) => {
-    if (response.writableEnded || response.destroyed) return;
-    const body = JSON.stringify({
-      jsonrpc: "2.0",
-      id,
-      error: { code: -32603, message: `[${failure.code}] ${failure.message}`, data: failure },
-    });
-    if (response.headersSent) {
-      if (String(response.getHeader("content-type")).includes("text/event-stream"))
-        response.end(`\n\nevent: message\ndata: ${body}\n\n`);
-      else response.destroy(new Error(failure.message));
-      // A completed JSON-RPC exchange uses HTTP 200 even when its result is an
-      // error. HTTP 503 makes the SDK discard the structured MCP error as a
-      // transport failure. Observational HTTP requests still receive 503.
-    } else response.writeHead(id === null ? 503 : 200, { "content-type": "application/json" }).end(body);
-  };
   const fail = async (code: ObservedFailureCode, message: string) => {
     if (sup.stopping || sup.runtime.kind === "failed" || sup.runtime.kind === "failing") return;
     sup.runtime = { kind: "failing" };
     const observedAt = new Date().toISOString();
     const { requestId, precedingRequestId } = requestContextOf(sup.activity);
+    const machine = tickDelaysAtFailure(sup); // Read before the capture: it is the supervisor's lateness at the failure.
+    const planned = planRestart(sup);
     recorder.record("runtime_failure", {
       code,
       message,
       pid: sup.child?.pid,
       heartbeatAgeMs: performance.now() - sup.lastHeartbeat,
-      supervisorTickDelayMs: sup.watchdogDelayMs,
+      supervisorTickDelayMs: machine.supervisorTickDelayMs,
       activity: sup.activity,
       activityAgeMs: sup.activity === null ? null : Date.now() - sup.activity.observedAt,
       pending: [...pending].map(({ id, method, tool, path, httpMethod }) => ({ id, method, tool, path, httpMethod })),
@@ -177,32 +181,26 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       requestId,
       precedingRequestId,
     );
-    const incident: IncidentReference =
-      captured.kind === "completed"
-        ? captured.reference
-        : {
-            incidentId: "supervisor-write-failed",
-            trigger: incidentTriggerOf(code),
-            requestId,
-            precedingRequestId,
-            artifact: { kind: "failed", error: captured.kind === "failed" ? captured.error : "Capture was coalesced." },
-          };
+    const incident = incidentReferenceOf(captured, code, requestId, precedingRequestId);
+    const decision = sup.stopping ? null : planned; // A close during the capture schedules nothing, and the failure says so.
+    const outlook = restartOutlook(sup.options, decision);
     const failure: RuntimeFailure = {
       ...(sup.activity?.active.find((scope) => scope.owner.actionId)?.owner.actionId
         ? { actionId: sup.activity.active.find((scope) => scope.owner.actionId)!.owner.actionId! } : {}),
       code,
       observedAt,
-      message: `${message} Failure observed at ${observedAt}; this runtime has been stopped and requires a restart.`,
+      message: `${message} Failure observed at ${observedAt}; ${outlook.tail}`,
       incident,
       activity: sup.activity,
+      restart: outlook.restart,
     };
     for (const entry of pending) {
       pending.delete(entry); // Its upstream error below is ours, not a second failure of the restarted runtime.
       entry.upstream.destroy();
       answerFailure(entry.response, entry.id, failure);
     }
-    console.error(`[minecraft-supervisor] ${JSON.stringify(failure)}`);
-    restartOrStayFailed(sup, code, failure, startChild);
+    printSupervisorLine(sup, failure);
+    scheduleRestart(sup, code, decision, failure, machine, startChild);
   };
 
   const app = createMcpExpressApp({ host: options.host, allowedHosts: ["127.0.0.1", "localhost", "[::1]"] });
@@ -297,6 +295,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
   const stop = async () => {
     sup.stopping = true;
     clearInterval(watchdog);
+    if (sup.restartTimer !== null) clearTimeout(sup.restartTimer);
     if (sup.child?.pid !== undefined && sup.child.exitCode === null && sup.child.signalCode === null) {
       const stopped = new Promise<void>((resolve) => sup.child!.once("exit", () => resolve()));
       sup.child.kill("SIGTERM");
@@ -339,6 +338,8 @@ function startWatchdog(sup: SupervisorState, fail: (code: ObservedFailureCode, m
     const now = performance.now();
     sup.watchdogDelayMs = Math.max(0, now - sup.lastWatchdogTick - heartbeatMs);
     sup.lastWatchdogTick = now;
+    sup.tickDelays.push({ at: now, delayMs: sup.watchdogDelayMs });
+    while (sup.tickDelays[0]!.at < now - TICK_HISTORY_MS) sup.tickDelays.shift();
     // A watchdog that missed its own liveness window cannot attribute that
     // gap to the child. Resume observation before judging it; queued IPC and
     // a child recovering from the same scheduling pause get a full window.
@@ -378,23 +379,134 @@ function handleRuntimeMessage(sup: SupervisorState, from: ChildProcess, raw: unk
     sup.runtime = { kind: "ready", port: event.port };
     // Ready shows a live loop; the shorter deadline counts from here, not from the last start-up heartbeat.
     sup.lastHeartbeat = performance.now();
+    sup.streak = readyAgain(sup.streak, sup.lastHeartbeat);
+    if (sup.streak.attempts > 0) printSupervisorLine(sup, { event: "runtime_ready", observedAt: new Date().toISOString(), attempt: sup.streak.attempts });
   }
 }
 
-/** After a failure: starts the runtime once per restart window, else the supervisor stays failed with that failure. */
-function restartOrStayFailed(
+/** Answers one pending or later MCP call with the saved failure, as a JSON-RPC error over the channel the call came in on. */
+function answerFailure(response: ServerResponse, id: string | number | null, failure: RuntimeFailure): void {
+  if (response.writableEnded || response.destroyed) return;
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    error: { code: -32603, message: `[${failure.code}] ${failure.message}`, data: failure },
+  });
+  if (response.headersSent) {
+    if (String(response.getHeader("content-type")).includes("text/event-stream"))
+      response.end(`\n\nevent: message\ndata: ${body}\n\n`);
+    else response.destroy(new Error(failure.message));
+    // A completed JSON-RPC exchange uses HTTP 200 even when its result is an
+    // error. HTTP 503 makes the SDK discard the structured MCP error as a
+    // transport failure. Observational HTTP requests still receive 503.
+  } else response.writeHead(id === null ? 503 : 200, { "content-type": "application/json" }).end(body);
+}
+
+/** The receipt of the failure's incident: the saved artifact's, or one saying the supervisor could not write it. */
+function incidentReferenceOf(
+  captured: Awaited<ReturnType<IncidentRecorder["capture"]>>,
+  code: ObservedFailureCode,
+  requestId: number | null,
+  precedingRequestId: number | null,
+): IncidentReference {
+  if (captured.kind === "completed") return captured.reference;
+  return {
+    incidentId: "supervisor-write-failed",
+    trigger: incidentTriggerOf(code),
+    requestId,
+    precedingRequestId,
+    artifact: { kind: "failed", error: captured.kind === "failed" ? captured.error : "Capture was coalesced." },
+  };
+}
+
+/** The restart settings the supervisor runs with: the option, else production's; `null` (never restart) is kept as given. */
+const restartSettingsOf = (options: McpSupervisorOptions): RestartSettings | null =>
+  options.restart === undefined ? RUNTIME_RESTART : options.restart;
+
+/** One `[minecraft-supervisor] <json>` line to the option's `log` (default stderr). */
+function printSupervisorLine(sup: SupervisorState, payload: object): void {
+  (sup.options.log ?? console.error)(`[minecraft-supervisor] ${JSON.stringify(payload)}`);
+}
+
+/** The supervisor's lateness now and its largest over the last minute: whether the machine was starving it at the failure. */
+function tickDelaysAtFailure(sup: SupervisorState): { supervisorTickDelayMs: number; maxTickDelayMs: number } {
+  const since = performance.now() - TICK_HISTORY_MS;
+  const recent = sup.tickDelays.filter((tick) => tick.at >= since).map((tick) => tick.delayMs);
+  return { supervisorTickDelayMs: sup.watchdogDelayMs, maxTickDelayMs: Math.max(0, ...recent) };
+}
+
+/**
+ * What the policy decides for a failure seen now (the streak moves with it), else `null` when the supervisor is
+ * stopping or runs without restart settings. The delay is whole milliseconds: the line, the timer and `at` agree.
+ */
+function planRestart(sup: SupervisorState): RestartDecision | null {
+  const settings = restartSettingsOf(sup.options);
+  if (sup.stopping || settings === null) return null;
+  const decision = decideRestart(sup.streak, performance.now(), settings, Math.random);
+  sup.streak = decision.streak;
+  return decision.kind === "restart" ? { ...decision, delayMs: Math.round(decision.delayMs) } : decision;
+}
+
+/**
+ * The failure's `restart` field and the tail of its message: when the runtime starts again, that it stays down for
+ * good, or (no decision: no restart option, or stopping) that it requires a restart. `at` is display only.
+ */
+function restartOutlook(options: McpSupervisorOptions, decision: RestartDecision | null): { restart: RuntimeFailure["restart"]; tail: string } {
+  if (decision?.kind === "restart") {
+    const at = new Date(Date.now() + decision.delayMs).toISOString();
+    return {
+      restart: { attempt: decision.attempt, of: decision.of, at },
+      tail: `this runtime has been stopped; it starts again at ${at} (restart ${decision.attempt} of ${decision.of}).`,
+    };
+  }
+  if (decision?.kind === "give_up") {
+    const healthyMinutes = Number((restartSettingsOf(options)!.healthyMs / 60_000).toFixed(1));
+    return {
+      restart: null,
+      tail: `this runtime has been stopped and stays down after ${decision.of} restarts in a row without ${healthyMinutes} min of play: restart the host.`,
+    };
+  }
+  return { restart: null, tail: "this runtime has been stopped and requires a restart." };
+}
+
+/**
+ * After a failure the supervisor is `failed` with that failure; for a `restart` decision a timer starts the runtime
+ * again after the delay (calls meanwhile get the failure). A close, before or during the wait, starts nothing.
+ */
+function scheduleRestart(
   sup: SupervisorState,
   code: ObservedFailureCode,
+  decision: RestartDecision | null,
   failure: RuntimeFailure,
+  machine: { supervisorTickDelayMs: number; maxTickDelayMs: number },
   startChild: () => void,
 ): void {
+  sup.runtime = { kind: "failed", failure };
+  if (sup.stopping || decision?.kind !== "restart") return;
+  const scheduled = {
+    event: "restart_scheduled",
+    observedAt: new Date().toISOString(),
+    attempt: decision.attempt,
+    of: decision.of,
+    delayMs: decision.delayMs,
+    ...machine,
+    loadavg: os.loadavg(),
+    hostFreeMemMB: Math.round(os.freemem() / 1_048_576), // The OS the host runs in: WSL's under WSL.
+  };
+  const { event: _event, ...recorded } = scheduled;
+  sup.recorder.record("runtime_restart_scheduled", recorded);
+  printSupervisorLine(sup, scheduled);
+  sup.restartTimer = setTimeout(() => {
+    sup.restartTimer = null;
+    if (sup.stopping) return;
+    startAfterFailure(sup, code, failure, startChild);
+  }, decision.delayMs);
+  sup.restartTimer.unref();
+}
+
+/** The restart timer's turn: the runtime is `starting` with fresh liveness clocks, or the supervisor stays failed if the spawn throws. */
+function startAfterFailure(sup: SupervisorState, code: ObservedFailureCode, failure: RuntimeFailure, startChild: () => void): void {
   const now = performance.now();
-  const window = sup.options.restartWindowMs ?? RUNTIME_RESTART_WINDOW_MS;
-  if (sup.stopping || window <= 0 || (sup.lastRestartAt !== null && now - sup.lastRestartAt < window)) {
-    sup.runtime = { kind: "failed", failure };
-    return;
-  }
-  sup.lastRestartAt = now;
   sup.recorder.record("runtime_restarted", { after: code, previousPid: sup.child?.pid });
   sup.runtime = { kind: "starting" };
   sup.lastHeartbeat = now;
@@ -404,7 +516,7 @@ function restartOrStayFailed(
   try {
     startChild();
   } catch (cause) {
-    // A spawn that throws must not leave the supervisor `failing` (it would answer 503 for ever) nor reject into `fail`'s caller.
+    // A spawn that throws must not leave the supervisor `failing` (it would answer 503 for ever) nor reject into the timer.
     stayFailedAfterRestartFailed(sup, failure, cause);
   }
 }
@@ -418,10 +530,11 @@ function stayFailedAfterRestartFailed(sup: SupervisorState, failure: RuntimeFail
     code: "RUNTIME_RESTART_FAILED",
     observedAt,
     message: `Starting the runtime again after ${failure.code} failed: ${reason}. Failure observed at ${observedAt}; this runtime has been stopped and requires a restart of the host.`,
+    restart: null,
   };
   sup.recorder.record("runtime_restart_failed", { after: failure.code, reason });
   sup.runtime = { kind: "failed", failure: restartFailure };
-  console.error(`[minecraft-supervisor] ${JSON.stringify(restartFailure)}`);
+  printSupervisorLine(sup, restartFailure);
 }
 
 /** The request an incident belongs to: the one running in the runtime's last activity, else the one that just closed. */

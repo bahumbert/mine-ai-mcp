@@ -52,6 +52,7 @@ export async function startHost(
       directory: incidentDirectory,
       retention: configuration.incidentRetention,
     },
+    restart: configuration.restart,
   });
   const address = supervisor.server.address();
   if (!address || typeof address === "string") throw new Error("Minecraft MCP requires a TCP listener.");

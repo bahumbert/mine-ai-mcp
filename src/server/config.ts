@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import type mineflayer from "mineflayer";
 import type { BotDataScopeKind, BotDataStorage } from "../bot-data/index.js";
 import { DEFAULT_INCIDENT_RETENTION, type IncidentRetention } from "../bot-data/incident-log.js";
+import { RUNTIME_RESTART, type RestartDelay, type RestartSettings } from "./runtime-liveness.js";
 
 type Auth = NonNullable<Parameters<typeof mineflayer.createBot>[0]["auth"]>;
 
@@ -34,6 +35,8 @@ export interface HostOptions {
    * out of the event log and served at `/chat-commands`; null (the default) leaves every line recorded as today.
    */
   readonly chatCommandPrefix: string | null;
+  /** How the supervisor starts a killed runtime again (`--restart-delays-ms`, `--restart-attempts`, `--restart-reset-after-ms`). */
+  readonly restart: RestartSettings;
   readonly botData: {
     readonly storage: BotDataStorage;
     readonly scope: BotDataScopeKind;
@@ -58,6 +61,9 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
       "debug-execute-javascript": { type: "boolean", default: false },
       "neoforge-components": { type: "string" },
       "chat-command-prefix": { type: "string" },
+      "restart-delays-ms": { type: "string", default: RUNTIME_RESTART.delays.map(({ minMs, maxMs }) => `${minMs}-${maxMs}`).join(",") },
+      "restart-attempts": { type: "string", default: String(RUNTIME_RESTART.attempts) },
+      "restart-reset-after-ms": { type: "string", default: String(RUNTIME_RESTART.healthyMs) },
       "data-root": { type: "string", default: DEFAULT_DATA_ROOT },
       "bot-data-persistence": { type: "string", default: "persistent" },
       "bot-data-scope": { type: "string", default: "bot" },
@@ -88,6 +94,11 @@ export function parseHostOptions(args: readonly string[] = process.argv.slice(2)
     neoforgeComponents:
       values["neoforge-components"] === undefined ? null : path.resolve(values["neoforge-components"]),
     chatCommandPrefix: chatCommandPrefix(values["chat-command-prefix"]),
+    restart: {
+      delays: restartDelays("--restart-delays-ms", values["restart-delays-ms"]),
+      attempts: positiveInteger("--restart-attempts", values["restart-attempts"]),
+      healthyMs: positiveInteger("--restart-reset-after-ms", values["restart-reset-after-ms"]),
+    },
     botData: {
       storage:
         botDataPersistence === "temporary"
@@ -111,6 +122,25 @@ function positiveInteger(name: string, raw: string): number {
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
   return value;
+}
+
+/** The longest wait a timer holds (2^31 - 1 ms, ~24.8 days): a longer one fires after 1 ms (measured in Bun, 2026-11-08). */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** A comma list of `<min>-<max>` whole milliseconds, one range per restart attempt (a shorter list repeats its last range). */
+function restartDelays(name: string, raw: string): readonly RestartDelay[] {
+  const delays = raw.split(",").map((range): RestartDelay | null => {
+    const match = /^(\d+)-(\d+)$/.exec(range);
+    if (!match) return null;
+    const [minMs, maxMs] = [Number(match[1]), Number(match[2])];
+    return minMs <= maxMs && maxMs <= MAX_TIMER_MS ? { minMs, maxMs } : null;
+  });
+  if (delays.some((delay) => delay === null)) {
+    throw new Error(
+      `${name} must be a comma list of <min>-<max> whole milliseconds with min <= max (e.g. 0-5000,15000-30000; max ${MAX_TIMER_MS}); received ${JSON.stringify(raw)}.`,
+    );
+  }
+  return delays as RestartDelay[];
 }
 
 /** Narrow an argument to one of its allowed values, so no caller has to assert it later. */
