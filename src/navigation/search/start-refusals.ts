@@ -6,7 +6,7 @@
  * the block over the head and the block under the feet. Never part of the search itself.
  */
 import { standsFree } from "../movements/catalogue.js";
-import { breakRefusalCause, type MovementPolicy } from "../movements/policy.js";
+import { LAVA_SPREAD_REASON, breakRefusalCause, type MovementPolicy } from "../movements/policy.js";
 import { isPassable } from "../world/block-geometry.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
 import type { SearchEvidence } from "./search-result.js";
@@ -43,6 +43,20 @@ export function countStartRefusals(world: WorldView, policy: MovementPolicy, fee
   for (const [x, y, z] of [...sides, [feet.x, feet.y + 2, feet.z] as const, [feet.x, feet.y - 1, feet.z] as const]) {
     const cause = refusalAt(x, y, z);
     if (cause !== null) count(cause);
+  }
+  // A side cell the bot can walk into is no dig, but the policy may still refuse the step into it: lava beside or above
+  // it flows in on its next update (spec p4-06b D5). The cells are the ones a first move reaches: level, one up, one down.
+  // `penalized` costs, it does not refuse; an escape leg prices the lava refusal, so it is what the escape lifts here.
+  for (const [dx, dz] of SIDES) {
+    for (const dy of [0, 1, -1]) {
+      const [x, y, z] = [feet.x + dx, feet.y + dy, feet.z + dz];
+      const block = world.blockAt(x, y, z);
+      if (block.kind !== "loaded" || !isPassable(block) || block.traits.liquid !== null) continue;
+      const decision = policy.decideStep(x, y, z, world);
+      // Only the lava refusal is counted: the other step refusals (fire underfoot, a block the policy avoids) have no
+      // phrase a model can act on, and an escape leg lifts none of them.
+      if (decision.kind === "prohibited" && decision.reason === LAVA_SPREAD_REASON) count(LAVA_SPREAD_REASON);
+    }
   }
   // The style override refuses a dig down that nothing else refuses, so it is named only when it is the one reason.
   const below = world.blockAt(feet.x, feet.y - 1, feet.z);

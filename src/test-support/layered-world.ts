@@ -43,6 +43,11 @@ export function loadNamedBlock(world: MemoryWorld, bot: Pick<Bot, "registry">, a
   world.load(at, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
 }
 
+/** A lava source in each of the four diagonal cells of `centre`: every cell beside `centre` then has lava beside it. */
+export function loadLavaAtDiagonals(world: MemoryWorld, bot: Pick<Bot, "registry">, centre: { x: number; y: number; z: number }): void {
+  for (const [dx, dz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]] as const) loadNamedBlock(world, bot, { x: centre.x + dx, y: centre.y, z: centre.z + dz }, "lava");
+}
+
 /** Every cell of the spec's box, with the block name its layer gives it or `outside` for its y. */
 function forEachLayeredCell(spec: LayeredWorldSpec, visit: (at: { x: number; y: number; z: number }, name: string) => void): void {
   const rows = Object.values(spec.layers)[0]!;

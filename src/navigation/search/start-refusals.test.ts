@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeBot, createFakeBot } from "../../test-support/fake-bot/index.js";
+import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkPocket, sanaPocket } from "../../test-support/frozen-pockets.js";
-import { WELL_FED, observation, planningStart } from "../../test-support/navigation.js";
+import { WELL_FED, flatWorld, observation, planningStart } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
 import { createMovementCatalogue } from "../movements/catalogue.js";
+import { LAVA_SPREAD_REASON } from "../movements/policy.js";
 import { createMovements } from "../runtime.js";
 import type { BlockPosition } from "../world/world.js";
-import type { MemoryWorld } from "../world/memory-world.js";
+import { MemoryWorld } from "../world/memory-world.js";
 import { IncrementalSearch } from "./search.js";
-import { neverLeftStart } from "./start-refusals.js";
+import { countStartRefusals, neverLeftStart } from "./start-refusals.js";
 
 /** One search from a pocket's cell to its cave, with the straight-down dig off (the persona's style override) or on. */
 function leavePocket(world: (bot: FakeBot) => MemoryWorld, start: BlockPosition, cave: BlockPosition, digDown: boolean) {
@@ -63,4 +65,54 @@ test("Sana's pocket: the dig below her opens into the water beside her cell, so 
     assert.ok((refusals.opens_into_liquid ?? 0) >= 1, JSON.stringify(refusals));
     assert.equal(refusals.policy_dig_down, undefined, JSON.stringify(refusals));
   }
+});
+
+// ── Lava about to flow into the side cells (plan p4-06b T7, spec D5) ─────────────────────────────────────────────
+// The floor of `flatWorld` is y 62, the feet cell y 63. Lava is a source: in the overworld it spreads one more step.
+const LAVA_FEET = { x: 0, y: 63, z: 0 } as const;
+
+/** The start refusals of `world` for a bot at {@link LAVA_FEET}; `edit` builds on the flat world with the bot's registry. */
+function startRefusalsBeside(edit: (world: MemoryWorld, bot: FakeBot) => void) {
+  const { bot } = createFakeBot();
+  const world = flatWorld();
+  edit(world, bot);
+  return countStartRefusals(world, createMovements(bot), LAVA_FEET);
+}
+
+test("a passable side neighbour whose step the policy refuses for lava spread counts under that reason, level, one up and one down", () => {
+  const cases = [
+    ["side cell", (world: MemoryWorld, bot: FakeBot) => loadNamedBlock(world, bot, { x: 2, y: 63, z: 0 }, "lava")],
+    ["step-up cell, lava on its feet row", (world: MemoryWorld, bot: FakeBot) => loadNamedBlock(world, bot, { x: 2, y: 64, z: 0 }, "lava")],
+    ["step-down cell, the floor dug out", (world: MemoryWorld, bot: FakeBot) => {
+      world.load({ x: 1, y: 62, z: 0 }, { stateId: 0 });
+      loadNamedBlock(world, bot, { x: 2, y: 62, z: 0 }, "lava");
+    }],
+  ] as const;
+  for (const [name, edit] of cases) assert.equal(startRefusalsBeside(edit)[LAVA_SPREAD_REASON], 1, name);
+});
+
+test("a side cell with no lava, or a solid one (judged by the dig rules, not as a step), counts no lava refusal", () => {
+  assert.equal(startRefusalsBeside(() => {})[LAVA_SPREAD_REASON], undefined);
+  const walled = startRefusalsBeside((world, bot) => {
+    for (const y of [63, 64]) loadNamedBlock(world, bot, { x: 1, y, z: 0 }, "stone");
+    loadNamedBlock(world, bot, { x: 2, y: 63, z: 0 }, "lava");
+  });
+  assert.equal(walled[LAVA_SPREAD_REASON], undefined);
+});
+
+test("an unloaded side cell is never asked for a step", () => {
+  const { bot } = createFakeBot();
+  const world = new MemoryWorld();
+  for (let x = -2; x <= 2; x += 1) for (let z = -2; z <= 2; z += 1) {
+    if (x === 1 && z === 0) continue; // the cell east of the bot at feet height and above stays unloaded
+    for (const y of [62, 63, 64, 65]) world.load({ x, y, z }, { stateId: y === 62 ? 1 : 0 });
+  }
+  assert.equal(countStartRefusals(world, createMovements(bot), LAVA_FEET)[LAVA_SPREAD_REASON], undefined);
+});
+
+test("fire in the side cells is no lava exit: the policy avoids it, but no refusal is counted for it", () => {
+  const refusals = startRefusalsBeside((world, bot) => {
+    for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) loadNamedBlock(world, bot, { x, y: 63, z }, "fire");
+  });
+  assert.deepEqual(refusals, {});
 });

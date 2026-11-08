@@ -5,6 +5,7 @@
  * caller resolves — navigation does not decide whether the process is done.
  */
 import type { PlanningNode } from "../goals/goal.js";
+import { LAVA_SPREAD_REASON } from "../movements/policy.js";
 import { neverLeftStart } from "../search/start-refusals.js";
 import type { NavigationObservation } from "../world/world.js";
 import type { NavigationFailure } from "./outcome.js";
@@ -39,6 +40,7 @@ const REFUSAL_PHRASES: Readonly<Record<string, (count: number) => string>> = {
   protected: (count) => `${count} protected`,
   policy_dig_down: (count) => `${count} refused by your rule against digging straight down`,
   unloaded: (count) => `${count} not loaded`,
+  [LAVA_SPREAD_REASON]: (count) => `${count} exits lava is about to flow into`,
 };
 
 /** What the first digs around the start were refused for, or "" when none was counted. */
