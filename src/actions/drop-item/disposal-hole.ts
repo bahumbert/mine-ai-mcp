@@ -13,6 +13,7 @@ import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { protectedRegionAt, readProtectedRegions } from "../../world/protected-regions.js";
 import { sealedPitGuarding } from "../../world/sealed-pits.js";
+import { faceTossTarget } from "./toss-item.js";
 
 const SIDES = [
   [1, 0],
@@ -213,8 +214,9 @@ export async function prepareDisposalHole(
   // Aim through the opening. Aiming at the bottom throws too steeply: the
   // stack's collision box clips the near rim before it crosses the edge.
   // Aim half a block above the lip to clear the item's own collision radius.
-  // Await the normal look so the server receives that orientation before toss.
-  await bot.lookAt(bottom.offset(0.5, 2.5, 0.5));
+  // A forced look, then a few ticks: the server gets that orientation with a tick's look packet before the toss. An
+  // unforced look ended on the yaw alone, the pitch still turning (0.15 rad a tick).
+  await faceTossTarget(bot, bottom.offset(0.5, 2.5, 0.5));
   return bottom;
 }
 

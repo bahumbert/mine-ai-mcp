@@ -6,7 +6,8 @@ import { createDiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
 import { dropItem } from "./drop-item.js";
 import { approachPlayer } from "./drop-walks.js";
-import { dropBot, dropTest, deps } from "./drop-item-fixtures.test.js";
+import { PLAYER_EYE_HEIGHT, tossAimHeight } from "./hand-over.js";
+import { dropBot, dropTest, deps, pitchesAtTosses } from "./drop-item-fixtures.test.js";
 
 const DEV = 42;
 /** The failure line of a drop result; empty for one that succeeded. */
@@ -181,4 +182,18 @@ dropTest("a recipient who stepped once and then stood still on a ledge is out of
   }) as never;
   const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: search, recipientWaitMs: 6_000 }), createDiscardedItems()));
   assert.match(errorOf(result), /^\[DROP_RECIPIENT_OUT_OF_REACH\] Dev stands still 2 blocks above me.*Ask them to come down to my floor/);
+});
+
+dropTest("the hand-over toss leaves with the aimed pitch when the yaw was already aimed", async ({ clock, run }) => {
+  // Live s3r: the walk-up had turned the giver toward the recipient, so an unforced look ended after one tick with the
+  // pitch 0.15 rad on its way (Mineflayer `physics.js:164-175`, `:308-311`) and the toss flew level, past the recipient.
+  const reach = 0.86;
+  const { bot, harness } = dropBot({ carried, players: { Dev: { id: DEV, position: { x: reach, y: 64, z: 0 } } }, position: giverAt }, clock);
+  await bot.look(-Math.PI / 2, 0.31, true);
+  await clock.advance(50);
+  const pitches = pitchesAtTosses(bot, harness.server);
+  await run(dropItem(bot, handOverRequest, {}, deps(), createDiscardedItems()));
+  const aimed = Math.atan2(64 + tossAimHeight(reach) - (64 + PLAYER_EYE_HEIGHT), reach);
+  assert.equal(pitches.length, 1, "one toss");
+  assert.ok(Math.abs(pitches[0]! - aimed) < 0.01, `the server held pitch ${pitches[0]} at the toss, aimed ${aimed}`);
 });

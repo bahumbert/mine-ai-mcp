@@ -1,10 +1,25 @@
 // Tossing one requested item stack by stack, and confirming from the inventory what the server really took.
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
+import type { Vec3 } from "vec3";
 import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
 import { durabilityOf } from "../../world/tool-tiers.js";
 import type { ActionContext } from "../action.js";
 import { dropItemOutcomes, type DroppedItem } from "./contract.js";
+
+/** Ticks between facing the toss's target and the toss, so the server has the look the toss is thrown along. */
+const LOOK_SETTLE_TICKS = 3;
+
+/**
+ * Turn to `target` so the next toss is thrown toward it. The look is forced: an unforced one ends once the sent yaw has
+ * turned, whatever the sent pitch (it moves 0.15 rad a tick), and a toss sent then flies at the old pitch (Mineflayer
+ * `physics.js:164-175`, `:308-311`; live s3r). A forced look is sent with the next physics tick's look packet
+ * (`physics.js:350-353`, `:185-193`), so the settle ticks keep the toss behind it.
+ */
+export async function faceTossTarget(bot: Bot, target: Vec3): Promise<void> {
+  await bot.lookAt(target, true);
+  await bot.waitForTicks(LOOK_SETTLE_TICKS);
+}
 
 /**
  * The stacks of an item to toss, the most worn first (a tool with a durability maximum): a drop of one of two pickaxes

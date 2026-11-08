@@ -1,13 +1,14 @@
 template: ../../templates/spectator.yaml
 
 name: hand-over-pillar-3wide
-tags: [reliability]
+tags: [regression]
 description: >-
-  Measurement, not a test (plan 2026-11-08-trading-p2-fixes Task 3.1, spec D5, hypothesis H2): hand-over-pillar-stair without the stair.
-  The receiver stands still on the top of a 3x3 stone pillar one block high, the giver on the floor with one bread to hand over;
-  the giver has to climb the pillar's side by the one-block step and toss from its top. If this is taken where the stair variant is
-  not, the stair is the cause. The driver traces the toss (trace) and both roles end succeeded (measure), the receiver's line
-  saying TOSS_RESULT taken=yes or taken=no with where the item rests.
+  Live s3r (2026-11-08, plan 2026-11-08-trading-p2-fixes Task 3.3): the receiver stood still on a small pillar and the giver's toss
+  from its near cell flew past them (11 of 12 reproduced runs missed). The receiver stands still on the top of a 3x3 stone pillar one
+  block high, the giver on the floor with one bread to hand over; the giver has to climb the pillar's side by the one-block step,
+  face the receiver (its yaw is aimed by the walk-up, its pitch is not) and toss from the top: the toss has to leave at the aimed
+  pitch and the receiver has to hold both bread (the one it started with and the toss). hand-over-pillar-3wide-measure keeps the
+  trace for diagnosis.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
@@ -33,11 +34,12 @@ client:
   command: bun
   cwd: ../..
   args: [client-host.ts, drivers/hand-over.ts]
-params: { giver: 0, receiver: 1, item_name: bread, count: 1, receiver_holds: 2, receiver_wait_ticks: 400, trace: true, measure: true }
+params: { giver: 0, receiver: 1, item_name: bread, count: 1, receiver_holds: 2, receiver_wait_ticks: 400 }
 
 goal:
   kind: all
   timeout: 60
   goals:
+    - { kind: hasItem, who: Receiver, item: bread, count: 2 }
     - { kind: completion, who: Giver }
     - { kind: completion, who: Receiver }

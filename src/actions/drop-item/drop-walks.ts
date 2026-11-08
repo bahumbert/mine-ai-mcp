@@ -11,12 +11,10 @@ import { dropItemOutcomes, type DropRecipient, type HoleClosure } from "./contra
 import { pluggedCellCount, sealDisposalHole } from "./disposal-hole.js";
 import type { DropItemDependencies } from "./drop-item.js";
 import { tossAimHeight } from "./hand-over.js";
+import { faceTossTarget } from "./toss-item.js";
 import { handOverStance, heightBetweenText, heightBlocksStance, HANDOVER_RANGE, inHandOverStance } from "./hand-over-stance.js";
 import { startWalkBound, WALK_AWAY_MAX_BLOCKS, WALK_AWAY_MAX_MS } from "./walk-bound.js";
 import { awaitStillRecipient, RECIPIENT_STILL_EPSILON, RECIPIENT_STILL_TICKS, RECIPIENT_WAIT_MS, trackRecipientMoves } from "./recipient-still.js";
-
-/** Ticks between facing the recipient and tossing, so the server has the look the toss is thrown along. */
-const LOOK_SETTLE_TICKS = 3;
 
 /**
  * How far, in the plane, the bot ends a hole drop from the hole's column.
@@ -156,9 +154,7 @@ export async function approachPlayer(
   // Aimed so the toss rests at their feet: facing their body overshot them and facing their feet fell short, back at the
   // giver (B2, 2026-10-19).
   const reach = Math.hypot(target.position.x - bot.entity.position.x, target.position.z - bot.entity.position.z);
-  await bot.lookAt(target.position.offset(0, tossAimHeight(reach), 0));
-  // The server learns the new pitch with the next position packet; a toss sent before it flies level and overshoots.
-  await bot.waitForTicks(LOOK_SETTLE_TICKS);
+  await faceTossTarget(bot, target.position.offset(0, tossAimHeight(reach), 0));
   return {
     name,
     distance: Number(bot.entity.position.distanceTo(target.position).toFixed(2)),

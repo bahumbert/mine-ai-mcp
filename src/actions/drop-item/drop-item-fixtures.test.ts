@@ -2,7 +2,7 @@
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
-import { EQUIPMENT_SLOTS, type FakeBot, type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { EQUIPMENT_SLOTS, type FakeBot, type FakeClock, type FakeServer, createFakeBot, createFakeClock, sentPitchOf } from "../../test-support/fake-bot/index.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
 import { type DropItemDependencies, beginDropItem } from "./drop-item.js";
@@ -115,6 +115,25 @@ export function dropBot(options: DropBotOptions, clock: FakeClock) {
   return { harness, bot, items: () => bot.inventory.items(), lookedAt };
 }
 
+/**
+ * The pitch (radians) the server holds at each toss the bot makes from now: the toss's packet leaves with the look the
+ * server has read so far, not the look the bot has turned to.
+ */
+export function pitchesAtTosses(bot: FakeBot, server: FakeServer): number[] {
+  const pitches: number[] = [];
+  const tossStack = bot.tossStack.bind(bot);
+  bot.tossStack = async (stack) => {
+    pitches.push(sentPitchOf(server.packets) ?? Number.NaN);
+    await tossStack(stack);
+  };
+  const toss = bot.toss.bind(bot);
+  bot.toss = async (type, metadata, count) => {
+    pitches.push(sentPitchOf(server.packets) ?? Number.NaN);
+    await toss(type, metadata, count);
+  };
+  return pitches;
+}
+
 /** A bot carrying an iron chestplate it wears and a diamond pickaxe it holds. */
 export function wearingChestplateHoldingPickaxe(clock: FakeClock) {
   return dropBot(
@@ -221,5 +240,5 @@ export function pitWorld(clock: FakeClock, carried: readonly Stack[] = DEFAULT_P
       return { status: "completed", elapsedMs: 0 } as never;
     },
   });
-  return { bot, items, dug, plugged, dependencies, blockNameAt: (cell: Vec3) => bot.blockAt(cell)?.name };
+  return { bot, server: harness.server, items, dug, plugged, dependencies, blockNameAt: (cell: Vec3) => bot.blockAt(cell)?.name };
 }

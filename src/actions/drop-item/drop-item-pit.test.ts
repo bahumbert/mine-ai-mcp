@@ -4,7 +4,22 @@ import { createDiscardedItems } from "../../world/discarded-items.js";
 import { sealedPitGuarding } from "../../world/sealed-pits.js";
 import { parseDropItemRequest } from "./contract.js";
 import { dropItem, formatDropItemResult } from "./drop-item.js";
-import { abortAfterToss, dropAttempts, dropTest, pitWorld } from "./drop-item-fixtures.test.js";
+import { PLAYER_EYE_HEIGHT } from "./hand-over.js";
+import { abortAfterToss, dropAttempts, dropTest, pitchesAtTosses, pitWorld } from "./drop-item-fixtures.test.js";
+
+dropTest("the pit toss leaves with the aimed pitch when the yaw was already aimed", async ({ clock, run }) => {
+  // The same unforced-look miss as the hand-over's: the look through the opening ended on the yaw, the pitch still on its way.
+  const world = pitWorld(clock);
+  const { bot, server } = world;
+  await bot.look(-Math.PI / 2, 0.31, true);
+  await clock.advance(50);
+  const pitches = pitchesAtTosses(bot, server);
+  const result = await run(dropItem(bot, parseDropItemRequest({ items: [{ item_name: "dirt" }], in_a_hole: true }), {}, world.dependencies, createDiscardedItems()));
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  const aimed = Math.atan2(62 + 2.5 - (64 + PLAYER_EYE_HEIGHT), 1);
+  assert.ok(pitches.length >= 1, "a toss");
+  for (const pitch of pitches) assert.ok(Math.abs(pitch - aimed) < 0.01, `the server held pitch ${pitch} at the toss, aimed ${aimed}`);
+});
 
 dropTest("a pit half dug when a reflex took the body is dug on, filled with the drop and plugged by the next attempt", async ({ clock, run }) => {
   const world = pitWorld(clock);

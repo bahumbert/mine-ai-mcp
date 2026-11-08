@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import type { FakeBot } from "./fake-bot.js";
 import type { FakeClock } from "./fake-clock.js";
+import type { ReceivedPacket } from "./fake-server.js";
 
 /** Mineflayer's physics engine (no typings shipped): one step of a player's state, written back onto the bot. */
 interface PrismarinePhysics {
@@ -28,8 +29,25 @@ function physicsStep(bot: FakeBot): () => void {
 const TICK_MS = 50;
 /** How far the sent yaw turns in a tick: `PHYSICS_TIMESTEP * physics.yawSpeed` (prismarine-physics 3 rad/s, `physics.js:169`). */
 const YAW_STEP_PER_TICK = 0.05 * 3;
-/** Mineflayer ends a look once the sent yaw is this close to the body's (`physics.js:308-311`). */
+/** How far the sent pitch turns in a tick: `PHYSICS_TIMESTEP * physics.pitchSpeed` (prismarine-physics 3 rad/s, `physics.js:169-170`). */
+const PITCH_STEP_PER_TICK = 0.05 * 3;
+/** Mineflayer ends a look once the sent yaw is this close to the body's (`physics.js:308-311`): the pitch is not asked. */
 const LOOK_DONE_YAW = 0.001;
+
+/**
+ * The pitch (radians) the server holds: that of the last `look` packet the client sent, undefined before any. A notchian
+ * pitch is the negated degrees (`conversions.js toNotchianPitch`). The fake writes `look` packets only, never the
+ * `position_look` a moving real client sends (`physics.js:195-197`), so this reads every sent pitch.
+ */
+export function sentPitchOf(packets: readonly ReceivedPacket[]): number | undefined {
+  const last = packets.findLast((packet) => packet.name === "look")?.data as { pitch: number } | undefined;
+  return last && (-last.pitch * Math.PI) / 180;
+}
+
+/** A step of at most `maxStep` from `from` toward `to` (`math.clamp(-max, d, max)` of `physics.js:169-170`). */
+function stepToward(from: number, delta: number, maxStep: number): number {
+  return from + Math.max(-maxStep, Math.min(maxStep, delta));
+}
 
 /** `physics.js` `deltaYaw`: the signed turn from `from` to `to`, in -π..π. */
 function deltaYaw(to: number, from: number): number {
@@ -83,14 +101,46 @@ interface PositionPacket {
   readonly teleportId: number;
 }
 
+/**
+ * `lastSentYaw` and `lastSentPitch` of `physics.js`: the look the server was told, which turns toward the body's a step a
+ * tick and goes out as a `look` packet when it changed (`updatePosition`, `physics.js:164-193`).
+ */
+function createSentLook(bot: FakeBot) {
+  let yaw = bot.entity.yaw;
+  let pitch = bot.entity.pitch;
+  /** The look of the last packet written (`lookUpdated`). */
+  let written = { yaw, pitch };
+  const toDegrees = (radians: number) => (radians * 180) / Math.PI;
+  return {
+    /** One tick: the sent look turns a step, a packet in notchian degrees (`conversions.js:17-18`) goes out if it changed; true once the sent yaw is the body's. */
+    tick(): boolean {
+      yaw = stepToward(yaw, deltaYaw(bot.entity.yaw, yaw), YAW_STEP_PER_TICK);
+      pitch = stepToward(pitch, bot.entity.pitch - pitch, PITCH_STEP_PER_TICK);
+      if (yaw !== written.yaw || pitch !== written.pitch) {
+        written = { yaw, pitch };
+        bot._client.write("look", {
+          yaw: Math.fround(toDegrees(Math.PI - yaw)),
+          pitch: Math.fround(toDegrees(-pitch)),
+          flags: { onGround: bot.entity.onGround, hasHorizontalCollision: undefined },
+        });
+      }
+      return Math.abs(deltaYaw(bot.entity.yaw, yaw)) < LOOK_DONE_YAW;
+    },
+    /** A forced look (`lastSentYaw = yaw; lastSentPitch = pitch`): what the next tick's packet carries. */
+    force(forcedYaw: number, forcedPitch: number): void {
+      yaw = forcedYaw;
+      pitch = forcedPitch;
+    },
+  };
+}
+
 /** Give `bot` its ticks, `look`, `lookAt` and `waitForTicks`, driven by `clock` and the `position` packets on its client. */
 export function attachFakePhysics(bot: FakeBot, clock: FakeClock, simulate = false): void {
   // `shouldUsePhysics` of `physics.js`: off from a mount, a death or a respawn until the next position packet.
   let shouldUsePhysics = true;
   let accumulatedMs = 0;
   let pendingLook: (() => void) | null = null;
-  /** `lastSentYaw`: the yaw the server was told, which turns toward the body's a step a tick. */
-  let sentYaw = bot.entity.yaw;
+  const sentLook = createSentLook(bot);
   bot.physicsEnabled = true;
   const step = simulate ? physicsStep(bot) : null;
 
@@ -101,9 +151,9 @@ export function attachFakePhysics(bot: FakeBot, clock: FakeClock, simulate = fal
       bot.emit("physicsTick");
     }
     if (!shouldUsePhysics) return;
-    // `updatePosition`: the sent yaw turns a step toward the body's; the look ends on the `move` once it caught up.
-    sentYaw += Math.max(-YAW_STEP_PER_TICK, Math.min(YAW_STEP_PER_TICK, deltaYaw(bot.entity.yaw, sentYaw)));
-    if (pendingLook === null || Math.abs(deltaYaw(bot.entity.yaw, sentYaw)) >= LOOK_DONE_YAW) return;
+    // `updatePosition`: the look ends on the `move` once the sent yaw caught up, whatever the sent pitch is by then.
+    const yawCaughtUp = sentLook.tick();
+    if (pendingLook === null || !yawCaughtUp) return;
     const finished = pendingLook;
     pendingLook = null;
     bot.emit("move", bot.entity.position.clone());
@@ -144,7 +194,7 @@ export function attachFakePhysics(bot: FakeBot, clock: FakeClock, simulate = fal
     bot.entity.yaw = yaw;
     bot.entity.pitch = pitch;
     if (force) {
-      sentYaw = yaw; // `lastSentYaw = yaw`: a forced look reaches the server at once
+      sentLook.force(yaw, pitch);
       return;
     }
     await new Promise<void>((resolve) => (pendingLook = resolve));
