@@ -1,4 +1,8 @@
 import type { Bot } from "mineflayer";
+import { bareHand, combatDataSource, damageScaling, itemAttack, mobCombatData, variesFields } from "../../../world/combat-data.js";
+import { botDefence, meleeWeapon, serverDifficulty } from "../../../world/combat-stats.js";
+import { entityMetadata } from "../../../world/end-fight.js";
+import { assessThreats, type AssessmentInput, type ThreatAssessment } from "../../perception/combat/threat-assessment.js";
 import { isBurning, isInLava, isInWater } from "../../perception/body.js";
 import { bowDrawAimedAtBot } from "../../perception/combat/attention.js";
 import { defendsOnContact, inDefensiveContact } from "../../perception/combat/contact.js";
@@ -14,15 +18,46 @@ import {
 } from "../../perception/combat/threats.js";
 import { DEFAULT_COMBAT_POLICY, type CombatPolicy } from "../../policy/combat/contract.js";
 import { DEFAULT_FOOD_POLICY } from "../../policy/contract.js";
-import { decideCombatResponse, type CombatDecisionFacts } from "../../policy/combat/decision.js";
+import { decideCombatResponse, type CombatContact, type CombatDecisionFacts } from "../../policy/combat/decision.js";
 import { permitsHide } from "../../policy/combat/permissions.js";
 import type { HostileDirective, HostileThreat } from "../../policy/combat/response.js";
-import { carriesCombatWeapon, carriesRangedWeapon, isShield, readCombatItems } from "../../weapons/equipment.js";
+import { carriesCombatWeapon, carriesRangedWeapon, isShield, MELEE_RANGE, readCombatItems } from "../../weapons/equipment.js";
 import { contextPolicy, type HostileContext } from "./context.js";
 import { responseScope } from "./scopes/response.js";
 const NO_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() };
 function inContact(threat: HostileThreat, context: HostileContext): boolean {
   return threat.distance <= HOSTILE_CONTACT_RANGE || context.attackerIds.has(threat.id);
+}
+
+/** Combine one contact's live body, carried item and this connection's own observations. */
+function assessmentContact(bot: Bot, contact: CombatContact, context: HostileContext,
+  fuses: ReadonlyMap<number, number | undefined>): AssessmentInput["contacts"][number] {
+  const entity = bot.entities[contact.id];
+  const health = entity ? entityMetadata(bot, entity, "health") : undefined;
+  const hits = context.perception?.observedHits(contact.id);
+  return {
+    id: contact.id, species: contact.name, distance: contact.distance, inContact: contact.inContact,
+    data: mobCombatData(contact.name, bot.version),
+    health: typeof health === "number" && Number.isFinite(health) ? health : null,
+    heldItemAttack: entity?.heldItem ? itemAttack(entity.heldItem.name, bot.version) : null,
+    observedHitDamage: hits?.damage ?? null,
+    observedIntervalTicks: hits?.intervalTicks ?? null,
+    unknownMelee: variesFields(contact.name, bot.version).includes("attackDamage"),
+    fuseRemainingTicks: fuses.get(contact.id) ?? null,
+  };
+}
+
+/** Build the pure assessment from a single live reading of defence, equipment and contact facts. */
+export function assessContacts(bot: Bot, contacts: readonly CombatContact[], context: HostileContext): ThreatAssessment {
+  const fuses = new Map(context.perception?.creeperClearance.observe(context.perception.tick, context.resolvedIds)
+    .map((fuse) => [fuse.id, fuse.fuseRemainingTicks]));
+  return assessThreats({
+    bot: botDefence(bot), difficulty: serverDifficulty(bot),
+    mobAttackScaling: damageScaling("mob_attack", bot.version), explosionScaling: damageScaling("explosion", bot.version),
+    weapon: meleeWeapon(bot), bareHand: bareHand(bot.version), meleeReach: MELEE_RANGE,
+    contacts: contacts.map((contact) => assessmentContact(bot, contact, context, fuses)),
+    source: combatDataSource(bot.version),
+  });
 }
 
 /** Read shared relationship, exposure and equipment once before deciding. */

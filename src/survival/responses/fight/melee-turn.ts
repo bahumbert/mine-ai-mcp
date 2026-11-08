@@ -3,7 +3,7 @@ import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { isHostile } from "../../perception/combat/threats.js";
-import { isCreeper } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 import { facing } from "../../weapons/aim.js";
 import { MELEE_RANGE, type CombatLoadout } from "../../weapons/equipment.js";
 import {
@@ -138,7 +138,7 @@ export async function runMeleeTurn(
   await scene.execution.run("swing", async () => {
     // Knockback is a property of this hit, not a separate fight mode. Report
     // the clearance obligation and let shared policy choose the next effect.
-    const knockback = isCreeper(scene.target);
+    const knockback = hasSelfExplosion(scene.target.name, scene.bot.version);
     if (knockback) {
       weapons.itemUse.lowerShield();
       scene.bot.setControlState("sprint", true);

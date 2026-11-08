@@ -7,7 +7,8 @@ import { bowDrawAimedAtBot, holdsBow, isDrawingBow } from "./attention.js";
 import { incomingBlazeProjectiles, isIncomingBlazeProjectile } from "./blaze-projectiles.js";
 import { holdsShooter } from "./contact.js";
 import { readProjectileSpawn } from "./projectile-spawn.js";
-import { isCreeper } from "./creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
+import { ObservedHits } from "./observed-hits.js";
 import { canBeBystander, isHostile } from "./threats.js";
 import { trackArrowFlights } from "./arrow-flight.js";
 import { bowReleaseInTicks, trackBowDraws } from "./bow-timing.js";
@@ -77,7 +78,7 @@ const MELEE_CLOSING_ALLOWANCE = Math.ceil(SHIELD_READY_TICKS * MOB_CLOSING_SPEED
  * fuse - blast defence owns that, and needs the hands.
  */
 export function meleeImminent(bot: Bot, entity: Entity): boolean {
-  if (!isHostile(entity) || canBeBystander(bot, entity) || isCreeper(entity)) return false;
+  if (!isHostile(entity) || canBeBystander(bot, entity) || hasSelfExplosion(entity.name, bot.version)) return false;
   if (isRangedAttacker(bot, entity)) return false;
   if (entity.position.distanceTo(bot.entity.position) > MELEE_REACH + MELEE_CLOSING_ALLOWANCE) return false;
   return hasExposedBody(bot, entity);
@@ -166,15 +167,18 @@ export class CombatPerception implements Disposable {
   #snapshot: readonly ObservedThreat[] | null = null;
   #incoming: Entity[] | null = null;
   readonly #listeners = new DisposableStack();
+  readonly #hits: ObservedHits;
 
   constructor(readonly bot: Bot) {
     this.creeperClearance = new CreeperClearance(bot);
+    this.#hits = new ObservedHits(bot, () => this.#tick);
     const invalidate = () => {
       this.#snapshot = null;
       this.#incoming = null;
     };
     const tick = () => {
       this.#tick++;
+      this.#hits.checkReach();
       invalidate();
       for (const [id, owner] of this.#owners) {
         const projectile = bot.entities[id];
@@ -182,6 +186,7 @@ export class CombatPerception implements Disposable {
       }
     };
     const hurt: BotEvents["entityHurt"] = (entity, source) => {
+      this.#hits.hurt(entity, source);
       if (isHostile(source)) {
         if (entity.id === bot.entity.id) this.attackerIds.add(source.id);
         // Neutral Endermen can switch to the dragon or another victim. Their
@@ -191,6 +196,7 @@ export class CombatPerception implements Disposable {
       invalidate();
     };
     const gone: BotEvents["entityGone"] = (entity) => {
+      this.#hits.forget(entity);
       for (const set of [this.resolvedIds, this.attackerIds]) set.delete(entity.id);
       this.#owners.delete(entity.id);
       this.#lastSeen.delete(entity.id);
@@ -227,13 +233,21 @@ export class CombatPerception implements Disposable {
     const explosion = (packet: unknown) => this.creeperClearance.exploded(packet, this.#tick);
     bot._client.on("explosion", explosion);
     this.#listeners.defer(() => bot._client.off("explosion", explosion));
-    const respawn = () => this.creeperClearance.reset();
+    const respawn = () => { this.creeperClearance.reset(); this.#hits.reset(); };
     bot.on("respawn", respawn);
     this.#listeners.defer(() => bot.off("respawn", respawn));
     bot._client.on("spawn_entity", shot);
     this.#listeners.defer(() => bot._client.off("spawn_entity", shot));
     this.#listeners.use(trackArrowFlights(bot));
     this.#listeners.use(trackBowDraws(bot));
+    const health = (packet: { health: number }) => this.#hits.recordHealth(packet.health);
+    bot._client.on("update_health", health);
+    this.#listeners.defer(() => bot._client.off("update_health", health));
+  }
+
+  /** The measured cost of this entity's hits to this bot, forgotten with the body or life. */
+  observedHits(entityId: number): { damage: number | null; intervalTicks: number | null } {
+    return this.#hits.read(entityId);
   }
 
   incoming(): readonly Entity[] {

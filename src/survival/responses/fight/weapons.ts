@@ -41,7 +41,7 @@ import {
   meleeDistance,
 } from "../../weapons/melee.js";
 import { shieldCoverage, shieldFacing } from "../../weapons/shield-facing.js";
-import { isCreeper } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 import type { FightScene } from "./scene.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
@@ -77,7 +77,7 @@ export class FightWeapons {
             entity.id !== this.scene.target.id &&
             !this.scene.dead.has(entity.id) &&
             isThreat(this.scene.bot, entity, this.scene.perception) &&
-            !isCreeper(entity) &&
+            !hasSelfExplosion(entity.name, this.scene.bot.version) &&
             meleeDistance(this.scene.bot, entity) < distance,
         )
         .sort((a, b) => meleeDistance(this.scene.bot, a) - meleeDistance(this.scene.bot, b))

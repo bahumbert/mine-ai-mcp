@@ -54,7 +54,7 @@ export const SPIDER_PASSIVE_SKY_LIGHT = 12;
 /** What the reflex has learned that a distance alone cannot say. */
 export interface HostileKnowledge {
   /** Runtime callers share cached exposure with the engagement and recorder. */
-  readonly perception?: Pick<CombatPerception, "read">;
+  readonly perception?: Pick<CombatPerception, "read" | "observedHits" | "creeperClearance" | "tick">;
   /** Targets already killed whose dying entities are still loaded. */
   readonly resolvedIds: ReadonlySet<number>;
   /** Hostiles observed attacking this bot, through damage or an incoming owned projectile. */

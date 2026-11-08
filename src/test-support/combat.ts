@@ -78,7 +78,8 @@ export function combatResourceRefusalForTest(
 }
 export function combatTestContext(bot: Bot): ResponseContext {
   return {
-    perception: { read: () => [], creeperClearance: new CreeperClearance(bot), tick: 0, resolvedIds: new Set() },
+    perception: { read: () => [], observedHits: () => ({ damage: null, intervalTicks: null }),
+      creeperClearance: new CreeperClearance(bot), tick: 0, resolvedIds: new Set() },
     survival: survivalResources(),
     policy: DEFAULT_COMBAT_POLICY,
     food: DEFAULT_FOOD_POLICY,

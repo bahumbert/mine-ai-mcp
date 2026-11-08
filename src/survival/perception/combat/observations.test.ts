@@ -97,3 +97,86 @@ test("Enderman attack attribution follows the observed victim, not its anger fla
     "an observed attack on someone else retires its bot-target attribution",
   );
 });
+
+test("observed hit damage and intervals belong to one attacker and require continuous melee reach", async () => {
+  const { bot, combat, clock } = createFakeBot({ entities: { 2: { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } } } });
+  using perception = new CombatPerception(bot);
+  combat.hurtBot(3, 2);
+  assert.deepEqual(perception.observedHits(2), { damage: 3, intervalTicks: null });
+  await clock.advance(1_000);
+  combat.hurtBot(3, 2);
+  assert.deepEqual(perception.observedHits(2), { damage: 3, intervalTicks: 20 });
+  bot.entities[2]!.position.x = 10;
+  await clock.advance(500);
+  bot.entities[2]!.position.x = 2.5;
+  await clock.advance(500);
+  combat.hurtBot(3, 2);
+  assert.deepEqual(perception.observedHits(2), { damage: 3, intervalTicks: null });
+  await clock.advance(1_500);
+  combat.hurtBot(3, 2);
+  assert.equal(perception.observedHits(2).intervalTicks, 20, "an observation cannot lengthen the vanilla interval");
+  bot.emit("entityGone", bot.entities[2]!);
+  assert.deepEqual(perception.observedHits(2), { damage: null, intervalTicks: null });
+});
+
+test("ambiguous, sourceless and zero-drop hurts cannot be credited to a mob", () => {
+  const { bot, combat } = createFakeBot({ entities: {
+    2: { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } },
+    3: { name: "skeleton", position: { x: 2.5, y: 64, z: 1.5 } },
+  } });
+  using perception = new CombatPerception(bot);
+  // Packet shapes: damage-event-to-bot contract; Mineflayer entities.js:398-402.
+  for (const sources of [[2], [2, 3], [2, null], [null]]) {
+    for (const source of sources) bot.emit("entityHurt", bot.entity, bot.entities[source ?? -1]!);
+    combat.setHealth(sources.length === 1 && sources[0] === 2 ? bot.health : bot.health - 1);
+    assert.deepEqual(perception.observedHits(2), { damage: null, intervalTicks: null });
+    assert.deepEqual(perception.observedHits(3), { damage: null, intervalTicks: null });
+  }
+});
+
+test("observed damage includes absorption lost and is forgotten on respawn or dimension change", () => {
+  const { bot, combat } = createFakeBot({ entities: { 2: { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } } } });
+  const key = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("player_absorption");
+  Reflect.set(bot.entity.metadata, key, 4);
+  using perception = new CombatPerception(bot);
+  for (const reset of [() => bot.emit("respawn"), () => { bot.game.dimension = "the_nether"; }]) {
+    // Metadata layout from minecraft-data; we exercise the reader boundary, not fake absorption mechanics.
+    Reflect.set(bot.entity.metadata, key, 4);
+    bot.emit("entityHurt", bot.entity, bot.entities[2]!);
+    Reflect.set(bot.entity.metadata, key, 1);
+    combat.setHealth(bot.health);
+    assert.deepEqual(perception.observedHits(2), { damage: 3, intervalTicks: null });
+    reset();
+    assert.deepEqual(perception.observedHits(2), { damage: null, intervalTicks: null });
+  }
+});
+
+test("ambiguous hurts break the interval evidence between an attacker's known hits", async () => {
+  const { bot, combat, clock } = createFakeBot({ entities: {
+    2: { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } },
+    3: { name: "skeleton", position: { x: 2.5, y: 64, z: 1.5 } },
+  } });
+  using perception = new CombatPerception(bot);
+  combat.hurtBot(3, 2);
+  await clock.advance(600);
+  for (const id of [2, 3]) bot.emit("entityHurt", bot.entity, bot.entities[id]!);
+  combat.setHealth(14);
+  assert.equal(perception.observedHits(2).damage, 3, "an ambiguous update does not replace the known cost");
+  await clock.advance(600);
+  combat.hurtBot(3, 2);
+  assert.deepEqual(perception.observedHits(2), { damage: 3, intervalTicks: null }, "the old and new known hits need not be consecutive");
+});
+
+test("pending hit attribution cannot cross removal, body replacement, respawn or a dimension change", () => {
+  for (const transition of ["removal", "replacement", "respawn", "dimension"] as const) {
+    const { bot, combat, entities } = createFakeBot({ entities: { 2: { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } } } });
+    using perception = new CombatPerception(bot);
+    bot.emit("entityHurt", bot.entity, bot.entities[2]!);
+    if (transition === "removal") entities.remove(2);
+    if (transition === "replacement") bot.entities[2] = entityBodyOf(2, { name: "zombie", position: { x: 2.5, y: 64, z: 0.5 } });
+    if (transition === "respawn") bot.emit("respawn");
+    if (transition === "dimension") bot.game.dimension = "the_nether";
+    combat.setHealth(17);
+    assert.deepEqual(perception.observedHits(2), { damage: null, intervalTicks: null }, transition);
+  }
+});

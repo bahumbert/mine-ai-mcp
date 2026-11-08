@@ -18,6 +18,8 @@ export interface ContactAssessment {
   /** Health this contact takes from the bot per hit, after armour and difficulty; null: it does not melee and no hit was seen. */
   readonly damagePerHit: number | null;
   readonly damageSource: "observed" | "attribute" | "none";
+  /** The measured melee damage varies by individual and this bot has not yet observed its hit cost. */
+  readonly unknownMelee: boolean;
   /** Ticks between its hits: observed, else the vanilla melee interval. */
   readonly hitIntervalTicks: number;
   /** Its health now (its `health` metadata), else its measured max_health. */
@@ -78,6 +80,7 @@ export interface AssessmentInput {
     readonly heldItemAttack: ItemAttack | null;
     /** Health one of its hits cost this bot (armour and difficulty already applied), null when unobserved. */
     readonly observedHitDamage: number | null;
+    readonly unknownMelee?: boolean;
     readonly observedIntervalTicks: number | null;
     readonly fuseRemainingTicks: number | null;
   }[];
@@ -176,6 +179,7 @@ function assessContact(contact: ContactInput, input: AssessmentInput, ourAttack:
     species: contact.species,
     damagePerHit,
     damageSource,
+    unknownMelee: contact.unknownMelee === true && damageSource !== "observed",
     hitIntervalTicks: hitIntervalTicks(contact),
     health,
     hitsToKill,

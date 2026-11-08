@@ -14,7 +14,7 @@ import { shieldAnswersThreats } from "../../weapons/aim.js";
 import { BOW_DRAW_TICKS, MELEE_RANGE } from "../../weapons/equipment.js";
 import { canMeleeTarget, hasMeleeKnockbackRoom, meleeDistance } from "../../weapons/melee.js";
 import { recoverUnderCover } from "../recover.js";
-import { isCreeper } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 import type { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
@@ -251,7 +251,7 @@ export class CoverFight {
               entry.windingUp &&
               isHostile(entry.entity) &&
               !canBeBystander(this.scene.bot, entry.entity) &&
-              !isCreeper(entry.entity),
+              !hasSelfExplosion(entry.entity.name, this.scene.bot.version),
           );
         candidates.sort(
           (a, b) =>

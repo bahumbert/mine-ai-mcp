@@ -19,7 +19,7 @@ export interface ResponseContext extends HostileContext {
   readonly survival: SurvivalResources;
   readonly policy: Readonly<CombatPolicy>;
   readonly food: Readonly<FoodPolicy>;
-  readonly perception: Pick<CombatPerception, "read" | "creeperClearance" | "tick" | "resolvedIds">;
+  readonly perception: Pick<CombatPerception, "read" | "observedHits" | "creeperClearance" | "tick" | "resolvedIds">;
 }
 
 /** Combat scopes read combat and food; navigation reads its live policy at the runtime boundary. */
