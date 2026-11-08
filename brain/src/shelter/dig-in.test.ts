@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, INSTANT_TYPING } from "../body.ts";
+import { Body, INSTANT_TYPING, type ActOutcome } from "../body.ts";
 import type { CarriedStack, ProtectedArea } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
 import { digShelterFlow, type ShelterContext, type ShelterHole, type ShelterTimings } from "./dig-in.ts";
@@ -50,6 +50,11 @@ function rig(options: RigOptions = {}) {
       if (!falls) pendingFall = { x, y, z };
       else if (y < here.y) moveTo(x + 0.5, y, z + 0.5);
     }
+    if (input.operation === "place") {
+      const offsets: Record<string, readonly [number, number]> = { west: [-1, 0], east: [1, 0], north: [0, -1], south: [0, 1] };
+      const [dx, dz] = offsets[String(input.face)] ?? [0, 0];
+      runtime.world.set(`${Number(input.x) + dx},${Number(input.y)},${Number(input.z) + dz}`, String(input.block_name));
+    }
     if (input.operation === "control" && input.state === "forward" && pendingFall !== null && options.neverLands !== true) {
       moveTo(pendingFall.x + 0.5, pendingFall.y, pendingFall.z + 0.5);
       pendingFall = null;
@@ -78,6 +83,30 @@ function rig(options: RigOptions = {}) {
 }
 
 const detailOf = (result: { readonly status: string; readonly detail?: string }) => result.detail ?? "";
+const failed = (error: string, status: ActOutcome["status"] = "failed"): ActOutcome => ({ status, error, preempted: false });
+
+/** Intercepts body outcomes to model an unmeasured reflex handing control back. */
+function intercept(r: ReturnType<typeof rig>, hook: (tool: string, input: Readonly<Record<string, unknown>>) => ActOutcome | null) {
+  const original = r.context.body.act.bind(r.context.body);
+  r.context.body.act = async (tool, input, reason, options) => hook(tool, input) ?? original(tool, input, reason, options);
+}
+
+test("by day without minutes nothing is submitted and the model is told how to shelter", async () => {
+  const { runtime, context } = rig({ dayCame: async () => true });
+  const result = await digShelterFlow(context);
+  assert.equal(result.status, "done");
+  assert.match(detailOf(result), /give minutes to stay in a while/u);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("minutes by day expire after digging and climbing out", async () => {
+  const { context, calls } = rig({ dayCame: async () => true, timings: { minuteMs: 10, waitSliceMs: 1 } });
+  let now = 0;
+  const result = await digShelterFlow({ ...context, now: () => now, alive: () => { now += 5; } }, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.deepEqual(calls("dig").map((dig) => dig.y), [63, 62, 61, 63]);
+  assert.equal(now, 20);
+});
 
 test("a night in the hole: three digs, the roof placed against its support, the day, the roof dug, the climb out: done", async () => {
   const { runtime, context, dayIn, calls, onPlace } = rig();
@@ -210,20 +239,136 @@ test("a needed dirt is not the roof: cobblestone is", async () => {
   assert.deepEqual(calls("place").map((place) => place.block_name), ["cobblestone"]);
 });
 
-// A dig that fails below the first says the bot is in a hole, where the surface is, and keeps the spot and the feet after it (a log tells a bad fall from a reflex).
-for (const [after, failedAt, deep] of [[63, 62, 1], [62, 61, 2]] as const) {
-  test(`the dig below ${after} fails: failed with the cell, the hole ${deep} deep, the way to the surface, the spot and the feet`, async () => {
-    const { runtime, context } = rig();
-    const dug = runtime.succeedEffects.raw_action!;
-    runtime.succeedEffects.raw_action = (input) => {
-      dug(input);
-      if (Number(input.y) === after) runtime.failNext.raw_action = { error: "[HOSTILE_CONTACT] a zombie hit me" };
-    };
-    const result = await digShelterFlow(context);
+test("a reflex interrupts the second dig two blocks away: return to the floor and dig it again", async () => {
+  const r = rig(); let once = true;
+  intercept(r, (tool, input) => {
+    if (tool === "raw_action" && input.operation === "dig" && input.y === 62 && once) {
+      once = false; r.moveTo(2.5, 64, 0.5); return failed("[HOSTILE_CONTACT] a zombie hit me");
+    }
+    return null;
+  });
+  r.onPlace(() => r.dayIn(20));
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.deepEqual(r.walks()[0], { x: 0, y: 63, z: 0, range: 0 });
+  assert.deepEqual(r.calls("dig").slice(0, 3).map((x) => x.y), [63, 62, 61]);
+  assert.match(detailOf(result), /resumes: 1 \(\[HOSTILE_CONTACT\]/u);
+});
+
+for (const reason of ["a broken tool", "[HOSTILE_CONTACT] evade response outmatched"]) {
+  test(`five dig failures (${reason}) give up after four resumes, naming position and cause`, async () => {
+    const r = rig();
+    intercept(r, (tool, input) => tool === "raw_action" && input.operation === "dig" ? failed(reason) : null);
+    const result = await digShelterFlow(r.context);
     assert.equal(result.status, "failed");
-    assert.match(detailOf(result), new RegExp(`could not dig the hole at 0 ${failedAt} 0: \\[HOSTILE_CONTACT\\] a zombie hit me; I am in a hole ${deep} deep: go_to a spot on the surface nearby \\(0 64 0\\) to get out \\(spot 0 64 0, feet 0 ${after} 0\\)`, "u"));
+    assert.match(detailOf(result), /gave up after 4 resumes; now at 0 64 0/u);
+    assert.ok(detailOf(result).includes(`resumes: 4 (${reason}`));
   });
 }
+
+test("a failed walk back counts another resume and retries", async () => {
+  const r = rig(); let interrupted = false; let failedWalk = false;
+  intercept(r, (tool, input) => {
+    if (tool === "raw_action" && input.operation === "dig" && !interrupted) { interrupted = true; r.moveTo(2.5, 64, 0.5); return failed("hit"); }
+    if (tool === "navigate" && !failedWalk) { failedWalk = true; return failed("no path yet"); }
+    return null;
+  });
+  r.onPlace(() => r.dayIn(20));
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /resumes: 2 \(hit; no path yet\)/u);
+});
+
+test("a busy dig until the minutes expire is not a resume", async () => {
+  const r = rig({ dayCame: async () => true, timings: { minuteMs: 5 } });
+  intercept(r, (tool) => tool === "raw_action" ? failed("ACTION_BUSY: reflex", "refused") : null);
+  const result = await digShelterFlow(r.context, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /resumes: 0/u);
+});
+
+test("a busy dig displaced outside at the deadline ends without a climb", async () => {
+  let now = 0;
+  const r = rig({ dayCame: async () => true, timings: { minuteMs: 10 } });
+  intercept(r, (tool, input) => {
+    if (tool === "raw_action" && input.operation === "dig" && input.y === 62) {
+      r.moveTo(2.5, 64, 0.5); now = 20; return failed("ACTION_BUSY: reflex", "refused");
+    }
+    return null;
+  });
+  const result = await digShelterFlow({ ...r.context, now: () => now }, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.equal(r.walks().length, 0);
+  assert.match(detailOf(result), /resumes: 0/u);
+});
+
+test("a busy walk to the first spot until the deadline ends without another candidate", async () => {
+  const r = rig({ dayCame: async () => true, timings: { minuteMs: 10 } }); let calls = 0;
+  intercept(r, (tool) => { if (tool === "navigate") { calls++; return failed("ACTION_BUSY: reflex", "refused"); } return null; });
+  const result = await digShelterFlow({ ...r.context, areas: [OWN_COLUMN_PROTECTED] }, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.ok(calls >= 1);
+  assert.equal(r.calls("dig").length, 0);
+});
+
+test("minutes expire at night even if dawn never comes", async () => {
+  const r = rig({ timings: { minuteMs: 10 } });
+  const result = await digShelterFlow(r.context, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.equal(r.runtime.snapshot.position.y, 64);
+});
+
+test("three ACTION_BUSY refusals do not count as resumes", async () => {
+  const r = rig(); let busy = 3;
+  intercept(r, (tool, input) => tool === "raw_action" && input.operation === "dig" && busy-- > 0 ? failed("ACTION_BUSY: reflex holds body", "refused") : null);
+  r.onPlace(() => r.dayIn(20));
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /resumes: 0/u);
+});
+
+test("a reflex moving twenty blocks away causes a new search there", async () => {
+  const r = rig(); let once = true;
+  intercept(r, (tool, input) => {
+    if (tool === "raw_action" && input.operation === "dig" && once) { once = false; r.moveTo(20.5, 64, 0.5); return failed("[HOSTILE_CONTACT] evade"); }
+    return null;
+  });
+  r.onPlace(() => r.dayIn(20));
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.equal(r.calls("dig")[0]?.x, 20);
+});
+
+test("an order after a failed dig prevents the walk back", async () => {
+  const r = rig(); let handedBack = false;
+  const status = r.runtime.status.bind(r.runtime);
+  r.runtime.status = async () => {
+    const snapshot = await status();
+    if (handedBack) r.controller.abort();
+    return snapshot;
+  };
+  intercept(r, (tool, input) => {
+    if (tool === "raw_action" && input.operation === "dig") { r.moveTo(2.5, 64, 0.5); handedBack = true; return failed("[HOSTILE_CONTACT] evade"); }
+    return null;
+  });
+  assert.equal((await digShelterFlow(r.context)).status, "stopped");
+  assert.equal(r.walks().length, 0);
+});
+
+test("minutes at night end at dawn before the deadline", async () => {
+  let now = 0;
+  const r = rig({ dayCame: async () => now >= 10, timings: { minuteMs: 10, waitSliceMs: 1 } });
+  const result = await digShelterFlow({ ...r.context, now: () => now, alive: () => { now += 5; } }, { minutes: 2 });
+  assert.equal(result.status, "done", detailOf(result));
+  assert.equal(r.runtime.snapshot.position.y, 64);
+  assert.equal(now, 10);
+});
+
+test("each shelter wait slice reports alive", async () => {
+  const r = rig(); let alive = 0; r.onPlace(() => r.dayIn(30));
+  const result = await digShelterFlow({ ...r.context, alive: () => { alive++; } });
+  assert.equal(result.status, "done"); assert.ok(alive >= 2);
+});
 
 test("an open hole dug before: no dig, the bot drops in by itself, roofs and waits", async () => {
   const { runtime, context, moveTo, dayIn, calls, onPlace } = rig();
@@ -287,15 +432,18 @@ test("a player standing in the best column: it is not dug, the next one is", asy
 });
 
 test("day already when the bot reaches the spot: nothing dug, done", async () => {
-  const { runtime, context } = rig({ dayCame: async () => true });
+  let checks = 0;
+  const { runtime, context } = rig({ dayCame: async () => ++checks > 1 });
   const result = await digShelterFlow(context);
   assert.equal(result.status, "done");
   assert.deepEqual(runtime.submitted, []);
 });
 
 test("the day coming after the second dig stops the digging and climbs out from depth 2, no roof placed", async () => {
-  const answers = [false, false];
-  const { runtime, context, calls } = rig({ dayCame: async () => answers.shift() ?? true });
+  let day = false;
+  const { runtime, context, calls } = rig({ dayCame: async () => day });
+  const dug = runtime.succeedEffects.raw_action!;
+  runtime.succeedEffects.raw_action = (input) => { dug(input); if (input.operation === "dig" && input.y === 62) day = true; };
   const result = await digShelterFlow(context);
   assert.deepEqual(calls("dig").map((dig) => dig.y), [63, 62]);
   assert.deepEqual(calls("place"), []);
@@ -309,24 +457,21 @@ function failedClimb() {
   const made = rig();
   made.onPlace(() => {
     made.dayIn(20);
-    made.runtime.failNext.raw_action = { error: "[OUT_OF_REACH] the roof is too far" };
-    made.runtime.failNext.navigate = { error: "[NO_PATH] no route out of the hole" };
+    made.runtime.failures.raw_action = "[OUT_OF_REACH] the roof is too far";
+    made.runtime.failures.navigate = "[NO_PATH] no route out of the hole";
   });
   return made;
 }
 
 test("a failed climb out is failed with the hole's floor and the roof still on when its dig failed (SKL-01)", async () => {
-  const { context } = failedClimb();
+  const { runtime, context, walks } = failedClimb();
   const result = await digShelterFlow(context);
   assert.equal(result.status, "failed");
   assert.match(detailOf(result), /still in my hole: feet at 0 61 0; its roof is still on: \[NO_PATH\]/u);
   assert.match(detailOf(result), /go_to a spot on the surface nearby \(0 64 0\)/u);
-});
-
-test("after a failed climb out the next step runs from the hole: a go_to from the floor position is submitted and settles", async () => {
-  const { runtime, context } = failedClimb();
-  const result = await digShelterFlow(context);
+  assert.equal(walks().filter((walk) => walk.range === 1).length, 2);
   assert.equal(runtime.snapshot.position.y, 61);
+  delete runtime.failures.navigate;
   const [, x, y, z] = /nearby \((-?\d+) (-?\d+) (-?\d+)\)/u.exec(detailOf(result)) ?? [];
   assert.ok(x !== undefined);
   const next = await context.body.act("navigate", { x: Number(x), y: Number(y), z: Number(z), range: 1 }, "the order after the shelter");
@@ -334,15 +479,75 @@ test("after a failed climb out the next step runs from the hole: a go_to from th
   assert.equal(runtime.snapshot.position.y, 64);
 });
 
-test("a bot that is no longer in the hole at night (a death, a reflex) ends failed at once, no roof dug, no walk back", async () => {
-  const { runtime, context, moveTo, calls, walks, onPlace } = rig();
-  onPlace(() => moveTo(50.5, 70, 50.5));
-  const result = await digShelterFlow(context);
+test("a transient failed climb succeeds on the single retry", async () => {
+  const r = rig();
+  r.onPlace(() => { r.dayIn(20); r.runtime.failNext.navigate = { error: "[NO_PATH] temporary" }; });
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /resumes: 1 \(\[NO_PATH\] temporary\)/u);
+  assert.equal(r.runtime.snapshot.position.y, 64);
+});
+
+test("a busy climb after the shelter ends is not counted as a resume", async () => {
+  const r = rig(); r.onPlace(() => r.dayIn(20));
+  intercept(r, (tool, input) => tool === "navigate" && input.range === 1 ? failed("ACTION_BUSY: reflex", "refused") : null);
+  const result = await digShelterFlow(r.context);
   assert.equal(result.status, "failed");
-  assert.match(detailOf(result), /no longer in my hole \(now at 50 70 50: a death, a reflex or a push\)/u);
-  assert.deepEqual(calls("dig").map((dig) => dig.y), [63, 62, 61]);
-  assert.equal(walks().length, 0);
-  assert.equal(runtime.snapshot.position.y, 70);
+  assert.match(detailOf(result), /ACTION_BUSY/u);
+  assert.match(detailOf(result), /resumes: 0/u);
+});
+
+test("a reflex displaces the bot during the climb: it reports its actual position", async () => {
+  const r = rig(); r.onPlace(() => r.dayIn(20));
+  intercept(r, (tool, input) => {
+    if (tool === "navigate" && input.range === 1) { r.moveTo(20.5, 64, 0.5); return failed("[HOSTILE_CONTACT] evade"); }
+    return null;
+  });
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /now at 20 64 0/u);
+  assert.match(detailOf(result), /resumes: 1/u);
+});
+
+test("a failed climb retry does not dig a roof already removed by the first attempt", async () => {
+  const r = rig();
+  r.onPlace(() => { r.dayIn(20); r.runtime.failures.navigate = "[NO_PATH] blocked"; });
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "failed");
+  assert.deepEqual(r.calls("dig").map((dig) => dig.y), [63, 62, 61, 63]);
+  assert.doesNotMatch(detailOf(result), /roof is still on/u);
+});
+
+test("giving up on a dig in the hole leaves a usable next go_to", async () => {
+  const r = rig();
+  intercept(r, (tool, input) => tool === "raw_action" && input.operation === "dig" && input.y === 62 ? failed("tool broke") : null);
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "failed");
+  assert.match(detailOf(result), /go_to a spot on the surface/u);
+  const next = await r.context.body.act("navigate", { x: 0, y: 64, z: 0, range: 1 }, "leave the partial hole");
+  assert.equal(next.status, "succeeded");
+});
+
+test("pushed from the hole with its roof gone: returns, roofs again and waits", async () => {
+  const r = rig(); let places = 0;
+  r.onPlace(() => {
+    places++;
+    if (places === 1) { r.runtime.world.set("0,63,0", "air"); r.moveTo(2.5, 64, 0.5); }
+    else r.dayIn(20);
+  });
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.deepEqual(r.walks()[0], { x: 0, y: 61, z: 0, range: 0 });
+  assert.equal(r.calls("place").length, 2);
+});
+
+test("death during the wait: search and dig at the distant respawn", async () => {
+  const r = rig(); let places = 0;
+  r.onPlace(() => { if (++places === 1) r.moveTo(300.5, 64, 0.5); else r.dayIn(20); });
+  const result = await digShelterFlow(r.context);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.ok(r.calls("dig").some((dig) => dig.x === 300));
+  assert.match(detailOf(result), /resumes: 1/u);
 });
 
 test("a roof the server refuses leaves the hole open and says so", async () => {
@@ -358,12 +563,15 @@ test("a roof the server refuses leaves the hole open and says so", async () => {
 });
 
 test("a stop while waiting returns stopped and leaves no timer", async () => {
-  const { context, controller, onPlace } = rig({ timings: { waitSliceMs: 60_000 } });
+  const { runtime, context, controller, onPlace } = rig({ timings: { waitSliceMs: 60_000 } });
   onPlace(() => setTimeout(() => controller.abort(), 20));
   const started = performance.now();
   const result = await digShelterFlow(context);
   assert.equal(result.status, "stopped");
   assert.ok(performance.now() - started < 2_000, "the abort ended the 60 s wait slice at once");
+  const next = await context.body.act("navigate", { x: 0, y: 64, z: 0, range: 1 }, "the next order leaves the roofed hole");
+  assert.equal(next.status, "succeeded");
+  assert.equal(runtime.snapshot.position.y, 64);
 });
 
 test("a stop during the climb out is stopped, not a failed climb", async () => {
