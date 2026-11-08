@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { findPlacementSupport, placeBlock } from "../../../world/placement.js";
+import { cellsOutsideRegionsFirst } from "../../../world/protected-regions.js";
 import type { CombatPolicy } from "../../policy/combat/contract.js";
 import { extinguishFireAt } from "../fire-clearance.js";
 import { capBlock } from "./hide-blocks.js";
@@ -38,7 +39,9 @@ export async function buildProtection(
   const { signal, mayContinue, terrain } = options;
   const protects = (block: ReturnType<Bot["blockAt"]>) =>
     fullProtectionBlock(block) && (!options.blockNames || options.blockNames.includes(block!.name));
-  const pending = [...new Map(cells.map((cell) => [cell.toString(), cell])).values()];
+  // Cells outside every region first, the bot's own region's next, another owner's last: its placement is refused by
+  // the core (ADR-012), after everything that can still be built has been.
+  const pending = cellsOutsideRegionsFirst(bot, [...new Map(cells.map((cell) => [cell.toString(), cell])).values()]);
   const placed: Vec3[] = [];
   const blocked = (reason: string): ProtectionBuild => ({ kind: "blocked", placed, reason });
   while (pending.length) {

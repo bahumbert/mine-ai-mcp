@@ -4,7 +4,7 @@ import { cellIntersectsPlayerBody } from "../utils/index.js";
 import { isDryPlacementSite, isLiquid, supportsFlatPlacement } from "./block-classification.js";
 import { placeBlock, findPlacementSupport, type WorldBlock } from "./placement.js";
 import { chestOpeningObstruction } from "./chest-clearance.js";
-import { protectedRegionAt, readProtectedRegions } from "./protected-regions.js";
+import { anyRegionAt, foreignRegionAt } from "./protected-regions.js";
 import { CRAFTING_STATION } from "./workstations.js";
 
 /** Vanilla block-interaction reach, measured from the bot's feet cell like every other placement here. */
@@ -39,12 +39,12 @@ function chooseCell(
   bot: Bot,
   itemName: string,
   maxRadius: number,
-  inRegions: boolean,
+  /** False: cells outside every region only. True: the bot's own regions' cells too; another owner's never. */
+  allowOwnRegions: boolean,
   /** Where the bot stands, or would stand: its feet cell and its body position. */
   from: { readonly feet: Vec3; readonly body: Vec3 } = { feet: bot.entity.position.floored(), body: bot.entity.position },
 ): PlacementCell | null {
   const { feet, body } = from;
-  const regions = readProtectedRegions(bot);
   let chosen: { readonly cell: PlacementCell; readonly distance: number; readonly onFloor: boolean } | null = null;
   for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
     for (let dz = -maxRadius; dz <= maxRadius; dz += 1) {
@@ -54,7 +54,7 @@ function chooseCell(
         if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, body)) continue;
         if (!isDryPlacementSite(bot.blockAt(position), bot.version)) continue;
         if (chestOpeningObstruction(bot, itemName, position)) continue;
-        if (!inRegions && protectedRegionAt(regions, bot.game.dimension, position.x, position.y, position.z) !== null) continue;
+        if ((allowOwnRegions ? foreignRegionAt(bot, position) : anyRegionAt(bot, position)) !== null) continue;
         const placement = findPlacementSupport(bot, position, supportsFlatPlacement);
         if (placement) {
           const { support, face } = placement;
@@ -135,7 +135,8 @@ export async function placeCarriedBlockNearby(
   const item = bot.inventory.items().find((candidate) => candidate.name === itemName);
   if (!item) return { kind: "no_item" };
   // Outside every protected region first, the bot's own included: a block put down there could not be taken back
-  // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside one only when nothing else is free.
+  // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside its own region only when
+  // nothing else is free; inside another owner's never (the placement core refuses it as well, ADR-012).
   const cell = chooseCell(bot, itemName, options.maxRadius ?? 3, false) ?? chooseCell(bot, itemName, options.maxRadius ?? 3, true);
   if (!cell) return { kind: "no_cell" };
   const result = await placeBlock(bot, {

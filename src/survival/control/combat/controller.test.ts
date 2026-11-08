@@ -28,6 +28,7 @@ import { incomingShieldProjectiles } from "../../perception/combat/shield-projec
 import { FootingRecovery } from "../../responses/footing.js";
 import { type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeWorld } from "../../../test-support/fake-bot/index.js";
 import { setCarriedCount } from "../../../test-support/carried-counts.js";
+import { foreignRegionAt, setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
 import { FightMovement } from "../../responses/fight/movement.js";
 import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facing.js";
@@ -251,6 +252,22 @@ test("blaze admission prices the whole cover before any aim, equipment or moveme
   assert.deepEqual(fixture.controls, []);
   assert.deepEqual(fixture.equipped, []);
   assert.equal(fixture.clock.tick, 0);
+});
+
+test("combat cover never plans a placement inside another owner's protected region (plan 06a T5a)", () => {
+  const { bot, target, navigation } = blazePreflightFixture(["iron_sword", "cobblestone"]);
+  bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;
+  const free = new CombatPosition(bot, navigation, target, new Set()).planCover();
+  assert.equal(free.kind, "ready");
+  if (free.kind !== "ready") return;
+  const first = free.plan.placements[0]!;
+  // A build of Tom's around the first cell the free plan would fill.
+  setProtectedRegionsProvider(bot, () => [
+    { regionId: 2, dimension: "overworld", min: { x: first.x, y: first.y, z: first.z }, max: { x: first.x, y: first.y, z: first.z }, owner: "Tom", label: "Tom's place" },
+  ]);
+  const planned = new CombatPosition(bot, navigation, target, new Set()).planCover();
+  assert.equal(planned.kind, "ready", "open ground offers another cover");
+  if (planned.kind === "ready") assert.ok(planned.plan.placements.every((cell) => foreignRegionAt(bot, cell) === null), "no foreign cell in the plan");
 });
 
 test("combat cover uses navigation's standing cell on a lowered soul-sand floor", () => {

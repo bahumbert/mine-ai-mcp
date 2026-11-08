@@ -7,6 +7,8 @@ import { isReplaceableForPlacement } from "./block-classification.js";
 import { carriedCount, settleInventoryCount } from "./inventory-count.js";
 import { SERVER_ANSWER_TICKS, waitForServerAnswer } from "./world-age.js";
 import { recordCombatResourceReceipt } from "../runtime/combat-resource-receipts.js";
+import { recordLifeSavingPlacement } from "./life-saving-placements.js";
+import { foreignRegionAt, regionRefusalText } from "./protected-regions.js";
 import type { BlockHalf } from "./block-states.js";
 
 export type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
@@ -51,6 +53,11 @@ export interface BlockPlacement {
   readonly onSent?: () => void;
   /** Longest wait for the server's answer on the wall clock; default `PLACEMENT_ANSWER_WALL_MS`. */
   readonly answerWallMs?: number;
+  /**
+   * A reflex saving the body (a footing block under a fall) may place inside someone else's protected region; the
+   * placement is then recorded in the life-saving ledger so the block can be taken out again (T5c).
+   */
+  readonly lifeSaving?: true;
 }
 
 /** The wall-clock bound of the answer wait: a server seconds behind answers inside it, a stopped server clock does not. */
@@ -66,7 +73,28 @@ export type RefusalCause = (typeof REFUSAL_CAUSES)[number];
 
 export type BlockPlacementResult =
   | { kind: "placed"; block: WorldBlock }
-  | { kind: "failed"; error: string; /** Set when a body stood in the cell; any other failure is a placement one. */ cause?: "entity" };
+  | {
+      kind: "failed";
+      error: string;
+      /** `entity`: a body stood in the cell; `policy`: another owner's protected region holds it; none: a placement failure. */
+      cause?: "entity" | "policy";
+    };
+
+/** The refusal for a cell inside someone else's region (ADR-012), unless a life-saving reflex places it. */
+function regionRefusal(bot: Bot, placement: BlockPlacement): BlockPlacementResult | null {
+  if (placement.lifeSaving) return null;
+  for (const cell of placement.expectedCells) {
+    const region = foreignRegionAt(bot, cell);
+    if (region) {
+      return {
+        kind: "failed",
+        error: `Placement cell (${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}: build elsewhere or ask its owner.`,
+        cause: "policy",
+      };
+    }
+  }
+  return null;
+}
 
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -137,6 +165,8 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
 
   try {
     placement.signal?.throwIfAborted();
+    const refusal = regionRefusal(bot, placement);
+    if (refusal) return refusal;
     const initialBlocker = occupiedCell(bot, cubeCell);
     if (initialBlocker) return { kind: "failed", error: initialBlocker, cause: "entity" };
     // Each Mineflayer call waits on the server (or on physics ticks): a death must end the placement, not the call.
@@ -157,6 +187,10 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     if (currentBlocker) return { kind: "failed", error: currentBlocker, cause: "entity" };
     setSneaking(bot, true);
     sentAtAge = bot.time?.age;
+    // Written down before the packet leaves: a death or a cut after it can leave the block standing unseen.
+    if (placement.lifeSaving) {
+      for (const cell of placement.expectedCells) recordLifeSavingPlacement(bot, asVec3(cell), "block", placement.item.name);
+    }
     placement.onSent?.();
     await raceSignal(placeWithoutLooking(bot, placement.support, face, placement.half), placement.signal);
   } catch (cause) {
@@ -287,7 +321,7 @@ export async function placeSolidBlockInto(
   bot: Bot,
   cell: Position3,
   item: InventoryItem | null,
-  options: { readonly signal?: AbortSignal } = {},
+  options: { readonly signal?: AbortSignal; readonly lifeSaving?: true } = {},
 ): Promise<BlockPlacementResult> {
   const position = asVec3(cell);
   const current = bot.blockAt(position);
@@ -305,5 +339,6 @@ export async function placeSolidBlockInto(
     expectedCells: [{ x: position.x, y: position.y, z: position.z }],
     matches: isSolid,
     ...(options.signal && { signal: options.signal }),
+    ...(options.lifeSaving && { lifeSaving: options.lifeSaving }),
   });
 }

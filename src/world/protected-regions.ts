@@ -59,3 +59,34 @@ export function protectedRegionAt(
 export function describeProtectedRegion(region: ProtectedRegion): string {
   return `protected region #${region.regionId} '${region.label}' (owner ${region.owner})`;
 }
+
+/** A region of someone else holding the cell, or null; the bot's own regions never refuse. Read at each call. */
+export function foreignRegionAt(bot: Bot, cell: BlockCorner): ProtectedRegion | null {
+  return protectedRegionAt(readProtectedRegions(bot), bot.game.dimension, cell.x, cell.y, cell.z, bot.username);
+}
+
+/** Any region (own included) holding the cell: for choosers that prefer cells outside every region. */
+export function anyRegionAt(bot: Bot, cell: BlockCorner): ProtectedRegion | null {
+  return protectedRegionAt(readProtectedRegions(bot), bot.game.dimension, cell.x, cell.y, cell.z);
+}
+
+/** Why a placement or dig was refused here, without the action's own words around it. */
+export function regionRefusalText(region: ProtectedRegion): string {
+  return `inside ${describeProtectedRegion(region)}`;
+}
+
+/**
+ * The cells in the order a chooser should try them: outside every region, then in the bot's own, then in someone
+ * else's (which the placement core refuses). Stable inside each group.
+ */
+export function cellsOutsideRegionsFirst<T extends BlockCorner>(bot: Bot, cells: readonly T[]): T[] {
+  const regions = readProtectedRegions(bot);
+  const rank = (cell: BlockCorner): number => {
+    if (protectedRegionAt(regions, bot.game.dimension, cell.x, cell.y, cell.z) === null) return 0;
+    return protectedRegionAt(regions, bot.game.dimension, cell.x, cell.y, cell.z, bot.username) === null ? 1 : 2;
+  };
+  return cells
+    .map((cell, index) => ({ cell, index, rank: rank(cell) }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map(({ cell }) => cell);
+}

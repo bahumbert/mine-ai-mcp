@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
+import { cellKey } from "../../utils/index.js";
+import { pendingLifeSavingPlacements } from "../../world/life-saving-placements.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { FootingRecovery } from "./footing.js";
 
 /** Physics ticks `clock` runs until `pending` settles (at most `max`), as Mineflayer's ticks would drive it. */
@@ -17,7 +20,7 @@ async function ticksUntilSettled(clock: FakeClock, pending: Promise<unknown>, ma
   return ticks;
 }
 
-function fixture(wide = false, clock?: FakeClock) {
+function fixture(wide = false, clock?: FakeClock, extra: FakeBotOptions = {}) {
   const world = new MemoryWorld();
   for (let x = -3; x <= 5; x++)
     for (let z = -3; z <= 3; z++)
@@ -27,6 +30,7 @@ function fixture(wide = false, clock?: FakeClock) {
     position: new Vec3(0.8, 47, 0.5),
     groundY: null,
     clock,
+    ...extra,
   });
   const { bot } = harness;
   const entity = bot.entity;
@@ -172,6 +176,45 @@ test("an observed lower terrace preserves protection and resumes only after actu
   assert.ok(protection >= 2);
   assert.equal(ticks, 2, "a predicted landing alone must not resume the request");
   assert.equal(f.controls.size, 0);
+});
+
+/** The footing block's cell (1, 46, 0) lies in a region of Tom; the floor ends at x 0, the impulse carries the body past it. */
+async function footingBlockInForeignRegion() {
+  const clock = createFakeClock({ mode: "mocked" });
+  const f = fixture(false, clock, {
+    username: "Ayla", gameMode: "creative", carried: { cobblestone: 8 }, cells: { [cellKey(new Vec3(0, 46, 0))]: "stone" },
+  });
+  setProtectedRegionsProvider(f.bot, () => [
+    { regionId: 6, dimension: "overworld", min: { x: 1, y: 40, z: -3 }, max: { x: 3, y: 60, z: 3 }, owner: "Tom", label: "a build" },
+  ]);
+  using _timers = clock.install();
+  using recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  f.entity.position = new Vec3(0.8, 47.5, 0.5);
+  f.entity.velocity = new Vec3(0.3, 0, 0);
+  f.entity.onGround = false;
+  const placed = () => f.server.packets.some((packet) => packet.name === "block_place");
+  f.onEachTick(() => {
+    if (!placed()) return;
+    // The server has the block: the floor is there and the body stands on it.
+    f.world.load({ x: 1, y: 46, z: 0 }, { stateId: 1 });
+    f.entity.position = new Vec3(1.5, 47, 0.5);
+    f.entity.velocity = new Vec3(0, 0, 0);
+    f.entity.onGround = true;
+  });
+  const recovered = recovery.recover(new AbortController().signal);
+  await ticksUntilSettled(f.clock, recovered, 60);
+  return { outcome: await recovered, placed: placed(), ledger: pendingLifeSavingPlacements(f.bot) };
+}
+
+test("a footing block in a foreign region is placed and recorded", async () => {
+  const result = await footingBlockInForeignRegion();
+  assert.equal(result.outcome, "landed");
+  assert.equal(result.placed, true, "the reflex does not wait for a region's leave");
+  assert.deepEqual(
+    result.ledger.map(({ cell, block, regionId, kind }) => ({ cell: cell.toString(), block, regionId, kind })),
+    [{ cell: new Vec3(1, 46, 0).toString(), block: "cobblestone", regionId: 6, kind: "block" }],
+  );
 });
 
 test("a blast-broken floor can steer onto the adjacent lower cell before releasing the request", async () => {

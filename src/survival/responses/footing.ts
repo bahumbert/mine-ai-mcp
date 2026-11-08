@@ -255,6 +255,8 @@ export class FootingRecovery implements Disposable {
         expectedCells: [{ ...cell }],
         signal,
         matches: (placed) => placed.name === item.name,
+        // A body falling past its footing is saved even inside someone else's region; the ledger lets it be taken out.
+        lifeSaving: true,
       });
       this.#state = {
         ...this.#state!,

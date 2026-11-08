@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import {
   type FakeBotOptions,
@@ -9,6 +8,7 @@ import {
   createFakeBot,
   createFakeClock,
 } from "../test-support/fake-bot/index.js";
+import { placementAt } from "../test-support/placement-request.js";
 import { placeBlock, type InventoryItem, type WorldBlock } from "./placement.js";
 
 /** Off every target cell: Mineflayer lists the bot's own entity in `bot.entities` (`entities.js:105`), which a placement checks. */
@@ -41,17 +41,6 @@ const QUARTER_TURN_MS = 1_000;
 const SERVER_ANSWER_MS = 50;
 /** Two time packets, one a second (contract check `world-age-per-second`): the 40 ticks past a send. */
 const TWO_TIME_PACKETS_MS = 2_000;
-
-function placementAt(bot: Bot, item: InventoryItem, target: Vec3, extra: Record<string, unknown> = {}) {
-  return {
-    item,
-    support: bot.blockAt(target.offset(0, -1, 0))!,
-    face: new Vec3(0, 1, 0),
-    expectedCells: [target] as [Vec3],
-    matches: (block: WorldBlock) => block.name === item.name,
-    ...extra,
-  };
-}
 
 test("placement settles the last item before another caller can select the emptied stack", async () => {
   const target = new Vec3(0, 64, 0);

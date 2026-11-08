@@ -1,6 +1,6 @@
 import { bucketAvailable } from "../../navigation/mineflayer/water-landing.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
-import { describeProtectedRegion, protectedRegionAt, readProtectedRegions, sameOwner } from "../../world/protected-regions.js";
+import { protectedRegionAt, readProtectedRegions, regionRefusalText, sameOwner } from "../../world/protected-regions.js";
 import { sealedPitRefusal } from "./sealed-pit-refusal.js";
 /**
  * The production movement policy: what the bot may dig, place, or step on,
@@ -504,7 +504,7 @@ export function createMineflayerMovementPolicy(
     const regions = readProtectedRegions(bot);
     if (regions.length === 0) return null;
     const region = protectedRegionAt(regions, bot.game.dimension, x, y, z, options.ignoreRegionsOwnedBy ?? (ownRegionsOpen ? bot.username : undefined));
-    return region === null ? null : { kind: "prohibited", reason: `inside ${describeProtectedRegion(region)}` };
+    return region === null ? null : { kind: "prohibited", reason: regionRefusalText(region) };
   };
 
   // Whether a route may stand in or on a cell: damaging, lava, or a block to

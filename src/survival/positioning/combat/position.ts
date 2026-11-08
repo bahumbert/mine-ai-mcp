@@ -16,6 +16,7 @@ import { blockClass } from "../../../navigation/mineflayer/world.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { clearCombatRay, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { occupiedCell } from "../../../world/placement.js";
+import { foreignRegionAt } from "../../../world/protected-regions.js";
 import { positionThreat, type CombatPerception } from "../../perception/combat/observations.js";
 import { fireAt } from "../../perception/body.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
@@ -109,7 +110,12 @@ export class CombatPosition {
   private canPlaceProtection = (cell: Vec3): boolean => {
     const observed = this.navigation.world.blockAt(cell.x, cell.y, cell.z);
     const block = observed.kind === "loaded" ? blockClass(this.bot).fromStateId(observed.stateId, 0) : null;
-    return isReplaceableForPlacement(block, this.bot.version) && occupiedCell(this.bot, cell) === null;
+    // Another owner's region refuses the placement (ADR-012): a plan with such a cell is priced out, not half built.
+    return (
+      isReplaceableForPlacement(block, this.bot.version) &&
+      occupiedCell(this.bot, cell) === null &&
+      foreignRegionAt(this.bot, cell) === null
+    );
   };
 
   /** Reject this geometry for this target position, not the target or the hunt. */
