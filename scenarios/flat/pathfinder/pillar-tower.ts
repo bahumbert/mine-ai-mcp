@@ -1,4 +1,5 @@
 /** Compare repeated same-cell pillar actuation with an independently observed tower. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { ClientCompletion } from "mine-labs/client";
 import { createNavigateAction, ActionRunner } from "@aibengineering/mine-ai-mcp";
 
@@ -37,7 +38,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     }
     context.log("Unsupported adjacent height refused with requested Y, unchanged position and scaffold inventory.");
 
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     const run = await new ActionRunner().run(
       createNavigateAction(bot, context.navigation),
       { ...TARGET, range: 0.5, build: true },
@@ -46,7 +47,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     const cell = bot.entity.position.floored();
     const reached = cell.x === TARGET.x && cell.y === TARGET.y && cell.z === TARGET.z;
     const detail =
-      `${run.result.status} in ${Date.now() - startedAt} ms at ${cell.x},${cell.y},${cell.z}; ` +
+      `${run.result.status} in ${monotonicNow() - startedAt} ms at ${cell.x},${cell.y},${cell.z}; ` +
       context.pathfinder.summary();
     const failureDetail = run.result.status === "succeeded" ? "target cell was not observed" : run.result.error;
     context.log(detail);

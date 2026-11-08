@@ -1,4 +1,5 @@
 // Starting the daemon from `submit`: one daemon per socket, enforced by a non-blocking flock held for the daemon's life.
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
@@ -34,8 +35,8 @@ export async function ensureDaemon(options: { readonly socketPath: string; reado
   const log = openSync(join(logDir, "daemon.log"), "a");
   const [program, ...args] = daemonCommand(options.daemonFile, options.socketPath, options.port, process.execPath);
   spawn(program!, args, { cwd: options.repoRoot, env: daemonEnv(process.env), detached: true, stdio: ["ignore", log, log] }).unref();
-  const deadline = Date.now() + START_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + START_TIMEOUT_MS;
+  while (monotonicNow() < deadline) {
     if (await daemonListens(options.socketPath)) return;
     await new Promise(resolve => setTimeout(resolve, START_POLL_MS));
   }

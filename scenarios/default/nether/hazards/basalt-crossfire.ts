@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../../src/utils/monotonic-clock.ts";
 import type { BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
@@ -59,7 +60,7 @@ export const run: MineAiScenario = async (context) => {
   const seen = new Set<string>();
   const damage: unknown[] = [];
   const samples: unknown[] = [];
-  const started = Date.now();
+  const started = monotonicNow();
   let lastSample = 0;
   const runtime = await openRuntime(context, "basalt-crossfire");
   const stopNavigation = runtime.navigation.onEvent((event) => {
@@ -82,7 +83,7 @@ export const run: MineAiScenario = async (context) => {
     )
       endermanAttackedFirst = true;
     damage.push({
-      ms: Date.now() - started,
+      ms: monotonicNow() - started,
       target: entity.name,
       id: entity.id,
       source: source?.name,
@@ -97,10 +98,10 @@ export const run: MineAiScenario = async (context) => {
     onMagma ||= bot.entity.onGround && bot.blockAt(position.offset(0, -0.1, 0))?.name === "magma_block";
     for (const e of Object.values(bot.entities))
       if (e.isValid && e.position.distanceTo(position) < 32 && e.name) seen.add(e.name);
-    if (Date.now() - lastSample < 1000) return;
-    lastSample = Date.now();
+    if (monotonicNow() - lastSample < 1000) return;
+    lastSample = monotonicNow();
     samples.push({
-      ms: Date.now() - started,
+      ms: monotonicNow() - started,
       position: position.clone(),
       health: bot.health,
       owner: runtime.status().activeAction?.action,

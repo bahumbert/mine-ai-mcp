@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -38,7 +39,7 @@ export const run: MineAiScenario = async (context) => {
       handoffs++;
     });
     bot.chat("/execute as @e[tag=night_ring] run data merge entity @s {NoAI:0b}");
-    const started = Date.now();
+    const started = monotonicNow();
     const startingAge = bot.time.age;
     let ticks = 0;
     while (bot.time.timeOfDay >= 13000) {
@@ -63,7 +64,7 @@ export const run: MineAiScenario = async (context) => {
       handoffs,
       ticks,
       worldTicks,
-      elapsedMs: Date.now() - started,
+      elapsedMs: monotonicNow() - started,
       minimumHealth,
       died: died.signal.aborted,
       dawn: bot.time.timeOfDay,

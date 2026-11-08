@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import {
@@ -64,7 +65,7 @@ export const run: MineAiScenario = async (context) => {
   // defence can claim the body while we await the native-AI acknowledgement,
   // and the single measured hunt is refused before it ever starts.
   await releaseThreats(context);
-  const started = Date.now();
+  const started = monotonicNow();
   const runtime = await openRuntime(context, "fortress-twelve-rods");
   let deaths = 0,
     minimumHealth = bot.health,
@@ -74,7 +75,7 @@ export const run: MineAiScenario = async (context) => {
   let phase: unknown = null;
   const useFlags = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("living_entity_flags");
   const snapshot = () => ({
-    ms: Date.now() - started,
+    ms: monotonicNow() - started,
     position: bot.entity.position.clone(),
     velocity: bot.entity.velocity.clone(),
     health: bot.health,
@@ -162,7 +163,7 @@ export const run: MineAiScenario = async (context) => {
     // Keep defence attached through a full native blaze charge and volley
     // after the last pickup, so delayed fire cannot turn a death into a pass.
     if (bot.inventory.count(rodId, null) >= collection.drops) await bot.waitForTicks(100);
-    const elapsedMs = Date.now() - started;
+    const elapsedMs = monotonicNow() - started;
     const gained = bot.inventory.count(rodId, null);
     const dropsPerMinute = (Math.min(gained, collection.drops) * 60_000) / elapsedMs;
 

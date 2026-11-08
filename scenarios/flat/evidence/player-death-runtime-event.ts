@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ClientCompletion } from "mine-labs/client";
@@ -49,8 +50,8 @@ function foregroundResultFrom(response: unknown): unknown {
 const FOREGROUND_WAIT_MS = 120_000;
 
 async function waitUntil(check: () => boolean, description: string | (() => string), timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  const deadline = monotonicNow() + timeoutMs;
+  while (!check() && monotonicNow() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
   if (!check()) throw new Error(`Timed out waiting for ${typeof description === "string" ? description : description()}.`);
 }
 

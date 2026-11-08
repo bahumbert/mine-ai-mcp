@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
 import { hideInPlace } from "../../../src/survival/responses/hide.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
@@ -30,7 +31,7 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
   if (!neutral && observedWeapon !== "stone_sword")
     throw new Error(`Attacker stone sword not observed: ${observedWeapon}`);
   log(JSON.stringify({ kind: "arranged", mobId: mob.id, observedWeapon, health: bot.health }));
-  const started = Date.now();
+  const started = monotonicNow();
   const abort = new AbortController();
   let died = false;
   let attacks = 0;
@@ -40,7 +41,7 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
       log(
         JSON.stringify({
           kind: name,
-          ms: Date.now() - started,
+          ms: monotonicNow() - started,
           data,
           held: bot.heldItem?.name,
           count: bot.heldItem?.count,
@@ -96,7 +97,7 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
       attacks,
       health: bot.health,
       openCells,
-      durationMs: Date.now() - started,
+      durationMs: monotonicNow() - started,
     };
     log(JSON.stringify(evidence));
     return { status: passed ? "succeeded" : "failed", detail: JSON.stringify(evidence) };

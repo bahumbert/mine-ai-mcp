@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import type { Bot } from "mineflayer";
 import { appendFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -127,7 +128,7 @@ export const run: MineAiScenario = async context => {
   const artifacts = process.env.MINE_LABS_ARTIFACTS_DIR!;
   const stop = new AbortController();
   const signal = AbortSignal.any([context.signal, stop.signal]);
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   let callSequence = 0;
   let currentAction: string | null = null;
   let stopDiagnostics = () => {};
@@ -138,14 +139,14 @@ export const run: MineAiScenario = async context => {
         if (event.kind !== "response" || !event.evidence || typeof event.evidence !== "object" ||
             Array.isArray(event.evidence) || !("boundary" in event.evidence) || event.evidence.boundary !== "dragon_perch") return;
         appendFileSync(path.join(artifacts, "perch-decisions.jsonl"),
-          JSON.stringify({ ms: Date.now() - startedAt, callSequence, action: currentAction, ...event.evidence }) + "\n");
+          JSON.stringify({ ms: monotonicNow() - startedAt, callSequence, action: currentAction, ...event.evidence }) + "\n");
       });
       return combat;
     },
   });
   let stage: "crystals" | "perch" = params.phase === "perch" ? "perch" : "crystals";
   let ticks = 0, deaths = 0, lowestHealth = bot.health;
-  const snapshot = () => ({ ms: Date.now() - startedAt, stage, health: bot.health, lowestHealth, deaths,
+  const snapshot = () => ({ ms: monotonicNow() - startedAt, stage, health: bot.health, lowestHealth, deaths,
     position: bot.entity.position, grounded: bot.entity.onGround,
     crystals: Object.values(bot.entities).filter(e => e.isValid && e.name === "end_crystal").length,
     dragons: Object.values(bot.entities).filter(e => e.isValid && e.name === "ender_dragon")
@@ -165,13 +166,13 @@ export const run: MineAiScenario = async context => {
     while (runtime.status().busy) { signal.throwIfAborted(); await bot.waitForTicks(1); }
     const action = runtime.actions.find(a => a.name === name);
     if (!action) throw new Error("Missing action " + name);
-    const at = Date.now();
+    const at = monotonicNow();
     callSequence++;
     currentAction = name;
     appendFileSync(path.join(artifacts, "calls.jsonl"), JSON.stringify({ ms: at - startedAt, callSequence, name, input }) + "\n");
     log("CALL " + name + " " + JSON.stringify(input));
     const output = await runtime.run(action, input, signal);
-    appendFileSync(path.join(artifacts, "calls.jsonl"), JSON.stringify({ ms: Date.now() - startedAt, callSequence, name, durationMs: Date.now() - at, output }) + "\n");
+    appendFileSync(path.join(artifacts, "calls.jsonl"), JSON.stringify({ ms: monotonicNow() - startedAt, callSequence, name, durationMs: monotonicNow() - at, output }) + "\n");
     currentAction = null;
     log("RESULT " + name + ": " + output.result.status);
     return output;

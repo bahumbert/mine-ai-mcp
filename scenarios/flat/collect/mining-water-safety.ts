@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-client.ts";
@@ -16,7 +17,7 @@ export const run: MineAiScenario = async (context) => {
   let minHealth = bot.health;
   let digTicks = 0;
   let arrivals = 0;
-  const start = Date.now();
+  const start = monotonicNow();
   const tick = () => {
     wet ||= Reflect.get(bot.entity, "isInWater") === true;
     minHealth = Math.min(minHealth, bot.health);
@@ -33,7 +34,7 @@ export const run: MineAiScenario = async (context) => {
     const gained = bot.inventory.items().filter((item) => item.name === "cobblestone")
       .reduce((sum, item) => sum + item.count, 0);
     const roofIntact = !roof || bot.blockAt(new Vec3(1, -60, 0))?.name === "stone";
-    const elapsedMs = Date.now() - start;
+    const elapsedMs = monotonicNow() - start;
     return {
       status: output.result.status === "succeeded" && gained >= wanted && minHealth === 20 &&
         (flowing ? wet : !wet) && roofIntact && elapsedMs < 45_000 ? "succeeded" : "failed",

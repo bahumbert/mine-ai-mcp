@@ -1,4 +1,5 @@
 /** Arrangement checks and observed combat evidence shared by the fortress trials. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { Entity } from "prismarine-entity";
 import { z } from "zod";
 import { declaredEntitiesArranged, standStill, wearArmor } from "../../src/runtime.ts";
@@ -63,7 +64,7 @@ export async function releaseThreats(context: MineAiScenarioContext): Promise<vo
 
 export function observeFortress(context: MineAiScenarioContext) {
   const { bot } = context;
-  const started = Date.now();
+  const started = monotonicNow();
   const initialHealth = bot.health;
   const start = bot.entity.position.clone();
   const dimension = bot.game.dimension;
@@ -100,7 +101,7 @@ export function observeFortress(context: MineAiScenarioContext) {
     if (entity.name === "small_fireball" || entity.name === "fireball") fireballs++;
   };
   const snapshot = () => ({
-    elapsedMs: Date.now() - started,
+    elapsedMs: monotonicNow() - started,
     deaths,
     initialHealth,
     minimumHealth,

@@ -1,4 +1,5 @@
 /** Run one Mine Labs driver with a prepared bot and the Minecraft runtime. */
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import path from "node:path";
 import { mkdtempDisposable } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -123,15 +124,15 @@ async function runTimedDriver(driver: ScenarioRun, context: ScenarioContext, ses
   session.signal.throwIfAborted();
 
   // Preparation is outside the trial budget; only the driver's run is timed.
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   try {
     const completion = await driver(context);
-    const detail = [completion.detail, `duration ${Date.now() - startedAt} ms`].filter(Boolean).join("; ");
+    const detail = [completion.detail, `duration ${monotonicNow() - startedAt} ms`].filter(Boolean).join("; ");
     return { ...completion, detail };
   } catch (cause) {
     session.signal.throwIfAborted();
     const error = cause instanceof Error ? cause.message : String(cause);
-    const detail = [error, `duration ${Date.now() - startedAt} ms`].filter(Boolean).join("; ");
+    const detail = [error, `duration ${monotonicNow() - startedAt} ms`].filter(Boolean).join("; ");
     return { status: "failed", detail };
   }
 }

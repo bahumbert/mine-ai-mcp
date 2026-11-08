@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
@@ -185,7 +186,7 @@ export const run: MineAiScenario = async (context) => {
     try {
       // The collection variant replenishes only an exhausted target population;
       // terrain, native health and loot stay unchanged throughout the trip.
-      const started = Date.now();
+      const started = monotonicNow();
       const [x, y, z] = params.approach;
       const outward = await call("navigate", { x, y, z, range: 1, dig: false, scaffold: false });
       const requested = params.collection?.drops ?? 1;
@@ -204,7 +205,7 @@ export const run: MineAiScenario = async (context) => {
       // Keep the reflex attached through five seconds of post-return damage and delayed contact.
       await bot.waitForTicks(100);
       const gained = bot.inventory.count(pearlId, null) - initialPearls;
-      const elapsedMs = Date.now() - started;
+      const elapsedMs = monotonicNow() - started;
       const dropsPerMinute = (Math.min(gained, requested) * 60_000) / elapsedMs;
       const remaining = bot.entity.position.distanceTo(start);
       const passed =

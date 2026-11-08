@@ -1,4 +1,5 @@
 /** A hurt bot afloat in a pool must fight or evade, never hide, and keep answering status reads. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
@@ -30,9 +31,9 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     let slowestReadMs = 0;
     for (let tick = 0; tick < params.waitTicks && !died; tick += 5) {
       context.signal.throwIfAborted();
-      const started = Date.now();
+      const started = monotonicNow();
       seen.push(...(await readEncounters(context, runtime)));
-      slowestReadMs = Math.max(slowestReadMs, Date.now() - started);
+      slowestReadMs = Math.max(slowestReadMs, monotonicNow() - started);
       if (seen.some((encounter) => encounter.response !== "hide")) break;
       await bot.waitForTicks(5);
     }

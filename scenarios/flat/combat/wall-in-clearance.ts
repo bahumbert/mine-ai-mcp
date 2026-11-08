@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
 import { hideInPlace } from "../../../src/survival/responses/hide.ts";
 import { standStill } from "../../src/runtime.ts";
@@ -11,7 +12,7 @@ export const run: MineAiScenario = async (context) => {
     .items()
     .filter((item) => item.name === "cobblestone")
     .reduce((sum, item) => sum + item.count, 0);
-  const started = Date.now();
+  const started = monotonicNow();
   using responseOwner1 = new ScenarioCombat(context.bot, context.navigation);
   const result = await hideInPlace(context.bot, {
     threatContext: {
@@ -46,7 +47,7 @@ export const run: MineAiScenario = async (context) => {
       open,
       blocksBefore,
       blocksAfter,
-      elapsedMs: Date.now() - started,
+      elapsedMs: monotonicNow() - started,
     }),
   };
 };

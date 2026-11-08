@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { DEFAULT_COMBAT_POLICY } from "../../../src/survival/policy/combat/contract.ts";
 import { DEFAULT_NAVIGATION_POLICY } from "../../../src/survival/policy/contract.ts";
 /**
@@ -82,9 +83,9 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     const [x, y, z] = params.target;
     const runner = new ActionRunner();
     const navigate = createNavigateAction(bot, context.navigation);
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     const output = await runner.run(navigate, { x, y, z, range: params.range }, context.signal);
-    const elapsedMs = Date.now() - startedAt;
+    const elapsedMs = monotonicNow() - startedAt;
 
     let visited = 0;
     let computeMs = 0;

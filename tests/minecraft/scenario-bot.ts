@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import { once, type EventEmitter } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import mineflayer, { type Bot } from "mineflayer";
@@ -140,10 +141,10 @@ async function waitForArrangement(bot: Bot, session: PreparationSession, signal:
 }
 
 async function waitForStandingColumn(bot: Bot, signal: AbortSignal): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = monotonicNow() + 30_000;
   while (bot.blockAt(bot.entity.position) === null) {
     signal.throwIfAborted();
-    if (Date.now() > deadline) throw new Error(`The starting column at ${bot.entity.position} did not load within 30 seconds.`);
+    if (monotonicNow() > deadline) throw new Error(`The starting column at ${bot.entity.position} did not load within 30 seconds.`);
     await delay(50, undefined, { signal });
   }
   signal.throwIfAborted();

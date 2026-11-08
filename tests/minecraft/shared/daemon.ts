@@ -1,4 +1,5 @@
 // The scenario daemon: listens on a unix socket, owns the server pool and the scheduler, samples the machine, exits when idle.
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Scenario } from "mine-labs";
@@ -122,7 +123,7 @@ async function serverParts(options: DaemonOptions): Promise<{ readonly factory: 
 
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const { config, log, socketPath } = options;
-  const now = Date.now;
+  const now = () => Math.round(monotonicNow());
   const { factory, templateBuilds } = await serverParts(options);
   const pool = new ServerPool(factory, config, log);
   const clientsAhead = options.clientsAhead ?? (options.runTrial ? undefined : new ClientsAhead({ config, log, now }));

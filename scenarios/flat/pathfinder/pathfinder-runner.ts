@@ -1,4 +1,5 @@
 /** Generic scenario driver for pathfinder navigation tests with candidate comparison telemetry. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
 import { z } from "zod";
@@ -72,11 +73,11 @@ export async function run(
       const label = leg.label ?? `leg ${index + 1}`;
       context.log(`Starting ${label} to [${tx}, ${ty}, ${tz}] with range ${leg.range}`);
 
-      const startedAt = Date.now();
+      const startedAt = monotonicNow();
       const output = await runner.run(navigate, { x: tx, y: ty, z: tz, range: leg.range }, context.signal);
 
       const result = output.result;
-      const elapsedMs = Date.now() - startedAt;
+      const elapsedMs = monotonicNow() - startedAt;
 
       if (result.status !== "succeeded") {
         const errorDetail = `${label} failed with status ${result.status}: ${result.error ?? "unknown error"}`;

@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { createMinecraftRuntime } from "../../../src/runtime/minecraft-runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { readEncounters } from "./reflex.ts";
@@ -20,8 +21,8 @@ export const run: MineAiScenario = async (context) => {
       identity: { worldId: "piglin-attribution", scope: { kind: "bot", botId: bot.username } },
     },
   });
-  const started = Date.now();
-  const record = (kind: string, value: unknown) => log(JSON.stringify({ ms: Date.now() - started, kind, value }));
+  const started = monotonicNow();
+  const record = (kind: string, value: unknown) => log(JSON.stringify({ ms: monotonicNow() - started, kind, value }));
   const damage = (packet: unknown) => record("damage_event", packet);
   let sourceLessHurt = false;
   let attributedBeforeResponse = false;
@@ -70,13 +71,13 @@ export const run: MineAiScenario = async (context) => {
   });
   const originalLookAt = bot.lookAt;
   bot.lookAt = async (point, force) => {
-    if (Date.now() - started > 15_000) record("lookStart", { point, force, ...body() });
+    if (monotonicNow() - started > 15_000) record("lookStart", { point, force, ...body() });
     await originalLookAt.call(bot, point, force);
-    if (Date.now() - started > 15_000) record("lookEnd", { point, force, ...body() });
+    if (monotonicNow() - started > 15_000) record("lookEnd", { point, force, ...body() });
   };
   const originalWrite = bot._client.write;
   bot._client.write = (name, params) => {
-    if (Date.now() - started > 15_000 && ["block_dig", "block_place", "use_item_on", "use_entity"].includes(name))
+    if (monotonicNow() - started > 15_000 && ["block_dig", "block_place", "use_item_on", "use_entity"].includes(name))
       record("outgoing", { name, params, ...body() });
     return originalWrite.call(bot._client, name, params);
   };
@@ -109,7 +110,7 @@ export const run: MineAiScenario = async (context) => {
     // telemetry; surviving the arranged overlapping damage is the verdict.
     for (let tick = 0; !died && tick < 400; tick++) {
       signal.throwIfAborted();
-      if (Date.now() - started > 15_000 && tick % 5 === 0)
+      if (monotonicNow() - started > 15_000 && tick % 5 === 0)
         record("body", {
           position: bot.entity.position,
           controls: controls(),

@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import mineflayer, { type Bot } from "mineflayer";
@@ -65,10 +66,10 @@ async function runMineAiScenario(file: string, session: NodeClientSession): Prom
     session.prepared();
     await session.start;
     if (session.signal.aborted) return;
-    startedAt = Date.now();
+    startedAt = monotonicNow();
     const completion = await run(context);
     if (!session.signal.aborted) {
-      const elapsedMs = Date.now() - startedAt;
+      const elapsedMs = monotonicNow() - startedAt;
       // Drivers that already appended the summary themselves keep theirs; the
       // rest get it here. Either way it appears exactly once, and it carries
       // the memory figures, so the host no longer runs a second probe of the
@@ -83,7 +84,7 @@ async function runMineAiScenario(file: string, session: NodeClientSession): Prom
   } catch (cause) {
     if (session.signal.aborted) return;
     if (startedAt === undefined) throw cause;
-    const elapsedMs = Date.now() - startedAt;
+    const elapsedMs = monotonicNow() - startedAt;
     const complaint = cause instanceof Error ? cause.message : String(cause);
     const detail = `${complaint}; duration ${elapsedMs} ms; ${pathfinder.summary()}`;
     session.log(`scenario client failed: ${detail}`);
@@ -167,9 +168,9 @@ function holdStillWhileChunksLoad(bot: Bot): void {
 }
 
 async function standingColumnLoaded(bot: Bot): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = monotonicNow() + 30_000;
   while (bot.blockAt(bot.entity.position) === null) {
-    if (Date.now() > deadline) throw new Error(`column under ${bot.entity.position} did not load within 30s`);
+    if (monotonicNow() > deadline) throw new Error(`column under ${bot.entity.position} did not load within 30s`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
