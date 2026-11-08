@@ -7,6 +7,23 @@ import { createFakeBot, type FakeBot, type FakeHarness } from "../../test-suppor
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
+import { useBucketOutcomes } from "../use-bucket/contract.js";
+
+test("use_item with a held lava bucket aimed at the bot's own feet cell is refused with the same message", async () => {
+  const { bot, clock, server } = createFakeBot({
+    position: new Vec3(0.5, 64, 0.5), groundY: 63,
+    slots: { 36: { name: "lava_bucket" } },
+  });
+  await bot.look(0, -Math.PI / 2, true);
+  const running = executeRawAction(bot, { operation: "use_item", hand: "hand" }, {});
+  await clock.advance(100);
+  const result = await running;
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail("raw use must not bypass the pour guard");
+  assert.ok(result.error.endsWith(useBucketOutcomes.pourReachesBody(bot.username, new Vec3(0, 64, 0))), result.error);
+  assert.equal(result.attempted, false);
+  assert.equal(server.packets.filter((packet) => packet.name === "use_item").length, 0);
+});
 
 test("parses each operation into a small discriminated request and rejects mixed fields", () => {
   assert.deepEqual(

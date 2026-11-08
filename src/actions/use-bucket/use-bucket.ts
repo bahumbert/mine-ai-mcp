@@ -46,6 +46,7 @@ import {
 } from "../../world/index.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import type { ObserveRequest } from "../../session/request.js";
+import { pourRefusal } from "./pour-guard.js";
 import {
   parseUseBucketRequest,
   USE_BUCKET,
@@ -390,8 +391,12 @@ async function castBucket(
     });
   }
   if (!isReplaceableForPlacement(targetBlock, bot.version)) return refused(useBucketOutcomes.targetOccupied(targetBlock.name));
+  const beforeAim = pourRefusal(bot, target, request.liquid);
+  if (beforeAim) return refused(beforeAim);
   const stepped = await aimWithCloserSteps(bot, target, context, dependencies);
   if ("error" in stepped) return refused(stepped.error);
+  const afterAim = pourRefusal(bot, target, request.liquid);
+  if (afterAim) return refused(afterAim);
   progress.aimedAt = stepped.aim.surface;
   progress.watch = watchFormations(bot, target);
   return dependencies.useItem(bot, {

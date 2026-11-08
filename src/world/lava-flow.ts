@@ -36,7 +36,7 @@ const SPREAD_NEIGHBOURS: readonly (readonly [number, number, number])[] = [[-1, 
  * Lava or air under it, or a block lava replaces, lets lava pour on: false.
  * A cell not loaded is not known: undefined, which `lavaSpreadsFrom` reads as a floor.
  */
-function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
+export function restsOnFloor(world: Pick<WorldView, "blockAt">, x: number, y: number, z: number): boolean | undefined {
   const below = world.blockAt(x, y - 1, z);
   if (below.kind !== "loaded") return undefined;
   if (below.collisionShapes.length > 0 || below.traits.liquid === "water") return true;

@@ -4,7 +4,8 @@ import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
-import { createFakeBot, itemOf, type FakeCell, type FakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, itemOf, type FakeBotOptions, type FakeCell, type FakeClock } from "../../test-support/fake-bot/index.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { parseUseBucketRequest } from "./contract.js";
 import { beginUseBucket, formatUseBucketResult, useBucket, type UseBucketDependencies } from "./use-bucket.js";
 
@@ -38,14 +39,16 @@ async function driven<T>(clock: FakeClock, call: Promise<T>): Promise<T> {
 }
 
 /** A pool world: a bucket and a full water bucket carried (`held` in hand), the server's answer to a cast scripted. */
-function poolWorld(held: string | null = null, cells: Record<string, FakeCell> = poolCells()) {
+function poolWorld(held: string | null = null, cells: Record<string, FakeCell> = poolCells(), players: FakeBotOptions["players"] = {}) {
   const slots: Record<number, { name: string }> =
     held === "bucket"
       ? { [HELD_SLOT]: { name: "bucket" }, 37: { name: "water_bucket" } }
       : held === "water_bucket"
         ? { [HELD_SLOT]: { name: "water_bucket" }, 37: { name: "bucket" } }
-        : { 37: { name: "bucket" }, 38: { name: "water_bucket" } };
-  const { bot, clock, world, inventory } = createFakeBot({ groundY: null, cells, slots });
+        : held === "lava_bucket"
+          ? { [HELD_SLOT]: { name: "lava_bucket" }, 37: { name: "bucket" } }
+          : { 37: { name: "bucket" }, 38: { name: "water_bucket" } };
+  const { bot, clock, world, inventory } = createFakeBot({ groundY: null, cells, slots, players });
   const { registry } = bot;
   const setSlot = (slot: number, item: Item | null) =>
     (inventory.updateSlot as (slot: number, item: Item | null) => void).call(inventory, slot, item);
@@ -289,6 +292,81 @@ test("a pour named at a solid cell fails before the walk", async () => {
   if (result.status === "succeeded") assert.fail("a stone cell must not take a pour");
   assert.match(result.error, /BUCKET_TARGET_OCCUPIED/);
   assert.equal(routes, 0);
+});
+
+// Removing either the falling column or the first sideways reach must allow an unsafe cast and fail these cases.
+for (const { name, target, player } of [
+  { name: "into the bot's feet cell", target: new Vec3(0, 64, 0) },
+  { name: "beside the bot on a floor", target: new Vec3(1, 64, 0) },
+  { name: "3 above a player's head over open air", target: new Vec3(2, 68, 0), player: new Vec3(2.5, 64, 0.5) },
+  { name: "whose first spread reaches a player", target: new Vec3(2, 64, 0), player: new Vec3(3.5, 64, 0.5) },
+]) {
+  test(`a lava pour ${name} is refused naming the body and cell, without casting`, async () => {
+    const { bot, dependencies, uses, drive } = poolWorld("lava_bucket", poolCells(), { Alex: { sleeping: false } });
+    bot.entity.position.set(0.5, 64, 0.5);
+    if (player) bot.players.Alex!.entity!.position = player;
+    else delete bot.players.Alex;
+    const result = await drive(useBucket(bot, { action: "pour", liquid: "lava", cell: target }, {}, dependencies));
+    assert.equal(result.status, "failed");
+    if (result.status !== "failed") assert.fail("the lava must not be cast");
+    assert.match(result.error, /BUCKET_POUR_REACHES_BODY/);
+    assert.ok(result.error.includes(player ? "Alex" : bot.username), result.error);
+    assert.match(result.error, /\(\d+, 6[45], 0\)/);
+    assert.equal(result.bucket.used, false);
+    assert.equal(uses.length, 0);
+  });
+}
+
+for (const liquid of ["water", "lava"] as const) {
+  for (const regionX of [2, 3]) {
+    test(`a ${liquid} pour with its ${regionX === 2 ? "target" : "spread"} in a foreign region is refused${regionX === 3 ? ", but its own region allows it" : ""}`, async () => {
+      const { bot, dependencies, uses, drive } = poolWorld(`${liquid}_bucket`);
+      bot.entity.position.set(0.5, 64, 0.5);
+      let owner = "Alex";
+      setProtectedRegionsProvider(bot, () => [{
+        regionId: 7, dimension: bot.game.dimension, owner, label: "garden",
+        min: { x: regionX, y: 64, z: 0 }, max: { x: regionX, y: 64, z: 0 },
+      }]);
+      const request = { action: "pour", liquid, cell: { x: 2, y: 64, z: 0 } } as const;
+      const refused = await drive(useBucket(bot, request, {}, dependencies));
+      assert.equal(refused.status, "failed");
+      if (refused.status !== "failed") assert.fail("the protected region must refuse the pour");
+      assert.match(refused.error, /BUCKET_POUR_PROTECTED_REGION.*garden.*Alex/);
+      assert.equal(uses.length, 0);
+      if (regionX === 2) return;
+      owner = bot.username.toUpperCase();
+      const allowed = await drive(useBucket(bot, request, {}, dependencies));
+      assert.equal(allowed.status, "succeeded");
+      assert.equal(allowed.bucket.used, true);
+    });
+  }
+}
+
+test("a water pour beside the bot is cast", async () => {
+  const { bot, dependencies, drive } = poolWorld("water_bucket");
+  bot.entity.position.set(0.5, 64, 0.5);
+  const result = await drive(useBucket(bot, { action: "pour", liquid: "water", cell: { x: 1, y: 64, z: 0 } }, {}, dependencies));
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.bucket.used, true);
+});
+
+test("a lava pour rechecks the body after stepping closer to find a face", async () => {
+  const { bot, dependencies, setCell, uses, drive } = poolWorld("lava_bucket");
+  setCell(new Vec3(6, 63, 0), "air");
+  setCell(new Vec3(6, 62, 0), "stone");
+  bot.entity.position.set(6.5, 64, 8.5);
+  let routes = 0;
+  const result = await drive(useBucket(bot, { action: "pour", liquid: "lava", cell: { x: 6, y: 63, z: 0 } }, {}, {
+    ...dependencies,
+    navigate: async () => {
+      bot.entity.position.set(6.5, routes++ === 0 ? 64 : 63, routes === 1 ? 4.5 : 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  }));
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") assert.fail("the closer stance is inside the pour");
+  assert.match(result.error, /BUCKET_POUR_REACHES_BODY/);
+  assert.equal(uses.length, 0);
 });
 
 test("pour aims where the ray actually lands in the named cell, and counts the obsidian", async () => {

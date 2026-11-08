@@ -4,6 +4,10 @@ import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js"
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { familyIndexOf } from "../../world/item-families.js";
 import { regionChangeRefusal } from "../../world/protected-regions.js";
+import { bucketItem } from "../../world/buckets.js";
+import { observedEyeHeight } from "../../world/block-visibility.js";
+import { USE_RAY_REACH } from "../../world/liquid.js";
+import { pourRefusal } from "../use-bucket/pour-guard.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
 import {
@@ -282,6 +286,25 @@ function swing(
   evidence.effectObserved = null;
 }
 
+/** A raw bucket keeps the current look: the solid ray hit and face determine where its liquid lands. */
+function refuseUnsafeLavaUse(bot: Bot, hand: "hand" | "off-hand", evidence: Evidence): void {
+  const held = hand === "off-hand" ? bot.inventory.slots[bot.getEquipmentDestSlot("off-hand")] : bot.heldItem;
+  if (held?.name !== bucketItem("lava", true)) return;
+  const { yaw, pitch } = bot.entity;
+  const direction = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+  const eye = bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0);
+  const hit = bot.world.raycast(eye, direction, USE_RAY_REACH);
+  if (!hit) return;
+  const face = [FACES.down, FACES.up, FACES.north, FACES.south, FACES.west, FACES.east][hit.face];
+  if (!face) return;
+  const surface = (Reflect.get(hit, "position") as Vec3 | undefined) ?? new Vec3(hit.x, hit.y, hit.z);
+  const target = surface.plus(face);
+  evidence.target = target;
+  evidence.beforeBlock = bot.blockAt(target)?.name ?? null;
+  const refusal = pourRefusal(bot, target, "lava");
+  if (refusal) throw new Error(refusal);
+}
+
 async function useItem(
   bot: Bot,
   request: Extract<RawActionRequest, { operation: "use_item" }>,
@@ -290,6 +313,7 @@ async function useItem(
 ) {
   const beforeHeld = bot.heldItem?.name ?? null;
   const beforeInventory = inventory(bot);
+  refuseUnsafeLavaUse(bot, request.hand, evidence);
   evidence.attempted = true;
   bot.activateItem(request.hand === "off-hand");
   try {
