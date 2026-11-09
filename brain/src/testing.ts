@@ -5,25 +5,9 @@ import type { Persona } from "./persona.ts";
 import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 import { MOSTLY_WATER, sameDimension } from "./bot-data-sql.ts";
-import familyMap from "#src/world/data/item-families.json" with { type: "json" };
-import vanillaOverride from "#src/world/data/item-families/minecraft.json" with { type: "json" };
-import { itemTagsOf } from "#src/world/item-tags.ts";
+import { vanillaItemFamilies } from "./testing-item-families.ts";
 
-const VANILLA_VERSION = "1.21.4";
-
-/**
- * The families a 1.21.4 server's stack of `name` reports (`pickaxe`, `boat`...): the shipped item tags through the family
- * map, plus the vanilla override, as `src/world/item-families.ts` resolves them for a bot with no server tags yet (the
- * `food` family, which needs the registry, is left out). Test fixtures use it for the stacks the runtime would label.
- */
-export function vanillaItemFamilies(name: string): string[] {
-  const tags = itemTagsOf(name, VANILLA_VERSION);
-  const added: Readonly<Record<string, readonly string[]>> = vanillaOverride.families;
-  return Object.entries(familyMap.item as Record<string, readonly string[]>)
-    .filter(([family, familyTags]) => familyTags.some((tag) => tags.includes(tag)) || added[family]?.includes(name) === true)
-    .map(([family]) => family)
-    .sort();
-}
+export { vanillaItemFamilies };
 
 /** A one-level recipe for the fake crafting planner: `makes` items per application. */
 export interface FakeRecipe {
@@ -141,9 +125,12 @@ export class FakeRuntime implements BotRuntime {
 
   async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
     this.digSettings.push(allowed);
-    if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
-    this.snapshot = { ...this.snapshot, policy: { revision: `${revision}+`, digStraightDown: allowed } };
-    return true;
+    return this.editPolicy(revision, { digStraightDown: allowed });
+  }
+
+  /** `navigation.report_open_sky`, shown as `snapshot.policy.reportOpenSky`. */
+  async setReportOpenSky(on: boolean, revision: string): Promise<boolean> {
+    return this.editPolicy(revision, { reportOpenSky: on });
   }
 
   /** Every `setScaffoldBlocks` call, in order. */
@@ -151,8 +138,13 @@ export class FakeRuntime implements BotRuntime {
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
     this.scaffoldSettings.push(blocks);
+    return this.editPolicy(revision, { scaffoldBlocks: blocks });
+  }
+
+  /** A stale revision changes nothing; the other policy fields stay, as the runtime's merge keeps them. */
+  private editPolicy(revision: string, change: Partial<NonNullable<BotSnapshot["policy"]>>): boolean {
     if (this.snapshot.policy === null || this.snapshot.policy.revision !== revision) return false;
-    this.snapshot = { ...this.snapshot, policy: { ...this.snapshot.policy, revision: `${revision}+`, scaffoldBlocks: blocks } };
+    this.snapshot = { ...this.snapshot, policy: { ...this.snapshot.policy, ...change, revision: `${revision}+` } };
     return true;
   }
 

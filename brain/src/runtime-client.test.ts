@@ -312,14 +312,47 @@ test("sameDimensionSql strips minecraft: on both sides and refuses a value that 
   assert.equal(sameDimensionSql("dimension", "custom:the_deep-1.5/x"), "replace(dimension, 'minecraft:', '') = 'custom:the_deep-1.5/x'");
 });
 
-function statusClient(situation: Record<string, unknown>): ToolClient {
-  const data = { result: { situation: { position: { x: 0, y: 64, z: 0 }, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] }, ...situation } } };
+function statusClient(situation: Record<string, unknown>, survivalPolicy?: Record<string, unknown>): ToolClient {
+  const data = { result: { situation: { position: { x: 0, y: 64, z: 0 }, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] }, ...situation } }, ...(survivalPolicy === undefined ? {} : { survivalPolicy }) };
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
 test("status rejects malformed optional cover reports from a newer runtime", async () => {
   const at = { x: 4, y: 64, z: 0 };
   await assert.rejects(McpBotRuntime.over(statusClient({ navigation: { coverExit: { at, plannedAt: "now", reached: "yes" } } })).status());
+});
+
+function policyClient(): ToolClient & { readonly calls: { readonly name: string; readonly arguments: Record<string, unknown> }[] } {
+  const client = {
+    calls: [] as { readonly name: string; readonly arguments: Record<string, unknown> }[],
+    callTool: async (request: { name: string; arguments?: Record<string, unknown> }) => {
+      client.calls.push({ name: request.name, arguments: request.arguments ?? {} });
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded" } } } } };
+    },
+    close: async () => {},
+  };
+  return client;
+}
+
+test("setReportOpenSky sends navigation.report_open_sky with the revision it read (plan 2026-11-07-p4-05a-shelter T9a)", async () => {
+  for (const [on, revision] of [[true, "r7"], [false, "r8"]] as const) {
+    const client = policyClient();
+    assert.equal(await McpBotRuntime.over(client).setReportOpenSky(on, revision), true);
+    assert.equal(client.calls.length, 1);
+    assert.equal(client.calls[0]!.name, "set_survival_policy");
+    assert.equal(client.calls[0]!.arguments.expected_revision, revision);
+    assert.deepEqual(client.calls[0]!.arguments.changes, { navigation: { report_open_sky: on } });
+  }
+});
+
+test("status reads coverExit and the policy's reportOpenSky (plan 2026-11-07-p4-05a-shelter T9a)", async () => {
+  const exit = { at: { x: 6, y: -60, z: 512 }, plannedAt: "2026-11-09T00:00:00.000Z", reached: true };
+  for (const [reportOpenSky, navExit] of [[true, exit], [false, null]] as const) {
+    const policy = { revision: "r3", effective: { navigation: { dig_straight_down: false, scaffold_blocks: ["cobblestone"], report_open_sky: reportOpenSky } } };
+    const status = await McpBotRuntime.over(statusClient({ navigation: { coverExit: navExit } }, policy)).status();
+    assert.deepEqual(status.coverExit, navExit);
+    assert.deepEqual(status.policy, { revision: "r3", digStraightDown: false, scaffoldBlocks: ["cobblestone"], reportOpenSky });
+  }
 });
 
 test("status reads the condition facts", async () => {
@@ -345,6 +378,11 @@ test("an older view_status parses; nullable condition facts stay unknown", async
   assert.equal(unknown.armour, undefined);
   assert.equal(unknown.light, undefined);
   assert.equal(unknown.combat, undefined);
+  // An older view_status without coverExit or report_open_sky: both stay unset (plan 2026-11-07-p4-05a-shelter T9a).
+  const olderPolicy = await McpBotRuntime.over(statusClient({}, { revision: "r1", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] } } })).status();
+  assert.equal("coverExit" in olderPolicy, false);
+  assert.equal(olderPolicy.policy?.revision, "r1");
+  assert.equal("reportOpenSky" in (olderPolicy.policy ?? {}), false);
 });
 
 test("families parse from the runtime's stacks; a runtime that sends none means empty", async () => {

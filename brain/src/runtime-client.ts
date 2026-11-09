@@ -6,7 +6,8 @@ import type { JsonSchemaValidator, jsonSchemaValidator } from "@modelcontextprot
 import { z } from "zod";
 import { exploredChunksSql, nearestLandSql, ownContainersSql, seenAtSql, seenPlacesSql, waterShareSql } from "./bot-data-sql.ts";
 import type { CarriedStack } from "./carried-stack.ts";
-import { parseLastDeath, type LastDeath } from "./last-death.ts";
+import type { LastDeath } from "./last-death.ts";
+import { snapshotOf } from "./status-snapshot.ts";
 import { positionSchema, viewStatusSchema } from "./status-schema.ts";
 
 export interface Position {
@@ -354,6 +355,11 @@ export interface BotRuntime {
    * resets every override on death and dimension change, so the brain checks it again from each snapshot.
    */
   setDigStraightDown(allowed: boolean, revision: string): Promise<boolean>;
+  /**
+   * Whether `view_status` reports where a foreground route first goes under the open sky (`navigation.report_open_sky`);
+   * the route is never changed by it. Read back as `BotSnapshot.coverExit`.
+   */
+  setReportOpenSky(on: boolean, revision: string): Promise<boolean>;
   /** The blocks routes may place as scaffolding (runtime survival policy `navigation.scaffold_blocks`). */
   setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean>;
   /**
@@ -515,19 +521,6 @@ const MAX_RATIONALE = 200;
 /** Largest page `read_recent_events` accepts. */
 const EVENT_PAGE = 100;
 
-/** The runtime lists a species once per age group: one entry per species, counts added, the nearest distance kept. */
-function mobSpecies(groups: readonly { name: string; hostile: boolean; count: number; nearest: { distance: number; position?: Position | undefined } }[]): NearbyMob[] {
-  const species = new Map<string, NearbyMob>();
-  for (const group of groups) {
-    const seen = species.get(group.name);
-    const nearest = { distance: group.nearest.distance, ...(group.nearest.position === undefined ? {} : { position: group.nearest.position }) };
-    species.set(group.name, seen === undefined
-      ? { name: group.name, hostile: group.hostile, count: group.count, ...nearest }
-      : { ...seen, count: seen.count + group.count, ...(group.nearest.distance < seen.distance ? nearest : {}) });
-  }
-  return [...species.values()].sort((a, b) => a.distance - b.distance);
-}
-
 /** The runtime's outcome code: the bracketed prefix its errors start with, e.g. `HOSTILE_CONTACT`. */
 export function errorCode(error: string | null | undefined): string | null {
   return /^\[([A-Z_]+)\]/u.exec(error ?? "")?.[1] ?? null;
@@ -586,37 +579,7 @@ export class McpBotRuntime implements BotRuntime {
   }
 
   async status(): Promise<BotSnapshot> {
-    const data = viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding."));
-    const { situation } = data.result;
-    return {
-      position: situation.position,
-      dimension: situation.dimension,
-      health: situation.vitals.health,
-      food: situation.vitals.food,
-      ...(situation.vitals.saturation === undefined ? {} : { saturation: situation.vitals.saturation }),
-      ...(situation.vitals.armour === undefined ? {} : { armourPoints: situation.vitals.armour }),
-      ...(situation.vitals.armourToughness === undefined ? {} : { armourToughness: situation.vitals.armourToughness }),
-      ...(situation.vitals.burn === undefined ? {} : { burn: situation.vitals.burn }),
-      ...(situation.armourWorn == null || situation.armourCarried == null ? {} : { armour: { worn: situation.armourWorn, carried: situation.armourCarried } }),
-      ...(situation.light == null ? {} : { light: situation.light }),
-      ...(situation.combat == null ? {} : { combat: situation.combat }),
-      ...(situation.respawn === undefined ? {} : { respawn: situation.respawn }),
-      difficulty: situation.difficulty,
-      inventory: situation.inventory.stacks.map(({ name, count, durability, families }) => ({ name, count, durability, families })),
-      foods: situation.inventory.foods,
-      mobs: mobSpecies(situation.nearby.mobs),
-      players: situation.nearby.players,
-      ...(situation.clock === undefined ? {} : { clock: situation.clock }),
-      ...(situation.tools === undefined ? {} : { gear: situation.tools }),
-      ...(situation.lastDeath === undefined ? {} : { lastDeath: parseLastDeath(situation.lastDeath, situation.observedAt) }),
-      policy: data.survivalPolicy === undefined
-        ? null
-        : {
-          revision: data.survivalPolicy.revision,
-          digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down,
-          scaffoldBlocks: data.survivalPolicy.effective.navigation.scaffold_blocks,
-        },
-    };
+    return snapshotOf(viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding.")));
   }
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
@@ -629,6 +592,13 @@ export class McpBotRuntime implements BotRuntime {
   async setDigStraightDown(allowed: boolean, revision: string): Promise<boolean> {
     const reason = allowed ? "I may dig straight down." : "I never dig straight down: I go down by staircase.";
     const input = { operation: "set", expected_revision: revision, changes: { navigation: { dig_straight_down: allowed } }, lifetime: { kind: "session" }, reason };
+    const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
+    return result.status === "succeeded";
+  }
+
+  async setReportOpenSky(on: boolean, revision: string): Promise<boolean> {
+    const reason = on ? "Report in view_status where my foreground route first leaves cover; routes are not changed." : "Stop reporting where routes leave cover; routes are not changed.";
+    const input = { operation: "set", expected_revision: revision, changes: { navigation: { report_open_sky: on } }, lifetime: { kind: "session" }, reason };
     const { result } = policyEditSchema.parse(await this.call("set_survival_policy", input, reason));
     return result.status === "succeeded";
   }
