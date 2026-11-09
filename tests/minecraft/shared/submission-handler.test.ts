@@ -162,7 +162,7 @@ class FakeMirror {
     if (answer.kind === "in-place") return { kind: "in-place", root, reason: answer.reason, fallback: answer.fallback, release: () => {} };
     const generation = ++this.generations;
     return {
-      kind: "snapshot", root, dir: join(this.snapshotsIn, `g${generation}`), generation, syncMs: 123, startedAt: SNAPSHOT_TIME, release: () => { this.released.push(generation); },
+      kind: "snapshot", root, dir: join(this.snapshotsIn, `g${generation}`), generation, syncMs: 123, startedAt: SNAPSHOT_TIME, sourceHead: "1234567890abcdef", release: () => { this.released.push(generation); },
     };
   }
 }
@@ -215,6 +215,7 @@ test("lane and own entries of one root carry the snapshot's cwd, one acquire ser
     assert.deepEqual(fake.acquired.map(call => call.cwd), [TESTS_DIR], "one acquire for the root both scenarios share");
     const snapshotCwd = join("/snapshots/g1", relative(WORKTREE, TESTS_DIR));
     assert.deepEqual(cwdsOfRunning(rig), [snapshotCwd, snapshotCwd], "the lane trial (shifted copy of the lifted scenario) and the own trial both run from the snapshot");
+    assert.deepEqual(rig.running.map(trial => trial.input.scenario.client.env.MINE_AI_SOURCE_HEAD), ["1234567890abcdef", "1234567890abcdef"]);
     assert.ok(infoTexts(sent).includes(`clients start from snapshot g1 of ${WORKTREE} (synced in 123 ms, started ${SNAPSHOT_TIME})`), infoTexts(sent).join(" | "));
     await rig.drain();
     await running.finished;

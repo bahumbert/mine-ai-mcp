@@ -11,7 +11,7 @@ import {
 } from "@aibengineering/mine-ai-mcp";
 
 import { installScenarioPathfinder } from "./pathfinder-implementation.ts";
-import { observeScenarioPlayerPreparation } from "../../tests/minecraft/player-preparation.ts";
+import { prepareScenarioPlayer } from "./player-preparation.ts";
 import type { MineAiScenario, MineAiScenarioContext, MineAiScenarioPreparation } from "./scenario-client.ts";
 
 const scenarioFile = process.argv[2];
@@ -21,6 +21,7 @@ await runNodeClient((session) => runMineAiScenario(scenarioFile, session));
 
 /** Own the Mineflayer connection and run one test after Mine Labs prepares it. */
 async function runMineAiScenario(file: string, session: NodeClientSession): Promise<void> {
+  Object.assign(process.env, session.env);
   const { run, prepare } = await loadScenarioTest(file);
   const bot = createScenarioBot(session);
   session.signal.addEventListener("abort", () => closeBot(bot), { once: true });
@@ -29,15 +30,7 @@ async function runMineAiScenario(file: string, session: NodeClientSession): Prom
 
   await waitForSpawn(bot, session.username);
   assertBotPluginsLoaded(bot);
-  const preparation = observeScenarioPlayerPreparation(bot, session.scenario, session.signal);
-  try {
-    session.ready();
-    await session.arranged;
-    if (session.signal.aborted) return;
-    await preparation.wait();
-  } finally {
-    preparation.close();
-  }
+  await prepareScenarioPlayer(bot, session);
   if (session.signal.aborted) return;
 
   // Observe the same package-local Pathfinder every production action uses.

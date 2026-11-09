@@ -1,6 +1,7 @@
 // The scenario mirror: a snapshot of a submitter's worktree on ext4 for each submission's clients, held while a batch runs and pruned after (spec 2026-10-30-scenario-clients-ext4 D1, D3, D4, D5).
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import { spawnSync } from "node:child_process";
 import { INSTALL_RETRY_CONDITION, pidIsAlive, type ModulesState } from "./mirror-modules.ts";
 import { runBounded, type RunResult } from "./run-bounded.ts";
 import { ninePMountOf, rootSlug, sourceRootOf } from "./source-root.ts";
@@ -53,6 +54,7 @@ export type Snapshot = {
   readonly generation: number;
   readonly syncMs: number;
   readonly startedAt: string;
+  readonly sourceHead: string | null;
   release(): void;
 };
 export type InPlace = {
@@ -64,7 +66,7 @@ export type InPlace = {
   release(): void;
 };
 
-interface SnapshotInfo { readonly root: string; readonly startedAt: string; readonly finishedAt: string; readonly modulesHash: string }
+interface SnapshotInfo { readonly root: string; readonly startedAt: string; readonly finishedAt: string; readonly modulesHash: string; readonly sourceHead: string | null }
 interface Generation { readonly dir: string; readonly number: number; readonly info: SnapshotInfo | null }
 
 function safeReaddir(dir: string): string[] {
@@ -89,10 +91,16 @@ function readSnapshotInfo(dir: string): SnapshotInfo | null {
     const parsed = JSON.parse(readFileSync(join(dir, SNAPSHOT_FILE), "utf8")) as Partial<Record<keyof SnapshotInfo, unknown>>;
     const { root, startedAt, finishedAt, modulesHash } = parsed;
     if (typeof root !== "string" || typeof startedAt !== "string" || typeof finishedAt !== "string" || typeof modulesHash !== "string") return null;
-    return { root, startedAt, finishedAt, modulesHash };
+    return { root, startedAt, finishedAt, modulesHash, sourceHead: typeof parsed.sourceHead === "string" ? parsed.sourceHead : null };
   } catch {
     return null;
   }
+}
+
+/** Git belongs to the submitting checkout, never the mirror; sources without Git remain identifiable by hashes. */
+function sourceHeadOf(root: string): string | null {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", timeout: 5_000, windowsHide: true });
+  return result.status === 0 ? result.stdout.trim() || null : null;
 }
 
 /** Every `g<n>` directory of one root, oldest first. */
@@ -282,6 +290,7 @@ export class ScenarioMirror {
     const startedAtMs = this.ports.now();
     this.syncing.add(dir);
     try {
+      const sourceHead = sourceHeadOf(root);
       mkdirSync(dir, { recursive: true });
       const failure = await this.runParallelRsync(root, dir, newestCompleteOf(rootDir)?.dir ?? null, signal);
       if (failure !== null) {
@@ -292,7 +301,7 @@ export class ScenarioMirror {
       const syncMs = Math.round(this.ports.now() - startedAtMs);
       symlinkSync(nodeModules, join(dir, "node_modules"));
       const startedAt = new Date(startedAtMs).toISOString();
-      this.writeSnapshotInfo(dir, { root, startedAt, finishedAt: new Date(this.ports.now()).toISOString(), modulesHash });
+      this.writeSnapshotInfo(dir, { root, startedAt, finishedAt: new Date(this.ports.now()).toISOString(), modulesHash, sourceHead });
       this.sweep(rootDir);
       this.holds.set(dir, 1);
       this.options.log(`snapshot g${generation} of ${root} synced in ${syncMs} ms (started ${startedAt})`);
@@ -302,7 +311,7 @@ export class ScenarioMirror {
         released = true;
         this.release(rootDir, dir);
       };
-      return { kind: "snapshot", root, dir, generation, syncMs, startedAt, release };
+      return { kind: "snapshot", root, dir, generation, syncMs, startedAt, sourceHead, release };
     } catch (error) {
       this.removeTree(dir);
       return this.inPlace(root, `the snapshot of ${root} could not be made: ${describeError(error)}`);

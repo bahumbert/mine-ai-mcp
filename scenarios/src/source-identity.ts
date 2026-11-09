@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +24,7 @@ export async function recordSourceIdentity(): Promise<void> {
     }
   }
   files.sort((a, b) => a.path.localeCompare(b.path));
-  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8", windowsHide: true }).trim();
+  const head = process.env.MINE_AI_SOURCE_HEAD?.trim() || null;
   const identity = { head, recordedAt: new Date().toISOString(), files };
   await writeFile(path.join(artifacts, "qualification-source.json.gz"), gzipSync(JSON.stringify(identity)));
   await writeFile(

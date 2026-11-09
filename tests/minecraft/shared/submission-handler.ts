@@ -47,14 +47,14 @@ async function readDefaults(deps: SubmissionHandlerDeps, scenarios: readonly { r
 }
 
 /** A scenario whose client starts in `cwd`. */
-function withClientCwd(scenario: Scenario, cwd: string): Scenario {
-  return { ...scenario, client: { ...scenario.client, cwd } };
+function withClientCwd(scenario: Scenario, cwd: string, sourceHead: string | null): Scenario {
+  return { ...scenario, client: { ...scenario.client, cwd, env: { ...scenario.client.env, MINE_AI_SOURCE_HEAD: sourceHead ?? "" } } };
 }
 
 /** The entry with its client in `cwd`, in every copy it holds: the scenario as loaded and, on a lane, the lifted scenario the trial shifts (an own placement holds none). */
-function withEntryCwd(entry: SubmissionEntry, cwd: string): SubmissionEntry {
-  const scenario = withClientCwd(entry.scenario, cwd);
-  return { ...entry, scenario, placement: entry.placement.kind === "lane" ? { ...entry.placement, scenario: withClientCwd(entry.placement.scenario, cwd) } : entry.placement };
+function withEntryCwd(entry: SubmissionEntry, cwd: string, sourceHead: string | null): SubmissionEntry {
+  const scenario = withClientCwd(entry.scenario, cwd, sourceHead);
+  return { ...entry, scenario, placement: entry.placement.kind === "lane" ? { ...entry.placement, scenario: withClientCwd(entry.placement.scenario, cwd, sourceHead) } : entry.placement };
 }
 
 /** What the submitter reads for one root: the snapshot its clients start from, or why they start from `/mnt/d`; nothing when nothing failed and no clients start anywhere else (an ext4 root, a submitter who left). */
@@ -99,7 +99,7 @@ async function startFromSnapshots(
   return entries.map(entry => {
     const { cwd } = entry.scenario.client;
     const answer = cwd === undefined ? undefined : answers.get(rootKeyOf(cwd));
-    return cwd !== undefined && answer?.kind === "snapshot" ? withEntryCwd(entry, snapshotCwd(answer, cwd)) : entry;
+    return cwd !== undefined && answer?.kind === "snapshot" ? withEntryCwd(entry, snapshotCwd(answer, cwd), answer.sourceHead) : entry;
   });
 }
 

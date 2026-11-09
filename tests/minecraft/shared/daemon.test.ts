@@ -213,7 +213,7 @@ test("a daemon given clients ahead boots one for the scenario it runs and kills 
 /** A mirror that records what the daemon asks of it, in order. */
 function recordingMirror(calls: string[]): DaemonMirror {
   return {
-    acquire: async () => ({ kind: "snapshot", root: "/repo", dir: "/snapshots/g1", generation: 1, syncMs: 5, startedAt: "2026-10-31T10:00:00.000Z", release: () => { calls.push("release"); } }),
+    acquire: async () => ({ kind: "snapshot", root: "/repo", dir: "/snapshots/g1", generation: 1, syncMs: 5, startedAt: "2026-10-31T10:00:00.000Z", sourceHead: null, release: () => { calls.push("release"); } }),
     prune: async () => { calls.push("prune"); },
     settled: async () => { calls.push("settled"); },
   };
