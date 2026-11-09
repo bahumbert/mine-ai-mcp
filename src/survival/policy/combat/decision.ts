@@ -4,6 +4,8 @@ import type { CombatPolicy } from "./contract.js";
 import { needsCombatRecovery } from "./health.js";
 import type { EvadeReason, HostileDirective, HostileThreat } from "./response.js";
 import { compareTargets, type TargetFacts } from "./target-utility.js";
+import type { ThreatAssessment } from "../../perception/combat/threat-assessment.js";
+import { bareHand } from "../../../world/combat-data.js";
 
 /** Intent authorizes a quarry; automatic engagement permission does not erase it. */
 export type CombatPurpose =
@@ -35,6 +37,7 @@ export interface CombatDecisionFacts {
   readonly hideAllowed: boolean;
   readonly recoveryAvailable: boolean;
   readonly weapon: boolean;
+  readonly assessment: ThreatAssessment;
   readonly rangedWeapon: boolean;
   readonly shield: boolean;
   readonly contacts: readonly CombatContact[];
@@ -70,6 +73,12 @@ export function combatDecisionEvidence(
     purpose: { ...purpose },
     inputs: {
       ...facts,
+      assessment: {
+        ...facts.assessment,
+        bot: { ...facts.assessment.bot }, weapon: { ...facts.assessment.weapon }, source: { ...facts.assessment.source },
+        contacts: facts.assessment.contacts.map((contact) => ({ ...contact,
+          explosion: contact.explosion ? { ...contact.explosion } : null })),
+      },
       policy: { ...facts.policy, terrain: { ...facts.policy.terrain } },
       contacts: facts.contacts.map((contact) => ({
         ...contact,
@@ -131,35 +140,50 @@ export function combatResponseExclusions(
   ];
 }
 
+/** Immediate defence remains available even when withdrawal is prohibited or spent. */
+function defendContact(facts: CombatDecisionFacts, threats: readonly HostileThreat[]): HostileDirective {
+  const { policy, contacts, answered } = facts;
+  const target = contacts.find(
+    (threat) =>
+      !fightAnswered(facts, threat.id) &&
+      threat.relationship.defend &&
+      (threat.inReach || (policy.shield && facts.shield && threat.ranged && threat.inContact)),
+  );
+  return target && !answered.has("fight") && (policy.melee || (policy.shield && facts.shield))
+    ? { kind: "fight", targetId: target.id, threats }
+    : blocked(
+        `No permitted response can progress. Retreat ${policy.retreat ? "answered" : "prohibited"}; no authorized immediate defence.`,
+      );
+}
+
+/** A retained fight failure excludes only its target, unless the whole response is answered. */
+function fightAnswered(facts: CombatDecisionFacts, targetId: number): boolean {
+  return facts.answered.has("fight") || facts.answeredFights.has(targetId);
+}
+
+/** Keep refusal wording shared by purpose and withdrawal branches. */
+function blocked(why: string): HostileDirective {
+  return { kind: "constrained", reason: `[COMBAT_CONSTRAINED] ${why}` };
+}
+
+/** A spent automatic withdrawal falls back to contact defence rather than repeating the evade. */
+function withdraw(facts: CombatDecisionFacts, purpose: CombatPurpose, threats: readonly HostileThreat[], reason: EvadeReason): HostileDirective {
+  return facts.policy.retreat && !facts.answered.has("evade")
+    ? { kind: "evade", threats, safeRange: facts.policy.evade_safe_range, reason }
+    : purpose.kind === "automatic"
+      ? defendContact(facts, threats)
+      : blocked("Withdrawal is prohibited or answered for this scope.");
+}
+
 export function decideCombatResponse(facts: CombatDecisionFacts, purpose: CombatPurpose): HostileDirective {
   const { policy, contacts, health, answered } = facts;
-  const fightAnswered = (targetId: number) => answered.has("fight") || facts.answeredFights.has(targetId);
   const threats = contacts.map(({ id, name, position, distance }) => ({ id, name, position, distance }));
-  const blocked = (why: string): HostileDirective => ({ kind: "constrained", reason: `[COMBAT_CONSTRAINED] ${why}` });
-  const defend = (): HostileDirective => {
-    const target = contacts.find(
-      (threat) =>
-        !fightAnswered(threat.id) &&
-        threat.relationship.defend &&
-        (threat.inReach || (policy.shield && facts.shield && threat.ranged && threat.inContact)),
-    );
-    return target && !answered.has("fight") && (policy.melee || (policy.shield && facts.shield))
-      ? { kind: "fight", targetId: target.id, threats }
-      : blocked(
-          `No permitted response can progress. Retreat ${policy.retreat ? "answered" : "prohibited"}; no authorized immediate defence.`,
-        );
-  };
-  const evade = (reason: EvadeReason): HostileDirective =>
-    policy.retreat && !answered.has("evade")
-      ? { kind: "evade", threats, safeRange: policy.evade_safe_range, reason }
-      : purpose.kind === "automatic"
-        ? defend()
-        : blocked("Withdrawal is prohibited or answered for this scope.");
+  const evade = (reason: EvadeReason) => withdraw(facts, purpose, threats, reason);
   const hideAvailable = facts.hideAllowed && !answered.has("hide");
 
   if (facts.fireball && policy.melee && !answered.has("deflect"))
     return { kind: "deflect", targetId: facts.fireball.id, reason: "incoming_fireball", threats: [facts.fireball] };
-  if (purpose.kind === "contact_defence" && fightAnswered(purpose.targetId)) return evade("unreachable");
+  if (purpose.kind === "contact_defence" && fightAnswered(facts, purpose.targetId)) return evade("unreachable");
   if (purpose.kind === "contact_defence")
     return policy.melee || policy.bow || (policy.shield && facts.shield)
       ? { kind: "fight", targetId: purpose.targetId, threats }
@@ -180,7 +204,7 @@ export function decideCombatResponse(facts: CombatDecisionFacts, purpose: Combat
       : blocked("No permitted, unanswered handoff response remains.");
   }
   if (purpose.kind === "pursuit") {
-    if (fightAnswered(purpose.targetId)) return evade("unreachable");
+    if (fightAnswered(facts, purpose.targetId)) return evade("unreachable");
     if (needsCombatRecovery(health, purpose.minimumHealth))
       return decideCombatResponse(facts, { kind: "recovery", targetId: purpose.targetId });
     return policy.melee || policy.bow
@@ -188,6 +212,23 @@ export function decideCombatResponse(facts: CombatDecisionFacts, purpose: Combat
       : blocked("The requested target remains authorized, but both attack capabilities are prohibited.");
   }
 
+  return decideAutomaticCombat(facts, purpose, threats);
+}
+
+/** Rank attackable contacts with assessed explosives last, keeping quarry and utility preferences. */
+function chooseAutomaticTarget(facts: CombatDecisionFacts, candidates: readonly CombatContact[], quarry: ReadonlySet<string>): CombatContact | undefined {
+  const explosiveIds = new Set(facts.assessment.contacts.filter((contact) => contact.explosion !== null).map((contact) => contact.id));
+  return candidates.filter((contact) => !fightAnswered(facts, contact.id)).sort((a, b) =>
+    Number(explosiveIds.has(a.id)) - Number(explosiveIds.has(b.id)) ||
+    Number(quarry.has(b.name)) - Number(quarry.has(a.name)) ||
+    compareTargets(a.utility, b.utility) || a.id - b.id)[0];
+}
+
+/** Automatic engagement weighs melee advantage; explicit pursuit and contact defence bypass it. */
+function decideAutomaticCombat(facts: CombatDecisionFacts, purpose: Extract<CombatPurpose, { kind: "automatic" }>, threats: readonly HostileThreat[]): HostileDirective {
+  const { policy, contacts, health, answered, assessment } = facts;
+  const evade = (reason: EvadeReason) => withdraw(facts, purpose, threats, reason);
+  const hideAvailable = facts.hideAllowed && !answered.has("hide");
   const hurtBadly = health < policy.critical_health;
   if (!(hurtBadly ? threats.length > 0 : contacts.some((threat) => threat.inContact))) return { kind: "none" };
   if (hurtBadly)
@@ -196,32 +237,30 @@ export function decideCombatResponse(facts: CombatDecisionFacts, purpose: Combat
   // A hunted species is the request's objective. Health rules above still
   // withdraw from it; nothing below does, because the hunt owns giving up on
   // a quarry it cannot fight, and it does so by its own stop counts.
-  const quarry = new Set(purpose.kind === "automatic" ? (purpose.quarry ?? []) : []);
+  const quarry = new Set(purpose.quarry ?? []);
   const hunted = (threat: CombatContact) => quarry.has(threat.name);
   const candidates = contacts.filter(
     (threat) =>
       threat.inContact &&
       (health < policy.engage_min_health || !threat.defendsOnContact || threat.inReach || hunted(threat)),
   );
-  const target = candidates
-    .filter((contact) => !fightAnswered(contact.id))
-    .sort(
-      (a, b) =>
-        Number(a.name === "creeper") - Number(b.name === "creeper") ||
-        Number(hunted(b)) - Number(hunted(a)) ||
-        compareTargets(a.utility, b.utility) ||
-        a.id - b.id,
-    )[0];
+  const target = chooseAutomaticTarget(facts, candidates, quarry);
   if (!target) return candidates.some((threat) => !hunted(threat)) ? evade("unreachable") : { kind: "none" };
   if (answered.has("evade") && hideAvailable && !answered.has("recovery") && !hunted(target))
     return { kind: "hide", threats, reason: "cornered" };
   if (!target.relationship.defend && !hunted(target)) return evade("observed_aggression");
-  const creepers = contacts.filter((threat) => threat.name === "creeper");
+  const explosives = assessment.contacts.filter((threat) => threat.explosion !== null);
   if (
-    creepers.some((threat) => threat.inContact) &&
-    (!facts.weapon || (creepers.length > 1 && (!policy.bow || !facts.rangedWeapon)))
+    explosives.some((threat) => threat.inContact) &&
+    (assessment.weapon.damage <= bareHand(assessment.source.version).attackDamage ||
+      (explosives.length > 1 && (!policy.bow || !facts.rangedWeapon)))
   )
-    return evade("creeper");
+    return evade("explosive");
+  if (
+    !hunted(target) && assessment.margin !== null && assessment.margin < policy.fight_margin &&
+    !(policy.bow && facts.rangedWeapon && !contacts.some((contact) => contact.inReach))
+  )
+    return evade("outmatched");
   const needsRangedRecovery =
     (facts.burning || !policy.shield || !facts.shield) && contacts.every((threat) => threat.ranged && !threat.inReach);
   if (health < policy.engage_min_health && hideAvailable && !answered.has("recovery") && needsRangedRecovery)
@@ -240,7 +279,7 @@ export function decideCombatResponse(facts: CombatDecisionFacts, purpose: Combat
   if (answered.has("fight")) return hunted(target) ? { kind: "none" } : evade("unreachable");
   return policy.engagement === "defend_only" && !hunted(target)
     ? target.inReach
-      ? defend()
+      ? defendContact(facts, threats)
       : evade("withdraw")
     : { kind: "fight", targetId: target.id, threats };
 }

@@ -76,6 +76,9 @@ test("reflex notifications preserve observed interruption and eating evidence wi
       outcome: { kind: "ate", food: "cooked_porkchop", hungerBefore: 16, hungerAfter: 20 },
     } },
   ];
+  assert.match(formatSurvivalOutcome({ ...receipts[0]!, evidence: { selection: { inputs: {
+    policy: { fight_margin: 1.5 }, assessment: { margin: 0.606, weapon: { item: null } },
+  } } } }), /margin 0.6 \(fight_margin 1.5\), weapon bare hands/);
   for (const receipt of receipts) recordEvent(data, "TestBot", {
     type: "survival_outcome", observedAt: new Date().toISOString(),
     summary: formatSurvivalOutcome(receipt), payload: receipt,

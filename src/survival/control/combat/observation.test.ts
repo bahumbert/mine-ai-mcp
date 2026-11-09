@@ -28,8 +28,10 @@ test("hiding is not allowed while the body is in lava", () => {
 test("contact assessment weighs a nearby zombie with bare hands and finite live health", () => {
   const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(2.5, 64, 0.5) } } });
   const context = { resolvedIds: new Set<number>(), attackerIds: new Set<number>(), unreachableIds: new Set<number>() };
-  const contacts = observeCombatDecision(bot, context).contacts;
+  const observed = observeCombatDecision(bot, context);
+  const contacts = observed.contacts;
   const assessment = assessContacts(bot, contacts, context);
+  assert.deepEqual(observed.assessment, assessment);
   assert.ok(Math.abs(assessment.margin! - 0.60606) < 0.001);
   assert.equal(assessment.contacts[0]!.damagePerHit, 3);
   const health = bot.registry.entitiesByName.zombie!.metadataKeys!.indexOf("health");

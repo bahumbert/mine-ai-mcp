@@ -803,7 +803,7 @@ test("a foreign-region shaft cell fails the hide and the decision evades", async
   const directive = observeHostileResponse(wounded, {
     resolvedIds: new Set(), attackerIds: new Set([7]), unreachableIds: new Set(), blockedResponses: new Set(["hide"]),
   });
-  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
+  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "outmatched");
 });
 
 test("a foreign-region third shaft cell leaves the dug part whole, names the region and the cells already dug", async () => {

@@ -1,13 +1,33 @@
 import { z } from "zod";
-import { combatPolicySchema } from "./contract.js";
+import { combatPolicySchema, DEFAULT_COMBAT_POLICY } from "./contract.js";
 import { decideCombatResponse, type CombatDecisionFacts } from "./decision.js";
 import { decideFightBoundary } from "./fight-boundary.js";
 import { decideHostileReflex } from "./reflex-decision.js";
+import { bareHand, combatDataSource, damageScaling, mobCombatData } from "../../../world/combat-data.js";
+import { assessThreats, type ThreatAssessment } from "../../perception/combat/threat-assessment.js";
+import type { CombatContact } from "./decision.js";
+import { MELEE_RANGE } from "../../weapons/equipment.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../../../server/config.js";
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const threat = z.object({ id: z.number(), name: z.string(), position, distance: z.number() });
+const finite = z.number().finite();
+const assessmentSchema = z.object({
+  bot: z.object({ effectiveHealth: finite, armor: finite, toughness: finite }),
+  weapon: z.object({ item: z.string().nullable(), damage: finite, intervalTicks: finite }),
+  contacts: z.array(z.object({
+    id: finite, species: z.string(), damagePerHit: finite.nullable(),
+    damageSource: z.enum(["observed", "attribute", "none"]), unknownMelee: z.boolean(),
+    hitIntervalTicks: finite, health: finite, hitsToKill: finite, ticksToKill: finite,
+    hitsToKillBot: finite.nullable(), inContact: z.boolean(),
+    explosion: z.object({ radius: finite, fuseTicks: finite, fuseRemainingTicks: finite.nullable(), damageAtReach: finite }).nullable(),
+  })),
+  ticksToDie: finite.nullable(), ticksToClear: finite, healthLostToClear: finite, margin: finite.nullable(),
+  source: z.object({ version: z.string(), measured: z.boolean() }),
+});
 const inputs = z.object({
-  policy: combatPolicySchema,
+  policy: combatPolicySchema.extend({ fight_margin: combatPolicySchema.shape.fight_margin.default(DEFAULT_COMBAT_POLICY.fight_margin) }),
+  assessment: assessmentSchema.optional(),
   health: z.number(),
   burning: z.boolean(),
   hideAllowed: z.boolean(),
@@ -69,12 +89,28 @@ const recordSchema = z.union([
   selection,
 ]);
 
+/** Old recordings know only a weapon boolean: preserve their explosive rule without inventing a fight margin. */
+export function legacyAssessment(contacts: readonly CombatContact[], weapon: boolean, version: string): ThreatAssessment {
+  const hand = bareHand(version);
+  const assessment = assessThreats({
+    bot: { health: 20, absorption: 0, armor: 0, toughness: 0 }, difficulty: "normal",
+    mobAttackScaling: damageScaling("mob_attack", version), explosionScaling: damageScaling("explosion", version),
+    weapon: { item: null, attack: { ...hand, attackDamage: hand.attackDamage + Number(weapon) } },
+    bareHand: hand, meleeReach: MELEE_RANGE, source: combatDataSource(version),
+    contacts: contacts.map((contact) => ({ id: contact.id, species: contact.name, distance: contact.distance,
+      inContact: contact.inContact, data: mobCombatData(contact.name, version), health: null,
+      heldItemAttack: null, observedHitDamage: null, observedIntervalTicks: null, fuseRemainingTicks: null })),
+  });
+  return { ...assessment, margin: null };
+}
+
 /** Replay a recorded decision input without a bot, world, policy store or clock. */
 export function replayCombatDecision(recorded: unknown) {
   const record = recordSchema.parse(recorded);
   const selected = "selection" in record ? record.selection : record;
   const facts: CombatDecisionFacts = {
     ...selected.inputs,
+    assessment: selected.inputs.assessment ?? legacyAssessment(selected.inputs.contacts, selected.inputs.weapon, DEFAULT_MINECRAFT_VERSION),
     unreachable: new Set(selected.inputs.unreachable),
     answeredFights: new Map(selected.inputs.answeredFights),
     answered: new Set(selected.inputs.answered),

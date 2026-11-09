@@ -224,8 +224,8 @@ test("withdrawal retains emergency shelter and does not invent contact with hidd
   );
 });
 
-test("fights a hostile in contact while above half health", () => {
-  const directive = observeHostileResponse(botWith({ mobs: [{ id: 7, name: "zombie", x: 3 }] }));
+test("a wooden sword fights a hostile in contact while above half health", () => {
+  const directive = observeHostileResponse(botWith({ items: ["wooden_sword"], mobs: [{ id: 7, name: "zombie", x: 3 }] }));
 
   assert.equal(directive.kind, "fight");
   if (directive.kind === "fight") assert.equal(directive.targetId, 7);
@@ -265,14 +265,14 @@ test("closed cover prevents contact even with a previous attacker or critically 
 });
 
 test("opening cover makes the same nearby hostile eligible immediately", () => {
-  const { bot, world } = sceneWith({ covered: true, mobs: [{ id: 7, name: "blaze", x: 5 }] });
+  const { bot, world } = sceneWith({ items: ["diamond_sword"], covered: true, mobs: [{ id: 7, name: "blaze", x: 5 }] });
   assert.deepEqual(observeHostileResponse(bot), { kind: "none" });
   raiseWall(world, "none");
   assert.equal(observeHostileResponse(bot).kind, "fight");
 });
 
 test("a low wall that leaves the hostile's head exposed does not prevent contact", () => {
-  const bot = botWith({ covered: "low_wall", mobs: [{ id: 7, name: "skeleton", x: 5 }] });
+  const bot = botWith({ items: ["wooden_sword"], covered: "low_wall", mobs: [{ id: 7, name: "skeleton", x: 5 }] });
   assert.equal(observeHostileResponse(bot).kind, "fight");
 });
 
@@ -285,10 +285,10 @@ test("fights a crowd one body at a time, nearest first", () => {
         { id: 9, name: "zombie", x: 12 },
       ],
     }),
+    context(), { ...DEFAULT_COMBAT_POLICY, fight_margin: 0 },
   );
 
-  // Being outnumbered is not a condition: the nearest hostile is the target and
-  // the rest stay in the evidence rather than changing the decision.
+  // Target ordering is independent of the policy's required advantage.
   assert.equal(directive.kind, "fight");
   if (directive.kind !== "fight") return;
   assert.equal(directive.targetId, 7);
@@ -300,6 +300,7 @@ test("fights a crowd one body at a time, nearest first", () => {
 
 test("names the next target once the first is resolved", () => {
   const bot = botWith({
+    items: ["wooden_sword"],
     mobs: [
       { id: 7, name: "zombie", x: 2 },
       { id: 8, name: "zombie", x: 3 },
@@ -319,7 +320,7 @@ test("recognises hostiles by minecraft-data category, not by the narrower entity
     ["hoglin", "animal"],
     ["witch", "hostile"],
   ] as const) {
-    const directive = observeHostileResponse(botWith({ mobs: [{ id: 7, name, type, x: 3 }] }));
+    const directive = observeHostileResponse(botWith({ items: ["diamond_sword"], mobs: [{ id: 7, name, type, x: 3 }] }));
 
     assert.equal(directive.kind, "fight", `expected to engage a ${name}`);
   }
@@ -331,7 +332,7 @@ test("leaves an enderman alone until it turns on the bot", () => {
   angryMetadata[CREEPY] = true;
   const angry = observeHostileResponse(botWith({ mobs: [{ id: 7, name: "enderman", x: 4, metadata: angryMetadata }] }));
   const struckBack = observeHostileResponse(
-    botWith({ mobs: [{ id: 7, name: "zombified_piglin", x: 3 }] }),
+    botWith({ items: ["diamond_sword"], mobs: [{ id: 7, name: "zombified_piglin", x: 3 }] }),
     context({ attackers: [7] }),
   );
 
@@ -353,7 +354,7 @@ test("leaves an enderman alone until it turns on the bot", () => {
 test("leaves a piglin alone until it turns on the bot", () => {
   const calm = observeHostileResponse(botWith({ mobs: [{ id: 7, name: "piglin", x: 3 }] }));
   const struckBack = observeHostileResponse(
-    botWith({ mobs: [{ id: 7, name: "piglin", x: 3 }] }),
+    botWith({ items: ["wooden_sword"], mobs: [{ id: 7, name: "piglin", x: 3 }] }),
     context({ attackers: [7] }),
   );
 
@@ -376,7 +377,7 @@ test("leaves passive mobs and players alone", () => {
 
 test("a hostile that has hurt the bot is in contact from beyond the contact range", () => {
   const directive = observeHostileResponse(
-    botWith({ mobs: [{ id: 7, name: "skeleton", x: 13 }] }),
+    botWith({ items: ["wooden_sword"], mobs: [{ id: 7, name: "skeleton", x: 13 }] }),
     context({ attackers: [7] }),
   );
 
@@ -386,6 +387,7 @@ test("a hostile that has hurt the bot is in contact from beyond the contact rang
 test("targets the nearest hostile in contact, not merely the nearest hostile", () => {
   const directive = observeHostileResponse(
     botWith({
+      items: ["wooden_sword"],
       mobs: [
         { id: 7, name: "zombie", x: 10 },
         { id: 8, name: "skeleton", x: 14 },
@@ -397,32 +399,27 @@ test("targets the nearest hostile in contact, not merely the nearest hostile", (
   assert.equal(directive.kind === "fight" ? directive.targetId : directive.kind, 8);
 });
 
-test("an unarmed bot evades any creeper in contact, however healthy it is", () => {
-  const directive = observeHostileResponse(
-    botWith({
-      mobs: [
-        { id: 7, name: "zombie", x: 2 },
-        { id: 8, name: "creeper", x: 7 },
-      ],
-    }),
-  );
-
-  assert.deepEqual(
-    directive.kind === "evade"
-      ? { reason: directive.reason, ids: directive.threats.map((threat) => threat.id) }
-      : directive,
-    {
-      reason: "creeper",
-      ids: [7, 8],
-    },
-  );
-});
-
-test("an armed bot fights a creeper; shared tactics own its physical defence", () => {
-  for (const items of [["iron_sword"], ["bow", "arrow"]]) {
-    const directive = observeHostileResponse(botWith({ items, mobs: [{ id: 8, name: "creeper", x: 7 }] }));
-
-    assert.equal(directive.kind, "fight", `expected to fight with ${items.join("+")}`);
+test("explosive equipment answers account for the crowd and observation range", () => {
+  const creeper = { id: 8, name: "creeper", x: 6 };
+  const pair = [creeper, { id: 9, name: "creeper", x: 7 }];
+  const cases: { name: string; items: string[]; mobs: Mob[]; result: string; ids?: number[] }[] = [
+    { name: "unarmed mixed crowd", items: [], mobs: [{ id: 7, name: "zombie", x: 2 }, creeper],
+      result: "explosive", ids: [7, 8] },
+    { name: "sword against one explosive", items: ["iron_sword"], mobs: [creeper], result: "fight" },
+    { name: "bow alone", items: ["bow", "arrow"], mobs: [creeper], result: "explosive" },
+    { name: "pair without ranged equipment", items: ["iron_sword"], mobs: pair,
+      result: "explosive", ids: [8, 9] },
+    { name: "pair with ranged equipment", items: ["iron_sword", "bow", "arrow"], mobs: pair, result: "fight" },
+    { name: "second explosive inside observation range", items: ["iron_sword"],
+      mobs: [creeper, { ...pair[1]!, x: 12 }], result: "explosive" },
+    { name: "second explosive beyond observation range", items: ["iron_sword"],
+      mobs: [creeper, { ...pair[1]!, x: 20 }], result: "fight" },
+  ];
+  for (const row of cases) {
+    const directive = observeHostileResponse(botWith(row));
+    assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, row.result, row.name);
+    if (row.ids) assert.deepEqual(directive.kind === "evade" ? directive.threats.map((threat) => threat.id) : directive,
+      row.ids, row.name);
   }
 });
 
@@ -451,52 +448,10 @@ test("a creeper in a crowd is fought last: the zombie behind it is the target", 
   assert.equal(strungOut.kind === "fight" ? strungOut.targetId : strungOut, 8);
 });
 
-test("a bot without a bow evades two creepers in contact; with one it fights the pair", () => {
-  const pair = [
-    { id: 8, name: "creeper", x: 6 },
-    { id: 9, name: "creeper", x: 7 },
-  ];
-  const sword = observeHostileResponse(botWith({ items: ["iron_sword"], mobs: pair }));
-  assert.deepEqual(
-    sword.kind === "evade" ? { reason: sword.reason, ids: sword.threats.map((threat) => threat.id) } : sword,
-    {
-      reason: "creeper",
-      ids: [8, 9],
-    },
-  );
-
-  const bow = observeHostileResponse(botWith({ items: ["bow", "arrow", "iron_sword"], mobs: pair }));
-  assert.equal(bow.kind, "fight");
-
-  // The second creeper counts from anywhere in observation range: a step
-  // outside the contact boundary is a step from being the second fuse.
-  const strungOut = observeHostileResponse(
-    botWith({
-      items: ["iron_sword"],
-      mobs: [
-        { id: 8, name: "creeper", x: 6 },
-        { id: 9, name: "creeper", x: 12 },
-      ],
-    }),
-  );
-  assert.equal(strungOut.kind, "evade");
-
-  // Beyond observation range it is not yet part of this encounter.
-  const distant = observeHostileResponse(
-    botWith({
-      items: ["iron_sword"],
-      mobs: [
-        { id: 8, name: "creeper", x: 6 },
-        { id: 9, name: "creeper", x: 20 },
-      ],
-    }),
-  );
-  assert.equal(distant.kind, "fight");
-});
-
 test("a creeper outside contact range does not change a fight", () => {
   const directive = observeHostileResponse(
     botWith({
+      items: ["wooden_sword"],
       mobs: [
         { id: 7, name: "zombie", x: 2 },
         { id: 8, name: "creeper", x: 12 },
@@ -509,16 +464,16 @@ test("a creeper outside contact range does not change a fight", () => {
 
 test("evades a target no route reached instead of walking back into its fire", () => {
   const directive = observeHostileResponse(
-    botWith({ mobs: [{ id: 7, name: "skeleton", x: 11 }] }),
+    botWith({ items: ["wooden_sword"], mobs: [{ id: 7, name: "skeleton", x: 11 }] }),
     context({ attackers: [7], unreachable: [7] }),
   );
 
   assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "unreachable");
 });
 
-test("a healthy defender can fight a formerly unreachable blaze that comes into exposed melee reach", () => {
+test("a healthy defender with a diamond sword fights a formerly unreachable blaze in exposed melee reach", () => {
   const directive = observeHostileResponse(
-    botWith({ mobs: [{ id: 7, name: "blaze", x: 2 }] }),
+    botWith({ items: ["diamond_sword"], mobs: [{ id: 7, name: "blaze", x: 2 }] }),
     context({ attackers: [7], unreachable: [7] }),
   );
   assert.equal(directive.kind, "fight");
@@ -532,52 +487,25 @@ test("failed approach memory still prevents pursuing a covered close blaze", () 
   assert.notEqual(directive.kind, "fight");
 });
 
-test("still evades an ordinary hostile while wounded", () => {
-  const directive = observeHostileResponse(
-    botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, mobs: [{ id: 7, name: "zombie", x: 3 }] }),
-  );
-
-  assert.deepEqual(
-    directive.kind === "evade"
-      ? { reason: directive.reason, ids: directive.threats.map((threat) => threat.id) }
-      : directive,
-    {
-      reason: "hurt",
-      ids: [7],
-    },
-  );
+test("the same formerly unreachable blaze in reach, bare hands: evade outmatched", () => {
+  const directive = observeHostileResponse(botWith({ mobs: [{ id: 7, name: "blaze", x: 2 }] }),
+    context({ attackers: [7], unreachable: [7] }));
+  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "outmatched");
 });
 
-test("shelters at eleven health from an enderman observed attacking us", () => {
+test("wounded bare hands evade zombie and attacking enderman as outmatched before or after failed hide", () => {
   const metadata = Array.from(ENDERMAN_METADATA_KEYS, (_, index) => index === CREEPY);
-  const bot = botWith({ health: 11, mobs: [{ id: 7, name: "enderman", x: 4, metadata }] });
-  const directive = observeHostileResponse(bot, context({ attackers: [7] }));
-
-  assert.deepEqual(
-    directive.kind === "hide"
-      ? { reason: directive.reason, ids: directive.threats.map((threat) => threat.id) }
-      : directive,
-    { reason: "hurt", ids: [7] },
-  );
-});
-
-test("a wounded enderman encounter evades after the same hide attempt failed", () => {
-  const metadata = Array.from(ENDERMAN_METADATA_KEYS, (_, index) => index === CREEPY);
-  const bot = botWith({ health: 11, mobs: [{ id: 7, name: "enderman", x: 4, metadata }] });
-  const directive = observeHostileResponse(bot, context({ blocked: ["hide"], attackers: [7] }));
-
-  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
-});
-
-test("after the slow-shaft failure the decision evades", () => {
-  // A hide that stopped before a shaft cell it could not finish in time is a failed hide on record (`blocked`): the
-  // wounded bot gets the next answer, which is to evade.
-  const directive = observeHostileResponse(
-    botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, mobs: [{ id: 7, name: "zombie", x: 3 }] }),
-    context({ blocked: ["hide"], attackers: [7] }),
-  );
-
-  assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "hurt");
+  for (const name of ["zombie", "enderman"]) for (const hideAnswered of [false, true]) {
+    // A failed slow-shaft attempt is represented by the same blocked hide answer.
+    const bot = botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1,
+      mobs: [{ id: 7, name, x: name === "enderman" ? 4 : 3, metadata: name === "enderman" ? metadata : [] }] });
+    const directive = observeHostileResponse(bot, context({
+      attackers: name === "enderman" || hideAnswered ? [7] : [], blocked: hideAnswered ? ["hide"] : [],
+    }));
+    assert.deepEqual(directive.kind === "evade"
+      ? { reason: directive.reason, ids: directive.threats.map((threat) => threat.id) } : directive,
+      { reason: "outmatched", ids: [7] }, `${name}, hide answered: ${hideAnswered}`);
+  }
 });
 
 test("enderman shelter does not change healthy fights, neutral encounters, or distant observation", () => {
@@ -586,7 +514,7 @@ test("enderman shelter does not change healthy fights, neutral encounters, or di
   assert.equal(
     observeHostileResponse(
       botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health, mobs: [angry] }),
-      context({ attackers: [7] }),
+      context({ attackers: [7] }), { ...DEFAULT_COMBAT_POLICY, fight_margin: 0 },
     ).kind,
     "fight",
   );
@@ -601,7 +529,7 @@ test("enderman shelter does not change healthy fights, neutral encounters, or di
       ],
     }),
   );
-  assert.equal(distant.kind === "evade" ? distant.reason : distant.kind, "hurt");
+  assert.equal(distant.kind === "evade" ? distant.reason : distant.kind, "outmatched");
 });
 
 test("wounded enderman shelter preserves creeper and unreachable priorities", () => {
@@ -615,19 +543,19 @@ test("wounded enderman shelter preserves creeper and unreachable priorities", ()
         mobs: [angry, { id: 8, name: "creeper", x: 4 }, { id: 9, name: "creeper", x: 12 }],
       }),
     );
-    assert.equal(creeper.kind === "evade" ? creeper.reason : creeper.kind, "creeper");
+    assert.equal(creeper.kind === "evade" ? creeper.reason : creeper.kind, "explosive");
   }
 
   const unreachable = observeHostileResponse(
-    botWith({ health: 11, mobs: [angry] }),
+    botWith({ health: 11, items: ["bow", "arrow"], mobs: [angry] }),
     context({ unreachable: [7], attackers: [7] }),
   );
   assert.equal(unreachable.kind === "evade" ? unreachable.reason : unreachable.kind, "unreachable");
 });
 
-test("still fights at exactly the half-health threshold", () => {
+test("an iron sword still fights at exactly the half-health threshold", () => {
   const directive = observeHostileResponse(
-    botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health, mobs: [{ id: 7, name: "zombie", x: 3 }] }),
+    botWith({ health: DEFAULT_COMBAT_POLICY.engage_min_health, items: ["iron_sword"], mobs: [{ id: 7, name: "zombie", x: 3 }] }),
   );
 
   assert.equal(directive.kind, "fight");
@@ -701,13 +629,13 @@ test("a spider in daylight is left alone; the same spider at night is a threat",
   const daylight = observeHostileResponse(
     botWith({ mobs: spider, timeOfDay: NOON_TICKS, skyLight: SPIDER_PASSIVE_SKY_LIGHT }),
   );
-  const dusk = observeHostileResponse(botWith({ mobs: spider, timeOfDay: NIGHT_TICKS, skyLight: 15 }));
+  const dusk = observeHostileResponse(botWith({ items: ["wooden_sword"], mobs: spider, timeOfDay: NIGHT_TICKS, skyLight: 15 }));
   // Noon underground: the clock says day and the cell is unlit, so it hunts.
   const cave = observeHostileResponse(
-    botWith({ mobs: spider, timeOfDay: NOON_TICKS, skyLight: SPIDER_PASSIVE_SKY_LIGHT - 1 }),
+    botWith({ items: ["wooden_sword"], mobs: spider, timeOfDay: NOON_TICKS, skyLight: SPIDER_PASSIVE_SKY_LIGHT - 1 }),
   );
   const provoked = observeHostileResponse(
-    botWith({ mobs: spider, timeOfDay: NOON_TICKS, skyLight: 15 }),
+    botWith({ items: ["wooden_sword"], mobs: spider, timeOfDay: NOON_TICKS, skyLight: 15 }),
     context({ attackers: [7] }),
   );
 
@@ -813,7 +741,7 @@ for (const health of [20, 10, 6]) {
 
 test("observed aggressive piglin remains subject to contact and exposure", () => {
   const mob = { id: 7, name: "piglin", x: 3, metadata: piglinMetadata({ mob_flags: 4 }) };
-  const bot = botWith({ mobs: [mob] });
+  const bot = botWith({ items: ["wooden_sword"], mobs: [mob] });
   assert.equal(isThreat(bot, bot.entities[7], context()), false);
   assert.equal(shouldAvoidEntity(bot, bot.entities[7], context()), true);
   const response = observeHostileResponse(bot);
@@ -831,7 +759,7 @@ test("observed aggressive piglin remains subject to contact and exposure", () =>
 
 test("wounded unguarded ranged contact seeks shelter, retaining guarded and failed-build escapes", () => {
   for (const name of ["blaze", "skeleton"]) {
-    const bot = botWith({ health: 10, items: ["diamond_sword", "cobblestone"], mobs: [{ id: 7, name, x: 10 }] });
+    const bot = botWith({ health: 10, items: ["diamond_sword", "cobblestone", "bow", "arrow"], mobs: [{ id: 7, name, x: 10 }] });
     if (name === "skeleton") holdBow(bot, bot.entities[7]!);
     const seen = context({ attackers: [7] });
     assert.equal(observeHostileResponse(bot, seen).kind, "hide", name);
@@ -855,7 +783,7 @@ test("an existing burn needs recovery even when a shield can block future ranged
   for (const name of ["blaze", "skeleton"]) {
     const bot = botWith({
       health: 10,
-      items: ["shield", "diamond_sword", "cobblestone"],
+      items: ["shield", "diamond_sword", "cobblestone", "bow", "arrow"],
       mobs: [{ id: 7, name, x: 10 }],
     });
     if (name === "skeleton") holdBow(bot, bot.entities[7]!);

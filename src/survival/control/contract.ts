@@ -16,7 +16,9 @@ export type ResponseExclusion =
   | { readonly kind: "infeasible_now"; readonly premise: string };
 
 export type ResponseDecision<Response> =
-  | { readonly kind: "respond"; readonly response: Response; readonly name: string; readonly reason: string }
+  | { readonly kind: "respond"; readonly response: Response; readonly name: string; readonly reason: string;
+      /** Stable response identity when the explanation contains live measurements. */
+      readonly identity?: Facts }
   | {
       readonly kind: "stand_down";
       readonly candidates: readonly { readonly response: string; readonly excluded: ResponseExclusion }[];

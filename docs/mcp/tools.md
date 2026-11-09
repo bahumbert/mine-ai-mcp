@@ -66,6 +66,17 @@ fire, breath, and footing reflexes remain independent. See the
 [policy contract](../../src/survival/policy/contract.ts) and the
 [survival policy guide](../survival/survival-policy.md).
 
+`combat.fight_margin` (default `1.5`, finite range `0`–`10`) is the minimum
+melee advantage for an automatic fight: effective health divided by the
+estimated health lost while clearing the contacts. Below it the bot evades
+as `outmatched`. A usable permitted bow bypasses this melee estimate while
+no contact is in melee reach. A hunt's quarry and immediate contact defence
+keep their own rules. After an answered evade, the bot hides if possible or
+defends in reach. Explosive contacts use measured explosion data: a weapon no
+stronger than bare hands, or multiple explosives without a permitted usable
+ranged weapon, trigger `explosive`. The interruption explains the estimate;
+completed combat notifications show the margin, threshold and carried weapon.
+
 `navigation.hostile_avoidance_multiplier` scales capped hostile proximity
 costs during ordinary navigation and evasion: `1` is normal, `2` doubles the
 cost, `0.5` halves it, and `0` removes proximity cost. It accepts finite,

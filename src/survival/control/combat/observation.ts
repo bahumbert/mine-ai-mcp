@@ -78,6 +78,21 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
     const scope = responseScope(bot, contextPolicy(context), "deflect", fireball.id);
     if (context.survival.answered.find(scope.capability, scope.scope)) answered.add("deflect");
   }
+  const contacts: CombatContact[] = observeExposedAvoidanceContact(bot, context)
+    .filter((threat) => threat.name !== "ender_dragon")
+    .map((threat) => {
+      const entity = bot.entities[threat.id]!;
+      return {
+        ...threat,
+        relationship: hostileRelationship(bot, entity, context),
+        // Exposed bow draws aimed at us are contact before their first projectile hits.
+        inContact: inContact(threat, context) || bowDrawAimedAtBot(bot, entity),
+        inReach: inDefensiveContact(bot, entity),
+        defendsOnContact: defendsOnContact(bot, entity),
+        ranged: isRangedAttacker(bot, entity),
+        utility: targetFacts(bot, entity, context.attackerIds.has(entity.id)),
+      };
+    });
   return {
     policy,
     health: bot.health,
@@ -88,6 +103,7 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
     weapon: carriesCombatWeapon(bot),
     rangedWeapon: carriesRangedWeapon(bot),
     shield: readCombatItems(bot).some((item) => isShield(bot, item)),
+    assessment: assessContacts(bot, contacts, context),
     fireball: fireball
       ? {
           id: fireball.id,
@@ -96,21 +112,7 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
           distance: fireball.position.distanceTo(bot.entity.position),
         }
       : null,
-    contacts: observeExposedAvoidanceContact(bot, context)
-      .filter((threat) => threat.name !== "ender_dragon")
-      .map((threat) => {
-        const entity = bot.entities[threat.id]!;
-        return {
-          ...threat,
-          relationship: hostileRelationship(bot, entity, context),
-          // Exposed bow draws aimed at us are contact before their first projectile hits.
-          inContact: inContact(threat, context) || bowDrawAimedAtBot(bot, entity),
-          inReach: inDefensiveContact(bot, entity),
-          defendsOnContact: defendsOnContact(bot, entity),
-          ranged: isRangedAttacker(bot, entity),
-          utility: targetFacts(bot, entity, context.attackerIds.has(entity.id)),
-        };
-      }),
+    contacts,
     unreachable: context.unreachableIds,
     answeredFights,
     answered,

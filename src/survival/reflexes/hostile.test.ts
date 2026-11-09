@@ -177,11 +177,11 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   const { bot, clock, combat, world, inventory, entities, server } = createFakeBot({
     username: "ReflexBot",
     position: new Vec3(0, 64, 0),
-    // Open air with nothing carried: a hide here can dig nothing and place
-    // nothing, which is the state the standing-down rule exists for.
+    // Open air without building material: hiding cannot dig or place here.
+    // A diamond sword keeps lifecycle tests above fight_margin; explicit equipment replaces it.
     groundY: null,
     entities: options.entities,
-    carried: options.carried,
+    carried: options.carried ?? { diamond_sword: 1 },
     health: options.health,
     food: options.food,
     slots: options.slots,
@@ -1020,7 +1020,7 @@ test("a cancelled escape preserves its attack and kill evidence when navigation 
       fixture.runner.cancelActive("footing recovery");
       throw new Error("navigation released during cancellation");
     },
-    { entities: { 7: hostile("zombie", 2) } },
+    { carried: {}, entities: { 7: hostile("zombie", 2) } },
   );
   fixture.bot.health = 11;
   try {

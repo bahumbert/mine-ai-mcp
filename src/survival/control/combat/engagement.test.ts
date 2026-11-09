@@ -4,6 +4,7 @@ import test from "node:test";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
 import type { CombatDecisionFacts } from "../../policy/combat/decision.js";
+import { combatDecisionFacts } from "../../../test-support/combat.js";
 import type { CombatOutcome } from "./contract.js";
 
 import { runEngagement } from "./engagement.js";
@@ -142,7 +143,7 @@ for (const cleanupFails of [false, true]) {
 function operations(bot: Bot, minimumHealth = 12) {
   return {
     purpose: { kind: "pursuit", targetId: 7, minimumHealth } as const,
-    observe: (): CombatDecisionFacts => ({
+    observe: (): CombatDecisionFacts => combatDecisionFacts({
       policy: DEFAULT_COMBAT_POLICY,
       health: bot.health,
       burning: false,

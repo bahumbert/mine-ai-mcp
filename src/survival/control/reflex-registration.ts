@@ -39,6 +39,7 @@ export interface RegisteredReflex {
 /** One claim in flight: what its settlement needs to tell a cancel, a limit and a failure apart. */
 interface ClaimRun<Response> {
   readonly response: Response;
+  readonly decisionFacts: Facts;
   readonly name: string;
   readonly world: number;
   readonly limits: ReflexLimits;
@@ -69,6 +70,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   #danger: Facts = null;
   #missing: string | null = null;
   #decision: Facts = null;
+  #decisionIdentity: Facts = null;
   #observedDanger: Facts = null;
   #observedAt: number | null = null;
   #observedWorld = -1;
@@ -208,12 +210,13 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       );
       return;
     }
-    this.#changeDecision({ kind: "respond", response: chosen.name, reason: chosen.reason }, inputs);
-    this.#startClaim(chosen.response, chosen.name, chosen.reason);
+    this.#changeDecision({ kind: "respond", response: chosen.name, reason: chosen.reason }, inputs, chosen.identity);
+    this.#startClaim(chosen.response, chosen.name, chosen.reason, inputs());
   }
 
-  #changeDecision(next: Facts, inputs: () => Facts = () => this.#danger): void {
-    if (isDeepStrictEqual(next, this.#decision)) return;
+  #changeDecision(next: Facts, inputs: () => Facts = () => this.#danger, identity: Facts = next): void {
+    if (isDeepStrictEqual(identity, this.#decisionIdentity)) return;
+    this.#decisionIdentity = identity;
     this.#decision = next;
     this.host.publish({
       kind: "decision",
@@ -222,7 +225,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     });
   }
 
-  #startClaim(response: Response, responseName: string, reason: string): void {
+  #startClaim(response: Response, responseName: string, reason: string, decisionFacts: Facts): void {
     const { definition, host } = this;
     const controller = new AbortController();
     const active: ActiveClaim = { name: responseName, startedAt: Date.now(), controller, signal: null };
@@ -231,6 +234,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     const progress = new ReflexProgress();
     const run: ClaimRun<Response> = {
       response,
+      decisionFacts,
       name: responseName,
       world: host.world(),
       limits,
@@ -328,6 +332,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       reflex: definition.name,
       evidence: {
         response: run.name,
+        decision: run.decisionFacts,
         cancelled,
         outcome: limit ? this.#limitOutcome(run, limit) : definition.describe(outcome),
         interrupted: run.interrupted ? { ...run.interrupted } : null,
@@ -348,6 +353,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         reflex: definition.name,
         evidence: {
           response: run.name,
+          decision: run.decisionFacts,
           cancelled: false,
           outcome: this.#limitOutcome(run, limit),
           interrupted: run.interrupted ? { ...run.interrupted } : null,
@@ -363,6 +369,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       reflex: definition.name,
       evidence: {
         response: run.name,
+        decision: run.decisionFacts,
         kind: run.signal?.aborted || run.world !== host.world() ? "cancelled" : "execution_failed",
         why,
       },

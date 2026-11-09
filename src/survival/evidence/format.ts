@@ -56,6 +56,16 @@ export function formatSurvivalOutcome(receipt: SurvivalReceipt): string {
   const interrupted = object(evidence.interrupted);
   const result = outcome.kind ?? outcome.outcome ?? evidence.kind ?? receipt.status.summary;
   const parts = [`${label(receipt.source)}: ${label(String(result))}`];
+  const decision = object(evidence.decision);
+  const selection = object(evidence.selection ?? decision.selection);
+  const inputs = object(selection.inputs ?? decision.inputs ?? evidence.inputs);
+  const assessment = object(inputs.assessment);
+  if ("margin" in assessment) {
+    const policy = object(inputs.policy);
+    const weapon = object(assessment.weapon);
+    const margin = typeof assessment.margin === "number" ? assessment.margin.toFixed(1) : "unknown";
+    parts.push(`margin ${margin} (fight_margin ${policy.fight_margin}), weapon ${weapon.item ?? "bare hands"}`);
+  }
   if (typeof outcome.food === "string") parts.push(label(outcome.food));
   if (typeof interrupted.action === "string") parts.push(`interrupted ${interrupted.action}`);
   for (const [name, before, after] of [["health", outcome.healthBefore, outcome.healthAfter], ["hunger", outcome.hungerBefore, outcome.hungerAfter]] as const) {

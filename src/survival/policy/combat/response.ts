@@ -6,7 +6,7 @@ export interface HostileThreat {
   readonly distance: number;
 }
 
-export type EvadeReason = "hurt" | "creeper" | "unreachable" | "observed_aggression" | "withdraw";
+export type EvadeReason = "hurt" | "explosive" | "outmatched" | "unreachable" | "observed_aggression" | "withdraw";
 
 export type HideReason = "hurt" | "cornered";
 

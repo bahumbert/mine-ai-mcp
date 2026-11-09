@@ -17,6 +17,14 @@ import { EndCombat } from "../survival/responses/end/execute.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { survivalResources, type SurvivalResources } from "../survival/state/resources.js";
 import { SurvivalPolicyState } from "../survival/state/survival-policy.js";
+import type { CombatDecisionFacts } from "../survival/policy/combat/decision.js";
+import { legacyAssessment } from "../survival/policy/combat/replay.js";
+import { DEFAULT_MINECRAFT_VERSION } from "../server/config.js";
+
+/** Preserve pre-assessment fixture decisions unless the test supplies explicit measured combat facts. */
+export function combatDecisionFacts(facts: Omit<CombatDecisionFacts, "assessment"> & Partial<Pick<CombatDecisionFacts, "assessment">>): CombatDecisionFacts {
+  return { ...facts, assessment: facts.assessment ?? legacyAssessment(facts.contacts, facts.weapon, DEFAULT_MINECRAFT_VERSION) };
+}
 
 const resources = new Set<Disposable>();
 function own<T extends Disposable>(resource: T): T {

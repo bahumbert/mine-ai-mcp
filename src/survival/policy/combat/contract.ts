@@ -15,6 +15,8 @@ export const combatPolicySchema = z.strictObject({
   melee: z.boolean(),
   bow: z.boolean(),
   shield: z.boolean(),
+  fight_margin: z.number().finite().min(0).max(10)
+    .describe("Minimum melee advantage for automatic fighting; contact defence and a hunt's quarry remain separate."),
   terrain: z
     .strictObject({ dig: z.boolean(), place: z.boolean() })
     .describe("Combat-owned terrain changes and approaches. Ordinary navigation keeps its own dig/scaffold arguments."),
@@ -78,6 +80,7 @@ export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
   melee: true,
   bow: true,
   shield: true,
+  fight_margin: 1.5,
   terrain: Object.freeze({ dig: true, place: true }),
   engage_min_health: 12,
   critical_health: 8,

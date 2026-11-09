@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_COMBAT_POLICY } from "./contract.js";
+import { combatPolicySchema, DEFAULT_COMBAT_POLICY } from "./contract.js";
+import type { ThreatAssessment } from "../../perception/combat/threat-assessment.js";
+import { createFakeBot } from "../../../test-support/fake-bot/index.js";
+import { ActionRunner } from "../../../session/action-runner.js";
+import { ReflexDriver } from "../../control/driver.js";
+import type { SurvivalTransition } from "../../control/contract.js";
+import { combatDecisionFacts } from "../../../test-support/combat.js";
 import {
   combatDecisionEvidence,
   combatResponseExclusions,
@@ -8,9 +14,9 @@ import {
   type CombatDecisionFacts,
   type CombatPurpose,
 } from "./decision.js";
-import { decideHostileReflex } from "./reflex-decision.js";
+import { decideHostileReflex, describeDirectiveReason } from "./reflex-decision.js";
 
-const scene = (): CombatDecisionFacts => ({
+const scene = (): CombatDecisionFacts => combatDecisionFacts({
   policy: { ...DEFAULT_COMBAT_POLICY, engagement: "defend_only" },
   health: 20,
   burning: false,
@@ -205,4 +211,125 @@ test("a hostile interruption names the decision's reason so the caller can act o
   const fight = decideCombatResponse(facts, { kind: "automatic", quarry: ["skeleton"] });
   const fighting = decideHostileReflex({ facts, directive: fight, settling: false, combatOwnsBody: false, entries: [] });
   if (fighting.kind === "respond") assert.equal(fighting.reason, "[HOSTILE_CONTACT] fight response for skeleton#24617 at 6,64,0 (6 blocks).");
+});
+
+/** Hand-priced inputs isolate policy from the separately tested damage formulas. */
+function weighedScene(margin: number | null = 0.6) {
+  const base = scene();
+  const contact = { ...base.contacts[0]!, name: "zombie", defendsOnContact: false,
+    relationship: { avoid: true, defend: true, attention: "on_sight" as const } };
+  const assessment: ThreatAssessment = {
+    bot: { effectiveHealth: 20, armor: 0, toughness: 0 },
+    weapon: { item: null, damage: 1, intervalTicks: 10 },
+    contacts: [{ id: 7, species: "zombie", damagePerHit: 3, damageSource: "attribute", unknownMelee: false,
+      hitIntervalTicks: 20, health: 20, hitsToKill: 22, ticksToKill: 220, hitsToKillBot: 7,
+      explosion: null, inContact: true }],
+    ticksToDie: 133, ticksToClear: 220, healthLostToClear: 33, margin,
+    source: { version: "1.21.4", measured: true },
+  };
+  return { ...base, policy: { ...DEFAULT_COMBAT_POLICY, fight_margin: 1.5 }, contacts: [contact], assessment };
+}
+
+test("automatic fighting respects the margin, quarry, defence, ranged and answered-evade boundaries", async (t) => {
+  const base = weighedScene();
+  const cases = [
+    { name: "bare hands outmatched", facts: base, want: "outmatched" },
+    { name: "margin passes", facts: { ...base, assessment: { ...base.assessment, margin: 2.1 } }, want: "fight" },
+    { name: "margin equals threshold", facts: { ...base, assessment: { ...base.assessment, margin: 1.5 } }, want: "fight" },
+    { name: "hunt owns giving up", facts: base, purpose: { kind: "automatic", quarry: ["zombie"] } as const, want: "fight" },
+    { name: "contact defence", facts: weighedScene(0.3), purpose: { kind: "contact_defence", targetId: 7 } as const, want: "fight" },
+    { name: "retreat prohibited defends in reach", facts: { ...weighedScene(0.3), policy: { ...base.policy, retreat: false } }, want: "fight" },
+    { name: "can shoot outside reach", facts: { ...base, rangedWeapon: true, contacts: [{ ...base.contacts[0]!, inReach: false }] }, want: "fight" },
+    { name: "can shoot but melee contact", facts: { ...base, rangedWeapon: true }, want: "outmatched" },
+    { name: "bow prohibited", facts: { ...base, rangedWeapon: true, policy: { ...base.policy, bow: false } }, want: "outmatched" },
+    { name: "no damage to weigh", facts: weighedScene(null), want: "fight" },
+    { name: "unmeasured source", facts: { ...base, assessment: { ...base.assessment, source: { version: "1.21.4", measured: false } } }, want: "outmatched" },
+    { name: "answered evade hides", facts: { ...base, answered: new Set(["evade"]), hideAllowed: true }, want: "hide" },
+    { name: "answered evade defends", facts: { ...base, answered: new Set(["evade"]) }, want: "fight" },
+  ];
+  for (const entry of cases) await t.test(entry.name, () => {
+    const result = decideCombatResponse(entry.facts, entry.purpose ?? { kind: "automatic" });
+    assert.equal(result.kind === "evade" ? result.reason : result.kind, entry.want);
+  });
+});
+
+test("explosive decisions use assessed explosions and damage, including a damage-one carried weapon", () => {
+  const base = weighedScene(null);
+  // A different name proves the branch reads explosion data, not a species spelling.
+  const contacts = [{ ...base.contacts[0]!, name: "measured_explosive" }];
+  const explosive = { ...base.assessment.contacts[0]!, species: "measured_explosive", damagePerHit: null,
+    explosion: { radius: 3, fuseTicks: 30, fuseRemainingTicks: null, damageAtReach: 16.75 } };
+  for (const damage of [1, 2]) {
+    const facts = { ...base, weapon: true, contacts, assessment: { ...base.assessment,
+      weapon: { ...base.assessment.weapon, damage }, contacts: [explosive] } };
+    const result = decideCombatResponse(facts, { kind: "automatic" });
+    assert.equal(result.kind === "evade" ? result.reason : result.kind, damage === 1 ? "explosive" : "fight");
+    for (const [bow, rangedWeapon] of [[false, true], [true, false], [true, true]]) {
+      const pair = decideCombatResponse({ ...facts, policy: { ...facts.policy, bow: bow! }, rangedWeapon: rangedWeapon!,
+        contacts: [...contacts, { ...contacts[0]!, id: 8 }],
+        assessment: { ...facts.assessment, contacts: [explosive, { ...explosive, id: 8 }] } }, { kind: "automatic" });
+      assert.equal(pair.kind === "evade" ? pair.reason : pair.kind,
+        damage === 1 || !bow || !rangedWeapon ? "explosive" : "fight");
+    }
+  }
+  const order = decideCombatResponse({ ...base, contacts: [...contacts, { ...base.contacts[0]!, id: 8 }],
+    assessment: { ...base.assessment, weapon: { ...base.assessment.weapon, damage: 2 },
+      contacts: [explosive, { ...base.assessment.contacts[0]!, id: 8 }] } }, { kind: "automatic" });
+  assert.ok(order.kind === "fight" && order.targetId === 8);
+});
+
+test("combat explanations give rounded costs without nested parentheses", () => {
+  const base = weighedScene(0.202);
+  const facts = { ...base, contacts: [...base.contacts, { ...base.contacts[0]!, id: 8 }],
+    assessment: { ...base.assessment, healthLostToClear: 99,
+      contacts: [...base.assessment.contacts, { ...base.assessment.contacts[0]!, id: 8 }] } };
+  assert.equal(describeDirectiveReason("outmatched", facts),
+    "outmatched: killing 2 zombie with bare hands would cost ~99 of your 20 health; margin 0.2 under fight_margin 1.5");
+  assert.equal(describeDirectiveReason("explosive", { ...base,
+    contacts: [{ ...base.contacts[0]!, name: "creeper", distance: 3 }],
+    assessment: { ...base.assessment, contacts: [{ ...base.assessment.contacts[0]!, species: "creeper",
+      explosion: { radius: 3, fuseTicks: 30, fuseRemainingTicks: null, damageAtReach: 16.75 } }] } }),
+    "explosive: creeper at 3 blocks can deal ~17 of your 20 health at melee reach; you carry nothing stronger than a bare hand");
+});
+
+test("fight_margin rejects nonfinite and out-of-range policy edits", () => {
+  assert.equal(DEFAULT_COMBAT_POLICY.fight_margin, 1.5);
+  for (const fight_margin of [0, 1.5, 10]) assert.ok(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, fight_margin }).success);
+  for (const fight_margin of [-1, 11, NaN, Infinity]) assert.equal(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, fight_margin }).success, false);
+});
+
+test("changing only assessment numbers or distances publishes one decision; target and reason changes publish", async () => {
+  const { bot } = createFakeBot();
+  await using driver = new ReflexDriver(bot, new ActionRunner());
+  const events: SurvivalTransition[] = [];
+  driver.onTransition((event) => events.push(event));
+  let facts = weighedScene();
+  driver.register({
+    name: "hostile_reflex",
+    sense: () => ({ kind: "observed", danger: facts, evidence: null }),
+    decide: (observed) => decideHostileReflex({ facts: observed,
+      directive: decideCombatResponse(observed, { kind: "automatic" }), settling: false, combatOwnsBody: false, entries: [] }),
+    decisionFacts: (observed) => combatDecisionEvidence(observed, { kind: "automatic" }, decideCombatResponse(observed, { kind: "automatic" })),
+    facts: () => ({ capability: "combat", response: "response", scope: "test", facts: () => null, permissions: () => null }),
+    limits: () => ({ ceilingMs: 600_000, noProgressMs: 600_000, standDownMs: 2_000 }),
+    act: async () => true,
+    continuation: () => ({ kind: "resume" }),
+    failure: () => null,
+    describe: () => null,
+  });
+  const tick = async () => { bot.emit("physicsTick"); await new Promise<void>((resolve) => setImmediate(resolve)); };
+  await tick();
+  const outcome = events.find((event) => event.kind === "outcome")!;
+  const captured = outcome.evidence as { decision: { inputs: { assessment: { margin: number } } } };
+  assert.equal(captured.decision.inputs.assessment.margin, 0.6, "outcomes carry the admission assessment for the world feed");
+  facts = { ...facts, contacts: [{ ...facts.contacts[0]!, distance: 2.1 }],
+    assessment: { ...facts.assessment, margin: 0.5, healthLostToClear: 40 } };
+  await tick();
+  assert.equal(events.filter((event) => event.kind === "decision").length, 1);
+  facts = { ...facts, contacts: [{ ...facts.contacts[0]!, id: 8 }] };
+  await tick();
+  assert.equal(events.filter((event) => event.kind === "decision").length, 2);
+  facts = { ...facts, assessment: { ...facts.assessment, margin: 2.1 } };
+  await tick();
+  assert.equal(events.filter((event) => event.kind === "decision").length, 3);
 });

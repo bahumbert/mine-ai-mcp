@@ -7,13 +7,16 @@ import { sourceImports } from "../../test-support/imports.js";
 const survival = fileURLToPath(new URL("../", import.meta.url));
 
 test("survival policy selects from facts without importing the bot, mutable stores or physical execution", () => {
-  const invalid = sourceImports(survival, "policy").filter(({ target, typeOnly }) => {
+  const invalid = sourceImports(survival, "policy").filter(({ from, target, typeOnly }) => {
     if (target === "mineflayer") return true;
     if (typeOnly) return false;
-    // Food's fixed regeneration threshold is shared game data; decisions receive no live bot.
+    // Food and combat data/formulas are immutable facts; legacy replay also needs version and reach constants.
     return !(
       target.startsWith("policy/") ||
       target === "../world/food.js" ||
+      target === "../world/combat-data.js" ||
+      target === "perception/combat/threat-assessment.js" ||
+      (from === "policy/combat/replay.ts" && (target === "weapons/equipment.js" || target === "../server/config.js")) ||
       target === "zod" ||
       target === "node:util"
     );
