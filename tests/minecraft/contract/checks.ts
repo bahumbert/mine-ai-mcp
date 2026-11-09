@@ -31,6 +31,7 @@ import { lightInCells } from "./checks/light-in-cells.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
+import { useEntitySneakInBoat } from "./checks/use-entity-sneak-in-boat.ts";
 import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
 import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
@@ -145,6 +146,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   stopDiggingBothWindows,
   boatGetOffByShift,
   boatDismountIgnored,
+  useEntitySneakInBoat,
   boatPlacedByUse,
   boatFollowsVehicleMove,
   boatBrokenByAttack,

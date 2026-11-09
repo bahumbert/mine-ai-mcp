@@ -16,7 +16,7 @@ import type { NavigationRuntime } from "../navigation/index.js";
  * Vex by a shore). Returns the take-back's report, null when no boat was there to take back.
  */
 export async function leaveBoatSeat(bot: Bot, signal?: AbortSignal, takeBack: Pick<TakeBackOptions, "maxHits"> = {}): Promise<TakeBackReport | null> {
-  const justLeft: Entity | null = isBoatEntity(bot.entity.vehicle) ? (await getOff(bot)).vehicle : null;
+  const justLeft: Entity | null = isBoatEntity(bot.entity.vehicle) ? (await getOff(bot, signal)).vehicle : null;
   const boat = boatToTakeBack(bot, justLeft);
   return boat === null ? null : takeBoatBackReport(bot, boat, signal, takeBack);
 }

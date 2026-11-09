@@ -1,4 +1,5 @@
 import type { Bot, BotEvents } from "mineflayer";
+import { onBodyTick } from "../../../runtime/body-ticks.js";
 import { SHIELD_READY_TICKS } from "../../weapons/item-use.js";
 import { entityDimensions } from "../../../world/entity-dimensions.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
@@ -153,7 +154,7 @@ export interface ObservedThreat extends PositionThreat {
   readonly hasHitUs: boolean;
 }
 
-/** Packet facts belong to this connection; consumers share one lazy table per physics tick. */
+/** Packet facts belong to this connection; consumers share one lazy table per body tick, including while seated. */
 export class CombatPerception implements Disposable {
   readonly creeperClearance: CreeperClearance;
   get tick(): number { return this.#tick; }
@@ -220,8 +221,7 @@ export class CombatPerception implements Disposable {
       bot.entities[spawn.projectileId]?.velocity.update(spawn.velocity);
       invalidate();
     };
-    bot.on("physicsTick", tick);
-    this.#listeners.defer(() => bot.off("physicsTick", tick));
+    this.#listeners.defer(onBodyTick(bot, tick));
     bot.on("entitySpawn", invalidate);
     this.#listeners.defer(() => bot.off("entitySpawn", invalidate));
     bot.on("entityHurt", hurt);

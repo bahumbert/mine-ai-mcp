@@ -9,7 +9,7 @@ import { shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, messageOf, type HostileScene } from "./hostile-scene.js";
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
-const HOSTILE_TAKE_BACK_HITS = 15;
+export const HOSTILE_TAKE_BACK_HITS = 15;
 
 export type ShieldPrepared = { readonly kind: "shield_prepared"; readonly equipped: boolean; readonly error: string | null };
 

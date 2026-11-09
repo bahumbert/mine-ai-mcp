@@ -31,6 +31,43 @@ export interface HostileReflex extends AsyncDisposable {
   activeResponse(): HostileResponse["kind"] | null;
 }
 
+/** Cancel changed response permissions and reset encounter policy at death or a dimension change. */
+function watchHostilePolicy(scene: HostileScene): () => void {
+  const { bot, policy, driver, encounterThreats, transition } = scene;
+  let previousPolicy = policy.combat;
+  let previousFood = policy.food;
+  const unsubscribePolicy = policy.onChange(async (snapshot) => {
+    const changed = scene.activeResponse && (
+      responsePolicyChanged(previousPolicy, policy.combat, scene.activeResponse) ||
+      (scene.activeResponse === "hide" && !isDeepStrictEqual(previousFood, policy.food))
+    );
+    previousPolicy = policy.combat;
+    previousFood = policy.food;
+    if (changed)
+      await driver.cancel(
+        HOSTILE_REFLEX,
+        new BodyAbort({ kind: "policy_changed", revision: snapshot.revision }, "Combat policy changed."),
+      );
+  });
+  const resetPolicy = () => {
+    encounterThreats.clear();
+    transition(policy.reset("Death or dimension change; defaults restored."));
+  };
+  bot.on("death", resetPolicy);
+  let dimension = bot.game.dimension;
+  const dimensionChanged = () => {
+    if (dimension === bot.game.dimension) return;
+    dimension = bot.game.dimension;
+    resetPolicy();
+  };
+  bot.on("game", dimensionChanged);
+  return () => {
+    unsubscribePolicy();
+    bot.off("death", resetPolicy);
+    bot.off("game", dimensionChanged);
+  };
+}
+
 /** Hostile observations and execution; admission, cancellation and failure retention belong to the driver. */
 export function attachHostileReflex(
   bot: Bot,
@@ -42,8 +79,6 @@ export function attachHostileReflex(
   const policy = controller.policy;
   const { resolvedIds, attackerIds } = perception;
   const encounterThreats = new Set<number>();
-  let previousPolicy = policy.combat;
-  let previousFood = policy.food;
   let closing: Promise<void> | null = null;
 
   const context: ResponseContext = {
@@ -80,34 +115,11 @@ export function attachHostileReflex(
     activeResponse: null,
   };
 
-  const unsubscribePolicy = policy.onChange(async (snapshot) => {
-    const changed = scene.activeResponse && (
-      responsePolicyChanged(previousPolicy, policy.combat, scene.activeResponse) ||
-      (scene.activeResponse === "hide" && !isDeepStrictEqual(previousFood, policy.food))
-    );
-    previousPolicy = policy.combat;
-    previousFood = policy.food;
-    if (changed)
-      await driver.cancel(
-        HOSTILE_REFLEX,
-        new BodyAbort({ kind: "policy_changed", revision: snapshot.revision }, "Combat policy changed."),
-      );
-  });
-  const resetPolicy = () => {
-    encounterThreats.clear();
-    transition(policy.reset("Death or dimension change; defaults restored."));
-  };
-  bot.on("death", resetPolicy);
-  let dimension = bot.game.dimension;
-  const dimensionChanged = () => {
-    if (dimension === bot.game.dimension) return;
-    dimension = bot.game.dimension;
-    resetPolicy();
-  };
-  bot.on("game", dimensionChanged);
+  const stopWatchingPolicy = watchHostilePolicy(scene);
 
   const registration = driver.register({
     name: HOSTILE_REFLEX,
+    seated: true,
     sense: () => senseHostile(scene),
     decisionFacts: hostileDecisionFacts,
     decide: decideHostile,
@@ -129,9 +141,7 @@ export function attachHostileReflex(
     activeResponse: () => scene.activeResponse,
     [Symbol.asyncDispose]: () =>
       (closing ??= (async () => {
-        unsubscribePolicy();
-        bot.off("death", resetPolicy);
-        bot.off("game", dimensionChanged);
+        stopWatchingPolicy();
         await registration[Symbol.asyncDispose]();
         await controller.stop("hostile contact observer closed");
       })()),
