@@ -481,7 +481,8 @@ export class Agent {
     this.openRequestsOnceSaid(said, decision, whisperTo, snapshot);
     // A stop with a request stops the work before `decided`: the give the line's own trade pushes is no work to stop (spec 2026-11-07-gift-asked-for D4).
     if (carriesRequest && this.stack.length > 0) this.stopAndRest(message.username);
-    const tradeId = decision.trade === undefined ? null : await this.relations?.decided(decision, message.username, snapshot, { ...seen, asked: routed === "act" || routed === "later" }) ?? null;
+    const lineDecision = this.relations?.withoutRestatement(decision, message.username, seen.heardAt) ?? decision;
+    const tradeId = lineDecision.trade === undefined ? null : await this.relations?.decided(lineDecision, message.username, snapshot, { ...seen, asked: routed === "act" || routed === "later" }) ?? null;
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
     if (conversation !== undefined) this.spokeInConversation(decision, message.username);
@@ -503,7 +504,7 @@ export class Agent {
       log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
       return;
     }
-    const verdict = orderVerdict(this.relations, decision, message.username, asked.purpose, tradeId);
+    const verdict = orderVerdict(this.relations, lineDecision, message.username, asked.purpose, tradeId);
     if (verdict.kind === "refused") return void log(verdict.log);
     if (this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) return void log(`already on "${asked.text}" for ${asked.requester}`);
     if (verdict.log !== undefined) log(verdict.log);
@@ -671,7 +672,7 @@ export class Agent {
         const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
         let decision = await mind.chat(input, this.runSignal);
         let checked: BotSnapshot | undefined;
-        if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, snapshot, signal: this.runSignal }));
+        if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, heardAt: wallTimeOf(heardAt), snapshot, signal: this.runSignal }));
         this.modelFailures = 0;
         return { decision, snapshot, ...(checked !== undefined && { checked }), conversation, ...(input.relations?.seenOfferId !== undefined && { seenOfferId: input.relations.seenOfferId }) };
       } catch (error) {

@@ -12,7 +12,7 @@ import type { BotRuntime, BotSnapshot, HurtBy } from "../runtime-client.ts";
 import type { SkillContext } from "../skills.ts";
 import type { TradeBoard } from "./board.ts";
 import { RelationBook } from "./book.ts";
-import { resendRefusedTrade, type CheckedTrade } from "./chat-trade.ts";
+import { resendRefusedTrade, restatedLine, withoutTrade, type CheckedTrade } from "./chat-trade.ts";
 import { TradeController } from "./controller.ts";
 import { awaitTheirSide, GIVE_ALLOWANCE_MS, handoffOutcome, type PartnerWitness, runHandoff, type Handoff, type HandoffEnd } from "./handoff.ts";
 import { ObeyMoods, type ObeyMood } from "./obey.ts";
@@ -111,8 +111,10 @@ export class AgentRelations {
     const { mood, current } = this.rollFor(speaker);
     const refusing = mood.obeys ? "" : notObeyingLine(speaker, current);
     const seenOfferId = this.deps.board?.offerFrom(speaker, this.deps.persona.username)?.id;
+    // The conversation lists the speaker too: each name once (any case), so the speaker's summary is not printed twice.
+    const partners = [speaker, ...others].filter((name, i, all) => all.findIndex((other) => other.toLowerCase() === name.toLowerCase()) === i);
     return {
-      block: [this.trades.block([speaker, ...others], this.deps.lacks(snapshot.inventory)), tooFar, refusing].filter((part) => part !== "").join("\n"),
+      block: [this.trades.block(partners, this.deps.lacks(snapshot.inventory)), tooFar, refusing].filter((part) => part !== "").join("\n"),
       tradeOn: true, requests: mine === null ? [] : requestLines(mine, speaker, this.now()), ...(seenOfferId !== undefined && { seenOfferId }),
     };
   }
@@ -161,8 +163,20 @@ export class AgentRelations {
     return cameToNothing ? `${GIVE_OUTSIDE_TRADE} not given: the trade ${player} spoke of with this order came to nothing; a give outside a trade is no part of it` : null;
   }
 
+  /**
+   * The decision as it goes on: a propose or accept that re-states a trade of the book before it is decided (the speaker's open trades,
+   * or the trade done just before the line was heard) is no trade part, so it loses its trade (one line logged) and the line stands as a plain one
+   * (spec 2026-11-08-trading-p2-fixes D7b).
+   */
+  withoutRestatement(decision: ChatDecision, speaker: string, heardAt: number): ChatDecision {
+    const restated = decision.trade === undefined ? undefined : this.trades.restatement(decision.trade, speaker, { afterRefusal: false, heardAt });
+    if (restated === undefined || decision.trade === undefined) return decision;
+    this.deps.log(restatedLine(restated, decision.trade));
+    return withoutTrade(decision);
+  }
+
   /** A reply that carries a trade: the trade is checked on the world as it is now, and sent back once when the checks refuse it; the snapshot of the last check comes with it. */
-  checkedTrade(first: ChatDecision, input: ChatInput, o: { readonly speaker: string; readonly snapshot: BotSnapshot; readonly signal: AbortSignal }): Promise<CheckedTrade> {
+  checkedTrade(first: ChatDecision, input: ChatInput, o: { readonly speaker: string; readonly heardAt: number; readonly snapshot: BotSnapshot; readonly signal: AbortSignal }): Promise<CheckedTrade> {
     return resendRefusedTrade({ mind: this.deps.mind, input, first, trades: this.trades, log: this.deps.log, fresh: () => this.deps.runtime.status(), ...o });
   }
 

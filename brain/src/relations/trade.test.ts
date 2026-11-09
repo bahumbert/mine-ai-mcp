@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { TradeDecision } from "../mind.ts";
 import type { Position } from "../runtime-client.ts";
 import type { ItemCount, Trade, TradeSettings } from "./types.ts";
-import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, giverFirst, heldPayment, inventoryGains, isOpen, markGave, proposeTrade, settleTrade } from "./trade.ts";
+import { agreeTrade, attributeGains, cancelTrade, creditTrade, failTrade, giverFirst, heldPayment, inventoryGains, isOpen, markGave, proposeTrade, restatedTrade, settleTrade } from "./trade.ts";
 
 const settings: TradeSettings = { payBackMinutes: 10, startMinutes: 3, handoffDistance: 4, offersForgetMinutes: 60, maxOpenTrades: 3, tradeReach: 32 };
 const MIN = 60_000;
@@ -267,4 +268,45 @@ test("giverFirst: a one-sided trade's giver goes first; both sides keep the mode
   assert.equal(giverFirst(bread, ingots, "them"), "them");
   assert.equal(giverFirst(bread, ingots, "me"), "me");
   assert.equal(giverFirst([], [], "me"), "me");
+});
+
+// Spec 2026-11-08-trading-p2-fixes D7a (plan Task 4.1): a propose or accept that restates a trade of the book is no trade part.
+const restating = (action: TradeDecision["action"] = "accept", over: Partial<TradeDecision> = {}): TradeDecision => ({ action, give: bread, get: ingots, first: "them", ...over });
+const noOthers = { others: false, done: false, now: t0 + MIN };
+
+test("restatedTrade: an accept with the agreed trade's terms re-states it (s3s seq 31)", () => {
+  const agreed = deal("them");
+  assert.equal(restatedTrade([agreed], restating(), "Theo", noOthers), agreed);
+  assert.equal(restatedTrade([markGave(deal("me"), t0)], restating(), "Theo", noOthers)?.state, "i_gave");
+  const theyGave = creditTrade(deal("me"), ingots, t0 + MIN).trade;
+  assert.equal(theyGave.state, "they_gave");
+  assert.equal(restatedTrade([theyGave], restating(), "Theo", noOthers), theyGave);
+  assert.equal(restatedTrade([agreed], restating("accept", { first: "me" }), "Theo", noOthers), agreed, "who goes first is ignored");
+  assert.equal(restatedTrade([agreed], restating("propose"), "Theo", noOthers), agreed, "a propose restates too");
+  assert.equal(restatedTrade([agreed], restating(), "theo", noOthers), agreed, "the speaker in another case");
+});
+
+test("restatedTrade: a proposed trade, other counts or items, decline and cancel are no restatement", () => {
+  const proposed = proposeTrade({ self: "Ayla", partner: "Theo", give: bread, get: ingots, first: "them", now: t0 });
+  assert.equal(restatedTrade([proposed], restating(), "Theo", { ...noOthers, others: true, done: true }), undefined, "a proposed trade is never re-stated");
+  const agreed = deal("them");
+  assert.equal(restatedTrade([agreed], restating("accept", { give: [{ item: "bread", count: 6 }] }), "Theo", noOthers), undefined);
+  assert.equal(restatedTrade([agreed], restating("accept", { get: [{ item: "oak_log", count: 5 }] }), "Theo", noOthers), undefined);
+  assert.equal(restatedTrade([agreed], restating("decline"), "Theo", noOthers), undefined);
+  assert.equal(restatedTrade([agreed], restating("cancel"), "Theo", noOthers), undefined);
+});
+
+test("restatedTrade: another partner's trade counts only with others (s3s seq 17)", () => {
+  const agreed = deal("them");
+  assert.equal(restatedTrade([agreed], restating(), "Lena", { ...noOthers, others: true }), agreed);
+  assert.equal(restatedTrade([agreed], restating(), "Lena", noOthers), undefined);
+});
+
+test("restatedTrade: a trade done just before, heard before it ended", () => {
+  const done = markGave(creditTrade(deal("them"), ingots, t0 + MIN).trade, t0 + 2 * MIN);
+  assert.equal(done.state, "done");
+  const now = t0 + 2 * MIN + 30_000;
+  assert.equal(restatedTrade([done], restating(), "Theo", { others: false, done: true, now, heardAt: t0 + MIN }), done);
+  assert.equal(restatedTrade([done], restating(), "Theo", { others: false, done: true, now, heardAt: t0 + 3 * MIN }), undefined, "heard after it ended: a new ask");
+  assert.equal(restatedTrade([done], restating(), "Theo", { others: false, done: false, now, heardAt: t0 + MIN }), undefined);
 });

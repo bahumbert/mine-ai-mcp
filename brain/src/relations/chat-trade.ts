@@ -1,9 +1,10 @@
-// The chat call with a trade: the relations block goes in, a trade the checks refuse is sent back once, then dropped.
+// The chat call with a trade: the relations block goes in, a trade the checks refuse is sent back once, then dropped; a reply that only re-states a trade of the book is neither.
 import { targetItems, type Step } from "../actions.ts";
-import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
+import type { ChatDecision, ChatInput, Mind, TradeDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { TradeController } from "./controller.ts";
 import { carriedOf } from "./items.ts";
+import type { Trade } from "./types.ts";
 
 /** What the current objective lacks: its wanted items none of which is carried (names only, the model weighs how much). */
 export function describeLacks(wanted: Iterable<string>, inventory: BotSnapshot["inventory"]): string[] {
@@ -18,6 +19,8 @@ export interface RefusedTrade {
   readonly first: ChatDecision;
   readonly trades: TradeController;
   readonly speaker: string;
+  /** When the line answered was heard (wall time): a trade done after it is no restatement of a line that came later. */
+  readonly heardAt?: number;
   /** What the chat call started from: the checks fall back to it when a fresh read fails. */
   readonly snapshot: BotSnapshot;
   /** The world as it is now: a model call takes seconds, so each check reads it again. */
@@ -43,16 +46,33 @@ async function worldNow(o: RefusedTrade, earlier: BotSnapshot): Promise<BotSnaps
   }
 }
 
+/** The log line of a reply whose propose or accept re-states a trade of the book: it is no trade part (spec 2026-11-08-trading-p2-fixes D7). */
+export function restatedLine(t: Trade, d: TradeDecision): string {
+  return `  trade: the reply's ${d.action} restates ${t.id} (${t.state}) with ${t.partner}; no new trade, nothing sent back`;
+}
+
+/** The reply without its trade: the rest of the line stands. */
+export function withoutTrade(decision: ChatDecision): ChatDecision {
+  const { trade: _removed, ...rest } = decision;
+  return rest;
+}
+
 /**
  * A reply with a trade: the checks (ids, what is carried, limits, room) run on the world as it is after the model call; a
  * trade they refuse goes back once with the reason, as the conversations' opening rule does; refused again, the line
- * stands and the trade is dropped.
+ * stands and the trade is dropped. A reply that only re-states a trade of the book (D7) is neither sent back nor dropped:
+ * it loses its trade and the line stands as a plain one.
  */
 export async function resendRefusedTrade(o: RefusedTrade): Promise<CheckedTrade> {
   if (o.first.trade === undefined) return { decision: o.first, snapshot: o.snapshot };
   const world = await worldNow(o, o.snapshot);
   const reason = o.trades.checkDecision(o.first.trade, o.speaker, world);
   if (reason === null) return { decision: o.first, snapshot: world };
+  const restated = o.trades.restatement(o.first.trade, o.speaker, { afterRefusal: true, ...(o.heardAt !== undefined && { heardAt: o.heardAt }) });
+  if (restated !== undefined) {
+    o.log(restatedLine(restated, o.first.trade));
+    return { decision: withoutTrade(o.first), snapshot: world };
+  }
   o.log(`  trade refused: ${reason}; sent back once`);
   const block = `${o.input.relations?.block ?? ""}
 
@@ -63,9 +83,10 @@ The trade in your last reply was refused: ${reason}. Answer again; leave "trade"
   const later = await worldNow(o, world);
   const again = o.trades.checkDecision(second.trade, o.speaker, later);
   if (again === null) return { decision: second, snapshot: later };
-  o.log(`  trade refused again: ${again}; dropped`);
-  const { trade: _dropped, ...kept } = second;
-  return { decision: { ...kept, tradeDropped: true }, snapshot: later };
+  // A re-answer that re-states a trade is dropped without the refusal text; the first reply's trade still came to nothing.
+  const restatedAgain = o.trades.restatement(second.trade, o.speaker, { afterRefusal: true, ...(o.heardAt !== undefined && { heardAt: o.heardAt }) });
+  o.log(restatedAgain === undefined ? `  trade refused again: ${again}; dropped` : `  trade refused again: the re-answer's ${second.trade.action} restates ${restatedAgain.id} (${restatedAgain.state}) with ${restatedAgain.partner}; dropped`);
+  return { decision: { ...withoutTrade(second), tradeDropped: true }, snapshot: later };
 }
 
 /** The items a running step is out to get (or the block it mines): its gains are its own work, never a partner's payment. */

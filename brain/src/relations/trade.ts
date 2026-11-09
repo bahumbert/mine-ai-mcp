@@ -47,6 +47,32 @@ export function repeatOfDone(trades: readonly Trade[], speaker: string, terms: T
   return trades.find((t) => t.state === "done" && t.partner.toLowerCase() === speaker.toLowerCase() && t.endedAt !== null && now - t.endedAt <= REPEAT_AFTER_DONE_MS && (heardAt === undefined || heardAt <= t.endedAt) && sameDealTerms(t, terms));
 }
 
+export interface RestatedOptions {
+  /** A trade of another partner counts too (the speaker has nothing open with me). */
+  readonly others: boolean;
+  /** A trade that ended `done` within the repeat window counts too. */
+  readonly done: boolean;
+  /** Wall time, for the repeat window of a done trade. */
+  readonly now: number;
+  /** When the line answered was heard (wall time): a line heard after a done trade's end is a new ask. */
+  readonly heardAt?: number;
+}
+
+const PAID_STATES: ReadonlySet<TradeState> = new Set(["agreed", "i_gave", "they_gave"]);
+
+/**
+ * The trade a propose or accept re-states (spec 2026-11-08-trading-p2-fixes D7a), else undefined: the same items and counts as a trade
+ * of the speaker that is agreed or being paid, then (`others`) of any partner, then (`done`) one that ended `done` just before.
+ * A proposed trade is never re-stated (an accept of it agrees it); a decline or cancel re-states nothing.
+ */
+export function restatedTrade(trades: readonly Trade[], d: TradeDecision, speaker: string, o: RestatedOptions): Trade | undefined {
+  if (d.action !== "propose" && d.action !== "accept") return undefined;
+  const paid = trades.filter((t) => PAID_STATES.has(t.state) && sameDealTerms(t, d));
+  return paid.find((t) => t.partner.toLowerCase() === speaker.toLowerCase())
+    ?? (o.others ? paid[0] : undefined)
+    ?? (o.done ? repeatOfDone(trades, speaker, d, o.now, o.heardAt) : undefined);
+}
+
 /** The newest trade the filter keeps; on equal `createdAt` the later one in the list wins. */
 export function newestTrade(trades: readonly Trade[], match: (t: Trade) => boolean): Trade | null {
   let newest: Trade | null = null;

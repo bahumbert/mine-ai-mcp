@@ -2165,22 +2165,70 @@ test("an order with no work during a trade is not taken: a persona with no prefe
   assert.ok(logs.includes(NOT_TAKEN_OPEN(BUILD_ORDER.request)), logs.join("\n"));
 });
 
-test("s3r: a build order during an agreed trade is taken although its line re-accepts the trade", async (t) => {
+/** Ayla with the trade of `ACCEPT_THEO` agreed (Theo pays first, so only a wait stands on the stack); the id of that trade. */
+async function withAgreedTrade(t: Parameters<typeof agentFor>[0]) {
   const runtime = tradingRuntime();
-  const { agent, chat, action, events, logs } = moodyAgent(t, runtime, 0, 0, { preferences: PREFS });
-  // Theo pays first, so only a wait stands on the stack and the order is taken at once.
-  const reaccept = { ...ACCEPT_THEO, ...BUILD_ORDER };
-  chat.reply(ACCEPT_THEO, reaccept, reaccept);
-  action.reply({ give_up: "test" });
-  await agent.handle(say("Theo", "Ayla, take the deal"));
+  const built = moodyAgent(t, runtime, 0, 0, { preferences: PREFS });
+  built.chat.reply(ACCEPT_THEO);
+  await built.agent.handle(say("Theo", "Ayla, take the deal"));
   await until(() => savedRelations(runtime)[0]?.trades[0]?.state === "agreed");
+  const relations = (built.agent as unknown as { relations: AgentRelations }).relations;
+  return { runtime, ...built, relations, id: relations.book.trades()[0]!.id };
+}
+
+test("s3s: a build order whose line re-states the agreed trade is taken during the trade, with no mark", async (t) => {
+  const { agent, chat, action, events, logs, id } = await withAgreedTrade(t);
+  // One reply for the build line: its accept re-states the agreed trade, so nothing is sent back.
+  chat.reply({ ...ACCEPT_THEO, ...BUILD_ORDER });
+  action.reply({ give_up: "test" });
   await agent.handle(say("Theo", "Ayla, can you build a small shelter right here first?"));
   assert.ok(takenObjectives(events).includes("Theo: build a small shelter right here first"), takenObjectives(events).join("\n"));
-  assert.ok(logs.some((line) => line.startsWith("taken after the line's trade with Theo came to nothing")), logs.join("\n"));
+  assert.ok(logs.some((line) => line.startsWith(`taken during trade ${id} with Theo`)), logs.join("\n"));
+  assert.ok(!logs.some((line) => line.includes("came to nothing")), logs.join("\n"));
   assert.ok(!logs.some((line) => line.startsWith("not taken:")), logs.join("\n"));
   const taken = events.find((event) => event.kind === "objective" && event.event === "taken" && event.requester === "Theo");
-  assert.equal(taken?.kind === "objective" && taken.duringTrade, "came to nothing", "the journal says why it was let through");
+  assert.equal(taken?.kind === "objective" && taken.duringTrade, id, "the journal says which trade it was let through");
+  assert.equal(chat.requests.length, 2, "one chat call per line");
 });
+
+test("a give order whose line re-states the agreed trade is refused with the open-trade line", async (t) => {
+  const { agent, chat, events, logs, id } = await withAgreedTrade(t);
+  chat.reply({ ...ACCEPT_THEO, ...GIVE_ORDER, work: "none" });
+  await agent.handle(say("Theo", "Ayla, give me 5 bread"));
+  assert.deepEqual(takenObjectives(events), []);
+  assert.ok(logs.includes(`not taken: Theo and I have trade ${id} open; its hand-off is how items move (${JSON.stringify(GIVE_ORDER.request)})`), logs.join("\n"));
+  assert.ok(!logs.some((line) => line.includes("came to nothing")), logs.join("\n"));
+});
+
+test("a talk line re-stating the agreed trade leaves the trade as it is", async (t) => {
+  const { agent, chat, relations, id } = await withAgreedTrade(t);
+  chat.reply({ ...ACCEPT_THEO, route: "talk" });
+  await agent.handle(say("Theo", "Ayla, remember, 5 iron_ingot for your 5 bread"));
+  assert.deepEqual(relations.book.trades().map((trade) => [trade.id, trade.state]), [[id, "agreed"]]);
+  assert.equal(chat.requests.length, 2, "one chat call for that line");
+});
+
+// Spec D7: the repeat of a trade done while the model answered, whether the checks accept it (the bag still holds the items: site 3 in `handle`) or refuse it (the items are gone: after the first refusal, `resendRefusedTrade`).
+for (const [bag, carried] of [["still held", true], ["gone, so the checks refuse it", false]] as const) {
+  test(`a build line re-accepting a trade that ended while the model answered is taken with no mark, its items ${bag}`, async (t) => {
+    const { runtime, agent, chat, action, events, logs, relations, id } = await withAgreedTrade(t);
+    const release = chat.hold();
+    chat.reply({ ...ACCEPT_THEO, ...BUILD_ORDER });
+    action.reply(...GIVE_STEPS);
+    const handling = agent.handle(say("Theo", "Ayla, can you build a small shelter right here first?"));
+    await until(() => chat.requests.length === 2);
+    // The hand-off finished while the model thought: the line's accept now repeats a trade that is done.
+    await relations.book.update("Theo", (r) => ({ ...r, trades: r.trades.map((trade) => ({ ...trade, state: "done" as const, endedAt: Date.now() })) }));
+    if (!carried) runtime.snapshot = { ...runtime.snapshot, inventory: [] };
+    release();
+    await handling;
+    assert.equal(chat.requests.length, 2, "nothing is sent back");
+    assert.ok(takenObjectives(events).includes("Theo: build a small shelter right here first"), takenObjectives(events).join("\n"));
+    assert.ok(logs.some((line) => line.includes(`restates ${id} (done)`)), logs.join("\n"));
+    assert.ok(!logs.some((line) => line.includes("came to nothing") || line.startsWith("not taken:")), logs.join("\n"));
+    await until(() => runtime.submitted.some((call) => call.tool === "drop_item"));
+  });
+}
 
 test("an order whose accept was refused carries the mark: its give to the requester fails with nothing open", async (t) => {
   const runtime = tradingRuntime();
@@ -2429,6 +2477,32 @@ test("a talked-over accept of a bot's offer is kept: the trade is agreed, the li
   assert.deepEqual(trades.map((trade) => [trade.id, trade.state]), [["Theo-Ayla-1", "agreed"]]);
   assert.ok(logs.includes("  superseded: the line is dropped, its trade accept is kept"), logs.join("\n"));
   assert.deepEqual(runtime.said, ["Hi."]);
+});
+
+test("a talked-over accept restating the agreed trade while the bot's second offer stands opens no second trade", async (t) => {
+  const runtime = tradingRuntime();
+  const board = new TradeBoard();
+  const { agent, chat, logs } = moodyAgent(t, runtime, 0, 0, {}, talkOptions({ tradeBoard: board, otherAgents: others("Theo") }));
+  chat.reply({ ...toAyla, say: "Hi." });
+  await agent.handle(say("Theo", "Ayla, got a minute?"));
+  board.post(THEO_OFFER);
+  chat.reply(ACCEPT_THEO);
+  await agent.handle(say("Theo", "Ayla, take the deal", false));
+  const relations = (agent as unknown as { relations: AgentRelations }).relations;
+  await until(() => relations.book.trades().some((trade) => trade.state === "agreed"));
+  // Theo posts the same offer again; his next line is talked over, and her accept of it restates the trade she already agreed.
+  board.post({ ...THEO_OFFER, id: "Theo-Ayla-2", postedAt: 2 });
+  const release = chat.hold();
+  chat.reply(ACCEPT_THEO);
+  const line = say("Theo", "Ayla, take it too", false);
+  const handling = agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  await until(() => chat.requests.length === 3);
+  (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Theo", "and quickly", false));
+  release();
+  await handling;
+  assert.ok(logs.some((entry) => entry.startsWith("  superseded:")), logs.join("\n"));
+  assert.ok(logs.some((entry) => entry.includes("restates Theo-Ayla-1 (agreed)")), "the resend step took the trade off before the superseded path saw it");
+  assert.deepEqual(relations.book.trades().map((trade) => [trade.id, trade.state]), [["Theo-Ayla-1", "agreed"]], "exactly one agreed trade");
 });
 
 test("a talked-over accept is refused when the offer was withdrawn or replaced meanwhile", async (t) => {

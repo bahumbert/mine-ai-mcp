@@ -373,6 +373,14 @@ test("the chat block shows the speaker's open requests, numbered", async () => {
   assert.deepEqual(relations.chatBlock("Bruno", [], around({})).requests, []);
 });
 
+test("the relations block names the speaker once when the conversation lists them", () => {
+  const { relations } = relationsWithClock();
+  const summaries = (others: readonly string[]) => relations.chatBlock("Theo", others, around({ Theo: 3 })).block.split("\n").filter((line) => /^You (and|have not dealt with) Theo/u.test(line));
+  assert.equal(summaries(["Theo", "Steve"]).length, 1, "the same name");
+  assert.equal(summaries(["theo"]).length, 1, "another case");
+  assert.equal(summaries(["Steve"]).length, 1);
+});
+
 test("a whisper makes only the one whispered to hear: the others it asks are out of range", async () => {
   const { relations } = relationsWithClock();
   relations.asked(["Ayla2", "Bob"], "bread", "Ayla2", around({ Ayla2: 2, Bob: 200 }));
@@ -641,7 +649,7 @@ test("a trade the checks refuse is dropped and the decision says so, whether the
     const { chat, mind } = scriptedMind();
     chat.reply(second);
     const h = relationsWithClock({ mind });
-    const { decision: out } = await h.relations.checkedTrade(first, input, { speaker: "Bruno", snapshot, signal: new AbortController().signal });
+    const { decision: out } = await h.relations.checkedTrade(first, input, { speaker: "Bruno", heardAt: Date.now(), snapshot, signal: new AbortController().signal });
     assert.deepEqual([out.trade, out.tradeDropped, out.route], [undefined, true, "act"]);
   }
 });

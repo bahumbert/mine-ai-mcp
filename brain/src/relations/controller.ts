@@ -22,7 +22,7 @@ import { relationsBlock } from "./prompts.ts";
 import { countLateToss, giveToHeldTrades, heldAwaits, heldOwed } from "./held.ts";
 import { heldWindow, withTrade } from "./record.ts";
 import { scoreEndedTrade } from "./trade-score.ts";
-import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, giverFirst, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, repeatOfDone, sameTerms, settleTrade } from "./trade.ts";
+import { AGREED_STATES, agreeTrade, cancelTrade, closedBeforeGiven, endedWhileWaiting, failTrade, flipped, giveLate, giverFirst, type HeldWindow, isOpen, markGave, newestTrade, owedItems, partnerPosition, repeatOfDone, restatedTrade, sameTerms, settleTrade } from "./trade.ts";
 import { type Clocks, type GiveProgress, type ItemCount, MINUTE_MS, type RelationEvent, type Trade, type TradeEvent, type TradeSettings, type TradeState } from "./types.ts";
 
 /** A give is tried this many times (the second only with the partner in talk range) before it counts as failed. */
@@ -108,6 +108,18 @@ export class TradeController implements BoardPeer {
   /** Null when a propose or accept can become a trade, else the reason that is sent back to the chat tier once. */
   checkDecision(d: TradeDecision, speaker: string, snapshot: BotSnapshot): string | null {
     return checkTradeDecision({ decision: this.termsOf(d, d.action === "accept" ? this.offerFromPartner(speaker) : undefined), speaker, snapshot, trades: this.deps.book.trades(), maxOpenTrades: this.deps.settings.maxOpenTrades, reach: this.deps.settings.tradeReach, givenOutside: this.creditedTo(speaker), held: heldOwed(this.deps.book.trades(), this.heldWindow()) });
+  }
+
+  /**
+   * The trade a propose or accept of the speaker's line re-states, else undefined (spec 2026-11-08-trading-p2-fixes D7b).
+   * The speaker's agreed trades always count. The trade done just before the line was heard (`heardAt`) counts too, also after a refusal (its giver no longer holds the items),
+   * but only with nothing open or offered by the speaker, as `onDecision` ignores a repeat: an accept of my own proposal agrees it.
+   * `afterRefusal` (the checks refused the reply's trade): a trade of another partner counts too when the speaker has no trade or offer with me either way.
+   */
+  restatement(d: TradeDecision, speaker: string, o: { readonly afterRefusal: boolean; readonly heardAt?: number }): Trade | undefined {
+    const nothingOpen = this.openWith(speaker) === undefined && this.offerFromPartner(speaker) === undefined;
+    const others = o.afterRefusal && nothingOpen && this.deps.board?.offerFrom(this.deps.self, speaker) === undefined;
+    return restatedTrade(this.deps.book.trades(), d, speaker, { others, done: nothingOpen, now: this.clocks().wallNow, ...(o.heardAt !== undefined && { heardAt: o.heardAt }) });
   }
 
   /** The proposal the partner (a bot of this brain) posted to me, still open. */
