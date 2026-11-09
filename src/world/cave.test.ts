@@ -36,10 +36,46 @@ test("an overhang two above the head is open and one five above is a cave", () =
   assert.equal(fixture({ "0,70,0": "stone" }, 63).reader.inCave(point(0, 64, 0)), true);
 });
 
-test("a cave roof and wall top are cave targets", () => {
-  const { reader } = fixture(opening());
-  assert.equal(reader.caveTarget(point(0, 66, 0)), true);
+test("cave targets include roofs, wall tops and reach edges, but exclude the target's own cell", () => {
+  for (const { x, y, z, want, groundY = 75, target = point(0, 64, 0) } of [
+    { x: 0, y: 64, z: 0, want: true, groundY: 70, target: point(0, 66, 0) },
+    { x: 0, y: 64, z: 0, want: true, groundY: 70, target: point(1, 66, 0) },
+    { x: 3, y: 67, z: 3, want: true },
+    { x: -3, y: 61, z: -3, want: true },
+    { x: 4, y: 64, z: 0, want: false },
+    { x: 0, y: 60, z: 0, want: false },
+    { x: 0, y: 68, z: 0, want: false },
+    { x: 0, y: 64, z: 0, want: false },
+    { x: 0, y: 63, z: 0, want: true },
+    { x: 0, y: 65, z: 0, want: true },
+  ]) {
+    const { reader } = fixture({ [`${x},${y},${z}`]: "air", [`${x},${y + 1},${z}`]: "air" }, groundY);
+    assert.equal(reader.caveTarget(target), want, `${x},${y},${z}`);
+  }
+});
+
+test("a low surface hint rules out cave cells and targets without spending the scan budget", () => {
+  const { bot } = createFakeBot({ groundY: 63 });
+  const base = liveBlockReader(bot);
+  let reads = 0;
+  const reader = caveReader(bot, { heightHint: () => 64, read: (x, y, z) => { reads++; return base(x, y, z); } });
+  assert.equal(reader.inCave(point(0, 64, 0)), false);
+  assert.equal(reader.caveTarget(point(0, 64, 0)), false);
+  assert.equal(reads, 0);
+});
+
+test("a cached target answer is refreshed after a cave closes or its chunk unloads", () => {
+  const { bot, world } = createFakeBot({ groundY: 70, cells: opening() });
+  const reader = caveReader(bot, { readsPerScan: 100_000 });
   assert.equal(reader.caveTarget(point(1, 66, 0)), true);
+  assert.equal(reader.caveTarget(point(1, 66, 0)), true);
+  world.setCell(new Vec3(0, 64, 0), "stone");
+  reader.beginScan();
+  assert.equal(reader.caveTarget(point(1, 66, 0)), false);
+  bot._client.emit("unload_chunk", { chunkX: 0, chunkZ: 0 });
+  world.setCell(new Vec3(0, 64, 0), "void");
+  reader.beginScan();
+  assert.equal(reader.caveTarget(point(1, 66, 0)), null);
 });
 
 test("open ground, an open cliff and a block two under grass are not cave targets", () => {
@@ -108,6 +144,8 @@ test("a cached cave still wins over unknown cells when the budget is exhausted",
   assert.equal(reader.inCave(point(0, 64, 0)), true);
   for (let x = 10; x < 20; x++) reader.inCave(point(x, 64, 0));
   assert.equal(reader.caveTarget(point(1, 65, 0)), true);
+  const partial = caveReader(bot, { readsPerScan: 7, heightHint: () => 71 });
+  assert.equal(partial.caveTarget(point(3, 66, 3)), true, "a cave above the unread bottom of its range still wins");
 });
 
 test("1024 targets respect the scan budget and a later scan finishes an unread target", () => {

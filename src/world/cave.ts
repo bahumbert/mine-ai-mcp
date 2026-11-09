@@ -46,8 +46,21 @@ function rememberAir(column: Column, y: number, air: boolean): void {
   else column.air.push({ low: y, high: y });
 }
 
+/** Intersect dry two-high cave bases with a requested range, excluding the target cell itself. */
+function caveInRange(column: Column, low: number, high: number, excludedY?: number): boolean {
+  if (column.surface === null) return false;
+  const roofLimit = column.surface - CAVE_ROOF_MIN - 1;
+  return column.air.some((run) => {
+    const first = Math.max(low, run.low);
+    const last = Math.min(high, run.high - 1, roofLimit);
+    return first <= last && (first !== excludedY || last !== excludedY);
+  });
+}
+
 /** Read and memoize one column, resuming a partial walk after the next scan. */
-function readColumn(column: Column, cell: BlockPosition, minY: number, read: (x: number, y: number, z: number) => LoadedBlock | null, isTree: (block: LoadedBlock) => boolean): boolean | null {
+function readColumn(column: Column, cell: BlockPosition, range: { high: number; excludedY?: number }, minY: number, read: (x: number, y: number, z: number) => LoadedBlock | null, isTree: (block: LoadedBlock) => boolean): boolean | null {
+  // The hint (or a partial surface walk) is already an upper bound; no block read can raise it.
+  if ((column.surface ?? column.next) < cell.y + CAVE_AIR_MIN - 1 + CAVE_ROOF_MIN) return false;
   while (column.surface === null && column.next >= minY) {
     const block = read(cell.x, column.next, cell.z);
     if (block === null) return null;
@@ -60,22 +73,10 @@ function readColumn(column: Column, cell: BlockPosition, minY: number, read: (x:
   if (column.surface < cell.y + CAVE_AIR_MIN - 1 + CAVE_ROOF_MIN) return false;
   while (column.next >= cell.y) {
     const block = read(cell.x, column.next, cell.z);
-    if (block === null) return null;
+    if (block === null) return caveInRange(column, cell.y, range.high, range.excludedY) || null;
     rememberAir(column, column.next--, isPassable(block) && !cellHoldsWater(block));
   }
-  return column.air.some((run) => run.low <= cell.y && run.high >= cell.y + 1);
-}
-
-/** Classify the nearby cells in one vertical line around a target. */
-function caveOnLine(inCave: CaveReader["inCave"], target: BlockPosition, x: number, z: number): boolean | null {
-  let unknown = false;
-  for (let y = target.y - CAVE_REACH; y <= target.y + CAVE_REACH; y++) {
-    if (x === target.x && y === target.y && z === target.z) continue;
-    const cave = inCave({ x, y, z });
-    if (cave === true) return true;
-    if (cave === null) unknown = true;
-  }
-  return unknown ? null : false;
+  return caveInRange(column, cell.y, range.high, range.excludedY);
 }
 
 interface ReadBounds { minX: number; maxX: number; minZ: number; maxZ: number; caveMinX: number; caveMaxX: number; caveMinZ: number; caveMaxZ: number }
@@ -101,51 +102,101 @@ function certainlyUnknown(bounds: ReadBounds, target: BlockPosition): boolean {
   return caveOutside && (target.x - CAVE_REACH < bounds.minX || target.x + CAVE_REACH > bounds.maxX || target.z - CAVE_REACH < bounds.minZ || target.z + CAVE_REACH > bounds.maxZ);
 }
 
-/** A reader whose memo lasts across scans; reads are capped independently for each scan. */
-export function caveReader(bot: Bot, options: { read?: WorldView["blockAt"]; readsPerScan?: number; heightHint?: (x: number, z: number) => number | null } = {}): CaveReader {
-  const read = options.read ?? liveBlockReader(bot);
-  const hint = options.heightHint ?? heightHint(bot);
-  const isTree = treePartTest(bot);
-  const minY = (bot.game as typeof bot.game & { minY: number }).minY;
-  const columns = new Map<string, Column>();
-  const revision = columnRevision(bot);
-  const budget = options.readsPerScan ?? CAVE_READS_PER_SCAN;
-  let remaining = budget;
-  let exhaustedBounds: ReadBounds | undefined;
-  const readCell = (x: number, y: number, z: number): LoadedBlock | null => {
-    if (remaining <= 0) return null;
-    remaining--;
-    const block = read(x, y, z);
+interface CaveOptions { read?: WorldView["blockAt"]; readsPerScan?: number; heightHint?: (x: number, z: number) => number | null }
+
+/** Keep column revisions and target answers local to one synchronous scan. */
+class CaveScan implements CaveReader {
+  readonly #columns = new Map<string, Column>();
+  readonly #scanColumns = new Map<number, Map<number, Column | null>>();
+  readonly #targets = new Map<string, boolean>();
+  readonly #read: WorldView["blockAt"];
+  readonly #hint: (x: number, z: number) => number | null;
+  readonly #isTree: (block: LoadedBlock) => boolean;
+  readonly #revision: ReturnType<typeof columnRevision>;
+  readonly #minY: number;
+  readonly #budget: number;
+  #remaining: number;
+  #exhaustedBounds: ReadBounds | undefined;
+
+  constructor(private readonly bot: Bot, options: CaveOptions) {
+    this.#read = options.read ?? liveBlockReader(bot);
+    this.#hint = options.heightHint ?? heightHint(bot);
+    this.#isTree = treePartTest(bot);
+    this.#revision = columnRevision(bot);
+    this.#minY = (bot.game as typeof bot.game & { minY: number }).minY;
+    this.#remaining = this.#budget = options.readsPerScan ?? CAVE_READS_PER_SCAN;
+  }
+
+  beginScan(): void {
+    this.#remaining = this.#budget;
+    this.#exhaustedBounds = undefined;
+    this.#scanColumns.clear();
+    this.#targets.clear();
+  }
+
+  readonly #readCell = (x: number, y: number, z: number): LoadedBlock | null => {
+    if (this.#remaining <= 0) return null;
+    this.#remaining--;
+    const block = this.#read(x, y, z);
     return block.kind === "loaded" ? block : null;
   };
-  const inCave = (cell: BlockPosition): boolean | null => {
-    const key = `${cell.x},${cell.z}`;
-    let column = columns.get(key);
-    const currentRevision = revision(cell.x, cell.z);
-    if (column && column.revision !== currentRevision) { columns.delete(key); column = undefined; }
+
+  /** Validate a memoized column once, even when many targets share it. */
+  private columnAt(x: number, z: number): Column | null {
+    let line = this.#scanColumns.get(x);
+    const cached = line?.get(z);
+    if (cached !== undefined) return cached;
+    if (!line) { line = new Map(); this.#scanColumns.set(x, line); }
+    const key = `${x},${z}`;
+    let column = this.#columns.get(key);
+    const currentRevision = this.#revision(x, z);
+    if (column && column.revision !== currentRevision) { this.#columns.delete(key); column = undefined; }
     if (!column) {
-      const top = hint(cell.x, cell.z);
-      const start = top === null ? columnTop(bot, cell.x, cell.z) : top - 1;
-      if (start === null) return null;
+      const top = this.#hint(x, z);
+      const start = top === null ? columnTop(this.bot, x, z) : top - 1;
+      if (start === null) { line.set(z, null); return null; }
       column = { next: start, surface: null, air: [], revision: currentRevision };
-      columns.set(key, column);
+      this.#columns.set(key, column);
     }
-    return readColumn(column, cell, minY, readCell, isTree);
-  };
-  return {
-    beginScan: () => { remaining = budget; exhaustedBounds = undefined; },
-    inCave,
-    caveTarget(target) {
-      if (remaining <= 0 && certainlyUnknown(exhaustedBounds ??= readBounds(columns), target)) return null;
-      let unknown = false;
-      for (let x = target.x - CAVE_REACH; x <= target.x + CAVE_REACH; x++) {
-        for (let z = target.z - CAVE_REACH; z <= target.z + CAVE_REACH; z++) {
-          const cave = caveOnLine(inCave, target, x, z);
-          if (cave === true) return true;
-          if (cave === null) unknown = true;
-        }
+    line.set(z, column);
+    return column;
+  }
+
+  /** Warm ranges need only the memo's roof bound and air runs; allocate read coordinates only when extending it. */
+  private inRange(x: number, z: number, low: number, high: number, excludedY?: number): boolean | null {
+    const column = this.columnAt(x, z);
+    if (column === null) return null;
+    if ((column.surface ?? column.next) < low + CAVE_AIR_MIN - 1 + CAVE_ROOF_MIN) return false;
+    if (column.next < low) return caveInRange(column, low, high, excludedY);
+    return readColumn(column, { x, y: low, z }, { high, ...(excludedY !== undefined && { excludedY }) }, this.#minY, this.#readCell, this.#isTree);
+  }
+
+  inCave(cell: BlockPosition): boolean | null {
+    return this.inRange(cell.x, cell.z, cell.y, cell.y);
+  }
+
+  caveTarget(target: BlockPosition): boolean | null {
+    const key = `${target.x},${target.y},${target.z}`;
+    const cached = this.#targets.get(key);
+    if (cached !== undefined) return cached;
+    if (this.#remaining <= 0 && certainlyUnknown(this.#exhaustedBounds ??= readBounds(this.#columns), target)) return null;
+    let unknown = false;
+    for (let x = target.x - CAVE_REACH; x <= target.x + CAVE_REACH; x++) {
+      for (let z = target.z - CAVE_REACH; z <= target.z + CAVE_REACH; z++) {
+        const cave = this.inRange(x, z, target.y - CAVE_REACH, target.y + CAVE_REACH,
+          x === target.x && z === target.z ? target.y : undefined);
+        if (cave === true) { this.#targets.set(key, true); return true; }
+        if (cave === null) unknown = true;
       }
-      return unknown ? null : false;
-    },
-  };
+    }
+    // An unknown range can become known if another query extends its column in this scan.
+    if (unknown) return null;
+    this.#targets.set(key, false);
+    return false;
+  }
+}
+
+/** A reader whose memo lasts across scans; reads are capped independently for each scan. */
+export function caveReader(bot: Bot, options: CaveOptions = {}): CaveReader {
+  return new CaveScan(bot, options);
 }
