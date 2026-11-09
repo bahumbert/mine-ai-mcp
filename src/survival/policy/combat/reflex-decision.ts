@@ -39,6 +39,7 @@ export function decideHostileReflex(observed: HostileDecisionFacts): ResponseDec
   return {
     kind: "respond",
     response: directive,
+    // The `reason` text below is read by the brain's parser (brain/src/gathering/hostile-interruptions.ts): keep its format.
     name: directive.kind,
     identity: { kind: directive.kind, target: "targetId" in directive ? directive.targetId : directive.threats.map((threat) => threat.id).sort((a, b) => a - b),
       reason: "reason" in directive ? directive.reason : null },

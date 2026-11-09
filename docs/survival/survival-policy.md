@@ -214,10 +214,25 @@ marked unreachable, the reflex returns no directive and the hunt decides by its
 own stop counts. A hunt that walked toward a skeleton while a reflex fled the
 same skeleton took turns owning the body until the request timed out.
 
-Every `[HOSTILE_CONTACT]` interruption names the response, each threat's cell
-and distance at the decision, and, for evade, hide and deflect, the decision's
-reason in parentheses, so a caller can tell a
+Every `[HOSTILE_CONTACT]` interruption names the response, each threat's name and
+id, its cell and distance at the decision, and, for evade, hide and deflect, the
+decision's reason in parentheses, so a caller can tell a
 withdrawal to accept from one to change with a policy edit or another request.
+
+A fight is kept going by progress: its target or the bot closing in by a block,
+a hit on the bot or the target, or a target dying or leaving. A target pacing
+back and forth, a shield block or the bot shuffling about does not count. A melee
+target that stays out of reach ends the fight only after 20 physics ticks (about
+a second), so a knockback does not end it; a ranged attacker is not a melee
+contact, and a creeper that must be cleared can defer the end. A fight the bot
+could not reach its target in is not chosen again against that same target for
+30 seconds, whichever cell either of them stands on; a reachable, exposed contact
+with that target clears it sooner, and changed weapons or permissions do too. A
+fight with no progress pauses 10 seconds, then 20, doubling per target up to five
+minutes. Waits counted in game ticks also end after twice their span in real time,
+so a stopped game clock cannot hold them; footing recovery stops at about 30
+seconds. A bot seated in a boat at sea answers a hostile from the seat and keeps
+its boat; near shore it gets off first.
 
 Requested pursuit names its authorized target and minimum health. Recovery asks
 for permitted healing toward `max(recover_to_health, engage_min_health)`. Handoff asks for observed
