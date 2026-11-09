@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { projectileReachesBody } from "../../positioning/combat/exposure.js";
+import { isIncomingDirectionalProjectile } from "./directional-projectiles.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -8,7 +8,7 @@ export function isIncomingBlazeProjectile(bot: Bot, projectile: Entity, movement
   if (projectile.name !== "small_fireball" || !projectile.isValid) return false;
   // A movement warning can include the nearby cells the body may enter before
   // it stops. The default remains the physical hitbox for stationary combat.
-  return projectileReachesBody(bot.world, projectile, {
+  return isIncomingDirectionalProjectile(bot, projectile, {
     position: bot.entity.position,
     width: bot.entity.width + movementAllowance * 2,
     height: bot.entity.height,

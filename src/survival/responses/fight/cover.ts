@@ -1,4 +1,5 @@
 import { isIncomingArrow } from "../../perception/combat/shield-projectiles.js";
+import { isIncomingDirectionalProjectile } from "../../perception/combat/directional-projectiles.js";
 import { Vec3 } from "vec3";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
@@ -7,7 +8,7 @@ import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { targetFacts } from "../../perception/combat/target.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
 import { compareTargets } from "../../policy/combat/target-utility.js";
-import { decideCombatPosition, positionExposed, projectileReachesBody } from "../../positioning/combat/exposure.js";
+import { decideCombatPosition, positionExposed } from "../../positioning/combat/exposure.js";
 import { positionWorld, standingBody } from "../../positioning/combat/geometry.js";
 import { type ProtectionRefusal } from "../../positioning/combat/position.js";
 import { shieldAnswersThreats } from "../../weapons/aim.js";
@@ -60,7 +61,7 @@ export class CoverFight {
           (threat.attack !== "projectile" || (!atProtection && windupNeedsCover(threat.id))),
       );
     const incomingProjectiles = Object.values(this.scene.bot.entities).filter(
-      (entity) => entity.isValid && ((entity.name === "small_fireball" && projectileReachesBody(rays, entity, body)) || isIncomingArrow(this.scene.bot, entity, 0, body)),
+      (entity) => isIncomingDirectionalProjectile(this.scene.bot, entity, body) || isIncomingArrow(this.scene.bot, entity, 0, body),
     );
     const targetWindingUp =
       !atProtection && bow && this.weapons.currentLoadout().shield === null && windupNeedsCover(this.scene.target.id);

@@ -17,7 +17,7 @@ const assessmentSchema = z.object({
   weapon: z.object({ item: z.string().nullable(), damage: finite, intervalTicks: finite }),
   contacts: z.array(z.object({
     id: finite, species: z.string(), damagePerHit: finite.nullable(),
-    damageSource: z.enum(["observed", "attribute", "none"]), unknownMelee: z.boolean(),
+    damageSource: z.enum(["observed", "attribute", "unknown", "none"]), unknownMelee: z.boolean(),
     hitIntervalTicks: finite, health: finite, hitsToKill: finite, ticksToKill: finite,
     hitsToKillBot: finite.nullable(), inContact: z.boolean(),
     explosion: z.object({ radius: finite, fuseTicks: finite, fuseRemainingTicks: finite.nullable(), damageAtReach: finite }).nullable(),

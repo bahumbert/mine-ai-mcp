@@ -1,4 +1,5 @@
 import { isIncomingArrow } from "../../perception/combat/shield-projectiles.js";
+import { isIncomingDirectionalProjectile } from "../../perception/combat/directional-projectiles.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { SupportedPositionHold } from "../../../navigation/index.js";
@@ -12,11 +13,7 @@ import {
   type NavigationRuntime,
 } from "../../../navigation/index.js";
 import { isHeadPassable, isPassable, isSafeSupport, navigationFeet } from "../../../navigation/world/block-geometry.js";
-import { blockClass } from "../../../navigation/mineflayer/world.js";
-import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { clearCombatRay, nearestBodyPoint } from "../../../world/entity-geometry.js";
-import { occupiedCell } from "../../../world/placement.js";
-import { foreignRegionAt } from "../../../world/protected-regions.js";
 import { positionThreat, type CombatPerception } from "../../perception/combat/observations.js";
 import { fireAt } from "../../perception/body.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
@@ -24,8 +21,8 @@ import { type CombatPolicy } from "../../policy/combat/contract.js";
 import { Answered, type AnsweredScope } from "../../state/answered.js";
 import { MELEE_RANGE } from "../../weapons/equipment.js";
 import { extinguishFireAt } from "../fire-clearance.js";
-import { buildProtection, fullProtectionBlock } from "./build-protection.js";
-import { positionExposed, projectileReachesBody, type PositionThreat } from "./exposure.js";
+import { buildProtection, canPlaceProtection, fullProtectionBlock } from "./build-protection.js";
+import { positionExposed, type PositionThreat } from "./exposure.js";
 import { geometryAnswer } from "./geometry-answer.js";
 import { positionWorld, standingBody, standingCell, type CombatPositionPlan } from "./geometry.js";
 import { countCapBlocks } from "./hide-blocks.js";
@@ -106,17 +103,7 @@ export class CombatPosition {
     plan.placements.every(this.canPlaceProtection) &&
     this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null;
 
-  /** The cells the server can fill, priced before provoking a quarry or starting a wall: a plant is not always replaceable. */
-  private canPlaceProtection = (cell: Vec3): boolean => {
-    const observed = this.navigation.world.blockAt(cell.x, cell.y, cell.z);
-    const block = observed.kind === "loaded" ? blockClass(this.bot).fromStateId(observed.stateId, 0) : null;
-    // Another owner's region refuses the placement (ADR-012): a plan with such a cell is priced out, not half built.
-    return (
-      isReplaceableForPlacement(block, this.bot.version) &&
-      occupiedCell(this.bot, cell) === null &&
-      foreignRegionAt(this.bot, cell) === null
-    );
-  };
+  private canPlaceProtection = (cell: Vec3): boolean => canPlaceProtection(this.bot, this.navigation.world, cell);
 
   /** Reject this geometry for this target position, not the target or the hunt. */
   rejectCover(reason = "The protected position offered no usable attack opening."): void {
@@ -363,7 +350,7 @@ export class CombatPosition {
       }) &&
       !this.threats().some((threat) => positionExposed(rays, body, threat)) &&
       !Object.values(this.bot.entities).some(
-        (entity) => entity.isValid && ((entity.name === "small_fireball" && projectileReachesBody(rays, entity, body)) || isIncomingArrow(this.bot, entity, 0, body)),
+        (entity) => isIncomingDirectionalProjectile(this.bot, entity, body) || isIncomingArrow(this.bot, entity, 0, body),
       )
     );
   }

@@ -143,7 +143,8 @@ Each nearby hostile's `threat` gives estimated damage per hit, hits to kill the 
 and whether it explodes. `nearby.fight` is null with no nearby hostiles; otherwise it reports the best carried
 melee weapon, margin, estimated health lost and ticks to clear damaging contacts, ticks to die, current
 `fightMargin`, effective health including absorption, and the combat data source. A null margin or damage
-means it could not be priced, not that a threat is safe. The totals include damaging contacts within contact
+means it could not be priced, not that a threat is safe. `unknownMelee` marks varying melee damage with no observed hit;
+an unknown contact makes the combined margin unknown and refuses automatic melee engagement. The totals include damaging contacts within contact
 range or observed attacking, not explosives; observed hits override attribute damage when available.
 
 Every inventory stack carries `families` (sorted, empty when none): the item's

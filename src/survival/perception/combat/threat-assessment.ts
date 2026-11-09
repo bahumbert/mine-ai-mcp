@@ -15,9 +15,9 @@ export type Difficulty = "peaceful" | "easy" | "normal" | "hard";
 export interface ContactAssessment {
   readonly id: number;
   readonly species: string;
-  /** Health this contact takes from the bot per hit, after armour and difficulty; null: it does not melee and no hit was seen. */
+  /** Health this contact takes per hit after armour and difficulty; null: no priced hit (see damageSource). */
   readonly damagePerHit: number | null;
-  readonly damageSource: "observed" | "attribute" | "none";
+  readonly damageSource: "observed" | "attribute" | "unknown" | "none";
   /** The measured melee damage varies by individual and this bot has not yet observed its hit cost. */
   readonly unknownMelee: boolean;
   /** Ticks between its hits: observed, else the vanilla melee interval. */
@@ -53,6 +53,7 @@ export interface ThreatAssessment {
   readonly healthLostToClear: number;
   /** effectiveHealth / healthLostToClear; null when nothing in contact deals damage or every
    * damaging contact is already at 0 health (JSON keeps null, not Infinity).
+   * Also null when an unobserved varying melee contact makes the combined cost unknown.
    * The number `fight_margin` is compared with. */
   readonly margin: number | null;
   readonly source: { readonly version: string; readonly measured: boolean };
@@ -152,6 +153,7 @@ function attributeHitDamage(contact: ContactInput, data: MobCombatData, input: A
 function hitDamage(contact: ContactInput, input: AssessmentInput): Pick<ContactAssessment, "damagePerHit" | "damageSource"> {
   // The recorder never keeps a 0 (a shield, the hurt window); a 0 that arrives anyway must not make a mob look harmless.
   if (contact.observedHitDamage !== null && contact.observedHitDamage > 0) return { damagePerHit: contact.observedHitDamage, damageSource: "observed" };
+  if (contact.unknownMelee) return { damagePerHit: null, damageSource: "unknown" };
   const attribute = contact.data === null ? null : attributeHitDamage(contact, contact.data, input);
   return attribute === null ? { damagePerHit: null, damageSource: "none" } : { damagePerHit: attribute, damageSource: "attribute" };
 }
@@ -238,7 +240,8 @@ export function assessThreats(input: AssessmentInput): ThreatAssessment {
     ticksToDie: rate > 0 ? effectiveHealth / rate : null,
     ticksToClear,
     healthLostToClear,
-    margin: healthLostToClear > 0 ? effectiveHealth / healthLostToClear : null,
+    margin: assessed.some((contact) => contact.inContact && contact.unknownMelee) ? null :
+      healthLostToClear > 0 ? effectiveHealth / healthLostToClear : null,
     source: input.source,
   };
 }

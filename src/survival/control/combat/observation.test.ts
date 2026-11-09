@@ -8,6 +8,35 @@ import { CombatPerception } from "../../perception/combat/observations.js";
 import { survivalResources } from "../../state/resources.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../../policy/contract.js";
 import { responseScope } from "./scopes/response.js";
+import { combatDecisionEvidence, decideCombatResponse } from "../../policy/combat/decision.js";
+import { replayCombatDecision } from "../../policy/combat/replay.js";
+import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
+import { describeDirectiveReason } from "../../policy/combat/reflex-decision.js";
+
+test("unobserved hoglin melee blocks automatic fighting alone or beside a priced zombie", () => {
+  for (const withZombie of [false, true]) {
+    const { bot, combat, entities } = createFakeBot({ entities: {
+      3: { name: "hoglin", position: new Vec3(2.5, 64, 0.5) },
+    } });
+    if (withZombie) entities.spawn({ id: 2, name: "zombie", position: new Vec3(2.5, 64, -0.5) });
+    using perception = new CombatPerception(bot);
+    const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds,
+      policy: { ...DEFAULT_COMBAT_POLICY, fight_margin: 0.1 } };
+    const facts = observeCombatDecision(bot, context);
+    assert.equal(facts.assessment.weapon.item, null);
+    assert.equal(facts.assessment.contacts.find((c) => c.id === 3)!.damageSource, "unknown");
+    assert.equal(facts.assessment.margin, null, "a known neighbour cannot make the combined cost known");
+    const response = decideCombatResponse(facts, { kind: "automatic" });
+    assert.equal(response.kind === "evade" ? response.reason : response.kind, "outmatched");
+    assert.deepEqual(replayCombatDecision(combatDecisionEvidence(facts, { kind: "automatic" }, response)), response);
+    assert.match(describeDirectiveReason("outmatched", facts), /unknown.*hoglin.*keep away/i);
+    assert.equal(decideCombatResponse(facts, { kind: "contact_defence", targetId: 3 }).kind, "fight");
+    combat.hurtBot(2, 3);
+    const measured = observeCombatDecision(bot, context);
+    assert.equal(measured.assessment.contacts.find((c) => c.id === 3)!.unknownMelee, false);
+    assert.equal(decideCombatResponse(measured, { kind: "automatic" }).kind, "fight");
+  }
+});
 
 test("an answered fight for a contact is still found", () => {
   const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });

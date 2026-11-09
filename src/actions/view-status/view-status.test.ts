@@ -13,6 +13,15 @@ import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { Vec3 } from "vec3";
 import { CombatPerception } from "../../survival/perception/combat/observations.js";
 
+test("status names unknown melee cost instead of pricing a hoglin harmless", (t) => {
+  const { bot } = createFakeBot({ entities: { 2: { name: "hoglin", position: new Vec3(2.5, 64, 0.5) } } });
+  const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
+  assert.equal(Reflect.get(situation.nearby.hostiles[0]!.threat, "unknownMelee"), true);
+  assert.equal(situation.nearby.fight!.margin, null);
+  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /unknown melee.*hoglin.*keep away/i);
+  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation }), /no damaging contact is priced/);
+});
+
 test("status uses observed hit damage and does not price a distant hostile", (t) => {
   const { bot, combat } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
   using perception = new CombatPerception(bot);
@@ -30,7 +39,7 @@ test("status assesses nearby hostiles and reports the fight estimate", (t) => {
   const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
   const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
   const situation = observeLiveSituation(bot, data, idleActivity);
-  assert.deepEqual(situation.nearby.hostiles[0]!.threat, { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 22, explodes: false });
+  assert.deepEqual(situation.nearby.hostiles[0]!.threat, { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 22, explodes: false, unknownMelee: false });
   assert.ok(Math.abs(situation.nearby.fight!.margin! - 0.606) < 0.001);
   assert.equal(situation.nearby.fight!.fightMargin, 1.5);
   assert.equal(situation.nearby.fight!.weapon, null);
@@ -153,7 +162,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
       { username: "Faraway", distance: null, position: null },
       { username: "Scout", distance: 5.3, position: { x: -12, y: 99, z: 14 } },
     ],
-    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 }, threat: { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 7, explodes: false } }],
+    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 }, threat: { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 7, explodes: false, unknownMelee: false } }],
     fight: { effectiveHealth: 18.08, fightMargin: 1.5, healthLostToClear: 17.5, margin: 18.08 / 17.5,
       source: { measured: true, version: "1.21.4" }, ticksToClear: 7 * (20 / 1.2), ticksToDie: 18.08 / (3 / 20), weapon: "stone_pickaxe" },
     mobs: [

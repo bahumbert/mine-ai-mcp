@@ -1,8 +1,10 @@
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
+import type { WorldView } from "../../../navigation/index.js";
+import { blockClass } from "../../../navigation/mineflayer/world.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
-import { findPlacementSupport, placeBlock } from "../../../world/placement.js";
-import { cellsOutsideRegionsFirst } from "../../../world/protected-regions.js";
+import { findPlacementSupport, occupiedCell, placeBlock } from "../../../world/placement.js";
+import { cellsOutsideRegionsFirst, foreignRegionAt } from "../../../world/protected-regions.js";
 import type { CombatPolicy } from "../../policy/combat/contract.js";
 import { extinguishFireAt } from "../fire-clearance.js";
 import { capBlock } from "./hide-blocks.js";
@@ -10,6 +12,14 @@ import { capBlock } from "./hide-blocks.js";
 export type ProtectionBuild =
   | { readonly kind: "built"; readonly placed: readonly Vec3[] }
   | { readonly kind: "blocked"; readonly placed: readonly Vec3[]; readonly reason: string };
+
+/** Price only cells the server can fill before provoking a quarry or starting construction. */
+export function canPlaceProtection(bot: Bot, world: WorldView, cell: Vec3): boolean {
+  const observed = world.blockAt(cell.x, cell.y, cell.z);
+  const block = observed.kind === "loaded" ? blockClass(bot).fromStateId(observed.stateId, 0) : null;
+  // Foreign regions refuse placement (ADR-012): reject the plan before it is half built (P4 review, 2026-11-09).
+  return isReplaceableForPlacement(block, bot.version) && occupiedCell(bot, cell) === null && foreignRegionAt(bot, cell) === null;
+}
 
 /** A wall must fill its cell. A fence's bounding-box label is not a closed wall. */
 export function fullProtectionBlock(block: ReturnType<Bot["blockAt"]>): boolean {

@@ -257,8 +257,9 @@ function decideAutomaticCombat(facts: CombatDecisionFacts, purpose: Extract<Comb
   )
     return evade("explosive");
   if (
-    !hunted(target) && assessment.margin !== null && assessment.margin < policy.fight_margin &&
-    !(policy.bow && facts.rangedWeapon && !contacts.some((contact) => contact.inReach))
+    !hunted(target) && (assessment.contacts.some((contact) => contact.inContact && contact.unknownMelee) ||
+      (assessment.margin !== null && assessment.margin < policy.fight_margin &&
+        !(policy.bow && facts.rangedWeapon && !contacts.some((contact) => contact.inReach))))
   )
     return evade("outmatched");
   const needsRangedRecovery =

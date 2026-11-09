@@ -1,8 +1,8 @@
 import type { EntityBody } from "../../../world/entity-geometry.js";
 import type { Bot } from "mineflayer";
-import { familyIndexOf } from "../../../world/item-families.js";
-import { PROJECTILE_HIT_MARGIN, projectileContact, projectileReachesBody } from "../../positioning/combat/exposure.js";
+import { PROJECTILE_HIT_MARGIN, projectileContact } from "../../positioning/combat/exposure.js";
 import { arrowFlight, isArrowEntity } from "./arrow-flight.js";
+import { isIncomingDirectionalProjectile } from "./directional-projectiles.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -58,17 +58,6 @@ export function isIncomingArrow(bot: Bot, arrow: Entity, movementAllowance = 0, 
   return arrowImpactInTicks(bot, arrow, movementAllowance, target) !== null;
 }
 
-/** Non-arrow shield projectiles use their observed direction; no unmeasured gravity or drag is inferred (P4-06c T9b). */
-function isIncomingDirectionalProjectile(bot: Bot, entity: Entity, movementAllowance: number): boolean {
-  if (!entity.isValid || !entity.name || isArrowEntity(bot, entity) ||
-      !familyIndexOf(bot).entityFamilies(entity.name).includes("projectile_entity")) return false;
-  return projectileReachesBody(bot.world, entity, {
-    position: bot.entity.position,
-    width: bot.entity.width + movementAllowance * 2,
-    height: bot.entity.height,
-  });
-}
-
 /** Shield-facing and retreat admission must consider the same set of blockable shots. */
 export function incomingShieldProjectiles(bot: Bot, movementAllowance = 0): Entity[] {
   const travelTime = (entity: Entity) => {
@@ -78,7 +67,7 @@ export function incomingShieldProjectiles(bot: Bot, movementAllowance = 0): Enti
   return Object.values(bot.entities)
     .filter(
       (entity) =>
-        isIncomingDirectionalProjectile(bot, entity, movementAllowance) || isIncomingArrow(bot, entity, movementAllowance),
+        isIncomingDirectionalProjectile(bot, entity, { ...bot.entity, width: bot.entity.width + movementAllowance * 2 }) || isIncomingArrow(bot, entity, movementAllowance),
     )
     .sort((a, b) => travelTime(a) - travelTime(b));
 }

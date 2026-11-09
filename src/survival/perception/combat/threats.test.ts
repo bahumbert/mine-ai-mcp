@@ -245,7 +245,7 @@ test("a melee mob across a ledge cannot turn a journey into a hunt, even after a
   bot.entities[7]!.position.y = -5;
   assert.deepEqual(observeHostileResponse(bot, context({ attackers: [7] })), { kind: "none" });
   bot.entities[7]!.position.y = 0;
-  assert.equal(observeHostileResponse(bot).kind, "fight");
+  assert.equal(observeHostileResponse(bot).kind, "evade", "unmeasured cube damage refuses an automatic fight");
   bot.entities[7]!.position.x = 6;
   assert.equal(observeHostileResponse(bot).kind, "none");
   bot.health = 11;
@@ -256,7 +256,7 @@ test("a jumping cube retains defensive contact before descending into swing reac
   const { bot, world } = sceneWith({ mobs: [{ id: 7, name: "magma_cube", x: 2 }], air: true });
   const cube = bot.entities[7]!;
   cube.position.y = 6;
-  assert.equal(observeHostileResponse(bot).kind, "fight", "do not start a journey underneath the airborne attacker");
+  assert.equal(observeHostileResponse(bot).kind, "evade", "airborne contact still responds; unmeasured damage refuses a fight");
   world.setCell(cube.position.offset(0, -1, 0), "stone");
   assert.equal(
     observeHostileResponse(bot).kind,
@@ -322,16 +322,16 @@ test("names the next target once the first is resolved", () => {
 });
 
 test("recognises hostiles by minecraft-data category, not by the narrower entity type", () => {
-  for (const [name, type] of [
-    ["phantom", "mob"],
-    ["slime", "mob"],
-    ["ghast", "mob"],
-    ["hoglin", "animal"],
-    ["witch", "hostile"],
+  for (const [name, type, response] of [
+    ["phantom", "mob", "fight"],
+    ["slime", "mob", "evade"],
+    ["ghast", "mob", "fight"],
+    ["hoglin", "animal", "evade"],
+    ["witch", "hostile", "fight"],
   ] as const) {
     const directive = observeHostileResponse(botWith({ items: ["diamond_sword"], mobs: [{ id: 7, name, type, x: 3 }] }));
 
-    assert.equal(directive.kind, "fight", `expected to engage a ${name}`);
+    assert.equal(directive.kind, response, `expected a hostile response to ${name}`);
   }
 });
 

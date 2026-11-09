@@ -312,7 +312,7 @@ export const liveSituationSchema = z.strictObject({
     ),
     hostiles: z.array(
       z.strictObject({ name: z.string(), distance: z.number().nonnegative(), position: positionSchema,
-        threat: z.strictObject({ damagePerHit: z.number().nullable(), hitsToKillYou: z.number().nullable(), yourHitsToKill: z.number(), explodes: z.boolean() }) }),
+        threat: z.strictObject({ damagePerHit: z.number().nullable(), hitsToKillYou: z.number().nullable(), yourHitsToKill: z.number(), explodes: z.boolean(), unknownMelee: z.boolean() }) }),
     ),
     fight: z.strictObject({ weapon: z.string().nullable(), margin: z.number().nullable(), healthLostToClear: z.number(), effectiveHealth: z.number(),
       ticksToDie: z.number().nullable(), ticksToClear: z.number(), fightMargin: z.number(),

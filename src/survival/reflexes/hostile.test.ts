@@ -727,6 +727,7 @@ test("melee contact ending after 20 ticks out of reach releases the reflex witho
         signal.addEventListener("abort", () => resolve({ ...died(targetId), kind: "cancelled" }), { once: true });
       }), undefined, { entities: { 7: hostile("magma_cube", 3) } },
   );
+  fixture.combat.hurtBot(1, 7);
   fixture.tick();
   assert.ok(await until(() => engaging));
   fixture.bot.entities[7]!.position.y = 58;
@@ -746,6 +747,7 @@ test("ending the original melee contact cannot drop the owner while another fuse
     engaging = true;
     signal.addEventListener("abort", () => resolve({ ...died(targetId), kind: "cancelled" }), { once: true });
   }), undefined, { entities: { 7: hostile("magma_cube", 3) } });
+  fixture.combat.hurtBot(1, 7);
   fixture.tick();
   assert.ok(await until(() => engaging));
   const creeper = fixture.entities.spawn({ id: 8, ...hostile("creeper", 2) });
@@ -802,28 +804,18 @@ async function contactScene() {
   return { ...fixture, ticksOut, ticksIn, settled, fighting: () => !aborted && fixture.runner.status().busy, close };
 }
 
-test("a knockback that carries the bot out of reach for 12 ticks keeps the fight", async () => {
-  const scene = await contactScene();
-  try {
-    scene.ticksOut(12);
-    scene.ticksIn(1);
-    assert.deepEqual(await scene.settled(), [], "the flight of about 0.6 s does not end the fight");
-    assert.equal(scene.fighting(), true);
-  } finally {
-    await scene.close();
-  }
-});
-
 // The 20th tick ending it (`contact_ended`) is held by the renamed pin above ("ending after 20 ticks out of reach").
-test("19 ticks out of reach then back keeps fighting", async () => {
-  const scene = await contactScene();
-  try {
-    scene.ticksOut(19); // a literal: the rule is "20 ticks", a lowered constant must fail here
-    scene.ticksIn(1);
-    assert.deepEqual(await scene.settled(), []);
-    assert.equal(scene.fighting(), true);
-  } finally {
-    await scene.close();
+test("12 or 19 ticks out of reach then back keeps fighting", async () => {
+  for (const ticks of [12, 19]) {
+    const scene = await contactScene();
+    try {
+      scene.ticksOut(ticks);
+      scene.ticksIn(1);
+      assert.deepEqual(await scene.settled(), [], `${ticks} ticks out of reach does not end the fight`);
+      assert.equal(scene.fighting(), true);
+    } finally {
+      await scene.close();
+    }
   }
 });
 

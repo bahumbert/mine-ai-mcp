@@ -18,7 +18,7 @@ export function statusThreats(bot: Bot, fightMargin: number, context: HostileCon
       return { name: hostile.name, distance: rounded(hostile.distance, 1), position: {
         x: rounded(hostile.position.x, 2), y: rounded(hostile.position.y, 2), z: rounded(hostile.position.z, 2),
       }, threat: { damagePerHit: contact.damagePerHit, hitsToKillYou: contact.hitsToKillBot,
-        yourHitsToKill: contact.hitsToKill, explodes: contact.explosion !== null } };
+        yourHitsToKill: contact.hitsToKill, explodes: contact.explosion !== null, unknownMelee: contact.unknownMelee } };
     }),
     fight: assessment ? { weapon: assessment.weapon.item, margin: assessment.margin, healthLostToClear: assessment.healthLostToClear,
       effectiveHealth: assessment.bot.effectiveHealth, ticksToDie: assessment.ticksToDie, ticksToClear: assessment.ticksToClear,
@@ -32,6 +32,11 @@ export function statusThreatLines(nearby: Nearby): string[] {
   const lines = [`- Hostiles: ${hostiles}`];
   const fight = nearby.fight;
   if (!fight) return lines;
+  const unknown = nearby.hostiles.filter((hostile) => hostile.threat.unknownMelee);
+  if (unknown.length) {
+    lines.push(`- Unknown melee cost for ${unknown.map((hostile) => hostile.name).join(", ")}; keep away or choose explicit pursuit/contact defence. A complete fight margin is unavailable for an unknown contact.`);
+    return lines;
+  }
   const groups = new Map<string, { name: string; hits: number; count: number }>();
   for (const hostile of nearby.hostiles) {
     const key = `${hostile.name}:${hostile.threat.yourHitsToKill}`;
