@@ -13,8 +13,8 @@ geometry:
   - fill: { block: bedrock, from: [118, 109, -2], to: [122, 114, 2] }
   - fill: { block: air, from: [120, 110, 0], to: [120, 112, 0] }
 entities:
-  - { type: enderman, pos: [120.5, 100, 0.5], nbt: '{PersistenceRequired:1b,attributes:[{id:"minecraft:movement_speed",base:0.0d}],Tags:["reconsider_primary"]}' }
-  - { type: enderman, pos: [140.5, 100, 4.5], nbt: '{PersistenceRequired:1b,attributes:[{id:"minecraft:movement_speed",base:0.0d}],Tags:["reconsider_alternative"]}' }
+  - { type: enderman, pos: [120.5, 100, 0.5], nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:movement_speed",base:0.0d}],Tags:["reconsider_primary"]}' }
+  - { type: enderman, pos: [140.5, 100, 4.5], nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:movement_speed",base:0.0d}],Tags:["reconsider_alternative"]}' }
 players:
   - name: EndermanRanking
     pos: [100.5, 100, 0.5]
@@ -37,5 +37,5 @@ params:
   alternative: [140.5, 100, 4.5]
   teleportTo: [120.5, 110, 0.5]
   returnTo: [108.5, 100, 0.5]
-  expectedReason: closer target during approach
+  expectedChanges: [[primary, alternative], [alternative, primary]]
 goal: { kind: completion, who: EndermanRanking, timeout: 120 }

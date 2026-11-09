@@ -4,6 +4,7 @@ import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { waitForReleaseAnswers } from "../../src/arranged-release.ts";
 import { openRuntime, wearArmor, type Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { describe, excessExplosions, readEncounters, watchExplosions, watchShield } from "./reflex.ts";
@@ -49,44 +50,7 @@ export async function releaseArranged(context: MineAiScenarioContext): Promise<v
     const swell: unknown = entity.metadata[16];
     if (name === "creeper" && swell === 1) throw new Error("creeper fusing under NoAI");
   }
-  await waitForReleaseAnswers(context, pending);
-}
-
-/** Send the release command and settle when every arranged mob answers or the bound expires. */
-async function waitForReleaseAnswers(context: MineAiScenarioContext, pending: Set<number>): Promise<void> {
-  const { bot, signal } = context;
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const deadline = monotonicNow() + 1_100;
-  let sentAt = 0;
-  const cleanup = () => {
-    clearTimeout(timer);
-    bot._client.off("entity_metadata", metadata);
-    bot.off("messagestr", message);
-    signal.removeEventListener("abort", abort);
-  };
-  const finish = (error?: unknown) => { cleanup(); if (error) reject(error); else resolve(); };
-  const metadata = (packet: { entityId: number; metadata: { key: number; value: unknown }[] }) => {
-    const now = monotonicNow();
-    if (packet.metadata.some((entry) => entry.key === 15 && typeof entry.value === "number" && (entry.value & 1) === 0) && pending.delete(packet.entityId)) {
-      context.log(`release acknowledged ${JSON.stringify({ entityId: packet.entityId, ms: now - sentAt })}`);
-    }
-    if (now > deadline) return finish(new Error("release not answered"));
-    if (pending.size === 0) finish();
-  };
-  const message = (answer: string) => context.log(`release answer ${answer}`);
-  const abort = () => finish(signal.reason);
-  const timer = setTimeout(() => {
-    context.log(`release timeout ${JSON.stringify({ pending: [...pending], ms: monotonicNow() - sentAt })}`);
-    finish(new Error("release not answered"));
-  }, Math.max(0, deadline - monotonicNow()));
-  bot._client.on("entity_metadata", metadata);
-  bot.on("messagestr", message);
-  signal.addEventListener("abort", abort, { once: true });
-  sentAt = monotonicNow();
-  context.log(`release sent ${JSON.stringify({ pending: [...pending] })}`);
-  bot.chat(`/execute at ${bot.username} as @e[distance=..16,nbt={NoAI:1b}] run data merge entity @s {NoAI:0b}`);
-  if (pending.size === 0) finish();
-  return await promise;
+  await waitForReleaseAnswers(context, pending, `/execute at ${bot.username} as @e[distance=..16,nbt={NoAI:1b}] run data merge entity @s {NoAI:0b}`);
 }
 
 /** Wait for the foreground navigate action to own the body before releasing threats. */

@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { Vec3 } from "vec3";
 import { huntMobResultSchema } from "../../../src/actions/hunt-mob/contract.ts";
-import { declaredEntitiesArranged, openRuntime, standStill, wearArmor } from "../../src/runtime.ts";
+import { changesObserved, releaseByTag } from "../../src/arranged-release.ts";
+import { declaredEntitiesArranged, declaredStart, openRuntime, standStill, wearArmor } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { recordSourceIdentity } from "../../src/source-identity.ts";
 import { writeScenarioEvidence } from "../../src/scenario-evidence.ts";
+import { settleReconsiderationHunt } from "../../src/reconsideration-settlement.ts";
+import { observeReconsideration } from "./reconsideration-observer.ts";
 
 const point = z.tuple([z.number(), z.number(), z.number()]);
 const paramsSchema = z.strictObject({
@@ -14,7 +16,7 @@ const paramsSchema = z.strictObject({
   alternative: point,
   teleportTo: point.optional(),
   returnTo: point.optional(),
-  expectedReason: z.string().optional(),
+  expectedChanges: z.array(z.tuple([z.enum(["primary", "alternative"]), z.enum(["primary", "alternative"])])).default([]),
 });
 
 /**
@@ -24,101 +26,79 @@ const paramsSchema = z.strictObject({
  */
 export const run: MineAiScenario = async (context) => {
   await recordSourceIdentity();
-  const { bot, signal, log } = context;
+  const { bot, signal } = context;
   const params = paramsSchema.parse(context.scenario.params);
   assert.ok(await standStill(context));
   await wearArmor(context);
   await declaredEntitiesArranged(context);
 
-  const nearestTo = ([x, y, z]: readonly [number, number, number]) =>
-    Object.values(bot.entities)
-      .filter((entity) => entity.isValid && entity.name === "enderman")
-      .sort(
-        (left, right) => left.position.distanceTo(new Vec3(x, y, z)) - right.position.distanceTo(new Vec3(x, y, z)),
-      )[0]!;
-  const primary = nearestTo(params.primary);
-  const alternative = nearestTo(params.alternative);
-  assert.ok(primary && alternative && primary.id !== alternative.id, "The two declared Endermen were not independently observed.");
+  const primary = await releaseByTag(context, "reconsider_primary", "enderman");
+  const alternative = await releaseByTag(context, "reconsider_alternative", "enderman");
+  assert.notEqual(primary, alternative, "The two declared Endermen were not independently observed.");
 
   const runtime = await openRuntime(context, `enderman-reconsideration-${params.mode}`);
-  let firstNativeHit: number | null = null;
-  let primaryMoved = false;
-  let primaryReturned = false;
-  const damage = (packet: { entityId: number; sourceCauseId: number; sourceDirectId: number }) => {
-    if (
-      firstNativeHit === null &&
-      (packet.sourceCauseId === bot.entity.id + 1 || packet.sourceDirectId === bot.entity.id + 1) &&
-      (packet.entityId === primary.id || packet.entityId === alternative.id)
-    ) {
-      firstNativeHit = packet.entityId;
-      log(`FIRST_NATIVE_TARGET_HIT ${packet.entityId}`);
-    }
-  };
-  const tick = () => {
-    const checkpoint = runtime.status().survival.request?.evidence?.checkpoint;
-    const selectedTargetId =
-      typeof checkpoint === "object" && checkpoint !== null && "selectedTargetId" in checkpoint &&
-      typeof checkpoint.selectedTargetId === "number"
-        ? checkpoint.selectedTargetId
-        : null;
-    if (!primaryMoved && selectedTargetId === primary.id && params.teleportTo) {
-      bot.chat(`/tp @e[tag=reconsider_primary,limit=1] ${params.teleportTo.join(" ")}`);
-      primaryMoved = true;
-      log(`PRIMARY_MOVED ${params.teleportTo.join(" ")}`);
-    }
-    if (primaryMoved && !primaryReturned && selectedTargetId === alternative.id && params.returnTo) {
-      bot.chat(`/tp @e[tag=reconsider_primary,limit=1] ${params.returnTo.join(" ")}`);
-      bot.chat("/data merge entity @e[tag=reconsider_primary,limit=1] {NoGravity:0b}");
-      primaryReturned = true;
-      log(`PRIMARY_RETURNED_AFTER_SELECTION ${selectedTargetId} ${params.returnTo.join(" ")}`);
-    }
-  };
-  bot._client.on("damage_event", damage);
-  bot.on("physicsTick", tick);
+  const home = declaredStart(context);
+  const child = new AbortController();
+  const observer = observeReconsideration(context, runtime, { primary, alternative }, params, child);
   try {
     const action = runtime.actions.find((candidate) => candidate.name === "collect_mob_drop")!;
-    const output = await runtime.run(
+    const hunt = runtime.run(
       action,
       { mob_name: "enderman", drop_name: "ender_pearl", count: 1, observe_for_ms: 5_000 },
-      signal,
+      AbortSignal.any([signal, child.signal]),
     );
+    const output = await settleReconsiderationHunt(hunt, child, observer.failure);
     const result = huntMobResultSchema.parse(output.result);
-    const reasonObserved =
-      params.expectedReason === undefined ||
-      result.hunt.targetChanges.some(({ reason }) => reason === params.expectedReason);
-    const expectedFirstHit = params.mode === "teleport_away" ? alternative.id : primary.id;
-    const passed = firstNativeHit === expectedFirstHit && reasonObserved && bot.health > 0;
+    const observed = changesObserved(result.hunt.targetChanges, params.expectedChanges, { primary, alternative });
+    const expectedFirstHit = params.mode === "teleport_away" ? alternative : primary;
+    const navigate = runtime.actions.find((candidate) => candidate.name === "navigate")!;
+    const nextSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
+    let rejectNext = () => {};
+    const nextTimeout = new Promise<never>((_, reject) => {
+      rejectNext = () => reject(nextSignal.reason);
+      if (nextSignal.aborted) rejectNext(); else nextSignal.addEventListener("abort", rejectNext, { once: true });
+    });
+    let next: Awaited<ReturnType<typeof runtime.run>>;
+    try { next = await Promise.race([runtime.run(navigate, { x: home.x, y: home.y, z: home.z, range: 1 }, nextSignal), observer.failure, nextTimeout]); }
+    finally { nextSignal.removeEventListener("abort", rejectNext); }
+    const { firstNativeHit, primaryMoved, primaryReturned, deaths, movePending } = observer.snapshot();
+    if (movePending) throw new Error("arranged move not observed");
+    const passed = firstNativeHit === expectedFirstHit && observed && (!params.teleportTo || primaryMoved) && (params.mode !== "failed_approach" || primaryReturned) && deaths === 0 && bot.health > 0 && next.result.status === "succeeded";
     const evidenceFile = await writeScenarioEvidence(context, `${params.mode}.json`, {
       params,
-      primaryId: primary.id,
-      alternativeId: alternative.id,
+      primaryId: primary,
+      alternativeId: alternative,
       expectedFirstHit,
       firstNativeHit,
       primaryMoved,
       primaryReturned,
       result,
       output,
+      next,
+      deaths,
     });
     return {
       status: passed ? "succeeded" : "failed",
       detail: JSON.stringify({
         mode: params.mode,
-        primaryId: primary.id,
-        alternativeId: alternative.id,
+        primaryId: primary,
+        alternativeId: alternative,
         expectedFirstHit,
         firstNativeHit,
         primaryMoved,
         primaryReturned,
-        expectedReason: params.expectedReason ?? null,
-        reasonObserved,
+        expectedChanges: params.expectedChanges,
+        changesObserved: observed,
         targetChanges: result.hunt.targetChanges,
+        deaths,
+        next,
         health: bot.health,
         evidenceFile,
       }),
     };
   } finally {
-    bot._client.off("damage_event", damage);
-    bot.off("physicsTick", tick);
+    observer.close();
+    child.abort("scenario ended");
     await runtime.close();
   }
 };
