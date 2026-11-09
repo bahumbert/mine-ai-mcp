@@ -1,7 +1,9 @@
 /** Observe an idle bot under the declared conditions; YAML owns the world goals. */
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
-import { openRuntime, wearArmor } from "../../src/runtime.ts";
+import { Vec3 } from "vec3";
+import { fullProtectionBlock } from "../../../src/survival/positioning/combat/build-protection.js";
+import { declaredEntitiesArranged, openRuntime, wearArmor } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { describe, excessExplosions, hurt, readEncounters, watchExplosions, watchShield } from "./reflex.ts";
 
@@ -14,11 +16,12 @@ const paramsSchema = z.strictObject({
   /** Single-quarry fixtures can finish once its death and the combat handoff are observed. */
   finishAfterTargetDeath: z.string().optional(),
   maxExplosions: z.number().int().nonnegative().optional(),
+  requiredWallCells: z.array(z.tuple([z.number().int(), z.number().int(), z.number().int()])).default([]),
 });
 
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
   const params = paramsSchema.parse(context.scenario.params ?? {});
-  const runtime = await openRuntime(context, "combat-idle");
+  const runtime = await openAtArrangedHealth(context, params.hurtTo);
   const explosions = watchExplosions(context);
   const shield = watchShield(context);
   let died = false;
@@ -33,8 +36,6 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   context.bot.on("death", death);
   try {
     if (params.wearArmor) await wearArmor(context);
-    if (params.hurtTo !== undefined && !(await hurt(context, params.hurtTo)))
-      return { status: "failed", detail: `Arrangement could not establish ${params.hurtTo} health.` };
     if (params.provoke)
       context.bot.chat(
         `/damage @e[type=minecraft:${params.provoke},limit=1,sort=nearest] 1 minecraft:player_attack by @s`,
@@ -46,9 +47,10 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     }
     const encounters = await readEncounters(context, runtime);
     const exploded = excessExplosions(explosions.count(), params.maxExplosions);
+    const openWalls = params.requiredWallCells.filter(([x, y, z]) => !fullProtectionBlock(context.bot.blockAt(new Vec3(x, y, z))));
     return {
-      status: !died && context.bot.health > 0 && !exploded ? "succeeded" : "failed",
-      detail: `${exploded ?? ""}; health ${context.bot.health}; died ${died}; ${encounters.map(describe).join(" | ")}; ${shield.summary()}`,
+      status: !died && context.bot.health > 0 && !exploded && openWalls.length === 0 ? "succeeded" : "failed",
+      detail: `${exploded ?? ""}; open required walls ${JSON.stringify(openWalls)}; health ${context.bot.health}; died ${died}; ${encounters.map(describe).join(" | ")}; ${shield.summary()}`,
     };
   } finally {
     context.bot.off("entityDead", targetDeath);
@@ -56,5 +58,22 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     shield.close();
     explosions.close();
     await runtime.close();
+  }
+}
+
+/** Hold the native scene still until the runtime can observe the declared health (T16d, 2026-11-09). */
+async function openAtArrangedHealth(context: MineAiScenarioContext, health: number | undefined) {
+  if (health === undefined) return openRuntime(context, "combat-idle");
+  await declaredEntitiesArranged(context);
+  context.bot.chat("/tick freeze");
+  context.bot.chat("/gamerule naturalRegeneration false");
+  try {
+    if (!(await hurt(context, health))) throw new Error(`Arrangement could not establish ${health} health.`);
+    const runtime = await openRuntime(context, "combat-idle");
+    context.log(`Runtime attached at arranged health ${context.bot.health} (requested ${health}).`);
+    return runtime;
+  } finally {
+    context.bot.chat(`/gamerule naturalRegeneration ${context.scenario.world.gamerules.naturalRegeneration ?? true}`);
+    context.bot.chat("/tick unfreeze");
   }
 }

@@ -77,22 +77,26 @@ for (const { hit, occluded, name } of [
   { hit: false, occluded: true, name: "the seated hostile reflex notices a mob moving into view after a cached hidden observation" },
 ]) {
   test(name, async () => {
-    await using fixture = responseFixture(occluded);
+    const fixture = responseFixture(occluded);
     using _clock = fixture.clock.install();
     const { bot, clock, combat, driver, perception } = fixture;
-    const sensed: boolean[] = [];
-    driver.onTransition((event) => {
-      if (event.kind === "danger") sensed.push(bot.vehicle?.id === 7);
-    });
-    bot.mount(bot.entities[7]!);
-    await clock.advance(occluded ? 150 : 50);
-    if (occluded) assert.equal(perception.read().find((entity) => entity.id === 8)?.visible, false);
-    bot.entities[8]!.position.x = 2.5;
-    if (hit) combat.hurtBot(1, 8);
-    await clock.advance(100);
-    assert.ok(sensed.includes(true), "the seated tick must observe the zombie");
-    const danger = driver.snapshot()[0]!.danger as { threats: readonly { id: number; confirmedAttacker: boolean }[] } | null;
-    assert.ok(danger?.threats.some((threat) => threat.id === 8 && threat.confirmedAttacker === hit), "a seated observation must refresh a cached hidden threat");
+    try {
+      const sensed: boolean[] = [];
+      driver.onTransition((event) => {
+        if (event.kind === "danger") sensed.push(bot.vehicle?.id === 7);
+      });
+      bot.mount(bot.entities[7]!);
+      await clock.advance(occluded ? 150 : 50);
+      if (occluded) assert.equal(perception.read().find((entity) => entity.id === 8)?.visible, false);
+      bot.entities[8]!.position.x = 2.5;
+      if (hit) combat.hurtBot(1, 8);
+      await clock.advance(100);
+      assert.ok(sensed.includes(true), "the seated tick must observe the zombie");
+      const danger = driver.snapshot()[0]!.danger as { threats: readonly { id: number; confirmedAttacker: boolean }[] } | null;
+      assert.ok(danger?.threats.some((threat) => threat.id === 8 && threat.confirmedAttacker === hit), "a seated observation must refresh a cached hidden threat");
+    } finally {
+      await clock.settle(fixture[Symbol.asyncDispose](), 30_000);
+    }
   });
 }
 
@@ -229,7 +233,7 @@ test("seated settlement retains strikes, deaths and explosions across completion
   }
 });
 
-test("near shore the take-back stops at HOSTILE_TAKE_BACK_HITS hits", async () => {
+test("near shore a stalled server ends preparation without queueing take-back hits", async () => {
   await using fixture = responseFixture();
   using _clock = fixture.clock.install();
   const { bot, clock, server, scene } = fixture;
@@ -239,7 +243,9 @@ test("near shore the take-back stops at HOSTILE_TAKE_BACK_HITS hits", async () =
     if ((data as { mouse: number }).mouse === 1) server.stop();
   });
   const pending = respondToHostile(scene, { kind: "fight", targetId: 8, threats: [] }, new AbortController().signal);
-  await clock.settle(pending, 30_000);
-  assert.equal(attackedIds(server).filter((id) => id === 7).length, HOSTILE_TAKE_BACK_HITS);
+  const result = await clock.settle(pending, 30_000);
+  assert.equal(result.kind, "failed");
+  assert.match(result.reason ?? "", /BOAT_TAKE_BACK_FAILED/);
+  assert.ok(attackedIds(server).filter((id) => id === 7).length < HOSTILE_TAKE_BACK_HITS);
   assert.ok(bot.entities[7], "a stalled server leaves the boat for the next movement");
 });

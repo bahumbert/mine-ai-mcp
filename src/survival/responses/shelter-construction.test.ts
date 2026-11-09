@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import type { NavigationRuntime } from "../../navigation/index.js";
+import { createNavigationRuntime, type NavigationRuntime } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext, onAttack } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
@@ -10,6 +10,81 @@ import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { hideInPlace, enclosedInPlace } from "./hide.js";
 import { centerShelterCell, type ShelterBuild } from "./shelter-build.js";
+
+test("a fence wall is broken with a server answer, closed, and recovery continues from the completed shelter", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot, world, server } = createFakeBot({
+    clock, health: 7, carried: { cobblestone: 32, iron_pickaxe: 1 },
+    cells: { "1,65,0": "nether_brick_fence" },
+  });
+  using _installed = clock.install();
+  await using navigation = createNavigationRuntime(bot);
+  // The fork's dig predicts air; only the later server packet confirms removal (bot.ts #awaitServerBreak).
+  const stop = server.onPacket("block_dig", (data) => {
+    const packet = data as { status: number; location: Vec3 };
+    if (packet.status === 2) clock.after(50, () => {
+      world.setCell(packet.location, "air");
+      bot._client.emit("block_change", { location: packet.location, type: 0 });
+    });
+  });
+  try {
+    const context = combatTestContext(bot);
+    const hidden = await clock.settle(hideInPlace(bot, {
+      navigation, signal: new AbortController().signal, threatContext: context, maximumMs: 5_000, recoverTo: 7,
+    }), 6_000);
+    assert.equal(hidden.kind, "recovered", hidden.error ?? "");
+    assert.equal(bot.blockAt(new Vec3(1, 65, 0))?.name, "cobblestone");
+    assert.equal(enclosedInPlace(bot), true);
+    clock.after(100, () => { bot.health = 20; });
+    const next = await clock.settle(recoverCombatHealth(bot, navigation, context, new AbortController().signal, () => {}), 6_000);
+    assert.deepEqual(next, { kind: "recovered" });
+  } finally { stop(); }
+});
+
+test("unsafe fence breaks leave the wall intact and name why the shelter is open", async () => {
+  for (const variant of ["no navigation", "dig prohibited", "lava", "falling", "slow", "server silent", "server fence", "unloaded target"] as const) {
+    const clock = createFakeClock({ mode: "mocked" });
+    const { bot, world, server } = createFakeBot({
+      clock, health: 7, carried: { cobblestone: 32, ...(variant === "slow" ? {} : { iron_pickaxe: 1 }) },
+      cells: { "1,65,0": variant === "unloaded target" ? "void" : "nether_brick_fence",
+        ...(variant === "lava" ? { "2,65,0": "lava" } : {}),
+        ...(variant === "falling" ? { "1,66,0": "sand" } : {}) },
+    });
+    using _installed = clock.install();
+    await using navigation = createNavigationRuntime(bot);
+    const context = combatTestContext(bot);
+    const stop = server.onPacket("block_dig", (data) => {
+      const packet = data as { status: number; location: Vec3 };
+      if (packet.status === 2) clock.after(50, () => {
+        world.setCell(packet.location, "nether_brick_fence");
+        if (variant === "server fence")
+          bot._client.emit("block_change", { location: packet.location, type: bot.blockAt(packet.location)!.stateId });
+      });
+    });
+    try {
+      const result = await clock.settle(hideInPlace(bot, {
+        ...(variant === "no navigation" ? {} : { navigation }),
+        signal: new AbortController().signal,
+        threatContext: variant === "dig prohibited"
+          ? { ...context, policy: { ...context.policy, terrain: { ...context.policy.terrain, dig: false } } } : context,
+        maximumMs: variant === "slow" ? 2_000 : 5_000, recoverTo: 7,
+      }), 10_000);
+      assert.equal(result.kind, "failed", variant);
+      assert.match(result.error ?? "", /1,65,0/, variant);
+      const reason = variant.startsWith("unloaded") ? /not loaded/ : variant === "slow" ? /digs in .* s, .* s left/
+        : variant === "falling" ? /falling block/
+        : variant === "lava" ? /liquid/
+        : variant === "server silent" ? /server did not confirm/
+        : variant === "server fence" ? /removal was not observed|block never changed/
+        : /cannot be replaced by placement/;
+      assert.match(result.error ?? "", reason, variant);
+      assert.equal(bot.blockAt(new Vec3(1, 65, 0))?.name, variant === "unloaded target" ? undefined : "nether_brick_fence", variant);
+      if (!["server silent", "server fence"].includes(variant))
+        assert.equal(server.packets.some((packet) => packet.name === "block_dig" &&
+          (packet.data as { status: number }).status === 0), false, variant);
+    } finally { stop(); }
+  }
+});
 
 test("a known intruder cannot mask a new attacker arriving while the shelter recenters", async () => {
   const clock = createFakeClock({ mode: "mocked" });

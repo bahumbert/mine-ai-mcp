@@ -149,7 +149,7 @@ export class EndCombat {
       };
       this.recordDecision({ response: "dragon_shelter", state: "started", cell: origin.toString(), health: bot.health });
       const hidden = await this.phase("recover", () => hideInPlace(bot, {
-        signal,
+        navigation: this.navigation, signal,
         threatContext: this.threatContext,
         recoverTo: this.policy().combat.recover === "never"
           ? this.policy().combat.engage_min_health

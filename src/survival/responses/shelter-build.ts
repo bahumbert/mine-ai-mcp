@@ -1,7 +1,7 @@
 // What a hide in progress shares between its steps (the build), and the steps that act on the bot: hold, centre, place, strike.
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { centerOnCell, steeringPortFor } from "../../navigation/index.js";
+import { centerOnCell, steeringPortFor, type NavigationRuntime } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import type { ResponseContext } from "../control/combat/context.js";
@@ -17,8 +17,10 @@ import { canMeleeTarget, combatItemsForTarget, hasSweepBystander, sweepsOnSwing 
 import { shieldFacing } from "../weapons/shield-facing.js";
 import type { CoveredRecovery } from "./recover.js";
 import { type Entity, shelterFeet, shelterIntruder, shelterIntruders } from "./shelter-cells.js";
+import { clearShelterCell } from "./shelter-clearance.js";
 
 export interface HideOptions {
+  readonly navigation?: NavigationRuntime;
   readonly signal: AbortSignal;
   readonly threatContext: ResponseContext;
   /** Health at which the hole has done its job and the body is handed back. */
@@ -188,6 +190,7 @@ export async function sealShelterCell(build: ShelterBuild, cell: Vec3): Promise<
       mayContinue: () => shelterHazard(build),
       terrain: policy.terrain,
       blockNames: options.blockNames,
+      clearCell: options.navigation && policy.terrain.dig ? (cell, signal) => clearShelterCell(build, cell, signal) : undefined,
     });
     if (built.kind === "blocked") build.refusal ??= `${cell.x},${cell.y},${cell.z}: ${built.reason}`;
     return built.placed.length > 0;

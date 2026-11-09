@@ -117,12 +117,14 @@ async function fight(
 
 async function hide(
   bot: Bot,
+  navigation: NavigationRuntime,
   request: Extract<HostileDirective, { kind: "hide" }>,
   context: ResponseContext,
   healthBefore: number,
   signal: AbortSignal,
 ): Promise<HideResponseResult> {
   const result = await hideInPlace(bot, {
+    navigation,
     signal,
     threatContext: context,
     recoverTo: recoveryHealth(context.policy),
@@ -189,7 +191,7 @@ export async function executeHostileResponse(
     case "fight":
       return fight(bot, controller, request, context, healthBefore, signal);
     case "hide":
-      return hide(bot, request, context, healthBefore, signal);
+      return hide(bot, navigation, request, context, healthBefore, signal);
     case "evade":
       return evade(bot, navigation, request, context, healthBefore, signal);
   }

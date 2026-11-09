@@ -13,6 +13,63 @@ export type ProtectionBuild =
   | { readonly kind: "built"; readonly placed: readonly Vec3[] }
   | { readonly kind: "blocked"; readonly placed: readonly Vec3[]; readonly reason: string };
 
+interface ProtectionBuildOptions {
+  readonly signal: AbortSignal;
+  readonly mayContinue: () => string | null;
+  readonly terrain: Readonly<CombatPolicy["terrain"]>;
+  /** Some hazards destroy ordinary walls; selection and existing cover must agree. */
+  readonly blockNames?: readonly string[];
+  /** The hide owns safe excavation; other protective shapes admit only replaceable cells. */
+  readonly clearCell?: (cell: Vec3, signal: AbortSignal) => Promise<"cleared" | string>;
+}
+
+/** Clear an obstructed cell only through its caller's excavation policy. */
+async function clearProtectionCell(bot: Bot, cell: Vec3, options: ProtectionBuildOptions): Promise<string | null> {
+  const current = bot.blockAt(cell);
+  if (isReplaceableForPlacement(current, bot.version)) return null;
+  const refusal = `Protection cell ${cell} contains ${current?.name ?? "unobserved terrain"}, which cannot be replaced by placement.`;
+  if (!options.clearCell) return refusal;
+  if (!capBlock(bot, options.blockNames)) return "no block worth placing is carried";
+  if (!findPlacementSupport(bot, cell)) return `No reachable supporting face for protection cell ${cell}.`;
+  const cleared = await options.clearCell(cell, options.signal);
+  options.signal.throwIfAborted();
+  return cleared === "cleared" ? null : `${refusal} ${cleared}`;
+}
+
+/** Re-read closure supplies after excavation, and report an opening if they changed. */
+async function fillProtectionCell(bot: Bot, cell: Vec3, options: ProtectionBuildOptions): Promise<string | null> {
+  const { signal, terrain } = options;
+  if ((await extinguishFireAt(bot, cell, signal, terrain.dig)) === "blocked")
+    return `Fire could not be cleared from protection cell ${cell}.`;
+  signal.throwIfAborted();
+  const changed = options.mayContinue();
+  if (changed) return changed;
+  const dug = !isReplaceableForPlacement(bot.blockAt(cell), bot.version);
+  const refused = await clearProtectionCell(bot, cell, options);
+  if (refused) return refused;
+  signal.throwIfAborted();
+  const open = (reason: string) => dug ? `Protection cell ${cell} dug and left open: ${reason}. Restore its wall or withdraw.` : reason;
+  const interrupted = options.mayContinue();
+  if (interrupted) return open(interrupted);
+  if (!isReplaceableForPlacement(bot.blockAt(cell), bot.version)) return open("the cell is obstructed again");
+  const item = capBlock(bot, options.blockNames);
+  if (!item) return open("no block worth placing is carried");
+  const support = findPlacementSupport(bot, cell);
+  if (!support) return open("no reachable supporting face remains");
+  const context = `${item.name} against ${support.support.name} face ${support.face.x},${support.face.y},${support.face.z}`;
+  try {
+    const result = await placeBlock(bot, {
+      item, ...support, expectedCells: [cell],
+      matches: (block) => fullProtectionBlock(block) && (!options.blockNames || options.blockNames.includes(block.name)),
+      signal,
+    });
+    return result.kind === "failed" ? open(`${context}: ${result.error}`) : null;
+  } catch (cause) {
+    signal.throwIfAborted();
+    return open(`${context}: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
 /** Price only cells the server can fill before provoking a quarry or starting construction. */
 export function canPlaceProtection(bot: Bot, world: WorldView, cell: Vec3): boolean {
   const observed = world.blockAt(cell.x, cell.y, cell.z);
@@ -38,13 +95,7 @@ export function fullProtectionBlock(block: ReturnType<Bot["blockAt"]>): boolean 
 export async function buildProtection(
   bot: Bot,
   cells: readonly Vec3[],
-  options: {
-    readonly signal: AbortSignal;
-    readonly mayContinue: () => string | null;
-    readonly terrain: Readonly<CombatPolicy["terrain"]>;
-    /** Some hazards destroy ordinary walls; selection and existing cover must agree. */
-    readonly blockNames?: readonly string[];
-  },
+  options: ProtectionBuildOptions,
 ): Promise<ProtectionBuild> {
   const { signal, mayContinue, terrain } = options;
   const protects = (block: ReturnType<Bot["blockAt"]>) =>
@@ -64,37 +115,13 @@ export async function buildProtection(
       continue;
     }
     if (!terrain.place) return blocked("Combat placement prohibited by policy.");
-    const item = capBlock(bot, options.blockNames);
-    if (!item) return blocked("no block worth placing is carried");
+    if (!capBlock(bot, options.blockNames)) return blocked("no block worth placing is carried");
     const index = pending.findIndex((cell) => findPlacementSupport(bot, cell) !== null);
     if (index < 0)
       return blocked(`No reachable supporting face for remaining protection cells: ${pending.join(", ")}.`);
     const cell = pending[index]!;
-    if ((await extinguishFireAt(bot, cell, signal, terrain.dig)) === "blocked")
-      return blocked(`Fire could not be cleared from protection cell ${cell}.`);
-    const changedAfterClearing = mayContinue();
-    if (changedAfterClearing) return blocked(changedAfterClearing);
-    const current = bot.blockAt(cell);
-    if (!isReplaceableForPlacement(current, bot.version))
-      return blocked(
-        `Protection cell ${cell} contains ${current?.name ?? "unobserved terrain"}, which cannot be replaced by placement.`,
-      );
-    const support = findPlacementSupport(bot, cell)!;
-    const context = `${item.name} against ${support.support.name} face ${support.face.x},${support.face.y},${support.face.z}`;
-    let result;
-    try {
-      result = await placeBlock(bot, {
-        item,
-        ...support,
-        expectedCells: [cell],
-        matches: protects,
-        signal,
-      });
-    } catch (cause) {
-      signal.throwIfAborted();
-      return blocked(`${context}: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }
-    if (result.kind === "failed") return blocked(`${context}: ${result.error}`);
+    const refusal = await fillProtectionCell(bot, cell, options);
+    if (refusal) return blocked(refusal);
     placed.push(cell);
     pending.splice(index, 1);
   }
