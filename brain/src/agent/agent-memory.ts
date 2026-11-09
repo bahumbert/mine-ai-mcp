@@ -112,7 +112,8 @@ export class AgentMemory {
     this.farms.push(farm);
     if (this.farms.length > KNOWN_FARMS) this.farms.splice(0, this.farms.length - KNOWN_FARMS);
     const started = monotonicNow();
-    this.farmNearTime.set(farm, { started, reading: this.lastPosition, near: 0, unknown: 0 });
+    const tally = previous?.tendedAt === farm.tendedAt ? this.farmNearTime.get(previous) : undefined;
+    this.farmNearTime.set(farm, tally ?? { started, reading: this.lastPosition, near: 0, unknown: 0 });
     for (const known of this.farmNearTime.keys()) if (!this.farms.includes(known)) this.farmNearTime.delete(known);
     this.memorize({ kind: "farm", farm });
   }

@@ -83,6 +83,7 @@ export class StepRunner {
       work.step = null;
       body.onAction = null;
     }
+    await death.settled();
     return { label, result, started, actions, phases, stalled: gain.stalled(), died: death.died() };
   }
 

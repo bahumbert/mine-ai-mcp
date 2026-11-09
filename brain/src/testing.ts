@@ -94,6 +94,7 @@ export class FakeRuntime implements BotRuntime {
   readonly cancelled: string[] = [];
   private readonly actions = new Map<string, { tool: ForegroundTool; input: Readonly<Record<string, unknown>>; remaining: number; cancelled: boolean }>();
   private nextId = 1;
+  private readonly heldStatusReads: { readonly started: () => void; readonly released: Promise<void> }[] = [];
 
   get said(): string[] {
     return this.submitted.filter((call) => call.tool === "send_message").map((call) => String(call.input.message));
@@ -102,7 +103,21 @@ export class FakeRuntime implements BotRuntime {
   /** Like the real runtime, every stack comes with its families; a stack the test labelled itself (even with `[]`) keeps its own. */
   async status(): Promise<BotSnapshot> {
     const inventory = this.snapshot.inventory.map((stack) => stack.families === undefined ? { ...stack, families: vanillaItemFamilies(stack.name) } : stack);
-    return { ...this.snapshot, inventory };
+    const snapshot = { ...this.snapshot, inventory };
+    const held = this.heldStatusReads.shift();
+    held?.started();
+    if (held !== undefined) await held.released;
+    return snapshot;
+  }
+
+  /** Holds the next captured status answer until released, modelling transport latency without changing its facts. */
+  holdNextStatus(): { readonly started: Promise<void>; readonly release: () => void } {
+    let start!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { start = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    this.heldStatusReads.push({ started: start, released });
+    return { started, release };
   }
 
   private deaths = 0;

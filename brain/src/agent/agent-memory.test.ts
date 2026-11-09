@@ -84,6 +84,27 @@ test("a tend restarts the tally, a restart and missing dimension give unknown, a
   assert.equal(memory.nearMinutes(old), null, "a trimmed farm's tally is dropped");
 });
 
+test("a cancelled tend keeps all 25 near-minutes and the next reading continues that tally", (t) => {
+  let atMs = 0;
+  t.mock.method(performance, "now", () => atMs);
+  const runtime = new FakeRuntime();
+  const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
+  const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", pace: 0.1, paceFresh: true, state: { planted: 8, ripe: 0, empty: 0, stage: 3, ripeAge: 7 } };
+  memory.learnFarm(farm);
+  for (let minute = 0; minute <= 25; minute += 1) {
+    atMs = minute * 60_000;
+    memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+  }
+  memory.learnFarm({ ...farm, paceFresh: false });
+  const cancelled = memory.farms[0]!;
+  assert.deepEqual(memory.nearMinutes(cancelled), { near: 25, unknown: 0, since: 25 });
+  assert.equal(cancelled.paceFresh, false);
+  atMs += 60_000;
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+  assert.deepEqual(memory.nearMinutes(cancelled), { near: 26, unknown: 0, since: 26 });
+  assert.equal(memory.nearMinutes(farm), null, "only the current farm object owns the tally");
+});
+
 test("a tend cannot reuse a position read before a long gap as a fresh near baseline", (t) => {
   let atMs = 0;
   t.mock.method(performance, "now", () => atMs);
