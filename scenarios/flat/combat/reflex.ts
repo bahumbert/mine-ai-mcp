@@ -163,6 +163,7 @@ export async function readReflexOutcomes(
   const seen: { encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] } = { encounters: [], limits: [], failures: [] };
   for (;;) {
     const output = await runtime.run(readEvents, { limit: 100 }, context.signal);
+    if (output.result.status !== "succeeded") throw new Error(output.result.error);
     const result = readRecentEventsResultSchema.parse(output.result);
     for (const event of result.events) {
       if (event.type !== "survival_outcome" || event.payload.source !== "hostile_reflex") continue;

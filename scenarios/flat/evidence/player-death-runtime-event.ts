@@ -35,6 +35,14 @@ function resultFrom(response: unknown): unknown {
   return jsonResponseSchema.parse(response).structuredContent.response.data.result;
 }
 
+/** Preserve a failed event read's runtime error before parsing its page. */
+function eventPageFrom(response: unknown) {
+  const result = resultFrom(response);
+  const status = z.object({ status: z.string(), error: z.string().optional() }).parse(result);
+  if (status.status !== "succeeded") throw new Error(status.error);
+  return readRecentEventsResultSchema.parse(result);
+}
+
 const settledForegroundSchema = z.object({
   state: z.literal("settled"),
   output: z.object({ result: z.unknown() }),
@@ -245,7 +253,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
         response_format: "json",
       },
     });
-    const eventPage = readRecentEventsResultSchema.parse(resultFrom(eventResponse));
+    const eventPage = eventPageFrom(eventResponse);
     const deathEvents = eventPage.events.filter((event) => event.type === "player_death");
     if (deathEvents.length !== 1) throw new Error(`Expected one player_death event, observed ${deathEvents.length}.`);
     const event = deathEvents[0];

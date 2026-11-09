@@ -59,7 +59,7 @@ export const run: MineAiScenario = async (context) => {
       if (nextSignal.aborted) rejectNext(); else nextSignal.addEventListener("abort", rejectNext, { once: true });
     });
     let next: Awaited<ReturnType<typeof runtime.run>>;
-    try { next = await Promise.race([runtime.run(navigate, { x: home.x, y: home.y, z: home.z, range: 1 }, nextSignal), observer.failure, nextTimeout]); }
+    try { next = await Promise.race([runtime.run(navigate, { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 }, nextSignal), observer.failure, nextTimeout]); }
     finally { nextSignal.removeEventListener("abort", rejectNext); }
     const { firstNativeHit, primaryMoved, primaryReturned, deaths, movePending } = observer.snapshot();
     if (movePending) throw new Error("arranged move not observed");

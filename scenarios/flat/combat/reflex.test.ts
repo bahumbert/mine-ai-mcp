@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { awaitEncounters } from "./reflex.ts";
+import { awaitEncounters, readReflexOutcomes } from "./reflex.ts";
 import type { Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { DEFAULT_SURVIVAL_POLICY } from "../../../src/survival/policy/contract.js";
 import type { SurvivalReceipt } from "../../../src/survival/evidence/contract.js";
+
+test("a failed event read reports the runtime error instead of a schema error", async () => {
+  const runtime = {
+    actions: [{ name: "read_recent_events" }],
+    run: async () => ({ action: "read_recent_events", durationMs: 1,
+      result: { kind: "runtime_failure", status: "failed", error: "[MINECRAFT_DISCONNECTED] socket closed" } }),
+  } as unknown as Runtime;
+  const context = { signal: new AbortController().signal } as MineAiScenarioContext;
+  await assert.rejects(readReflexOutcomes(context, runtime), /\[MINECRAFT_DISCONNECTED\] socket closed/);
+});
 
 test("an encounter settled during the final observation sleep is still read", async () => {
   let busy = true;
