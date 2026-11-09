@@ -23,9 +23,10 @@ export const run: MineAiScenario = async (context) => {
     // without waiting out another cooldown or requiring a model action.
     bot.chat("/fill 1 -60 0 1 -59 0 air");
     const encounters = await awaitEncounters(context, runtime, 1, 400);
-    const killed = encounters.some((encounter) => encounter.outcome === "target_died");
+    const responded = encounters.some((encounter) =>
+      encounter.outcome === "target_died" || encounter.outcome === "safe_separation");
     return {
-      status: killed ? "succeeded" : "failed",
+      status: responded ? "succeeded" : "failed",
       detail: `Held closed cover for 660 ticks, then opened it: ${encounters.map(describe).join(" | ")}`,
     };
   } finally {

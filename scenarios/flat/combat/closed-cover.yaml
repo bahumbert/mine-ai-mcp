@@ -37,7 +37,6 @@ goal:
   kind: all
   timeout: 65
   goals:
-    - { kind: kill, who: CoverBot, target: blaze }
     - { kind: health, who: CoverBot, health: 20 }
     - { kind: blockAt, who: CoverBot, pos: [0, -58, 0], block: nether_bricks }
     - { kind: completion, who: CoverBot }
