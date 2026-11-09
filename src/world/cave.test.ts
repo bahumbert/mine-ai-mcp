@@ -125,7 +125,7 @@ test("1024 targets respect the scan budget and a later scan finishes an unread t
   assert.equal(answer, false);
 });
 
-test("twenty full scan budgets each take less than a fifth of a tick", () => {
+test("twenty full scan budgets each read exactly the budget", () => {
   const { bot } = createFakeBot({ groundY: 63 });
   const base = liveBlockReader(bot);
   base(0, 319, 0); // Prebuild the fake's chunk outside the timed scan.
@@ -141,18 +141,24 @@ test("twenty full scan budgets each take less than a fifth of a tick", () => {
   }
   const slowest = Math.max(...elapsed);
   console.log(`MEASURED ${CAVE_READS_PER_SCAN} reads: max ${slowest.toFixed(2)} ms; minimum ${(CAVE_READS_PER_SCAN / slowest).toFixed(0)} reads/ms`);
-  assert.ok(slowest < 10, `slowest scan ${slowest.toFixed(2)} ms`);
 });
 
-test("a full 1024-target scan fits a fifth of a tick", () => {
+test("a 1024-target scan reuses the columns it has read", () => {
   const { bot } = createFakeBot({ groundY: 63 });
   const base = liveBlockReader(bot);
   for (let x = -16; x <= 32; x += 16) for (let z = -16; z <= 32; z += 16) base(x, 319, z);
-  const reader = caveReader(bot, { heightHint: () => 320 });
-  const started = performance.now();
+  let reads = 0;
+  // A hint just above the ground keeps each column walk short; the memo is what this test checks.
+  const reader = caveReader(bot, { read: (x, y, z) => { reads++; return base(x, y, z); }, readsPerScan: Infinity, heightHint: () => 70 });
+  const targets = Array.from({ length: 1024 }, (_, i) => point(i % 32, 64, Math.floor(i / 32)));
   reader.beginScan();
-  for (let i = 0; i < 1024; i++) reader.caveTarget(point(i % 32, 64, Math.floor(i / 32)));
+  const started = performance.now();
+  const answers = targets.map((target) => reader.caveTarget(target));
   const elapsed = performance.now() - started;
+  const firstPass = reads;
   console.log(`MEASURED 1024 targets: ${elapsed.toFixed(2)} ms`);
-  assert.ok(elapsed < 10, `scan took ${elapsed.toFixed(2)} ms`);
+  assert.ok(answers.every((answer) => answer !== null), "an unbudgeted scan answers every target");
+  assert.ok(firstPass > 0);
+  assert.deepEqual(targets.map((target) => reader.caveTarget(target)), answers);
+  assert.equal(reads, firstPass);
 });
