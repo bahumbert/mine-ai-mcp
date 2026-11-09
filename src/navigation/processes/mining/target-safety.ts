@@ -29,7 +29,8 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
 import { waterMiningStance } from "../../world/water.js";
-import { isDryAir, isLava } from "../../world/block-geometry.js";
+import { dropColumn, isDryAir, isLava } from "../../world/block-geometry.js";
+import type { BlockObservation } from "../../world/world.js";
 import { liveBlockReader } from "../../mineflayer/world.js";
 import { cellHoldsWater } from "../../world/deep-water.js";
 import { breakRefusalCause } from "../../movements/policy.js";
@@ -139,23 +140,10 @@ function fallingColumnStop(
  * (live 2026-10-10: Lena mined the blocks of her own bridge over a 23-block drop). A natural ceiling is not (solid above).
  */
 export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, position: BlockPosition): boolean {
-  const open = (y: number) => {
-    const block = world.blockAt(position.x, y, position.z);
-    return block.kind === "loaded" && block.traits.empty && block.traits.liquid === null;
-  };
-  if (!open(position.y + 1)) return false;
-  let depth = 0;
-  for (let y = position.y - 1; open(y); y -= 1) {
-    depth += 1;
-    if (depth > MAXIMUM_BUCKET_DROP) return true;
-  }
-  if (depth <= movements.maximumDrop) return false;
-  const landing = world.blockAt(position.x, position.y - 1 - depth, position.z);
-  const below = world.blockAt(position.x, position.y - 2 - depth, position.z);
-  // Source water only: a long fall into flowing water is no landing (the planner offers none either, plan 06b T4).
-  const deepWater = (block: typeof landing) =>
-    block.kind === "loaded" && block.traits.liquid === "water" && block.traits.liquidSource;
-  return !(deepWater(landing) && deepWater(below));
+  const open = (block: BlockObservation) => block.kind === "loaded" && block.traits.empty && block.traits.liquid === null;
+  if (!open(world.blockAt(position.x, position.y + 1, position.z))) return false;
+  const { depth, deepWater } = dropColumn(world, position.x, position.y - 1, position.z, open);
+  return depth > MAXIMUM_BUCKET_DROP || (depth > movements.maximumDrop && !deepWater);
 }
 
 /**

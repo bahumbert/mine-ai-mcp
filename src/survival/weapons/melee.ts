@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { HORIZONTAL_TICKS_PER_BLOCK, hasSupportedCorridor, type Goal, type WorldView } from "../../navigation/index.js";
+import { HORIZONTAL_TICKS_PER_BLOCK, hasSupportedCorridor, knockbackCorridorHazard, type Goal, type KnockbackHazard, type WorldView } from "../../navigation/index.js";
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { obstaclesOf, worldViewRaycaster } from "../../navigation/world/line-of-sight.js";
 import type { Position3 } from "../../utils/index.js";
@@ -110,11 +110,30 @@ export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView):
  * this is a checked buffer for ordinary contact, not an explosion guarantee.
  */
 export function hasMeleeKnockbackRoom(world: WorldView, position: Position3, attacker: Position3): boolean {
+  const displacement = meleeKnockbackDisplacement(position, attacker);
+  return displacement !== null && hasSupportedCorridor(world, position, displacement);
+}
+
+/** The same three-block contact buffer for stance admission and lethal-terrain checks. */
+function meleeKnockbackDisplacement(position: Position3, attacker: Position3): Position3 | null {
   const dx = position.x - attacker.x;
   const dz = position.z - attacker.z;
   const distance = Math.hypot(dx, dz);
-  if (distance < 0.01) return false;
-  return hasSupportedCorridor(world, position, { x: (dx / distance) * 3, y: 0, z: (dz / distance) * 3 });
+  if (distance < 0.01) return null;
+  return { x: (dx / distance) * 3, y: 0, z: (dz / distance) * 3 };
+}
+
+/** A lethal push from any imminent attacker takes priority over holding the current shielded stance. */
+export function meleeKnockbackHazard(
+  world: WorldView, position: Position3, attackers: readonly Position3[], health: number,
+): KnockbackHazard | null {
+  for (const attacker of attackers) {
+    const displacement = meleeKnockbackDisplacement(position, attacker);
+    if (!displacement) continue;
+    const hazard = knockbackCorridorHazard(world, position, displacement, health);
+    if (hazard) return hazard;
+  }
+  return null;
 }
 
 /** Whether a swing of `item` sweeps the living bodies beside the target: every item of the `sword` family does. */

@@ -4,7 +4,7 @@ import { Vec3 } from "vec3";
 import { createFakeBot, type FakeCell } from "../../../test-support/fake-bot/index.js";
 import { flatWorld } from "../../../test-support/navigation.js";
 import { createMovementPolicy } from "../../movements/policy.js";
-import { evaluateMineTarget, lavaClosuresOf, standsOnBlock } from "./target-safety.js";
+import { evaluateMineTarget, isWalkwayOverDrop, lavaClosuresOf, standsOnBlock } from "./target-safety.js";
 import { BREAK_UNDER_WATER, createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { observeMineflayerBlock } from "../../mineflayer/world.js";
 import { setProtectedRegionsProvider } from "../../../world/protected-regions.js";
@@ -180,6 +180,13 @@ test("a bridge over a long drop is a walkway unless the drop ends in two cells o
   assert.equal(verdictOver(flowing, flowing), "prohibited", "flowing water is no landing");
   assert.equal(verdictOver("water", flowing), "prohibited", "a source landing over flowing water is not two deep");
   assert.equal(verdictOver(flowing, "water"), "prohibited", "flowing water over a source is not a source landing");
+});
+
+test("a carpet landing ends a mining walkway's empty column at the existing drop limit", () => {
+  const { bot } = createFakeBot({ groundY: 59, cells: {
+    "0,64,0": "cobblestone", "0,63,0": "air", "0,62,0": "air", "0,61,0": "air", "0,60,0": "white_carpet",
+  } });
+  assert.equal(isWalkwayOverDrop(createMovementPolicy({ maximumDrop: 3 }), viewOf(bot), { x: 0, y: 64, z: 0 }), false);
 });
 
 test("standsOnBlock: on the block, not beside it or lower in its column; a swimmer afloat over it does not", () => {

@@ -9,7 +9,7 @@ import type { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
 
-import { runMeleeTurn } from "./melee-turn.js";
+import { needsMeleeStance, prepareMeleeStance, runMeleeTurn } from "./melee-turn.js";
 import { runRangedTurn } from "./ranged-turn.js";
 /** Observe settlement, maintain protection, answer contact, then execute one attack turn. */
 export async function runFightTurn(
@@ -84,28 +84,21 @@ export async function runFightTurn(
   if (positioned.kind === "outcome") {
     return positioned.outcome;
   }
-  if (await weapons.defendContact()) return null;
-  // Establish landing room before committing to an exposed approach.
-  // Contact defence above remains immediate; a nearby sword target is
-  // never made to wait for construction.
-  if (
-    !scene.heightLimitedTarget &&
-    isHostile(scene.target) &&
-    scene.movement === "pursue" &&
-    !scene.position.plan &&
-    meleeDistance(scene.bot, scene.target) > MELEE_RANGE &&
-    !hasMeleeKnockbackRoom(scene.navigation.world, scene.bot.entity.position, scene.target.position)
-  ) {
-    if (weapons.currentLoadout().shield) await weapons.raiseGuard();
-    try {
-      const backstop = await locomotion.positionEffect((effectSignal) =>
-        scene.execution.run("establish", () => scene.position.establishBackstop(effectSignal)),
-      );
-      if (backstop.kind === "interrupted" || backstop.value) return null;
-    } finally {
-      weapons.itemUse.invalidateShield();
-    }
+  return runPreparedFightTurn(scene, weapons, locomotion, cover, roof);
+}
+
+/** Protected positioning has settled; contact defence and the selected attack now share stance admission. */
+async function runPreparedFightTurn(
+  scene: FightScene, weapons: FightWeapons, locomotion: FightMovement, cover: CoverFight, roof: EndermanFight,
+): Promise<CombatOutcome | null> {
+  const contact = scene.policy.combat.melee ? weapons.contact() : null;
+  if (contact) {
+    const guarded = weapons.currentLoadout().shield !== null;
+    const stance = await prepareMeleeStance(scene, locomotion, roof, guarded, true, contact);
+    if (stance !== "ready") return stance;
+    if (await weapons.defendContact(defender => !needsMeleeStance(scene, roof, true, defender))) return null;
   }
+  if (await establishApproachBackstop(scene, weapons, locomotion)) return null;
   const loadout = weapons.currentLoadout();
   await weapons.equip(loadout);
   const guarded = loadout.kind === "melee" && loadout.shield !== null;
@@ -119,4 +112,20 @@ export async function runFightTurn(
   if (prepared.kind !== "ready") return prepared.kind === "outcome" ? prepared.outcome : null;
 
   return runMeleeTurn(scene, weapons, locomotion, roof, loadout);
+}
+
+/** Construction protects an exposed approach, while a contact already in sword reach never waits for it. */
+async function establishApproachBackstop(scene: FightScene, weapons: FightWeapons, locomotion: FightMovement): Promise<boolean> {
+  if (scene.heightLimitedTarget || !isHostile(scene.target) || scene.movement !== "pursue" || scene.position.plan ||
+    meleeDistance(scene.bot, scene.target) <= MELEE_RANGE ||
+    hasMeleeKnockbackRoom(scene.navigation.world, scene.bot.entity.position, scene.target.position)) return false;
+  if (weapons.currentLoadout().shield) await weapons.raiseGuard();
+  try {
+    const backstop = await locomotion.positionEffect((effectSignal) =>
+      scene.execution.run("establish", () => scene.position.establishBackstop(effectSignal)),
+    );
+    return backstop.kind === "interrupted" || !!backstop.value;
+  } finally {
+    weapons.itemUse.invalidateShield();
+  }
 }

@@ -340,7 +340,7 @@ export class FightWeapons {
       this.scene.attacks += 1;
       return "shot";
     });
-  readonly defendContact = async (): Promise<boolean> => {
+  readonly defendContact = async (canStrike: (defender: Entity) => boolean = () => true): Promise<boolean> => {
     // The shared tactic admitted this attack window and interrupts it if a
     // fuse becomes urgent. The quarry's species cannot veto another attacker.
     if (!this.scene.policy.combat.melee) return false;
@@ -357,7 +357,8 @@ export class FightWeapons {
         this.scene.settled() ||
         !defender.isValid ||
         this.scene.dead.has(defender.id) ||
-        !canMeleeTarget(this.scene.bot, defender)
+        !canMeleeTarget(this.scene.bot, defender) ||
+        !canStrike(defender)
       )
         return true;
       if (!this.strike(defender, loadout)) return true;

@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { addItemsToServerTag } from "../../../test-support/datapack-tags.js";
-import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, itemOf, type FakeCell, type FakeEntitySpec } from "../../../test-support/fake-bot/index.js";
+import { liveBlockReader } from "../../../navigation/index.js";
 import type { CombatLoadout } from "../../weapons/equipment.js";
 import type { EndermanFight } from "./enderman.js";
-import type { FightMovement } from "./movement.js";
+import { FightMovement } from "./movement.js";
 import { runMeleeTurn } from "./melee-turn.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
@@ -48,17 +49,119 @@ async function turnWith(weapon: string, datapackSwords: readonly string[]) {
   return runMeleeTurn(scene, weapons, {} as unknown as FightMovement, roof, loadout);
 }
 
-test("every vanilla sword in the loadout skips the swing while a bystander is in sweep range", async () => {
-  for (const sword of ["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]) {
-    assert.equal(await turnWith(sword, []), null, sword);
+test("sword-family weapons withhold a sweep beside a bystander; other weapons reach the policy check", async () => {
+  for (const { weapon, tags, want } of [
+    ...["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]
+      .map(weapon => ({ weapon, tags: [], want: null })),
+    { weapon: "stick", tags: ["stick"], want: null },
+    { weapon: "iron_axe", tags: [], want: "capability_blocked" },
+  ]) {
+    assert.equal((await turnWith(weapon, tags))?.kind ?? null, want, weapon);
   }
 });
 
-test("an item a datapack adds to swords skips the swing while a bystander is in sweep range", async () => {
-  assert.equal(await turnWith("stick", ["stick"]), null);
+/** A shielded imminent contact; navigation and readiness are boundaries controlled by each turn test. */
+function guardedTurn(options: {
+  cells?: Record<string, FakeCell>;
+  secondAttacker?: boolean;
+  hold?: boolean;
+  stopped?: string;
+  circleDuringGuard?: boolean;
+  realMovement?: boolean;
+} = {}) {
+  const entities: Record<number, FakeEntitySpec> = {
+    7: { name: "zombie", position: options.secondAttacker || options.circleDuringGuard ? new Vec3(2.5, 64, 0.5) : new Vec3(0.5, 64, 2.5) },
+  };
+  if (options.secondAttacker) entities[8] = { name: "zombie", position: new Vec3(0.5, 64, 2.5) };
+  const harness = createFakeBot({
+    position: new Vec3(0.5, 64, 0.5),
+    cells: options.cells,
+    entities,
+  });
+  const { bot } = harness;
+  const attacks: number[] = [];
+  bot.attack = target => { attacks.push(target.id); };
+  const approaches: unknown[][] = [];
+  const scene = {
+    bot, target: bot.entities[7]!, targetId: 7, movement: options.hold ? "hold" : "pursue",
+    holdsGround: false, position: { plan: null }, refusedStance: null,
+    signal: new AbortController().signal, navigation: {
+      world: { blockAt: liveBlockReader(bot) }, onEvent: () => () => {},
+      navigate: async (request: { stopSignal: AbortSignal }) => {
+        approaches.push([request.stopSignal.reason]);
+        return { status: "cancelled" };
+      },
+    },
+    footingRecovery: { needed: false, active: false },
+    perception: { attackerIds: new Set([7]), read: () => Object.values(bot.entities)
+      .filter(entity => entity.id !== bot.entity.id).map(entity => ({ id: entity.id, meleeImminent: true })) },
+    policy: { combat: { melee: true, terrain: { dig: false, place: false } } }, settled: () => false, result: (kind: string) => ({ kind }),
+    execution: { run: async (_phase: string, effect: () => Promise<void>) => effect() },
+  } as unknown as FightScene;
+  const weapons = {
+    volleyActive: () => false,
+    raiseGuard: async () => { if (options.circleDuringGuard) scene.target.position.set(0.5, 64, 2.5); },
+    readyWeapon: async () => {}, faceGuard: async () => {}, holdFacing: async () => {},
+    strike: (target: typeof bot.entity) => { bot.attack(target); return true; },
+    currentLoadout: () => loadout, projectileDefence: () => null, contact: () => null,
+    itemUse: { shieldRaised: true, invalidateShield: () => {} },
+  } as unknown as FightWeapons;
+  const locomotion = options.realMovement ? new FightMovement(scene, weapons) :
+    { approach: async (...args: unknown[]) => { approaches.push(args); return options.stopped ?? null; } } as unknown as FightMovement;
+  const roof = { state: { kind: "idle" } } as unknown as EndermanFight;
+  const loadout: Extract<CombatLoadout, { kind: "melee" }> = {
+    kind: "melee", weapon: itemOf(bot.registry, "diamond_sword"), shield: itemOf(bot.registry, "shield"), cooldownTicks: 10,
+  };
+  return { scene, approaches, attacks, locomotion, turn: () => harness.clock.settle(runMeleeTurn(scene, weapons, locomotion, roof, loadout), 500) };
+}
+
+for (const secondAttacker of [false, true]) {
+  test(secondAttacker ? "a second attacker's push toward lava routes to a stance first" : "an imminent hit beside lava routes to a stance first", async () => {
+    const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, secondAttacker });
+    assert.equal(await fixture.turn(), null);
+    assert.deepEqual(fixture.approaches, [[true, null]]);
+    assert.deepEqual(fixture.attacks, []);
+  });
+}
+
+for (const { name, cells, hold } of [
+  { name: "no room without a hazard keeps the in-place guard", cells: { "0,63,-2": "air", "0,62,-2": "air" } },
+  { name: "a damaging floor behind keeps the in-place guard", cells: { "0,63,-2": "magma_block" } },
+  { name: "a held position keeps its stance beside lava", cells: { "0,63,-2": "lava" }, hold: true },
+]) {
+  test(name, async () => {
+    const fixture = guardedTurn({ cells, hold });
+    assert.equal(await fixture.turn(), null);
+    assert.deepEqual(fixture.approaches, []);
+    assert.deepEqual(fixture.attacks, [7]);
+  });
+}
+
+test("a hazard with no reachable stance keeps the in-place guard", async () => {
+  const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, stopped: "no path" });
+  assert.equal(await fixture.turn(), null);
+  assert.notEqual(fixture.scene.refusedStance, null);
+  assert.deepEqual(fixture.attacks, [7]);
+  assert.equal(await fixture.turn(), null);
+  assert.equal(fixture.approaches.length, 1);
+  assert.deepEqual(fixture.attacks, [7, 7]);
+  fixture.scene.target.position.z = 3.5;
+  assert.equal(await fixture.turn(), null);
+  assert.equal(fixture.approaches.length, 2);
+  assert.deepEqual(fixture.attacks, [7, 7, 7]);
 });
 
-test("a weapon outside the swords family goes on to the swing beside a bystander", async () => {
-  const outcome = await turnWith("iron_axe", []);
-  assert.equal(outcome?.kind, "capability_blocked");
+test("the attacker circles to the lava side during guard readiness, no swing", async () => {
+  const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, circleDuringGuard: true });
+  assert.equal(await fixture.turn(), null);
+  assert.deepEqual(fixture.attacks, []);
+});
+
+test("a secondary hazard whose real approach stops without moving falls back to the guard next turn", async () => {
+  const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, secondAttacker: true, realMovement: true });
+  try {
+    for (let turn = 0; turn < 3; turn++) assert.equal(await fixture.turn(), null);
+    assert.equal(fixture.approaches.length, 1);
+    assert.deepEqual(fixture.attacks, [7, 7]);
+  } finally { fixture.locomotion.footing.release(); }
 });

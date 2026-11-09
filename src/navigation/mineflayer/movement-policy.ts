@@ -20,7 +20,8 @@ import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
 import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
-import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
+import { MAXIMUM_BUCKET_DROP, TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
+export { MAXIMUM_BUCKET_DROP } from "../world/block-geometry.js";
 import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
   packKey,
@@ -391,9 +392,6 @@ export const TERRAIN_BREAK_PENALTY = 25;
  * with no water bucket is told why its routes stop descending at three.
  */
 export const DEFAULT_MAXIMUM_DROP = 3;
-
-/** The longest planned water-bucket drop, matching the survival policy's own description of `bucket_drops`. */
-export const MAXIMUM_BUCKET_DROP = 80;
 
 /** The step decisions, shared: search asks about every cell it could stand in, and the answer names no cell. */
 const ALLOWED_STEP: PolicyDecision = { kind: "allowed" };

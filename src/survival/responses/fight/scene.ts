@@ -44,6 +44,7 @@ export class FightScene implements Disposable {
   readonly dragonDefense = new AbortController();
   readonly responseRequired = new AbortController();
   recoveryTarget: number | null = null;
+  refusedStance: string | null = null;
   boundaryDecision: FightBoundaryDecision = { kind: "fight" };
   private boundaryKey: string | null = null;
   readonly dead = new Set<number>();

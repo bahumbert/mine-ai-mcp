@@ -45,7 +45,7 @@ export type { CoverExit } from "./cover-watch.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
 export { bucketAvailable, placeWaterInto, waterLandingSupply, waterableLanding } from "./mineflayer/water-landing.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
-export { hasSupportedCorridor, heldByBlockAt } from "./world/block-geometry.js";
+export { dropColumn, hasSupportedCorridor, heldByBlockAt, knockbackCorridorHazard, MAXIMUM_BUCKET_DROP, type KnockbackHazard } from "./world/block-geometry.js";
 export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
 
 // The navigation transaction.
