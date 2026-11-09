@@ -42,6 +42,11 @@ export function enclosedInPlace(bot: Bot, blockNames?: readonly string[]): boole
 
 /** An authorized threat occupying the body or shelter shell; never chase beyond construction space. */
 export function shelterIntruder(bot: Bot, context: ResponseContext): Entity | null {
+  return shelterIntruders(bot, context).next().value ?? null;
+}
+
+/** Every authorized threat in construction space, so a known occupant cannot mask a new arrival. */
+export function* shelterIntruders(bot: Bot, context: ResponseContext): Generator<Entity> {
   for (const id in bot.entities) {
     const entity = bot.entities[id];
     // Multipart dragon contact belongs to the End owner, not shaft melee.
@@ -54,9 +59,8 @@ export function shelterIntruder(bot: Bot, context: ResponseContext): Entity | nu
       delta.y <= SHAFT_REACH &&
       [feet, feet.offset(0, 1, 0), ...shell(feet)].some((cell) => cellIntersectsBody(cell, entity))
     )
-      return entity;
+      yield entity;
   }
-  return null;
 }
 
 /** The four sides, the one facing the nearest hostile first, so cover goes up where the arrows come from. */

@@ -59,6 +59,8 @@ function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
     swings: 0,
     recovery: null,
     refusal: null,
+    pass: 0,
+    blockedCells: new Map(),
   };
   return build;
 }

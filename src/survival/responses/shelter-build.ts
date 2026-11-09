@@ -8,14 +8,15 @@ import type { ResponseContext } from "../control/combat/context.js";
 import { tickBudgetWallMs } from "../control/combat/progress.js";
 import { isInLava, isInWater } from "../perception/body.js";
 import { isThreat } from "../perception/combat/threats.js";
-import { buildProtection } from "../positioning/combat/build-protection.js";
+import { buildProtection, fullProtectionBlock } from "../positioning/combat/build-protection.js";
 import { countCapBlocks } from "../positioning/combat/hide-blocks.js";
+import { occupiedCell } from "../../world/placement.js";
 import { equipCombatLoadout, permittedMeleeLoadout } from "../weapons/equipment.js";
 import type { CombatItemUse } from "../weapons/item-use.js";
 import { canMeleeTarget, combatItemsForTarget, hasSweepBystander, sweepsOnSwing } from "../weapons/melee.js";
 import { shieldFacing } from "../weapons/shield-facing.js";
 import type { CoveredRecovery } from "./recover.js";
-import { type Entity, shelterFeet, shelterIntruder } from "./shelter-cells.js";
+import { type Entity, shelterFeet, shelterIntruder, shelterIntruders } from "./shelter-cells.js";
 
 export interface HideOptions {
   readonly signal: AbortSignal;
@@ -50,6 +51,8 @@ export interface ShelterBuild {
   recovery: CoveredRecovery | null;
   /** Why the first placement that could have closed the box did not, for the record. */
   refusal: string | null;
+  pass: number;
+  readonly blockedCells: Map<string, { pass: number; count: number; reason: string }>;
 }
 
 /** How a construction step leaves the pass: go round again from the top, or stop with this failure. */
@@ -124,8 +127,14 @@ export async function holdShelterGuard(build: ShelterBuild, ticks: number): Prom
 export async function centerShelterCell(build: ShelterBuild, cell: Vec3): Promise<boolean> {
   const { bot, options } = build;
   const interrupted = new AbortController();
+  const knownIntruders = new Set([...shelterIntruders(bot, options.threatContext)].map((entity) => entity.id));
   const observe = () => {
-    if (shelterIntruder(bot, options.threatContext)) interrupted.abort();
+    for (const intruder of shelterIntruders(bot, options.threatContext)) {
+      if (!knownIntruders.has(intruder.id)) {
+        interrupted.abort();
+        return;
+      }
+    }
   };
   bot.on("physicsTick", observe);
   try {
@@ -159,10 +168,20 @@ export async function sealShelterCell(build: ShelterBuild, cell: Vec3): Promise<
   const { bot, options, itemUse } = build;
   const policy = options.threatContext.policy;
   try {
+    const existing = bot.blockAt(cell);
+    if (fullProtectionBlock(existing) && (!options.blockNames || options.blockNames.includes(existing!.name))) {
+      build.blockedCells.delete(`${cell.x},${cell.y},${cell.z}`);
+      return false;
+    }
     if (!policy.terrain.place) {
       build.refusal ??= "Combat placement prohibited by policy";
       return false;
     }
+    const origin = shelterFeet(bot);
+    const intruder = shelterIntruder(bot, options.threatContext);
+    if (intruder) await repelShelterIntruder(build, intruder);
+    if (constructionChanged(build, origin)) return false;
+    if (shelterBlocks(build) > 0 && shelterCellOccupied(build, cell)) return false;
     itemUse.lowerShield();
     const built = await buildProtection(bot, [cell], {
       signal: options.signal,
@@ -177,6 +196,20 @@ export async function sealShelterCell(build: ShelterBuild, cell: Vec3): Promise<
     build.refusal ??= `${cell.x},${cell.y},${cell.z}: ${message(cause)}`;
     return false;
   }
+}
+
+/** Count an occupied cell once per pass; a cleared cell starts a fresh consecutive-pass bound. */
+function shelterCellOccupied(build: ShelterBuild, cell: Vec3): boolean {
+  const key = `${cell.x},${cell.y},${cell.z}`;
+  const reason = occupiedCell(build.bot, cell);
+  if (!reason) {
+    build.blockedCells.delete(key);
+    return false;
+  }
+  const previous = build.blockedCells.get(key);
+  const count = previous?.pass === build.pass ? previous.count : previous?.pass === build.pass - 1 ? previous.count + 1 : 1;
+  build.blockedCells.set(key, { pass: build.pass, count, reason });
+  return true;
 }
 
 /**
@@ -212,16 +245,16 @@ export async function repelShelterIntruder(build: ShelterBuild, intruder: Entity
   await holdShelterGuard(build, Math.max(1, loadout.cooldownTicks));
 }
 
-/** Whether the body left the cell construction began in, or something entered the shell. */
+/** Whether the construction budget or grounded, centred stance changed. Contact is handled between placements. */
 export function constructionChanged(build: ShelterBuild, origin: Vec3): boolean {
-  const { bot, options } = build;
+  const { bot } = build;
   return (
+    monotonicNow() >= build.constructionDeadline ||
     !bot.entity.onGround ||
     !shelterFeet(bot).equals(origin) ||
     (shelterBlocks(build) > 0 &&
       (Math.abs(bot.entity.position.x - origin.x - 0.5) + bot.entity.width / 2 > 0.5 ||
-        Math.abs(bot.entity.position.z - origin.z - 0.5) + bot.entity.width / 2 > 0.5)) ||
-    shelterIntruder(bot, options.threatContext) !== null
+        Math.abs(bot.entity.position.z - origin.z - 0.5) + bot.entity.width / 2 > 0.5))
   );
 }
 

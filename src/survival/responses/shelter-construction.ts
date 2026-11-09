@@ -171,8 +171,9 @@ async function centerForShelterRing(build: ShelterBuild, feet: Vec3): Promise<St
   if (shelterBlocks(build) > 0 && !supportedCenter) {
     return { kind: "failed", error: "The shelter cell has no solid floor to centre on" };
   }
+  if (!constructionChanged(build, feet)) return null;
   const centered = shelterBlocks(build) === 0 || (await centerShelterCell(build, feet));
-  if (!bot.entity.onGround || !shelterFeet(bot).equals(feet) || shelterIntruder(bot, options.threatContext))
+  if (!bot.entity.onGround || !shelterFeet(bot).equals(feet) || (!centered && shelterIntruder(bot, options.threatContext)))
     return "again";
   if (!centered) return { kind: "failed", error: "The bot could not centre inside the shelter walls" };
   return constructionChanged(build, feet) ? "again" : null;
@@ -291,6 +292,20 @@ function constructionStopped(build: ShelterBuild): StepEnd | null {
   return null;
 }
 
+/** Finish the other walls, but hand an open shelter back after three consecutive occupied passes. */
+async function blockedShelterEnd(build: ShelterBuild): Promise<StepEnd | null> {
+  const blocked = [...build.blockedCells].filter(([, cell]) => cell.pass === build.pass);
+  const skipped = blocked.filter(([, cell]) => cell.count >= 3);
+  if (skipped.length) return {
+    kind: "failed",
+    error: `The shelter is still open: skipped ${skipped.map(([key, cell]) => `${key} (${cell.reason})`).join("; ")} ` +
+      "after 3 consecutive construction passes. Evade or withdraw to another shelter cell.",
+  };
+  if (!blocked.length) return null;
+  await waitForShelterTicks(build, 1, "construction");
+  return "again";
+}
+
 /**
  * One pass of construction: repel, land, dig the shaft or raise the ring, cap.
  * "built" when the pass ends with nothing more to place; "again" when the body
@@ -301,10 +316,11 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   options.signal.throwIfAborted();
   const stopped = constructionStopped(build);
   if (stopped) return stopped;
+  build.pass += 1;
   const intruder = shelterIntruder(bot, options.threatContext);
-  if (intruder) {
+  if (intruder && (constructionChanged(build, shelterFeet(bot)) ||
+    (shelterBlocks(build) < WALL_IN_BLOCKS && build.walled === 0 && !build.capped))) {
     await repelShelterIntruder(build, intruder);
-    return "again";
   }
   // Knockback can change both the occupied cell and its floor. Pick the
   // construction origin only after the body has landed, then recheck it.
@@ -322,6 +338,8 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   if (ringed) return ringed;
   const capped = descended >= 2 || build.walled > 0 ? await capShelter(build, feet, sides, descended) : null;
   if (capped) return capped;
+  const blocked = await blockedShelterEnd(build);
+  if (blocked) return blocked;
   if (descended === 0 && build.walled === 0 && !build.capped) {
     return {
       kind: "failed",

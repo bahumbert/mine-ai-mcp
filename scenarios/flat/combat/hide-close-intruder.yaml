@@ -1,5 +1,6 @@
 name: hide-close-intruder
-description: An authorized close attacker is repelled before low-health shelter construction.
+description: Walls progress between repels of a surviving close attacker, preventing shelter construction starvation.
+tags: [regression]
 minecraft:
   version: "1.21.4"
 world:
