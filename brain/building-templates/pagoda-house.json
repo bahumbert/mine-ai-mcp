@@ -2,16 +2,16 @@
   "id": "pagoda-house",
   "family": "east-asia",
   "name": "pagoda house",
-  "description": "Two-storey tea house: cherry walls between dark oak posts on a stone-brick terrace, an inner ladder to the upper room, two dark oak roof tiers with upturned eaves.",
+  "description": "Two-storey tea house: birch walls between dark oak posts on a stone-brick terrace, an inner ladder to the upper room, two dark oak roof tiers with upturned eaves.",
   "palette": {
     "foundation": "stone_bricks",
     "floor": "spruce_planks",
-    "wall": "cherry_planks",
+    "wall": "birch_planks",
     "pillar": "dark_oak_log",
     "trim": "dark_oak_log",
     "roof": "dark_oak_planks",
     "window": "dark_oak_fence",
-    "door": "cherry_door",
+    "door": "birch_door",
     "accent": "ladder"
   },
   "variants": {

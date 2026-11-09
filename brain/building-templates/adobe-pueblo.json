@@ -2,13 +2,13 @@
   "id": "adobe-pueblo",
   "family": "north-america",
   "name": "adobe pueblo",
-  "description": "Stepped adobe house of terracotta on a sandstone base: a flat-roofed ground room with log beam ends, a parapeted terrace reached by an inner ladder, and a smaller room above.",
+  "description": "Stepped adobe house of sandstone on a cut-sandstone base: a flat-roofed ground room with log beam ends, a parapeted terrace reached by an inner ladder, and a smaller room above.",
   "palette": {
-    "foundation": "sandstone",
+    "foundation": "cut_sandstone",
     "floor": "smooth_sandstone",
-    "wall": "terracotta",
+    "wall": "sandstone",
     "trim": "spruce_log",
-    "roof": "terracotta",
+    "roof": "cut_sandstone",
     "window": "glass_pane",
     "door": "acacia_door",
     "accent": "ladder"
