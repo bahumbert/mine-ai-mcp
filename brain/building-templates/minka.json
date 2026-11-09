@@ -1,0 +1,159 @@
+{
+  "id": "minka",
+  "family": "east-asia",
+  "name": "minka",
+  "description": "Farmhouse: white plaster between dark oak posts on a stone plinth, an earthen entry and a raised spruce floor, a deep spruce hip roof with a hay ridge.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "spruce_planks",
+    "wall": "polished_diorite",
+    "pillar": "dark_oak_log",
+    "trim": "dark_oak_log",
+    "roof": "spruce_planks",
+    "window": "spruce_fence",
+    "door": "birch_door",
+    "accent": "hay_block"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "spruce_stairs",
+      "slab": "spruce_slab"
+    }
+  },
+  "key": {
+    "D": {
+      "role": "door"
+    },
+    "A": {
+      "role": "accent"
+    },
+    "F": {
+      "role": "floor"
+    },
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "e": {
+      "role": "window"
+    },
+    "h": {
+      "role": "air"
+    },
+    "i": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "east",
+      "half": "bottom"
+    },
+    "j": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "k": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    },
+    "l": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "west",
+      "half": "bottom"
+    },
+    "m": {
+      "role": "roof"
+    },
+    "t": {
+      "role": "trim",
+      "axis": "x"
+    },
+    "u": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "w": {
+      "role": "wall"
+    }
+  },
+  "layers": [
+    [
+      ".........",
+      ".aaaaaaa.",
+      ".a.....a.",
+      ".a.....a.",
+      ".a.....a.",
+      ".aaaaaaa.",
+      "........."
+    ],
+    [
+      ".........",
+      ".bwwDwwb.",
+      ".w.....w.",
+      ".bFFFFFb.",
+      ".wFFFFFw.",
+      ".bwwbwwb.",
+      "........."
+    ],
+    [
+      ".........",
+      ".bwwhwwb.",
+      ".w.....w.",
+      ".b.....b.",
+      ".w.....w.",
+      ".bwwbwwb.",
+      "........."
+    ],
+    [
+      ".........",
+      ".bewwweb.",
+      ".e.....e.",
+      ".b.....b.",
+      ".w.....w.",
+      ".bwebewb.",
+      "........."
+    ],
+    [
+      "ijjjjjjjl",
+      "ibtttttbl",
+      "iu.....ul",
+      "iu.....ul",
+      "iu.....ul",
+      "ibtttttbl",
+      "ikkkkkkkl"
+    ],
+    [
+      ".........",
+      ".ijjjjjl.",
+      ".immmmml.",
+      ".immmmml.",
+      ".immmmml.",
+      ".ikkkkkl.",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      "..ijjjl..",
+      "..immml..",
+      "..ikkkl..",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      "...AAA...",
+      ".........",
+      ".........",
+      "........."
+    ]
+  ]
+}
