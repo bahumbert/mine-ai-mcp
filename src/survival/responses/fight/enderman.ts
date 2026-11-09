@@ -262,6 +262,20 @@ export class EndermanFight implements Disposable {
 
     return { kind: "ready" };
   }
+  /** An occupied local layer does not rule out a reachable roof on another level. */
+  private async planRoof(defending: boolean) {
+    if (defending) {
+      const local = this.scene.position.planRoof({ kind: "protection" });
+      return local.kind === "unreachable"
+        ? this.locomotion.approachRoof(() => ({ kind: "protection" }))
+        : local;
+    }
+    return this.locomotion.approachRoof(() => ({
+      kind: "provoke",
+      targetEye: aimPoint(this.scene.bot, this.scene.requestedTarget),
+      eyeHeight: observedEyeHeight(this.scene.bot.entity),
+    }));
+  }
   async prepare(guarded: boolean): Promise<TacticalStep> {
     // Existing protection already permits a safe melee provocation. Looking
     // through its ceiling for a neutral target's eyes would discard that roof.
@@ -301,13 +315,7 @@ export class EndermanFight implements Disposable {
     ) {
       this.setRoof({ kind: "unavailable" });
       const defending = this.scene.defendingAtStart || this.scene.roofTargetHostile();
-      const planned = defending
-        ? this.scene.position.planRoof({ kind: "protection" })
-        : await this.locomotion.approachRoof(() => ({
-            kind: "provoke",
-            targetEye: aimPoint(this.scene.bot, this.scene.requestedTarget),
-            eyeHeight: observedEyeHeight(this.scene.bot.entity),
-          }));
+      const planned = await this.planRoof(defending);
       if (planned.kind === "interrupted") {
         this.setRoof({ kind: "unprepared" });
         return { kind: "continue" };

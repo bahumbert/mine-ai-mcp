@@ -1,0 +1,43 @@
+name: enderman-occupied-roof
+tags: [regression]
+description: A hostile Enderman's hunt leaves an occupied one-cell ledge to build a reachable roof two blocks below, then kills the target and survives.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: midnight
+  difficulty: normal
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false }
+geometry:
+  - fill: { block: stone, from: [-16, -61, -16], to: [16, -61, 16] }
+  - fill: { block: stone, from: [0, -59, 0], to: [0, -59, 0] }
+  # Hold native pursuit outside contact until the searched roof is observed, then the driver opens this pen.
+  - fill: { block: stone, from: [11, -60, -1], to: [13, -58, 1] }
+  - fill: { block: air, from: [12, -60, 0], to: [12, -58, 0] }
+players:
+  - name: OccupiedRoof
+    op: true
+    pos: [0.5, -58, 0.5]
+    inventory:
+      - { item: diamond_sword, count: 1 }
+      - { item: shield, count: 1 }
+      - { item: diamond_helmet, count: 1 }
+      - { item: diamond_chestplate, count: 1 }
+      - { item: diamond_leggings, count: 1 }
+      - { item: diamond_boots, count: 1 }
+      - { item: cobblestone, count: 64 }
+entities:
+  - { type: enderman, pos: [12.5, -60, 0.5], nbt: '{PersistenceRequired:1b,Tags:["roof_quarry"]}' }
+  - { type: cow, pos: [1.7, -58, 0.5], nbt: '{NoAI:1b,NoGravity:1b,PersistenceRequired:1b}' }
+  - { type: cow, pos: [-0.7, -58, 0.5], nbt: '{NoAI:1b,NoGravity:1b,PersistenceRequired:1b}' }
+  - { type: cow, pos: [0.5, -58, 1.7], nbt: '{NoAI:1b,NoGravity:1b,PersistenceRequired:1b}' }
+  - { type: cow, pos: [0.5, -58, -0.7], nbt: '{NoAI:1b,NoGravity:1b,PersistenceRequired:1b}' }
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./enderman-occupied-roof.ts"]
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - { kind: kill, who: OccupiedRoof, target: enderman }
+    - { kind: survive, who: OccupiedRoof, seconds: 1 }
+    - { kind: completion, who: OccupiedRoof }
