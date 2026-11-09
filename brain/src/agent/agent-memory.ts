@@ -1,11 +1,11 @@
 // What the agent knows and keeps across restarts: known places, farms, protected areas, its own outcomes, activity time, the unfinished house.
 import type { AgentOptions } from "../agent.ts";
 import type { Body } from "../body.ts";
-import { describeStage } from "../farming/growth.ts";
+import { describeGrowthSince, describeStage, GROWTH_REACH, READING_GAP_MS, type Near } from "../farming/growth.ts";
 import type { KnownPlace } from "../mind.ts";
 import { activityNotesQuery, memoryNote, recall, recallQuery, shelterNotesQuery, staleActivityNotes, staleShelterNotes, type KnownFarm, type Memory, type ShelterHole } from "../memory.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
-import type { ProtectedArea } from "../runtime-client.ts";
+import type { Position, ProtectedArea } from "../runtime-client.ts";
 import type { UnfinishedHouse } from "../skills.ts";
 import { RESUME_RANGE } from "../skills/build-house.ts";
 import { lastOfPlay, RECENT_MINUTES, type ActivityTime } from "../time-spent.ts";
@@ -23,6 +23,34 @@ const ROTATE_EVERY_MS = 10 * 60_000;
 /** At most this many notes deleted in one `note_delete`. */
 const DELETE_BATCH = 500;
 
+/** A position reading and the per-farm intervals since its last tend; never persisted across a restart. */
+interface FarmReading { readonly position: Position; readonly dimension: string; readonly at: number }
+interface FarmNearTime { readonly started: number; reading: FarmReading | null; near: number; unknown: number }
+
+/** Growth reach is horizontal from the middle of the farm's chunk, including negative coordinates (T1 facts). */
+function isNearFarm(farm: KnownFarm, reading: FarmReading): boolean {
+  const x = Math.floor(farm.centre.x / 16) * 16 + 8;
+  const z = Math.floor(farm.centre.z / 16) * 16 + 8;
+  return farm.dimension === reading.dimension && Math.hypot(reading.position.x - x, reading.position.z - z) <= GROWTH_REACH;
+}
+
+/** A known farm's observed state, growth since its tend and the action that harvests and replants it. */
+function farmPlace(farm: KnownFarm, near: Near | null, at: number, explainDry: boolean): KnownPlace {
+  const growth = describeStage(farm.state);
+  const since = Math.max(0, Math.round((at - Date.parse(farm.tendedAt)) / 60_000));
+  const dry = (farm.state.dry ?? 0) > 0 ? `; ${farm.state.dry} dry farmland${explainDry ? " (grows slower; water within 4 blocks hydrates it)" : ""}` : "";
+  const counts = `${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty`;
+  const detail = farm.state.stage === undefined
+    ? `${counts}${growth === "" ? "" : `, ${growth}`} when you last tended it, ${minutesAgo(farm.tendedAt)}`
+    : `${farm.state.planted} planted/${farm.state.ripe} ripe/${farm.state.empty} empty; ${describeGrowthSince(farm, since, near)}${dry}`;
+  // Modern farms omit the repeated action guide: the work tier's farm skill already states it (master 2026-11-09).
+  const action = farm.state.stage === undefined ? "; farming it again harvests what is ripe and replants it" : "";
+  return {
+    name: `your ${farm.crop} farm`,
+    detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${detail}${action}`,
+  };
+}
+
 export class AgentMemory {
   readonly places: KnownPlace[] = [];
   /** Its farms, oldest first, each as it was at its last tend. */
@@ -39,6 +67,8 @@ export class AgentMemory {
   private savedUnfinished = "null";
   /** When old activity notes were last deleted. */
   private rotatedAt = Number.NEGATIVE_INFINITY;
+  private readonly farmNearTime = new Map<KnownFarm, FarmNearTime>();
+  private lastPosition: FarmReading | null = null;
 
   constructor(private readonly options: Pick<AgentOptions, "runtime" | "log" | "persona">, private readonly body: Body) {}
 
@@ -49,13 +79,9 @@ export class AgentMemory {
   knownPlaces(): KnownPlace[] {
     // Her farms, as they were at their last tend: the models only know what the situation says (when to come back is
     // their choice).
-    const farms = this.farms.map((farm): KnownPlace => {
-      const growth = describeStage(farm.state);
-      return {
-        name: `your ${farm.crop} farm`,
-        detail: `${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}; ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty${growth === "" ? "" : `, ${growth}`} when you last tended it, ${minutesAgo(farm.tendedAt)}; farming it again harvests what is ripe and replants it`,
-      };
-    });
+    // One general hydration explanation covers every farm; keep each farm's own dry count.
+    const dryFarm = this.farms.find((farm) => farm.state.stage !== undefined && (farm.state.dry ?? 0) > 0);
+    const farms = this.farms.map((farm) => farmPlace(farm, this.nearMinutes(farm), Date.now(), farm === dryFarm));
     const house = this.building.unfinished;
     if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;
@@ -79,10 +105,40 @@ export class AgentMemory {
   learnFarm(farm: KnownFarm): void {
     this.options.log(`farm: ${farm.crop} ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z} (${farm.state.planted} planted)`);
     const index = this.farms.findIndex((known) => known.centre.x === farm.centre.x && known.centre.y === farm.centre.y && known.centre.z === farm.centre.z);
+    const previous = this.farms[index];
+    if (previous !== undefined && farm.pace === undefined && previous.pace !== undefined) farm = { ...farm, pace: previous.pace };
+    if (previous !== undefined && farm.paceFresh === undefined && previous.paceFresh !== undefined) farm = { ...farm, paceFresh: previous.paceFresh };
     if (index >= 0) this.farms.splice(index, 1);
     this.farms.push(farm);
     if (this.farms.length > KNOWN_FARMS) this.farms.splice(0, this.farms.length - KNOWN_FARMS);
+    const started = monotonicNow();
+    this.farmNearTime.set(farm, { started, reading: this.lastPosition, near: 0, unknown: 0 });
+    for (const known of this.farmNearTime.keys()) if (!this.farms.includes(known)) this.farmNearTime.delete(known);
     this.memorize({ kind: "farm", farm });
+  }
+
+  /** Credits only intervals whose endpoints were sampled, short enough, in the same dimension and within reach. */
+  notePosition(position: Position, dimension: string, atMs: number): void {
+    const reading = { position: { ...position }, dimension, at: atMs };
+    this.lastPosition = reading;
+    for (const [farm, tally] of this.farmNearTime) {
+      const previous = tally.reading;
+      // Keep the real sample gap, but credit only time after the tend (task review, 2026-11-09).
+      const elapsed = atMs - Math.max(previous?.at ?? tally.started, tally.started);
+      if (elapsed < 0) continue;
+      if (previous === null || atMs - previous.at > READING_GAP_MS) tally.unknown += elapsed / 60_000;
+      else if (isNearFarm(farm, previous) && isNearFarm(farm, reading)) tally.near += elapsed / 60_000;
+      tally.reading = reading;
+    }
+  }
+
+  /** A recalled farm has no process-local baseline; an unsampled tail remains unknown until another reading. */
+  nearMinutes(farm: KnownFarm): Near | null {
+    const tally = this.farmNearTime.get(farm);
+    if (tally === undefined || farm.dimension === undefined) return null;
+    const now = monotonicNow();
+    const tail = Math.max(0, now - Math.max(tally.reading?.at ?? tally.started, tally.started)) / 60_000;
+    return { near: tally.near, unknown: tally.unknown + (tail * 60_000 > READING_GAP_MS ? tail : 0), since: Math.max(0, now - tally.started) / 60_000 };
   }
 
   /**

@@ -453,6 +453,8 @@ export class FakeRuntime implements BotRuntime {
   /** A `tend_crops` result for the plot: every cell but the middle planted (src/actions/tend-crops/contract.ts). */
   /** Replaces the `tend_crops` result the fake settles with, when a test needs a particular plot. */
   tendAfter: Readonly<Record<string, unknown>> | null = null;
+  /** `before.crops` from T3's runtime contract; a harvest can replant the after-reading at stage zero. */
+  tendBefore: Readonly<Record<string, number>> | null = null;
   /** Cells `tend_crops` leaves as they were, by reason: the fake then settles it as partial ([TEND_INCOMPLETE]). */
   tendSkipped: Readonly<Record<string, readonly { x: number; z: number }[]>> | null = null;
   /** The soils `tend_crops` reports tilled, by block name and cells. */
@@ -469,7 +471,7 @@ export class FakeRuntime implements BotRuntime {
 
   private tendResult(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
     const skipped = this.tendSkipped ?? {};
-    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
+    if (this.tendAfter !== null) return { tended: { after: this.tendAfter, ...(this.tendBefore !== null && { before: { crops: this.tendBefore } }), skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
     const cells = (Math.abs(Number(input.x2) - Number(input.x1)) + 1) * (Math.abs(Number(input.z2) - Number(input.z1)) + 1) - 1;
     return { tended: { after: { crops: { "wheat age 0": cells }, emptyFarmland: 0, dryFarmland: 0, water: 1 }, skipped, tilledSoil: this.tendTilledSoil, untillable: this.tendUntillable } };
   }

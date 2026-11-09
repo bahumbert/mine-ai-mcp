@@ -1,5 +1,50 @@
 // A farm's growth stage from a `tend_crops` reading, and the words for it (stage and dry farmland).
-import type { FarmState } from "../memory.ts";
+import type { FarmState, KnownFarm } from "../memory.ts";
+
+/** See facts/farming.md "Where crops grow" (T1); 128 to the farm middle's chunk centre, unmeasured. */
+export const GROWTH_REACH = 128;
+/** A longer gap between position readings may hide a trip away; that interval is unknown, never near. */
+export const READING_GAP_MS = 120_000;
+
+/** Minutes sampled near a farm, unknown, and elapsed since its last tend in this process. */
+export interface Near {
+  readonly near: number;
+  readonly unknown: number;
+  readonly since: number;
+}
+
+/** Measures growth before harvesting against the previous after-reading; incomplete intervals keep the old pace. */
+export function nextPace(previous: KnownFarm | undefined, beforeStage: number | null, near: Near | null): number | undefined {
+  const stage = previous?.state.stage;
+  if (previous?.paceFresh === false || stage === undefined || beforeStage === null || near === null || near.unknown > 0 || near.near < 1 || beforeStage < stage) return previous?.pace;
+  return (beforeStage - stage) / near.near;
+}
+
+/** Remaining near-minutes at the measured pace; a zero pace gives no finite ripe estimate. */
+export function ripeInNearMinutes(farm: KnownFarm, near: Near | null): number | null {
+  const { stage, ripeAge } = farm.state;
+  if (farm.pace === undefined || farm.pace <= 0 || stage === undefined || ripeAge === undefined || near === null) return null;
+  return (ripeAge - stage) / farm.pace - near.near;
+}
+
+/** The observed stage at the tend and the time sampled near it, shared by the hint and known place. */
+export function describeNearTend(farm: KnownFarm, minutesSince: number, near: Near | null): string {
+  const { stage, ripeAge } = farm.state;
+  const growth = stage === undefined || ripeAge === undefined ? "" : `stage ${stage.toFixed(1)}/${ripeAge}; `;
+  const time = near === null ? "near time unknown" : `near ${Math.round(near.near)} min${near.unknown > 0 ? ` (${Math.round(near.unknown)} min unknown)` : ""}`;
+  return `${growth}tend ${minutesSince} min ago; ${time}`;
+}
+
+/** Growth since a tend, qualified by the pace actually seen rather than a promised growth rate. */
+export function describeGrowthSince(farm: KnownFarm, minutesSince: number, near: Near | null): string {
+  const observed = describeNearTend(farm, minutesSince, near);
+  if (near === null) return observed;
+  if (farm.pace === 0) return `${observed}; seen pace 0; ripe time unknown`;
+  const remaining = ripeInNearMinutes(farm, near);
+  if (remaining === null) return `${observed}; pace unknown`;
+  if (remaining <= 0) return `${observed}; seen pace: ripe now`;
+  return `${observed}; seen pace ${(farm.pace! * 10).toFixed(1)} stages/10 near-min; ripe in ~${Math.round(remaining)} more near-min`;
+}
 
 /**
  * A farm's growth stage from one `tend_crops` reading: the mean age of the cells holding `block` (the farm's own crop;

@@ -1,6 +1,8 @@
 // Test inputs of the brain's prompts at measured sizes: the median fixtures (golden texts) and the worst case per tier.
 import type { ChatLine, ChatInput, EarlierFailure, GoalInput, KnownPlace, NarrateInput, StepRecord, WorkInput } from "./mind.ts";
-import type { Opportunity } from "./opportunities.ts";
+import { findOpportunities, type Opportunity } from "./opportunities.ts";
+import { AgentMemory } from "./agent/agent-memory.ts";
+import { Body, INSTANT_TYPING } from "./body.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import { FakeRuntime, testPersona } from "./testing.ts";
 
@@ -127,13 +129,35 @@ function bigPersona() {
   return testPersona({ goal: "build yourself a base", description: filler(1900, "persona") });
 }
 
-/** 2 own places, 6 notes, 4 farms and 1 unfinished house, about 700 characters in all (the measured maximum is 688). */
+/** Four farms through the real place and hint renderers; all six hints measure 567 chars (2026-11-09). */
+export function farmPromptFacts() {
+  const runtime = new FakeRuntime();
+  const log = () => undefined;
+  const memory = new AgentMemory({ runtime, log, persona: testPersona() }, new Body(runtime, log, INSTANT_TYPING));
+  const now = new Date().toISOString();
+  for (let index = 0; index < 4; index++) memory.learnFarm({
+    crop: "wheat_seeds", size: 9, centre: { x: index * 30, y: 63, z: -20 }, madeAt: now,
+    tendedAt: new Date(Date.parse(now) - 30 * 60_000).toISOString(), dimension: runtime.snapshot.dimension,
+    state: { planted: 80, ripe: 0, empty: 0, stage: 2, ripeAge: 7, dry: 2 }, pace: 1,
+  });
+  // A fixture's known 6 near-minutes of 30; production samples are covered by agent-memory.test.ts.
+  const nearMinutes = () => ({ near: 6, unknown: 0, since: 30 });
+  memory.nearMinutes = nearMinutes;
+  const opportunities = findOpportunities({
+    now: Date.parse(now), snapshot: { ...runtime.snapshot, inventory: ["iron_sword", "iron_pickaxe", "iron_axe"].map((name) => ({ name, count: 1 })), foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] },
+    farms: memory.farms, nearMinutes, unfinished: { kind: "small medieval house", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" }, part: 1 }, ownHome: false,
+    houseShortfall: [], smallHouse: [], carriedBlocks: [], temporaryHouse: null,
+  }, ["farming"]);
+  return { places: memory.knownPlaces(), opportunities };
+}
+
+/** 2 own places, 6 notes, 4 real farm descriptions and 1 unfinished house. */
 function manyPlaces(): KnownPlace[] {
   return [
     { name: "own house", detail: "door 1 76 3 facing north", own: true },
     { name: "house for Tom", detail: "door 9 70 3 facing east" },
     ...Array.from({ length: 6 }, (_, index) => ({ name: `note ${index + 1}`, detail: `iron at ${index * 40} 20 -45` })),
-    ...Array.from({ length: 4 }, (_, index) => ({ name: `wheat farm ${index + 1}`, detail: `around ${index * 30} 64 -20` })),
+    ...farmPromptFacts().places,
     { name: "unfinished house", detail: "door 5 64 5" },
   ];
 }
@@ -174,14 +198,14 @@ export function workWorst(): WorkInput {
   };
 }
 
-/** The goal tier's worst case: 5 lately lines of 560 characters, 6 hints of the measured maximum (3 pressing). */
+/** The goal tier's worst case: 5 lately lines of 560 characters, 4 real farm hints plus a house and bed. */
 export function goalWorst(): GoalInput {
   return {
     ...goalP50(),
     persona: bigPersona(),
     ...crowdedSnapshotAndAreas(),
     lately: Array.from({ length: 5 }, (_, index) => filler(560, `lately${index + 1}`)),
-    opportunities: hints(6, 3, 230),
+    opportunities: farmPromptFacts().opportunities,
   };
 }
 

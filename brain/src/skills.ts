@@ -19,6 +19,7 @@ import { getItems } from "./skills/get-items.ts";
 import { giveItem } from "./skills/give-item.ts";
 import { improveHouse } from "./skills/improve-house.ts";
 import { levelArea } from "./skills/level-area.ts";
+import type { Near } from "./farming/growth.ts";
 import { protectArea, releaseArea } from "./skills/protect-area.ts";
 import { collectBlock, eat, equip, goTo, hunt, sleep } from "./skills/single-action.ts";
 
@@ -52,6 +53,8 @@ export interface SkillContext {
   readonly heardFrom?: () => number;
   /** The farms it made, as at their last tend; farming near one tends it. */
   readonly farms?: readonly KnownFarm[];
+  /** Sampled minutes near a farm since its last tend; absent or null after a restart. */
+  readonly nearMinutes?: (farm: KnownFarm) => Near | null;
   /** Told about a farm made or tended, to remember it. */
   readonly rememberFarm?: (farm: KnownFarm) => void;
   /** Told about the hole after its roof step, so the memory and monitor keep the newest shelter. */

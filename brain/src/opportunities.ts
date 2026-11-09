@@ -1,6 +1,7 @@
 import { describeActivity, type Activity } from "./activities.ts";
 import type { BlockRole } from "./building/blueprint.ts";
 import type { KnownFarm } from "./memory.ts";
+import { describeNearTend, ripeInNearMinutes, type Near } from "./farming/growth.ts";
 import { HINTS } from "./prompt-budget.ts";
 import type { BotSnapshot, Position } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -30,6 +31,7 @@ export interface OpportunityFacts {
   readonly now: number;
   readonly snapshot: BotSnapshot;
   readonly farms: readonly KnownFarm[];
+  readonly nearMinutes?: (farm: KnownFarm) => Near | null;
   readonly unfinished: UnfinishedHouse | null;
   /** Whether she knows a house she built for herself. */
   readonly ownHome: boolean;
@@ -60,7 +62,7 @@ const WORN_USES = 16;
 const ENOUGH_FOOD_POINTS = 20;
 /** Hunger at or under this is starving: sprinting stops at 6 (the game's rule). */
 const STARVING = 6;
-/** A farm left this long may have ripened (wheat takes about half an hour near water). */
+/** Fallback while no pace is measured (spec 2026-11-07-p4-08b-crops, open choice 3); measured r35 growth: reports/2026-11-08-p4-08b-crop-growth.md. */
 const FARM_RECHECK_MINUTES = 20;
 
 function wornTools(facts: OpportunityFacts): Opportunity[] {
@@ -95,12 +97,25 @@ function where(farm: KnownFarm, facts: OpportunityFacts): string {
   return `your ${farm.crop} farm around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}, ${away} blocks away,`;
 }
 
+/** Farms with ripe crops observed, a ripe estimate from near time, or the no-pace fallback. */
 function farmsToHarvest(facts: OpportunityFacts): Opportunity[] {
-  return facts.farms.flatMap((farm) => {
-    const minutes = minutesSince(farm.tendedAt, facts.now);
-    if (minutes < FARM_RECHECK_MINUTES && farm.state.ripe === 0) return [];
-    return [{ activities: ["farming"], text: `${where(farm, facts)} was tended ${minutes} min ago (${farm.state.ripe} ripe then)` }];
-  });
+  return facts.farms.flatMap((farm) => farmToHarvest(farm, facts));
+}
+
+/** One farm worth checking, using its observed ripe cells or measured growth; no pace keeps the old fallback. */
+function farmToHarvest(farm: KnownFarm, facts: OpportunityFacts): Opportunity[] {
+  const minutes = minutesSince(farm.tendedAt, facts.now);
+  const near = facts.nearMinutes?.(farm) ?? null;
+  const remaining = ripeInNearMinutes(farm, near);
+  const estimatedRipe = remaining !== null && remaining <= 0;
+  if (farm.state.ripe === 0 && !estimatedRipe && (farm.pace !== undefined || minutes < FARM_RECHECK_MINUTES)) return [];
+  const distance = Math.round(Math.hypot(farm.centre.x - facts.snapshot.position.x, farm.centre.z - facts.snapshot.position.z));
+  const shortWhere = `your ${farm.crop} farm ${distance} blocks away`;
+  if (estimatedRipe) return [{ activities: ["farming"], text: `${shortWhere}: ripe by now at seen pace (${describeNearTend(farm, minutes, near)})` }];
+  if (farm.pace !== undefined) return [{ activities: ["farming"], text: `${shortWhere} was tended ${minutes} min ago (${farm.state.ripe} ripe then; ${describeNearTend(farm, minutes, near)})` }];
+  const { stage, ripeAge } = farm.state;
+  if (stage !== undefined && ripeAge !== undefined) return [{ activities: ["farming"], text: `${shortWhere} was tended ${minutes} min ago (${farm.state.ripe} ripe then; stage ${stage.toFixed(1)} of ${ripeAge}; no pace known yet)` }];
+  return [{ activities: ["farming"], text: `${where(farm, facts)} was tended ${minutes} min ago (${farm.state.ripe} ripe then)` }];
 }
 
 function farmsToSow(facts: OpportunityFacts): Opportunity[] {

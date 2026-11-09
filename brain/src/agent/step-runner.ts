@@ -66,7 +66,7 @@ export class StepRunner {
     // A death during the model call is not "during this step": the baseline is read now, not taken from the decision.
     const baseline = await options.runtime.status().then((current) => current.lastDeath, () => snapshot.lastDeath);
     const death = watchDeath({ baseline, controller, status: () => options.runtime.status(), log: options.log });
-    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }), onSnapshot: [death.sample] });
+    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }), onSnapshot: [death.sample, (s) => this.host.memory.notePosition(s.position, s.dimension, monotonicNow())] });
     body.onAction = (tool, input, ms, outcome) => {
       gain.alive();
       death.actionEnded(outcome);
@@ -101,6 +101,7 @@ export class StepRunner {
       remember: (place) => memory.learnPlace(place),
       ownHouse: () => memory.temporaryHouse(),
       farms: memory.farms,
+      nearMinutes: (farm) => memory.nearMinutes(farm),
       rememberFarm: (farm) => memory.learnFarm(farm),
       rememberShelter: (hole) => memory.rememberShelter(hole),
       soil: this.host.soil,

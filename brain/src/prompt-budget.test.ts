@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { farmPromptFacts, goalP50 } from "./prompt-fixtures.ts";
+import { opportunityLine } from "./opportunities.ts";
+import { goalParts } from "./prompt-parts.ts";
+import { HINTS } from "./prompt-budget.ts";
 import {
   budgetFor,
   capLines,
@@ -150,4 +154,20 @@ test("ModelCalibration: the median of a model's last 50 first replies, clamped, 
 test("estimateTokens rounds up", () => {
   assert.equal(estimateTokens(34, 3.4), 10);
   assert.equal(estimateTokens(35, 3.4), 11);
+});
+
+test("four farm hints fit the hint budget with a house and bed still shown", () => {
+  const { places, opportunities } = farmPromptFacts();
+  assert.equal(places.length, 4);
+  assert.ok(places.every((place) => place.detail.includes("stage 2.0/7") && place.detail.includes("near")));
+  assert.ok(places.every((place) => place.detail.includes("2 dry farmland")));
+  assert.equal(places.filter((place) => place.detail.includes("water within 4 blocks hydrates it")).length, 1, "one general explanation covers all dry farm counts");
+  assert.equal(opportunities.filter((hint) => hint.activities.includes("farming")).length, 4);
+  const lines = opportunities.map(opportunityLine).join("\n");
+  assert.ok(lines.length <= HINTS.chars, `${lines.length}/${HINTS.chars}`);
+  assert.equal(opportunities.length, HINTS.lines);
+  const rendered = goalParts({ ...goalP50(), places, opportunities }).find((part) => part.key === "hints")!.render(0);
+  assert.ok(rendered.includes("unfinished small medieval house"));
+  assert.ok(rendered.includes("you carry no bed"));
+  assert.equal((rendered.match(/ripe by now/gu) ?? []).length, 4);
 });

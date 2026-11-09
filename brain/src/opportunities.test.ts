@@ -86,6 +86,20 @@ test("a farm tended a while ago, or left with ripe crops, could be harvested; on
   assert.deepEqual(texts(settled({ farms: [farm({ tendedAt: minutesAgo(5) })] })), []);
 });
 
+test("a farm with a pace shows once it can be ripe; without pace it keeps the 20-minute fallback", () => {
+  const known = farm({ centre: { x: 40, y: 63, z: 0 }, tendedAt: minutesAgo(30), pace: 1, state: { planted: 8, ripe: 0, empty: 0, stage: 2, ripeAge: 7 } });
+  const facts = settled({ farms: [known], nearMinutes: () => ({ near: 6, unknown: 0, since: 30 }) });
+  assert.deepEqual(texts(facts), ["(farming) your wheat_seeds farm 40 blocks away: ripe by now at seen pace (stage 2.0/7; tend 30 min ago; near 6 min)"]);
+  assert.deepEqual(texts({ ...facts, nearMinutes: () => ({ near: 4, unknown: 0, since: 30 }) }), []);
+  assert.deepEqual(texts({ ...facts, nearMinutes: () => null }), [], "a restart cannot estimate ripe from elapsed wall time");
+  assert.deepEqual(texts({ ...facts, farms: [{ ...known, pace: undefined }] }), ["(farming) your wheat_seeds farm 40 blocks away was tended 30 min ago (0 ripe then; stage 2.0 of 7; no pace known yet)"]);
+  assert.deepEqual(texts({ ...facts, farms: [{ ...known, pace: undefined, tendedAt: minutesAgo(19) }] }), []);
+  assert.ok(texts({ ...facts, farms: [{ ...known, tendedAt: minutesAgo(1), state: { ...known.state, ripe: 2 } }], nearMinutes: () => null })[0]?.includes("2 ripe then"));
+  const ripe = texts({ ...facts, farms: [{ ...known, pace: 0.1, state: { ...known.state, ripe: 2 } }] })[0]!;
+  assert.ok(ripe.includes("near 6 min"));
+  assert.ok(!ripe.includes("near time unknown"), "a known near tally must not be called unknown");
+});
+
 test("empty farmland with no crop item carried is a farming opportunity (the seeds are for the farm)", () => {
   const found = texts(settled({ farms: [farm({ tendedAt: minutesAgo(5), state: { planted: 60, ripe: 0, empty: 20 } })] }));
   assert.deepEqual(found, ["(farming) your wheat_seeds farm around 10 63 -5, 11 blocks away, has 20 empty farmland and you carry no wheat_seeds"]);

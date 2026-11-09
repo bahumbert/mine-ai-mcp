@@ -370,6 +370,7 @@ export class Agent {
     if (persona.goal === undefined || monotonicNow() < this.restUntil) return false;
     if (!(await this.guards.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
+    this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     const hour = lastOfPlay(this.memory.times);
     const time = minutesByActivity(hour);
     // What it feels like doing now (spec 2026-10-09-activity-draw): two activities drawn by their chances, which count
@@ -395,6 +396,7 @@ export class Agent {
     if (work.objective.requester === null && !(await this.guards.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     const snapshot = await runtime.status();
+    this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     await this.keepSettings(snapshot);
     const decision = await this.decideStep(work, snapshot);
     // Set aside or stopped while it was thinking: it thinks again once the objective is back on top.

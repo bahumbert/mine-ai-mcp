@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
-import { memoryNote, recall } from "../memory.ts";
+import { memoryNote, recall, type KnownFarm } from "../memory.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "../testing.ts";
 import { AgentMemory } from "./agent-memory.ts";
 import { say, agentFor, journaledAgent } from "./agent-fixtures.test.ts";
@@ -27,6 +27,77 @@ test("a second shelter replaces the first: one hole is kept, and no place line n
 
 const BUILDER = { loves: "building", likes: "farming", dislikes: "mob_combat", hates: "mining" } as const;
 
+test("farm near time counts sampled intervals and leaves gaps and dimensions far or unknown", (t) => {
+  let atMs = 0;
+  t.mock.method(performance, "now", () => atMs);
+  const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: -1, y: 63, z: -1 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", state: { planted: 8, ripe: 0, empty: 0 } };
+  const cases = [
+    { name: "two near readings within the gap count near", samples: [[0, 10], [1.5, 30]], near: 1.5, unknown: 0 },
+    { name: "a 6-min step near the farm counts near", samples: Array.from({ length: 13 }, (_, i) => [i / 2, 40]), near: 6, unknown: 0 },
+    { name: "a 6-min step 300 blocks away counts far", samples: Array.from({ length: 13 }, (_, i) => [i / 2, i === 0 || i === 12 ? 10 : 300]), near: 0, unknown: 0 },
+    { name: "a gap with no sample is not near", samples: [[0, 10], [20, 10]], near: 0, unknown: 20 },
+    { name: "a reading far from the farm counts nothing near", samples: [[0, 10], [1, 300]], near: 0, unknown: 0 },
+    { name: "a reading in another dimension is far", samples: [[0, 10], [1, 10]], dimension: "the_nether", near: 0, unknown: 0 },
+    { name: "reach is horizontal and relative to the negative chunk centre", samples: [[0, 120], [1, 120]], near: 1, unknown: 0 },
+    { name: "a gap at the limit counts near", samples: [[0, 10], [2, 30]], near: 2, unknown: 0 },
+  ];
+  for (const row of cases) {
+    atMs = 0;
+    const runtime = new FakeRuntime();
+    const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
+    memory.learnFarm(farm);
+    for (const [minutes, distance] of row.samples) {
+      atMs = minutes! * 60_000;
+      memory.notePosition({ x: -8 + distance!, y: 200, z: -8 }, row.dimension ?? "overworld", minutes! * 60_000);
+    }
+    assert.deepEqual(memory.nearMinutes(farm), { near: row.near, unknown: row.unknown, since: row.samples.at(-1)![0] }, row.name);
+  }
+});
+
+test("a tend restarts the tally, a restart and missing dimension give unknown, and trimmed tallies are dropped", async (t) => {
+  let atMs = 0;
+  t.mock.method(performance, "now", () => atMs);
+  const runtime = new FakeRuntime();
+  const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
+  const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", pace: 0.1, state: { planted: 8, ripe: 0, empty: 0 } };
+  memory.learnFarm(farm);
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 0);
+  atMs = 60_000;
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 60_000);
+  assert.equal(memory.nearMinutes(farm)?.near, 1);
+  const tended = { ...farm, pace: undefined, tendedAt: "t1" };
+  memory.learnFarm(tended);
+  assert.deepEqual(memory.nearMinutes(memory.farms[0]!), { near: 0, unknown: 0, since: 0 });
+  assert.equal(memory.farms[0]?.pace, 0.1, "replacement keeps the measured pace");
+  atMs = 210_000;
+  assert.deepEqual(memory.nearMinutes(memory.farms[0]!), { near: 0, unknown: 2.5, since: 2.5 }, "a long unsampled tail is unknown");
+  const old = memory.farms[0]!;
+  runtime.notes = [memoryNote({ kind: "farm", farm })];
+  const restarted = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
+  await restarted.recallMemory();
+  restarted.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 210_000);
+  assert.equal(restarted.nearMinutes(restarted.farms[0]!), null, "restart after the tend gives unknown");
+  memory.learnFarm({ ...farm, dimension: undefined });
+  assert.equal(memory.nearMinutes(memory.farms[0]!), null, "a farm with no dimension gives unknown");
+  for (let i = 1; i <= 4; i++) memory.learnFarm({ ...farm, centre: { ...farm.centre, x: i * 20 } });
+  assert.equal(memory.farms.length, 4);
+  assert.equal(memory.nearMinutes(old), null, "a trimmed farm's tally is dropped");
+});
+
+test("a tend cannot reuse a position read before a long gap as a fresh near baseline", (t) => {
+  let atMs = 0;
+  t.mock.method(performance, "now", () => atMs);
+  const runtime = new FakeRuntime();
+  const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 0);
+  atMs = 119_000;
+  const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", state: { planted: 8, ripe: 0, empty: 0 } };
+  memory.learnFarm(farm);
+  atMs += 60_000;
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+  assert.deepEqual(memory.nearMinutes(farm), { near: 0, unknown: 1, since: 1 });
+});
+
 test("a house the agent built becomes a known place, with its roof, for what comes next", async (t) => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
@@ -48,22 +119,21 @@ test("a house the agent built becomes a known place, with its roof, for what com
   assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");
 });
 
-test("her farms are places she knows, as they were at their last tend", async (t) => {
-  const runtime = new FakeRuntime();
-  runtime.notes = [memoryNote({ kind: "farm", farm: { crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "2026-10-02T20:00:00.000Z", tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0 } } })];
-  const { planner } = agentFor(t, runtime, { goal: "live well" });
-  planner.reply({ objective: "rest a while" });
-  await until(() => planner.requests.length === 1);
-  assert.match(planner.requests[0]?.[1]?.content ?? "", /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty when you last tended it, [^)]* ago; farming it again harvests what is ripe and replants it\)/u);
-});
-
-test("known farm says its stage and dry farmland", async (t) => {
-  const runtime = new FakeRuntime();
-  runtime.notes = [memoryNote({ kind: "farm", farm: { crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "2026-10-02T20:00:00.000Z", tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0, stage: 3, ripeAge: 7, dry: 2 } } })];
-  const { planner } = agentFor(t, runtime, { goal: "live well" });
-  planner.reply({ objective: "rest a while" });
-  await until(() => planner.requests.length === 1);
-  assert.match(planner.requests[0]?.[1]?.content ?? "", /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty, at stage 3\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\) when you last tended it, [^)]* ago; farming it again/u);
+test("recalled farms keep old wording or show their stage, dry farmland and unknown near time", async (t) => {
+  for (const growth of [{}, { stage: 3, ripeAge: 7, dry: 2 }]) {
+    const runtime = new FakeRuntime();
+    runtime.notes = [memoryNote({ kind: "farm", farm: { crop: "wheat_seeds", size: 9, centre: { x: 4, y: 63, z: 6 }, madeAt: "2026-10-02T20:00:00.000Z", tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0, ...growth } } })];
+    const { planner } = agentFor(t, runtime, { goal: "live well" });
+    planner.reply({ objective: "rest a while" });
+    await until(() => planner.requests.length === 1);
+    const prompt = planner.requests[0]?.[1]?.content ?? "";
+    if (growth.stage === undefined) {
+      assert.match(prompt, /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted, 0 ripe, 0 empty when you last tended it, [^)]* ago; farming it again harvests what is ripe and replants it\)/u);
+    } else {
+      assert.match(prompt, /your wheat_seeds farm \(9x9 around 4 63 6; 80 planted\/0 ripe\/0 empty; stage 3\.0\/7; tend \d+ min ago; near time unknown/u);
+      assert.match(prompt, /2 dry farmland \(grows slower; water within 4 blocks hydrates it\)/u);
+    }
+  }
 });
 
 test("memories an earlier run saved as notes come back: places, its own last objectives, an unfinished house", async (t) => {

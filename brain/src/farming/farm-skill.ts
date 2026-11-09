@@ -10,7 +10,7 @@ import { levelZone } from "../skills/level-zone.ts";
 import { findPlayer, navigateInput } from "../skills/positions.ts";
 import { releaseArea } from "../skills/protect-area.ts";
 import { describeOverlaps, nearestClearSpot, noteArea, overlapsOf, SITE_SEARCH } from "../skills/protected-areas.ts";
-import { cropStage, describeStage } from "./growth.ts";
+import { cropStage, describeStage, nextPace } from "./growth.ts";
 import { farmBox, farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
@@ -231,7 +231,7 @@ async function tendKnown(context: SkillContext, snapshot: BotSnapshot, known: Kn
   // Planting is asked only with the item carried: without it the harvest still replants its own cells from the drops.
   const plant = carried(snapshot, wanted) > 0 ? wanted : null;
   context.progress?.(`tending your ${known.crop} farm: harvesting what is ripe and replanting`);
-  return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
+  return withNote(await tend(context, plot, known.crop, plant, { madeAt: known.madeAt, previous: known }, `tended your ${known.crop} farm around ${known.centre.x} ${known.centre.y} ${known.centre.z}`), planting.note);
 }
 
 /**
@@ -262,18 +262,24 @@ async function plantedBlock(runtime: SkillContext["runtime"], crop: string): Pro
 }
 
 /** One `tend_crops` over the plot, then the farm remembered as it stands. */
-async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string }, doneDetail: string): Promise<SkillResult> {
+async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: string | null, made: { madeAt: string; previous?: KnownFarm }, doneDetail: string): Promise<SkillResult> {
   const input = { x1: plot.min.x, z1: plot.min.z, x2: plot.max.x, z2: plot.max.z, y: plot.water.y, ...(plant !== null && { plant }) };
   // Resolved before the tend: the farm's own crop block is what its stage is the mean age of.
   const cropBlock = await plantedBlock(context.runtime, crop);
+  const near = made.previous === undefined ? null : context.nearMinutes?.(made.previous) ?? null;
   const outcome = await context.body.act("tend_crops", input, `Farm my ${crop} plot.`, { signal: context.signal });
-  if (context.signal.aborted) return { status: "stopped" };
+  if (context.signal.aborted || outcome.status === "cancelled") {
+    if (made.previous !== undefined) context.rememberFarm?.({ ...made.previous, paceFresh: false });
+    return { status: "stopped" };
+  }
   const tended = tendedSchema.safeParse(outcome.result).data?.tended;
   learnSoil(context.soil, plot, tended);
   const after = tended?.after;
   const left = skippedCells(tended?.skipped);
   const crops = Object.entries(after?.crops ?? {});
   const growth = after === undefined || cropBlock === null ? null : cropStage(after.crops, after.ripeAge?.[cropBlock], cropBlock);
+  const before = tended?.before === undefined || cropBlock === null ? null : cropStage(tended.before.crops, after?.ripeAge?.[cropBlock] ?? made.previous?.state.ripeAge, cropBlock);
+  const pace = nextPace(made.previous, before?.stage ?? null, near);
   const state: FarmState = {
     planted: crops.reduce((sum, [, count]) => sum + count, 0),
     ripe: crops.filter(([key]) => key.endsWith(" ripe")).reduce((sum, [, count]) => sum + count, 0),
@@ -283,7 +289,7 @@ async function tend(context: SkillContext, plot: FarmPlot, crop: string, plant: 
   };
   const snapshot = await context.runtime.status();
   if (after !== undefined) {
-    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state, dimension: snapshot.dimension });
+    context.rememberFarm?.({ crop, size: plot.size, centre: plot.water, madeAt: made.madeAt, tendedAt: new Date().toISOString(), state, dimension: snapshot.dimension, ...(pace !== undefined && { pace }), paceFresh: true });
   }
   // Why farmland stays empty, as the step that fixes it (live 2026-10-03: told only "4 farmland empty", the model
   // tended the farm three more times).

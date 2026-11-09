@@ -39,7 +39,7 @@ export async function opportunitiesFor(source: OpportunitySource, snapshot: BotS
   } catch (error) {
     source.log(`could not work out what a house of its own needs: ${String(error)}`);
   }
-  return findOpportunities({ now: Date.now(), snapshot, farms: memory.farms, unfinished, ownHome, houseShortfall: houseShortfallFacts, smallHouse, carriedBlocks: carriedBlockFacts, temporaryHouse }, drawn);
+  return findOpportunities({ now: Date.now(), snapshot, farms: memory.farms, nearMinutes: (farm) => memory.nearMinutes(farm), unfinished, ownHome, houseShortfall: houseShortfallFacts, smallHouse, carriedBlocks: carriedBlockFacts, temporaryHouse }, drawn);
 }
 
 /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */

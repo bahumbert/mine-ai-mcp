@@ -129,13 +129,47 @@ function grownFarm(after: Record<string, unknown> | null): { runtime: FakeRuntim
   return { runtime, farms, remembered: [] };
 }
 
-test("a tend result carries stage and dry farmland", async () => {
-  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 3": 6, "wheat age 7 ripe": 2 }, emptyFarmland: 1, dryFarmland: 2, ripeAge: { wheat: 7 }, water: 1 });
-  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
-  assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(remembered[0]!.state, { planted: 8, ripe: 2, empty: 1, stage: 4, ripeAge: 7, dry: 2 });
-  assert.equal(remembered[0]!.dimension, runtime.snapshot.dimension);
-  assert.match(result.status === "done" ? result.detail : "", /8 planted, 2 ripe, 1 farmland empty.*, at stage 4\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\)/u);
+test("a harvest tend measures pace from before, not the replanted after stage", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 0": 8 }, emptyFarmland: 0, ripeAge: { wheat: 7 } });
+  runtime.tendBefore = { "wheat age 4": 4, "wheat age 7 ripe": 2 };
+  farms[0] = { ...farms[0]!, state: { planted: 6, ripe: 0, empty: 2, stage: 1, ripeAge: 7 } };
+  const result = await runStep({ skill: "farm", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm), nearMinutes: () => ({ near: 40, unknown: 0, since: 40 }) }));
+  assert.equal(result.status, "done");
+  assert.equal(remembered[0]?.pace, 0.1);
+  assert.equal(remembered[0]?.state.stage, 0);
+  assert.equal(remembered[0]?.paceFresh, true);
+});
+
+test("a stopped tend makes the pace reading stale; the next quiet tend keeps its pace and refreshes it", async () => {
+  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 2": 8 }, emptyFarmland: 0, ripeAge: { wheat: 7 } });
+  farms[0] = { ...farms[0]!, pace: 0.12, state: { ...farms[0]!.state, stage: 1, ripeAge: 7 } };
+  const controller = new AbortController();
+  runtime.succeedEffects.tend_crops = () => controller.abort();
+  const context = contextFor(runtime, { farms, signal: controller.signal, rememberFarm: (farm) => remembered.push(farm), nearMinutes: () => ({ near: 40, unknown: 0, since: 40 }) });
+  assert.deepEqual(await runStep({ skill: "farm", size: 3 }, context), { status: "stopped" });
+  assert.deepEqual(remembered[0], { ...farms[0]!, paceFresh: false });
+  runtime.succeedEffects.tend_crops = undefined;
+  runtime.tendBefore = { "wheat age 5": 8 };
+  const next = await runStep({ skill: "farm", size: 3 }, { ...context, farms: [remembered[0]!], signal: new AbortController().signal });
+  assert.equal(next.status, "done");
+  assert.equal(remembered[1]?.pace, 0.12);
+  assert.equal(remembered[1]?.paceFresh, true);
+});
+
+test("a tend saves its own crop's stage over loaded cells, plus dry farmland and dimension", async () => {
+  const cases = [
+    { crops: { "wheat age 3": 6, "wheat age 7 ripe": 2 }, empty: 1, dry: 2, want: { planted: 8, ripe: 2, empty: 1, stage: 4, ripeAge: 7, dry: 2 } },
+    { crops: { "wheat age 7 ripe": 2, "wheat age 1": 3 }, empty: 0, dry: 0, want: { planted: 5, ripe: 2, empty: 0, stage: 3.4, ripeAge: 7, dry: 0 } },
+    { crops: { "wheat age 2": 4, "carrots age 7 ripe": 4 }, empty: 0, dry: 0, want: { planted: 8, ripe: 4, empty: 0, stage: 2, ripeAge: 7, dry: 0 } },
+  ];
+  for (const row of cases) {
+    const { runtime, farms, remembered } = grownFarm({ crops: row.crops, emptyFarmland: row.empty, dryFarmland: row.dry, ripeAge: { wheat: 7, carrots: 7 }, water: 1 });
+    const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
+    assert.equal(result.status, "done", JSON.stringify(result));
+    assert.deepEqual(remembered[0]!.state, row.want);
+    assert.equal(remembered[0]!.dimension, runtime.snapshot.dimension);
+    if (row.dry > 0) assert.match(result.status === "done" ? result.detail : "", /8 planted, 2 ripe, 1 farmland empty.*, at stage 4\.0 of 7, 2 dry farmland \(grows slower; water within 4 blocks hydrates it\)/u);
+  }
 });
 
 test("a failed crop lookup still tends and remembers", async () => {
@@ -154,19 +188,6 @@ test("a result without ripeAge still tends", async () => {
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(remembered[0]!.state, { planted: 9, ripe: 0, empty: 0 });
   assert.doesNotMatch(result.status === "done" ? result.detail : "", /stage|dry/u);
-});
-
-test("stage counts only the cells read", async () => {
-  // 5 of the 9 cells were read (the rest lie in an unloaded chunk): the stage is over those 5.
-  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 7 ripe": 2, "wheat age 1": 3 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7 }, water: 1 });
-  await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
-  assert.deepEqual([remembered[0]!.state.planted, remembered[0]!.state.stage], [5, 3.4]);
-});
-
-test("the stage is of the farm's own crop when another stands on the plot", async () => {
-  const { runtime, farms, remembered } = grownFarm({ crops: { "wheat age 2": 4, "carrots age 7 ripe": 4 }, emptyFarmland: 0, dryFarmland: 0, ripeAge: { wheat: 7, carrots: 7 }, water: 1 });
-  await runStep({ skill: "farm", crop: "wheat_seeds", size: 3 }, contextFor(runtime, { farms, rememberFarm: (farm) => remembered.push(farm) }));
-  assert.equal(remembered[0]!.state.stage, 2);
 });
 
 test("farmland left empty for want of seeds says so, naming the get_items step", async () => {
