@@ -1,5 +1,6 @@
 {
   "id": "medieval",
+  "family": "europe",
   "description": "Timber-framed cottage: cobblestone footing, oak frame and walls, steep spruce gable roof.",
   "palette": {
     "foundation": "cobblestone",

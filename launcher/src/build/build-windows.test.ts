@@ -32,7 +32,7 @@ function fakeRepository(): string {
   const root = scratchDir();
   for (const file of [
     "src/server/host.ts", "src/server/host.test.ts", "src/navigation/search/fixtures/staircase-region.ts",
-    "brain/src/main.ts", "brain/src/main.test.ts", "brain/building-styles/rustic.json",
+    "brain/src/main.ts", "brain/src/main.test.ts", "brain/building-styles/rustic.json", "brain/building-templates/medieval-small.json",
     "launcher/src/main.ts", "launcher/src/main.test.ts", "launcher/src/install/java.ts",
     "launcher/src/install/fixtures/status.bin", "launcher/src/build/build-windows.ts",
     "packaging/manifest.json", "packaging/windows/mine-ai.iss",
@@ -51,7 +51,7 @@ test("the staged list has the public app and none of the private or test files",
   const root = fakeRepository();
   try {
     assert.deepEqual(stagedOf(root), [
-      "LICENSE", "brain/building-styles/rustic.json", "brain/src/main.ts", "bun.lock", "launcher/src/install/java.ts",
+      "LICENSE", "brain/building-styles/rustic.json", "brain/building-templates/medieval-small.json", "brain/src/main.ts", "bun.lock", "launcher/src/install/java.ts",
       "launcher/src/main.ts", "package.json", "packaging/manifest.json", PATCH_FILE, "src/server/host.ts",
     ].sort());
   } finally {

@@ -7,6 +7,9 @@ import type { Style } from "./styles.ts";
 /** The tag the game gives every door block (`doors`), read from `view_blocks` kinds. */
 const DOOR_TAG = "doors";
 
+/** The roles a house may leave open: any block, or `air` (open windows, no accent or railing). */
+const OPEN_ROLES: readonly BlockRole[] = ["window", "accent", "railing"];
+
 /**
  * Why `materials` cannot build a house in `style`, from the game's data about each block (`kinds`, by block id as
  * `view_blocks` reports them): one sentence per bad role, null when all are fine. A block the game has no kind for is
@@ -17,12 +20,13 @@ export function checkMaterials(materials: Materials, style: Style, kinds: Readon
   const refusals: string[] = [];
   for (const role of BUILD_ROLES) {
     const block = materials[role];
-    if (block === undefined || (role === "window" && block === "air")) continue;
+    if (block === undefined || (OPEN_ROLES.includes(role) && block === "air")) continue;
     const kind = kinds[block];
-    const preferred = `(your style uses ${style.palette[role]})`;
-    if (kind === undefined) refusals.push(`${role}: ${block} is no block id ${preferred}.`);
-    else if (STRUCTURAL_ROLES.includes(role) && kind.fullCube !== true) refusals.push(`${role}: ${block} is not a full block ${preferred}.`);
-    else if (role === "door" && !(kind.tags ?? []).includes(DOOR_TAG)) refusals.push(`${role}: ${block} is not a door ${preferred}.`);
+    const own = style.palette[role];
+    const preferred = own === undefined ? "" : ` (your style uses ${own})`;
+    if (kind === undefined) refusals.push(`${role}: ${block} is no block id${preferred}.`);
+    else if (STRUCTURAL_ROLES.includes(role) && kind.fullCube !== true) refusals.push(`${role}: ${block} is not a full block${preferred}.`);
+    else if (role === "door" && !(kind.tags ?? []).includes(DOOR_TAG)) refusals.push(`${role}: ${block} is not a door${preferred}.`);
   }
   return refusals.length === 0 ? null : refusals.join(" ");
 }

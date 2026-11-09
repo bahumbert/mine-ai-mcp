@@ -1,5 +1,6 @@
 {
   "id": "rustic",
+  "family": "europe",
   "description": "Plain oak cottage for lands with only oak trees: cobblestone footing, oak walls and frame, oak roof.",
   "palette": {
     "foundation": "cobblestone",

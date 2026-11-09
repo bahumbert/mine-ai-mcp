@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { faceFits as runtimeFaceFits, type BuildCell } from "#src/navigation/processes/building/build-process.ts";
+import { faceFits } from "./support.ts";
+
+const FACES = [
+  { x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 },
+  { x: 0, y: -1, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 },
+] as const;
+const HALVES = [undefined, "top", "bottom"] as const;
+const AXES = [undefined, "x", "y", "z"] as const;
+
+// The brain imports no src/ module in production, so support.ts keeps a copy of the runtime's rule; this keeps them one.
+test("the brain's faceFits agrees with the runtime's on every face, half and axis", () => {
+  for (const face of FACES) {
+    for (const half of HALVES) {
+      for (const axis of AXES) {
+        const runtimeCell: BuildCell = { position: { x: 0, y: 0, z: 0 }, blockName: "oak_log", ...(half !== undefined && { half }), ...(axis !== undefined && { axis }) };
+        assert.equal(faceFits(face, { half, axis }), runtimeFaceFits(face, runtimeCell), `face ${JSON.stringify(face)} half ${half} axis ${axis}`);
+      }
+    }
+  }
+});

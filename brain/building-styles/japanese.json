@@ -1,5 +1,6 @@
 {
   "id": "japanese",
+  "family": "east-asia",
   "description": "Minka-like house: pale birch walls between dark oak posts, spruce floor, dark hip roof with deep eaves.",
   "palette": {
     "foundation": "cobblestone",

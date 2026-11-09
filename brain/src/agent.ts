@@ -1443,7 +1443,7 @@ export class Agent {
     const missing = shortfall(improvement(style, house, roles).bill, (await this.options.runtime.status()).inventory);
     return {
       door: house.door,
-      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] })),
+      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] ?? "nothing" })),
       shortfall: await this.withActivities(missing),
     };
   }

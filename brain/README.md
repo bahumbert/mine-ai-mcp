@@ -152,7 +152,8 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
 | `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
-| `building-styles/*.json` | Style palettes (material role → block) and house options |
+| `building-styles/*.json` | Style palettes (material role → block) and house options; each style names its family of house templates |
+| `building-templates/*.json` | House templates: layers of role cells with their own palette (`src/building/templates.ts`), checked at load by `validateBlueprint` (`support.ts`); the six classic houses are the first files |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
 | `src/say.ts` | Dev CLI: make another bot host say a chat line (a scripted player for live tests) |
 | `src/gathering.ts` | Gather and craft items like a player (`get_items` skill) |

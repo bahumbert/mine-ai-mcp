@@ -35,6 +35,12 @@ test("a door needs the game's doors tag", () => {
   assert.equal(checkMaterials({ door: "dirt" }, medieval, kinds), "door: dirt is not a door (your style uses oak_door).");
 });
 
+test("accent and railing may be air or any block, like the window, and name no style block the style lacks", () => {
+  assert.equal(checkMaterials({ accent: "air", railing: "air" }, medieval, kinds), null);
+  assert.equal(checkMaterials({ accent: "dirt", railing: "glass_pane" }, medieval, kinds), null);
+  assert.equal(checkMaterials({ accent: "stone_blok" }, medieval, kinds), "accent: stone_blok is no block id.");
+});
+
 test("every bad role gets its own sentence", () => {
   const refusal = checkMaterials({ wall: "stone_blok", door: "dirt" }, medieval, kinds)!;
   assert.match(refusal, /wall: stone_blok is no block id/u);

@@ -1,0 +1,140 @@
+{
+  "id": "medieval-small",
+  "family": "europe",
+  "name": "small medieval house",
+  "description": "Timber-framed cottage: cobblestone footing, oak frame and walls, steep spruce gable roof.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "oak_planks",
+    "wall": "oak_planks",
+    "pillar": "oak_log",
+    "trim": "oak_log",
+    "roof": "spruce_planks",
+    "window": "glass_pane",
+    "door": "oak_door"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "spruce_stairs",
+      "slab": "spruce_slab"
+    }
+  },
+  "key": {
+    "D": {
+      "role": "door"
+    },
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "c": {
+      "role": "wall"
+    },
+    "d": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "e": {
+      "role": "window"
+    },
+    "f": {
+      "role": "trim",
+      "axis": "x"
+    },
+    "g": {
+      "role": "floor"
+    },
+    "h": {
+      "role": "air"
+    },
+    "i": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "east",
+      "half": "bottom"
+    },
+    "j": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "west",
+      "half": "bottom"
+    },
+    "k": {
+      "role": "roof",
+      "shape": "slab",
+      "half": "bottom"
+    }
+  },
+  "layers": [
+    [
+      ".......",
+      ".aaaaa.",
+      ".aggga.",
+      ".aggga.",
+      ".aggga.",
+      ".aaaaa.",
+      "......."
+    ],
+    [
+      "...h...",
+      ".bcDcb.",
+      ".chhhc.",
+      ".chhhc.",
+      ".chhhc.",
+      ".bcccb.",
+      "......."
+    ],
+    [
+      "...h...",
+      ".bc.cb.",
+      ".chhhc.",
+      ".ehhhe.",
+      ".chhhc.",
+      ".bcecb.",
+      "......."
+    ],
+    [
+      "i.....j",
+      "ibfffbj",
+      "idhhhdj",
+      "idhhhdj",
+      "idhhhdj",
+      "ibfffbj",
+      "i.....j"
+    ],
+    [
+      ".i...j.",
+      ".icccj.",
+      ".i...j.",
+      ".i...j.",
+      ".i...j.",
+      ".icccj.",
+      ".i...j."
+    ],
+    [
+      "..i.j..",
+      "..icj..",
+      "..i.j..",
+      "..i.j..",
+      "..i.j..",
+      "..icj..",
+      "..i.j.."
+    ],
+    [
+      "...k...",
+      "...k...",
+      "...k...",
+      "...k...",
+      "...k...",
+      "...k...",
+      "...k..."
+    ]
+  ],
+  "classic": {
+    "style": "medieval",
+    "size": "small"
+  }
+}

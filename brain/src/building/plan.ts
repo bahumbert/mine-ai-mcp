@@ -1,6 +1,8 @@
-import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, cellsCountedOnce, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
 import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
+import { supportGroups } from "./support.ts";
+import { stagesOf, type Stage, type Template } from "./templates.ts";
 
 /** Blocks between the bot's feet and the door: the bot stands on the doorstep's far side, clear of every cell. */
 const DOOR_DISTANCE = 2;
@@ -42,16 +44,19 @@ export function facingToward(from: Position, toward: Position | null): Facing {
 }
 
 export interface HousePlan {
-  readonly style: Style;
-  readonly size: HouseSize;
+  readonly template: Template;
   readonly site: Site;
-  /** The roles built with other blocks than the style's; empty for a house as the style. */
+  /** The roles built with other blocks than the template's; empty for a house as the template. */
   readonly materials: Materials;
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
   /** Where to stand on the roof, remembered with the house so "go to the roof" has real coordinates. */
   readonly roofTop: Position;
+  /** The runs of `batches` the bot fetches blocks for and builds together; contiguous, covering every batch. */
+  readonly stages: readonly Stage[];
+  /** What a stage needs, each cell counted in its last batch only: the bills of all stages add up to `bill`. */
+  readonly stageBill: (stage: Stage) => MaterialCount[];
 }
 
 /** Falls back to the default style when the name is unknown (a persona may name a style not shipped yet). */
@@ -65,23 +70,45 @@ export function styleOrDefault(name: string | undefined): Style {
 export type Materials = Partial<Record<BlockRole, string>>;
 
 /**
- * The house for `style` at `site`. `materials` names other blocks for some roles; those roles are built with full
- * blocks (the style's stairs and slabs belong to its own block), and ask no log axis either (live 2026-10-10:
- * cobblestone pillars asked an axis cobblestone has, so the audit never saw them right). A role named with the style's
- * own block is the style's.
+ * The house of `template` at `site`. `materials` names other blocks for some roles; those roles are built with full
+ * blocks (the template's stairs and slabs belong to its own block), and ask no log axis, facing or half either (live
+ * 2026-10-10: cobblestone pillars asked an axis cobblestone has, so the audit never saw them right; a ladder's facing
+ * on stone is the same case). A role named with the
+ * template's own block is the template's.
  */
-export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
-  const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => style.palette[role as BlockRole] !== block)) as Materials;
-  const variants = Object.fromEntries(Object.entries(style.variants ?? {}).filter(([role]) => other[role as BlockRole] === undefined));
-  const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-  const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants)
-    .map((cell) => cell.axis === undefined || other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, ...rest }) => rest)(cell));
-  return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
+export function planTemplate(template: Template, site: Site, materials: Materials = {}): HousePlan {
+  const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => template.palette[role as BlockRole] !== block)) as Materials;
+  const variants = Object.fromEntries(Object.entries(template.variants).filter(([role]) => other[role as BlockRole] === undefined));
+  const cells = placeBlueprint(template.blueprint, { ...template.palette, ...other }, site.door, site.facing, variants)
+    .map((cell) => other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, facing: _facing, half: _half, ...rest }) => rest)(cell));
+  const batches = buildBatches(cells);
+  const counted = cellsCountedOnce(batches);
+  return {
+    template, site, materials: other, cells, bill: billOfMaterials(cells), batches, roofTop: roofTop(cells),
+    stages: stagesOf(template, batches, supportGroups(cells).groups),
+    stageBill: (stage) => billOfMaterials(counted.slice(stage.first, stage.last + 1).flat()),
+  };
 }
 
-/** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof). */
+/** The classic generator's house for `style` and `size` as a template, the regression's reference until the classic houses are files only. */
+function generatedTemplate(style: Style, size: HouseSize): Template {
+  const name = `${size} ${style.id} house`;
+  return {
+    id: `${style.id}-${size}`, family: style.family, name, description: style.description, kind: name,
+    blueprint: house({ ...HOUSE_SIZES[size], ...style.house }), palette: style.palette, variants: style.variants ?? {},
+    classic: { style: style.id, size },
+  };
+}
+
+/** The house the classic generator makes for `style` at `site` (see {@link planTemplate} for `materials`). */
+export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
+  return planTemplate(generatedTemplate(style, size), site, materials);
+}
+
+/** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof); a house with no roof role, the highest cell. */
 export function roofTop(cells: readonly WorldCell[]): Position {
-  const roof = cells.filter((cell) => cell.role === "roof");
+  const roofCells = cells.filter((cell) => cell.role === "roof");
+  const roof = roofCells.length > 0 ? roofCells : cells.filter((cell) => cell.role !== "air");
   const top = Math.max(...roof.map((cell) => cell.y));
   const ridge = roof.filter((cell) => cell.y === top);
   const middleX = ridge.reduce((sum, cell) => sum + cell.x, 0) / ridge.length;
