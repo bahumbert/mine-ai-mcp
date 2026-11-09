@@ -308,14 +308,21 @@ test("a pour named at a solid cell fails before the walk", async () => {
 });
 
 // Removing either the falling column or the first sideways reach must allow an unsafe cast and fail these cases.
-for (const { name, target, player } of [
+for (const { name, target, player, hole } of [
   { name: "into the bot's feet cell", target: new Vec3(0, 64, 0) },
   { name: "beside the bot on a floor", target: new Vec3(1, 64, 0) },
   { name: "3 above a player's head over open air", target: new Vec3(2, 68, 0), player: new Vec3(2.5, 64, 0.5) },
   { name: "whose first spread reaches a player", target: new Vec3(2, 64, 0), player: new Vec3(3.5, 64, 0.5) },
+  { name: "over a hole beside a player's feet", target: new Vec3(2, 64, 0), player: new Vec3(3.5, 64, 0.5), hole: true },
+  { name: "over a hole beside a player's head", target: new Vec3(2, 65, 0), player: new Vec3(3.5, 64, 0.5), hole: true },
 ]) {
   test(`a lava pour ${name} is refused naming the body and cell, without casting`, async () => {
-    const { bot, dependencies, uses, drive } = poolWorld("lava_bucket", poolCells(), { Alex: { sleeping: false } });
+    const cells = poolCells();
+    if (hole) {
+      cells["2,63,0"] = "air";
+      cells[`2,${target.y},1`] = "stone";
+    }
+    const { bot, dependencies, uses, drive } = poolWorld("lava_bucket", cells, { Alex: { sleeping: false } });
     bot.entity.position.set(0.5, 64, 0.5);
     if (player) bot.players.Alex!.entity!.position = player;
     else delete bot.players.Alex;
@@ -333,7 +340,12 @@ for (const { name, target, player } of [
 for (const liquid of ["water", "lava"] as const) {
   for (const regionX of [2, 3]) {
     test(`a ${liquid} pour with its ${regionX === 2 ? "target" : "spread"} in a foreign region is refused${regionX === 3 ? ", but its own region allows it" : ""}`, async () => {
-      const { bot, dependencies, uses, drive } = poolWorld(`${liquid}_bucket`);
+      const cells = poolCells();
+      if (regionX === 3) {
+        cells["2,63,0"] = "air";
+        cells["2,64,1"] = "stone";
+      }
+      const { bot, dependencies, uses, drive } = poolWorld(`${liquid}_bucket`, cells);
       bot.entity.position.set(0.5, 64, 0.5);
       let owner = "Alex";
       setProtectedRegionsProvider(bot, () => [{
@@ -413,14 +425,8 @@ test("pour aims where the ray actually lands in the named cell, and counts the o
   assert.match(formatUseBucketResult(result), /Formed: 2 obsidian$/m);
 });
 
-test("pour refuses an occupied cell and reports the missing bucket", async () => {
+test("pour reports the missing bucket", async () => {
   const { bot, dependencies, drive } = poolWorld();
-  const occupied = await drive(
-    useBucket(bot, { action: "pour", liquid: "water", cell: { x: 2, y: 63, z: 0 } }, {}, dependencies),
-  );
-  if (occupied.status === "succeeded") assert.fail("a stone cell must not take a pour");
-  assert.match(occupied.error, /BUCKET_TARGET_OCCUPIED/);
-
   const missing = await drive(
     useBucket(bot, { action: "pour", liquid: "lava", cell: { x: 2, y: 64, z: 0 } }, {}, dependencies),
   );

@@ -155,3 +155,78 @@ for (const change of ["respawn", "bucket", "terrain"] as const) {
     assert.deepEqual(placements.pendingLifeSavingPlacements(bot), []);
   });
 }
+
+test("failed cleanup ignores unrelated ticks and supplies, retrying only within eight blocks or for cleanup supplies", async () => {
+  const { bot, clock, world, inventory } = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), cells: { "2,64,0": "water" },
+    position: new Vec3(0.5, 64, 0.5),
+  });
+  using data = temporaryBotData();
+  using _timers = clock.install();
+  const runner = new ActionRunner();
+  await using driver = new ReflexDriver(bot, runner, { lifeSaving: { data } });
+  registerIdleCleanup(driver);
+  setProtectedRegionsProvider(bot, () => [{
+    regionId: 9, owner: "Tom", label: "garden", dimension: "overworld",
+    min: { x: 2, y: 64, z: 0 }, max: { x: 2, y: 64, z: 0 },
+  }]);
+  const events: SurvivalTransition[] = [];
+  driver.onTransition(event => events.push(event));
+  placements.recordLifeSavingPlacement(bot, new Vec3(2, 64, 0), "water");
+  const failures = () => events.filter(event => JSON.stringify(event).includes("placements_left")).length;
+  await clock.advance(200);
+  assert.equal(failures(), 1);
+  for (let tick = 0; tick < 5; tick++) {
+    world.setCell(new Vec3(11, 64, 0), tick % 2 ? "air" : "stone");
+    setCarriedCount(inventory, bot.registry, bot.registry.itemsByName.stick!.id, tick + 1);
+    await clock.advance(50);
+    assert.equal(runner.ownership().current, null);
+  }
+  assert.equal(failures(), 1, "reach+1 updates and unrelated supplies do not claim the body again");
+  world.setCell(new Vec3(10, 64, 0), "stone");
+  await clock.advance(100);
+  assert.equal(failures(), 2, "an update at the ledger's eight-block boundary retries");
+  for (const name of ["bucket", "cobblestone"]) {
+    setCarriedCount(inventory, bot.registry, bot.registry.itemsByName[name]!.id, 1);
+    await clock.advance(100);
+  }
+  assert.equal(failures(), 4, "buckets and building blocks retry cleanup");
+});
+
+test("failed cleanup remembers its travelled route and ignores changes beyond that route's reach", async () => {
+  const { bot, clock, world } = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), position: new Vec3(0.5, 64, 0.5),
+    cells: { "2,64,0": "cobblestone", "1,64,0": "stone", "1,65,0": "stone" },
+  });
+  using data = temporaryBotData();
+  using _timers = clock.install();
+  bot.physicsEnabled = false;
+  await using driver = new ReflexDriver(bot, new ActionRunner(), { lifeSaving: {
+    data, navigate: async () => {
+      bot.entity.position.set(-4.5, 64, 0.5);
+      bot.emit("physicsTick");
+      bot.entity.position.set(0.5, 64, 0.5);
+      return { status: "stopped", reason: "no_path", elapsedMs: 0 };
+    },
+  } });
+  registerIdleCleanup(driver);
+  setProtectedRegionsProvider(bot, () => [{
+    regionId: 9, owner: "Tom", label: "garden", dimension: "overworld",
+    min: { x: 2, y: 64, z: 0 }, max: { x: 2, y: 64, z: 0 },
+  }]);
+  const events: SurvivalTransition[] = [];
+  driver.onTransition(event => events.push(event));
+  placements.recordLifeSavingPlacement(bot, new Vec3(2, 64, 0), "block");
+  const failures = () => events.filter(event => JSON.stringify(event).includes("placements_left")).length;
+  bot.emit("physicsTick");
+  await clock.advance(100);
+  assert.equal(failures(), 1);
+  world.setCell(new Vec3(-14, 64, 0), "stone");
+  bot.emit("physicsTick");
+  await clock.advance(100);
+  assert.equal(failures(), 1, "reach+1 from the route cannot restart cleanup");
+  world.setCell(new Vec3(-13, 64, 0), "stone");
+  bot.emit("physicsTick");
+  await clock.advance(100);
+  assert.equal(failures(), 2, "eight blocks from a travelled cell retries even far from the ledger and current stance");
+});

@@ -6,7 +6,7 @@ import { familyIndexOf } from "../../world/item-families.js";
 import { regionChangeRefusal } from "../../world/protected-regions.js";
 import { bucketItem } from "../../world/buckets.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
-import { USE_RAY_REACH } from "../../world/liquid.js";
+import { LIQUIDS, USE_RAY_REACH } from "../../world/liquid.js";
 import { pourRefusal } from "../use-bucket/pour-guard.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { executionCheckpointSchema } from "../checkpoint-schemas.js";
@@ -287,9 +287,10 @@ function swing(
 }
 
 /** A raw bucket keeps the current look: the solid ray hit and face determine where its liquid lands. */
-function refuseUnsafeLavaUse(bot: Bot, hand: "hand" | "off-hand", evidence: Evidence): void {
+function refuseUnsafeBucketUse(bot: Bot, hand: "hand" | "off-hand", evidence: Evidence): void {
   const held = hand === "off-hand" ? bot.inventory.slots[bot.getEquipmentDestSlot("off-hand")] : bot.heldItem;
-  if (held?.name !== bucketItem("lava", true)) return;
+  const liquid = LIQUIDS.find(liquid => held?.name === bucketItem(liquid, true));
+  if (!liquid) return;
   const { yaw, pitch } = bot.entity;
   const direction = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
   const eye = bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0);
@@ -301,7 +302,7 @@ function refuseUnsafeLavaUse(bot: Bot, hand: "hand" | "off-hand", evidence: Evid
   const target = surface.plus(face);
   evidence.target = target;
   evidence.beforeBlock = bot.blockAt(target)?.name ?? null;
-  const refusal = pourRefusal(bot, target, "lava");
+  const refusal = pourRefusal(bot, target, liquid);
   if (refusal) throw new Error(refusal);
 }
 
@@ -313,7 +314,7 @@ async function useItem(
 ) {
   const beforeHeld = bot.heldItem?.name ?? null;
   const beforeInventory = inventory(bot);
-  refuseUnsafeLavaUse(bot, request.hand, evidence);
+  refuseUnsafeBucketUse(bot, request.hand, evidence);
   evidence.attempted = true;
   bot.activateItem(request.hand === "off-hand");
   try {

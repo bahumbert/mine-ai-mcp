@@ -8,6 +8,20 @@ import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 
+/** Hold the arranged body until the fire packet arrives, so a delayed command cannot light the route behind it. */
+async function injectFire(context: ScenarioContext): Promise<boolean> {
+  context.physics.pause();
+  const cell = context.bot.entity.position.floored();
+  try {
+    context.bot.chat(`/setblock ${cell.x} ${cell.y} ${cell.z} fire`);
+    const deadline = monotonicNow() + 2_000;
+    while (context.bot.blockAt(cell)?.name !== "fire" && monotonicNow() < deadline) await delay(20);
+    return context.bot.blockAt(cell)?.name === "fire";
+  } finally {
+    context.physics.resume();
+  }
+}
+
 /** The arranged block stands for a confirmed T5a placement; the runtime's real driver owns all subsequent work. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { cell, next } = z.strictObject({ cell: arenaPoint(context.arena), next: arenaPoint(context.arena) }).parse(context.scenario.params);
@@ -30,8 +44,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const owner = status.survival?.owner.current;
     if (owner === "remove_life_saving_placements") cleanupSeen = true;
     if (cleanupSeen && !injected && bot.entity.position.distanceTo(start) > 0.1) {
-      bot.chat("/execute at @s run setblock ~ ~ ~ fire");
-      injected = true;
+      injected = await injectFire(context);
     }
     if (owner === "fire_reflex") {
       fireOwned = true;

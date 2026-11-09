@@ -290,6 +290,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
 
   assert.equal(added(bot, "chunkColumnLoad"), 2);
   assert.equal(added(bot, "chunkColumnUnload"), 1);
+  assert.equal(added(bot, "blockUpdate"), 3, "world observation, fire sensing and the driver's cleanup retry each own one listener");
   assert.equal(
     added(bot, "physicsTick"),
     9,

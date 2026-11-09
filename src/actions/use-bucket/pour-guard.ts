@@ -10,16 +10,16 @@ import { useBucketOutcomes, type BucketLiquid } from "./contract.js";
 
 const MAXIMUM_POUR_FALL_CELLS = 64;
 
-/** The target, its falling column to a floor (at most 64 cells down), and that landing's first sideways spread. */
+/** The source and its sides, its falling column (at most 64 cells), and the landing's first sideways spread. */
 export function pourReachCells(world: Pick<WorldView, "blockAt">, target: Vec3): Vec3[] {
-  const cells = [target];
+  const cells = [target, ...HORIZONTAL.map((side) => target.plus(side))];
   let landing = target;
   for (let depth = 0; depth < MAXIMUM_POUR_FALL_CELLS; depth += 1) {
     if (restsOnFloor(world, landing.x, landing.y, landing.z) !== false) break;
     landing = landing.offset(0, -1, 0);
     cells.push(landing);
   }
-  if (restsOnFloor(world, landing.x, landing.y, landing.z) !== false) {
+  if (!landing.equals(target) && restsOnFloor(world, landing.x, landing.y, landing.z) !== false) {
     cells.push(...HORIZONTAL.map((side) => landing.plus(side)));
   }
   return cells;
