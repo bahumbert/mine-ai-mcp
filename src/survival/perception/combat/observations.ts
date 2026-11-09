@@ -5,7 +5,7 @@ import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { PositionThreat } from "../../positioning/combat/exposure.js";
 import { bowDrawAimedAtBot, holdsBow, isDrawingBow } from "./attention.js";
 import { incomingBlazeProjectiles, isIncomingBlazeProjectile } from "./blaze-projectiles.js";
-import { holdsShooter } from "./contact.js";
+import { holdsRangedWeapon } from "./contact.js";
 import { readProjectileSpawn } from "./projectile-spawn.js";
 import { hasSelfExplosion } from "../../../world/combat-data.js";
 import { ObservedHits } from "./observed-hits.js";
@@ -26,9 +26,9 @@ function blazeCharged(bot: Bot, entity: Entity): boolean | null {
   return typeof flags === "number" ? (flags & BLAZE_CHARGING_FLAG) !== 0 : null;
 }
 
-/** Whether the target shoots: a bow in hand, or a species that shoots by nature. */
+/** Whether the target holds a ranged weapon or shoots by nature. */
 export function isRangedAttacker(bot: Bot, entity: Entity): boolean {
-  return holdsBow(bot, entity) || RANGED_SPECIES.has(entity.name ?? "");
+  return holdsRangedWeapon(bot, entity) || RANGED_SPECIES.has(entity.name ?? "");
 }
 
 /**
@@ -114,7 +114,7 @@ export function isWindingUp(bot: Bot, entity: Entity): boolean {
 }
 
 export function positionThreat(bot: Bot, entity: Entity): PositionThreat {
-  const projectile = entity.name === "blaze" || holdsShooter(bot, entity);
+  const projectile = isRangedAttacker(bot, entity);
   // These modes are not stopped by a sight-line claim alone. Leave their
   // existing responses in charge until the cover contract models them.
   const unmodelled = [

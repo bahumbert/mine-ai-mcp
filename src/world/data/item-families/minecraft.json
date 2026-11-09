@@ -5,6 +5,7 @@
     "shield": ["shield"],
     "bow": ["bow"],
     "crossbow": ["crossbow"],
+    "ranged_weapon": ["bow", "crossbow", "trident"],
     "helmet": ["leather_helmet", "chainmail_helmet", "iron_helmet", "golden_helmet", "diamond_helmet", "netherite_helmet", "turtle_helmet"],
     "chestplate": ["leather_chestplate", "chainmail_chestplate", "iron_chestplate", "golden_chestplate", "diamond_chestplate", "netherite_chestplate"],
     "leggings": ["leather_leggings", "chainmail_leggings", "iron_leggings", "golden_leggings", "diamond_leggings", "netherite_leggings"],
@@ -23,13 +24,14 @@
     "avoided_food": ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken", "suspicious_stew", "chorus_fruit", "enchanted_golden_apple"],
     "container": ["chest", "trapped_chest", "barrel", "hopper", "dropper", "dispenser"],
     "chest": ["chest", "trapped_chest", "ender_chest"],
-    "projectile_entity": ["small_fireball"]
+    "projectile_entity": ["small_fireball", "trident"]
   },
   "why": {
     "shears": "vanilla has no tag of shears alone: only the enchantable/* tags, shared with other items",
     "shield": "vanilla has no tag of shields alone: only the enchantable/* tags, shared with other items",
     "bow": "tag enchantable/bow exists from 1.20.6; 1.19.4 to 1.20.4 group no bow",
     "crossbow": "tag enchantable/crossbow exists from 1.20.6; 1.19.4 to 1.20.4 group no crossbow",
+    "ranged_weapon": "the enchantable/bow, enchantable/crossbow and enchantable/trident tags define the family; 1.19.4 to 1.20.4 lack those tags",
     "helmet": "tag head_armor exists from 1.20.6; 1.19.4 to 1.20.4 group no armour piece",
     "chestplate": "tag chest_armor exists from 1.20.6; 1.19.4 to 1.20.4 group no armour piece",
     "leggings": "tag leg_armor exists from 1.20.6; 1.19.4 to 1.20.4 group no armour piece",
@@ -42,6 +44,6 @@
     "avoided_food": "the foods the hunger reflex never picks, each carrying an effect the model weighs for itself (this list is the only home of the choice: selectReflexFood, src/world/food.ts, skips the family); vanilla has no tag of them",
     "container": "vanilla has no block tag of storage containers (shulker boxes come from the shulker_boxes tag)",
     "chest": "vanilla has no block tag of chests: the chests whose lid an opaque block above stops (src/world/chest-clearance.ts)",
-    "projectile_entity": "the blaze's small fireball, tracked beside arrows (projectile-spawn.ts); the entity tag impact_projectiles also holds snowballs and eggs"
+    "projectile_entity": "the blaze's small fireball and thrown trident are shield projectiles beside arrows; the entity tag impact_projectiles also holds snowballs and eggs; tridents use direction guarding, not unmeasured arrow flight physics"
   }
 }

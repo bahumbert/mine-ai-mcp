@@ -51,8 +51,8 @@ function isLocationOwnedContainer(blockName: string): boolean {
 /** chest-clearance.ts:4. */
 const CHESTS = new Set(["chest", "trapped_chest", "ender_chest"]);
 
-/** projectile-spawn.ts:22: arrows and the blaze's small fireball. */
-const PROJECTILE_ENTITIES = ["arrow", "spectral_arrow", "small_fireball"];
+/** Projectile families: arrows, the blaze's small fireball and thrown tridents (P4-06c T9b). */
+const PROJECTILE_ENTITIES = ["arrow", "spectral_arrow", "small_fireball", "trident"];
 const ARROW_ENTITIES = ["arrow", "spectral_arrow"];
 
 /** The item families the references decide; `crossbow` is new (no table named it) and `food` is the registry's list. */

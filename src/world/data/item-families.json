@@ -8,6 +8,7 @@
     "shears": [],
     "bow": ["enchantable/bow"],
     "crossbow": ["enchantable/crossbow"],
+    "ranged_weapon": ["enchantable/bow", "enchantable/crossbow", "enchantable/trident"],
     "shield": [],
     "helmet": ["head_armor"],
     "chestplate": ["chest_armor"],
