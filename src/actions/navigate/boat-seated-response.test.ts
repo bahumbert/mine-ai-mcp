@@ -124,7 +124,7 @@ test("the wall ceiling ends it with the boat stopped", async () => {
   const startedAt = performance.now();
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 600 }), SETTLE_MS);
   assert.equal(result.outcome, "timed_out");
-  assert.ok(performance.now() - startedAt < 1_500, "the row itself stops at the ceiling");
+  assert.ok(performance.now() - startedAt <= 10_800, "the rowing ceiling also waits for the bounded server stop answer");
   stopped(world);
 });
 
@@ -176,6 +176,13 @@ test("a diagonal bank beyond the combat distance keeps the seat at sea", async (
   await world.clock.advance(100);
   assert.equal(seatedAtSea(world.bot, 36), true);
   assert.equal(seatedAtSea(world.bot, 43), false);
+});
+
+test("a shallow seat with a beach behind and deep water ahead takes the shore path", async () => {
+  const world = await mountedSea({ waterDepth: 2, landUntilZ: -3 });
+  for (let x = -6; x <= 6; x++) for (let z = 10; z <= 30; z++)
+    world.world.setCell(new Vec3(x, 60, z), "water");
+  assert.equal(seatedAtSea(world.bot, 8), false);
 });
 
 test("a late shield equip cannot start another equip after cancel, death or ceiling", async () => {

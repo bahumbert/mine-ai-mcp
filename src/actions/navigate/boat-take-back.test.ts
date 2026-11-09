@@ -8,8 +8,10 @@ import { attackedIds } from "../../test-support/combat.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
 import { boatsCarried, settled, shoreSea, stallServerAtFirstHit } from "./boat-fixtures.test.js";
 import { TAKE_BACK_WALL_MS, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
+import { ActionRunner } from "../../session/action-runner.js";
+import { createNavigateAction } from "./navigate.js";
 
-const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
+const navigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
 /** Standing on boat 7 over water two deep by the shore (the feet the server sets her at on top of it). */
 const STANDING = { feet: new Vec3(20.5, 63.05, 0.5), boat: new Vec3(20.5, 62.49, 0.5), mocked: true, physics: true, waterDepth: 2 } as const;
 /** The bot stands on a boat (physics off keeps her there: the fake sinks her, the server would hold her) and the server stalls at the first hit, for `afterMs` or for good; install the clock first. */
@@ -61,9 +63,25 @@ test("a boat that is not in her view is not hit: no hits, nothing carried", asyn
 test("the preparation of a movement passes the hostile reflex's cap of hits to the take-back", async () => {
   const world = standingOnBoatWithServerStalledAtFirstHit(undefined, false);
   using _timers = world.clock.install();
-  await settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 }));
+  await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 })), /\[BOAT_TAKE_BACK_FAILED\]/u);
   assert.equal(hitsSent(world), 15, "capped: a mob attacks meanwhile");
   assert.equal(world.bot.entities[7] !== undefined, true);
-  await settled(world, prepareBotForMovement(world.bot, navigation));
+  let routed = false;
+  const action = createNavigateAction(world.bot, navigation, {
+    createMovements: (() => ({ name: "standard" })) as never,
+    navigate: async () => {
+      routed = true;
+      world.bot.entity.position.set(45.5, 63, 0.5);
+      return { status: "completed", elapsedMs: 1 };
+    },
+  });
+  const next = await settled(world, new ActionRunner().run(action, { x: 45, y: 63, z: 0, range: 2 }));
+  assert.equal(next.result.status, "failed");
+  assert.match("error" in next.result ? next.result.error ?? "" : "", /\[BOAT_TAKE_BACK_FAILED\]/u);
+  assert.equal(routed, false, "a failed take-back cannot start the next route");
   assert.ok(hitsSent(world) > 15 + 30, `${hitsSent(world)} hits: the next movement, with no cap, hits for the whole time bound`);
+  world.server.resume();
+  const recovered = await settled(world, new ActionRunner().run(action, { x: 45, y: 63, z: 0, range: 2 }));
+  assert.equal(recovered.result.status, "succeeded", JSON.stringify(recovered.result));
+  assert.equal(routed, true);
 });

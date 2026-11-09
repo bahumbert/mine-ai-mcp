@@ -18,7 +18,17 @@ import type { NavigationRuntime } from "../navigation/index.js";
 export async function leaveBoatSeat(bot: Bot, signal?: AbortSignal, takeBack: Pick<TakeBackOptions, "maxHits"> = {}): Promise<TakeBackReport | null> {
   const justLeft: Entity | null = isBoatEntity(bot.entity.vehicle) ? (await getOff(bot, signal)).vehicle : null;
   const boat = boatToTakeBack(bot, justLeft);
-  return boat === null ? null : takeBoatBackReport(bot, boat, signal, takeBack);
+  if (boat === null) return null;
+  return takeBoatBackReport(bot, boat, signal, takeBack);
+}
+
+/** A movement cannot route on an intact boat: keep its failed preparation explicit and bounded. */
+export async function leaveBoatSeatForMovement(bot: Bot, signal?: AbortSignal, takeBack: Pick<TakeBackOptions, "maxHits"> = {}): Promise<void> {
+  const report = await leaveBoatSeat(bot, signal, takeBack);
+  signal?.throwIfAborted();
+  if (report !== null && !report.carried) {
+    throw new Error(`[BOAT_TAKE_BACK_FAILED] The boat was not recovered after ${report.hits} hits in ${(report.elapsedMs / 1000).toFixed(1)} s. Movement did not start; retry movement to take the boat back, or choose another way off it.`);
+  }
 }
 
 /** Reset the admitted body before an action or survival response begins movement. */
@@ -41,7 +51,7 @@ export async function prepareBotForMovement(
   // is ignored until it is (live 2026-10-19, Cleo: 188 blocks swum north while the server kept her in the boat).
   await freeHeldSeat(bot, { ...(signal && { signal }), ...(options.takeBackHits !== undefined && { maxHits: options.takeBackHits }) });
   // A navigate keeps the boat she sits in: it rides on over deep water, or gets off itself when the way is over land.
-  if (!(options.keepBoatSeat === true && isBoatEntity(bot.entity.vehicle))) await leaveBoatSeat(bot, signal, options.takeBackHits === undefined ? {} : { maxHits: options.takeBackHits });
+  if (!(options.keepBoatSeat === true && isBoatEntity(bot.entity.vehicle))) await leaveBoatSeatForMovement(bot, signal, options.takeBackHits === undefined ? {} : { maxHits: options.takeBackHits });
   if (bot.entity.vehicle && !isBoatEntity(bot.entity.vehicle)) bot.dismount();
   if (bot.isSleeping) await bot.wake();
   // A web in the feet or head cell keeps the body from jumping, so every step up the route fails (live 2026-10-10:

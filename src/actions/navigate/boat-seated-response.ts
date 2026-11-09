@@ -8,7 +8,8 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { equipCombatLoadout, MELEE_RANGE, readCombatItems, permittedMeleeLoadout } from "../../survival/weapons/equipment.js";
 import { DEFAULT_COMBAT_POLICY, type CombatPolicy } from "../../survival/policy/combat/contract.js";
-import { BoatRide, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
+import { BoatRide } from "./boat-crossing.js";
+import { atSeaFrom } from "./boat-at-sea.js";
 import { isBoatEntity } from "./boat-entities.js";
 import { currentVehicle } from "./vehicle-sync.js";
 import { monotonicNow, raceSignal, sleepMs } from "../../utils/index.js";
@@ -47,9 +48,7 @@ export interface SeatedOutcome {
 export function seatedAtSea(bot: Bot, safeRange: number): boolean {
   const boat = currentVehicle(bot);
   if (!isBoatEntity(boat) || !boat) return false;
-  const water = deepWaterOnTheWay(bot, boat.position, boat.position.offset(0, 0, safeRange));
-  return water !== null && water.shore === null &&
-    launchSpot(bot, water.start, safeRange, (spot) => spot.distanceTo(boat.position) <= safeRange) === null;
+  return atSeaFrom(bot, boat.position, safeRange);
 }
 
 const turned = (way: { readonly x: number; readonly z: number }, degrees: number): { readonly x: number; readonly z: number } => {

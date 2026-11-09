@@ -16,6 +16,31 @@ import type { HostileResponse } from "../policy/combat/response.js";
 import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { observeCombatDecision } from "../control/combat/observation.js";
 import { decideCombatResponse } from "../policy/combat/decision.js";
+import { senseHostile } from "./hostile-sense.js";
+
+test("a hurt boat rider beside a beach keeps hide available in the sensed decision", async () => {
+  for (const moving of [false, true]) {
+    const harness = moving ? await mountedSea({ landFromZ: 60,
+      entities: { 8: { name: "zombie", position: new Vec3(2.5, 63, 3.5) } } }) : undefined;
+    await using fixture = responseFixture(false, harness);
+    using _clock = fixture.clock.install();
+    await fixture.driver[Symbol.asyncDispose]();
+    if (!moving) {
+      fixture.bot.mount(fixture.bot.entities[7]!);
+      await fixture.clock.advance(100);
+      fixture.bot.entities[8]!.position.x = 2.5;
+    }
+    fixture.bot.health = 6;
+    if (moving) {
+      assert.equal(senseHostile(fixture.scene)?.danger.facts.hideAllowed, false);
+      fixture.bot.entities[7]!.position.z = 58;
+      fixture.bot.entity.position.z = 58;
+      fixture.bot.entities[8]!.position.z = 56;
+    }
+    assert.equal(observeCombatDecision(fixture.bot, fixture.scene.context).hideAllowed, true);
+    assert.equal(senseHostile(fixture.scene)?.danger.facts.hideAllowed, true, "a moved seat must use the current beach");
+  }
+});
 
 /** The real response and reflex services around one shared fake bot. */
 function responseFixture(occluded = false, harness = createFakeBot({

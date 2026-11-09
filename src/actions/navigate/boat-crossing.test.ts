@@ -95,20 +95,22 @@ test("a ride over open sea with no land stops at the distance asked for and stay
 });
 
 test("the next movement from a bot mounted at sea takes the boat back, so the route goes in where she floats", async () => {
-  const world = seaHarness();
-  using _timers = world.clock.install();
-  await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
-  const boat = theBoat(world);
-  assert.equal(carriesBoat(world.bot), false);
-  // The server answers the shift with a position (contract check boat-get-off-by-shift): Mineflayer's physics, off since the mount, is switched on by it.
-  const positions = recordPositions(world);
-  await settled(world, prepareBotForMovement(world.bot, navigation));
-  assert.deepEqual(shifts(world), [true, false], "shift is pressed then released to get off a boat; a jump input does not");
-  assert.equal(positions.length, 1, "physics is switched back on where she stands");
-  assert.deepEqual(hitBoats(world), [boat.id], "the boat she rode is broken by hand");
-  assert.equal(carriesBoat(world.bot), true);
-  assert.equal(world.bot.vehicle, null);
-  assert.equal(world.bot.entity.vehicle, null);
+  for (const initial of [1, 2]) {
+    const world = seaHarness({ boatsCarried: initial });
+    using _timers = world.clock.install();
+    await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
+    const boat = theBoat(world);
+    assert.equal(boatsCarried(world), initial - 1);
+    // The server answers shift with a position (contract boat-get-off-by-shift), resuming Mineflayer physics.
+    const positions = recordPositions(world);
+    await settled(world, prepareBotForMovement(world.bot, navigation));
+    assert.deepEqual(shifts(world), [true, false]);
+    assert.equal(positions.length, 1, "physics is switched back on where she stands");
+    assert.deepEqual(hitBoats(world), [boat.id], "the ridden boat is recovered even with another carried");
+    assert.equal(boatsCarried(world), initial);
+    assert.equal(world.bot.vehicle, null);
+    assert.equal(world.bot.entity.vehicle, null);
+  }
 });
 
 // Run 14b: a ride that ended this way (Theo: "rode back to where the boat went in") left physics off; his next navigate
@@ -141,21 +143,14 @@ test("a ride that ends on the water gets off with shift held until the server le
 test("a ride end the server does not answer releases shift after the wait, forgets the boat and still turns physics back on", async () => {
   const world = seaHarness({ loadedTo: 12 });
   using _timers = world.clock.install();
-  world.bot.once("mount", () => world.server.stop());
+  world.server.onPacket("entity_action", () => world.server.stop());
   const positions = recordPositions(world);
   const result = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 40));
   assert.match(result.detail, /rode back to where the boat went in/u);
+  assert.match(result.detail, /may still be seated/u);
   assert.deepEqual(shifts(world), [true, false]);
   assert.equal(positions.length, 1, "physics is switched back on where she is");
   assert.equal(world.bot.vehicle, null);
-});
-
-test("a ride whose get-off went unanswered says she may still be seated", async () => {
-  const world = seaHarness({ loadedTo: 12 });
-  using _timers = world.clock.install();
-  world.bot.once("mount", () => world.server.stop());
-  const result = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 40, { getOffWallMs: 200 }));
-  assert.match(result.detail, /may still be seated/u);
 });
 
 test("a boat she could not get into is left with no listener behind and taken back", async () => {
@@ -199,19 +194,6 @@ test("a seat the server gives after the wait gave up: the boat she sits in is ta
   assert.ok(ticks >= 10, `${ticks} physics ticks in a second after the boat broke`);
   assert.equal(carriesBoat(world.bot), true);
   stopWatch();
-});
-
-// B4: with a second boat carried nothing broke the boat she left, and the server kept her seated while her client walked.
-test("the next movement after a stay at sea with two boats carried gets her off and takes back the boat she left", async () => {
-  const world = seaHarness({ boatsCarried: 2 });
-  using _timers = world.clock.install();
-  await settled(world, crossByBoat(world.bot, AHEAD, undefined, 10));
-  const boat = theBoat(world);
-  assert.equal(boatsCarried(world), 1, "one of the two boats is the one she sits in");
-  await settled(world, prepareBotForMovement(world.bot, navigation));
-  assert.deepEqual(hitBoats(world), [boat.id], "the boat she left is hit until it breaks, though another boat is carried");
-  assert.equal(boatsCarried(world), 2);
-  assert.equal(world.bot.vehicle, null);
 });
 
 describe("a seat the server still holds", () => {

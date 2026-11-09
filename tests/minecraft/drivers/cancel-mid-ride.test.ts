@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenario, scenarioDefinitionSchema } from "mine-labs";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../../src/test-support/fake-bot/index.ts";
+import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import { arenaFrame } from "../arena/frame.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
 import { run } from "./cancel-mid-ride.ts";
@@ -17,17 +17,21 @@ const BOAT_ID = 100;
 
 /** A bot seated in a boat at world x 80: past the arena's cancel line (30) but not the lane's (94). */
 function seatedBot() {
-  const { bot } = createFakeBot({
+  const harness = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }),
     position: new Vec3(80, -60, 512.5),
     entities: { [BOAT_ID]: { name: "oak_boat", position: new Vec3(80, -60, 512.5) } },
   });
+  const { bot } = harness;
   bot.entity.vehicle = bot.entities[BOAT_ID]!;
-  return bot;
+  return harness;
 }
 
 test("the cancel waits for the bot to pass cancelPastX in the lane's frame", async () => {
-  const bot = seatedBot();
-  const crossesLine = setTimeout(() => bot.entity.position.set(95, -60, 512.5), 250);
+  const harness = seatedBot();
+  const { bot, clock } = harness;
+  using _clock = clock.install();
+  clock.after(250, () => bot.entity.position.set(95, -60, 512.5));
   let xAtCancel: number | null = null;
   const context = scenarioTestContext({
     scenario: scenarioDefinitionSchema.parse({ params: PARAMS, goal: { kind: "completion" } }),
@@ -42,16 +46,17 @@ test("the cancel waits for the bot to pass cancelPastX in the lane's frame", asy
       return new Promise(() => {});
     },
   });
-  await run(context).then(
+  await clock.settle(run(context).then(
     () => assert.fail("the driver ran on past the cancel"),
     (cause: Error) => assert.equal(cause.message, "cancel seen"),
-  );
-  clearTimeout(crossesLine);
+  ), 10_000);
   assert.ok(xAtCancel !== null && xAtCancel >= 94, `cancelled at x ${xAtCancel}, before the lane's line at 94`);
 });
 
 test("leaving the boat short of the far bank is read in the lane's frame", async () => {
-  const bot = seatedBot();
+  const harness = seatedBot();
+  const { bot } = harness;
+  using _clock = harness.clock.install();
   bot.entity.position.set(95, -60, 512.5);
   let cancelled: (() => void) | undefined;
   let rides = 0;
@@ -76,7 +81,7 @@ test("leaving the boat short of the far bank is read in the lane's frame", async
       return { action, durationMs: 300, result: { status: "succeeded" }, summary };
     },
   });
-  const completion = await run(context);
+  const completion = await harness.clock.settle(run(context), 10_000);
   assert.equal(completion.status, "failed");
   assert.match(completion.detail ?? "", /the bot left the boat before the far bank/);
 });
@@ -87,7 +92,7 @@ test("the boat-ride scenario's own params are the ones the driver reads, and its
   const asked: { action: string; input: Record<string, unknown> }[] = [];
   const context = scenarioTestContext({
     scenario: scenarioDefinitionSchema.parse(scenario),
-    bot: seatedBot(),
+    bot: seatedBot().bot,
     call: async (action, input) => {
       asked.push({ action, input });
       // The navigate rides on; the bot already sits past the line, so the driver's next call is the cancel, which ends the run here.

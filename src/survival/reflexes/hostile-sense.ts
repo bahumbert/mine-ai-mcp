@@ -14,6 +14,31 @@ import { OFF_HAND_SLOT, shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, type HostileScene } from "./hostile-scene.js";
 import { isBoatEntity } from "../../actions/navigate/boat-entities.js";
 import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
+import { atSeaFrom } from "../../actions/navigate/boat-at-sea.js";
+
+const seatObservations = new WeakMap<HostileScene, {
+  readonly seat: ReturnType<typeof currentVehicle>;
+  readonly response: HostileScene["activeResponse"];
+  readonly range: number;
+  readonly cell: string;
+  readonly atSea: boolean;
+}>();
+
+/** Shore scans run once per observed seat cell/response, never on foot or repeatedly at the same seat cell. */
+function seatedOutAtSea(scene: HostileScene): boolean {
+  const seat = currentVehicle(scene.bot);
+  if (!seat || !isBoatEntity(seat)) {
+    seatObservations.delete(scene);
+    return false;
+  }
+  const range = scene.policy.combat.evade_safe_range;
+  const cell = seat.position.floored().toString();
+  const previous = seatObservations.get(scene);
+  if (previous?.seat === seat && previous.cell === cell && previous.response === scene.activeResponse && previous.range === range) return previous.atSea;
+  const atSea = atSeaFrom(scene.bot, seat.position, range);
+  seatObservations.set(scene, { seat, response: scene.activeResponse, range, cell, atSea });
+  return atSea;
+}
 
 export type ShieldPreparation = { readonly kind: "prepare_shield" };
 
@@ -88,7 +113,7 @@ export function senseHostile(scene: HostileScene) {
   // Aggression without attribution can require avoidance; it is not an attack authorization.
   const observed = observeCombatDecision(bot, scene.context);
   // A seated withdrawal rows; it cannot promise a shelter or protected recovery (P4-06c T10b, 2026-11-09).
-  const facts = { ...observed, hideAllowed: observed.hideAllowed && !isBoatEntity(currentVehicle(bot)) };
+  const facts = { ...observed, hideAllowed: observed.hideAllowed && !seatedOutAtSea(scene) };
   const purpose = { kind: "automatic", quarry: policy.quarry } as const;
   const directive = decideCombatResponse(facts, purpose);
   const prepareShield = shieldWanted(scene);

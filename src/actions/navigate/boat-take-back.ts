@@ -76,7 +76,7 @@ export async function takeBoatBackReport(bot: Bot, boat: Entity | null, signal?:
   const hitting = await hitUntilGone(bot, boat, signal, options.maxHits);
   await pause(options.settleMs ?? 1500, signal);
   // Its item floated off before it was picked up: swum after, a few blocks of the water by the bank.
-  if (boatsCarried(bot) <= before && !signal?.aborted) {
+  if (boatsCarried(bot) <= before && !signal?.aborted && (boat === null || bot.entities[boat.id] === undefined)) {
     await swimToDrop(bot, (item) => isBoatItemName(item.name), DROP_REACH, () => boatsCarried(bot) > before || signal?.aborted === true, 15_000);
   }
   return { carried: boatsCarried(bot) > before, ...hitting };

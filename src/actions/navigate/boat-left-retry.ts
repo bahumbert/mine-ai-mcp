@@ -3,6 +3,17 @@ import type { Bot } from "mineflayer";
 import { leaveBoatSeat } from "../../session/prepare-body.js";
 import { boatUnderFeet, type CrossingResult } from "./boat-crossing.js";
 import { type BoatLeft, boatLeftAfter } from "./boat-take-back.js";
+import { navigateOutcomes, type NavigateResult } from "./contract.js";
+
+/** Refuse the onward route while preserving the retry's latest evidence and the current body position. */
+export function boatTakeBackBlocked(bot: Bot, stopped: NavigateResult, left: BoatLeft): NavigateResult {
+  const { x, y, z } = bot.entity.position;
+  return {
+    ...stopped, status: "failed",
+    error: navigateOutcomes.boatCrossingFailed(`[BOAT_TAKE_BACK_FAILED] ${left.reason}. Retry movement to take it back before routing`),
+    navigation: { ...stopped.navigation, end: { x, y, z }, boatLeft: left },
+  };
+}
 
 /**
  * The onward leg of a crossing routes from where she stands, and a boat the take-back left under her pins every route

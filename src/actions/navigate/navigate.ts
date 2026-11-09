@@ -24,7 +24,7 @@ import { asVec3, elapsedSince, monotonicNow, type Position3 } from "../../utils/
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
-import { boatLeftEvidence, retryBoatTakeBack } from "./boat-left-retry.js";
+import { boatLeftEvidence, boatTakeBackBlocked, retryBoatTakeBack } from "./boat-left-retry.js";
 import { describeBoatLeft } from "./boat-take-back.js";
 import { describeEscape } from "./describe-escape.js";
 import { startFromSeat } from "./seated-leg.js";
@@ -629,7 +629,7 @@ async function crossByBoatFromHere(
     return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
   }
   const boatLeft = await withoutWalkWindow(leg, () => retryBoatTakeBack(bot, crossed, context.signal));
-  const onward = await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
+  const onward = boatLeft?.cause === "still_there" ? boatTakeBackBlocked(bot, stopped, boatLeft) : await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
   const boatBlocks = crossed.blocks + (onward.navigation.boatBlocks ?? 0);
   return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks, ...boatLeftEvidence(onward.navigation.boatLeft, boatLeft) } };
 }
