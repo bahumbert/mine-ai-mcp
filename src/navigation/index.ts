@@ -41,6 +41,7 @@ export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/p
 export { createNavigationRuntime, createMovements } from "./runtime.js";
 export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
+export type { CoverExit } from "./cover-watch.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
 export { bucketAvailable, placeWaterInto, waterLandingSupply, waterableLanding } from "./mineflayer/water-landing.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";

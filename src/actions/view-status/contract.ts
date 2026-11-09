@@ -246,6 +246,10 @@ export const liveSituationSchema = z.strictObject({
     .describe(
       "Current physical session owner and action. The reply's survival field also reports the request, reserved owner, response phase, budgets, answered scopes, observations and the survival policy.",
     ),
+  navigation: z.strictObject({
+    reportOpenSky: z.boolean(),
+    coverExit: z.strictObject({ at: positionSchema, plannedAt: z.string(), reached: z.boolean() }).nullable(),
+  }).describe("Passive foreground route cover report. Reached means its step started; the route is unchanged."),
   clock: z.strictObject({
     timeOfDay: z.number().int(),
     phase: z

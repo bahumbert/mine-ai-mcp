@@ -31,7 +31,8 @@ import {
 import { observeIncidents } from "../diagnostics/incident-observer.js";
 import { INCIDENT_HISTORY_MS, type IncidentProvenance } from "../diagnostics/incident-recorder.js";
 import { ExecutionScope, observeExecution } from "../execution/execution-scope.js";
-import { createNavigationRuntime, RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
+import { RouteOutcomes, type NavigationRuntime } from "../navigation/index.js";
+import { createForegroundNavigation } from "./foreground-cover.js";
 import type { StepFieldProvider } from "../navigation/step-field.js";
 import { ActionRunner, type ActionRunnerStatus } from "../session/action-runner.js";
 import type { ReflexLimitKind } from "../session/abort.js";
@@ -421,7 +422,7 @@ export async function createMinecraftRuntime(
   const bodyIncidents: BodyIncidents = { physicsStalled: () => {}, reflexLimit: () => {} };
   const { runner, routes } = createBodyRunner(bot, () => navigation.routesAsEscape(), options, resources, bodyIncidents);
   const reflexes = resources.use(new ReflexDriver(bot, runner, { lifeSaving: { data: botData, navigate: (route) => navigation.navigate(route) } }));
-  const navigation = resources.use(createNavigationRuntime(bot, { routes }));
+  const navigation = createForegroundNavigation(bot, runner, routes, resources, () => combat.activeEngagement() !== null);
   installMinecraftKnowledge(botData, bot.registry);
   const frontier = resources.use(attachSessionFrontier(bot, botData));
   const perception = resources.use(new CombatPerception(bot));

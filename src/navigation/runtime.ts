@@ -8,6 +8,8 @@
  * This is not the caller-facing boundary — `src/navigation/index.ts` is.
  */
 import { EscapeHolds } from "./escape-holds.js";
+import { CoverWatch, coveredCellReader, type CoverExit } from "./cover-watch.js";
+import { readNavigationPolicy } from "../survival/state/navigation-policy.js";
 import type { RouteOutcomes } from "./route-outcomes.js";
 import { Diving } from "./diving.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
@@ -31,6 +33,10 @@ import type { NavigationEvent, TelemetrySink } from "./telemetry/index.js";
  * Route execution and in-place excavation share the same world and bot adapter.
  */
 export interface NavigationRuntime extends AsyncDisposable {
+  /** First planned open-sky destination of a foreground route; reporting never changes execution. */
+  coverExit(): CoverExit | null;
+  /** Called when a new foreground action is admitted, including actions without routes. */
+  clearCoverExit(): void;
   /** Remaining-air floor while navigation owns a verified dive, otherwise null. */
   diveBackstop?(): number | null;
   /** The world as navigation observes it, for callers that judge blocks the way routes do. */
@@ -67,6 +73,8 @@ export function createMovements(bot: Bot, options?: MineflayerMovementPolicyOpti
 }
 
 export interface NavigationRuntimeOptions {
+  /** Only the session's foreground owner may report; reflexes and yielding/takeover owners are excluded. */
+  readonly foreground?: () => boolean;
   /** How long a new route waits for a cancelled one to settle before abandoning it (default 5 s). */
   readonly releaseWaitMs?: number;
   /** Told how every route of this bot ended, so the session can tell a failed route from another failure (see `RouteOutcomes`). */
@@ -123,22 +131,13 @@ async function breakInPlaceWithinDive(
   return result;
 }
 
-/** Build the navigation runtime for one connected Mineflayer bot. */
-export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOptions = {}): NavigationRuntime {
-  const releaseWaitMs = options.releaseWaitMs ?? 5_000;
-  const { routes } = options;
-  // Built in dependency order: the world view, the bot port over it, and the
-  // navigator that looks at and acts on the bot through that port.
-  const world = new MineflayerWorldView(bot);
-  const diving = new Diving(bot, world, (state) => telemetry.emit({ kind: "dive", runId: "dive", atMs: Date.now(), state }));
-  let selectedTool: ((itemType: number | null) => void) | undefined;
-  const surface = mineflayerBotSurface(bot);
-  const releaseNetherVinePhysics = installNetherVinePhysics(surface);
-  const navigationBot = new MineflayerBot(surface, world, () => diving.owned, () => selectedTool);
-  const listeners = new Set<(event: NavigationEvent) => void>();
-  const telemetry: TelemetrySink = {
+/** Feed the dive and passive cover observers before publishing a committed route to external listeners. */
+function createNavigationTelemetry(bot: Bot, diving: Diving, cover: CoverWatch, foreground: (() => boolean) | undefined, listeners: Set<(event: NavigationEvent) => void>): TelemetrySink {
+  return {
     emit(event) {
       if (event.kind === "route_committed") diving.committed(event.plan);
+      // Diving.active spans dry requests too; owned means the committed route actually claimed a verified dive.
+      cover.observe(event, readNavigationPolicy(bot).report_open_sky && foreground?.() === true && !diving.owned);
       for (const listener of [...listeners]) listener(event);
     },
     error(runId, cause) {
@@ -147,6 +146,23 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
       );
     },
   };
+}
+
+/** Build the navigation runtime for one connected Mineflayer bot. */
+export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOptions = {}): NavigationRuntime {
+  const releaseWaitMs = options.releaseWaitMs ?? 5_000;
+  const { routes } = options;
+  // Built in dependency order: the world view, the bot port over it, and the
+  // navigator that looks at and acts on the bot through that port.
+  const world = new MineflayerWorldView(bot);
+  const cover = new CoverWatch(coveredCellReader(bot, world));
+  const diving = new Diving(bot, world, (state) => telemetry.emit({ kind: "dive", runId: "dive", atMs: Date.now(), state }));
+  let selectedTool: ((itemType: number | null) => void) | undefined;
+  const surface = mineflayerBotSurface(bot);
+  const releaseNetherVinePhysics = installNetherVinePhysics(surface);
+  const navigationBot = new MineflayerBot(surface, world, () => diving.owned, () => selectedTool);
+  const listeners = new Set<(event: NavigationEvent) => void>();
+  const telemetry = createNavigationTelemetry(bot, diving, cover, options.foreground, listeners);
   const navigator = createNavigator({ world, bot: navigationBot, telemetry });
 
     const activeRouteSlot: { current: Promise<NavigationResult> | null } = { current: null };
@@ -207,6 +223,8 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     navigateAroundDragonBreath({ bot, navigator, listeners, isClosed: () => closed, requireOpen, activeRoute: activeRouteSlot }, options);
   return {
     world,
+    coverExit: () => cover.snapshot(),
+    clearCoverExit: () => cover.clear(),
     diveBackstop: () => diving.backstop(),
     navigate: async (options) => {
       requireOpen();

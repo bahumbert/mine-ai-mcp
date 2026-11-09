@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import type { CoverExit } from "../../navigation/index.js";
 import { Vec3 } from "vec3";
 import {
   CARRIED_SLOT_COUNT,
@@ -32,7 +33,7 @@ import {
 import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../world/index.js";
 import { isItemEntity } from "../../world/item-pickup.js";
 import { observeMobAge } from "../../world/mob-age.js";
-import { currentVehicle } from "../navigate/vehicle-sync.js";
+import { observeVehicle } from "./vehicle.js";
 import { conditionFactsLine, observeConditionFacts } from "./condition-facts.js";
 import { defineAction } from "../action.js";
 import {
@@ -58,6 +59,7 @@ export function observeLiveSituation(
   bot: Bot,
   data: SqlBotData,
   observeActivity: ObserveStatusActivity,
+  observeCoverExit: () => CoverExit | null = () => null,
 ): LiveSituation {
   const snapshot = snapshotBotStatus(bot);
   updateBotStatus(data, snapshot);
@@ -83,6 +85,7 @@ export function observeLiveSituation(
       cause: lastDeath.cause,
     } : null,
     activity: observeActivity(),
+    navigation: { reportOpenSky: readNavigationPolicy(bot).report_open_sky, coverExit: observeCoverExit() },
     vitals: {
       health: round(snapshot.health, 1),
       food: snapshot.food,
@@ -165,12 +168,6 @@ function observeEndFight(bot: Bot): LiveSituation["endFight"] {
  * sources the policy reads, so a blocked movement names the thing to fix
  * rather than leaving the model to guess from an empty slot.
  */
-/** The vehicle the client view says she sits in; null on foot. */
-function observeVehicle(bot: Bot): LiveSituation["vehicle"] {
-  const vehicle = currentVehicle(bot);
-  return vehicle === null ? null : { name: vehicle.name ?? "unknown", id: vehicle.id };
-}
-
 function observeMobility(bot: Bot): LiveSituation["mobility"] {
   const navigation = readNavigationPolicy(bot);
   const { waterBuckets, dimensionHoldsWater } = waterLandingSupply(bot);
@@ -582,7 +579,7 @@ function groupCarried(
   return [...groups.values()].sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
 }
 
-export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity) {
+export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity, observeCoverExit: () => CoverExit | null = () => null) {
   return defineAction({
     name: VIEW_STATUS,
     description: VIEW_STATUS_DESCRIPTION,
@@ -592,6 +589,6 @@ export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivi
     execution: { kind: "information" },
     annotations: viewStatusAnnotations,
     parse: parseViewStatusRequest,
-    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity) }),
+    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity, observeCoverExit) }),
   });
 }

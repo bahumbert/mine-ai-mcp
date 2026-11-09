@@ -143,7 +143,7 @@ export function createActions(
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
-    createViewStatusAction(bot, botData, observeStatusActivity),
+    createViewStatusAction(bot, botData, observeStatusActivity, () => navigation.coverExit()),
   ];
   if (options.debugExecuteJavaScript) {
     actions.push(createDebugSetPathfinderTelemetryAction(navigation), createDebugExecuteJavaScriptAction(bot));

@@ -6,6 +6,112 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { DEFAULT_NAVIGATION_POLICY } from "../survival/policy/contract.js";
+import { setNavigationPolicyProvider } from "../survival/state/navigation-policy.js";
+
+test("a foreground cover report leaves the tunnel route unchanged, tracks its step after policy disable, and excludes policy-off/reflex runs", async () => {
+  const runs: { steps: unknown[]; at: Vec3 }[] = [];
+  for (const [enabled, foreground, disableAfterCommit] of [[false, true], [true, true], [true, false], [true, true, true]]) {
+    const clock = createFakeClock({ mode: "manual" });
+    // Full-cube stone and fake physics use the shared registry; the real tunnel is also run in report-open-sky.yaml.
+    const cells = Object.fromEntries(Array.from({ length: 4 }, (_, x) => [`${x},66,0`, "stone"]));
+    const { bot } = createFakeBot({ clock, cells, groundY: 63, simulatePhysics: true });
+    let reportEnabled = enabled!;
+    setNavigationPolicyProvider(bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, report_open_sky: reportEnabled }));
+    const navigation = createNavigationRuntime(bot, { foreground: () => foreground! });
+    const steps: unknown[] = [];
+    navigation.onEvent((event) => {
+      if (event.kind === "route_committed") {
+        steps.push(...event.plan.steps.map(({ to }) => to));
+        assert.deepEqual(navigation.coverExit()?.at ?? null, enabled && foreground ? { x: 4, y: 64, z: 0 } : null);
+        if (enabled && foreground) assert.equal(navigation.coverExit()?.reached, false);
+        if (disableAfterCommit) reportEnabled = false;
+      }
+      if (event.kind === "step_started" && enabled && foreground && navigation.coverExit()?.reached) {
+        assert.deepEqual(navigation.coverExit()?.at, { x: 4, y: 64, z: 0 });
+      }
+    });
+    try {
+      const result = await tickUntilSettled(clock, navigation.navigate({
+        movements: createMovementPolicy({ allowDigging: false, allowParkour: false }),
+        goal: exactBlockGoal({ x: 6, y: 64, z: 0 }),
+      }));
+      assert.equal(result.status, "completed", JSON.stringify(result));
+      assert.equal(navigation.coverExit()?.reached ?? null, enabled && foreground ? true : null);
+      runs.push({ steps, at: bot.entity.position.clone() });
+      navigation.clearCoverExit();
+      assert.equal(navigation.coverExit(), null, "a new foreground action clears the previous report");
+    } finally { await navigation.close(); }
+  }
+  assert.deepEqual(runs[1], runs[0]);
+  assert.deepEqual(runs[2], runs[0]);
+  assert.deepEqual(runs[3], runs[0]);
+});
+
+test("a later committed segment reports its own exit, and starting the exit step marks it reached", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const cells = Object.fromEntries(Array.from({ length: 4 }, (_, x) => [`${x},66,0`, "stone"]));
+  const { bot } = createFakeBot({ clock, cells, groundY: 63, simulatePhysics: true });
+  setNavigationPolicyProvider(bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, report_open_sky: true }));
+  const navigation = createNavigationRuntime(bot, { foreground: () => true });
+  let goal = exactBlockGoal({ x: 2, y: 64, z: 0 });
+  let commits = 0;
+  let exitId: string | undefined;
+  let reachedExit = false;
+  navigation.onEvent((event) => {
+    if (event.kind === "route_committed") {
+      commits++;
+      if (commits === 1) assert.equal(navigation.coverExit(), null);
+      else {
+        exitId = event.plan.steps.find(({ to }) => to.x === 4)?.id;
+        assert.deepEqual(navigation.coverExit()?.at, { x: 4, y: 64, z: 0 });
+        assert.equal(navigation.coverExit()?.reached, false);
+      }
+    } else if (event.kind === "step_started" && event.stepId === exitId) {
+      reachedExit = true;
+      assert.equal(navigation.coverExit()?.reached, true);
+    }
+  });
+  try {
+    const result = await tickUntilSettled(clock, navigation.navigate({
+      movements: createMovementPolicy({ allowDigging: false, allowParkour: false }),
+      goal: { resolve: (observation) => goal.resolve(observation) },
+      onArrival: () => {
+        if (commits > 1) return { kind: "completed" };
+        goal = exactBlockGoal({ x: 6, y: 64, z: 0 });
+        return { kind: "continue" };
+      },
+    }));
+    assert.equal(result.status, "completed");
+    assert.equal(commits, 2);
+    assert.equal(reachedExit, true);
+  } finally { await navigation.close(); }
+});
+
+test("a verified underwater dive never reports its open-sky destinations", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const cells: Record<string, string> = {};
+  for (let x = -2; x <= 8; x++) for (let z = -2; z <= 2; z++)
+    for (let y = 64; y <= 67; y++) cells[`${x},${y},${z}`] = "water";
+  // Air metadata mirrors contract air-supply-under-water; the existing dive fixture uses the same shared breath API.
+  const { bot, breath } = createFakeBot({ clock, cells, groundY: 63 });
+  breath.setAirSupply(300);
+  setNavigationPolicyProvider(bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, report_open_sky: true }));
+  const navigation = createNavigationRuntime(bot, { foreground: () => true });
+  const stop = new AbortController();
+  let committed = false;
+  navigation.onEvent((event) => {
+    if (event.kind !== "route_committed") return;
+    committed = true;
+    assert.notEqual(navigation.diveBackstop?.(), null);
+    assert.equal(navigation.coverExit(), null);
+    stop.abort("dive observed; execution covered by dive scenarios");
+  });
+  try {
+    await tickUntilSettled(clock, navigation.navigate({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 3, y: 64, z: 0 }), stopSignal: stop.signal }));
+    assert.equal(committed, true);
+  } finally { await tickUntilSettled(clock, navigation.close()); }
+});
 
 /** Moves the clock, and with it the fake physics ticks, until `work` settles. */
 async function tickUntilSettled<T>(clock: FakeClock, work: Promise<T>): Promise<T> {

@@ -15,15 +15,14 @@ function dropsClient(sources: readonly Record<string, unknown>[]): ToolClient {
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
-test("a planted drop source carries the seed the runtime names, a wild one has none", async () => {
-  const runtime = McpBotRuntime.over(dropsClient([{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }]));
-  const sources = (await runtime.blockSources(["wheat"]))["wheat"]!;
-  assert.deepEqual(sources, [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }]);
-});
-
-test("a source from a runtime that names no seed still parses", async () => {
-  const runtime = McpBotRuntime.over(dropsClient([{ block: "wheat", chance: 1, planted: true }]));
-  assert.deepEqual((await runtime.blockSources(["wheat"]))["wheat"], [{ block: "wheat", chance: 1, planted: true }]);
+test("drop sources preserve planted seeds, wild sources and replies from an older runtime", async () => {
+  for (const { sources, expected } of [
+    { sources: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }],
+      expected: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }] },
+    { sources: [{ block: "wheat", chance: 1, planted: true }], expected: [{ block: "wheat", chance: 1, planted: true }] },
+  ]) {
+    assert.deepEqual((await McpBotRuntime.over(dropsClient(sources)).blockSources(["wheat"]))["wheat"], expected);
+  }
 });
 
 function boxClient(kinds: Record<string, unknown>): ToolClient {
@@ -31,20 +30,21 @@ function boxClient(kinds: Record<string, unknown>): ToolClient {
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
-test("a box reply with hardness, fluid, tags and known parses into BlockArea.kinds", async () => {
-  const runtime = McpBotRuntime.over(boxClient({
-    dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
-    water: { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
-  }));
-  const area = await runtime.blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
-  assert.deepEqual(area.kinds.dirt, { tool: "shovel", solid: true, fullCube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true });
-  assert.deepEqual([area.kinds.water!.hardness, area.kinds.water!.fluid, area.kinds.water!.known], [null, true, true]);
-});
-
-test("a box reply of an older runtime, without the new kind fields, still parses", async () => {
-  const runtime = McpBotRuntime.over(boxClient({ dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null } }));
-  const area = await runtime.blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
-  assert.deepEqual(area.kinds.dirt, { tool: "shovel", solid: true, fullCube: true, harvest: null });
+test("box kinds preserve new runtime facts and the exact shape of older replies", async () => {
+  for (const { kinds, expected } of [
+    { kinds: {
+      dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
+      water: { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
+    }, expected: {
+      dirt: { tool: "shovel", solid: true, fullCube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
+      water: { tool: null, solid: false, fullCube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
+    } },
+    { kinds: { dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null } },
+      expected: { dirt: { tool: "shovel", solid: true, fullCube: true, harvest: null } } },
+  ]) {
+    const area = await McpBotRuntime.over(boxClient(kinds)).blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
+    assert.deepEqual(area.kinds, expected);
+  }
 });
 
 /** A client that records the `view_blocks` input and answers with `cells` (the order the runtime reads them in). */
@@ -119,16 +119,20 @@ test("a call that met a lost session reconnects and fails as a restarted body; t
   assert.equal(fresh.calls, 1);
 });
 
-test("a reconnect that fails throws the original error, and the next call tries again", async () => {
-  let attempts = 0;
-  const fresh = sessionClient([async () => dropsReply()]);
-  const runtime = McpBotRuntime.over(sessionClient([lost]), async () => {
-    if (++attempts === 1) throw new Error("connection refused");
-    return fresh;
-  });
-  await assert.rejects(runtime.blockSources(["wheat"]), /404 session not found/u);
-  assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
-  assert.equal(attempts, 2);
+test("a failed reconnect preserves the original session or connection error, then retries on the next call", async () => {
+  for (const { error, expected } of [
+    { error: new Error("Streamable HTTP error: 404 session not found"), expected: /404 session not found/u },
+    { error: new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) }), expected: /fetch failed/u },
+  ]) {
+    let attempts = 0;
+    const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(error)]), async () => {
+      if (++attempts === 1) throw new Error("connection refused");
+      return sessionClient([async () => dropsReply()]);
+    });
+    await assert.rejects(runtime.blockSources(["wheat"]), expected);
+    assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
+    assert.equal(attempts, 2);
+  }
 });
 
 test("a reply that names an unresponsive or exited runtime is a lost body too", async () => {
@@ -166,17 +170,6 @@ test("only a gone session, a lost connection or a killed runtime reconnects; oth
     assert.equal(message, error.message);
     assert.equal(reopened, 0, `${error.message} must not reopen a live session`);
   }
-});
-
-test("a refused connection whose reconnect also fails throws the original error, and the next call retries", async () => {
-  const refused = new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) });
-  let attempts = 0;
-  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(refused)]), async () => {
-    if (++attempts === 1) throw new Error("still down");
-    return sessionClient([async () => dropsReply()]);
-  });
-  await assert.rejects(runtime.blockSources(["wheat"]), /fetch failed/u);
-  assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
 });
 
 test("a rationale longer than the contract's 200 characters is cut before it is sent", async () => {
@@ -324,6 +317,11 @@ function statusClient(situation: Record<string, unknown>): ToolClient {
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
+test("status rejects malformed optional cover reports from a newer runtime", async () => {
+  const at = { x: 4, y: 64, z: 0 };
+  await assert.rejects(McpBotRuntime.over(statusClient({ navigation: { coverExit: { at, plannedAt: "now", reached: "yes" } } })).status());
+});
+
 test("status reads the condition facts", async () => {
   const worn = [{ slot: "head", item: "iron_helmet" }, { slot: "torso", item: null }];
   const carried = [{ item: "iron_chestplate", count: 2 }];
@@ -337,6 +335,7 @@ test("status reads the condition facts", async () => {
 
 test("an older view_status parses; nullable condition facts stay unknown", async () => {
   const older = await McpBotRuntime.over(statusClient({})).status();
+  assert.equal(older.position.y, 64);
   for (const field of ["saturation", "armourPoints", "armourToughness", "burn", "armour", "light", "combat", "respawn"]) assert.equal(field in older, false, field);
   const unknown = await McpBotRuntime.over(statusClient({ vitals: { health: 20, food: 20, armour: null, armourToughness: null, burn: null }, armourWorn: null, armourCarried: null, light: null, combat: null, respawn: null })).status();
   assert.equal(unknown.armourPoints, null);

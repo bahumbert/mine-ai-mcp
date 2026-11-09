@@ -260,7 +260,7 @@ export function coverOver(area: BlockArea, at: Position): boolean {
   return false;
 }
 
-/** Reads the column over her head and tells {@link coverOver}. */
+/** Reads the column over her head and tells {@link coverOver}; same solid/non-leaf rule as src/world/cover.ts (build-height read: P4-18 T1a). */
 export async function underCover(runtime: BotRuntime, at: Position): Promise<boolean> {
   const x = Math.floor(at.x);
   const z = Math.floor(at.z);

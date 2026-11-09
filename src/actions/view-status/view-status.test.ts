@@ -7,6 +7,18 @@ import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fix
 import { emitFakeTags } from "../../test-support/fake-bot/fake-bot-tags.js";
 import { watchServerTags } from "../../world/server-tags.js";
 import { recordFireContact } from "../../survival/perception/burn.js";
+import { DEFAULT_NAVIGATION_POLICY } from "../../survival/policy/contract.js";
+import { setNavigationPolicyProvider } from "../../survival/state/navigation-policy.js";
+
+test("status exposes open-sky policy and the planned or reached exit, with a null default", (t) => {
+  const bot = liveBot();
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  assert.deepEqual(observeLiveSituation(bot, data, idleActivity).navigation, { reportOpenSky: false, coverExit: null });
+  setNavigationPolicyProvider(bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, report_open_sky: true }));
+  const coverExit = { at: { x: 4, y: 64, z: 0 }, plannedAt: "2026-11-09T00:00:00.000Z", reached: true };
+  const situation = observeLiveSituation(bot, data, idleActivity, () => coverExit);
+  assert.deepEqual(viewStatusResultSchema.parse({ status: "succeeded", situation }).situation.navigation, { reportOpenSky: true, coverExit });
+});
 
 test("status reports the burn estimate only while burning", (t) => {
   const bot = liveBot();
