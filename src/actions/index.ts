@@ -70,6 +70,7 @@ export interface ActionDependencies {
   readonly strongholdEyeFlights: StrongholdEyeFlights;
   /** The one combat controller; the hunt fights through it and the hostile reflex reads its state. */
   readonly combat: CombatController;
+  readonly combatContext?: import("../survival/control/combat/context.js").HostileContext;
   readonly cancelForegroundAction: (reason: string) => ForegroundCancellation;
   readonly observeStatusActivity: ObserveStatusActivity;
   /** The bot's protected regions (ADR-012); routes read them through the provider, these tools write them. */
@@ -89,6 +90,7 @@ export function createActions(
     navigation,
     strongholdEyeFlights,
     combat,
+    combatContext,
     cancelForegroundAction,
     observeStatusActivity,
     protectedRegions,
@@ -143,7 +145,7 @@ export function createActions(
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
-    createViewStatusAction(bot, botData, observeStatusActivity, () => navigation.coverExit()),
+    createViewStatusAction(bot, botData, observeStatusActivity, () => navigation.coverExit(), () => combat.policy.effective.combat.fight_margin, combatContext),
   ];
   if (options.debugExecuteJavaScript) {
     actions.push(createDebugSetPathfinderTelemetryAction(navigation), createDebugExecuteJavaScriptAction(bot));

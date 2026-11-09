@@ -16,7 +16,10 @@ import {
   preferredScaffoldItem,
 } from "../../navigation/mineflayer/movement-policy.js";
 import { waterLandingSupply } from "../../navigation/mineflayer/water-landing.js";
-import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies, observeHostileContact } from "../../survival/perception/combat/threats.js";
+import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies } from "../../survival/perception/combat/threats.js";
+import { statusThreatLines, statusThreats } from "./status-threat.js";
+import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
+import type { HostileContext } from "../../survival/control/combat/context.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
 import { isBurning } from "../../survival/perception/body.js";
 import { burnLeft } from "../../survival/perception/burn.js";
@@ -52,6 +55,7 @@ import {
 } from "./contract.js";
 
 type LiveNearby = LiveSituation["nearby"];
+const EMPTY_COMBAT_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() };
 export type ObserveStatusActivity = () => LiveSituation["activity"];
 
 /** Refresh the queryable status rows, then report the same facts plus what is loaded nearby. */
@@ -60,6 +64,8 @@ export function observeLiveSituation(
   data: SqlBotData,
   observeActivity: ObserveStatusActivity,
   observeCoverExit: () => CoverExit | null = () => null,
+  fightMargin: () => number = () => DEFAULT_COMBAT_POLICY.fight_margin,
+  combatContext: HostileContext = EMPTY_COMBAT_CONTEXT,
 ): LiveSituation {
   const snapshot = snapshotBotStatus(bot);
   updateBotStatus(data, snapshot);
@@ -125,7 +131,7 @@ export function observeLiveSituation(
     },
     tools: snapshot.tools!,
     item_families: { ...snapshot.itemFamilies!, overrides: [...snapshot.itemFamilies!.overrides] },
-    nearby: observeNearby(bot),
+    nearby: observeNearby(bot, fightMargin(), combatContext),
     endFight: observeEndFight(bot),
   };
 }
@@ -247,16 +253,12 @@ function carriedFoods(bot: Bot, carried: readonly InventoryStack[]): LiveSituati
     .sort((left, right) => right.points - left.points || right.saturation - left.saturation || left.name.localeCompare(right.name));
 }
 
-function observeNearby(bot: Bot): LiveNearby {
+function observeNearby(bot: Bot, fightMargin: number, context: HostileContext): LiveNearby {
   const origin = bot.entity?.position ?? { x: 0, y: 0, z: 0 };
   return {
     rangeBlocks: HOSTILE_OBSERVATION_RANGE,
     players: observePlayers(bot, origin),
-    hostiles: observeHostileContact(bot).map((threat) => ({
-      name: threat.name,
-      distance: round(threat.distance, 1),
-      position: roundedPosition(threat.position),
-    })),
+    ...statusThreats(bot, fightMargin, context),
     mobs: observeMobs(bot, origin),
     droppedItems: observeDroppedItems(bot, origin),
   };
@@ -425,13 +427,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
             .join("; ")
         : "none online"
     }`,
-    `- Hostiles: ${
-      nearby.hostiles.length > 0
-        ? nearby.hostiles
-            .map((hostile) => `${hostile.name} ${hostile.distance} blocks away at ${at(hostile.position)}`)
-            .join("; ")
-        : "none"
-    }`,
+    ...statusThreatLines(nearby),
     `- Loaded mobs (every loaded chunk, any distance):${nearby.mobs.length > 0 ? "" : " none"}`,
     ...nearby.mobs.map(
       (mob) =>
@@ -579,7 +575,7 @@ function groupCarried(
   return [...groups.values()].sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
 }
 
-export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity, observeCoverExit: () => CoverExit | null = () => null) {
+export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity, observeCoverExit: () => CoverExit | null = () => null, fightMargin: () => number = () => DEFAULT_COMBAT_POLICY.fight_margin, combatContext: HostileContext = EMPTY_COMBAT_CONTEXT) {
   return defineAction({
     name: VIEW_STATUS,
     description: VIEW_STATUS_DESCRIPTION,
@@ -589,6 +585,6 @@ export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivi
     execution: { kind: "information" },
     annotations: viewStatusAnnotations,
     parse: parseViewStatusRequest,
-    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity, observeCoverExit) }),
+    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity, observeCoverExit, fightMargin, combatContext) }),
   });
 }

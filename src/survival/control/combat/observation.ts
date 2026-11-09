@@ -30,7 +30,7 @@ function inContact(threat: HostileThreat, context: HostileContext): boolean {
 }
 
 /** Combine one contact's live body, carried item and this connection's own observations. */
-function assessmentContact(bot: Bot, contact: CombatContact, context: HostileContext,
+function assessmentContact(bot: Bot, contact: Pick<CombatContact, "id" | "name" | "distance" | "inContact">, context: HostileContext,
   fuses: ReadonlyMap<number, number | undefined>): AssessmentInput["contacts"][number] {
   const entity = bot.entities[contact.id];
   const health = entity ? entityMetadata(bot, entity, "health") : undefined;
@@ -48,7 +48,7 @@ function assessmentContact(bot: Bot, contact: CombatContact, context: HostileCon
 }
 
 /** Build the pure assessment from a single live reading of defence, equipment and contact facts. */
-export function assessContacts(bot: Bot, contacts: readonly CombatContact[], context: HostileContext): ThreatAssessment {
+export function assessContacts(bot: Bot, contacts: readonly Pick<CombatContact, "id" | "name" | "distance" | "inContact">[], context: HostileContext): ThreatAssessment {
   const fuses = new Map(context.perception?.creeperClearance.observe(context.perception.tick, context.resolvedIds)
     .map((fuse) => [fuse.id, fuse.fuseRemainingTicks]));
   return assessThreats({

@@ -139,6 +139,13 @@ species with its count, whether it is in the game's hostile category (the one `c
 a shield), and the nearest one's entity ID, distance and position, at any distance. Defined in
 [src/actions/view-status/contract.ts](../../src/actions/view-status/contract.ts).
 
+Each nearby hostile's `threat` gives estimated damage per hit, hits to kill the bot and hits the bot needs,
+and whether it explodes. `nearby.fight` is null with no nearby hostiles; otherwise it reports the best carried
+melee weapon, margin, estimated health lost and ticks to clear damaging contacts, ticks to die, current
+`fightMargin`, effective health including absorption, and the combat data source. A null margin or damage
+means it could not be priced, not that a threat is safe. The totals include damaging contacts within contact
+range or observed attacking, not explosives; observed hits override attribute damage when available.
+
 Every inventory stack carries `families` (sorted, empty when none): the item's
 kinds such as `sword`, `pickaxe`, `helmet`, `food` or `bed`, taken from the
 server's tags, else the tags shipped for the bot's version, plus the vanilla

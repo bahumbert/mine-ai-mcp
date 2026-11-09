@@ -9,6 +9,40 @@ import { watchServerTags } from "../../world/server-tags.js";
 import { recordFireContact } from "../../survival/perception/burn.js";
 import { DEFAULT_NAVIGATION_POLICY } from "../../survival/policy/contract.js";
 import { setNavigationPolicyProvider } from "../../survival/state/navigation-policy.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { Vec3 } from "vec3";
+import { CombatPerception } from "../../survival/perception/combat/observations.js";
+
+test("status uses observed hit damage and does not price a distant hostile", (t) => {
+  const { bot, combat } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  using perception = new CombatPerception(bot);
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  combat.hurtBot(4, 2);
+  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds, unreachableIds: new Set<number>() };
+  const situation = observeLiveSituation(bot, data, idleActivity, () => null, () => 1.5, context);
+  assert.equal(situation.nearby.hostiles[0]!.threat.damagePerHit, 4);
+  bot.entities[2]!.position = new Vec3(12.5, 64, 0.5);
+  const distant = observeLiveSituation(bot, data, idleActivity);
+  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation: distant }), /clearing damaging contacts/);
+});
+
+test("status assesses nearby hostiles and reports the fight estimate", (t) => {
+  const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  const situation = observeLiveSituation(bot, data, idleActivity);
+  assert.deepEqual(situation.nearby.hostiles[0]!.threat, { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 22, explodes: false });
+  assert.ok(Math.abs(situation.nearby.fight!.margin! - 0.606) < 0.001);
+  assert.equal(situation.nearby.fight!.fightMargin, 1.5);
+  assert.equal(situation.nearby.fight!.weapon, null);
+  assert.equal(observeLiveSituation(bot, data, idleActivity, () => null, () => 2).nearby.fight!.fightMargin, 2);
+  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /zombie x1: you need 22 hits each \(bare hands\), clearing damaging contacts in contact range or observed attacking costs ~33 of 20 health; margin 0\.6 < 1\.5/);
+  bot.entities[2]!.position = new Vec3(40, 64, 0.5);
+  assert.equal(observeLiveSituation(bot, data, idleActivity).nearby.fight, null);
+  const creeper = createFakeBot({ entities: { 3: { name: "creeper", position: new Vec3(4.5, 64, 0.5) } } }).bot;
+  const threat = observeLiveSituation(creeper, data, idleActivity).nearby.hostiles[0]!.threat;
+  assert.equal(threat.explodes, true);
+  assert.equal(threat.damagePerHit, null);
+});
 
 test("status exposes open-sky policy and the planned or reached exit, with a null default", (t) => {
   const bot = liveBot();
@@ -119,7 +153,9 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
       { username: "Faraway", distance: null, position: null },
       { username: "Scout", distance: 5.3, position: { x: -12, y: 99, z: 14 } },
     ],
-    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 } }],
+    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 }, threat: { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 7, explodes: false } }],
+    fight: { effectiveHealth: 18.08, fightMargin: 1.5, healthLostToClear: 17.5, margin: 18.08 / 17.5,
+      source: { measured: true, version: "1.21.4" }, ticksToClear: 7 * (20 / 1.2), ticksToDie: 18.08 / (3 / 20), weapon: "stone_pickaxe" },
     mobs: [
       {
         name: "cow",
