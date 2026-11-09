@@ -1,8 +1,14 @@
 import type { Bot } from "mineflayer";
 import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
+import type { Vec3 } from "vec3";
 
 type Entity = Parameters<Bot["attack"]>[0];
+
+/** A server-observed reversal, shared by standing and seated projectile defence. */
+export function observedFireballReversal(target: Entity, incoming: Vec3): boolean {
+  return target.velocity.dot(incoming) < 0;
+}
 
 /** Vanilla 1.21.4 AbstractHurtingProjectile.applyInertia, before each air movement. */
 function projectedPosition(target: Entity, ticks: number) {
@@ -30,7 +36,7 @@ export async function deflectFireball(bot: Bot, targetId: number, signal: AbortS
   bot.deactivateItem();
   while (target.isValid && bot.health > 0) {
     signal.throwIfAborted();
-    if (target.velocity.dot(incoming) < 0) {
+    if (observedFireballReversal(target, incoming)) {
       return {
         kind: "reflected" as const,
         attacks,

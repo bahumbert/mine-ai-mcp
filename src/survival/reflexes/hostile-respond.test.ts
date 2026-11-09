@@ -11,10 +11,14 @@ import { CombatPerception } from "../perception/combat/observations.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { attachHostileReflex } from "./hostile.js";
 import { HOSTILE_TAKE_BACK_HITS, respondToHostile } from "./hostile-respond.js";
+import { mountedSea, vehicleMoves, wroteAShift } from "../../actions/navigate/boat-fixtures.test.js";
+import type { HostileResponse } from "../policy/combat/response.js";
+import { respondToHostileFromBoat } from "./hostile-boat-response.js";
+import { observeCombatDecision } from "../control/combat/observation.js";
+import { decideCombatResponse } from "../policy/combat/decision.js";
 
 /** The real response and reflex services around one shared fake bot. */
-function responseFixture(occluded = false) {
-  const harness = createFakeBot({
+function responseFixture(occluded = false, harness = createFakeBot({
     clock: createFakeClock({ mode: "mocked" }),
     position: new Vec3(0.5, 64, 0.5),
     cells: occluded ? { "4,64,0": "stone", "4,65,0": "stone", "4,66,0": "stone" } : undefined,
@@ -22,7 +26,7 @@ function responseFixture(occluded = false) {
       7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
       8: { name: "zombie", position: new Vec3(occluded ? 10.5 : 100.5, 64, 0.5) },
     },
-  });
+  })) {
   const { bot, clock } = harness;
   const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
   const controller = engagingCombat(bot, unexpectedEngage);
@@ -92,6 +96,112 @@ test("a cancel during get-off ends it at once", async () => {
   assert.equal(bot._client.listenerCount("set_passengers"), clientListeners);
   assert.deepEqual(attackedIds(server), []);
   assert.equal(scene.activeResponse, null);
+});
+
+for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
+  test(`seated at sea ${kind} responds without taking the boat back`, async () => {
+    await using fixture = responseFixture(false, await mountedSea({
+      carries: ["iron_sword"], entities: { 8: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) } },
+    }));
+    using _clock = fixture.clock.install();
+    const { bot, clock, scene, combat, server } = fixture;
+    await fixture.driver[Symbol.asyncDispose]();
+    const threat = { id: 8, name: "zombie", position: { x: 2.5, y: 62.5, z: 3.5 }, distance: 2 };
+    const directive: HostileResponse = kind === "evade"
+      ? { kind, threats: [threat], reason: "hurt", safeRange: 36 }
+      : kind === "hide" ? { kind, threats: [threat], reason: "hurt" }
+      : { kind: "fight", targetId: 8, threats: [threat] };
+    const abort = new AbortController();
+    if (kind === "death") clock.after(200, () => combat.setHealth(0));
+    else if (kind === "abort") clock.after(200, () => abort.abort(new Error("cancel seated equip")));
+    else clock.after(1_500, () => combat.kill(8));
+    const settlement = await clock.settle(respondToHostile(scene, directive, abort.signal), 30_000);
+    assert.equal(settlement.kind, kind === "death" ? "bot_died" : kind === "abort" ? "cancelled" : "completed");
+    assert.equal(attackedIds(server).includes(7), false, "the seat is never attacked");
+    assert.equal(wroteAShift(fixture), false, "the hostile response never shifts off the seat");
+    if (kind === "fight") {
+      assert.ok(attackedIds(server).includes(8));
+      assert.equal(bot.vehicle?.id, 7);
+      assert.ok(settlement.evidence.attacks > 0);
+    }
+    if (kind === "evade" || kind === "hide") {
+      assert.deepEqual(attackedIds(server), [], "evade and hide row only, even with a mob in reach");
+      assert.ok(vehicleMoves(fixture).length > 0);
+    }
+    assert.equal(scene.activeResponse, null);
+  });
+}
+
+test("near shore the prepare path runs", async () => {
+  await using fixture = responseFixture(false, await mountedSea({ landUntilZ: 2 }));
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const settlement = await fixture.clock.settle(respondToHostile(fixture.scene,
+    { kind: "fight", targetId: 8, threats: [] }, new AbortController().signal), 30_000);
+  assert.equal(fixture.bot.vehicle, null);
+  assert.ok(attackedIds(fixture.server).includes(7));
+  assert.notEqual(settlement.kind, "cancelled");
+});
+
+test("a seated fight attacks only the selected authorized target among avoidance contacts", async () => {
+  await using fixture = responseFixture(false, await mountedSea({ carries: ["iron_sword"], entities: {
+    8: { name: "piglin", position: new Vec3(1.5, 62.5, 3.5) },
+    9: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) },
+  } }));
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const flags = fixture.bot.registry.entitiesByName.piglin!.metadataKeys?.indexOf("mob_flags") ?? -1;
+  assert.ok(flags >= 0);
+  Reflect.set(fixture.bot.entities[8]!.metadata, flags, 4);
+  const directive = decideCombatResponse(observeCombatDecision(fixture.bot, fixture.scene.context), { kind: "automatic", quarry: ["zombie"] });
+  assert.equal(directive.kind, "fight");
+  if (directive.kind !== "fight") throw new Error("fixture did not select a fight");
+  assert.equal(directive.targetId, 9);
+  fixture.clock.after(1_000, () => { fixture.combat.kill(8); fixture.combat.kill(9); });
+  await fixture.clock.settle(respondToHostileFromBoat(fixture.scene, directive, 20, new AbortController().signal), 30_000);
+  assert.deepEqual([...new Set(attackedIds(fixture.server))], [9]);
+});
+
+test("a seated deflection reports the observed projectile reversal", async () => {
+  await using fixture = responseFixture(false, await mountedSea());
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const ball = fixture.combat.launchFireball(new Vec3(2.5, 64, 3.5), new Vec3(-0.1, 0, 0));
+  const incoming = ball.velocity.clone();
+  let reversed = false;
+  fixture.bot.on("entityMoved", (entity) => { if (entity.id === ball.id && entity.velocity.dot(incoming) < 0) reversed = true; });
+  const settlement = await fixture.clock.settle(respondToHostile(fixture.scene, { kind: "deflect", targetId: ball.id,
+    threats: [{ id: ball.id, name: "fireball", position: ball.position, distance: 2 }], reason: "incoming_fireball" }, new AbortController().signal), 30_000);
+  assert.equal(reversed, true);
+  assert.equal(settlement.physical?.result.kind, "reflected");
+});
+
+test("seated settlement retains strikes, deaths and explosions across completion, cancel and death", async () => {
+  for (const end of ["completed", "cancelled", "bot_died"] as const) {
+    await using fixture = responseFixture(false, await mountedSea({ carries: ["iron_sword"], entities: {
+      8: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) },
+      9: { name: "zombie", position: new Vec3(3.5, 62.5, 3.5) },
+    } }));
+    using _clock = fixture.clock.install();
+    await fixture.driver[Symbol.asyncDispose]();
+    const abort = new AbortController();
+    const before = fixture.bot._client.listenerCount("explosion");
+    fixture.clock.after(900, () => { fixture.combat.explode(new Vec3(10.5, 62.5, 3.5)); fixture.combat.kill(9); });
+    fixture.clock.after(1_100, () => {
+      if (end === "completed") fixture.combat.kill(8);
+      else if (end === "cancelled") abort.abort(new Error("cancel after strike"));
+      else { fixture.combat.setHealth(0); abort.abort(new Error("cancel at death")); }
+    });
+    const threats = [8, 9].map((id) => ({ id, name: "zombie", position: fixture.bot.entities[id]!.position, distance: 2 }));
+    const settlement = await fixture.clock.settle(respondToHostile(fixture.scene, { kind: "fight", targetId: 8, threats }, abort.signal), 30_000);
+    assert.equal(settlement.kind, end);
+    assert.ok(attackedIds(fixture.server).length > 0);
+    assert.equal(settlement.evidence.attacks, attackedIds(fixture.server).length);
+    assert.ok(settlement.evidence.killedTargetIds.includes(9));
+    assert.equal(settlement.evidence.explosions, 1);
+    assert.deepEqual(settlement.evidence.weaponsUsed, ["iron_sword"]);
+    assert.equal(fixture.bot._client.listenerCount("explosion"), before);
+  }
 });
 
 test("near shore the take-back stops at HOSTILE_TAKE_BACK_HITS hits", async () => {

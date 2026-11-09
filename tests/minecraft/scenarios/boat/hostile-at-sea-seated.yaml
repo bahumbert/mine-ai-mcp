@@ -1,0 +1,37 @@
+template: ../../templates/flat-single-action.yaml
+name: hostile-at-sea-seated
+tags: [regression]
+description: >-
+  A zombie riding beside a seated actor at sea hurts the actor. Every response sample keeps the same boat,
+  the actor strikes or rows, and the next navigate resumes the crossing to dry land.
+world:
+  time: midnight
+  gamerules: { naturalRegeneration: false }
+geometry:
+  - fill: { block: water, from: [1, -63, -45], to: [100, -61, 45] }
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory: [{ item: oak_boat, count: 1 }, { item: iron_sword, count: 1 }]
+setup:
+  - "difficulty normal"
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  - 'execute as @a[name=Actor,x=39,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle unless entity @s[tag=hurtOnce] at @s run summon oak_boat ~2 ~ ~ {Passengers:[{id:"minecraft:zombie",Tags:["attacker"],NoAI:1b,Silent:1b,PersistenceRequired:1b}]}'
+  - "execute as @a[name=Actor,x=39,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle unless entity @s[tag=hurtOnce] on passengers run damage @s 1 minecraft:mob_attack by @e[tag=attacker,limit=1]"
+  - "execute as @a[name=Actor,x=39,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle run tag @s add hurtOnce"
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hostile-boat.ts]
+params:
+  approach: { x: 40, y: -61, z: 0 }
+  target: { x: 39, y: -60, z: 50 }
+  atSea: true
+  # First 10 hurt-to-effect ms: 985, 982, 951, 985, 1032, 976, 976, 950, 957, 956.
+  # Maximum 1032 + 50% = 1548 ms (2026-11-09, /tmp/p4b-06c-t10b-timing).
+  responseWithinMs: 1548
+goal:
+  kind: all
+  timeout: 180
+  goals: [{ kind: completion, who: Actor }]

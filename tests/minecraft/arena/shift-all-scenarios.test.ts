@@ -14,6 +14,9 @@ const BOX = `x=${LANE.cell.minX},y=-64,z=${LANE.cell.minZ},dx=${LANE.cell.maxX -
 
 /** Files the shift refuses today, each with the reason the scenario gets a server of its own. */
 const REFUSED: ReadonlyMap<string, RegExp> = new Map([
+  // Passenger-gated hurts use execute on; the lane grammar cannot translate entity relations.
+  ["scenarios/boat/hostile-at-sea-seated.yaml", /execute on/u],
+  ["scenarios/boat/hostile-near-shore-take-back.yaml", /execute on/u],
   // Natural terrain at a fixed place (seeded default world): lanes are flat.
   ["scenarios/collect/cast-obsidian.yaml", /world\.type/u],
   ["scenarios/pathfinder/obsidian-lava-approach.yaml", /world\.type/u],

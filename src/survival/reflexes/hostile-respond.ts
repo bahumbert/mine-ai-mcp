@@ -7,6 +7,8 @@ import { completeResponse } from "../control/combat/settlement.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import { shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, messageOf, type HostileScene } from "./hostile-scene.js";
+import { seatedAtSea } from "../../actions/navigate/boat-seated-response.js";
+import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
 export const HOSTILE_TAKE_BACK_HITS = 15;
@@ -101,13 +103,24 @@ function diedDuring(
   };
 }
 
+/** Prepare only where leaving the boat is safe; deep water keeps the response in its seat. */
+async function executeResponse(scene: HostileScene, directive: HostileResponse, healthBefore: number, signal: AbortSignal) {
+  signal.throwIfAborted();
+  const { bot, policy, navigation, controller, context } = scene;
+  if (seatedAtSea(bot, policy.combat.evade_safe_range))
+    return respondToHostileFromBoat(scene, directive, healthBefore, signal);
+  await prepareBotForMovement(bot, navigation, signal, { takeBackHits: HOSTILE_TAKE_BACK_HITS });
+  signal.throwIfAborted();
+  return executeHostileResponse(bot, navigation, controller, directive, context, healthBefore, signal);
+}
+
 /** Execute one directed response with the body, and settle it: died, cancelled, or what the physical response did. */
 export async function respondToHostile(
   scene: HostileScene,
   directive: HostileResponse,
   signal: AbortSignal,
 ): Promise<HostileSettlement> {
-  const { bot, policy, navigation, controller, context, perception } = scene;
+  const { bot, policy, perception } = scene;
   const { resolvedIds, attackerIds } = perception;
   scene.activeResponse = directive.kind;
   policy.observeResponse({
@@ -128,10 +141,7 @@ export async function respondToHostile(
   try {
     let settlement: HostileSettlement;
     try {
-      signal.throwIfAborted();
-      await prepareBotForMovement(bot, navigation, signal, { takeBackHits: HOSTILE_TAKE_BACK_HITS });
-      signal.throwIfAborted();
-      const physical = await executeHostileResponse(bot, navigation, controller, directive, context, healthBefore, signal);
+      const physical = await executeResponse(scene, directive, healthBefore, signal);
       settlement = completeResponse(physical, signal);
     } catch (cause) {
       settlement = abandonedEvidence(bot, directive, healthBefore, cause, signal);

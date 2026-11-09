@@ -119,9 +119,9 @@ const SHORE_SEARCH = 12;
  * surface at most), beside surface water, around where the deep water starts; null when there is none near. From a
  * cliff the water is out of reach (live 2026-10-04: 19 blocks below).
  */
-export function launchSpot(bot: Bot, water: Vec3): Vec3 | null {
+export function launchSpot(bot: Bot, water: Vec3, searchRange = SHORE_SEARCH, acceptSpot: (spot: Vec3) => boolean = () => true): Vec3 | null {
   const surface = water.y;
-  for (let ring = 0; ring <= SHORE_SEARCH; ring += 1) {
+  for (let ring = 0; ring <= searchRange; ring += 1) {
     const spots: Vec3[] = [];
     for (let dx = -ring; dx <= ring; dx += 1) {
       for (let dz = -ring; dz <= ring; dz += 1) {
@@ -135,7 +135,8 @@ export function launchSpot(bot: Bot, water: Vec3): Vec3 | null {
           // would put there is refused (live 2026-10-04: no angle placed one, not even on land, from a grassy shore).
           if (below?.boundingBox !== "block" || !isAir(feet?.name) || !isAir(head?.name)) continue;
           const besideWater = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([ox, oz]) => waterSurface(bot, x + ox!, z + oz!, surface + 1) === surface);
-          if (besideWater) spots.push(new Vec3(x, ground + 1, z));
+          const spot = new Vec3(x, ground + 1, z);
+          if (besideWater && acceptSpot(spot)) spots.push(spot);
         }
       }
     }

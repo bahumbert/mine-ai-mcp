@@ -12,6 +12,8 @@ import type { ResponseDecision } from "../control/contract.js";
 import { decideHostileReflex } from "../policy/combat/reflex-decision.js";
 import { OFF_HAND_SLOT, shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, type HostileScene } from "./hostile-scene.js";
+import { isBoatEntity } from "../../actions/navigate/boat-entities.js";
+import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
 
 export type ShieldPreparation = { readonly kind: "prepare_shield" };
 
@@ -84,7 +86,9 @@ export function senseHostile(scene: HostileScene) {
   scene.transition(policy.refresh());
   observeEncounter(scene);
   // Aggression without attribution can require avoidance; it is not an attack authorization.
-  const facts = observeCombatDecision(bot, scene.context);
+  const observed = observeCombatDecision(bot, scene.context);
+  // A seated withdrawal rows; it cannot promise a shelter or protected recovery (P4-06c T10b, 2026-11-09).
+  const facts = { ...observed, hideAllowed: observed.hideAllowed && !isBoatEntity(currentVehicle(bot)) };
   const purpose = { kind: "automatic", quarry: policy.quarry } as const;
   const directive = decideCombatResponse(facts, purpose);
   const prepareShield = shieldWanted(scene);

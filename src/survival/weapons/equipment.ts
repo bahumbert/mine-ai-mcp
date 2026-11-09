@@ -2,7 +2,7 @@ export const BOW_DRAW_TICKS = 20;
 /** Combat equipment rules shared by the hostile policy and the engagement loop. */
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
-import type { Position3 } from "../../utils/index.js";
+import { raceSignal, type Position3 } from "../../utils/index.js";
 import { familyIndexOf, hasItemFamily, type FamilyIndex, type ItemFamily } from "../../world/item-families.js";
 import type { CombatPolicy } from "../policy/combat/contract.js";
 import { permittedCombatItems } from "../policy/combat/permissions.js";
@@ -159,13 +159,15 @@ export function carriesRangedWeapon(bot: Bot): boolean {
 }
 
 /** Equip the shield first, then the selected weapon; null deliberately empties the hand. */
-export async function equipCombatLoadout(bot: Bot, loadout: CombatLoadout): Promise<void> {
+export async function equipCombatLoadout(bot: Bot, loadout: CombatLoadout, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (loadout.shield && !shieldInOffHand(bot)) {
-    await bot.equip(loadout.shield, "off-hand");
+    await raceSignal(bot.equip(loadout.shield, "off-hand"), signal);
   }
+  signal?.throwIfAborted();
   if (loadout.weapon) {
-    if (bot.heldItem?.name !== loadout.weapon.name) await bot.equip(loadout.weapon, "hand");
+    if (bot.heldItem?.name !== loadout.weapon.name) await raceSignal(bot.equip(loadout.weapon, "hand"), signal);
   } else if (bot.heldItem) {
-    await bot.unequip("hand");
+    await raceSignal(bot.unequip("hand"), signal);
   }
 }
