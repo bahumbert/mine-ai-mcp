@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { IncidentReference, IncidentRetention, IncidentTrigger } from "../bot-data/incident-log.js";
 import { writeIncidentArtifact } from "../bot-data/incident-log.js";
-import type { NavigationRuntime } from "../navigation/index.js";
+import type { NavigationEvent, NavigationRuntime } from "../navigation/index.js";
 import { deathMessage } from "../runtime/player-events.js";
 import type { ReflexLimitKind } from "../session/abort.js";
 import type { ActionRunnerStatus } from "../session/action-runner.js";
@@ -126,6 +126,100 @@ export interface IncidentObserverOptions {
   readonly published: (reference: IncidentReference) => void;
 }
 
+interface SearchCompute {
+  readonly runId: string;
+  slices: number;
+  computeMs: number;
+  readonly firstAt: number;
+  readonly admissionObserved: boolean;
+  lastAt: number;
+  finishedSlices?: number;
+}
+
+/** Runtime diagnostics can capture the exposed recorder directly, so every capture snapshots open searches. */
+class NavigationIncidentRecorder extends IncidentRecorder {
+  snapshotSearches: () => void = () => undefined;
+
+  override capture(...args: Parameters<IncidentRecorder["capture"]>) {
+    this.snapshotSearches();
+    return super.capture(...args);
+  }
+}
+
+/** Retain search timing without flooding the incident ring with every slice (combat P1 T3, 2026-11-09). */
+class NavigationIncidentHistory implements Disposable {
+  readonly #searches = new Map<string, SearchCompute>();
+  readonly #unsubscribe: () => void;
+
+  constructor(
+    navigation: Pick<NavigationRuntime, "onEvent">,
+    private readonly recorder: IncidentRecorder,
+    private readonly owner: IncidentObserverOptions["owner"],
+    private readonly dimension: () => string,
+  ) {
+    this.#unsubscribe = navigation.onEvent(event => this.#record(event));
+  }
+
+  #record(event: NavigationEvent): void {
+    const now = monotonicNow();
+    if (event.kind === "search_started") {
+      this.#finishRun(event.runId, event.kind);
+      this.#searches.set(event.searchId, { runId: event.runId, slices: 0, computeMs: 0, firstAt: now, lastAt: now, admissionObserved: true });
+    }
+    if (event.kind === "search_slice") {
+      const search: SearchCompute = this.#searches.get(event.searchId) ??
+        { runId: event.runId, slices: 0, computeMs: 0, firstAt: now, lastAt: now, admissionObserved: false };
+      search.slices += 1;
+      // Navigation emits cumulative compute; summing those totals would count earlier slices again.
+      search.computeMs = event.computeMs;
+      search.lastAt = now;
+      this.#searches.set(event.searchId, search);
+      if (search.finishedSlices !== undefined && search.slices >= search.finishedSlices)
+        this.#write(event.searchId, "search_finished");
+      return;
+    }
+    if (event.kind === "search_finished") {
+      const search = this.#searches.get(event.searchId);
+      // Navigation emits terminal evidence before the final slice (navigation-run.ts, 2026-11-09).
+      if (search) search.finishedSlices = event.counts.slices;
+      if (search && search.slices >= event.counts.slices) this.#write(event.searchId, event.kind);
+    }
+    // Route IDs are made from their search ID; a continuation may already be admitted before this commit.
+    if (event.kind === "route_committed") this.#write(event.planId.split(":route:")[0]!, event.kind);
+    if (event.kind === "calculation_failed" || event.kind === "run_settled")
+      this.#finishRun(event.runId, event.kind);
+    if (event.kind === "world_change" && event.classification === "irrelevant") return;
+    if (event.kind === "route_committed") {
+      this.recorder.retainPlan({ ...this.owner(), dimension: this.dimension(), event });
+      const { plan, ...summary } = event;
+      this.recorder.record("navigation", { ...this.owner(), event: summary });
+      return;
+    }
+    this.recorder.record("navigation", { ...this.owner(), event });
+  }
+
+  #write(searchId: string, reason: string): void {
+    const search = this.#searches.get(searchId);
+    if (search?.slices) this.recorder.record("navigation", {
+      event: { kind: "search_compute", searchId, ...search, reason, endedAt: monotonicNow() },
+    });
+    if (reason !== "capture") this.#searches.delete(searchId);
+  }
+
+  #finishRun(runId: string, reason: string): void {
+    for (const [id, search] of this.#searches) if (search.runId === runId) this.#write(id, reason);
+  }
+
+  capture(): void {
+    for (const id of this.#searches.keys()) this.#write(id, "capture");
+  }
+
+  [Symbol.dispose](): void {
+    this.#unsubscribe();
+    for (const id of this.#searches.keys()) this.#write(id, "observer_closed");
+  }
+}
+
 /** Passive runtime observations. No debug switch, controls, or raw packet dumps. */
 export function observeIncidents(
   bot: Bot,
@@ -133,7 +227,7 @@ export function observeIncidents(
   options: IncidentObserverOptions,
 ) {
   using listeners = new DisposableStack();
-  const recorder = new IncidentRecorder(
+  const recorder = new NavigationIncidentRecorder(
     { ...options.identity, runtimeId: randomUUID(), hostPid: process.pid, minecraftVersion: bot.version },
     ({ trigger, requestId, contents, precedingRequestId }) =>
       writeIncidentArtifact(options.directory, trigger, requestId, contents, precedingRequestId, options.retention),
@@ -141,6 +235,8 @@ export function observeIncidents(
     undefined,
     () => (options.survival ? { survival: options.survival() } : {}),
   );
+  const navigationHistory = listeners.use(new NavigationIncidentHistory(navigation, recorder, options.owner, () => bot.game.dimension));
+  recorder.snapshotSearches = () => navigationHistory.capture();
   let previous: { atMs: number; dimension: string; position: { x: number; y: number; z: number } } | null = null;
   let health = bot.health;
   let observationMs = 0;
@@ -441,19 +537,6 @@ export function observeIncidents(
         Math.hypot(change.position.x - position.x, change.position.y - position.y, change.position.z - position.z) <= 8
       )
         recorder.record("nearby_block_change", { dimension: bot.game.dimension, change });
-    }),
-  );
-  listeners.defer(
-    navigation.onEvent((event) => {
-      if (event.kind === "search_slice" || (event.kind === "world_change" && event.classification === "irrelevant"))
-        return;
-      if (event.kind === "route_committed") {
-        recorder.retainPlan({ ...options.owner(), dimension: bot.game.dimension, event });
-        const { plan, ...summary } = event;
-        recorder.record("navigation", { ...options.owner(), event: summary });
-        return;
-      }
-      recorder.record("navigation", { ...options.owner(), event });
     }),
   );
   const ownedListeners = listeners.move();

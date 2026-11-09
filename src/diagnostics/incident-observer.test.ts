@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { TestContext } from "node:test";
 import { Vec3 } from "vec3";
 import type { IncidentReference } from "../bot-data/incident-log.js";
 import type { NavigationEvent } from "../navigation/index.js";
@@ -12,6 +13,103 @@ import { CombatProgress } from "../survival/control/combat/progress.js";
 import { createFakeBot, createFakeClock, listenerCounts } from "../test-support/fake-bot/index.js";
 import { observeDamageRegistry } from "../world/damage-registry.js";
 import { observeIncidents } from "./incident-observer.js";
+
+/** Exercise the actual observer and artifact writer with navigation events, without inventing server answers. */
+async function navigationIncidents(t: TestContext) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "incident-search-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { bot } = createFakeBot();
+  const events = new Set<(event: NavigationEvent) => void>();
+  const observer = observeIncidents(bot, {
+    world: new MemoryWorld(),
+    onEvent: (listener) => { events.add(listener); return () => { events.delete(listener); }; },
+  }, {
+    directory, identity: {}, published: () => undefined,
+    owner: () => ({ requestId: null, precedingRequestId: null,
+      session: { owner: "idle", busy: false, activeAction: null }, combat: { targetId: null, position: null } }),
+  });
+  t.after(() => observer.close());
+  return {
+    emit: (event: NavigationEvent) => { for (const listener of events) listener(event); },
+    capture: async (direct = false) => {
+      const result = await (direct ? observer.recorder.capture("combat_waiting", null) : observer.capture());
+      if (result.kind !== "completed" || result.reference.artifact.kind !== "written") return assert.fail("capture not written");
+      return (await readFile(result.reference.artifact.path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    },
+  };
+}
+
+/** Navigation reports cumulative compute, as documented by NavigationEvent.search_slice. */
+function searchSlice(searchId: string, computeMs: number, runId = "r1"): NavigationEvent {
+  return { kind: "search_slice", searchId, runId, atMs: Date.now(), visited: 1, generated: 2, computeMs };
+}
+
+for (const outcome of ["stopped", "failed"] as const) {
+  test(`search slices become one cumulative compute record when a run is ${outcome}`, async t => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1000 });
+    using _installed = clock.install();
+    const fixture = await navigationIncidents(t);
+    fixture.emit(searchSlice("r1:search:1", 3));
+    clock.stepWallClock(-1700);
+    await clock.advance(40);
+    fixture.emit(searchSlice("r1:search:1", 7));
+    fixture.emit({ kind: "run_settled", runId: "r1", atMs: Date.now(), outcome });
+    const rows = await fixture.capture();
+    const summaries = rows.filter(row => row.event?.kind === "search_compute");
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].event.slices, 2);
+    assert.equal(summaries[0].event.computeMs, 7);
+    assert.equal(summaries[0].event.lastAt - summaries[0].event.firstAt, 40);
+    assert.equal(rows.filter(row => row.event?.kind === "search_slice").length, 0);
+  });
+}
+
+test("replaced searches are flushed separately without ending another run's search", async t => {
+  const fixture = await navigationIncidents(t);
+  fixture.emit(searchSlice("r1:search:1", 3));
+  fixture.emit(searchSlice("r2:search:1", 9, "r2"));
+  fixture.emit({ kind: "search_started", runId: "r1", searchId: "r1:search:2", atMs: Date.now(), reason: "start_changed", goal: "safe" });
+  fixture.emit(searchSlice("r1:search:2", 5));
+  const rows = await fixture.capture();
+  const summaries = rows.filter(row => row.event?.kind === "search_compute").map(row => row.event);
+  assert.deepEqual(summaries.map(row => [row.searchId, row.computeMs]), [["r1:search:1", 3], ["r2:search:1", 9], ["r1:search:2", 5]]);
+  assert.equal(summaries[0].reason, "search_started");
+  assert.equal(summaries[1].reason, "capture");
+});
+
+for (const terminal of ["route_committed", "search_finished"] as const) test(`capture keeps compute across ${terminal} and its terminal slice`, async t => {
+  const fixture = await navigationIncidents(t);
+  fixture.emit(searchSlice("r1:search:1", 3));
+  const first = await fixture.capture(true);
+  assert.equal(first.filter(row => row.event?.kind === "search_compute").at(-1)?.event.computeMs, 3);
+  // NavigationRun emits terminal evidence before that advance's last slice.
+  if (terminal === "search_finished") fixture.emit({ kind: terminal, runId: "r1", searchId: "r1:search:1", atMs: Date.now(),
+    goal: "safe", result: "no_path", counts: { queued: 0, visited: 1, farthestVisited: 0, generated: 2, slices: 2, computeMs: 7 },
+    exhausted: "frontier", limit: null, interpretation: "terminal search evidence" });
+  fixture.emit(searchSlice("r1:search:1", 7));
+  if (terminal === "route_committed") fixture.emit({ kind: terminal, runId: "r1", planId: "r1:search:1:route:1", atMs: Date.now(), steps: 0,
+    plan: { start: { x: 0, y: 64, z: 0 }, end: { x: 1, y: 64, z: 0 }, steps: [], complete: false } });
+  const final = await fixture.capture();
+  const summaries = final.filter(row => row.event?.kind === "search_compute").map(row => row.event);
+  assert.deepEqual(summaries.map(row => [row.reason, row.slices, row.computeMs]), [["capture", 1, 3], [terminal, 2, 7]]);
+  assert.equal(final.filter(row => row.event?.kind === "search_slice").length, 0);
+});
+
+test("committing a route preserves its pending continuation's admission time", async t => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1000 });
+  using _installed = clock.install();
+  const fixture = await navigationIncidents(t);
+  fixture.emit({ kind: "search_started", runId: "r1", searchId: "r1:search:2", atMs: Date.now(), reason: "segment_continuation", goal: "safe" });
+  const admitted = performance.now();
+  fixture.emit({ kind: "route_committed", runId: "r1", planId: "r1:search:1:route:1", atMs: Date.now(), steps: 0,
+    plan: { start: { x: 0, y: 64, z: 0 }, end: { x: 1, y: 64, z: 0 }, steps: [], complete: false } });
+  await clock.advance(50);
+  fixture.emit(searchSlice("r1:search:2", 7));
+  const rows = await fixture.capture();
+  const summary = rows.find(row => row.event?.kind === "search_compute")?.event;
+  assert.equal(summary.firstAt, admitted);
+  assert.equal(summary.admissionObserved, true);
+});
 
 test("incident evidence keeps body telemetry every tick, samples entities every five ticks, distinguishes corrections and detaches listeners", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
