@@ -37,6 +37,7 @@ import { BodyDown, bodyDownState, bodyDownWait } from "./body-down.ts";
 import type { EveryoneLines } from "./everyone-lines.ts";
 import { TillFacts } from "./farming/site.ts";
 import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
+import { UnfinishedHouseSaver } from "./unfinished-house-saver.ts";
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
@@ -239,8 +240,8 @@ export class Agent {
   private readonly foods = new Set<string>();
   private readonly itemActivities = new Map<string, Activity | null>();
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
-  /** The unfinished house as last saved to memory, to save it again only when it changed. */
-  private savedUnfinished = "null";
+  /** Saves the unfinished house to memory when it changed (also while a step runs: a throw skips the save after it). */
+  private readonly unfinishedSaver = new UnfinishedHouseSaver((house) => this.memorize({ kind: "unfinished_house", house }), () => this.building.unfinished);
   private readonly stack: Work[] = [];
   private readonly lately: string[] = [];
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
@@ -840,6 +841,7 @@ export class Agent {
     if (!this.bodyDownShown) return;
     this.bodyDownShown = false;
     this.journalState(null);
+    this.unfinishedSaver.request(); // a house recorded while the body was down could not be saved
   }
 
   /**
@@ -1079,6 +1081,8 @@ export class Agent {
       rememberFarm: (farm) => this.learnFarm(farm),
       soil: this.soil,
       building: this.building,
+      saveBuilding: () => this.unfinishedSaver.request(),
+      places: () => this.places,
       areas: this.areas,
       levelSites: work.levelSites,
       toolsLost: work.toolsLost,
@@ -1145,7 +1149,7 @@ export class Agent {
       work.carried.splice(0, work.carried.length - STEP_MEMORY);
     }
     this.options.log(`  -> ${record.outcome}: ${record.detail}`);
-    this.memorizeUnfinishedHouse();
+    this.unfinishedSaver.request();
     return restarted ? null : record;
   }
 
@@ -1247,14 +1251,6 @@ export class Agent {
     // Set aside (a member's favour, a night) it stays on the stack and runs again; stopped and removed, it ends here.
     if (result.status === "stopped" && this.stack.includes(work) && !this.runSignal.aborted) return;
     this.finish(work, result.status === "done" ? "done" : "failed", detail);
-  }
-
-  /** Saves the unfinished house to memory when it differs from the last saved one. */
-  private memorizeUnfinishedHouse(): void {
-    const unfinished = JSON.stringify(this.building.unfinished);
-    if (unfinished === this.savedUnfinished) return;
-    this.savedUnfinished = unfinished;
-    this.memorize({ kind: "unfinished_house", house: this.building.unfinished });
   }
 
   /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
@@ -1521,7 +1517,7 @@ export class Agent {
       this.relations?.load(recalled);
       for (const time of recalled.times) this.spent(time, false);
       this.building.unfinished = recalled.unfinished;
-      this.savedUnfinished = JSON.stringify(recalled.unfinished);
+      this.unfinishedSaver.known(recalled.unfinished);
       const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
       this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}`);
     } catch (error) {
@@ -1551,13 +1547,17 @@ export class Agent {
     }
   }
 
-  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). */
-  private memorize(memory: Memory): void {
-    this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
+  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). Resolves whether the note was saved; never rejects. */
+  private memorize(memory: Memory): Promise<boolean> {
+    return this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
       .then((outcome) => {
         if (outcome.status !== "succeeded") this.options.log(`could not save a memory (${outcome.status}): ${outcome.error ?? ""}`);
+        return outcome.status === "succeeded";
       })
-      .catch((error: unknown) => this.options.log(`could not save a memory: ${String(error)}`));
+      .catch((error: unknown) => {
+        this.options.log(`could not save a memory: ${String(error)}`);
+        return false;
+      });
   }
 
   /**

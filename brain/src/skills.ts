@@ -20,6 +20,7 @@ import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
 import { lostToolClass, ToolLosses, toolToMake } from "./building/tool-loss.ts";
+import { describeOverlaps, describeSiteBlocker, earlierProtections, houseKind, LEVELING_LABEL, overlapsBox, overlapsOf } from "./protected-areas.ts";
 import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -60,6 +61,10 @@ export interface SkillContext {
   readonly remember?: (place: KnownPlace) => void;
   /** The house left unfinished by an earlier build step, which the next build of the same kind resumes. */
   readonly building?: { unfinished: UnfinishedHouse | null };
+  /** Told that `building.unfinished` just changed: saved as a note at once, so a stop that throws (run 17b) still leaves the house on record. */
+  readonly saveBuilding?: () => void;
+  /** The places it knows (the houses it built among them): an own area around one of their doors is named as that house. */
+  readonly places?: () => readonly KnownPlace[];
   /** Its own house that still has temporary parts, as last remembered (a place with a `house` whose materials are not empty). */
   readonly ownHouse?: () => KnownPlace | null;
   /** The protected areas the agent knows (ADR-012), updated in place when a skill protects or releases one. */
@@ -496,7 +501,7 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const style = styleOrDefault(context.style);
-  const kind = `${step.size} ${style.id} house`;
+  const kind = houseKind(step.size, style.id);
   const what = `a ${kind}`;
   // The unfinished house is resumed where it stands; asked to build somewhere else, she starts a new one (live
   // 2026-10-02: "change of plan, build it right here" resumed the old pond-side site).
@@ -527,7 +532,9 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
       const where = clear === null
         ? `no site clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or build somewhere else`
         : `the nearest site clear of them has its door ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
-      return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) ${describeOverlaps(context, blocked)}; ${where}` };
+      const houses = { self: context.self, unfinished, places: context.places?.() ?? [], resumeRange: RESUME_RANGE };
+      const blockers = blocked.map((area) => describeSiteBlocker(houses, area)).join("; ");
+      return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) overlaps ${blockers}; ${where}` };
     }
     const { missing, owedNote } = billShortfall(plan.bill, snapshot.inventory, context.owed?.() ?? []);
     // Only what is missing, named as the step that fetches it: get_items adds to what she carries, so asking for the
@@ -568,9 +575,16 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
   noteArea(context, protection.area);
-  const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...(refused !== undefined && refused.length > 0 && { refused }) };
+  // Every change of the record is saved at once: a call that throws skips the save after the step (run 17b).
+  const record = (unfinished: UnfinishedHouse | null) => {
+    if (context.building === undefined) return;
+    context.building.unfinished = unfinished;
+    context.saveBuilding?.();
   };
+  const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => record({ kind, site: plan.site, part, prepared, materials: plan.materials, ...(refused !== undefined && refused.length > 0 && { refused }) });
+  const forgetUnfinished = () => record(null);
+  // A new house is on record before the first dig: its box is protected from now on, and a restart must find it.
+  if (resumed === null) leaveUnfinished(0, false);
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
   if (resumed === null || resumed.prepared === false) {
@@ -595,12 +609,13 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
       // offered again and again (live 2026-10-07: Ayla's unfinished house overlapped her other house #12; she went
       // back to it, protected a "temp_house" over it, and tried again).
       if (/overlaps protected area/u.test(prepared.detail)) {
-        if (context.building !== undefined) context.building.unfinished = null;
+        forgetUnfinished();
         return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}; that unfinished house is given up: build a new one somewhere clear` };
       }
       leaveUnfinished(0, false);
       return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}` };
     }
+    leaveUnfinished(0, true); // prepared, at once: a restart after this must never level again (it digs the house's walls too)
     context.phase?.("building");
   }
   const stopped = await buildParts(context, plan, what, {
@@ -608,10 +623,10 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
     leave: (part, refused) => leaveUnfinished(part, true, refused),
     refusedBefore: resumed?.refused,
     again: context.building === undefined ? "" : "; building it again resumes it there",
-    abandon: () => { if (context.building !== undefined) context.building.unfinished = null; },
+    abandon: forgetUnfinished,
   });
   if (stopped !== null) return stopped;
-  if (context.building !== undefined) context.building.unfinished = null;
+  forgetUnfinished();
   const { door, facing } = plan.site;
   const roof = plan.roofTop;
   context.remember?.({
@@ -638,7 +653,7 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const notTemporary = roles.filter((role) => !temporary.includes(role));
   if (notTemporary.length > 0) return { status: "failed", detail: `your house is not temporary in ${notTemporary.join(", ")}: its temporary parts are ${temporary.join(", ")}` };
   const { after, rest, bill } = improvement(style, house, roles);
-  const kind = `${house.size} ${style.id} house`;
+  const kind = houseKind(house.size, style.id);
   const what = `your ${kind}`;
   const snapshot = await context.runtime.status();
   const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
@@ -717,6 +732,15 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
   // A tool worn out mid-build is made again once per kind, and the part is built again (live 2026-10-09: Tom's house
   // stopped at part 1/9, "stone_pickaxe was lost").
   const toolLosses = new ToolLosses();
+  // A call that throws (`BodyDown`, a restart) records the part reached before it goes on up (run 17b: only returns did).
+  const recordingThrows = async <T>(index: number, call: () => Promise<T>): Promise<T> => {
+    try {
+      return await call();
+    } catch (error) {
+      options.leave(Math.min(index, plan.batches.length - 1));
+      throw error;
+    }
+  };
   for (let index = 0; index < parts.length; index += 1) {
     const partIndex = index % plan.batches.length;
     const blocks = (parts[index] ?? []).filter((cell) => lastPart.get(`${cell.x},${cell.y},${cell.z}`) === partIndex).map(({ x, y, z, block, facing, half, axis }) => ({
@@ -732,13 +756,13 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
     // What earlier parts built stays: a route to this part may not dig through it (live 2026-10-01: 11 cells dug).
     const keep = auditing ? [] : builtBefore(plan.batches, index, lastPart);
     const input = { blocks, remove_wrong_blocks: true, ...(keep.length > 0 && { keep }) };
-    const outcome = await context.body.act("build_structure", input, `Build ${what}, ${part}.`, { signal: context.signal });
+    const outcome = await recordingThrows(index, () => context.body.act("build_structure", input, `Build ${what}, ${part}.`, { signal: context.signal }));
     if (context.signal.aborted) {
       options.leave(Math.min(index, plan.batches.length - 1));
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) });
+      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) }));
       if (lost.status === "remade") {
         index -= 1;
         continue;
@@ -824,7 +848,10 @@ export async function levelZone(context: SkillContext, zone: Zone, level: number
   const { min, max } = levelBox(zone, level);
   // Leveling digs inside her own regions too (it runs as a build): never over an area she protects, her other houses
   // included, except the house being prepared (live 2026-10-02: a zone "between the oak_log markers" reached her house).
-  const overlapping = overlapsOf(await context.runtime.protectedRegions(), { min, max }, ownRegions);
+  const regions = await context.runtime.protectedRegions();
+  // Her own leveling margins an earlier leveling left over the zone (its release in `finally` throws with a body that is down: run 17b) go first.
+  for (const stale of regions.filter((area) => area.owner === context.self && area.label.startsWith(LEVELING_LABEL) && overlapsBox(area, { min, max }))) await releaseArea(context, stale.regionId);
+  const overlapping = overlapsOf(regions, { min, max }, ownRegions);
   if (overlapping.length > 0) {
     return { status: "failed", detail: `${what} ${describeOverlaps(context, overlapping)}: choose another zone clear of ${overlapping.length === 1 ? "it" : "them"}, or ask whoever asked you` };
   }
@@ -1003,8 +1030,6 @@ function auditSuffix(error: string | null, result: Readonly<Record<string, unkno
   return ` (${parts.join("; ")})`;
 }
 
-/** The label of the region a leveling job sets aside while it works (left behind only if the job was killed). */
-const LEVELING_LABEL = "leveling ";
 /** How far away marker blocks are looked for. */
 const MARKER_RANGE = 48;
 /** Blocks around a leveling zone where she never digs her fill, and how deep under its level. */
@@ -1387,36 +1412,6 @@ async function nearestFree(context: SkillContext, name: string): Promise<FoundBl
 
 /** How far around a refused house site the nearest clear one is looked for. */
 export const SITE_SEARCH = 32;
-
-/** Protected areas a box overlaps, her leveling margins and `except` (the region of the work itself) left out. */
-export function overlapsOf(areas: readonly ProtectedArea[], { min, max }: { readonly min: Position; readonly max: Position }, except: readonly number[] = []): ProtectedArea[] {
-  return areas.filter((area) =>
-    !except.includes(area.regionId) && !area.label.startsWith(LEVELING_LABEL) &&
-    area.min.x <= max.x && area.max.x >= min.x && area.min.y <= max.y && area.max.y >= min.y && area.min.z <= max.z && area.max.z >= min.z);
-}
-
-/**
- * "overlaps protected area #4 'small medieval house' (yours: leveling would dig it up)": what each area is, so the
- * model weighs it (live 2026-10-02: told only "release it first", she released Tom's area and then her own house to
- * level around Tom, and began digging the house).
- */
-export function describeOverlaps(context: SkillContext, overlapping: readonly ProtectedArea[]): string {
-  const whose = (area: ProtectedArea) => area.owner === context.self ? "yours: leveling would dig it up" : `owned by ${area.owner}`;
-  return `overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => `#${area.regionId} '${area.label}' (${whose(area)})`).join(", ")}`;
-}
-
-/**
- * Her own earlier protections of this same house: a region of hers, with its label, around its door (live 2026-10-04:
- * resuming her unfinished house, its site was refused for overlapping #12, the same house protected before with a
- * slightly different box). Read from the runtime, not from what this session learnt: after a restart the old box is
- * still there, and it is hers all the same.
- */
-function earlierProtections(context: SkillContext, label: string, door: Position, current: number, areas: readonly ProtectedArea[]): number[] {
-  return areas.filter((area) =>
-    area.regionId !== current && area.owner === context.self && area.label === label &&
-    door.x >= area.min.x - 1 && door.x <= area.max.x + 1 && door.z >= area.min.z - 1 && door.z <= area.max.z + 1,
-  ).map((area) => area.regionId);
-}
 
 /** Everything a new house touches: its protected box and the box its site leveling digs and fills. */
 function siteBox(plan: ReturnType<typeof planHouse>): { readonly min: Position; readonly max: Position } {

@@ -8,7 +8,7 @@ import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./sk
 import { RARE_DROP_BREAKS } from "./gathering.ts";
 import { DEFAULT_STYLE, STYLES } from "./building/styles.ts";
 import { neededItems } from "./inventory-room.ts";
-import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
+import { BodyDown, type BotSnapshot, type ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL, steppedClocks } from "./testing.ts";
 
@@ -2774,4 +2774,137 @@ test("a follow of its own minutes ends after them in monotonic time, whatever th
   const result = await Promise.race([following, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
   assert.notEqual(result, "hung");
   assert.match((result as { detail: string }).detail, /followed Tom for 2 minutes/u);
+});
+
+// Plan 2026-11-09-house-templates Task 1 (P1, run 17b): a build that dies records its house.
+
+/** The `nth` (1-based) `build_structure` call of the runtime throws `error`, as a runtime that dies under the call does; the others go on. */
+function dieOnBuildCall(runtime: FakeRuntime, nth: number, error: Error): void {
+  const submit = runtime.submit.bind(runtime);
+  let calls = 0;
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && (calls += 1) === nth) throw error;
+    return submit(tool, input, ...rest);
+  };
+}
+
+const bodyDownError = () => new BodyDown({ at: new Date(Date.now() + 30_000).toISOString(), attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
+const bodyRestartedError = () => new Error("[BODY_RESTARTED] the body restarted: build_structure was not done");
+const SMALL_HOUSE_STEP = { skill: "build", structure: "house", size: "small" } as const;
+const LEVELED_SITE_TOOLS = [...SMALL_MEDIEVAL, { name: "wooden_shovel", count: 1 }];
+
+/** A build whose records are kept, so a test sees what `saveBuilding` was asked to save, in order, with what the other events were. */
+function recordingContext(runtime: FakeRuntime, extra: Partial<SkillContext> = {}) {
+  const building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
+  const saved: (UnfinishedHouse | null)[] = [];
+  const events: string[] = [];
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure") events.push(`build_structure@${String(building.unfinished?.prepared)}`);
+    return submit(tool, input, ...rest);
+  };
+  const saveBuilding = () => {
+    saved.push(building.unfinished === null ? null : { ...building.unfinished });
+    events.push(`save prepared=${String(building.unfinished?.prepared)}`);
+  };
+  const context = contextFor(runtime, { style: "medieval", building, saveBuilding, ...extra });
+  return { building, saved, events, context };
+}
+
+function standingBy(runtime: FakeRuntime, inventory: BotSnapshot["inventory"] = SMALL_MEDIEVAL): void {
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory };
+}
+
+/** A site with a tree-like cell to dig, so the leveling is one `build_structure` call before the parts, and Steve to face. */
+function sitePlantedWithGrass(runtime: FakeRuntime): void {
+  standingBy(runtime, LEVELED_SITE_TOOLS);
+  runtime.world.set("-4,64,0", "grass_block");
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
+}
+
+const levelingCalls = (runtime: FakeRuntime) => builds(runtime).filter((call) => call.blocks.length === 1 && call.blocks[0]!.block_name === "air" && call.blocks[0]!.x === -4).length;
+
+test("a body that dies mid-part keeps the unfinished house, saved after it is set, and the next build resumes it", async () => {
+  for (const error of [bodyDownError, bodyRestartedError]) {
+    const runtime = new FakeRuntime();
+    standingBy(runtime);
+    dieOnBuildCall(runtime, 2, error());
+    const { building, saved, context } = recordingContext(runtime, { self: "self" });
+    await assert.rejects(runStep(SMALL_HOUSE_STEP, context), (thrown: unknown) => thrown instanceof Error && thrown.message.includes("RUNTIME_UNRESPONSIVE") === (error === bodyDownError));
+    const { site, ...record } = building.unfinished ?? ({} as UnfinishedHouse);
+    assert.deepEqual(record, { kind: "small medieval house", part: 1, prepared: true, materials: {} });
+    assert.ok(site !== undefined, "with its site");
+    assert.deepEqual(saved.at(-1), building.unfinished, "the saved record is the one the throw left");
+    // The next action from that state: no overlap with her own half-built house (run 17b), parts from the first, wrong blocks removed.
+    const before = builds(runtime).length;
+    const second = await runStep(SMALL_HOUSE_STEP, context);
+    assert.equal(second.status, "done", second.status === "failed" ? second.detail : "");
+    const calls = builds(runtime);
+    assert.deepEqual(calls[before]!.blocks, calls[0]!.blocks, "the parts start again from the first");
+    assert.ok(calls.slice(before).every((call) => call.remove_wrong_blocks), "wrong blocks are removed");
+    assert.equal(building.unfinished, null);
+    assert.equal(saved.at(-1), null, "the finished house is saved as no unfinished house at once, not only after the step");
+  }
+});
+
+test("a body down after leveling never levels again", async () => {
+  const runtime = new FakeRuntime();
+  sitePlantedWithGrass(runtime);
+  dieOnBuildCall(runtime, 2, bodyDownError());
+  const { saved, events, context } = recordingContext(runtime, { requester: "steve" });
+  await assert.rejects(runStep(SMALL_HOUSE_STEP, context));
+  assert.equal(events[0], "save prepared=false", "a new house is saved, unprepared, before the first dig");
+  const prepared = events.indexOf("save prepared=true");
+  assert.ok(prepared >= 0, "saved as prepared once the leveling was done");
+  assert.ok(events.indexOf("build_structure@false") < prepared && prepared < events.lastIndexOf("build_structure@true"), "after the leveling call, before the first part");
+  assert.equal(saved.at(-1)?.prepared, true);
+  assert.equal(levelingCalls(runtime), 1);
+  const again = await runStep(SMALL_HOUSE_STEP, context);
+  assert.equal(again.status, "done", again.status === "failed" ? again.detail : "");
+  assert.equal(levelingCalls(runtime), 1, "the second build makes no leveling call");
+});
+
+test("a body that dies while leveling keeps the house, unprepared, and its protected area", async () => {
+  const runtime = new FakeRuntime();
+  sitePlantedWithGrass(runtime);
+  dieOnBuildCall(runtime, 1, bodyDownError());
+  const { building, context } = recordingContext(runtime, { requester: "steve" });
+  await assert.rejects(runStep(SMALL_HOUSE_STEP, context));
+  assert.deepEqual(building.unfinished, { kind: "small medieval house", site: { door: { x: -2, y: 64, z: 0 }, facing: "east" }, part: 0, prepared: false, materials: {} });
+  assert.ok(runtime.areas.some((area) => area.label === "small medieval house"), "the house's area is not released");
+});
+
+/** An own area of the house `label` around `door`, as the runtime keeps it across a restart. */
+function ownAreaAround(runtime: FakeRuntime, regionId: number, label: string, door: { x: number; y: number; z: number }): void {
+  runtime.areas.push({ regionId, owner: "self", label, min: { x: door.x - 3, y: door.y - 1, z: door.z - 3 }, max: { x: door.x + 3, y: door.y + 8, z: door.z + 3 } });
+}
+
+test("an own area in the way of a new house is named as the unfinished or the finished house it holds", async () => {
+  const door = { x: 10, y: 64, z: 10 };
+  const place: KnownPlace = { name: "the small medieval house you built", detail: "door 10 64 10 facing east", house: { size: "small", style: "medieval", door, facing: "east", materials: {} } };
+  const unfinished = { kind: "small medieval house", site: { door, facing: "east" as const }, part: 1, prepared: true, materials: {} };
+  const cases = [
+    { name: "unfinished", building: { unfinished }, places: [] as KnownPlace[], says: [/that is your unfinished small medieval house \(area #5/u, /abandon_house/u, /door at 10 64 10/u], never: null },
+    { name: "finished", building: { unfinished: null }, places: [place], says: [/your small medieval house, door at 10 64 10/u, /build somewhere else/u], never: /unfinished/u },
+  ];
+  for (const { name, building, places, says, never } of cases) {
+    const runtime = new FakeRuntime();
+    standingBy(runtime);
+    ownAreaAround(runtime, 5, "small medieval house", door);
+    const result = await runStep(stepSchema.parse({ skill: "build", size: "medium", x: 13, y: 64, z: 10 }), contextFor(runtime, { style: "medieval", building, self: "self", places: () => places }));
+    const detail = result.status === "failed" ? result.detail : "";
+    for (const pattern of says) assert.match(detail, pattern, name);
+    if (never !== null) assert.doesNotMatch(detail, never, name);
+  }
+});
+
+test("a stale leveling region of mine is released by the next leveling", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }] };
+  runtime.world.set("1,64,1", "dirt");
+  runtime.areas.push({ regionId: 7, owner: "self", label: "leveling 14x14", min: { x: -4, y: 56, z: -4 }, max: { x: 9, y: 70, z: 9 } });
+  await runStep(stepSchema.parse({ skill: "level_area", x1: 0, z1: 0, x2: 5, z2: 5, y: 64 }), contextFor(runtime, { self: "self" }));
+  const released = runtime.submitted.filter((call) => call.tool === "unprotect_region").map((call) => call.input.region_id);
+  assert.ok(released.includes(7), "the stale region is released");
+  assert.ok(runtime.submitted.findIndex((call) => call.tool === "unprotect_region" && call.input.region_id === 7) < runtime.submitted.findIndex((call) => call.tool === "build_structure"), "before the leveling digs");
 });

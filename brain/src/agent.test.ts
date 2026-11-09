@@ -3778,3 +3778,59 @@ test("a follow ordered by a player counts their silence in monotonic time: a wal
   await sleep(1_000);
   assert.deepEqual(events.filter((event) => event.kind === "step"), [], "still following after a poll (750 ms): the silence is 1 s of real time");
 });
+
+// Plan 2026-11-09-house-templates Task 1 (P1, run 17b): the unfinished house is saved when it changes, and again when the save did not go through.
+
+/** The unfinished-house notes saved so far, oldest first, as their JSON. */
+function unfinishedHouseNotes(runtime: FakeRuntime): string[] {
+  return runtime.notes.map((note) => note.context).filter((context) => context.startsWith("brain memory: unfinished_house "));
+}
+
+/** A house at Steve's request: Ayla stands by the site with exactly the bill. */
+function houseOrderRuntime(): FakeRuntime {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
+  return runtime;
+}
+
+test("a note not saved while the body is down is saved when the body is back", async (t) => {
+  const runtime = houseOrderRuntime();
+  // A body that is down fails every call, note_save included, until two status reads have failed (`failStatusReads` is no help: the saves must fail too).
+  let down = false;
+  let failedReads = 0;
+  let parts = 0;
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input) => {
+    if (down) throw bodyDownAt(30_000);
+    if (tool === "build_structure" && (parts += 1) === 2) {
+      down = true;
+      throw bodyDownAt(30_000);
+    }
+    return submit(tool, input);
+  };
+  const status = runtime.status.bind(runtime);
+  runtime.status = async () => {
+    if (!down) return status();
+    if ((failedReads += 1) >= 2) down = false;
+    throw bodyDownAt(30_000);
+  };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Later then." });
+  action.reply({ step: { skill: "build" } }, { done: "the body went down; I stop here" });
+  await agent.handle(say("Steve", "build me a house"));
+  const leftByTheStop = () => unfinishedHouseNotes(runtime).some((note) => note.includes("\"kind\":\"small medieval house\"") && note.includes("\"part\":1,\"prepared\":true"));
+  await until(leftByTheStop, 3_000);
+  assert.ok(leftByTheStop(), "the record the stop left is saved");
+});
+
+test("a house recorded as prepared is saved before its first part is built", async (t) => {
+  // A brain that dies during the first part must find the house prepared: the note goes to the body before the next call.
+  const runtime = houseOrderRuntime();
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
+  action.reply({ step: { skill: "build" } }, { done: "the house is up" });
+  await agent.handle(say("Steve", "build me a house"));
+  await until(() => runtime.submitted.some((call) => call.tool === "build_structure"));
+  const asked = runtime.submitted.flatMap((call) => call.tool === "build_structure" ? ["part"] : call.tool === "note_save" && String(call.input.context).includes("\"prepared\":true") ? ["prepared"] : []);
+  assert.deepEqual(asked.slice(0, 2), ["prepared", "part"]);
+});
