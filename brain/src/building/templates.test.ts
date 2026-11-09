@@ -79,12 +79,14 @@ test("a bad file names itself", () => {
 });
 
 test("the six classic houses are registered", () => {
-  assert.deepEqual([...TEMPLATES.keys()].sort(), ["japanese-medium", "japanese-small", "medieval-medium", "medieval-small", "rustic-medium", "rustic-small"]);
+  // The registry also holds the regional templates (Task 6): the classic six are the ones that carry `classic`.
+  const classics = new Map([...TEMPLATES].filter(([, template]) => template.classic !== undefined));
+  assert.deepEqual([...classics.keys()].sort(), ["japanese-medium", "japanese-small", "medieval-medium", "medieval-small", "rustic-medium", "rustic-small"]);
   assert.equal(templateFor("medieval-small")?.kind, "small medieval house");
   assert.equal(templateFor("medieval-small")?.family, "europe");
   assert.equal(templateOfKind("small japanese house")?.id, "japanese-small");
   assert.equal(classicTemplate("rustic", "medium")?.id, "rustic-medium");
-  assert.deepEqual(familiesOf(TEMPLATES), ["east-asia", "europe"]);
+  assert.deepEqual(familiesOf(classics), ["east-asia", "europe"]);
 });
 
 test("templateOfHouse maps old houses", () => {

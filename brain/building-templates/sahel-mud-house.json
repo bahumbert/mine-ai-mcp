@@ -1,0 +1,85 @@
+{
+  "id": "sahel-mud-house",
+  "family": "africa",
+  "name": "sahel mud house",
+  "description": "Flat-roofed house of packed mud with mud-brick buttresses, acacia corner posts, wooden beam ends poking out of the walls and a parapet round the roof terrace.",
+  "palette": {
+    "foundation": "mud_bricks",
+    "floor": "packed_mud",
+    "wall": "packed_mud",
+    "pillar": "acacia_log",
+    "trim": "mud_bricks",
+    "roof": "packed_mud",
+    "window": "acacia_fence",
+    "door": "acacia_door",
+    "railing": "acacia_fence"
+  },
+  "key": {
+    "f": { "role": "foundation" },
+    "F": { "role": "floor" },
+    "w": { "role": "wall" },
+    "p": { "role": "pillar", "axis": "y" },
+    "t": { "role": "trim" },
+    "r": { "role": "roof" },
+    "e": { "role": "window" },
+    "R": { "role": "railing" },
+    "D": { "role": "door" },
+    "_": { "role": "air" }
+  },
+  "layers": [
+    [
+      ".........",
+      ".fffffff.",
+      ".fFFFFFf.",
+      "ffFFFFFff",
+      ".fFFFFFf.",
+      ".fffffff.",
+      "....f...."
+    ],
+    [
+      ".........",
+      ".pwwDwwp.",
+      ".w_____w.",
+      "tw_____wt",
+      ".w_____w.",
+      ".pwwwwwp.",
+      "....t...."
+    ],
+    [
+      ".........",
+      ".pew_wep.",
+      ".e_____e.",
+      "tw_____wt",
+      ".e_____e.",
+      ".pwewewp.",
+      "....t...."
+    ],
+    [
+      "..R.R.R..",
+      ".pwwwwwp.",
+      "Rw_____wR",
+      "tw_____wt",
+      "Rw_____wR",
+      ".pwwwwwp.",
+      "..R.t.R.."
+    ],
+    [
+      ".........",
+      ".prrrrrp.",
+      ".rrrrrrr.",
+      "trrrrrrrt",
+      ".rrrrrrr.",
+      ".prrrrrp.",
+      "....t...."
+    ],
+    [
+      ".........",
+      ".ptttttp.",
+      ".t.....t.",
+      ".t.....t.",
+      ".t.....t.",
+      ".ptttttp.",
+      "........."
+    ]
+  ]
+}

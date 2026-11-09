@@ -1,0 +1,128 @@
+{
+  "id": "ndebele-house",
+  "family": "africa",
+  "name": "ndebele house",
+  "description": "Whitewashed house with a yellow painted band and orange door frame, under a deep stepped hip roof of hay thatch with eaves all round.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "packed_mud",
+    "wall": "white_terracotta",
+    "trim": "orange_terracotta",
+    "roof": "hay_block",
+    "window": "glass_pane",
+    "door": "acacia_door",
+    "accent": "yellow_terracotta"
+  },
+  "key": {
+    "f": { "role": "foundation" },
+    "F": { "role": "floor" },
+    "w": { "role": "wall" },
+    "t": { "role": "trim" },
+    "a": { "role": "accent" },
+    "e": { "role": "window" },
+    "r": { "role": "roof" },
+    "D": { "role": "door" },
+    "_": { "role": "air" }
+  },
+  "layers": [
+    [
+      ".........",
+      ".fffffff.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fffffff.",
+      "........."
+    ],
+    [
+      ".........",
+      ".wwtDtww.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".wwwwwww.",
+      "........."
+    ],
+    [
+      ".........",
+      ".aet_tea.",
+      ".a_____a.",
+      ".a_____a.",
+      ".e_____e.",
+      ".a_____a.",
+      ".a_____a.",
+      ".aaaeaaa.",
+      "........."
+    ],
+    [
+      ".........",
+      ".wwtttww.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".wwwwwww.",
+      "........."
+    ],
+    [
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr",
+      "rrrrrrrrr"
+    ],
+    [
+      ".........",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      ".rrrrrrr.",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      "..rrrrr..",
+      "..rrrrr..",
+      "..rrrrr..",
+      "..rrrrr..",
+      "..rrrrr..",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      "...rrr...",
+      "...rrr...",
+      "...rrr...",
+      ".........",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      ".........",
+      "....r....",
+      ".........",
+      ".........",
+      ".........",
+      "........."
+    ]
+  ]
+}
