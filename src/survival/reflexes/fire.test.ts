@@ -18,6 +18,11 @@ import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
 import { attachFireReflex, fireEscapeFacts } from "./fire.js";
 import { recordFireContact } from "../perception/burn.js";
+import { temporaryBotData } from "../../test-support/bot-data.js";
+import { setCarriedCount } from "../../test-support/carried-counts.js";
+import { confirmFakeDigs } from "../../test-support/life-saving-placements.js";
+import { pendingLifeSavingPlacements, recordLifeSavingPlacement, setLifeSavingRemovalContext } from "../../world/life-saving-placements.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 
 test("health at or under the burn left is lethal", async () => {
   const { bot, clock, world } = burningBesidePit(true, { startAge: 1100 });
@@ -47,9 +52,14 @@ test("the fire reflex sees a water bucket only in a dimension that holds water",
   }
 });
 
-test("a bucket burn escape resumes the interrupted action beside its placed source", async () => {
-  for (const side of [false, true]) {
-    const { bot, clock } = createFakeBot({
+test("a bucket burn escape keeps ordinary water, reclaims foreign water, and reports a missing empty bucket", async () => {
+  for (const { side, foreign, noEmpty } of [
+    { side: false, foreign: false, noEmpty: false },
+    { side: true, foreign: false, noEmpty: false },
+    { side: false, foreign: true, noEmpty: false },
+    { side: false, foreign: true, noEmpty: true },
+  ]) {
+    const { bot, clock, inventory } = createFakeBot({
       carried: { water_bucket: 1 }, health: 8, simulatePhysics: true,
       cells: side ? { "0,63,0": "oak_leaves" } : {},
       entities: side ? { 2: { name: "player", position: new Vec3(1.5, 64, 0.5) } } : {},
@@ -62,8 +72,17 @@ test("a bucket burn escape resumes the interrupted action beside its placed sour
     bot.on("blockUpdate", (_before, after) => { if (after) world.load(after.position, observeMineflayerBlock(after)); });
     const source = bot.entity.position.floored().offset(side ? -1 : 0, 0, 0);
     await using resources = new AsyncDisposableStack();
+    const data = resources.use(temporaryBotData());
+    if (foreign) setProtectedRegionsProvider(bot, () => [{
+      regionId: 7, owner: "Tom", label: "pool", dimension: "overworld",
+      min: { x: -8, y: 63, z: -8 }, max: { x: 8, y: 70, z: 8 },
+    }]);
+    if (noEmpty) bot.on("physicsTick", () => {
+      const empty = bot.inventory.items().find(item => item.name === "bucket");
+      if (empty) setCarriedCount(inventory, bot.registry, empty.type, 0);
+    });
     const runner = stillRunner();
-    const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+    const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now, lifeSaving: { data } }));
     resources.use(attachFireReflex(bot, driver, world));
     let attempts = 0;
     const interrupted = defineAction({
@@ -72,8 +91,8 @@ test("a bucket burn escape resumes the interrupted action beside its placed sour
       execution: { kind: "resumable_task" }, parse: () => ({}),
       begin: () => async context => {
         if (++attempts > 1) {
-          assert.equal(bot.blockAt(source)?.name, "water");
-          assert.equal(Reflect.get(bot.entity, "isInWater"), true);
+          assert.equal(bot.blockAt(source)?.name, foreign && !noEmpty ? "air" : "water");
+          if (!foreign) assert.equal(Reflect.get(bot.entity, "isInWater"), true);
           return { status: "succeeded" as const };
         }
         const signal = context.signal;
@@ -87,12 +106,101 @@ test("a bucket burn escape resumes the interrupted action beside its placed sour
     setBurning(bot, true);
     recordFireContact(bot, "lava", bot.time.age);
     await clock.advance(2_500);
-    assert.equal((await output).result.status, "succeeded");
+    const finished = await output;
+    assert.equal(finished.result.status, "succeeded");
     assert.equal(attempts, 2);
-    assert.equal(bot.inventory.items().filter(item => item.name === "water_bucket").length, 0);
-    assert.equal(bot.inventory.items().find(item => item.name === "bucket")?.count, 1);
+    assert.equal(bot.inventory.items().filter(item => item.name === "water_bucket").length, foreign && !noEmpty ? 1 : 0);
+    assert.equal(bot.inventory.items().find(item => item.name === "bucket")?.count ?? 0, foreign ? 0 : 1);
+    assert.equal(pendingLifeSavingPlacements(bot).length, noEmpty ? 1 : 0);
+    assert.equal(bot.usingHeldItem, false);
+    if (noEmpty) assert.match((finished.interruptions ?? []).join("|"), /left a life-saving block in .*pool/);
     assert.equal(Object.values(bot.controlState).some(Boolean), false);
   }
+});
+
+/** Reuse the interrupted-pit scene, with a foreign region and the existing dig/server contract. */
+function foreignPoolScene(resources: AsyncDisposableStack) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const data = resources.use(temporaryBotData());
+  const scene = lavaWaitScene(resources, clock, { clock });
+  resources.use(clock.install());
+  setProtectedRegionsProvider(scene.bot, () => [{
+    regionId: 7, owner: "Tom", label: "pool", dimension: "overworld",
+    min: { x: -20, y: 62, z: -20 }, max: { x: 20, y: 70, z: 20 },
+  }]);
+  confirmFakeDigs({ bot: scene.bot, server: scene.server });
+  setLifeSavingRemovalContext(scene.bot, { data });
+  scene.bot.game.gameMode = "creative";
+  // The driver already exists; supply the same note store runtime composition normally sets.
+  return { ...scene, clock, data };
+}
+
+test("a lava step placed in a foreign region is removed before the action resumes", async () => {
+  await using resources = new AsyncDisposableStack();
+  const scene = foreignPoolScene(resources);
+  // The placement site is exercised by the response tests; this scene pins cleanup's ordering within the hold.
+  const cell = scene.bot.entity.position.floored().offset(1, 0, 0);
+  scene.fake.setCell(cell, "cobblestone");
+  recordLifeSavingPlacement(scene.bot, cell, "block");
+  const { output } = await scene.startInterrupted();
+  await scene.leavePit();
+  await scene.clock.advance(500);
+  assert.equal((await output).result.status, "succeeded");
+  assert.equal(scene.bot.blockAt(cell)?.name, "air");
+  assert.deepEqual(pendingLifeSavingPlacements(scene.bot), []);
+});
+
+test("a removal that cannot reach the step reports its region and retries at the next safe moment", async () => {
+  await using resources = new AsyncDisposableStack();
+  const scene = foreignPoolScene(resources);
+  const cell = new Vec3(12, 65, 0);
+  scene.fake.setCell(cell, "cobblestone");
+  recordLifeSavingPlacement(scene.bot, cell, "block");
+  const outcomes: unknown[] = [];
+  scene.driver.onTransition(event => { if (event.kind === "outcome") outcomes.push(event.evidence); });
+  const { output } = await scene.startInterrupted();
+  await scene.leavePit();
+  await scene.clock.advance(100);
+  const finished = await output;
+  assert.match((finished.interruptions ?? []).join("|"), /left a life-saving block in .* at 12 65 0/);
+  assert.match(JSON.stringify(outcomes), /leftInRegion.*12.*65.*pool/);
+  assert.equal(pendingLifeSavingPlacements(scene.bot).length, 1);
+  assert.equal(scene.data.read("SELECT * FROM notes").length, 1);
+  scene.bot.entity.position.set(10.5, 65, 0.5);
+  await scene.clock.advance(500);
+  scene.bot.emit("physicsTick");
+  await scene.clock.advance(500);
+  assert.equal(scene.bot.blockAt(cell)?.name, "air");
+  assert.deepEqual(pendingLifeSavingPlacements(scene.bot), []);
+});
+
+test("lava returning during fire cleanup stops the dig and retains the step for the next safe moment", async () => {
+  await using resources = new AsyncDisposableStack();
+  const scene = foreignPoolScene(resources);
+  scene.bot.game.gameMode = "survival";
+  const cell = scene.bot.entity.position.floored().offset(1, 0, 0);
+  scene.fake.setCell(cell, "cobblestone");
+  recordLifeSavingPlacement(scene.bot, cell, "block");
+  const { output } = await scene.startInterrupted();
+  await scene.leavePit();
+  await scene.clock.advance(100);
+  assert.ok(scene.bot.targetDigBlock, "cleanup is digging when lava returns");
+  Object.assign(scene.bot.entity, { isInLava: true });
+  scene.bot.emit("physicsTick");
+  await scene.clock.advance(100);
+  const finished = await output;
+  assert.equal(finished.result.status, "cancelled");
+  assert.match((finished.interruptions ?? []).join("|"), /in danger again/);
+  assert.equal(scene.bot.targetDigBlock, null);
+  assert.equal(pendingLifeSavingPlacements(scene.bot).length, 1);
+  assert.equal(scene.bot.blockAt(cell)?.name, "cobblestone");
+  Object.assign(scene.bot.entity, { isInLava: false });
+  setBurning(scene.bot, false);
+  scene.bot.game.gameMode = "creative";
+  scene.bot.emit("physicsTick");
+  await scene.clock.advance(500);
+  assert.deepEqual(pendingLifeSavingPlacements(scene.bot), []);
+  assert.equal(scene.bot.blockAt(cell)?.name, "air");
 });
 
 test("fire response selection replays from the observed escape availability", () => {
@@ -326,6 +434,7 @@ function lavaWaitScene(
   let lavaFlips = 0;
   const scene = {
     bot,
+    fake,
     runner,
     driver,
     server,
@@ -414,6 +523,18 @@ test("lava still spreading after 10 s returns the action with the spreading mess
   assert.equal(finished.result.status, "cancelled");
   assert.match((finished.interruptions ?? []).join("|"), /still spreading/);
   assert.deepEqual(scene.driver.answered.snapshot(), [], "nothing is remembered for this outcome");
+  const next = defineAction({
+    name: "look_around",
+    description: "A plain action started after the lava wait gave up.",
+    inputSchema: z.object({}),
+    resultSchema: actionResultSchema({}),
+    formatResult: (result) => result.status,
+    execution: { kind: "task" },
+    parse: () => ({}),
+    execute: async () => ({ status: "succeeded" as const }),
+  });
+  assert.equal((await scene.runner.run(next, {})).result.status, "succeeded");
+  assert.ok(!scene.runner.status().activeAction, "the next action releases the body again");
 });
 
 test("static lava resumes at once", async () => {
@@ -435,30 +556,6 @@ test("lava changes before the last two flow steps do not delay the resume", asyn
   await scene.leavePit();
   assert.equal((await output).result.status, "succeeded", "the change at 1000 is 120 ticks old");
   assert.equal(scene.attempts.count, 2);
-});
-
-test("a new action gets the body after the spreading outcome returned the old one", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _timers = clock.install();
-  await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources, clock);
-  const { output } = await scene.startInterrupted();
-  await leavePitWhileLavaSpreads(scene);
-  await scene.jump(10_000);
-  assert.equal((await output).result.status, "cancelled");
-  const next = defineAction({
-    name: "look_around",
-    description: "A plain action started after the lava wait gave up.",
-    inputSchema: z.object({}),
-    resultSchema: actionResultSchema({}),
-    formatResult: (result) => result.status,
-    execution: { kind: "task" },
-    parse: () => ({}),
-    execute: async () => ({ status: "succeeded" as const }),
-  });
-  const again = await scene.runner.run(next, {});
-  assert.equal(again.result.status, "succeeded");
-  assert.ok(!scene.runner.status().activeAction, "the body is free again");
 });
 
 test("an endangered body during the wait returns the action with the danger message", async () => {
@@ -539,6 +636,8 @@ test("lava that keeps advancing past the 10 s clock returns the action with the 
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action was not resumed");
   assert.equal(finished.result.status, "cancelled");
+  assert.match((finished.interruptions ?? []).join("|"), /still spreading/);
+  assert.deepEqual(scene.driver.answered.snapshot(), [], "spreading is not a failed escape");
 });
 
 /**
@@ -555,7 +654,8 @@ function limitedLavaScene(resources: AsyncDisposableStack, clock: FakeClock) {
   return { ...scene, pass };
 }
 
-test("waiting on dry ground for lava to settle is progress: not cut at 6 s", async () => {
+for (const inWater of [false, true]) {
+test(`after an escape onto ${inWater ? "water" : "dry ground"} the settle wait is not cut at 6 s`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
@@ -563,35 +663,20 @@ test("waiting on dry ground for lava to settle is progress: not cut at 6 s", asy
   const { output } = await scene.startInterrupted();
   scene.lavaChanges();
   await scene.leavePit();
-  // The lava keeps spreading for 7 s of the wait, so the world age alone does not settle it.
+  Object.assign(scene.bot.entity, { onGround: !inWater, isInWater: inWater });
   for (let second = 0; second < 7; second++) {
     scene.lavaChanges();
     await scene.pass(1_000);
   }
   await scene.pass(1_000);
-  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still waiting at 8 s of the lava wait");
-  assert.equal(scene.attempts.count, 1);
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "still waiting at 8 s in water");
   await scene.pass(1_100);
-  assert.equal((await output).result.status, "succeeded", "the lava settled: the action resumes");
-});
-
-test("the same wait with the body off the ground is cut at 6 s without progress", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _timers = clock.install();
-  await using resources = new AsyncDisposableStack();
-  const scene = limitedLavaScene(resources, clock);
-  const { output } = await scene.startInterrupted();
-  scene.lavaChanges();
-  await scene.leavePit();
-  scene.bot.entity.onGround = false;
-  for (let second = 0; second < 7; second++) {
-    scene.lavaChanges();
-    await scene.pass(1_000);
-  }
   const finished = await output;
-  assert.equal(scene.attempts.count, 1, "the action is not resumed");
-  assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
+  assert.equal(scene.attempts.count, 2, "the settled wait resumes the action");
+  assert.equal(finished.result.status, "succeeded");
+  assert.doesNotMatch((finished.interruptions ?? []).join("|"), /REFLEX_LIMIT/);
 });
+}
 
 test("rising in lava is progress, after sinking first", async () => {
   const clock = createFakeClock({ mode: "mocked" });

@@ -6,6 +6,7 @@ import { BodyAbort } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
 import { pendingLifeSavingPlacements, removeLifeSavingPlacements, setLifeSavingRemovalContext, type LifeSavingRemovalContext } from "../../world/life-saving-placements.js";
 import { isBurning, isInFire, isInLava } from "../perception/body.js";
+import { hasFireDanger } from "../perception/fire-danger.js";
 import { Answered } from "../state/answered.js";
 import { Budgets } from "../state/budgets.js";
 import type { ReflexDefinition, ReflexName, ReflexSnapshot, SurvivalTransition } from "./contract.js";
@@ -30,6 +31,8 @@ export class ReflexDriver implements AsyncDisposable {
   #dimension: string;
   #removal: Promise<void> | null = null;
   #removalController: AbortController | null = null;
+  #removalAt: string | null = null;
+  readonly #retryRemoval = (): void => { this.#removalAt = null; };
 
   constructor(
     readonly bot: Bot,
@@ -41,6 +44,9 @@ export class ReflexDriver implements AsyncDisposable {
     this.#dimension = bot.game?.dimension;
     bot.on("death", this.#death);
     bot.on("game", this.#game);
+    // New terrain or supplies can make an unchanged stance safe to clean from (T9 review, 2026-11-09).
+    bot.on("blockUpdate", this.#retryRemoval);
+    bot.inventory.on("updateSlot", this.#retryRemoval);
   }
 
   onTransition(observer: (transition: SurvivalTransition) => void): () => void {
@@ -71,10 +77,18 @@ export class ReflexDriver implements AsyncDisposable {
 
   /** The tick after settlement sees released registrations, unlike the outcome callback itself. */
   #removeWhenSafe(): void {
-    if (this.#removal || this.runner.ownership().current !== null || !this.bot.entity.onGround ||
+    if (this.#removal) return;
+    if (this.runner.ownership().current !== null || !this.bot.entity.onGround ||
       isBurning(this.bot) || isInFire(this.bot) || isInLava(this.bot) ||
-      this.snapshot().some((reflex) => reflex.response !== null) ||
-      !pendingLifeSavingPlacements(this.bot).some((entry) => entry.dimension === this.bot.game.dimension)) return;
+      this.snapshot().some((reflex) => reflex.response !== null)) {
+      this.#removalAt = null;
+      return;
+    }
+    const pending = pendingLifeSavingPlacements(this.bot).filter(entry => entry.dimension === this.bot.game.dimension);
+    if (pending.length === 0) { this.#removalAt = null; return; }
+    const at = `${this.bot.game.dimension}|${this.bot.entity.position}|${pending.map(entry => `${entry.cell}:${entry.recordedAt}`).join(";")}`;
+    if (at === this.#removalAt) return;
+    this.#removalAt = at;
     this.#removalController = new AbortController();
     this.#removal = this.#removePlacements(this.#removalController.signal).finally(() => {
       this.#removal = null;
@@ -93,7 +107,7 @@ export class ReflexDriver implements AsyncDisposable {
         const result = await removeLifeSavingPlacements(this.bot, context.signal!, (left) => this.#publish({
           kind: "outcome", reflex: "recover_footing",
           evidence: { response: "remove_life_saving_placements", outcome: { kind: "placements_left", error: left.why } },
-        }));
+        }), () => hasFireDanger(this.bot));
         if (result.removed.length) this.#publish({
           kind: "outcome", reflex: "recover_footing",
           evidence: { response: "remove_life_saving_placements", outcome: {
@@ -124,6 +138,7 @@ export class ReflexDriver implements AsyncDisposable {
   };
 
   #reset(cause: BodyAbort): void {
+    this.#retryRemoval();
     this.#removalController?.abort(cause);
     this.#world++;
     this.answered.clear();
@@ -172,6 +187,8 @@ export class ReflexDriver implements AsyncDisposable {
     this.#stopListening?.();
     this.bot.off("death", this.#death);
     this.bot.off("game", this.#game);
+    this.bot.off("blockUpdate", this.#retryRemoval);
+    this.bot.inventory.off("updateSlot", this.#retryRemoval);
     const closing = [...this.#registrations.values()].map((registration) => registration.close());
     await Promise.all(closing);
     await this.#removal;

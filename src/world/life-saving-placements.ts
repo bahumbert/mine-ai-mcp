@@ -31,6 +31,7 @@ export interface LifeSavingPlacement {
 const ledgers = new WeakMap<Bot, LifeSavingPlacement[]>();
 const contexts = new WeakMap<Bot, LifeSavingRemovalContext>();
 const waterHooks = new WeakMap<Bot, (cell: Vec3, signal: AbortSignal) => Promise<boolean>>();
+const notedFailures = new WeakMap<LifeSavingPlacement, string>();
 
 export const LIFE_SAVING_REMOVAL_MS = 30_000;
 export const LIFE_SAVING_ROUTE_BLOCKS = 8;
@@ -184,7 +185,7 @@ async function removePlacement(bot: Bot, entry: LifeSavingPlacement, signal: Abo
     ? { kind: "removed" } : { kind: "left", why: "the bucket refill failed" };
 }
 
-/** Persist a failed removal before forgetting its pending record, so a failed save cannot lose the obligation. */
+/** Keep a failed removal and its note until a later safe moment confirms removal or a changed cell. */
 async function settlePlacement(bot: Bot, entry: LifeSavingPlacement, signal: AbortSignal, parentSignal: AbortSignal, deadline: number): Promise<RemovalAttempt> {
   let attempt: RemovalAttempt;
   try {
@@ -201,11 +202,38 @@ async function settlePlacement(bot: Bot, entry: LifeSavingPlacement, signal: Abo
     const why = `left a ${entry.block} at ${x} ${y} ${z} inside ${describeProtectedRegion(entry.region)}: ${attempt.why}. Return to remove it when safe or ask its owner.`;
     const data = contexts.get(bot)?.data;
     if (!data) throw new Error(`${why} No bot note store is configured.`);
-    saveBotNote(data, bot, why, "A life-saving placement could not be removed after the reflex ended.");
+    if (notedFailures.get(entry) !== why) {
+      saveBotNote(data, bot, why, "A life-saving placement could not be removed after the reflex ended.");
+      notedFailures.set(entry, why);
+    }
     attempt = { kind: "left", why };
   }
-  forgetPlacement(bot, entry);
+  if (attempt.kind !== "left") forgetPlacement(bot, entry);
   return attempt;
+}
+
+/** Danger can return while a dig or server answer is pending, including with no more physics ticks. */
+function watchRemovalDanger(bot: Bot, isDangerous: () => boolean) {
+  const controller = new AbortController();
+  const check = () => {
+    try {
+      if (isDangerous()) controller.abort(new Error("Emergency placement cleanup waits for the danger to end."));
+    } catch (cause) {
+      controller.abort(cause);
+    }
+  };
+  bot.on("physicsTick", check);
+  bot.on("health", check);
+  bot.on("blockUpdate", check);
+  check();
+  return {
+    signal: controller.signal,
+    stop() {
+      bot.off("physicsTick", check);
+      bot.off("health", check);
+      bot.off("blockUpdate", check);
+    },
+  };
 }
 
 /** Remove one safe moment's ledger, bounded even when physics or a server answer stops. Interruptions retain work. */
@@ -213,10 +241,11 @@ export async function removeLifeSavingPlacements(
   bot: Bot,
   parentSignal: AbortSignal,
   onLeft?: (left: { cell: Vec3; why: string }) => void,
+  isDangerous: () => boolean = () => false,
 ): Promise<RemovalResult> {
   parentSignal.throwIfAborted();
   const result: RemovalResult = { removed: [], left: [] };
-  if (bot.health <= 0 || !bot.entity.onGround) return result;
+  if (bot.health <= 0 || !bot.entity.onGround || isDangerous()) return result;
   const deadline = monotonicNow() + LIFE_SAVING_REMOVAL_MS;
   const lifetime = new AbortController();
   const timer = setTimeout(() => lifetime.abort(new Error("the 30 s removal bound passed")), LIFE_SAVING_REMOVAL_MS);
@@ -227,14 +256,16 @@ export async function removeLifeSavingPlacements(
   };
   bot.on("death", death);
   bot.on("game", game);
-  const signal = AbortSignal.any([parentSignal, lifetime.signal]);
+  const danger = watchRemovalDanger(bot, isDangerous);
+  const interrupted = AbortSignal.any([parentSignal, danger.signal]);
+  const signal = AbortSignal.any([interrupted, lifetime.signal]);
   try {
     for (const entry of [...pendingLifeSavingPlacements(bot)]) {
       if (entry.dimension !== bot.game.dimension) continue;
-      parentSignal.throwIfAborted();
+      interrupted.throwIfAborted();
       const block = bot.blockAt(entry.cell);
       if (block && block.name !== entry.block) { forgetPlacement(bot, entry); continue; }
-      const attempt = await settlePlacement(bot, entry, signal, parentSignal, deadline);
+      const attempt = await settlePlacement(bot, entry, signal, interrupted, deadline);
       if (attempt.kind === "left") {
         const left = { cell: entry.cell.clone(), why: attempt.why };
         result.left.push(left);
@@ -243,7 +274,12 @@ export async function removeLifeSavingPlacements(
       if (attempt.kind === "removed") result.removed.push(entry.cell.clone());
     }
     return result;
+  } catch (cause) {
+    parentSignal.throwIfAborted();
+    if (!danger.signal.aborted || bot.health <= 0 || bot.game.dimension !== dimension) throw cause;
+    return result;
   } finally {
+    danger.stop();
     clearTimeout(timer);
     bot.off("death", death);
     bot.off("game", game);

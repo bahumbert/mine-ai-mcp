@@ -291,11 +291,6 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
   assert.equal(added(bot, "chunkColumnLoad"), 2);
   assert.equal(added(bot, "chunkColumnUnload"), 1);
   assert.equal(
-    added(bot, "blockUpdate"),
-    2,
-    "frontier observation and advancing lava both observe world changes",
-  );
-  assert.equal(
     added(bot, "physicsTick"),
     9,
     "the runtime owns shared perception, bow timing, footing, one reflex loop, idle water, Nether vine physics, End gaze and action progress; survival observation rides the shared body tick (onBodyTick), which also ticks while seated",

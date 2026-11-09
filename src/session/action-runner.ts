@@ -436,7 +436,7 @@ export class ActionRunner {
         return measured(definition.name, startedAtMs, result, interruptions);
       }
       if (invocation.lifetime.signal.aborted) return measured(definition.name, startedAtMs, result, interruptions);
-      interruptions.push(preemption.reason);
+      interruptions.push(preemption.reason, ...(verdict.reason ? [verdict.reason] : []));
       invocation.state = { kind: "resuming" };
       invocation.progress.transition("resuming");
       await this.#awaitIdle();

@@ -6,6 +6,9 @@ import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { type FakeCell, type FakeClock, type FakeEntitySpec, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { isInLava } from "../perception/body.js";
 import { escapeFire, lavaStepCells, type FireEscapeOutcome } from "./fire.js";
+import { buildLavaEscapeStep } from "./fire.js";
+import { pendingLifeSavingPlacements } from "../../world/life-saving-placements.js";
+import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 
 test("lava contact includes the shallow body overlap missed by the swimming flag", () => {
   const lavaCell = new Vec3(1, 63, 0);
@@ -361,6 +364,20 @@ function walledTwoCellPit(wallRadius = 5, wallHeight = 2): Record<string, FakeCe
 }
 
 const IN_THE_PIT = new Vec3(0.5, 64, 0.5);
+
+for (const owner of ["Tom", "own", "none"]) {
+  test(`a lava step in ${owner === "Tom" ? "a foreign" : owner} region ${owner === "Tom" ? "is recorded" : "needs no removal"}`, async () => {
+    const { bot, clock, world } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT, carried: { cobblestone: 8 } });
+    setProtectedRegionsProvider(bot, () => owner === "none" ? [] : [{
+      regionId: 7, owner: owner === "own" ? bot.username : owner, label: "pool", dimension: "overworld",
+      min: { x: -5, y: 63, z: -5 }, max: { x: 5, y: 70, z: 5 },
+    }]);
+    const step = await clock.settle(buildLavaEscapeStep(bot, world, new AbortController().signal), 3_000);
+    assert.ok(step, "emergency placement is admitted");
+    assert.equal(bot.blockAt(step.offset(0, -1, 0).floored())?.name, "cobblestone");
+    assert.equal(pendingLifeSavingPlacements(bot).length, owner === "Tom" ? 1 : 0);
+  });
+}
 
 test("a hop that goes nowhere in lava is dropped after 2 s for a lava step, asked once", async () => {
   // The ledge is one row over the lava top: its feet cell is two above the body's (a hop the scan admits), behind a wall.

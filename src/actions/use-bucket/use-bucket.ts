@@ -103,6 +103,38 @@ function carried(bot: Bot, name: string) {
   return bot.inventory.items().find((item) => item.name === name) ?? null;
 }
 
+/** Aim at a source's surface and confirm the bucket gain; emergency recovery also requires source removal. */
+function scoopSource(
+  bot: Bot,
+  target: Vec3,
+  liquid: BucketLiquid,
+  item: NonNullable<ReturnType<typeof carried>>,
+  useItem: typeof useItemAt,
+  options: { readonly signal?: AbortSignal; readonly lifeSaving?: true },
+): Promise<ItemUseResult> {
+  return useItem(bot, {
+    item,
+    // A ray to the centre can dip into the shore before reaching the source.
+    lookAt: target.offset(0.5, 0.9, 0.5),
+    expectedInventoryGain: { item: bucketItem(liquid, true), count: 1 },
+    ...(options.lifeSaving && {
+      expectedCells: [{ position: target, matches: (block) => !isLiquidSource(bot, block, liquid) }],
+      lifeSaving: true as const,
+    }),
+    signal: options.signal,
+  });
+}
+
+/** Reclaim an emergency water source in reach; the caller owns the removal deadline and body. */
+export async function pickUpPlacedWater(bot: Bot, cell: Vec3, signal: AbortSignal): Promise<boolean> {
+  signal.throwIfAborted();
+  const item = carried(bot, bucketItem("water", false));
+  const source = bot.blockAt(cell);
+  if (!item || !source || !isLiquidSource(bot, source, "water")) return false;
+  const result = await scoopSource(bot, cell, "water", item, useItemAt, { signal, lifeSaving: true });
+  return result.kind === "used";
+}
+
 interface SourceSearch {
   readonly sources: readonly Vec3[];
   readonly reason: string | null;
@@ -381,14 +413,7 @@ async function castBucket(
     if (!isLiquidSource(bot, targetBlock, request.liquid)) {
       return refused(useBucketOutcomes.notASource(request.liquid, targetBlock.name));
     }
-    // Aim at the source's surface, not its centre: from four blocks back a
-    // ray to the centre dips into the shore block just before the water.
-    return dependencies.useItem(bot, {
-      item,
-      lookAt: target.offset(0.5, 0.9, 0.5),
-      expectedInventoryGain: { item: bucketItem(request.liquid, true), count: 1 },
-      signal: context.signal,
-    });
+    return scoopSource(bot, target, request.liquid, item, dependencies.useItem, { signal: context.signal });
   }
   if (!isReplaceableForPlacement(targetBlock, bot.version)) return refused(useBucketOutcomes.targetOccupied(targetBlock.name));
   const beforeAim = pourRefusal(bot, target, request.liquid);

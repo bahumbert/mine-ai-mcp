@@ -9,6 +9,7 @@ import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { timeoutSignal } from "../../utils/wall-timers.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { bucketItem } from "../../world/buckets.js";
+import { recordLifeSavingPlacement } from "../../world/life-saving-placements.js";
 /** Stop waiting for an unavailable server; every continuation rechecks ownership before issuing another effect. */
 function whileOwned<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
@@ -70,7 +71,7 @@ async function selectBucket(bot: Bot, full: boolean, signal: AbortSignal): Promi
 }
 
 /** Issue a source pour into an open cell; the caller observes the server's source and inventory receipts. */
-export async function placeWaterInto(bot: Bot, cell: BlockPosition, signal: AbortSignal, permitted: () => boolean = () => true): Promise<boolean> {
+export async function placeWaterInto(bot: Bot, cell: BlockPosition, signal: AbortSignal, permitted: () => boolean = () => true, options: { readonly lifeSaving?: true } = {}): Promise<boolean> {
   signal.throwIfAborted();
   if (!bucketAvailable(bot) || !permitted() || !waterableLanding(view(bot), cell)) return false;
   await selectBucket(bot, true, signal);
@@ -79,6 +80,7 @@ export async function placeWaterInto(bot: Bot, cell: BlockPosition, signal: Abor
   if (!permitted() || bot.heldItem?.name !== bucketItem("water", true) || !waterableLanding(view(bot), cell)) return false;
   const point = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5);
   if (bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0).distanceTo(point) > 4.5) return false;
+  if (options.lifeSaving) recordLifeSavingPlacement(bot, new Vec3(cell.x, cell.y, cell.z), "water", "water");
   bot.activateItem();
   return true;
 }

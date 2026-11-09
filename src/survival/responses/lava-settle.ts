@@ -139,5 +139,8 @@ export async function escapeThenSettle(
     escape = await escapeFire(bot, world, signal, rerunFireReason(bot), {
       maximumMs: leftToEscape,
     });
+    // This escape owns only the remaining settle budget; native timers may truncate its fractional milliseconds.
+    if (escape === "timed_out" && !isInLava(bot) && !isInFire(bot))
+      return { escape: "escaped", settle: "spreading" };
   }
 }

@@ -23,6 +23,6 @@ export class BodyAbort extends Error {
 }
 
 export type Continuation =
-  | { readonly kind: "resume" }
+  | { readonly kind: "resume"; readonly reason?: string }
   | { readonly kind: "return"; readonly reason: string | null }
   | { readonly kind: "cancel"; readonly cause: BodyAbortCause };

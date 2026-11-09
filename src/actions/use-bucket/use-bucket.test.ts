@@ -8,6 +8,19 @@ import { createFakeBot, itemOf, type FakeBotOptions, type FakeCell, type FakeClo
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { parseUseBucketRequest } from "./contract.js";
 import { beginUseBucket, formatUseBucketResult, useBucket, type UseBucketDependencies } from "./use-bucket.js";
+import * as bucketHelpers from "./use-bucket.js";
+
+test("life-saving water recovery rejects an abort while the server stops answering", async () => {
+  const { bot, clock, server } = createFakeBot({ cells: { "2,64,0": "water" }, carried: { bucket: 1 } });
+  server.stop();
+  const abort = new AbortController();
+  const result = bucketHelpers.pickUpPlacedWater(bot, new Vec3(2, 64, 0), abort.signal);
+  const rejected = assert.rejects(result, /cleanup cancelled/);
+  await clock.advance(100);
+  abort.abort(new Error("cleanup cancelled"));
+  await rejected;
+  assert.equal(bot.usingHeldItem, false);
+});
 
 function key(position: { x: number; y: number; z: number }): string {
   return `${position.x},${position.y},${position.z}`;

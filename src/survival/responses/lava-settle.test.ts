@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
-import { awaitLavaSettled, LAVA_SETTLE_MAXIMUM_MS, rerunFireReason, type LavaSettle } from "./lava-settle.js";
+import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
+import { MemoryWorld } from "../../navigation/world/memory-world.js";
+import { awaitLavaSettled, escapeThenSettle, LAVA_SETTLE_MAXIMUM_MS, rerunFireReason, type LavaSettle } from "./lava-settle.js";
 import { recordFireContact } from "../perception/burn.js";
 
 test("an advancing re-run keeps lethal_burn while the burn is lethal", () => {
@@ -13,11 +14,35 @@ test("an advancing re-run keeps lethal_burn while the burn is lethal", () => {
   assert.equal(rerunFireReason(scene.bot), "lethal_burn");
 });
 
+for (const contact of ["none", "lava", "fire"] as const) {
+  test(`a second escape at the settle deadline ${contact === "none" ? "out of lava is spreading" : `still in ${contact} stays timed_out`}`, async () => {
+    const scene = settleScene();
+    using _timers = scene.clock.install();
+    // Native timers can truncate fractional delays (task review, 2026-11-09).
+    const schedule = globalThis.setTimeout;
+    globalThis.setTimeout = ((callback: () => void, ms: number) => schedule(callback, Math.floor(ms))) as typeof setTimeout;
+    using _roundedTimers = { [Symbol.dispose]: () => { globalThis.setTimeout = schedule; } };
+    const output = escapeThenSettle(scene.bot, new MemoryWorld(), scene.abort.signal, "contact", () => scene.bot.time.age, { maximumMs: 1_000.75 });
+    await flush();
+    // Re-enter lava after the first escape; freeze physics once the second swim starts.
+    Object.assign(scene.bot.entity, { isInLava: true, onGround: false });
+    await scene.advance(1);
+    scene.bot.physicsEnabled = false;
+    if (contact !== "lava") Object.assign(scene.bot.entity, { isInLava: false });
+    if (contact === "fire") scene.fake.setCell(scene.bot.entity.position.floored(), "fire");
+    await scene.clock.advance(1_000);
+    assert.deepEqual(await output, contact === "none"
+      ? { escape: "escaped", settle: "spreading" }
+      : { escape: "timed_out", settle: null });
+    assert.equal(Object.values(scene.bot.controlState).some(Boolean), false);
+  });
+}
+
 /** A bot standing on dry ground; `lastChange` is the world age of the last lava change the reflex heard of. */
 function settleScene(options: { dimension?: string; lavaBeside?: boolean; attacker?: boolean } = {}) {
-  // A mocked clock: the two tests that wait on the wall clock install it, the others never touch the timers.
+  // Install the mocked clock only for tests that wait on the wall clock.
   const clock = createFakeClock({ mode: "mocked" });
-  const { bot, combat, server } = createFakeBot({
+  const { bot, combat, server, world: fake } = createFakeBot({
     clock,
     dimension: options.dimension,
     server: { startAge: 1000 },
@@ -33,6 +58,7 @@ function settleScene(options: { dimension?: string; lavaBeside?: boolean; attack
   Object.assign(bot.entity, { metadata });
   const scene = {
     bot,
+    fake,
     combat,
     clock,
     server,
@@ -60,39 +86,29 @@ function settleScene(options: { dimension?: string; lavaBeside?: boolean; attack
   return scene;
 }
 
-test("settled at once when no lava changed", async () => {
+for (const lastChange of [null, 940]) {
+test(`settled at once when ${lastChange === null ? "no lava changed" : "the last change is two flow steps old"}`, async () => {
   const scene = settleScene();
+  scene.lastChange = lastChange;
   await scene.start();
   assert.equal(scene.result, "settled", "no physics tick has run");
 });
+}
 
-test("settled at once when the last change is two flow steps old", async () => {
-  const scene = settleScene();
-  scene.lastChange = 1000 - 60;
+for (const { dimension, lastChange, before, after } of [
+  { dimension: "overworld", lastChange: 1000, before: 40, after: 20 },
+  { dimension: "the_nether", lastChange: 1010, before: 20, after: 20 },
+]) {
+test(`${dimension} lava waits two flow steps after the last change`, async () => {
+  const scene = settleScene({ dimension });
+  scene.lastChange = lastChange;
   await scene.start();
+  await scene.advance(before);
+  assert.equal(scene.result, undefined);
+  await scene.advance(after);
   assert.equal(scene.result, "settled");
 });
-
-test("waits two overworld flow steps after the last change", async () => {
-  const scene = settleScene();
-  scene.lastChange = 1000;
-  await scene.start();
-  await scene.advance(20);
-  await scene.advance(20);
-  assert.equal(scene.result, undefined, "age 1040: one tick short of two steps");
-  await scene.advance(20);
-  assert.equal(scene.result, "settled", "age 1060: two flow steps of 30 ticks without a change");
-});
-
-test("nether lava settles after 20 ticks", async () => {
-  const scene = settleScene({ dimension: "the_nether" });
-  scene.lastChange = 1010;
-  await scene.start();
-  await scene.advance(20);
-  assert.equal(scene.result, undefined);
-  await scene.advance(20);
-  assert.equal(scene.result, "settled", "age 1040: 30 ticks since the change, 20 needed");
-});
+}
 
 test("a change during the wait restarts the quiet window", async () => {
   const scene = settleScene();

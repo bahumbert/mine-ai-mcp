@@ -8,6 +8,8 @@ import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.j
 import { confirmFakeDigs } from "../test-support/life-saving-placements.js";
 import * as placements from "./life-saving-placements.js";
 import { regionChangeRefusal, setProtectedRegionsProvider, type ProtectedRegion } from "./protected-regions.js";
+import { isBurning, isInFire, isInLava } from "../survival/perception/body.js";
+import { burnLeft, recordFireContact } from "../survival/perception/burn.js";
 
 const CELL = new Vec3(2, 64, 0);
 const REGION: ProtectedRegion = {
@@ -74,6 +76,7 @@ for (const failure of ["distance", "no route", "deadline", "dig rejected", "unlo
       },
     });
     placements.recordLifeSavingPlacement(bot, CELL, "block");
+    const dig = bot.dig;
     if (failure === "distance") bot.entity.position.x = -9;
     if (failure === "no route" || failure === "deadline") bot.entity.position.x = -4;
     if (failure === "dig rejected") bot.dig = async () => { throw new Error("Dig refused by server"); };
@@ -86,9 +89,14 @@ for (const failure of ["distance", "no route", "deadline", "dig rejected", "unlo
     const notes = data.read("SELECT note, context FROM notes");
     assert.equal(notes.length, 1);
     assert.equal(notes[0]!.note, result.left[0]!.why);
-    assert.deepEqual(await remove(bot), { removed: [], left: [] }, "a reported leftover is not retried or noted twice");
+    assert.equal(placements.pendingLifeSavingPlacements(bot).length, 1, "the failed obligation survives its note");
+    bot.entity.position.set(0.5, 64, 0.5);
+    bot.dig = dig;
+    world.setCell(CELL, "cobblestone");
+    placements.setLifeSavingRemovalContext(bot, { data });
+    assert.deepEqual(await clock.settle(remove(bot), 1_000), { removed: [CELL], left: [] }, "the next safe moment retries the entry");
     assert.equal(data.read("SELECT * FROM notes").length, 1);
-    if (failure !== "unloaded") assert.equal(world.blockAt(CELL)?.name, "cobblestone");
+    assert.equal(world.blockAt(CELL)?.name, "air");
   });
 }
 
@@ -191,5 +199,51 @@ test("a later interruption still reports the earlier noted leftover once", async
   assert.equal(told.length, 1);
   assert.match(told[0]!, /no hook/iu);
   assert.equal(data.read("SELECT * FROM notes").length, 1);
-  assert.equal(placements.pendingLifeSavingPlacements(bot).length, 1);
+  assert.equal(placements.pendingLifeSavingPlacements(bot).length, 2, "both the noted leftover and interrupted dig survive");
 });
+
+for (const swimming of [false, true]) {
+  test(`an off-ground ${swimming ? "swimming" : "airborne"} body keeps its ledger for the next grounded moment`, async () => {
+    const { bot, clock, world } = scene();
+    using _timers = clock.install();
+    placements.recordLifeSavingPlacement(bot, CELL, "block");
+    Object.assign(bot.entity, { onGround: false, isInWater: swimming });
+    assert.deepEqual(await remove(bot), { removed: [], left: [] });
+    assert.equal(placements.pendingLifeSavingPlacements(bot).length, 1);
+    assert.equal(world.blockAt(CELL)?.name, "cobblestone");
+    Object.assign(bot.entity, { onGround: true, isInWater: false });
+    assert.deepEqual(await clock.settle(remove(bot), 1_000), { removed: [CELL], left: [] });
+  });
+}
+
+for (const danger of ["lava", "fire", "lethal_burn"] as const) {
+  test(`${danger} interrupts removal and the next safe moment finishes it`, async () => {
+    const { bot, clock, world } = scene();
+    using data = temporaryBotData();
+    using _timers = clock.install();
+    placements.setLifeSavingRemovalContext(bot, { data });
+    placements.recordLifeSavingPlacement(bot, CELL, "block");
+    bot.game.gameMode = "survival";
+    const dangerous = () => isInLava(bot) || isInFire(bot) || (isBurning(bot) && bot.health <= burnLeft(bot).hp);
+    const work = placements.removeLifeSavingPlacements(bot, new AbortController().signal, undefined, dangerous);
+    await clock.advance(100);
+    if (danger === "lava") Object.assign(bot.entity, { isInLava: true });
+    if (danger === "fire") world.setCell(bot.entity.position.floored(), "fire");
+    if (danger === "lethal_burn") {
+      bot.health = 8;
+      Reflect.set(bot.entity.metadata, bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags"), 1);
+      recordFireContact(bot, "lava", bot.time.age);
+    }
+    bot.emit("physicsTick");
+    await clock.settle(work, 2_000);
+    assert.equal(world.blockAt(CELL)?.name, "cobblestone");
+    assert.equal(placements.pendingLifeSavingPlacements(bot).length, 1);
+    assert.equal(bot.targetDigBlock, null);
+    assert.equal(data.read("SELECT * FROM notes").length, 0, "a danger interruption is not a failed-removal note");
+    Object.assign(bot.entity, { isInLava: false });
+    world.setCell(bot.entity.position.floored(), "air");
+    Reflect.set(bot.entity.metadata, bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags"), 0);
+    bot.game.gameMode = "creative";
+    assert.deepEqual(await clock.settle(remove(bot), 1_000), { removed: [CELL], left: [] });
+  });
+}

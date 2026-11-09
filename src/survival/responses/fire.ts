@@ -69,7 +69,7 @@ export async function buildLavaEscapeStep(
     if (tried.has(key)) continue;
     tried.add(key);
     bot.setControlState("jump", true);
-    const placed = await placeSolidBlockInto(bot, cell, item, { signal });
+    const placed = await placeSolidBlockInto(bot, cell, item, { signal, lifeSaving: true });
     if (placed.kind === "placed") return cell.offset(0.5, 1, 0.5);
   }
   return null;
@@ -205,7 +205,7 @@ async function pourBurnRefuge(bot: Bot, world: WorldView, signal: AbortSignal): 
   const feet = bot.entity.position.floored();
   const free = (cell: Vec3) => waterableLanding(world, cell) && !occupiedCell(bot, cell, bot.entity.id);
   const cell = [feet, ...SIDE_STEPS.map(([dx, dz]) => feet.offset(dx, 0, dz))].find(free);
-  if (!cell || !await placeWaterInto(bot, cell, signal, () => free(cell))) return newFireWalk(bot, null);
+  if (!cell || !await placeWaterInto(bot, cell, signal, () => free(cell), { lifeSaving: true })) return newFireWalk(bot, null);
   // A sent use_item is not a source receipt (bucket-pour-and-fill, 2026-10-23).
   while (true) {
     signal.throwIfAborted();
