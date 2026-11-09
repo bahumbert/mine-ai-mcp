@@ -8,10 +8,11 @@ import {
   openRuntime,
   wearArmor,
 } from "../../src/runtime.ts";
-import type { MineAiScenario } from "../../src/scenario-client.ts";
+import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-client.ts";
+import type { Runtime } from "../../src/runtime.ts";
 import { observe } from "./hazards/pit.ts";
 import { releaseThreats } from "./fortress-common.ts";
-import { readEncounters } from "../../flat/combat/reflex.ts";
+import { readReflexOutcomes } from "../../flat/combat/reflex.ts";
 import { z } from "zod";
 import { recordSourceIdentity } from "../../src/source-identity.ts";
 
@@ -21,6 +22,15 @@ const collectionSchema = z.strictObject({
   camp_spawner: z.boolean().default(false),
   observe_for_ms: z.number().int().positive().default(720_000),
 });
+
+/** Report all reflex outcomes observed during the fortress trial. */
+async function reportReflexOutcomes(context: MineAiScenarioContext, runtime: Runtime) {
+  const reflex = await readReflexOutcomes(context, runtime);
+  for (const encounter of reflex.encounters) context.log(`FORTRESS ENCOUNTER ${JSON.stringify(encounter)}`);
+  for (const limit of reflex.limits) context.log(`FORTRESS REFLEX LIMIT ${JSON.stringify(limit)}`);
+  for (const failure of reflex.failures) context.log(`FORTRESS REFLEX FAILURE ${JSON.stringify(failure)}`);
+  return { reflexLimits: reflex.limits.length, reflexFailures: reflex.failures.length };
+}
 
 /** The driver supplies the task; all combat, recovery, and movement remain production actions. */
 export const run: MineAiScenario = async (context) => {
@@ -158,11 +168,10 @@ export const run: MineAiScenario = async (context) => {
     );
     attempts.push(result);
     log(`FORTRESS HUNT ${JSON.stringify(result)}`);
-    for (const encounter of await readEncounters(context, runtime))
-      log(`FORTRESS ENCOUNTER ${JSON.stringify(encounter)}`);
     // Keep defence attached through a full native blaze charge and volley
     // after the last pickup, so delayed fire cannot turn a death into a pass.
     if (bot.inventory.count(rodId, null) >= collection.drops) await bot.waitForTicks(100);
+    const reflexCounts = await reportReflexOutcomes(context, runtime);
     const elapsedMs = monotonicNow() - started;
     const gained = bot.inventory.count(rodId, null);
     const dropsPerMinute = (Math.min(gained, collection.drops) * 60_000) / elapsedMs;
@@ -184,6 +193,7 @@ export const run: MineAiScenario = async (context) => {
         minimumHealth,
         shieldBlocks,
         fireballs,
+        ...reflexCounts,
         final: snapshot(),
         attempts,
       }),

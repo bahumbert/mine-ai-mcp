@@ -36,6 +36,12 @@ const encounterSchema = z.object({
     .nullish(),
 });
 export type Encounter = z.output<typeof encounterSchema>;
+const limitSchema = z.object({ kind: z.literal("limit"), limit: z.enum(["physics_stalled", "ceiling", "no_progress"]),
+  elapsedMs: z.number(), lastProgress: z.string().nullable() });
+const failureSchema = z.object({ response: z.string(), kind: z.enum(["execution_failed", "cancelled"]), why: z.string() });
+export type ReflexOutcome = ({ kind: "encounter" } & Encounter)
+  | ({ response: string } & z.output<typeof limitSchema>)
+  | { kind: "failed"; response: string; failure: "execution_failed" | "cancelled"; why: string };
 
 /**
  * Count the explosions the server announces to this client.
@@ -143,17 +149,31 @@ export async function readEncounters(
   runtime: Runtime,
   ignoreOutcomes: readonly string[] = [],
 ): Promise<readonly Encounter[]> {
+  return (await readReflexOutcomes(context, runtime, ignoreOutcomes)).encounters;
+}
+
+/** Read each published hostile-reflex outcome without treating limits as encounters. */
+export async function readReflexOutcomes(
+  context: MineAiScenarioContext,
+  runtime: Runtime,
+  ignoreOutcomes: readonly string[] = [],
+): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] }> {
   const readEvents = runtime.actions.find((action) => action.name === READ_RECENT_EVENTS);
   if (!readEvents) throw new Error("The reflex scenarios require the recent-events action.");
-  const seen: Encounter[] = [];
+  const seen: { encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] } = { encounters: [], limits: [], failures: [] };
   for (;;) {
     const output = await runtime.run(readEvents, { limit: 100 }, context.signal);
     const result = readRecentEventsResultSchema.parse(output.result);
     for (const event of result.events) {
       if (event.type !== "survival_outcome" || event.payload.source !== "hostile_reflex") continue;
-      const encounter = parseEncounterEvidence(event.payload.evidence);
-      if (!encounter) continue;
-      if (!ignoreOutcomes.includes(encounter.outcome)) seen.push(encounter);
+      const outcome = parseReflexOutcome(event.payload.evidence);
+      if (!outcome) continue;
+      if (outcome.kind === "limit") seen.limits.push(outcome);
+      else if (outcome.kind === "failed") seen.failures.push(outcome);
+      else {
+        const { kind: _, ...encounter } = outcome;
+        if (!ignoreOutcomes.includes(encounter.outcome)) seen.encounters.push(encounter);
+      }
     }
     if (result.remainingEventCount === 0) break;
   }
@@ -162,12 +182,24 @@ export async function readEncounters(
 
 /** Equipment preparation shares the reflex, but is not a completed fight. */
 export function parseEncounterEvidence(value: unknown): Encounter | null {
+  const outcome = parseReflexOutcome(value);
+  if (!outcome || outcome.kind !== "encounter") return null;
+  const { kind: _, ...encounter } = outcome;
+  return encounter;
+}
+
+/** Parse the published limit, execution failure or completed response. */
+export function parseReflexOutcome(value: unknown): ReflexOutcome | null {
+  const failure = failureSchema.safeParse(value);
+  if (failure.success) return { kind: "failed", response: failure.data.response, failure: failure.data.kind, why: failure.data.why };
+  const limited = z.object({ response: z.string(), outcome: limitSchema }).safeParse(value);
+  if (limited.success) return { response: limited.data.response, ...limited.data.outcome };
   if (z.object({ response: z.literal("prepare_shield") }).safeParse(value).success) return null;
   const evidence = z.object({
     outcome: encounterSchema.omit({ interrupted: true }),
     interrupted: encounterSchema.shape.interrupted,
   }).parse(value);
-  return { ...evidence.outcome, interrupted: evidence.interrupted };
+  return { kind: "encounter", ...evidence.outcome, interrupted: evidence.interrupted };
 }
 
 /**
