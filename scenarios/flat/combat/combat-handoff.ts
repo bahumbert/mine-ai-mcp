@@ -3,7 +3,8 @@ import { NAVIGATE } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
 import { z } from "zod";
-import { openRuntime, wearArmor } from "../../src/runtime.ts";
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { openRuntime, wearArmor, type Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { describe, excessExplosions, readEncounters, watchExplosions, watchShield } from "./reflex.ts";
 
@@ -15,7 +16,111 @@ const paramsSchema = z.strictObject({
   forbidHide: z.boolean().default(false),
   requireEncounter: z.boolean().default(false),
   maxExplosions: z.number().int().nonnegative().optional(),
+  releaseAfterOpen: z.boolean().default(false),
 });
+
+/** Find a declared mob at its arranged position, excluding already matched entities. */
+export function arrangedEntityId(
+  entities: readonly { id: number; name?: string; position: Vec3 }[],
+  declaration: { type: string; pos: [number, number, number] | string },
+  used: ReadonlySet<number>,
+): number | undefined {
+  if (!Array.isArray(declaration.pos)) return undefined;
+  const position = new Vec3(...declaration.pos);
+  return entities.find((entity) => entity.name === declaration.type.replace(/^minecraft:/u, "") &&
+    !used.has(entity.id) && entity.position.distanceTo(position) <= 1)?.id;
+}
+
+/** Release the declared nearby NoAI mobs and wait for each server metadata answer. */
+export async function releaseArranged(context: MineAiScenarioContext): Promise<void> {
+  const { bot, signal } = context;
+  signal.throwIfAborted();
+  const pending = new Set<number>();
+  const entities = Object.values(bot.entities).filter((entity) => entity.position.distanceTo(bot.entity.position) <= 16);
+  for (const declaration of context.scenario.entities) {
+    if (Array.isArray(declaration.pos) && new Vec3(...declaration.pos).distanceTo(bot.entity.position) > 16) continue;
+    const name = declaration.type.replace(/^minecraft:/u, "");
+    const id = arrangedEntityId(entities, declaration, pending);
+    const entity = entities.find((candidate) => candidate.id === id);
+    if (!entity) throw new Error(`release not answered: declared ${name} not visible`);
+    pending.add(entity.id);
+    // minecraft-data 1.21.4 entities.json: mob_flags index 15; creeper swell_dir index 16.
+    context.log(`release entity ${name} ${entity.id} metadata ${JSON.stringify(entity.metadata)}`);
+    const swell: unknown = entity.metadata[16];
+    if (name === "creeper" && swell === 1) throw new Error("creeper fusing under NoAI");
+  }
+  await waitForReleaseAnswers(context, pending);
+}
+
+/** Send the release command and settle when every arranged mob answers or the bound expires. */
+async function waitForReleaseAnswers(context: MineAiScenarioContext, pending: Set<number>): Promise<void> {
+  const { bot, signal } = context;
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const deadline = monotonicNow() + 1_100;
+  let sentAt = 0;
+  const cleanup = () => {
+    clearTimeout(timer);
+    bot._client.off("entity_metadata", metadata);
+    bot.off("messagestr", message);
+    signal.removeEventListener("abort", abort);
+  };
+  const finish = (error?: unknown) => { cleanup(); if (error) reject(error); else resolve(); };
+  const metadata = (packet: { entityId: number; metadata: { key: number; value: unknown }[] }) => {
+    const now = monotonicNow();
+    if (packet.metadata.some((entry) => entry.key === 15 && typeof entry.value === "number" && (entry.value & 1) === 0) && pending.delete(packet.entityId)) {
+      context.log(`release acknowledged ${JSON.stringify({ entityId: packet.entityId, ms: now - sentAt })}`);
+    }
+    if (now > deadline) return finish(new Error("release not answered"));
+    if (pending.size === 0) finish();
+  };
+  const message = (answer: string) => context.log(`release answer ${answer}`);
+  const abort = () => finish(signal.reason);
+  const timer = setTimeout(() => {
+    context.log(`release timeout ${JSON.stringify({ pending: [...pending], ms: monotonicNow() - sentAt })}`);
+    finish(new Error("release not answered"));
+  }, Math.max(0, deadline - monotonicNow()));
+  bot._client.on("entity_metadata", metadata);
+  bot.on("messagestr", message);
+  signal.addEventListener("abort", abort, { once: true });
+  sentAt = monotonicNow();
+  context.log(`release sent ${JSON.stringify({ pending: [...pending] })}`);
+  bot.chat(`/execute at ${bot.username} as @e[distance=..16,nbt={NoAI:1b}] run data merge entity @s {NoAI:0b}`);
+  if (pending.size === 0) finish();
+  return await promise;
+}
+
+/** Wait for the foreground navigate action to own the body before releasing threats. */
+async function waitForNavigate(runtime: Runtime, signal: AbortSignal): Promise<void> {
+  const deadline = monotonicNow() + 500;
+  while (monotonicNow() < deadline) {
+    signal.throwIfAborted();
+    const status = runtime.status();
+    if (status.owner === "foreground" && status.activeAction?.action === NAVIGATE) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("navigate not started");
+}
+
+/** Abort and settle a started navigation if arranging its release fails. */
+export async function navigateWithRelease<T>(
+  start: (signal: AbortSignal) => Promise<T>,
+  release: (signal: AbortSignal) => Promise<void>,
+  signal: AbortSignal,
+): Promise<T> {
+  signal.throwIfAborted();
+  const controller = new AbortController();
+  const combined = AbortSignal.any([signal, controller.signal]);
+  const navigation = start(combined);
+  const settled = navigation.then(() => {}, () => {});
+  try {
+    await release(combined);
+  } catch (cause) {
+    controller.abort(cause);
+    await settled;
+    throw cause;
+  }
+  return await navigation;
+}
 
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
   const params = paramsSchema.parse(context.scenario.params ?? {});
@@ -42,8 +147,14 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
       );
     }
     const navigate = runtime.actions.find((action) => action.name === NAVIGATE)!;
-    for (const [x, y, zPosition] of [params.firstTarget, ...(params.secondTarget ? [params.secondTarget] : [])]) {
-      const output = await runtime.run(navigate, { x, y, z: zPosition, range: 1 }, signal);
+    for (const [index, [x, y, zPosition]] of [params.firstTarget, ...(params.secondTarget ? [params.secondTarget] : [])].entries()) {
+      const start = (navigationSignal: AbortSignal) => runtime.run(navigate, { x, y, z: zPosition, range: 1 }, navigationSignal);
+      const output = index === 0 && params.releaseAfterOpen
+        ? await navigateWithRelease(start, async (releaseSignal) => {
+          await waitForNavigate(runtime, releaseSignal);
+          await releaseArranged({ ...context, signal: releaseSignal });
+        }, signal)
+        : await start(signal);
       context.log(`NAVIGATION ${JSON.stringify(output)}`);
       if (context.bot.entity.position.distanceTo(new Vec3(x + 0.5, y, zPosition + 0.5)) > 2)
         return { status: "failed", detail: `Did not reach ${x},${y},${zPosition}: ${JSON.stringify(output)}` };
