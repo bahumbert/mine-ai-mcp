@@ -34,6 +34,12 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
 
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {
+  /** The cover report a foreground route leaves cover at, as the runtime sends it while `report_open_sky` is on (the shape the scenario `navigation/report-open-sky` reported: `.agent/knowledge/facts/navigation-and-boats.md`). */
+  planCoverExit(at: Position): void {
+    if (this.snapshot.policy?.reportOpenSky !== true) return;
+    this.snapshot = { ...this.snapshot, coverExit: { at, plannedAt: "2026-11-09T00:00:00.000Z", reached: true } };
+  }
+
   snapshot: BotSnapshot = {
     position: { x: 0, y: 64, z: 0 },
     dimension: "minecraft:overworld",

@@ -5,6 +5,7 @@ import { Agent } from "../agent.ts";
 import { INSTANT_TYPING } from "../body.ts";
 import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import { journaledAgent, others, say } from "./agent-fixtures.test.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 
 test("an agent stopped while an ordered dig_shelter waits ends its run within a bound", async (t) => {
   // The night shelter waits for the day in slices of 15 s: the agent's run signal must reach that wait (the shelter's
@@ -26,10 +27,10 @@ test("an agent stopped while an ordered dig_shelter waits ends its run within a 
   await agent.handle(say("Steve", "dig in"));
   await until(() => runtime.submitted.some((call) => call.tool === "raw_action" && call.input.operation === "place"));
   await until(() => runtime.submitted.some((call) => call.tool === "note_save" && String(call.input.context).startsWith("brain memory: shelter ")));
-  const stoppedAt = performance.now();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   controller.abort();
-  await running;
-  assert.ok(performance.now() - stoppedAt < 2_000, `run took ${Math.round(performance.now() - stoppedAt)} ms to end after the abort`);
+  await clock.settle(running, 100, 20);
 });
 
 test("an idle work-loop turn at night never digs a shelter by itself", async (t) => {

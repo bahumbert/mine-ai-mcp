@@ -33,7 +33,7 @@ function setup(baseline: LastDeath | null | undefined, reads: (BotSnapshot | Err
   return { watch, controller, logs, statusCalls: () => statusCalls };
 }
 
-const cancelled = (preempted: boolean): ActOutcome => ({ status: "cancelled", error: "cancelled by caller", preempted });
+const cancelled = (preempted: boolean): ActOutcome => ({ status: "cancelled", error: "cancelled by caller", code: null, preempted });
 
 test("a new death aborts at once, saying where and how", () => {
   const { watch, controller } = setup(T0);
@@ -105,7 +105,7 @@ test("a cancelled action with no new death reads the status and aborts nothing",
 test("an action ending any other way reads nothing", async () => {
   const { watch, statusCalls } = setup(T0);
   watch.actionEnded(cancelled(true));
-  for (const status of ["succeeded", "failed", "refused", "partial"] as const) watch.actionEnded({ status, error: null, preempted: false });
+  for (const status of ["succeeded", "failed", "refused", "partial"] as const) watch.actionEnded({ status, error: null, code: null, preempted: false });
   watch.actionEnded(null);
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(statusCalls(), 0);

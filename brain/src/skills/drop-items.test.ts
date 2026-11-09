@@ -51,16 +51,23 @@ test("a drop that dropped nothing fails with the action's reason, and a water-lo
   assert.match(failed.status === "failed" ? failed.detail : "", /DROP_PICKED_UP/u);
   assert.deepEqual(runtime.submitted.map((call) => call.tool), ["drop_item"], "no ground toss after a pit that failed otherwise");
 
-  const water = new FakeRuntime();
-  water.walkOnNavigate = true;
-  water.dropOutcomes.push(
-    { status: "failed", error: "[DROP_HOLE_UNAVAILABLE] No place within 8 blocks", dropped: [] },
-    { status: "succeeded", error: null, dropped: [{ item: "coal", dropped: 4 }] },
-  );
-  const ground = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "coal" }] }), contextFor(water));
-  assert.equal(ground.status, "done");
-  assert.deepEqual(water.submitted.map((call) => [call.tool, call.input.in_a_hole]), [["drop_item", true], ["drop_item", undefined]], "the action walks off itself, the step does not");
-  assert.match(ground.status === "done" ? ground.detail : "", /4 coal/u);
+  for (const codeOnly of [false, true]) {
+    const water = new FakeRuntime();
+    water.walkOnNavigate = true;
+    water.dropOutcomes.push(
+      { status: "failed", error: "[DROP_HOLE_UNAVAILABLE] No place within 8 blocks", dropped: [] },
+      { status: "succeeded", error: null, dropped: [{ item: "coal", dropped: 4 }] },
+    );
+    const context = contextFor(water);
+    if (codeOnly) {
+      const act = context.body.act.bind(context.body);
+      context.body.act = async (...args) => ({ ...await act(...args), error: "No place within 8 blocks" });
+    }
+    const ground = await runStep(stepSchema.parse({ skill: "drop_item", items: [{ item: "coal" }] }), context);
+    assert.equal(ground.status, "done");
+    assert.deepEqual(water.submitted.map((call) => [call.tool, call.input.in_a_hole]), [["drop_item", true], ["drop_item", undefined]], "the action walks off itself, the step does not");
+    assert.match(ground.status === "done" ? ground.detail : "", /4 coal/u);
+  }
 });
 
 test("walking to a crafting table close by sends navigate its coordinates only, never the block's name", async () => {

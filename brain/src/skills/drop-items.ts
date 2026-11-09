@@ -114,7 +114,7 @@ export async function dropItems(context: SkillContext, step: Extract<Step, { ski
   let outcome = await act({ in_a_hole: true });
   if (context.signal.aborted) return { status: "stopped" };
   let onGround = false;
-  if (outcome.status !== "succeeded" && (outcome.error ?? "").includes("[DROP_HOLE_UNAVAILABLE]")) {
+  if (outcome.status !== "succeeded" && outcome.code === "DROP_HOLE_UNAVAILABLE") {
     outcome = await act({});
     if (context.signal.aborted) return { status: "stopped" };
     onGround = true;

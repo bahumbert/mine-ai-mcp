@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
-import type { ActionStatus, BotRuntime, ForegroundState, ForegroundTool } from "./runtime-client.ts";
+import { errorCode, type ActionStatus, type BotRuntime, type ForegroundState, type ForegroundTool } from "./runtime-client.ts";
 
 /** How long one MCP wait may block; also the reaction time to stop, speech, and re-plan checks. */
 export const WAIT_SLICE_MS = 1_000;
@@ -33,6 +33,8 @@ const MAX_WHISPER_LENGTH = 233;
 export interface ActOutcome {
   readonly status: ActionStatus | "refused";
   readonly error: string | null;
+  /** The runtime refusal code, or the action contract's outcome code. */
+  readonly code: string | null;
   /** The body cancelled the action itself: to speak, or because `interruptWhen` asked to. */
   readonly preempted: boolean;
   /** The action's whole result, when the runtime returned one. */
@@ -51,6 +53,8 @@ export interface TypingPace {
   readonly msPerChar: number;
   /** A long line never waits longer than this. */
   readonly maxMs: number;
+  /** Wait for typing time; injectable so a test clock advances the same wait as the body. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 /** About eight characters a second, a quick typist; thinking time already spent counts as typing. */
@@ -101,7 +105,7 @@ export class Body {
       let from = since;
       for (const message of messages) {
         const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (monotonicNow() - from);
-        if (wait > 0) await sleep(wait);
+        if (wait > 0) await (this.typing.sleep ?? sleep)(wait);
         const outcome = await this.runtime.say(message, to);
         if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
         from = monotonicNow();
@@ -118,7 +122,7 @@ export class Body {
   }
 
   private async run(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions): Promise<ActOutcome> {
-    if (options.signal?.aborted) return { status: "cancelled", error: "stopped before it started", preempted: false };
+    if (options.signal?.aborted) return { status: "cancelled", error: "stopped before it started", code: null, preempted: false };
     let state = await this.submit(tool, input, rationale, options.signal);
     let cancelled = false;
     let preempted = false;
@@ -137,7 +141,7 @@ export class Body {
         const waited = monotonicNow() - cancelledAt;
         if (waited >= this.pace.giveUpMs) {
           this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
-          return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+          return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, code: null, preempted };
         }
         if (monotonicNow() - lastCancel >= this.pace.recancelMs) {
           lastCancel = monotonicNow();
@@ -149,12 +153,12 @@ export class Body {
       if (slice === GAVE_UP) {
         const waited = monotonicNow() - cancelledAt;
         this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
-        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, code: null, preempted };
       }
       state = slice;
     }
-    if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, preempted: false };
-    return { status: state.status, error: state.error, preempted, ...(state.result !== undefined && { result: state.result }) };
+    if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, code: state.code, preempted: false };
+    return { status: state.status, error: state.error, code: errorCode(state.error), preempted, ...(state.result !== undefined && { result: state.result }) };
   }
 
   /**

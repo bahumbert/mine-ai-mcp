@@ -3,6 +3,7 @@ import test from "node:test";
 import { Body, INSTANT_TYPING, type ActOutcome } from "../body.ts";
 import type { CarriedStack, ProtectedArea } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { digShelterFlow, type ShelterContext, type ShelterHole, type ShelterTimings } from "./dig-in.ts";
 
 /** Quick clocks for a night in the fake: the landing and the wait slices last milliseconds. */
@@ -22,6 +23,8 @@ interface RigOptions {
   /** The fall is never seen after a dig (a lagging server or client), even after the step-in. */
   readonly neverLands?: boolean;
   readonly needed?: ReadonlySet<string>;
+  /** Digging dirt yields its item (shelter/dig-in-and-climb-out uses the dug dirt for its roof). */
+  readonly collectDirt?: boolean;
 }
 
 /**
@@ -33,6 +36,8 @@ interface RigOptions {
  */
 function rig(options: RigOptions = {}) {
   const runtime = new FakeRuntime();
+  // view-blocks.ts kindOf: non-block items have no registry block and are omitted.
+  runtime.notBlocks = new Set(["wooden_pickaxe"]);
   runtime.snapshot = { ...runtime.snapshot, position: options.start ?? (options.offCentre === true ? OFF_CENTRE : SURFACE), inventory: [...(options.inventory ?? [{ name: "dirt", count: 4 }])] };
   const controller = new AbortController();
   const night = { over: false };
@@ -42,6 +47,7 @@ function rig(options: RigOptions = {}) {
     if (input.operation === "dig") {
       const [x, y, z] = [Number(input.x), Number(input.y), Number(input.z)];
       runtime.world.set(`${x},${y},${z}`, "air");
+      if (options.collectDirt) runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 1 }] };
       const here = runtime.snapshot.position;
       // The player box is 0.3 each side, so it fits a 1-wide hole when its centre is within 0.2 of the middle; only the
       // offset 0.35 (no fall) is measured, by the scenarios. The fake also puts the feet at the cell's middle: the game keeps the bot's x and z.
@@ -83,7 +89,7 @@ function rig(options: RigOptions = {}) {
 }
 
 const detailOf = (result: { readonly status: string; readonly detail?: string }) => result.detail ?? "";
-const failed = (error: string, status: ActOutcome["status"] = "failed"): ActOutcome => ({ status, error, preempted: false });
+const failed = (error: string, status: ActOutcome["status"] = "failed", code: string | null = status === "refused" ? "ACTION_BUSY" : null): ActOutcome => ({ status, error, code, preempted: false });
 
 /** Intercepts body outcomes to model an unmeasured reflex handing control back. */
 function intercept(r: ReturnType<typeof rig>, hook: (tool: string, input: Readonly<Record<string, unknown>>) => ActOutcome | null) {
@@ -108,17 +114,17 @@ test("minutes by day expire after digging and climbing out", async () => {
   assert.equal(now, 20);
 });
 
-test("a night in the hole: three digs, the roof placed against its support, the day, the roof dug, the climb out: done", async () => {
-  const { runtime, context, dayIn, calls, onPlace } = rig();
+test("a night from tools only roofs with dug dirt, waits and climbs out", async () => {
+  const { runtime, context, dayIn, calls, onPlace } = rig({ inventory: [{ name: "wooden_pickaxe", count: 1 }], collectDirt: true });
   const order: string[] = [];
   let hole: ShelterHole | null = null;
-  onPlace(() => { order.push("place"); dayIn(20); });
-  const result = await digShelterFlow({ ...context, onHole: (made) => { order.push("onHole"); hole = made; } });
+  onPlace(() => order.push("place"));
+  const result = await digShelterFlow({ ...context, onHole: (made) => { order.push("onHole"); hole = made; dayIn(20); } });
   assert.equal(result.status, "done");
+  assert.deepEqual(calls("place"), [{ operation: "place", block_name: "dirt", x: 1, y: 63, z: 0, face: "west" }]);
   assert.deepEqual(order, ["place", "onHole"], "onHole after the roof step, never before it");
   assert.deepEqual(hole, { x: 0, y: 64, z: 0, depth: 3, roofed: true });
   assert.deepEqual(calls("dig").map((dig) => dig.y), [63, 62, 61, 63]);
-  assert.deepEqual(calls("place"), [{ operation: "place", block_name: "dirt", x: 1, y: 63, z: 0, face: "west" }]);
   assert.deepEqual(runtime.submitted.at(-1), { tool: "navigate", input: { x: 0, y: 64, z: 0, range: 1 } });
   assert.match(detailOf(result), /roofed with dirt at 0 61 0.*climbed out/u);
   assert.equal(runtime.snapshot.position.y, 64);
@@ -149,14 +155,14 @@ test("still not landed after the step-in: one dig, failed could not drop into th
 });
 
 test("an order between the dig and the step-in: stopped at once, no look and no control submitted", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const { runtime, context, controller, calls } = rig({ offCentre: true, timings: { landingMs: 60_000, landingPollMs: 60_000 } });
   const dug = runtime.succeedEffects.raw_action!;
   runtime.succeedEffects.raw_action = (input) => { dug(input); if (input.operation === "dig") setTimeout(() => controller.abort(), 20); };
-  const started = performance.now();
-  const result = await digShelterFlow(context);
+  const result = await clock.settle(digShelterFlow(context), 100, 20);
   assert.equal(result.status, "stopped");
   assert.deepEqual([calls("look").length, calls("control").length], [0, 0]);
-  assert.ok(performance.now() - started < 2_000, "the abort ended the landing wait at once");
 });
 
 test("a look that is refused is not followed by a walk: the heading is unknown, so no control is sent", async () => {
@@ -318,13 +324,18 @@ test("minutes expire at night even if dawn never comes", async () => {
   assert.equal(r.runtime.snapshot.position.y, 64);
 });
 
-test("three ACTION_BUSY refusals do not count as resumes", async () => {
-  const r = rig(); let busy = 3;
-  intercept(r, (tool, input) => tool === "raw_action" && input.operation === "dig" && busy-- > 0 ? failed("ACTION_BUSY: reflex holds body", "refused") : null);
-  r.onPlace(() => r.dayIn(20));
-  const result = await digShelterFlow(r.context);
-  assert.equal(result.status, "done", detailOf(result));
-  assert.match(detailOf(result), /resumes: 0/u);
+test("structured refusal codes decide which interruptions count as resumes", async () => {
+  for (const row of [
+    { code: "ACTION_BUSY", error: "a reflex holds the body", refusals: 3, resumes: 0 },
+    { code: "NOT_CONNECTED", error: "ACTION_BUSY is unrelated", refusals: 1, resumes: 1 },
+  ]) {
+    const r = rig(); let remaining = row.refusals;
+    intercept(r, (tool, input) => tool === "raw_action" && input.operation === "dig" && remaining-- > 0 ? failed(row.error, "refused", row.code) : null);
+    r.onPlace(() => r.dayIn(0));
+    const result = await digShelterFlow(r.context);
+    assert.equal(result.status, "done", detailOf(result));
+    assert.ok(detailOf(result).includes(`resumes: ${row.resumes}`), detailOf(result));
+  }
 });
 
 test("a reflex moving twenty blocks away causes a new search there", async () => {
@@ -370,15 +381,20 @@ test("each shelter wait slice reports alive", async () => {
   assert.equal(result.status, "done"); assert.ok(alive >= 2);
 });
 
-test("an open hole dug before: no dig, the bot drops in by itself, roofs and waits", async () => {
-  const { runtime, context, moveTo, dayIn, calls, onPlace } = rig();
-  for (const y of [61, 62, 63]) runtime.world.set(`0,${y},0`, "air");
-  onPlace(() => dayIn(20));
-  setTimeout(() => moveTo(0.5, 61, 0.5), 20);
-  const result = await digShelterFlow(context);
-  assert.equal(result.status, "done", detailOf(result));
-  assert.deepEqual(calls("dig").map((dig) => dig.y), [63], "only the roof is dug on the way out");
-  assert.equal(calls("place").length, 1);
+test("an existing hole needs no digging and roofs only with a carried block", async () => {
+  for (const row of [
+    { inventory: [{ name: "dirt", count: 4 }], roof: ["dirt"], digs: [63], words: /roofed with dirt/u },
+    { inventory: [{ name: "wooden_pickaxe", count: 1 }], roof: [], digs: [], words: /open hole/u },
+  ]) {
+    const { runtime, context, moveTo, dayIn, calls } = rig({ inventory: row.inventory });
+    for (const y of [61, 62, 63]) runtime.world.set(`0,${y},0`, "air");
+    setTimeout(() => moveTo(0.5, 61, 0.5), 0);
+    const result = await digShelterFlow({ ...context, onHole: () => dayIn(0) });
+    assert.equal(result.status, "done", detailOf(result));
+    assert.deepEqual(calls("dig").map((dig) => dig.y), row.digs, "only a placed roof is dug on the way out");
+    assert.deepEqual(calls("place").map((place) => place.block_name), row.roof);
+    assert.match(detailOf(result), row.words);
+  }
 });
 
 test("a waterlogged stair in a wall cell of the best spot: the second spot is dug", async () => {
@@ -528,17 +544,20 @@ test("giving up on a dig in the hole leaves a usable next go_to", async () => {
   assert.equal(next.status, "succeeded");
 });
 
-test("pushed from the hole with its roof gone: returns, roofs again and waits", async () => {
-  const r = rig(); let places = 0;
-  r.onPlace(() => {
-    places++;
-    if (places === 1) { r.runtime.world.set("0,63,0", "air"); r.moveTo(2.5, 64, 0.5); }
-    else r.dayIn(20);
-  });
-  const result = await digShelterFlow(r.context);
+test("displaced after a minute: returns, replaces the roof with current materials and counts both waits", async () => {
+  const r = rig(); let now = 0; let displaced = false;
+  const result = await digShelterFlow({ ...r.context, now: () => now, alive: () => {
+    now += 60_000;
+    if (displaced) return;
+    displaced = true;
+    r.runtime.world.set("0,63,0", "air"); r.moveTo(2.5, 64, 0.5);
+    r.runtime.snapshot = { ...r.runtime.snapshot, inventory: [{ name: "cobblestone", count: 1 }] };
+  }, dayCame: async () => now >= 120_000 });
   assert.equal(result.status, "done", detailOf(result));
   assert.deepEqual(r.walks()[0], { x: 0, y: 61, z: 0, range: 0 });
-  assert.equal(r.calls("place").length, 2);
+  assert.deepEqual(r.calls("place").map((call) => call.block_name), ["dirt", "cobblestone"]);
+  assert.match(detailOf(result), /for 2 min; climbed out/u);
+  assert.equal(r.runtime.snapshot.position.y, 64);
 });
 
 test("death during the wait: search and dig at the distant respawn", async () => {
@@ -562,13 +581,13 @@ test("a roof the server refuses leaves the hole open and says so", async () => {
   assert.match(detailOf(result), /open hole \(the roof was not placed\)/u);
 });
 
-test("a stop while waiting returns stopped and leaves no timer", async () => {
+test("a stop ends the long shelter wait and permits the next order", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const { runtime, context, controller, onPlace } = rig({ timings: { waitSliceMs: 60_000 } });
   onPlace(() => setTimeout(() => controller.abort(), 20));
-  const started = performance.now();
-  const result = await digShelterFlow(context);
+  const result = await clock.settle(digShelterFlow(context), 100, 20);
   assert.equal(result.status, "stopped");
-  assert.ok(performance.now() - started < 2_000, "the abort ended the 60 s wait slice at once");
   const next = await context.body.act("navigate", { x: 0, y: 64, z: 0, range: 1 }, "the next order leaves the roofed hole");
   assert.equal(next.status, "succeeded");
   assert.equal(runtime.snapshot.position.y, 64);
