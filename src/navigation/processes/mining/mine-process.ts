@@ -43,6 +43,7 @@ import { clearMiningWater } from "./mining-water.js";
 import { hasWetFace, IN_WATER_PREFIX, WORKING_OFFSETS } from "./drowned-target.js";
 import { waterMiningStance } from "../../world/water.js";
 import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
+import { MineWeighing, scanTargets, WEIGHED_SCAN_LIMIT, type PassedOverNearest } from "./target-weighing.js";
 
 /** A loaded Mineflayer block, which is what `matches` is asked about. */
 export type MinecraftBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
@@ -199,6 +200,10 @@ export interface MineRequest extends DropLossObserver {
   readonly stopSignal?: AbortSignal;
   /** Synchronous observer of each changed target set, including refreshes during a route. */
   readonly onTargets?: (targets: readonly MineTarget[]) => void;
+  /** Optional per-scan cost budget and additional target distance; absent preserves the legacy scan. */
+  readonly targetCost?: { beginScan(): void; cost(position: BlockPosition): number | null };
+  /** Every actual scan, including unchanged target sets and candidates passed over by weighing. */
+  readonly onScan?: (scan: MineScan) => void;
   /** Preserve observed matching-block removals even when this attempt is cancelled. */
   readonly onBroken?: (position: BlockPosition) => void;
   /** Injectable physical effect for process regressions. */
@@ -226,6 +231,9 @@ export type MineResult = {
   readonly broken: readonly BlockPosition[];
   readonly reason: string | null;
   readonly underWater?: true;
+  /** Present with targetCost: the largest number passed over in any one scan, and its nearest target. */
+  readonly passedOver?: number;
+  readonly passedOverNearest?: PassedOverNearest | null;
 };
 
 function targetIdentity(target: MineTarget): string {
@@ -281,15 +289,17 @@ function workingCells(bot: Bot, target: MineBlockTarget, movements: MovementPoli
 }
 
 /**
- * Matching blocks and collectable items within range, nearest first.
+ * Matching blocks and collectable items within range, optionally weighed by the caller.
  *
  * Baritone's `prune` drops duplicates, blacklisted cells, cells that no longer
  * match, and anything implausible to break, then sorts by distance and caps the
  * list. The raw scan is already nearest-first, so only candidates retained for
  * the composite goal need to become Mineflayer's richer block objects.
  */
-interface MineScan {
+export interface MineScan {
   readonly targets: readonly MineTarget[];
+  readonly candidates: readonly MineBlockTarget[];
+  readonly passedOver: readonly MineBlockTarget[];
   /** How many loaded matching blocks were rejected, by the reason each was rejected for. */
   readonly rejections: ReadonlyMap<string, number>;
   readonly underWaterRejections: number;
@@ -311,6 +321,7 @@ interface MineBlacklist {
 }
 
 function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineScan {
+  request.targetCost?.beginScan();
   const feet = bot.entity?.position ?? new Vec3(0, 64, 0);
   // A named cell must not disappear behind the general scan's nearest matches.
   // Otherwise consider every loaded match, as the public block view does:
@@ -320,7 +331,7 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
     : findLoadedBlockPositions(bot, {
         center: feet,
         stateIds: request.matchingStateIds,
-        limit: 256,
+        limit: request.targetCost ? WEIGHED_SCAN_LIMIT : 256,
       });
   const blocks: MineBlockTarget[] = [];
   const rejections = new Map<string, number>();
@@ -342,7 +353,7 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
     if (standsOnBlock(bot, block.position)) excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
     blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances,
       ...(decision.drained && { drained: true as const }) });
-    if (blocks.length === MAX_MINE_TARGETS) break;
+    if (!request.targetCost && blocks.length === MAX_MINE_TARGETS) break;
   }
 
   const drops = Object.values(bot.entities ?? {})
@@ -353,17 +364,7 @@ function scan(bot: Bot, request: MineRequest, blacklist: MineBlacklist): MineSca
     .filter((entity) => !blacklist.dropEntities.has(entity.id) && !request.ignoredDropIds?.has(entity.id))
     .map((entity) => ({ position: entity.position.floored(), kind: "drop" as const, entityId: entity.id }));
 
-  const seen = new Set<string>();
-  const targets = [...drops, ...blocks]
-    .filter((target) => {
-      const identity = targetIdentity(target);
-      if (seen.has(identity)) return false;
-      seen.add(identity);
-      return true;
-    })
-    .sort((left, right) => feet.distanceSquared(asVec3(left.position)) - feet.distanceSquared(asVec3(right.position)))
-    .slice(0, MAX_MINE_TARGETS);
-  return { targets, rejections, underWaterRejections };
+  return { ...scanTargets(blocks, drops, feet, request.targetCost, MAX_MINE_TARGETS), rejections, underWaterRejections };
 }
 
 /** Cast from above the source, after climbing out of any preceding mining hole. */
@@ -681,6 +682,7 @@ class MineTargeting {
   /** Why each loaded matching block the last scan saw could not be a target, and how many were rejected for it. */
   rejections: ReadonlyMap<string, number> = new Map();
   underWaterRejections = 0;
+  readonly weighing: MineWeighing;
   /** A previous approach or in-place break makes "none was walked to" false, even when it succeeded. */
   attemptedWork = false;
   readonly broken: BlockPosition[] = [];
@@ -698,6 +700,7 @@ class MineTargeting {
     private readonly bot: Bot,
     private readonly request: MineRequest,
   ) {
+    this.weighing = new MineWeighing(request);
     this.#now = request.now ?? (() => performance.now());
     this.#casts = new CastTargets(bot, request, MAX_MINE_TARGETS);
     this.#drops = new MineDropTracker(bot, request, this.#dropBlacklist, this.#anticipatedDropBlacklist);
@@ -874,6 +877,7 @@ class MineTargeting {
     const found = [...scanResult.targets];
     this.rejections = scanResult.rejections;
     this.underWaterRejections = scanResult.underWaterRejections;
+    this.weighing.observe(scanResult, this.bot.entity.position);
     const tracked = this.#drops.update(found, now);
     // An item the bot stands in that never enters the inventory is one the
     // inventory cannot take. Give it up now rather than when the server
@@ -979,20 +983,36 @@ function rejectedTargetsResult(targeting: MineTargeting): MineResult {
   const satisfied = targeting.isSatisfied();
   return {
     status: satisfied ? "satisfied" : "unreachable", broken: targeting.broken, reason: targeting.lastReason,
+    ...targeting.weighing.result(),
     ...(!satisfied && !targeting.attemptedWork && targeting.blacklisted === 0 && targeting.underWaterRejections === total && { underWater: true as const }),
   };
+}
+
+/** Settle with the quantity and weighing evidence observed by this run. */
+function settledMineResult(targeting: MineTargeting, status: MineResult["status"]): MineResult {
+  return {
+    status: targeting.isSatisfied() ? "satisfied" : status,
+    broken: targeting.broken,
+    reason: targeting.lastReason,
+    ...targeting.weighing.result(),
+  };
+}
+
+/** End an empty or failed scan without confusing rejected targets with an unexplored world. */
+function mineStopAfterScan(targeting: MineTargeting, targets: readonly MineTarget[]): MineResult | null {
+  if (targeting.waterFailure !== null) return settledMineResult(targeting, "unreachable");
+  if (targets.length > 0) return null;
+  // Rejections and exhausted blacklists prove matching targets existed; an empty unexplored scan does not.
+  if (targeting.rejections.size > 0) return rejectedTargetsResult(targeting);
+  if (targeting.explorationFailure !== null) return settledMineResult(targeting, "stopped");
+  return targeting.exploring ? null : settledMineResult(targeting, targeting.blacklisted > 0 ? "unreachable" : "no_targets");
 }
 
 export async function mine(bot: Bot, request: MineRequest): Promise<MineResult> {
   const targeting = new MineTargeting(bot, request);
   const drive = request.route;
-
+  const settle = (status: MineResult["status"]) => settledMineResult(targeting, status);
   let fruitlessStops = 0;
-  const settle = (status: MineResult["status"]): MineResult => ({
-    status: targeting.isSatisfied() ? "satisfied" : status,
-    broken: targeting.broken,
-    reason: targeting.lastReason,
-  });
 
   while (!targeting.isSatisfied()) {
     request.signal?.throwIfAborted();
@@ -1003,19 +1023,8 @@ export async function mine(bot: Bot, request: MineRequest): Promise<MineResult> 
     if (targeting.broken.length >= request.maximumBreaks) return settle("exhausted");
 
     const targets = targeting.targets();
-    if (targeting.waterFailure !== null) return settle("unreachable");
-    if (targets.length === 0) {
-      // Nothing matching left, which is not the same as nothing matching ever:
-      // a blacklist that has eaten every candidate means they were found and
-      // could not be reached, and saying "none observed" would hide that.
-      if (targeting.rejections.size > 0) {
-        // The specific reasons, not "the movement policy": a model reading
-        // "3 lava faces, 1 block carried" knows to collect cobblestone first.
-        return rejectedTargetsResult(targeting);
-      }
-      if (targeting.explorationFailure !== null) return settle("stopped");
-      if (!targeting.exploring) return settle(targeting.blacklisted > 0 ? "unreachable" : "no_targets");
-    }
+    const stopped = mineStopAfterScan(targeting, targets);
+    if (stopped) return stopped;
 
     if (await recoverWaterInReach(bot, request, targeting, request.signal)) continue;
     // Submerged work must occur inside navigation's scoped dive, including work already in reach.
