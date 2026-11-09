@@ -1,8 +1,60 @@
 /** Wait for server metadata confirming release of arranged mobs. */
+import type { Entity } from "prismarine-entity";
 import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
 type Target = "primary" | "alternative";
+
+/** Remove tagged entities and wait for both server disappearance answers. */
+export async function removeArrangedEntities(context: MineAiScenarioContext, targets: readonly { tag: string; id: number }[]): Promise<void> {
+  const { bot, signal } = context;
+  signal.throwIfAborted();
+  const pending = new Set(targets.map((target) => target.id));
+  const positions = new Map<number, { x: number; y: number; z: number }>();
+  for (const { tag, id } of targets) {
+    const entity = bot.entities[id];
+    if (entity) positions.set(id, { x: entity.position.x, y: entity.position.y, z: entity.position.z });
+    else { pending.delete(id); context.log(`arranged ${tag} id ${id} already gone before removal`); }
+  }
+  const answers: string[] = [];
+  const deadline = monotonicNow() + 5_000;
+  await new Promise<void>((resolve, reject) => {
+    let ticks = 0;
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      bot.off("entityGone", gone);
+      bot.off("physicsTick", tick);
+      bot.off("messagestr", message);
+      signal.removeEventListener("abort", abort);
+      if (error !== undefined) reject(error); else resolve();
+    };
+    const fail = () => finish(new Error(`arranged Endermen not removed: ${JSON.stringify({ pending: targets.filter(({ id }) => pending.has(id)).map(({ tag, id }) => ({ tag, id, present: Boolean(bot.entities[id]), position: positions.get(id) ?? null })), commands: targets.map(({ tag }) => `/kill @e[tag=${tag}]`), answers })}`));
+    const gone = (entity: Entity) => {
+      if (monotonicNow() >= deadline) return fail();
+      pending.delete(entity.id);
+      if (pending.size === 0) finish();
+    };
+    const tick = () => {
+      for (const id of pending) {
+        const entity = bot.entities[id];
+        if (entity) positions.set(id, { x: entity.position.x, y: entity.position.y, z: entity.position.z });
+      }
+      if (++ticks >= 100 || monotonicNow() >= deadline) fail();
+    };
+    const message = (answer: string) => { answers.push(answer); };
+    const abort = () => finish(signal.reason);
+    const timer = setTimeout(fail, 5_000);
+    bot.on("entityGone", gone);
+    bot.on("physicsTick", tick);
+    bot.on("messagestr", message);
+    signal.addEventListener("abort", abort, { once: true });
+    for (const { tag } of targets) bot.chat(`/kill @e[tag=${tag}]`);
+    if (pending.size === 0) finish();
+  });
+}
 
 /** Check target transitions in order, ignoring unrelated changes and their reasons. */
 export function changesObserved(changes: readonly { fromTargetId: number | null; toTargetId: number | null }[], expected: readonly (readonly [Target, Target])[], ids: Record<Target, number>): boolean {

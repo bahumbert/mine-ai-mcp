@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { createFakeBot, createFakeClock } from "../../src/test-support/fake-bot/index.ts";
 import { changesObserved, releaseByTag } from "./arranged-release.ts";
+import * as arrangedRelease from "./arranged-release.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
 function fixture(signal = new AbortController().signal) {
@@ -66,4 +67,84 @@ test("target changes are an ordered subsequence independent of diagnostic reason
   assert.equal(changesObserved(changes, [["primary", "alternative"], ["alternative", "primary"]], ids), true);
   assert.equal(changesObserved(changes, [["alternative", "primary"], ["primary", "alternative"]], ids), false);
   assert.equal(changesObserved(changes.slice(0, 2), [["primary", "alternative"], ["alternative", "primary"]], ids), false);
+});
+
+test("removal waits for both bound entities and ignores unrelated disappearances", async () => {
+  const { context } = fixture();
+  const result = arrangedRelease.removeArrangedEntities(context, [{ tag: "primary", id: 2 }, { tag: "alternative", id: 3 }]);
+  let settled = false;
+  void result.then(() => { settled = true; });
+  context.bot.emit("entityGone", context.bot.entity);
+  context.bot.emit("entityGone", context.bot.entities[2]!);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  context.bot.emit("entityGone", context.bot.entities[3]!);
+  await result;
+  assert.equal(context.bot.listenerCount("entityGone"), 0);
+});
+
+test("removal fails when one entity is missing at either bound", async () => {
+  for (const bound of ["ticks", "time"] as const) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { context } = fixture();
+    const result = arrangedRelease.removeArrangedEntities(context, [{ tag: "primary", id: 2 }, { tag: "alternative", id: 3 }]);
+    const rejection = assert.rejects(result, /arranged Endermen not removed/);
+    context.bot.emit("entityGone", context.bot.entities[2]!);
+    if (bound === "ticks") for (let i = 0; i < 100; i++) context.bot.emit("physicsTick");
+    else await clock.advance(5_000);
+    await rejection;
+    assert.equal(context.bot.listenerCount("entityGone"), 0);
+    assert.equal(context.bot.listenerCount("physicsTick"), 0);
+  }
+});
+
+test("removal cancellation rejects and releases all observers", async () => {
+  for (const before of [true, false]) {
+    const controller = new AbortController();
+    const reason = new Error("cancelled");
+    if (before) controller.abort(reason);
+    const { context } = fixture(controller.signal);
+    const result = arrangedRelease.removeArrangedEntities(context, [{ tag: "primary", id: 2 }, { tag: "alternative", id: 3 }]);
+    if (!before) controller.abort(reason);
+    await assert.rejects(result, reason);
+    assert.equal(context.bot.listenerCount("entityGone"), 0);
+    assert.equal(context.bot.listenerCount("physicsTick"), 0);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  }
+});
+
+test("removal sends both kills when one bound entity has already gone", async () => {
+  const { context } = fixture();
+  delete context.bot.entities[2];
+  const commands: string[] = [];
+  const logs: string[] = [];
+  context.log = (message) => { logs.push(message); };
+  context.bot.chat = (message) => { commands.push(message); };
+  const result = arrangedRelease.removeArrangedEntities(context, [{ tag: "primary", id: 2 }, { tag: "alternative", id: 3 }]);
+  context.bot.emit("entityGone", context.bot.entities[3]!);
+  await result;
+  assert.deepEqual(commands, ["/kill @e[tag=primary]", "/kill @e[tag=alternative]"]);
+  assert.ok(logs.includes("arranged primary id 2 already gone before removal"));
+});
+
+test("removal timeout reports pending entity presence, last position and command answers", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { context } = fixture();
+  const result = arrangedRelease.removeArrangedEntities(context, [{ tag: "primary", id: 2 }, { tag: "alternative", id: 3 }]);
+  const rejection = assert.rejects(result, (error: Error) => {
+    assert.match(error.message, /"id":2/);
+    assert.match(error.message, /"present":false/);
+    assert.match(error.message, /"position":\{"x":0,"y":64,"z":0\}/);
+    assert.match(error.message, /Killed primary/);
+    assert.match(error.message, /Killed alternative/);
+    return true;
+  });
+  context.bot.emit("messagestr", "Killed primary", "system", null as never);
+  context.bot.emit("messagestr", "Killed alternative", "system", null as never);
+  delete context.bot.entities[2];
+  await clock.advance(5_000);
+  await rejection;
+  assert.equal(context.bot.listenerCount("messagestr"), 0);
 });

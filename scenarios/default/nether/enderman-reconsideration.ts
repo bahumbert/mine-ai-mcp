@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { z } from "zod";
 import { huntMobResultSchema } from "../../../src/actions/hunt-mob/contract.ts";
-import { changesObserved, releaseByTag } from "../../src/arranged-release.ts";
+import { changesObserved, releaseByTag, removeArrangedEntities } from "../../src/arranged-release.ts";
 import { declaredEntitiesArranged, declaredStart, openRuntime, standStill, wearArmor } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { recordSourceIdentity } from "../../src/source-identity.ts";
 import { writeScenarioEvidence } from "../../src/scenario-evidence.ts";
 import { settleReconsiderationHunt } from "../../src/reconsideration-settlement.ts";
 import { observeReconsideration } from "./reconsideration-observer.ts";
+import { readReflexOutcomes } from "../../flat/combat/reflex.ts";
+import type { Runtime } from "../../src/runtime.ts";
 
 const point = z.tuple([z.number(), z.number(), z.number()]);
 const paramsSchema = z.strictObject({
@@ -18,6 +20,22 @@ const paramsSchema = z.strictObject({
   returnTo: point.optional(),
   expectedChanges: z.array(z.tuple([z.enum(["primary", "alternative"]), z.enum(["primary", "alternative"])])).default([]),
 });
+
+/** Check the body can navigate after the arranged threats are gone. */
+async function navigateHome(context: Parameters<MineAiScenario>[0], runtime: Runtime, home: { x: number; y: number; z: number }, failure: Promise<never>) {
+  const navigate = runtime.actions.find((candidate) => candidate.name === "navigate")!;
+  const nextSignal = AbortSignal.any([context.signal, AbortSignal.timeout(10_000)]);
+  let rejectNext = () => {};
+  const nextTimeout = new Promise<never>((_, reject) => {
+    rejectNext = () => reject(nextSignal.reason);
+    if (nextSignal.aborted) rejectNext(); else nextSignal.addEventListener("abort", rejectNext, { once: true });
+  });
+  try { return await Promise.race([runtime.run(navigate, { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 }, nextSignal), failure, nextTimeout]); }
+  catch (error) {
+    context.log(`REFLEX AFTER NEXT ACTION ${JSON.stringify(await readReflexOutcomes(context, runtime).catch(String))}`);
+    throw error;
+  } finally { nextSignal.removeEventListener("abort", rejectNext); }
+}
 
 /**
  * Two server-tagged native Endermen expose selection through native outgoing
@@ -51,16 +69,13 @@ export const run: MineAiScenario = async (context) => {
     const result = huntMobResultSchema.parse(output.result);
     const observed = changesObserved(result.hunt.targetChanges, params.expectedChanges, { primary, alternative });
     const expectedFirstHit = params.mode === "teleport_away" ? alternative : primary;
-    const navigate = runtime.actions.find((candidate) => candidate.name === "navigate")!;
-    const nextSignal = AbortSignal.any([signal, AbortSignal.timeout(10_000)]);
-    let rejectNext = () => {};
-    const nextTimeout = new Promise<never>((_, reject) => {
-      rejectNext = () => reject(nextSignal.reason);
-      if (nextSignal.aborted) rejectNext(); else nextSignal.addEventListener("abort", rejectNext, { once: true });
-    });
-    let next: Awaited<ReturnType<typeof runtime.run>>;
-    try { next = await Promise.race([runtime.run(navigate, { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 }, nextSignal), observer.failure, nextTimeout]); }
-    finally { nextSignal.removeEventListener("abort", rejectNext); }
+    try { await removeArrangedEntities(context, [{ tag: "reconsider_primary", id: primary }, { tag: "reconsider_alternative", id: alternative }]); }
+    catch (error) {
+      context.log(`REFLEX ON REMOVAL FAILURE ${JSON.stringify(await readReflexOutcomes(context, runtime).catch(String))}`);
+      throw error;
+    }
+    context.log(`REFLEX AFTER REMOVAL ${JSON.stringify(await readReflexOutcomes(context, runtime))}`);
+    const next = await navigateHome(context, runtime, home, observer.failure);
     const { firstNativeHit, primaryMoved, primaryReturned, deaths, movePending } = observer.snapshot();
     if (movePending) throw new Error("arranged move not observed");
     const passed = firstNativeHit === expectedFirstHit && observed && (!params.teleportTo || primaryMoved) && (params.mode !== "failed_approach" || primaryReturned) && deaths === 0 && bot.health > 0 && next.result.status === "succeeded";
