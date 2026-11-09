@@ -53,7 +53,7 @@ test("the cancel waits for the bot to pass cancelPastX in the lane's frame", asy
   assert.ok(xAtCancel !== null && xAtCancel >= 94, `cancelled at x ${xAtCancel}, before the lane's line at 94`);
 });
 
-test("leaving the boat short of the far bank is read in the lane's frame", async () => {
+test("a clone-length server pause during stop measurement still reaches the next ride in the lane's frame", async () => {
   const harness = seatedBot();
   const { bot } = harness;
   using _clock = harness.clock.install();
@@ -67,6 +67,8 @@ test("leaving the boat short of the far bank is read in the lane's frame", async
     call: async (action) => {
       const summary = action;
       if (action === "cancel_foreground_action") {
+        harness.server.stop();
+        harness.clock.after(3_500, () => harness.server.resume());
         cancelled?.();
         return { action, durationMs: 1, result: { status: "succeeded" }, summary };
       }

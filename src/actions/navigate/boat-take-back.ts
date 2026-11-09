@@ -4,17 +4,16 @@ import type { Entity } from "prismarine-entity";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { droppedItemName, isItemEntity } from "../../world/item-pickup.js";
 import { BOAT_REACH, boatsCarried, isBoatItemName } from "./boat-entities.js";
+import { observeBoatAttackProgress } from "./boat-attack-progress.js";
 
 /** How far a dropped boat is swum after: one that drifted off the bank (live 2026-10-04: 4 blocks out). */
 const DROP_REACH = 10;
-/** Pause after each hit: 6 ticks on a server on time, a full hit's weight (contract boat-broken-by-attack: 9-10 hits at 300 ms). */
-const HIT_EVERY_MS = 300;
 /**
  * The longest the hits go on, counted from the first on the wall clock. A boat breaks above 40 damage, loses 1 a server
  * tick, and a full hand hit adds 10; one sooner than 5 ticks after the last adds `0.2 + 0.8 strength^2` of that (contract
  * check boat-broken-by-attack: 8 hits 250 ms apart, 9-10 at 300 ms, 17-19 at 400 ms, server on time; the strength rule
  * read in Player.attack). The hits a stalled server queues land in one tick at a fifth of a hit each, so a count of
- * hits is no measure of damage: the bound is time (run 20; Dirk's take-back failed, its cause unproven).
+ * hits is no measure of damage: the bound is time; pacing also reads server progress (T15, 2026-11-09).
  */
 export const TAKE_BACK_WALL_MS = 10_000;
 
@@ -50,7 +49,7 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Hits `boat` every {@link HIT_EVERY_MS} while it is in her client, until the wall bound, `maxHits` or an abort. */
+/** Hits after server-observed recovery while the boat is present, until the wall bound, cap or abort. */
 async function hitUntilGone(bot: Bot, boat: Entity | null, signal: AbortSignal | undefined, maxHits: number | undefined): Promise<Omit<TakeBackReport, "carried">> {
   const present = () => boat !== null && bot.entities[boat.id] !== undefined;
   let hits = 0;
@@ -59,9 +58,11 @@ async function hitUntilGone(bot: Bot, boat: Entity | null, signal: AbortSignal |
   while (boat !== null && present() && !signal?.aborted && hits < (maxHits ?? Number.POSITIVE_INFINITY) && elapsed() < TAKE_BACK_WALL_MS) {
     startedAt ??= performance.now();
     await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
+    if (!present() || signal?.aborted || elapsed() >= TAKE_BACK_WALL_MS) break;
+    using progress = observeBoatAttackProgress(bot, boat);
     bot.attack(boat);
     hits += 1;
-    await pause(HIT_EVERY_MS, signal);
+    await progress.wait(Math.max(0, TAKE_BACK_WALL_MS - elapsed()), () => !present() || signal?.aborted === true);
   }
   return { hits, elapsedMs: elapsed(), goneAfterHit: hits > 0 && !present() ? hits : null };
 }

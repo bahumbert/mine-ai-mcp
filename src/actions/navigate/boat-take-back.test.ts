@@ -6,7 +6,7 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
-import { boatsCarried, settled, shoreSea, stallServerAtFirstHit } from "./boat-fixtures.test.js";
+import { boatsCarried, makeHitsMiss, settled, shoreSea, stallServerAtFirstHit } from "./boat-fixtures.test.js";
 import { TAKE_BACK_WALL_MS, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { createNavigateAction } from "./navigate.js";
@@ -22,20 +22,33 @@ function standingOnBoatWithServerStalledAtFirstHit(afterMs?: number, physics = t
 }
 const hitsSent = (world: FakeHarness) => attackedIds(world.server).length;
 
-// Run 20 hardening: a boat breaks above 40 damage and a hit weighs 10 only 5 ticks after the last (contract boat-broken-by-attack),
-// so 15 hits 300 ms apart (4.5 s) end inside a longer stall and nothing breaks; the hits owed are counted in time.
-/** A stall past the 4.5 s the old 15 hits lasted (the fake: the hits break the boat soon after the resume, `fake-bot-boat-damage.ts`). */
-const STALL_MS = 6_000;
-test("a server stalled for 6 s after the first hit: the hits go on until the boat breaks, past the old 15", async () => {
-  const world = standingOnBoatWithServerStalledAtFirstHit(STALL_MS);
+// The short stop catches up owed ticks; vanilla drops a first stall over 2 s (fake-server.ts, T15, 2026-11-09).
+for (const stallMs of [1_500, 6_000]) test(`a ${stallMs} ms stall cannot spend another swing before its server cooldown; recovery permits the next navigate`, async () => {
+  const world = standingOnBoatWithServerStalledAtFirstHit(stallMs);
   using _timers = world.clock.install();
+  const attackTicks: number[] = [];
+  world.server.onPacket("use_entity", (data) => {
+    if ((data as { mouse: number }).mouse === 1) world.server.answer(() => attackTicks.push(world.server.gameTime));
+  });
   const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 }));
   assert.equal(report.carried, true);
   assert.equal(boatsCarried(world), 1);
-  assert.ok(report.hits > 15, `${report.hits} hits sent`);
+  assert.ok(attackTicks.slice(1).every((tick, index) => tick - attackTicks[index]! >= 5), `server attack ticks: ${attackTicks}`);
   assert.equal(report.hits, hitsSent(world), "the report counts the hits sent");
   assert.equal(report.goneAfterHit, report.hits, "the boat left her client at the last hit");
-  assert.ok(report.elapsedMs >= STALL_MS && report.elapsedMs < TAKE_BACK_WALL_MS, `${report.elapsedMs} ms`);
+  assert.ok(report.elapsedMs >= stallMs && report.elapsedMs < TAKE_BACK_WALL_MS, `${report.elapsedMs} ms`);
+  let routed = false;
+  const action = createNavigateAction(world.bot, navigation, {
+    createMovements: (() => ({ name: "standard" })) as never,
+    navigate: async () => {
+      routed = true;
+      world.bot.entity.position.set(45.5, 63, 0.5);
+      return { status: "completed", elapsedMs: 1 };
+    },
+  });
+  const next = await settled(world, new ActionRunner().run(action, { x: 45, y: 63, z: 0, range: 2 }));
+  assert.equal(next.result.status, "succeeded", JSON.stringify(next.result));
+  assert.equal(routed, true);
 });
 
 test("a server stopped for good: the take-back gives up after the wall bound of the wall clock, with no tick needed", async () => {
@@ -48,8 +61,23 @@ test("a server stopped for good: the take-back gives up after the wall bound of 
   assert.ok(report.elapsedMs >= TAKE_BACK_WALL_MS && report.elapsedMs < TAKE_BACK_WALL_MS + 400, `${report.elapsedMs} ms`);
   assert.ok(performance.now() - startedAt < TAKE_BACK_WALL_MS + 400);
   assert.equal(report.hits, hitsSent(world));
-  assert.ok(report.hits >= 30 && report.hits <= 35, `${report.hits} hits in 10 s, 300 ms apart`);
+  assert.equal(report.hits, 1, "a server that has not handled the first swing cannot receive queued swings");
   assert.equal(world.bot.entities[7] !== undefined, true, "the boat is still there: she is still on it");
+});
+
+test("cancelling a stalled swing releases its observation and the next take-back recovers the surviving boat", async () => {
+  const world = standingOnBoatWithServerStalledAtFirstHit(undefined, false);
+  using _timers = world.clock.install();
+  const controller = new AbortController();
+  const listeners = world.bot.listenerCount("entityUpdate");
+  setTimeout(() => controller.abort(), 1_000);
+  const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, controller.signal, { settleMs: 0 }));
+  assert.equal(report.carried, false);
+  assert.equal(report.hits, 1);
+  assert.equal(world.bot.listenerCount("entityUpdate"), listeners);
+  world.server.resume();
+  assert.equal(await settled(world, takeBoatBack(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 })), true);
+  assert.equal(world.bot.listenerCount("entityUpdate"), listeners);
 });
 
 test("a boat that is not in her view is not hit: no hits, nothing carried", async () => {
@@ -61,10 +89,11 @@ test("a boat that is not in her view is not hit: no hits, nothing carried", asyn
 });
 
 test("the preparation of a movement passes the hostile reflex's cap of hits to the take-back", async () => {
-  const world = standingOnBoatWithServerStalledAtFirstHit(undefined, false);
+  const world = shoreSea({ ...STANDING, physics: false });
+  const landAgain = makeHitsMiss(world);
   using _timers = world.clock.install();
-  await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 })), /\[BOAT_TAKE_BACK_FAILED\]/u);
-  assert.equal(hitsSent(world), 15, "capped: a mob attacks meanwhile");
+  await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 2 })), /\[BOAT_TAKE_BACK_FAILED\]/u);
+  assert.equal(hitsSent(world), 2, "capped: a mob attacks meanwhile");
   assert.equal(world.bot.entities[7] !== undefined, true);
   let routed = false;
   const action = createNavigateAction(world.bot, navigation, {
@@ -79,8 +108,8 @@ test("the preparation of a movement passes the hostile reflex's cap of hits to t
   assert.equal(next.result.status, "failed");
   assert.match("error" in next.result ? next.result.error ?? "" : "", /\[BOAT_TAKE_BACK_FAILED\]/u);
   assert.equal(routed, false, "a failed take-back cannot start the next route");
-  assert.ok(hitsSent(world) > 15 + 30, `${hitsSent(world)} hits: the next movement, with no cap, hits for the whole time bound`);
-  world.server.resume();
+  assert.ok(hitsSent(world) > 2, "the next movement retries within its time bound");
+  landAgain();
   const recovered = await settled(world, new ActionRunner().run(action, { x: 45, y: 63, z: 0, range: 2 }));
   assert.equal(recovered.result.status, "succeeded", JSON.stringify(recovered.result));
   assert.equal(routed, true);

@@ -4,7 +4,7 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { boatUnderFeet, carriesBoat, crossByBoat, cutStep, deepWaterOnTheWay, launchBoat, lowBankAlong } from "./boat-crossing.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
-import { takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
+import { takeBoatBack } from "./boat-take-back.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { leaveBoatSeat, prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
@@ -64,13 +64,6 @@ test("a boat she stands on out at sea is found, carried boats or not; not one sh
   assert.equal(boatUnderFeet(riding.bot), null);
   assert.equal(boatUnderFeet(shoreSea({ feet: new Vec3(24.5, 63.05, 0.5), boat: atSea }).bot), null);
   assert.equal(boatUnderFeet(shoreSea({ feet: new Vec3(0.5, 63.05, 0.5), boat: new Vec3(0.5, 62.49, 0.5) }).bot), null);
-});
-
-test("a boat taken back is broken by hand and its item picked up", async () => {
-  const world = shoreSea({ feet: new Vec3(20.5, 63.05, 0.5), boat: new Vec3(20.5, 62.49, 0.5), mocked: true, physics: true });
-  using _timers = world.clock.install();
-const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 })); assert.equal(report.carried, true); assert.equal(report.goneAfterHit, report.hits, "the report names the hit after which the boat left her view"); assert.equal(world.bot.entities[7], undefined);
-  assert.equal(boatsCarried(world), 1);
 });
 
 test("a ride over open sea with no land stops at the distance asked for and stays mounted there: no ride back, the boat not broken", async () => {
@@ -237,7 +230,7 @@ describe("a seat the server still holds", () => {
     setTimeout(() => world.server.sendPosition(world.bot.entity.position), 20_000);
     await settled(world, freeHeldSeat(world.bot));
     assert.equal(watch.heldAt(), null, "the answer came and the seat is forgotten");
-    assert.ok(attackedIds(world.server).length >= 30, "the hits went on for the whole 10 s");
+    assert.equal(attackedIds(world.server).length, 1, "the stopped server gets no queued swings during the 10 s wait");
     assert.ok(performance.now() - startedAt >= 20_000, "past the 15 s the whole freeing used to be given");
     watch.stop();
   });
@@ -248,8 +241,8 @@ describe("a seat the server still holds", () => {
     const { watch } = await heldAfterAStay(world);
     const before = attackedIds(world.server).length;
     world.server.stop();
-    await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 15 })), /SERVER_HELD_POSITION/u);
-    assert.equal(attackedIds(world.server).length - before, 15, "15 hits, not the 10 s of hits");
+    await assert.rejects(settled(world, prepareBotForMovement(world.bot, navigation, undefined, { takeBackHits: 0 })), /SERVER_HELD_POSITION/u);
+    assert.equal(attackedIds(world.server).length - before, 0, "the held-seat path also respects the caller's hit cap");
     watch.stop();
   });
 
@@ -286,29 +279,19 @@ describe("a ride that is interrupted stays seated (ACT-01)", () => {
     assert.equal(new Set(moves.slice(-4)).size, 1, "the last 4 moves are the same stopped place");
   };
 
-  test("a ride cancelled over deep water stops the boat and stays seated: no shift, no hit, the boat where it stopped", async () => {
-    const world = seaHarness();
-    using _timers = world.clock.install();
-    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
-    const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
-    assert.equal(result.status, "failed");
-    assert.equal(result.atSea, true);
-    assert.equal(result.interrupted, true);
-    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
-    assert.match(result.detail, /cancelled by the brain/u);
-    stillSeated(world);
-  });
-
-  test("a ride cancelled in shallows stays seated too", async () => {
-    const world = seaHarness({ waterDepth: 2 });
-    using _timers = world.clock.install();
-    const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
-    const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
-    assert.equal(result.status, "failed");
-    assert.equal(result.atSea, false);
-    assert.equal(result.interrupted, true);
-    assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
-    stillSeated(world);
+  test("a ride cancelled over deep water or shallows stops the boat and stays seated", async () => {
+    for (const { waterDepth, atSea } of [{ waterDepth: 13, atSea: true }, { waterDepth: 2, atSea: false }]) {
+      const world = seaHarness({ waterDepth });
+      using _timers = world.clock.install();
+      const controller = abortAfterMoves(world, 20, new Error("cancelled by the brain"));
+      const result = await settled(world, crossByBoat(world.bot, AHEAD, controller.signal, 100));
+      assert.equal(result.status, "failed");
+      assert.equal(result.atSea, atSea);
+      assert.equal(result.interrupted, true);
+      assert.match(result.detail, /still seated in its boat at -?\d+ -?\d+/u);
+      assert.match(result.detail, /cancelled by the brain/u);
+      stillSeated(world);
+    }
   });
 
   test("a cancel during the ride back still stays seated", async () => {

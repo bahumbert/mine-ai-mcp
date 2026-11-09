@@ -178,7 +178,7 @@ test("a boat that stays under her through the retry is in the result, and the ne
   assert.match("error" in result ? result.error ?? "" : "", /\[BOAT_TAKE_BACK_FAILED\]/u);
   assert.equal(boatLeftOf(result)?.cause, "still_there");
   assert.equal(boatsCarried(world), 0, "the retry did not break it either");
-  assert.ok(attackedIds(world.server).length > 60, "two take-backs of 10 s each hit it: the crossing's and the retry's");
+  assert.ok(attackedIds(world.server).length > 1, "the onward take-back retries the crossing's unsuccessful hit");
   assert.ok(boatUnderFeet(world.bot) !== null, "she stands on it");
   assert.match(formatNavigateResult(result), /- The boat was not picked back up: the boat is still under you after \d+ hits in \d+\.\d s\. The next movement tries to take it back again\./u);
   landAgain();
