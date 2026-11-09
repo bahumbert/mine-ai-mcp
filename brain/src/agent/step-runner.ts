@@ -99,6 +99,7 @@ export class StepRunner {
       ownHouse: () => memory.temporaryHouse(),
       farms: memory.farms,
       rememberFarm: (farm) => memory.learnFarm(farm),
+      rememberShelter: (hole) => memory.rememberShelter(hole),
       soil: this.host.soil,
       building: memory.building,
       areas: memory.areas,

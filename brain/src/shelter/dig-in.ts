@@ -10,8 +10,7 @@ import { DEPTH, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, s
  * there, digs it three deep, steps into it when the bot's box rests on a neighbour and stays up, roofs it with a carried
  * block that stays put, waits inside for the day, then digs the roof and climbs out.
  *
- * The model calls it as `dig_shelter`; until P4-18 brings the night decision the night trigger in
- * `brain/src/agent/step-guards.ts` (`shelterIfNight`) calls it too, with the same flow.
+ * The model calls it as `dig_shelter`; P4-18 owns the night decision. There is no automatic night trigger.
  */
 
 /** How often she looks at the sky while waiting. */

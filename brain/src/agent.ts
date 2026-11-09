@@ -91,7 +91,7 @@ export class Agent {
   private readonly chatHost: ChatRoutingHost;
   /** Runs the step the model chose and keeps what it did. */
   private readonly runner: StepRunner;
-  /** The night measure and the goal tier's pace. */
+  /** The goal tier's pace. */
   private readonly guards: StepGuards;
   private restUntil = 0;
   private wake: (() => void) | null = null;
@@ -108,14 +108,10 @@ export class Agent {
     this.memory = new AgentMemory(options, this.body);
     this.guards = new StepGuards({
       options,
-      body: this.body,
-      areas: this.memory.areas,
       pollMs: options.pollMs ?? DEFAULT_POLL_MS,
       runSignal: () => this.runSignal,
       top: () => this.stack.at(-1),
       idle: (ms) => this.idle(ms),
-      journalState: (step) => this.journalState(step),
-      rememberOwnOutcome: (line) => this.memory.rememberOwnOutcome(line),
     });
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
     this.whoWasNamed = new WhoWasNamed(options.persona.username, () => options.otherAgents.names());
@@ -183,7 +179,6 @@ export class Agent {
     try {
       while (!signal.aborted) {
         unreadable = await this.readChat(unreadable);
-        await this.guards.stopOwnStepAtNightfall().catch(() => undefined);
         await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
       }
     } finally {
@@ -311,7 +306,6 @@ export class Agent {
   private take(objective: Objective, whisperTo: string | null = null): void {
     const current = this.stack.at(-1);
     current?.step?.abort();
-    this.guards.stopShelter();
     this.stack.push(newWork(objective, whisperTo));
     this.journalObjective("taken", objective);
     this.wake?.();
@@ -334,7 +328,6 @@ export class Agent {
     while (!signal.aborted) {
       const work = this.stack.at(-1);
       try {
-        if (await this.guards.shelterIfNight(work)) continue;
         if (work !== undefined) await this.advance(work);
         else if (!(await this.pickOwnObjective())) await this.idle(this.options.pollMs ?? DEFAULT_POLL_MS);
         repeated = { error: "", count: 0 };

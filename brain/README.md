@@ -53,13 +53,18 @@ code gives basic functions, settings and safety checks, the models decide.
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
 (intermediates automatic), get items (fetch that many more like a player, keeping everything it already carries, then
-come back), eat, equip, sleep, hunt
+come back), eat, equip, sleep, dig a shelter, hunt
 mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
 respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
 blocks; `materials` names other full blocks per role for a temporary house) and `improve_house` it later (swap the
 temporary parts back to the style's blocks, in place), make a crop farm or tend one it made (below). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
+
+`dig_shelter` digs a closed hole nearby, roofs it with a carried full block that stays put (keeping materials its
+objective needs), waits inside until day or the optional `minutes` (1–15), then climbs out. By day, give minutes to
+dig in; without them it is done without digging. The model or a player's order chooses the skill: there is no
+automatic night dig or periodic nightfall abort. P4-18 owns the night check. The newest hole is saved for the monitor.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`building-styles/<id>.json`: block per material role +
 roof type, plus `variants`: the stairs and slab of a role) fed to a parametric generator (`house.ts`): stair roofs
@@ -151,6 +156,7 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/mind.ts`, `llm-mind.ts` | Chat, work and goal tiers + narration, init prompt, JSON repair round |
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
+| `src/skills/dig-shelter.ts` | Model-called shelter: objective materials, liveness and hole memory passed to `src/shelter/` |
 | `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
 | `building-styles/*.json` | Style palettes (material role → block) and house options |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |

@@ -62,6 +62,7 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({ skill: z.literal("eat"), food: minecraftId }),
   z.strictObject({ skill: z.literal("equip"), item: minecraftId }),
   z.strictObject({ skill: z.literal("sleep") }),
+  z.strictObject({ skill: z.literal("dig_shelter"), minutes: z.number().int().min(1).max(15).optional() }),
   z.strictObject({ skill: z.literal("hunt"), mob: minecraftId, drop: minecraftId, count: z.number().int().min(1).max(16).default(1) }),
   z.strictObject({
     skill: z.literal("protect_area"),
@@ -131,7 +132,7 @@ export function dropEntries(step: Extract<Step, { skill: "drop_item" }>): readon
 }
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "farm",
+  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "dig_shelter", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "farm",
 ] as const satisfies readonly SkillName[];
 
 /**
@@ -152,6 +153,7 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
     case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
+    case "dig_shelter": return `{"skill":"dig_shelter","minutes":<1-15, optional>}  dig a closed hole near you, roof it with a carried block, wait inside until day (or the minutes given), then climb out`;
     case "hunt": return `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`;
     case "level_area": return `{"skill":"level_area","markers":"<block id>"}  flatten (level, terraform) the zone between the nearest 2-4 blocks of that kind a player placed as markers: it finds the markers itself (do not look for them first) and keeps them, digs everything above their level and fills holes below, with the right tool for each block; add "y":<walking level> for another height. Or {"skill":"level_area","around":"<username>","radius":<2-16>} for a square around a player at their level (your own name for around yourself, never the speaker's name for "around you"), or "x1","z1","x2","z2" corners with "y" (they keep no block: when a player placed markers, use "markers" so they stay, even after walking up to them); at most 32 by 32; holes, water and drops get a one-block floor of dirt (or cobblestone), or of the block in "fill":"<block id>" when one is asked for; takes minutes`;
     case "protect_area": return `{"skill":"protect_area","player":"<username>","radius":8,"label":"<short name>"}  never dig or place blocks within radius (1-${MAX_AREA_RADIUS}) of where that player stands, or give "x","y","z" instead of "player"; omit "player" (or give your own name) for the area around yourself, never the speaker's name for "around you"; e.g. around a build someone asked you to respect; you can still walk there`;
@@ -207,6 +209,7 @@ export function describeStep(step: Step): string {
     case "eat": return `eat ${step.food}`;
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
+    case "dig_shelter": return step.minutes === undefined ? "dig in and wait for the day" : `dig in for ${step.minutes} min`;
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
     case "level_area": return `level ${step.markers !== undefined ? `the zone between the ${step.markers} markers` : step.around !== undefined ? `${step.radius} blocks around ${step.around}` : `${step.x1} ${step.z1} to ${step.x2} ${step.z2}`}${step.y === undefined ? "" : ` at y ${step.y}`}${step.fill === undefined ? "" : `, filled with ${step.fill}`}`;
     case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;

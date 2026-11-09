@@ -129,6 +129,7 @@ export function activityOf(step: Step, actions: readonly ActionTime[], facts: Ac
     case "eat":
     case "equip":
     case "sleep":
+    case "dig_shelter":
     case "protect_area":
     case "release_area": return null;
   }
@@ -156,6 +157,7 @@ export const SKILL_ACTIVITIES: Readonly<Record<SkillName, readonly Activity[]>> 
   eat: [],
   equip: [],
   sleep: [],
+  dig_shelter: [],
   protect_area: [],
   release_area: [],
 };

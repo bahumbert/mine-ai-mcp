@@ -10,6 +10,8 @@ import type { BotRuntime, BotSnapshot, ProtectedArea } from "./runtime-client.ts
 import { build } from "./skills/build-house.ts";
 import { craftItem } from "./skills/craft-item.ts";
 import { dropItems } from "./skills/drop-items.ts";
+import { digShelter } from "./skills/dig-shelter.ts";
+import type { ShelterHole } from "./shelter/dig-in.ts";
 import { explore } from "./skills/explore.ts";
 import { come, follow } from "./skills/follow.ts";
 import { getItems } from "./skills/get-items.ts";
@@ -51,6 +53,8 @@ export interface SkillContext {
   readonly farms?: readonly KnownFarm[];
   /** Told about a farm made or tended, to remember it. */
   readonly rememberFarm?: (farm: KnownFarm) => void;
+  /** Told about the hole after its roof step, so the memory and monitor keep the newest shelter. */
+  readonly rememberShelter?: (hole: ShelterHole) => void;
   /** The block names a till failed on, shared by every character: a farm site never has them as soil. */
   readonly soil?: TillFacts;
   /** The carried items its own work needs (set for its own objectives only): a drop of its own keeps them; an order drops anything asked. */
@@ -109,6 +113,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "eat": return await eat(context, step, why);
       case "equip": return await equip(context, step, why);
       case "sleep": return await sleep(context, step, why);
+      case "dig_shelter": return await digShelter(context, step);
       case "hunt": return await hunt(context, step, why);
       case "level_area": return await levelArea(context, step);
       case "protect_area": return await protectArea(context, step);
