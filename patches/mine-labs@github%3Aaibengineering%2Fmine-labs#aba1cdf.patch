@@ -1101,3 +1101,76 @@ index 0dfa0ed1ec590720a1bdae1e912463958a8da8ce..e5450d022003bb75af1dcf883399704b
 +
 +/** What `Rcon.executeChecked` puts before a command, so a command near the RCON size limit counts it. */
 +export const CHECKED_COMMAND_PREFIX = "execute store success score #ml_command ml_query run ";
+diff --git a/src/player/prepare.test.ts b/src/player/prepare.test.ts
+--- a/src/player/prepare.test.ts
++++ b/src/player/prepare.test.ts
+@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import { preparePlayerForTrial, type PlayerCommandHost } from "./prepare.js";
+ 
++test("declared effects are applied before teleport and after reusable cleanup", async () => {
++  for (const resetReusablePlayer of [false, true]) {
++    const host = new FakePlayerHost();
++    await preparePlayerForTrial({ commands: host, resetReusablePlayer,
++      player: { name: "Collector", pos: [0, -59, 0], inventory: [], op: false,
++        effects: [{ effect: "absorption", seconds: 120, amplifier: 4 }] },
++    });
++    const effect = host.commands.indexOf("effect give Collector minecraft:absorption 120 4 true");
++    assert.ok(effect >= 0);
++    assert.ok(effect < host.commands.indexOf("tp Collector 0 -59 0"));
++    if (resetReusablePlayer) assert.ok(effect > host.commands.indexOf("effect clear Collector"));
++  }
++});
++
+ test("equipment follows reusable cleanup and precedes inventory grants and teleport", async () => {
+   const host = new FakePlayerHost();
+   await preparePlayerForTrial({ commands: host, resetReusablePlayer: true,
+diff --git a/src/player/prepare.ts b/src/player/prepare.ts
+--- a/src/player/prepare.ts
++++ b/src/player/prepare.ts
+@@ -42,6 +42,9 @@ export interface PreparePlayerForTrialOptions {
+ export async function preparePlayerForTrial(options: PreparePlayerForTrialOptions): Promise<void> {
+   const { commands, player } = options;
+   if (options.resetReusablePlayer) await resetReusablePlayer(commands, player.name);
++  for (const { effect, seconds, amplifier } of player.effects ?? []) {
++    await commands.command(`effect give ${player.name} ${resourceId(effect)} ${seconds} ${amplifier} true`);
++  }
+   // Equip first so a main-hand declaration cannot overwrite an inventory grant.
+   for (const [slot, item] of Object.entries(player.equipment ?? {})) {
+     const target = EQUIPMENT_SLOTS[slot as keyof typeof EQUIPMENT_SLOTS];
+diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
+--- a/src/scenario/schema.ts
++++ b/src/scenario/schema.ts
+@@ -108,6 +108,12 @@ const playerSpecSchema = z.strictObject({
+   pos: posSchema.optional(),
+   /** Items Mine Labs gives after reusable-player cleanup and before ctx.start. */
+   inventory: z.array(inventoryItemSchema).default([]),
++  /** Effects to apply after cleanup and before the player is teleported. */
++  effects: z.array(z.strictObject({
++    effect: z.string().regex(minecraftResourceId),
++    seconds: z.number().int().positive(),
++    amplifier: z.number().int().min(0).max(255),
++  })).optional(),
+   /** One item per equipped slot, applied before inventory grants and client start. */
+   equipment: equipmentSchema.optional(),
+   /** Grant operator rights to the client player as part of scenario setup. */
+diff --git a/src/scenario/schema.test.ts b/src/scenario/schema.test.ts
+--- a/src/scenario/schema.test.ts
++++ b/src/scenario/schema.test.ts
+@@ -8,5 +8,16 @@ import {
+ } from "./schema.js";
+ 
++test("player effects accept valid values and reject unsafe commands", () => {
++  const scenario = (effect: unknown) => ({
++    client: { command: "test-client" }, goal: { kind: "completion" },
++    players: [{ name: "player1", effects: [effect] }],
++  });
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "minecraft:absorption", seconds: 120, amplifier: 4 })).success, true);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption run say x", seconds: 120, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 0, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 120, amplifier: 256 })).success, false);
++});
++
+ test("scenario parsing turns optional input into a complete runner scenario", () => {
+   const input: ScenarioInput = {
+     client: { command: "test-client" },

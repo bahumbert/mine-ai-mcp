@@ -15,6 +15,13 @@ const BESIDE_PIT_BLOCKS = 3;
  */
 export const run: MineAiScenario = async (context) => {
   const { bot, signal, log } = context;
+  const declaredEffects = context.scenario.players.find((player) => player.name === bot.username)?.effects ?? [];
+  for (const declared of declaredEffects) {
+    const active = Object.values(bot.entity.effects).find((effect) =>
+      bot.registry.effects[effect.id]?.name?.toLowerCase() === declared.effect.replace(/^minecraft:/u, ""));
+    assert.equal(active?.amplifier, declared.amplifier, `prepared effect ${declared.effect} missing`);
+    log(`prepared effect ${declared.effect} amplifier ${active.amplifier}`);
+  }
   // The pool surface is one below the dry start the scenario file put the bot on.
   const poolY = Math.floor(bot.entity.position.y) - 1;
   assert.ok(await standStill(context));
