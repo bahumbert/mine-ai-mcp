@@ -105,7 +105,7 @@ test("runtime lock contention reports an error without consuming the watchdog al
   });
 
   writer.exec("BEGIN IMMEDIATE");
-  const began = performance.now();
+  assert.equal(data.read("PRAGMA busy_timeout")[0]?.timeout, 0);
   assert.throws(
     () => data.transaction(() => {}, { name: "recordActionResponse", requestId: 115 }),
     (error) => {
@@ -121,9 +121,6 @@ test("runtime lock contention reports an error without consuming the watchdog al
       return true;
     },
   );
-  // A broad one-second ceiling distinguishes immediate rejection from the
-  // observed five-second synchronous SQLite wait, without timing normal SQL.
-  assert.ok(performance.now() - began < 1000, "Lock contention must not block the runtime for seconds.");
   assert.equal(data.diagnostics().lockFailures, 1, "Diagnostic reads must work while the other writer holds its lock.");
   assert.equal(data.read("PRAGMA query_only")[0]?.query_only, 1);
   writer.exec("ROLLBACK");

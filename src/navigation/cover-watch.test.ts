@@ -33,26 +33,21 @@ test("a later segment replaces the report and only its own run and step can mark
   assert.equal(watch.snapshot()?.reached, false);
 });
 
-test("reading cover for 200 covered destinations on the shared fake takes under 5 ms", () => {
+test("reading cover visits each covered destination once", () => {
   const cells = Object.fromEntries(Array.from({ length: 200 }, (_, x) => [`${x + 1},66,0`, "stone"]));
   const { bot, world: fakeWorld } = createFakeBot({ cells });
   // The live client already holds decoded columns; the fake builds its Prismarine columns lazily (fake-world-columns.ts).
   for (let chunkX = 0; chunkX <= 12; chunkX++) fakeWorld.getColumn(chunkX, 0);
   const world = new MineflayerWorldView(bot);
+  let reads = 0;
+  const blockAt = world.blockAt.bind(world);
+  world.blockAt = (...args) => { reads++; return blockAt(...args); };
   try {
     const covered = coveredCellReader(bot, world);
     const step = route().steps[0]!;
     const plan = { start: route().start, steps: Array.from({ length: 200 }, (_, x) => ({ ...step, id: `${x}`, to: { x: x + 1, y: 64, z: 0 } })) };
-    // The first tag lookup builds the version's reverse index (tag-index.ts). Measure that one-time setup separately
-    // from the per-route read; most of these 200 cells are still unread in the navigation world.
-    const initializing = performance.now();
-    covered(plan.steps[0]!.to);
-    console.log(`Cover reader first observation: ${(performance.now() - initializing).toFixed(3)} ms`);
-    const before = performance.now();
     const exit = firstOpenStep(plan, covered);
-    const elapsed = performance.now() - before;
     assert.equal(exit, null);
-    console.log(`200-step cover check: ${elapsed.toFixed(3)} ms`);
-    assert.ok(elapsed < 5, `${elapsed} ms`);
+    assert.equal(reads, 200);
   } finally { world.close(); }
 });

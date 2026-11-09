@@ -16,8 +16,8 @@ import { build, type BuildCell } from "./build-process.js";
 
 /**
  * Live 2026-10-10 run 8: a runtime went silent for 5 s while a build was levelling a 9x9 site (81 cells asked to be
- * air) from a swim cell in shallow water, under a goal of 38 "visible-dig" targets. These time that goal's calls: a
- * goal check has to stay far under a search slice (8 ms of nodes).
+ * air) from a swim cell in shallow water, under a goal of 38 "visible-dig" targets. Count the goal's block reads and
+ * visibility raycasts to catch repeated work independent of machine load.
  */
 const SITE = { x0: 2737, x1: 2745, z0: -380, z1: -372, y: 62 };
 const AREA = { x0: 2728, x1: 2756, z0: -392, z1: -362 };
@@ -74,38 +74,34 @@ async function capturedGoal(bot: ReturnType<typeof fixture>["bot"], cells: Build
   return goal;
 }
 
-function milliseconds<T>(work: () => T): [T, number] {
-  const began = performance.now();
-  const result = work();
-  return [result, performance.now() - began];
-}
-
 for (const away of [0, 8, 16, 24]) {
-  test(`the levelling goal from a swim cell ${away} blocks east of the site: each call and one search slice stay far under 50 ms`, async () => {
+  test(`the levelling goal from a swim cell ${away} blocks east of the site bounds world reads`, async () => {
     const { bot, world, cells } = fixture();
     const goal = await capturedGoal(bot, cells);
+    let reads = 0;
+    let rays = 0;
+    const blockAt = bot.blockAt.bind(bot);
+    const raycast = bot.world.raycast.bind(bot.world);
+    bot.blockAt = (...args) => { reads++; return blockAt(...args); };
+    bot.world.raycast = (...args) => { rays++; return raycast(...args); };
     const feet = { x: FEET.x + away, y: FEET.y, z: FEET.z };
     bot.entity.position = new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5);
-    const [resolved, resolveMs] = milliseconds(() => goal.resolve(observation(feet.x, feet.y, feet.z)));
+    const resolved = goal.resolve(observation(feet.x, feet.y, feet.z));
     assert.equal(resolved.kind, "active", JSON.stringify(resolved).slice(0, 300));
     if (resolved.kind !== "active") return;
     const state = planningStart(feet, 0);
     const view = state.overlay.view(world);
-    const [, satisfiedMs] = milliseconds(() => resolved.isSatisfied(state.node, view));
-    const [, heuristicMs] = milliseconds(() => resolved.heuristic(state.node));
+    resolved.isSatisfied(state.node, view);
+    resolved.heuristic(state.node);
     const search = new IncrementalSearch({
-      id: "level", start: state, goal: resolved, now: () => performance.now(),
+      id: "level", start: state, goal: resolved, now: () => 0,
       context: { world, policy: createMovements(bot), player: WELL_FED, catalogue: createMovementCatalogue() },
     });
-    const slices: number[] = [];
-    let last = "";
     for (let slice = 0; slice < 5; slice++) {
-      const [update, ms] = milliseconds(() => search.advance({ maximumMilliseconds: 8 }));
-      slices.push(ms);
-      last = update.kind;
+      const update = search.advance({ maximumExpansions: 5 });
       if (update.kind !== "progress") break;
     }
-    console.log(`goal timing, ${away} away (ms): resolve ${resolveMs.toFixed(2)}, isSatisfied ${satisfiedMs.toFixed(2)}, heuristic ${heuristicMs.toFixed(2)}, slices ${slices.map((ms) => ms.toFixed(1)).join("/")} (${last}), ${resolved.revision.split("|").length} targets`);
-    for (const [name, ms] of Object.entries({ resolveMs, satisfiedMs, heuristicMs, slowestSlice: Math.max(...slices) })) assert.ok(ms < 50, `${name} took ${ms.toFixed(1)} ms`);
+    assert.ok(reads <= cells.length * 26, `block reads: ${reads}`);
+    assert.ok(rays <= cells.length * 26 * 6, `raycasts: ${rays}`);
   });
 }

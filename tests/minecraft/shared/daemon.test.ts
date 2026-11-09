@@ -55,9 +55,9 @@ async function withDaemon(
   }
 }
 
-async function submitAndCollect(socketPath: string, paths: string[]): Promise<DaemonMessage[]> {
+async function submitAndCollect(socketPath: string, paths: string[], onMessage: (message: DaemonMessage) => void = () => {}): Promise<DaemonMessage[]> {
   const messages: DaemonMessage[] = [];
-  const session = await exchange(socketPath, { type: "submit", paths, out: "/tmp/daemon-test-out", repeat: 1, lanes: null, lock: false, env: {} }, message => messages.push(message));
+  const session = await exchange(socketPath, { type: "submit", paths, out: "/tmp/daemon-test-out", repeat: 1, lanes: null, lock: false, env: {} }, message => { messages.push(message); onMessage(message); });
   await session.closed;
   return messages;
 }
@@ -330,8 +330,9 @@ test("the daemon builds a missing template at the first idle sample, never besid
       release();
       await first;
       await until(() => builds.calls.length === 1, "the build");
-      const second = submitAndCollect(socketPath, [ONE_FILE]);
-      await pause(200);
+      let waitSeen = false;
+      const second = submitAndCollect(socketPath, [ONE_FILE], message => { if (message.type === "wait") waitSeen = true; });
+      await until(() => waitSeen, "the first wait message");
       assert.equal(started, 1, "the second submission's trial waits for the build");
       builds.calls[0]!.finish({ ok: true, dir: join(builds.storeDir, BUILD_KEY) });
       const messages = await second;
