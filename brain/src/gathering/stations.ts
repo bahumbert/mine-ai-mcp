@@ -106,7 +106,7 @@ export const STATION_RANGE_NONE_CARRIED = 48;
  * {@link STATION_RANGE_NONE_CARRIED} when she carries none); where it stands, or null when none is that close or the
  * way there fails (then a carried one is set down as before).
  */
-export async function walkToStation(context: GatherContext, block: "crafting_table" | "furnace"): Promise<Position | null> {
+export async function walkToStation(context: Pick<GatherContext, "runtime" | "body" | "signal">, block: "crafting_table" | "furnace"): Promise<Position | null> {
   const { inventory } = await context.runtime.status();
   const range = inventory.some((stack) => stack.name === block) ? STATION_RANGE : STATION_RANGE_NONE_CARRIED;
   const found = await placedStation(context.runtime, block, range);

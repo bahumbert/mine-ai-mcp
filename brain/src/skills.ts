@@ -6,6 +6,7 @@ import type { KnownPlace } from "./mind.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
+import type { HostileInterruptions } from "./gathering/hostile-interruptions.ts";
 import type { BotRuntime, BotSnapshot, ProtectedArea } from "./runtime-client.ts";
 import { build } from "./skills/build-house.ts";
 import { craftItem } from "./skills/craft-item.ts";
@@ -67,6 +68,8 @@ export interface SkillContext {
   readonly levelSites?: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
   /** The tool classes whose tool broke and was not made again, kept for the objective's life by the agent: the next fetch makes the tool before it digs (N7). */
   readonly toolsLost?: Set<string>;
+  /** The agent's hostile-interruption memory, retained across objectives and gatherings. */
+  readonly hostileInterruptions?: HostileInterruptions;
 }
 
 export interface UnfinishedHouse {

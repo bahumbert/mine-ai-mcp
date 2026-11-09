@@ -1,7 +1,9 @@
 // Getting items like a player (get_items): the gathering engine, then the walk back to where it started.
 import { describeMaterials } from "../building/blueprint.ts";
 import { gatherMaterials } from "../gathering/gather-materials.ts";
+import { HostileInterruptions } from "../gathering/hostile-interruptions.ts";
 import { isWetSite } from "../gathering/stations.ts";
+import { monotonicNow } from "../monotonic-clock.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
 import { makeRoom } from "./drop-items.ts";
 import { GO_TO_RANGE, navigateInput } from "./positions.ts";
@@ -21,7 +23,8 @@ export async function getItems(context: SkillContext, items: readonly { readonly
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
-  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
+  const hostileInterruptions = context.hostileInterruptions ?? new HostileInterruptions(monotonicNow);
+  const gathered = await gatherMaterials({ ...context, hostileInterruptions, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
   if (gathered.status !== "done") return gathered;
   const here = (await context.runtime.status()).position;
   const detail = `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})`;

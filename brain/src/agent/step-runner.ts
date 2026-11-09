@@ -8,6 +8,7 @@ import type { HouseSize } from "../building/house.ts";
 import { planHouse, styleOrDefault } from "../building/plan.ts";
 import type { TillFacts } from "../farming/site.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "../gain-watch.ts";
+import { HostileInterruptions } from "../gathering/hostile-interruptions.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "../inventory-room.ts";
 import type { StepRecord } from "../mind.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
@@ -42,6 +43,8 @@ interface StepRunnerHost {
 }
 
 export class StepRunner {
+  private readonly hostileInterruptions = new HostileInterruptions(monotonicNow);
+
   constructor(private readonly host: StepRunnerHost) {}
 
   /** Runs the step the model chose under a no-gain watch, timing it and the runtime actions and phases it went through. */
@@ -105,6 +108,7 @@ export class StepRunner {
       areas: memory.areas,
       levelSites: work.levelSites,
       toolsLost: work.toolsLost,
+      hostileInterruptions: this.hostileInterruptions,
       ...(requester === null && { needed: (current: BotSnapshot) => this.neededFor(current, work) }),
       phase: (activity) => {
         gain.alive();

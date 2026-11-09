@@ -5,11 +5,86 @@ import minecraftData from "minecraft-data";
 import { fuelsOf } from "#src/world/smelting.ts";
 import { runStep } from "../skills.ts";
 import { RARE_DROP_BREAKS } from "../gathering/how-to-get.ts";
+import { HostileInterruptions } from "../gathering/hostile-interruptions.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "../testing.ts";
 import { contextFor, describeCall, HOUSE_RECIPES, needsOnlyTools, GLASS_RECIPES } from "./skill-fixtures.test.ts";
 
 /** Run 13: Brea's shovel broke while digging dirt; dirt drops by hand, so the fetch went on bare-handed and never asked for another. */
 const SHOVEL_RECIPES = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+
+test("three interruptions by one unmoved zombie end the gathering naming it; the second gathering stops at once; afterwards gathering elsewhere runs", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  const context = { ...contextFor(runtime), hostileInterruptions: new HostileInterruptions(() => 0) };
+  runtime.failures.collect_block = "[HOSTILE_CONTACT] evade response for zombie#84159 at -553,59,-48 (3.2 blocks) (withdraw: ...).";
+  runtime.failNext.collect_block = { error: runtime.failures.collect_block, effect: () => runtime.addItem("oak_log", 1) };
+  const step = { skill: "get_items" as const, items: [{ item: "oak_log", count: 4 }] };
+  const first = await runStep(step, context);
+  assert.equal(first.status, "failed");
+  assert.match(first.status === "failed" ? first.detail : "", /zombie#84159 at -553,59,-48 interrupted gathering 3 times in .*has not moved/u);
+  assert.match(first.status === "failed" ? first.detail : "", /got .* so far \(carried now: 1 oak_log\)/u);
+  const second = await runStep(step, context);
+  assert.match(second.status === "failed" ? second.detail : "", /^stopped: .*interrupted gathering 4 times/u);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 200, y: 64, z: 200 } };
+  delete runtime.failures.collect_block;
+  const next = await runStep(step, context);
+  assert.equal(next.status, "done");
+  assert.equal(runtime.snapshot.inventory.find((item) => item.name === "oak_log")?.count, 5);
+});
+
+test("a chaser seen no farther away reaches the gathering stop with keeps coming back", async () => {
+  const runtime = new FakeRuntime();
+  runtime.failures.collect_block = "[HOSTILE_CONTACT] evade response for zombie#1 at 2,64,0 (2 blocks).";
+  runtime.failNext.collect_block = { error: "[HOSTILE_CONTACT] evade response for zombie#1 at 3,64,0 (3 blocks)." };
+  const context = { ...contextFor(runtime), hostileInterruptions: new HostileInterruptions(() => 0) };
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, context);
+  assert.match(result.status === "failed" ? result.detail : "", /interrupted gathering 3 times.*keeps coming back/u);
+});
+
+test("two mobs two interruptions each go on, and other setbacks do not count", async () => {
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  const context = { ...contextFor(runtime), hostileInterruptions: new HostileInterruptions(() => 0) };
+  const errors = [
+    "[HOSTILE_CONTACT] evade response for zombie#1 at 2,64,0 (2 blocks).",
+    "[HOSTILE_CONTACT] evade response for zombie#2 at 3,64,0 (3 blocks).",
+    "[HOSTILE_CONTACT] evade response for zombie#1 at 2,64,0 (2 blocks).",
+    "[HOSTILE_CONTACT] evade response for zombie#2 at 3,64,0 (3 blocks).",
+    "[SOMETHING_ODD] the axe slipped",
+    "[SOMETHING_ODD] the axe slipped",
+  ];
+  const queue = (index: number): void => {
+    const error = errors[index];
+    if (error !== undefined) runtime.failNext.collect_block = { error, effect: () => {
+      if (index >= 4) runtime.addItem("oak_log", 1);
+      queue(index + 1);
+    } };
+  };
+  queue(0);
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, context);
+  assert.equal(result.status, "done");
+  runtime.failNext.collect_block = { error: errors[0]! };
+  const later = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 1 }] }, context);
+  assert.match(later.status === "failed" ? later.detail : "", /zombie#1.*interrupted gathering 3 times/u);
+});
+
+test("a hostile interrupting replacement-tool crafting counts before the gather continues by hand", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = SHOVEL_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
+  const hostileInterruptions = new HostileInterruptions(() => 0);
+  const detail = "[HOSTILE_CONTACT] evade response for zombie#84159 at -553,59,-48 (3.2 blocks).";
+  hostileInterruptions.note(detail);
+  hostileInterruptions.note(detail);
+  runtime.failNext.craft_item = { error: detail };
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime, {
+    hostileInterruptions, toolsLost: new Set(["shovel"]),
+  }));
+  assert.equal(result.status, "failed", JSON.stringify({ result, submitted: runtime.submitted }));
+  assert.match(result.status === "failed" ? result.detail : "", /zombie#84159.*interrupted gathering 3 times.*has not moved/u);
+  assert.ok(!runtime.snapshot.inventory.some((item) => item.name === "dirt"));
+});
 
 const shovelLost = (runtime: FakeRuntime, dirt: number) => ({
   error: "[TOOL_TIER_LOST] wooden_shovel was lost at 1,64,2; no shovel remains. Broke 6 matching blocks; inventory gained 6/16 requested items.",
@@ -226,18 +301,6 @@ test("a shovel that breaks mid-fetch is made again for the dirt still to dig, th
   assert.deepEqual(runtime.submitted.map(describeCall), ["collect dirt", "craft wooden_shovel at table", "collect dirt"]);
   // The setback is told, with the tool that broke.
   assert.match(result.status === "done" ? result.detail : "", /setback \(\[TOOL_TIER_LOST\] wooden_shovel was lost/u);
-});
-
-test("a tool that breaks with nothing left to dig for its class is not made again", async () => {
-  const runtime = new FakeRuntime();
-  runtime.recipes = SHOVEL_RECIPES;
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }] };
-  // It broke on the last block: all 16 are carried.
-  runtime.failNext.collect_block = shovelLost(runtime, 16);
-  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime));
-  assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(runtime.submitted.map(describeCall), ["collect dirt"]);
 });
 
 test("a fetch that broke its shovel and cannot make another goes on by hand: dirt needs no tool", async () => {
@@ -904,17 +967,27 @@ test("near trees none could be reached are not offered again, and a fetch failin
   assert.equal(result.status === "failed" ? result.detail : "", "got setback ([SOMETHING_ODD] the axe slipped) so far (carried now: 2 oak_log); still missing 2 oak_log: [SOMETHING_ODD] the axe slipped");
 });
 
-test("get_items stops after a bounded number of blocks broken for a rare drop that never came, and says so", async () => {
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
-  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
-  assert.equal(result.status, "failed");
-  const detail = result.status === "failed" ? result.detail : "";
-  assert.match(detail, new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
-  assert.match(detail, /rare \(0\.5% of breaks\)/u);
-  const broken = runtime.submitted.filter((call) => call.tool === "collect_block").reduce((sum, call) => sum + Number(call.input.count), 0);
-  assert.equal(broken, RARE_DROP_BREAKS);
+test("a rare fetch bounds reported breaks, retains carried drops, and passes the remaining cap", async () => {
+  for (const [brokenPerCall, carriedBefore] of [[null, 0], [8, 0], [16, 2]] as const) {
+    const runtime = new FakeRuntime();
+    runtime.simulateInventory = true;
+    runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "apple", count: carriedBefore }] };
+    runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
+    if (brokenPerCall !== null) runtime.collectBroken = () => brokenPerCall;
+    const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
+    assert.equal(result.status, "failed");
+    const detail = result.status === "failed" ? result.detail : "";
+    assert.match(detail, new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
+    assert.match(detail, /rare \(0\.5% of breaks\)/u);
+    const calls = runtime.submitted.filter((call) => call.tool === "collect_block");
+    if (brokenPerCall === null) {
+      assert.equal(calls.reduce((sum, call) => sum + Number(call.input.count), 0), RARE_DROP_BREAKS);
+    } else {
+      assert.equal(calls.length, RARE_DROP_BREAKS / brokenPerCall);
+      assert.deepEqual(calls.map((call) => call.input.max_breaks), Array.from({ length: RARE_DROP_BREAKS / brokenPerCall }, (_unused, call) => RARE_DROP_BREAKS - call * brokenPerCall));
+    }
+    assert.equal(runtime.snapshot.inventory.find((item) => item.name === "apple")?.count, carriedBefore);
+  }
 });
 
 test("a boat is looked up only for carried woods: iron_block costs no recipe lookup", async () => {
@@ -935,29 +1008,6 @@ test("a boat is looked up only for carried woods: iron_block costs no recipe loo
   assert.deepEqual(asked.filter((item) => /^(iron|hay)_/u.test(item)), [], "no recipe was asked for a block that is no wood");
 });
 
-test("the rare-drop bound counts blocks the runtime reports broken, whatever drops came", async () => {
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
-  // Each call breaks fewer blocks than asked: only the structured count may stop the fetch.
-  runtime.collectBroken = () => 8;
-  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
-  assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
-  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, RARE_DROP_BREAKS / 8);
-});
-
-test("a rare drop already carried when the fetch starts is not taken for a gain", async () => {
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "apple", count: 2 }] };
-  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
-  runtime.collectBroken = () => 16;
-  const result = await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
-  assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", new RegExp(`broke ${RARE_DROP_BREAKS} oak_leaves without gaining apple`, "u"));
-});
-
 test("a fetch whose craft finds no room makes room and crafts again once", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
@@ -970,17 +1020,6 @@ test("a fetch whose craft finds no room makes room and crafts again once", async
   assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
 });
 
-test("a rare fetch tells the runtime how many blocks it may still break: max_breaks is what is left of the bound", async () => {
-  // Run 14 review SF7: one `collect_block oak_leaves count 5` could break 204 leaves before the bound was looked at.
-  const runtime = new FakeRuntime();
-  runtime.simulateInventory = true;
-  runtime.dropSources = { ...runtime.dropSources, apple: [{ block: "oak_leaves", chance: 0.005, planted: false }] };
-  runtime.collectBroken = () => 8;
-  await runStep({ skill: "get_items", items: [{ item: "apple", count: 5 }] }, contextFor(runtime));
-  const caps = runtime.submitted.filter((call) => call.tool === "collect_block").map((call) => call.input.max_breaks);
-  assert.deepEqual(caps, Array.from({ length: RARE_DROP_BREAKS / 8 }, (_unused, call) => RARE_DROP_BREAKS - call * 8));
-});
-
 test("a sure drop is given no break cap", async () => {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
@@ -990,47 +1029,27 @@ test("a sure drop is given no break cap", async () => {
   assert.ok(calls.every((call) => !("max_breaks" in call.input)));
 });
 
-test("a pickaxe that broke and cannot be made again ends a fetch of stone at once: stone needs it", async () => {
-  // Run 14 review N9: "going on without it" also applied to a harvest-required tool, so one more round tried the same remake.
-  const runtime = new FakeRuntime();
-  runtime.recipes = HOUSE_RECIPES;
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "wooden_pickaxe", count: 1 }] };
-  runtime.failNext.collect_block = {
-    error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains.",
-    result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: "wooden_pickaxe", class: "pickaxe" } } },
-    effect: () => {
-      runtime.addItem("cobblestone", 15);
-      runtime.addItem("wooden_pickaxe", -1);
-    },
-  };
-  runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
-  const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
-  assert.equal(result.status, "failed");
-  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 1, runtime.submitted.map(describeCall).join(" | "));
-  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1);
-});
-
-test("a harvest tool that broke and cannot be made again ends the fetch at once, whatever the tool is called: its class comes from the block, not the item's name", async () => {
-  const runtime = new FakeRuntime();
-  runtime.recipes = { ...HOUSE_RECIPES, mythril_digger: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
-  runtime.harvestTools = { stone: ["mythril_digger"], cobblestone: ["mythril_digger"] };
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: "mythril_digger", count: 1, families: ["pickaxe"] }] };
-  runtime.failNext.collect_block = {
-    error: "[TOOL_TIER_LOST] mythril_digger was lost; family: pickaxe; no pickaxe remains.",
-    result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: "mythril_digger", class: "pickaxe" } } },
-    effect: () => {
-      runtime.addItem("cobblestone", 15);
-      runtime.addItem("mythril_digger", -1);
-    },
-  };
-  runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
-  const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
-  // The fetch ends with the craft's own failure at once (stone drops nothing without the tool); a class read from the item's name
-  // ("digger") would not match the lost "pickaxe" and the gathering would go on to one more round.
-  assert.deepEqual(result, { status: "failed", detail: "[CRAFT_FAILED] no recipe works here" });
-  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1, runtime.submitted.map(describeCall).join(" | "));
+test("a required harvest tool that cannot be replaced ends the fetch once, by class for vanilla and modded tools", async () => {
+  for (const tool of ["wooden_pickaxe", "mythril_digger"]) {
+    const runtime = new FakeRuntime();
+    runtime.recipes = { ...HOUSE_RECIPES, mythril_digger: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+    if (tool === "mythril_digger") runtime.harvestTools = { stone: [tool], cobblestone: [tool] };
+    runtime.simulateInventory = true;
+    runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_log", count: 10 }, { name: "crafting_table", count: 1 }, { name: tool, count: 1, families: ["pickaxe"] }] };
+    runtime.failNext.collect_block = {
+      error: `[TOOL_TIER_LOST] ${tool} was lost; no pickaxe remains.`,
+      result: { collected: { requested: 16, gained: 15, gainedByItem: { cobblestone: 15 }, blocksBroken: 15, brokenAt: [], toolLost: { item: tool, class: "pickaxe" } } },
+      effect: () => {
+        runtime.addItem("cobblestone", 15);
+        runtime.addItem(tool, -1);
+      },
+    };
+    runtime.failures.craft_item = "[CRAFT_FAILED] no recipe works here";
+    const result = await runStep({ skill: "get_items", items: [{ item: "cobblestone", count: 16 }] }, contextFor(runtime));
+    assert.deepEqual(result, { status: "failed", detail: "[CRAFT_FAILED] no recipe works here" }, tool);
+    assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, 1, tool);
+    assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1, tool);
+  }
 });
 
 test("a stripped log makes its tree's boat with one planner call, none for another tree's boat", async () => {
@@ -1127,6 +1146,7 @@ test("a tool that broke in one fetch is remembered by the next fetch of the same
   runtime.failNext.collect_block = shovelLost(runtime, 16);
   const first = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 16 }] }, contextFor(runtime, { toolsLost }));
   assert.equal(first.status, "done", JSON.stringify(first));
+  assert.deepEqual(runtime.submitted.map(describeCall), ["collect dirt"]);
   runtime.submitted.length = 0;
   // ...and the next call of the objective makes it before it digs again.
   const second = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 32 }] }, contextFor(runtime, { toolsLost }));

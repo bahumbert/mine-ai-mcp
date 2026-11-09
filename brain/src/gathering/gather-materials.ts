@@ -2,10 +2,12 @@
 import { describeMaterials, shortfall } from "../building/blueprint.ts";
 import { MAX_TOOL_LOSSES } from "../building/tool-loss.ts";
 import type { Body } from "../body.ts";
+import { monotonicNow } from "../monotonic-clock.ts";
 import { errorCode, type BotRuntime, type ItemCount, type Position } from "../runtime-client.ts";
 import { act } from "./gather-action.ts";
 import { collectAll } from "./fetch-farther.ts";
 import { huntAll } from "./hunt-drops.ts";
+import { SAME_HOSTILE_LIMIT, type HostileInterruptions } from "./hostile-interruptions.ts";
 import { howToGet, newKnowledge, RARE_DROP_BREAKS, rareNote, type Knowledge } from "./how-to-get.ts";
 import { planRound, readyCrafts, requiresTool, smeltReady, TABLE, toolMissing, type Round } from "./plan-round.ts";
 import { carried, type Stacks } from "./stacks.ts";
@@ -20,6 +22,8 @@ export interface GatherContext {
   readonly runtime: BotRuntime;
   readonly body: Body;
   readonly signal: AbortSignal;
+  /** The agent's interruptions, shared across gatherings so a new step cannot restart the same hostile loop. */
+  readonly hostileInterruptions: HostileInterruptions;
   /**
    * Told what it starts doing now and what for, at each phase change (gathering, crafting, smelting), so the character
    * can say it (owner, 2026-10-02: under an order, she says what she does and why).
@@ -230,6 +234,12 @@ interface RoundOutcome {
  */
 async function afterFailedRound(outcome: RoundOutcome): Promise<"continue" | GatherResult | null> {
   const { context, step, plan, state, bill, keep, missing, knowledge } = outcome;
+  const hostile = step.status === "failed" ? context.hostileInterruptions.note(step.detail) : null;
+  if (hostile !== null && hostile.count >= SAME_HOSTILE_LIMIT) {
+    const minutes = Math.round((monotonicNow() - hostile.firstAt) / 60_000);
+    const detail = `stopped: ${hostile.name}#${hostile.id} at ${hostile.cell} interrupted gathering ${hostile.count} times in ${minutes} min and ${hostile.moved ? "keeps coming back" : "has not moved"}`;
+    return failedWithProgress(context, state, bill, { status: "failed", detail });
+  }
   const worn = wornOutTool(knowledge);
   if (worn !== null && step.status === "failed" && shortfall(state.wanted, (await context.runtime.status()).inventory).length > 0) {
     return { status: "failed", detail: `${worn}: stopping here; ${step.detail}` };
@@ -264,15 +274,18 @@ async function afterFailedRound(outcome: RoundOutcome): Promise<"continue" | Gat
   // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
   // round goes on without it, or makes another.
   if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) {
-    if (state.actions.length === 0) return step;
-    // What the earlier rounds got is not lost with the last failure (live 2026-10-10: a fetch ended with only the
-    // last place's failure, and no word of the logs already carried).
-    const now = (await context.runtime.status()).inventory;
-    const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
-    return { status: "failed", detail: `got ${state.actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(state.wanted, now))}: ${step.detail}` };
+    return failedWithProgress(context, state, bill, step);
   }
   state.actions.push(`setback (${step.detail})`);
   return "continue";
+}
+
+/** Keeps the items already carried visible when a later round ends the gathering (live 2026-10-10). */
+async function failedWithProgress(context: GatherContext, state: RoundState, bill: readonly ItemCount[], step: GatherResult & { readonly status: "failed" }): Promise<GatherResult> {
+  if (state.actions.length === 0) return step;
+  const now = (await context.runtime.status()).inventory;
+  const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
+  return { status: "failed", detail: `got ${state.actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(state.wanted, now))}: ${step.detail}` };
 }
 
 /** `wanted`, raised back to the kept count of every kept item a craft between `before` and `after` used up. */
