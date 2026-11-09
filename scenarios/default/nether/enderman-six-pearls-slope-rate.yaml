@@ -33,6 +33,7 @@ client:
   command: bun
   args: ["../../src/client-host.ts", "./enderman-expedition.ts"]
 params:
+  # The fixture replenishes before the population is exhausted.
   collection: { drops: 6, minimumDropsPerMinute: 1 }
   approach: [108, 58, 12]
 goal:
