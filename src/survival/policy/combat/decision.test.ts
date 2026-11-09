@@ -26,7 +26,6 @@ const scene = (): CombatDecisionFacts => combatDecisionFacts({
   rangedWeapon: false,
   shield: true,
   fireball: null,
-  unreachable: new Set(),
   answeredFights: new Map(),
   answered: new Set(),
   contacts: [
@@ -77,7 +76,6 @@ test("an exhausted recovery blocks reentry while a permitted enclosure can still
 test("serialized decision inputs retain every scope needed to replay the decision", () => {
   const facts = {
     ...scene(),
-    unreachable: new Set([7]),
     answeredFights: new Map([[7, 28]]),
     answered: new Set(["fight", "hide", "recovery"]),
   };
@@ -89,22 +87,19 @@ test("serialized decision inputs retain every scope needed to replay the decisio
   ] satisfies CombatPurpose[]) {
     const decision = decideCombatResponse(facts, purpose);
     const receipt = JSON.parse(JSON.stringify(combatDecisionEvidence(facts, purpose, decision))) as {
-      inputs: Omit<CombatDecisionFacts, "unreachable" | "answered" | "answeredFights"> & {
-        unreachable: number[];
+      inputs: Omit<CombatDecisionFacts, "answered" | "answeredFights"> & {
         answered: string[];
         answeredFights: [number, number][];
       };
       purpose: CombatPurpose;
       decision: ReturnType<typeof decideCombatResponse>;
     };
-    assert.deepEqual(receipt.inputs.unreachable, [7]);
     assert.deepEqual(receipt.inputs.answeredFights, [[7, 28]]);
     assert.deepEqual(receipt.inputs.answered, ["fight", "hide", "recovery"]);
     assert.deepEqual(
       decideCombatResponse(
         {
           ...receipt.inputs,
-          unreachable: new Set(receipt.inputs.unreachable),
           answeredFights: new Map(receipt.inputs.answeredFights),
           answered: new Set(receipt.inputs.answered),
         },
@@ -115,7 +110,7 @@ test("serialized decision inputs retain every scope needed to replay the decisio
   }
 });
 
-test("a failed fight stays excluded at melee reach without resolving its threat or excluding other targets", () => {
+test("a wounded defender keeps a failed fight excluded without resolving its threat or excluding a new target id", () => {
   // EnderSeeker 2026-09-11: blocked retreat was forgotten by selection at full
   // health and melee reach, then vetoed by the driver while the creeper remained.
   const facts = scene();
@@ -125,7 +120,7 @@ test("a failed fight stays excluded at melee reach without resolving its threat 
     distance: 0.36,
     relationship: { avoid: true, defend: true, attention: "on_sight" as const },
   };
-  const blocked = { ...facts, contacts: [creeper], answeredFights: new Map([[7, 28]]) };
+  const blocked = { ...facts, health: 11, contacts: [creeper], answeredFights: new Map([[7, 28]]) };
   for (const purpose of [
     { kind: "automatic" },
     { kind: "pursuit", targetId: 7, minimumHealth: 12 },
@@ -138,7 +133,7 @@ test("a failed fight stays excluded at melee reach without resolving its threat 
     assert.ok("threats" in response && response.threats.some(({ id }) => id === 7));
   }
   const another = { ...creeper, id: 8, name: "zombie" };
-  const response = decideCombatResponse({ ...blocked, contacts: [creeper, another] }, { kind: "automatic" });
+  const response = decideCombatResponse({ ...blocked, health: 20, contacts: [{ ...creeper, inReach: false }, another] }, { kind: "automatic" });
   assert.ok(response.kind === "fight" && response.targetId === 8, "failure is target-specific");
   assert.equal(decideCombatResponse({ ...blocked, contacts: [] }, { kind: "automatic" }).kind, "none");
 });
@@ -182,18 +177,13 @@ test("a hunted species in contact is fought, not withdrawn from, until health ru
   if (hurt.kind === "evade") assert.equal(hurt.reason, "hurt");
 });
 
-test("a hunted contact whose fight is answered or unreachable leaves the decision to the hunt", () => {
+test("a hunted contact whose fight is answered leaves the decision to the hunt", () => {
   const facts = skeletonScene();
   const answered = decideCombatResponse(
     { ...facts, answeredFights: new Map([[24617, 3]]) },
     { kind: "automatic", quarry: ["skeleton"] },
   );
   assert.equal(answered.kind, "none");
-  const unreachable = decideCombatResponse(
-    { ...facts, unreachable: new Set([24617]) },
-    { kind: "automatic", quarry: ["skeleton"] },
-  );
-  assert.equal(unreachable.kind, "none");
   const other = decideCombatResponse({ ...facts, answeredFights: new Map([[24617, 3]]) }, { kind: "automatic" });
   assert.equal(other.kind, "evade");
 });

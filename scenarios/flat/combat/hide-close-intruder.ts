@@ -73,7 +73,6 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
         ...responseOwner1.context,
         resolvedIds: new Set(),
         attackerIds: new Set(),
-        unreachableIds: new Set(),
       },
     });
     const feet = bot.entity.position.floored();

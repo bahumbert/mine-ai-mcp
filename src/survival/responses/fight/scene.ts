@@ -158,7 +158,6 @@ export class FightScene implements Disposable {
     const facts = observeCombatDecision(this.bot, {
       resolvedIds: this.perception.resolvedIds,
       attackerIds: this.perception.attackerIds,
-      unreachableIds: new Set(),
       perception: this.perception,
       policy: this.policy.combat,
       food: this.policy.food,

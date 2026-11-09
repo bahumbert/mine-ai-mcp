@@ -7,8 +7,6 @@ import type { SurvivalResources } from "../../state/resources.js";
 /** Decision inputs combine observed relationships with the admitted operation's state. */
 export interface HostileContext extends HostileKnowledge {
   readonly survival?: SurvivalResources;
-  /** Targets no route reached; retained by the operation across response changes. */
-  readonly unreachableIds: ReadonlySet<number>;
   readonly policy?: Readonly<CombatPolicy>;
   readonly food?: Readonly<FoodPolicy>;
   readonly blockedResponses?: ReadonlySet<string>;

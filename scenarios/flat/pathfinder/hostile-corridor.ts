@@ -39,7 +39,6 @@ const paramsSchema = z.strictObject({
 const NO_ENCOUNTER = {
   resolvedIds: new Set<number>(),
   attackerIds: new Set<number>(),
-  unreachableIds: new Set<number>(),
 };
 
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {

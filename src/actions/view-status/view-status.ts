@@ -55,7 +55,7 @@ import {
 } from "./contract.js";
 
 type LiveNearby = LiveSituation["nearby"];
-const EMPTY_COMBAT_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() };
+const EMPTY_COMBAT_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set() };
 export type ObserveStatusActivity = () => LiveSituation["activity"];
 
 /** Refresh the queryable status rows, then report the same facts plus what is loaded nearby. */

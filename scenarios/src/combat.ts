@@ -23,7 +23,6 @@ export class ScenarioCombat implements Disposable {
       survival: this.survival,
       resolvedIds: this.perception.resolvedIds,
       attackerIds: this.perception.attackerIds,
-      unreachableIds: new Set(),
       get policy() {
         return controller.policy.combat;
       },

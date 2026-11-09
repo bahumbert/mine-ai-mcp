@@ -546,7 +546,7 @@ export async function createMinecraftRuntime(
       frontier,
       navigation,
       strongholdEyeFlights,
-      combat, combatContext: { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds, unreachableIds: new Set() },
+      combat, combatContext: { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds },
       cancelForegroundAction: runner.cancelActive,
       observeStatusActivity: () => {
         const { owner, activeAction } = runner.status();

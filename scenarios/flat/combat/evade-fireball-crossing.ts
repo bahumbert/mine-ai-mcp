@@ -18,7 +18,6 @@ export const run: MineAiScenario = async (context) => {
   const threats: HostileContext = {
     resolvedIds: new Set(),
     attackerIds: new Set(),
-    unreachableIds: new Set(),
   };
   const request = observeHostileResponse(bot, threats);
   if (request.kind !== "evade") throw new Error(`Expected evade, observed ${request.kind}.`);

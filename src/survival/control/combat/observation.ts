@@ -24,7 +24,7 @@ import type { HostileDirective, HostileThreat } from "../../policy/combat/respon
 import { carriesCombatWeapon, carriesRangedWeapon, isShield, MELEE_RANGE, readCombatItems } from "../../weapons/equipment.js";
 import { contextPolicy, type HostileContext } from "./context.js";
 import { responseScope } from "./scopes/response.js";
-const NO_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() };
+const NO_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set() };
 function inContact(threat: HostileThreat, context: HostileContext): boolean {
   return threat.distance <= HOSTILE_CONTACT_RANGE || context.attackerIds.has(threat.id);
 }
@@ -60,20 +60,31 @@ export function assessContacts(bot: Bot, contacts: readonly Pick<CombatContact, 
   });
 }
 
+/** Reopen disproved approach failures before selection and admission read the same target memory. */
+function observeAnsweredFights(bot: Bot, context: HostileContext, contacts: readonly CombatContact[]): Map<number, number> {
+  const policy = context.policy ?? DEFAULT_COMBAT_POLICY;
+  const answeredFights = new Map<number, number>();
+  if (!context.survival) return answeredFights;
+  for (const contact of contacts) {
+    const scope = responseScope(bot, contextPolicy(context), "fight", contact.id);
+    const entry = context.survival.answered.find(scope.capability, scope.scope);
+    // A reachable attacker disproves an approach failure; clear admission's veto too.
+    // Limit stand-downs remain time-only (P4-06c T2, 2026-11-09).
+    if (entry && entry.failure.kind !== "reflex_limit" && bot.health >= policy.engage_min_health && contact.inReach) {
+      context.survival.answered.forget(scope.capability, scope.scope);
+      continue;
+    }
+    if (entry) answeredFights.set(contact.id, entry.id);
+  }
+  return answeredFights;
+}
+
 /** Read shared relationship, exposure and equipment once before deciding. */
 export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CONTEXT): CombatDecisionFacts {
   const policy = context.policy ?? DEFAULT_COMBAT_POLICY;
   const canRecover = recoveryAvailable(bot, context.food ?? DEFAULT_FOOD_POLICY);
   const fireball = incomingFireball(bot, HOSTILE_OBSERVATION_RANGE);
   const answered = new Set(context.blockedResponses);
-  const answeredFights = new Map<number, number>();
-  if (context.survival) {
-    for (const entity of Object.values(bot.entities)) {
-      const scope = responseScope(bot, contextPolicy(context), "fight", entity.id);
-      const entry = context.survival.answered.find(scope.capability, scope.scope);
-      if (entry) answeredFights.set(entity.id, entry.id);
-    }
-  }
   if (fireball && context.survival) {
     const scope = responseScope(bot, contextPolicy(context), "deflect", fireball.id);
     if (context.survival.answered.find(scope.capability, scope.scope)) answered.add("deflect");
@@ -113,8 +124,7 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
         }
       : null,
     contacts,
-    unreachable: context.unreachableIds,
-    answeredFights,
+    answeredFights: observeAnsweredFights(bot, context, contacts),
     answered,
   };
 }

@@ -175,6 +175,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
   "idle-then-breathe.ts": "no action, reads the air",
   "lava-pool-escape.ts": "asks only view_status; the teleport is a chat command built from the params' pool floor through arenaPoint",
+  "unreachable-shooter-ledge.ts": "teleports by chat using arenaPoint; action inputs read claim identities without coordinates",
   "workshop.ts": "BLIND: its first call is a craft whose receipt the stand-in does not model, so it ends before the table and furnace cells",
   "zombie-at-night.ts": "no action; the zombie is summoned by a chat command relative to the actor (@s), and its position is never compared",
 };

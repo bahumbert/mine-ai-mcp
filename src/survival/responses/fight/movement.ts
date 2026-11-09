@@ -250,7 +250,6 @@ export class FightMovement {
     using defence = defendWhileRetreating(scene.bot, {
       attackerIds: scene.perception.attackerIds,
       resolvedIds: scene.dead,
-      unreachableIds: new Set<number>(),
       get policy() { return scene.policy.combat; },
     }, scene.signal);
     try {

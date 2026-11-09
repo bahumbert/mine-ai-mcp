@@ -51,7 +51,6 @@ function fixture(options: { neutral?: boolean; weapon?: string; datapackSwords?:
   const context: HostileContext = {
     resolvedIds,
     attackerIds: new Set(),
-    unreachableIds: new Set(),
   };
   return {
     bot,

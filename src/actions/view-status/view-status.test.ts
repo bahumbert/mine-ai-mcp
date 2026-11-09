@@ -18,7 +18,7 @@ test("status uses observed hit damage and does not price a distant hostile", (t)
   using perception = new CombatPerception(bot);
   const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
   combat.hurtBot(4, 2);
-  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds, unreachableIds: new Set<number>() };
+  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds };
   const situation = observeLiveSituation(bot, data, idleActivity, () => null, () => 1.5, context);
   assert.equal(situation.nearby.hostiles[0]!.threat.damagePerHit, 4);
   bot.entities[2]!.position = new Vec3(12.5, 64, 0.5);

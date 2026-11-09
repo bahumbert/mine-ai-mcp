@@ -13,21 +13,14 @@ function loneBot(body: { readonly isInWater?: boolean; readonly isInLava?: boole
   return bot;
 }
 
-test("hiding is allowed on dry ground", () => {
-  assert.equal(observeCombatDecision(loneBot()).hideAllowed, true);
-});
-
-test("hiding is not allowed while the body is in water", () => {
-  assert.equal(observeCombatDecision(loneBot({ isInWater: true })).hideAllowed, false);
-});
-
-test("hiding is not allowed while the body is in lava", () => {
-  assert.equal(observeCombatDecision(loneBot({ isInLava: true })).hideAllowed, false);
+test("hiding requires dry ground rather than water or lava", () => {
+  for (const [body, allowed] of [[{}, true], [{ isInWater: true }, false], [{ isInLava: true }, false]] as const)
+    assert.equal(observeCombatDecision(loneBot(body)).hideAllowed, allowed, JSON.stringify(body));
 });
 
 test("contact assessment weighs a nearby zombie with bare hands and finite live health", () => {
   const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(2.5, 64, 0.5) } } });
-  const context = { resolvedIds: new Set<number>(), attackerIds: new Set<number>(), unreachableIds: new Set<number>() };
+  const context = { resolvedIds: new Set<number>(), attackerIds: new Set<number>() };
   const observed = observeCombatDecision(bot, context);
   const contacts = observed.contacts;
   const assessment = assessContacts(bot, contacts, context);
@@ -48,7 +41,7 @@ test("assessment reads held bonuses, observations, explosion fuses and varying m
     4: { name: "slime", position: new Vec3(2.5, 64, -0.5) },
   }, carried: { stone_sword: 1 } });
   using perception = new CombatPerception(bot);
-  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds, unreachableIds: new Set<number>() };
+  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds };
   const contacts = observeCombatDecision(bot, context).contacts;
   bot.entities[2]!.equipment[0] = bot.inventory.items()[0]!;
   let assessed = assessContacts(bot, contacts, context);

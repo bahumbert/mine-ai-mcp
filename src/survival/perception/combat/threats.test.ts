@@ -9,6 +9,9 @@ import { type FakeWorld, createFakeBot, itemOf } from "../../../test-support/fak
 import type { HostileContext } from "../../control/combat/context.js";
 import { observeHostileResponse } from "../../control/combat/observation.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
+import { DEFAULT_SURVIVAL_POLICY } from "../../policy/contract.js";
+import { survivalResources } from "../../state/resources.js";
+import { responseScope } from "../../control/combat/scopes/response.js";
 import { isThreat, observeHostileContact, shouldAvoidEntity, SPIDER_PASSIVE_SKY_LIGHT } from "./threats.js";
 
 interface Mob {
@@ -133,16 +136,22 @@ function context(
   options: {
     resolved?: number[];
     attackers?: number[];
-    unreachable?: number[];
     blocked?: string[];
   } = {},
 ): HostileContext {
   return {
     resolvedIds: new Set(options.resolved),
     attackerIds: new Set(options.attackers),
-    unreachableIds: new Set(options.unreachable),
     blockedResponses: new Set(options.blocked),
   };
+}
+
+/** Use the live retained-answer path, not the former unwritten unreachable-id set. */
+function observeAfterFailedFight(bot: Bot, options: Parameters<typeof context>[0] = {}) {
+  const survival = survivalResources();
+  survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 7),
+    { kind: "unreachable", why: "No route reached the target." });
+  return observeHostileResponse(bot, { ...context(options), survival });
 }
 
 test("native husks are hostile and defend at melee contact", () => {
@@ -463,33 +472,31 @@ test("a creeper outside contact range does not change a fight", () => {
 });
 
 test("evades a target no route reached instead of walking back into its fire", () => {
-  const directive = observeHostileResponse(
+  const directive = observeAfterFailedFight(
     botWith({ items: ["wooden_sword"], mobs: [{ id: 7, name: "skeleton", x: 11 }] }),
-    context({ attackers: [7], unreachable: [7] }),
+    { attackers: [7] },
   );
 
   assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "unreachable");
 });
 
-test("a healthy defender with a diamond sword fights a formerly unreachable blaze in exposed melee reach", () => {
-  const directive = observeHostileResponse(
-    botWith({ items: ["diamond_sword"], mobs: [{ id: 7, name: "blaze", x: 2 }] }),
-    context({ attackers: [7], unreachable: [7] }),
-  );
-  assert.equal(directive.kind, "fight");
-});
-
-test("failed approach memory still prevents pursuing a covered close blaze", () => {
-  const directive = observeHostileResponse(
-    botWith({ covered: true, mobs: [{ id: 7, name: "blaze", x: 2 }] }),
-    context({ attackers: [7], unreachable: [7] }),
-  );
-  assert.notEqual(directive.kind, "fight");
+test("a covered close blaze retains its failed approach when it moves into distant view", () => {
+  const { bot } = sceneWith({ covered: true, items: ["diamond_sword"], mobs: [{ id: 7, name: "blaze", x: 2 }] });
+  const survival = survivalResources();
+  survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 7),
+    { kind: "unreachable", why: "No route reached the target." },
+    { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+  const seen = { ...context({ attackers: [7] }), survival };
+  assert.notEqual(observeHostileResponse(bot, seen).kind, "fight");
+  assert.equal(survival.answered.snapshot().length, 1);
+  bot.entities[7]!.position = new Vec3(0, 0, 6);
+  const next = observeHostileResponse(bot, seen);
+  assert.equal(next.kind === "evade" ? next.reason : next.kind, "unreachable");
 });
 
 test("the same formerly unreachable blaze in reach, bare hands: evade outmatched", () => {
-  const directive = observeHostileResponse(botWith({ mobs: [{ id: 7, name: "blaze", x: 2 }] }),
-    context({ attackers: [7], unreachable: [7] }));
+  const directive = observeAfterFailedFight(botWith({ mobs: [{ id: 7, name: "blaze", x: 2 }] }),
+    { attackers: [7] });
   assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "outmatched");
 });
 
@@ -546,9 +553,9 @@ test("wounded enderman shelter preserves creeper and unreachable priorities", ()
     assert.equal(creeper.kind === "evade" ? creeper.reason : creeper.kind, "explosive");
   }
 
-  const unreachable = observeHostileResponse(
+  const unreachable = observeAfterFailedFight(
     botWith({ health: 11, items: ["bow", "arrow"], mobs: [angry] }),
-    context({ unreachable: [7], attackers: [7] }),
+    { attackers: [7] },
   );
   assert.equal(unreachable.kind === "evade" ? unreachable.reason : unreachable.kind, "unreachable");
 });
@@ -764,9 +771,9 @@ test("wounded unguarded ranged contact seeks shelter, retaining guarded and fail
     const seen = context({ attackers: [7] });
     assert.equal(observeHostileResponse(bot, seen).kind, "hide", name);
     assert.equal(
-      observeHostileResponse(bot, context({ attackers: [7], unreachable: [7] })).kind,
-      "hide",
-      "failed pursuit is not a reason to run through ranged fire",
+      observeAfterFailedFight(bot, { attackers: [7] }).kind,
+      "evade",
+      "a retained fight answer uses the unanswered escape",
     );
     assert.equal(
       observeHostileResponse(bot, context({ attackers: [7], blocked: ["hide"] })).kind,

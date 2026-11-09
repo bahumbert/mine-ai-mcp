@@ -154,7 +154,6 @@ function operations(bot: Bot, minimumHealth = 12) {
       shield: true,
       contacts: [],
       fireball: null,
-      unreachable: new Set(),
       answeredFights: new Map(),
       answered: new Set(),
     }),

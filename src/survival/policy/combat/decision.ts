@@ -42,7 +42,6 @@ export interface CombatDecisionFacts {
   readonly shield: boolean;
   readonly contacts: readonly CombatContact[];
   readonly fireball: HostileThreat | null;
-  readonly unreachable: ReadonlySet<number>;
   /** Target -> retained failed-fight entry for the current scope, independently of reachability. */
   readonly answeredFights: ReadonlyMap<number, number>;
   readonly answered: ReadonlySet<string>;
@@ -87,7 +86,6 @@ export function combatDecisionEvidence(
         utility: { ...contact.utility },
       })),
       fireball: facts.fireball ? { ...facts.fireball, position: { ...facts.fireball.position } } : null,
-      unreachable: [...facts.unreachable],
       answeredFights: [...facts.answeredFights],
       answered: [...facts.answered],
     },
@@ -158,7 +156,9 @@ function defendContact(facts: CombatDecisionFacts, threats: readonly HostileThre
 
 /** A retained fight failure excludes only its target, unless the whole response is answered. */
 function fightAnswered(facts: CombatDecisionFacts, targetId: number): boolean {
-  return facts.answered.has("fight") || facts.answeredFights.has(targetId);
+  const inReach = facts.health >= facts.policy.engage_min_health &&
+    facts.contacts.some((contact) => contact.id === targetId && contact.inReach);
+  return facts.answered.has("fight") || (!inReach && facts.answeredFights.has(targetId));
 }
 
 /** Keep refusal wording shared by purpose and withdrawal branches. */
@@ -265,8 +265,6 @@ function decideAutomaticCombat(facts: CombatDecisionFacts, purpose: Extract<Comb
     (facts.burning || !policy.shield || !facts.shield) && contacts.every((threat) => threat.ranged && !threat.inReach);
   if (health < policy.engage_min_health && hideAvailable && !answered.has("recovery") && needsRangedRecovery)
     return { kind: "hide", threats, reason: "hurt" };
-  if (facts.unreachable.has(target.id) && !(health >= policy.engage_min_health && target.inReach))
-    return hunted(target) ? { kind: "none" } : evade("unreachable");
   if (health < policy.engage_min_health) {
     if (
       hideAvailable &&

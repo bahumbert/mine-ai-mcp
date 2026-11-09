@@ -33,7 +33,6 @@ export const run: MineAiScenario = async (context) => {
         ...responseOwner1.context,
         resolvedIds: new Set(),
         attackerIds: new Set(),
-        unreachableIds: new Set(),
       },
       recoverTo: 18,
       maximumMs: 60_000,

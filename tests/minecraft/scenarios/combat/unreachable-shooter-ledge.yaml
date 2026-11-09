@@ -1,0 +1,90 @@
+template: ../../templates/flat-single-action.yaml
+name: unreachable-shooter-ledge
+tags: [regression, reliability]
+description: >-
+  A skeleton shoots from a four-high obsidian pillar six blocks from an actor with a sword and no bow.
+  Moving around after a failed approach must not reopen the same fight for 30 seconds; an evade separates retries.
+  While idle the actor is shifted through adjacent cells to reproduce a resumed task walking on.
+
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/unreachable-shooter-ledge.ts]
+
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -8 -60 -8 9 -50 8 air"
+
+setup:
+  - "difficulty normal"
+  # The open pen keeps the evade in view of the shooter without blocking the elevated arrows.
+  - "fill -7 -60 -7 7 -60 -7 oak_fence"
+  - "fill -7 -60 7 7 -60 7 oak_fence"
+  - "fill -7 -60 -7 -7 -60 7 oak_fence"
+  - "fill 7 -60 -7 7 -60 7 oak_fence"
+  # Keep the bot outside melee reach at the pillar's foot while leaving the elevated shot exposed.
+  - "fill 4 -60 -7 4 -59 7 obsidian"
+  - "fill 6 -60 0 6 -57 0 obsidian"
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: diamond_sword, count: 1 }
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  - "execute as @e[type=skeleton] run attribute @s minecraft:movement_speed base set 0"
+  # Damage is not the assertion; keep health above the fight bar while actual bow shots continue.
+  - "effect give Actor minecraft:resistance 2 4 true"
+
+params:
+  observeMs: 120000
+  minimumRetryMs: 30000
+  # The driver spawns after setting policy so a setup cancellation cannot enter the measured claim sequence.
+  shooter: [6.5, -56, 0.5]
+  # A one-block spiral visits fresh evade scopes; returning to a spent cell would correctly keep its evade answered.
+  steps:
+    - [1.5, -60, 0.5]
+    - [1.5, -60, 1.5]
+    - [0.5, -60, 1.5]
+    - [-0.5, -60, 1.5]
+    - [-0.5, -60, 0.5]
+    - [-0.5, -60, -0.5]
+    - [0.5, -60, -0.5]
+    - [1.5, -60, -0.5]
+    - [2.5, -60, -0.5]
+    - [2.5, -60, 0.5]
+    - [2.5, -60, 1.5]
+    - [2.5, -60, 2.5]
+    - [1.5, -60, 2.5]
+    - [0.5, -60, 2.5]
+    - [-0.5, -60, 2.5]
+    - [-1.5, -60, 2.5]
+    - [-1.5, -60, 1.5]
+    - [-1.5, -60, 0.5]
+    - [-1.5, -60, -0.5]
+    - [-1.5, -60, -1.5]
+    - [-0.5, -60, -1.5]
+    - [0.5, -60, -1.5]
+    - [1.5, -60, -1.5]
+    - [2.5, -60, -1.5]
+
+goal:
+  kind: all
+  # First ten corrected-fixture trials (ms): 120264, 120306, 120256, 120233, 120338, 120283, 120263, 120405, 120198, 120331.
+  # Maximum 120405 ms + 50% = 180607.5 ms, rounded up to 181 s (locked, one lane, 2026-11-09).
+  timeout: 181
+  goals:
+    - { kind: completion, who: Actor }

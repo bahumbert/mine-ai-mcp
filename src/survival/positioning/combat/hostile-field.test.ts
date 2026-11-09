@@ -72,7 +72,6 @@ function context(
     policy: DEFAULT_COMBAT_POLICY,
     resolvedIds: new Set(options.resolved),
     attackerIds: new Set(options.attackers),
-    unreachableIds: new Set(),
   };
 }
 

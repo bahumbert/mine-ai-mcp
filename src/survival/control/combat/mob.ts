@@ -50,7 +50,6 @@ export async function runMobEngagement(
   const context = {
     resolvedIds: perception.resolvedIds,
     attackerIds: perception.attackerIds,
-    unreachableIds: new Set<number>(),
     perception,
     survival,
     get policy() {

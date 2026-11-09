@@ -18,7 +18,6 @@ function facts(): CombatDecisionFacts {
     shield: true,
     contacts: [],
     fireball: null,
-    unreachable: new Set(),
     answeredFights: new Map(),
     answered: new Set(),
   });

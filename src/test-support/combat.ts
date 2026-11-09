@@ -93,7 +93,6 @@ export function combatTestContext(bot: Bot): ResponseContext {
     food: DEFAULT_FOOD_POLICY,
     resolvedIds: new Set(),
     attackerIds: new Set(),
-    unreachableIds: new Set(),
   };
 }
 

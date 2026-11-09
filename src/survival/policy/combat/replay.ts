@@ -36,7 +36,7 @@ const inputs = z.object({
   rangedWeapon: z.boolean(),
   shield: z.boolean(),
   fireball: threat.nullable(),
-  unreachable: z.array(z.number()),
+  unreachable: z.array(z.number()).optional(),
   // Older incident captures predate target-specific exclusion inputs.
   answeredFights: z.array(z.tuple([z.number(), z.number()])).default([]),
   answered: z.array(z.string()),
@@ -111,7 +111,6 @@ export function replayCombatDecision(recorded: unknown) {
   const facts: CombatDecisionFacts = {
     ...selected.inputs,
     assessment: selected.inputs.assessment ?? legacyAssessment(selected.inputs.contacts, selected.inputs.weapon, DEFAULT_MINECRAFT_VERSION),
-    unreachable: new Set(selected.inputs.unreachable),
     answeredFights: new Map(selected.inputs.answeredFights),
     answered: new Set(selected.inputs.answered),
   };

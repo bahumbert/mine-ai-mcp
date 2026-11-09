@@ -24,3 +24,17 @@ test("old creeper and zombie incidents replay with legacy weapons and renamed ex
       { kind: "fight", targetId: 7, threats });
   }
 });
+
+test("legacy unreachable receipt fields are optional and ignored", () => {
+  const contact = { id: 7, name: "skeleton", position: { x: 6, y: 68, z: 0 }, distance: 7,
+    relationship: { avoid: true, defend: true, attention: "on_sight" }, inContact: true, inReach: false,
+    defendsOnContact: false, ranged: true,
+    utility: { inReach: false, visible: true, hasHitUs: true, safeDropGround: true, distance: 7 } };
+  const inputs = { policy: DEFAULT_COMBAT_POLICY, health: 20, burning: false, hideAllowed: false,
+    recoveryAvailable: true, weapon: true, rangedWeapon: false, shield: false, contacts: [contact],
+    fireball: null, answered: [] };
+  for (const legacy of [{}, { unreachable: [7] }]) {
+    const result = replayCombatDecision({ inputs: { ...inputs, ...legacy }, purpose: { kind: "automatic" } });
+    assert.equal(result.kind, "fight");
+  }
+});

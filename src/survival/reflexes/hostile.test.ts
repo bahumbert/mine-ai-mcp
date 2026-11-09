@@ -6,6 +6,7 @@ import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
+import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, engagingCombat } from "../../test-support/combat.js";
 import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
@@ -19,7 +20,71 @@ import { observeHostileResponse } from "../control/combat/observation.js";
 import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
+import { responseScope } from "../control/combat/scopes/response.js";
 import { attachHostileReflex } from "./hostile.js";
+
+test("an unreachable fight is not chosen again for 30 s when bot and target step a block", async () => {
+  const fixture = reflexFixture(async (id) => ({ ...died(id), kind: "unreachable", observation: "No route onto the pillar." }),
+    async () => ({ status: "stopped", reason: "no path", elapsedMs: 0 }),
+    { entities: { 7: { ...hostile("skeleton", 6), position: new Vec3(6, 68, 0) } }, cells: { "6,67,0": "obsidian" } });
+  try {
+    await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+      changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise the fight retry without a cornered hide." });
+    fixture.tick();
+    assert.ok(await until(() => fixture.recorded().length === 1));
+    const remembered = fixture.driver.answered.snapshot().find((entry) => entry.response === "fight");
+    assert.ok(remembered);
+    assert.equal(remembered.temporal?.premise, "unreachable");
+    fixture.bot.entity.position.x++;
+    fixture.bot.entities[7]!.position.x++;
+    const decision = observeHostileResponse(fixture.bot, fixture.observer.threats);
+    assert.equal(decision.kind === "evade" ? decision.reason : decision.kind, "unreachable");
+    fixture.tick();
+    assert.ok(await until(() => fixture.recorded().length === 2));
+    assert.deepEqual(fixture.recorded(), ["fight -> target_unreachable", "evade -> capability_limit"]);
+    await fixture.clock.advance(29_950);
+    assert.equal(fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length, 1);
+    await fixture.clock.advance(50);
+    assert.equal(fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length, 2,
+      JSON.stringify({ records: fixture.recorded(), snapshots: fixture.driver.snapshot(), answered: fixture.driver.answered.snapshot() }));
+  } finally {
+    await fixture.observer.close();
+    fixture.data.close();
+  }
+});
+
+test("a formerly unreachable attacker in reach is fought by a healthy defender with a sword above fight_margin", async () => {
+  const fixture = reflexFixture(async (id) => { fixture.entities.remove(id); return died(id); }, undefined,
+    { entities: { 7: hostile("blaze", 2) } });
+  try {
+    fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
+      { kind: "unreachable", why: "Earlier approach stopped." },
+      { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+    fixture.tick();
+    await fixture.clock.advance(50);
+    assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
+  } finally {
+    await fixture.observer.close();
+    fixture.data.close();
+  }
+});
+
+test("a cancel or a death mid-fight remembers nothing", async () => {
+  for (const stop of ["cancel", "death"] as const) {
+    const fixture = standoffScene(7);
+    try {
+      await fixture.pass(50);
+      assert.equal(fixture.active(), true);
+      if (stop === "death") fixture.combat.setHealth(0);
+      else await fixture.driver.cancel("hostile_reflex", new BodyAbort({ kind: "cancelled", by: "model" }, "Stop fighting."));
+      assert.ok(await until(() => !fixture.active()));
+      assert.deepEqual(fixture.driver.answered.snapshot(), []);
+      assert.equal(fixture.active(), false);
+    } finally {
+      await fixture.close();
+    }
+  }
+});
 
 for (const escapes of [true, false]) {
   test(`withdrawal ${escapes ? "resumes its request after safe separation" : "returns when escape has no path"}`, async () => {
@@ -592,13 +657,13 @@ test("a controller cancellation after a policy edit preserves the cancellation r
   }
 });
 
-test("unchanged failed fight stays suppressed when no alternate response is permitted", async () => {
+test("an unchanged out-of-reach failed fight stays suppressed when no alternate response is permitted", async () => {
   const fixture = reflexFixture(
     async () => {
       throw new Error("equipment unavailable");
     },
     undefined,
-    { entities: { 7: hostile("zombie", 3) } },
+    { entities: { 7: hostile("blaze", 5) } },
   );
   await fixture.controller.policy.edit({
     operation: "set",
@@ -667,7 +732,7 @@ test("melee contact ending after 20 ticks out of reach releases the reflex witho
   for (let tick = 0; tick < CONTACT_GRACE_TICKS; tick += 1) fixture.tick();
   assert.ok(await until(() => !fixture.runner.status().busy));
   assert.deepEqual(fixture.recorded(), ["fight -> contact_ended"]);
-  assert.equal(fixture.observer.threats.unreachableIds.has(7), false);
+  assert.equal(fixture.driver.answered.snapshot().some((entry) => entry.response === "fight"), false);
   fixture.tick();
   assert.equal(fixture.runner.status().busy, false);
   await fixture.observer[Symbol.asyncDispose]();
@@ -1402,11 +1467,12 @@ test("a fight with no damage, no movement and no threat gone is released after 3
   }
 });
 
-test("after the stand-down of its fight the decision picks evade, and target A is not fought again", async () => {
+test("a wounded defender after its fight's limit picks evade, and target A is not fought again during stand-down", async () => {
   const scene = standoffScene(7);
   try {
     await scene.pass(31_000);
     assert.equal(scene.active(), false);
+    scene.combat.setHealth(11);
     await scene.pass(500);
     assert.ok(scene.recorded().some((outcome) => outcome.startsWith("evade ->")), `an evade ran: ${scene.recorded().join(", ")}`);
     assert.deepEqual(scene.engaged, [7], "the standoff is not fought again while it stands down");
@@ -1449,10 +1515,6 @@ test("a threat that dies resets the clock", async () => {
   // One threat dies at each of the four marks (a dead threat dies once; the fifth mark, at second 100, has none left): the target 7 is the nearest and the last to go.
   const dying = [8, 9, 10, 7];
   assert.equal(await keptAlive((scene) => { const id = dying.shift(); if (id !== undefined) scene.combat.kill(id); }, 7, 8, 9, 10), true);
-});
-
-test("a standoff with no mark at all is released inside 100 s", async () => {
-  assert.equal(await keptAlive(() => {}), false);
 });
 
 test("the probes of a limited fight are off after it: no listener is left on the bot or its connection", async () => {

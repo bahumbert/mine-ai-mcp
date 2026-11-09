@@ -73,7 +73,6 @@ function hide(bot: FakeBot, resolvedIds: Set<number> = new Set(), maximumMs: num
       ...combatTestContext(bot),
       resolvedIds,
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
     signal: new AbortController().signal,
     recoverTo: 18,
@@ -403,7 +402,6 @@ test("a stopped physics stream does not prevent hide cancellation", async () => 
       ...combatTestContext(bot),
       resolvedIds: new Set(),
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
   });
   abort.abort(new Error("hide cancelled"));
@@ -503,7 +501,6 @@ function hideBounded(bot: FakeBot, options: { readonly signal?: AbortSignal; rea
       ...combatTestContext(bot),
       resolvedIds: new Set(),
       attackerIds: new Set(),
-      unreachableIds: new Set(),
     },
     signal: options.signal ?? new AbortController().signal,
     recoverTo: 18,
@@ -717,7 +714,7 @@ test("an abort mid-dig stops digging", async () => {
   const abort = new AbortController();
   const { bot, clock, server } = scene({ health: 20 });
   const pending = hideInPlace(bot, {
-    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() },
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set() },
     signal: abort.signal,
     recoverTo: 18,
     maximumMs: 60_000,
@@ -742,7 +739,7 @@ test("an abort during the look before the dig starts no dig", async () => {
     overrides: { lookAt: async () => abort.abort(new Error("hide cancelled")) },
   });
   const pending = hideInPlace(bot, {
-    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set(), unreachableIds: new Set() },
+    threatContext: { ...combatTestContext(bot), resolvedIds: new Set(), attackerIds: new Set() },
     signal: abort.signal,
     recoverTo: 18,
     maximumMs: 60_000,
@@ -801,7 +798,7 @@ test("a foreign-region shaft cell fails the hide and the decision evades", async
   // The failed hide is on record (`blocked`): the wounded bot's next answer is to evade.
   const wounded = scene({ health: DEFAULT_COMBAT_POLICY.engage_min_health - 1, entities: { 7: { name: "zombie", kind: "Hostile mobs", metadata: [], position: new Vec3(3.5, 64, 0.5) } } }).bot;
   const directive = observeHostileResponse(wounded, {
-    resolvedIds: new Set(), attackerIds: new Set([7]), unreachableIds: new Set(), blockedResponses: new Set(["hide"]),
+    resolvedIds: new Set(), attackerIds: new Set([7]), blockedResponses: new Set(["hide"]),
   });
   assert.equal(directive.kind === "evade" ? directive.reason : directive.kind, "outmatched");
 });

@@ -92,7 +92,6 @@ export function createCombatController(
       perception,
       resolvedIds: perception.resolvedIds,
       attackerIds: perception.attackerIds,
-      unreachableIds: new Set<number>(),
       policy: policy.combat,
       food: policy.food,
       survival,
@@ -234,7 +233,6 @@ export function createCombatController(
         {
           resolvedIds: perception.resolvedIds,
           attackerIds: perception.attackerIds,
-          unreachableIds: new Set<number>(),
           perception,
           policy: policy.combat,
           food: policy.food,

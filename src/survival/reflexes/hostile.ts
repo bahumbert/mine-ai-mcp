@@ -68,6 +68,13 @@ function watchHostilePolicy(scene: HostileScene): () => void {
   };
 }
 
+/** A failed fight or deflection is a target standoff for the same window that judges combat progress. */
+function hostileFailureTemporal(outcome: HostileSettlement | ShieldPrepared) {
+  if (outcome.kind === "shield_prepared" || (outcome.response !== "fight" && outcome.response !== "deflect")) return null;
+  const failure = responseFailure(outcome);
+  return failure ? { premise: "unreachable", durationMs: COMBAT_LIMITS.noProgressMs, why: failure.why } : null;
+}
+
 /** Hostile observations and execution; admission, cancellation and failure retention belong to the driver. */
 export function attachHostileReflex(
   bot: Bot,
@@ -92,7 +99,6 @@ export function attachHostileReflex(
     get food() {
       return policy.food;
     },
-    unreachableIds: new Set(),
     get blockedResponses() {
       return answeredResponses(bot, () => policy.effective, driver);
     },
@@ -133,6 +139,7 @@ export function attachHostileReflex(
       directive.kind === "prepare_shield" ? prepareShield(scene, signal) : respondToHostile(scene, directive, signal),
     continuation: (outcome) => outcome.kind === "shield_prepared" ? { kind: "resume" } : responseContinuation(outcome),
     failure: (outcome) => outcome.kind === "shield_prepared" ? (outcome.error ? { kind: "equip_failed", why: outcome.error } : null) : responseFailure(outcome),
+    temporal: hostileFailureTemporal,
     describe: (outcome) => outcome.kind === "shield_prepared" ? { kind: outcome.kind, equipped: outcome.equipped, error: outcome.error } : describeResponse(outcome),
   });
 
