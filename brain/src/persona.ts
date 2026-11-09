@@ -203,8 +203,11 @@ export async function loadPersona(path: string): Promise<Persona> {
   return parsed.data;
 }
 
-/** The skills a character may use: its own list or the whole catalog; one who may build may also improve its house. */
+/** The skills that come with `build`: a character who may build a house may also improve it, give it up and look up other families' houses. */
+const HOUSE_SKILLS = ["improve_house", "abandon_house", "list_houses"] as const satisfies readonly SkillName[];
+
+/** The skills a character may use: its own list or the whole catalog, plus the house skills when it may build. */
 export function personaSkills(persona: Pick<Persona, "skills">): readonly SkillName[] {
   const skills = persona.skills ?? SKILL_NAMES;
-  return skills.includes("build") && !skills.includes("improve_house") ? [...skills, "improve_house"] : skills;
+  return skills.includes("build") ? [...skills, ...HOUSE_SKILLS.filter((skill) => !skills.includes(skill))] : skills;
 }

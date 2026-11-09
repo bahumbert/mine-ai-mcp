@@ -89,7 +89,7 @@ test("the drawn activities keep their seats: a farming lover's no-farm line is n
     snapshot: snapshot({ food: 10, inventory: [{ name: "stone_pickaxe", count: 1, durability: { remaining: 3, maximum: 131 } }] }),
     houseShortfall: [{ item: "oak_log", count: 22, activity: "woodcutting" }],
     smallHouse: [{ role: "wall", count: 34 }],
-    temporaryHouse: { door: { x: 4, y: 64, z: 2 }, roles: [{ role: "wall", block: "dirt", style: "oak_planks" }], shortfall: [{ item: "oak_planks", count: 34, activity: "woodcutting" }] },
+    temporaryHouse: { door: { x: 4, y: 64, z: 2 }, roles: [{ role: "wall", block: "dirt", own: "oak_planks" }], shortfall: [{ item: "oak_planks", count: 34, activity: "woodcutting" }] },
   });
   const undrawn = findOpportunities(facts);
   assert.equal(undrawn.length, MAX_OPPORTUNITIES);
@@ -102,7 +102,9 @@ test("the drawn activities keep their seats: a farming lover's no-farm line is n
 
 test("an unfinished house comes before having no home; a home's materials are one building line, by the work that gets them", () => {
   const unfinished = { kind: "small medieval house", site: { door: { x: 4, y: 64, z: 2 }, facing: "north" as const }, part: 3 };
-  assert.deepEqual(texts(settled({ ownHome: false, unfinished })), ["(building) your unfinished small medieval house, door at 4 64 2"]);
+  assert.deepEqual(texts(settled({ ownHome: false, unfinished })), ['(building) your unfinished small medieval house, door at 4 64 2: {"skill":"build","template":"medieval-small"}'], "an old note without a template resumes the classic house of its kind");
+  const staged = { kind: "rondavel", template: "rondavel", site: { door: { x: 1, y: 64, z: 2 }, facing: "north" as const }, part: 3, stage: 1, stages: 4, stageName: "walls" };
+  assert.deepEqual(texts(settled({ ownHome: false, unfinished: staged })), ['(building) your unfinished rondavel (stage 2 of 4, walls), door at 1 64 2: {"skill":"build","template":"rondavel"}']);
   const shortfall = [
     { item: "oak_log", count: 22, activity: "woodcutting" as const },
     { item: "cobblestone", count: 16, activity: "mining" as const },
@@ -182,11 +184,11 @@ test("with no house, her style's cost and the full blocks she carries are said o
 test("a temporary house is a home: its temporary parts and what improving it needs are said, by work", () => {
   const temporaryHouse = {
     door: { x: 4, y: 64, z: 2 },
-    roles: [{ role: "wall" as const, block: "dirt", style: "oak_planks" }, { role: "roof" as const, block: "dirt", style: "spruce_planks" }],
+    roles: [{ role: "wall" as const, block: "dirt", own: "oak_planks" }, { role: "roof" as const, block: "dirt", own: "spruce_planks" }],
     shortfall: [{ item: "oak_planks", count: 34, activity: "woodcutting" as const }, { item: "spruce_stairs", count: 42, activity: "crafting" as const }],
   };
   assert.deepEqual(texts(settled({ temporaryHouse })), [
-    "(building) your house at door 4 64 2 is temporary: wall dirt, roof dirt (your style: oak_planks, spruce_planks)",
+    "(building) your house at door 4 64 2 is temporary: wall dirt, roof dirt (the house's own: oak_planks, spruce_planks)",
     "(building) improving your house needs 34 more oak_planks (cutting wood); 42 more spruce_stairs (crafting)",
   ]);
   assert.deepEqual(texts(settled({ temporaryHouse: { ...temporaryHouse, roles: [] } })), []);

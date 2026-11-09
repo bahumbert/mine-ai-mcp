@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { BUILD_ROLES, describeMaterials } from "./building/blueprint.ts";
-import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
-import { chooseSite, planHouse } from "./building/plan.ts";
-import type { Style } from "./building/styles.ts";
+import { catalogueLine, CLASSIC_SIZES, familiesOf, TEMPLATES, type Template } from "./building/templates.ts";
 import { FARM_SIZES } from "./farming/plot.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
@@ -20,7 +18,8 @@ export const FARM_RANGE = 8;
 /** The runtime's limit for a centre and radius (src/actions/protect-region/contract.ts `MAX_REGION_RADIUS`). */
 const MAX_AREA_RADIUS = 31;
 
-const SIZES = Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]];
+/** The ids of the house templates the brain knows, read from the template files at load: a `build` step may name any of them. */
+const TEMPLATE_IDS = [...TEMPLATES.keys()] as [string, ...string[]];
 
 /** The eight compass words the models use (and results say), as headings in degrees clockwise from north. */
 export const COMPASS_HEADINGS = {
@@ -95,16 +94,21 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({
     skill: z.literal("build"),
     structure: z.literal("house").default("house"),
-    size: z.enum(SIZES).default("small"),
+    /** The house to build, any template of any family. */
+    template: z.enum(TEMPLATE_IDS).optional(),
+    /** Short for the persona's own classic house of that size; with no template and no size it is the small one (`build` applies it, so a template and a size can be told apart). */
+    size: z.enum(CLASSIC_SIZES).optional(),
     x: coordinate.optional(),
     y: z.number().int().min(-64).max(320).optional(),
     z: coordinate.optional(),
-    /** Other blocks than the style's for some roles (a full block for each but window and door): the house is temporary. */
+    /** Other blocks than the template's for some roles (a full block for each but window, door, accent and railing; a door block for the door; window, accent and railing may be "air"): the house is temporary. */
     materials: z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1)).optional(),
     /** The house is the bot's own (it was asked to build itself one, or it is for its own goal), not the asker's. */
     own: z.boolean().optional(),
-  }),
+  }).refine((step) => step.template === undefined || step.size === undefined, "give template or size, not both"),
   z.strictObject({ skill: z.literal("improve_house"), roles: z.array(z.enum(BUILD_ROLES)).min(1).optional() }),
+  z.strictObject({ skill: z.literal("abandon_house") }),
+  z.strictObject({ skill: z.literal("list_houses"), family: z.string().trim().min(1).max(40) }),
 ]);
 
 export type Step = z.infer<typeof stepSchema>;
@@ -130,14 +134,29 @@ export function dropEntries(step: Extract<Step, { skill: "drop_item" }>): readon
 }
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "farm",
+  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "abandon_house", "list_houses", "farm",
 ] as const satisfies readonly SkillName[];
 
 /**
- * One line per skill for the prompts: exact JSON shape, then what it does. The house line lists what the character's
- * own style needs, so the model can fetch it with `get_items` before building.
+ * The `build` line: the houses of the character's own family, one line each (what each takes, so the model can weigh
+ * it and fetch it with `get_items`), then the other families and the step that reads their houses.
  */
-export function skillUsage(skill: SkillName, style: Style): string {
+function buildUsage(family: string, templates: ReadonlyMap<string, Template>): string {
+  const own = [...templates.values()].filter((template) => template.family === family);
+  const others = familiesOf(templates).filter((other) => other !== family);
+  const lookup = (lead: string) => `${lead} house families you know: ${others.join(", ")}: {"skill":"list_houses","family":"<family>"} shows their houses.`;
+  const houses = own.length > 0
+    ? `Your ${family} houses:\n    ${own.map(catalogueLine).join("\n    ")}${others.length > 0 ? `\n${lookup("Other")}` : ""}`
+    : `You know no ${family} houses${others.length > 0 ? `; ${lookup("other")}` : "."}`;
+  const separator = own.length > 0 && others.length === 0 ? "\n" : " ";
+  return `{"skill":"build","template":"<id>"}  build a house where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes) and builds in stages (floor, walls, roof...): it starts when you carry the first stage's blocks and stops between stages when the next one's are missing, saying what to fetch; the same step again goes on. ${houses}${separator}{"skill":"build","size":"<${CLASSIC_SIZES.join("|")}>"} is short for your own ${CLASSIC_SIZES.join(" or ")} house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window, door, accent and railing; window, accent and railing may be "air"; a door must be a door block); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
+}
+
+/**
+ * One line per skill for the prompts: exact JSON shape, then what it does. `family` is the character's own family of
+ * houses: the `build` line lists its houses, and names the families of `templates` besides it.
+ */
+export function skillUsage(skill: SkillName, family: string, templates: ReadonlyMap<string, Template> = TEMPLATES): string {
   switch (skill) {
     case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3,"minutes":5}  follow that player: asked by them, leave "minutes" out and it lasts until they stop talking to you for 10 minutes (or say stop); on your own, "minutes" (1-15) says how long`;
     case "go_to_player": return `{"skill":"go_to_player","player":"<username>"}  walk up to that player once`;
@@ -156,11 +175,10 @@ export function skillUsage(skill: SkillName, style: Style): string {
     case "protect_area": return `{"skill":"protect_area","player":"<username>","radius":8,"label":"<short name>"}  never dig or place blocks within radius (1-${MAX_AREA_RADIUS}) of where that player stands, or give "x","y","z" instead of "player"; omit "player" (or give your own name) for the area around yourself, never the speaker's name for "around you"; e.g. around a build someone asked you to respect; you can still walk there`;
     case "release_area": return `{"skill":"release_area","area":<area number>}  stop protecting one of your protected areas, so you may dig and place blocks there again: whatever it protects can then be dug up (leveling over your own house digs the house); an area owned by another player is theirs, released only when they say so`;
     case "farm": return `{"skill":"farm","crop":"<item to plant>","size":<3|5|7|9>}  make a crop farm like a player: a size x size plot right behind you (away from whoever asked; or add "x","y","z" for its middle, y at walking level), leveled, water poured in its middle, tilled and planted with the crop item (wheat_seeds, carrot, potato, beetroot_seeds); needs a hoe, some of the crop item and a bucket (or a water bucket) carried; farming one of your farms again (within ${FARM_RANGE} blocks of its middle) harvests what is ripe and replants it; crops take a while to ripen near the water`;
-    case "build": {
-      const bills = SIZES.map((size) => `${size} = ${describeMaterials(planHouse(style, size, chooseSite({ x: 0, y: 64, z: 0 }, null)).bill)}`).join("; ");
-      return `{"skill":"build","structure":"house","size":"<${SIZES.join("|")}>"}  build a house in your ${style.id} style where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes); every block must be carried first (${bills}); add \"materials\":{\"<role>\":\"<block id>\"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window and door; window may be \"air\"); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for your style's; add \"own\":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
-    }
-    case "improve_house": return `{"skill":"improve_house","roles":["<role>", ...]}  swap the temporary parts of your own house (all of them, or the roles listed) for your style's blocks, in place; every block needed must be carried first`;
+    case "build": return buildUsage(family, templates);
+    case "improve_house": return `{"skill":"improve_house","roles":["<role>", ...]}  swap the temporary parts of your own house (all of them, or the roles listed) for the house's own blocks, in place; every block needed must be carried first`;
+    case "abandon_house": return `{"skill":"abandon_house"}  give up your unfinished house for good: it is no longer tracked and its protected area is released; what stands stays`;
+    case "list_houses": return `{"skill":"list_houses","family":"<family>"}  read the houses of another family you know (one line each, as above); then build any of them with its id`;
   }
 }
 
@@ -211,8 +229,10 @@ export function describeStep(step: Step): string {
     case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;
     case "release_area": return `release area #${step.area}`;
     case "farm": return `farm ${step.crop ?? "the crop it has"} (${step.size}x${step.size})${step.x === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}`;
-    case "build": return `build a ${step.size} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}${describeMaterialChoice(step.materials)}${step.own === true ? " for yourself" : ""}`;
+    case "build": return `build ${step.template === undefined ? `a ${step.size ?? "small"}` : `the ${step.template}`} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}${describeMaterialChoice(step.materials)}${step.own === true ? " for yourself" : ""}`;
     case "improve_house": return `improve your house${step.roles === undefined ? "" : ` (${step.roles.join(", ")})`}`;
+    case "abandon_house": return "give up your unfinished house";
+    case "list_houses": return `look up the ${step.family} houses`;
   }
 }
 

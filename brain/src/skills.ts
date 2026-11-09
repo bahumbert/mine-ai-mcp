@@ -6,6 +6,7 @@ import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./action
 import { describeMaterials, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Materials, type Site } from "./building/plan.ts";
+import { catalogueLine, classicTemplate, familiesOf, resumeStep, templateOfHouse, TEMPLATES, type Template } from "./building/templates.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
@@ -116,6 +117,14 @@ export interface UnfinishedHouse {
    * resume is refused at one of these cells again.
    */
   readonly refused?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
+  /** The template's id (an older note has none: `templateOfHouse` finds it by `kind`). */
+  readonly template?: string;
+  /** The template's family. */
+  readonly family?: string;
+  /** The stage (index) the next `build` goes on with, out of `stages`, called `stageName`. */
+  readonly stage?: number;
+  readonly stages?: number;
+  readonly stageName?: string;
 }
 
 /** The code `drop_item` answers with when the recipient never stood still: nothing was tossed. */
@@ -167,7 +176,10 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "protect_area": return await protectArea(context, step);
       case "release_area": return await releaseArea(context, step.area);
       case "build": return await build(context, step);
+      case "list_houses": return listHouses(step);
       case "improve_house": return await improveHouse(context, step);
+      // Task 4c of plan 2026-11-09-house-templates writes the real skill; until it lands the step is refused, truthfully.
+      case "abandon_house": return { status: "failed", detail: "giving a house up is not available yet: build it again to go on with it" };
       case "farm": return await farm(context, step);
     }
   } catch (error) {
@@ -493,6 +505,20 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
   return { status: "done", detail: `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})` };
 }
 
+// The step that goes on with an unfinished house (the places, opportunities and failures that name a house say it).
+export { resumeStep };
+
+/**
+ * Reads the houses of one family: ends `done` at once with its catalogue lines (the ones of the `build` line), so the
+ * model may then build any id it read; a family nobody knows fails with the families that exist. No body call. Its
+ * detail never starts with "built": the run analysis counts `done` + "built..." as a house.
+ */
+export function listHouses(step: Extract<Step, { skill: "list_houses" }>, templates: ReadonlyMap<string, Template> = TEMPLATES): SkillResult {
+  const houses = [...templates.values()].filter((template) => template.family === step.family);
+  if (houses.length === 0) return { status: "failed", detail: `no houses of the family ${step.family}; the families you know: ${familiesOf(templates).join(", ")}` };
+  return { status: "done", detail: houses.map(catalogueLine).join("\n") };
+}
+
 /**
  * Builds a house from the persona's style where the bot stands, facing the requester, with carried blocks only (the
  * model fetches them first with `get_items`); one `build_structure` call per batch. A house left unfinished (a cell
@@ -501,7 +527,8 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
 async function build(context: SkillContext, step: Extract<Step, { skill: "build" }>): Promise<SkillResult> {
   const snapshot = await context.runtime.status();
   const style = styleOrDefault(context.style);
-  const kind = houseKind(step.size, style.id);
+  const size = step.size ?? "small"; // no size and no template: the persona's small house (Task 4b builds by template)
+  const kind = houseKind(size, style.id);
   const what = `a ${kind}`;
   // The unfinished house is resumed where it stands; asked to build somewhere else, she starts a new one (live
   // 2026-10-02: "change of plan, build it right here" resumed the old pond-side site).
@@ -516,10 +543,12 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
   // A resumed house keeps the materials it was started with; the step's are ignored then.
   const materials = resumed === null ? step.materials ?? {} : resumed.materials ?? {};
   if (resumed === null && Object.keys(materials).length > 0) {
-    const refusal = checkMaterials(materials, style, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== "air")));
+    const classic = classicTemplate(style.id, size);
+    if (classic === undefined) return { status: "failed", detail: `no ${size} ${style.id} house template` };
+    const refusal = checkMaterials(materials, classic, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== "air")));
     if (refusal !== null) return { status: "failed", detail: `cannot build ${what} with those materials: ${refusal}` };
   }
-  const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)), materials);
+  const plan = planHouse(style, size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)), materials);
   if (resumed === null) {
     // A new site clear of every protected area before anything is protected or dug, and if not, where the nearest
     // clear one is (live 2026-10-03: told only "choose another zone clear of it", she stepped one block at a time,
@@ -527,7 +556,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const areas = await context.runtime.protectedRegions();
     const blocked = overlapsOf(areas, siteBox(plan));
     if (blocked.length > 0) {
-      const found = nearestClearSite(areas, style, step.size, plan.site, toward);
+      const found = nearestClearSite(areas, style, size, plan.site, toward);
       const clear = found === null ? null : await groundedDoor(context.runtime, found);
       const where = clear === null
         ? `no site clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or build somewhere else`
@@ -633,7 +662,7 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
     name: `the ${kind} you built${own ? "" : ` for ${context.requester}`}`,
     detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
     ...(own && { own: true }),
-    house: { size: step.size, style: style.id, door, facing, materials: plan.materials },
+    house: { size: step.size ?? "small", style: style.id, door, facing, materials: plan.materials },
   });
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
 }
@@ -647,13 +676,14 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const place = context.ownHouse?.() ?? null;
   const house = place?.house;
   if (place === null || house === undefined || Object.keys(house.materials).length === 0) return { status: "failed", detail: "you have no temporary house of your own to improve" };
-  const style = styleOrDefault(house.style);
+  const template = templateOfHouse(house);
+  if (template === undefined) return { status: "failed", detail: `${place.name} is no longer a house you know how to build: its temporary parts stay as they are` };
   const temporary = Object.keys(house.materials) as BlockRole[];
   const roles = step.roles ?? temporary;
   const notTemporary = roles.filter((role) => !temporary.includes(role));
   if (notTemporary.length > 0) return { status: "failed", detail: `your house is not temporary in ${notTemporary.join(", ")}: its temporary parts are ${temporary.join(", ")}` };
-  const { after, rest, bill } = improvement(style, house, roles);
-  const kind = houseKind(house.size, style.id);
+  const { after, rest, bill } = improvement(template, house, roles);
+  const kind = template.kind;
   const what = `your ${kind}`;
   const snapshot = await context.runtime.status();
   const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
@@ -663,14 +693,14 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
-  return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, style, roles, after, rest, bill, kind, what }));
+  return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, template, roles, after, rest, bill, kind, what }));
 }
 
 /** What {@link improveHouse} worked out before the house is protected and improved. */
 interface ImprovePlan {
   readonly place: KnownPlace;
   readonly house: NonNullable<KnownPlace["house"]>;
-  readonly style: ReturnType<typeof styleOrDefault>;
+  readonly template: Template;
   readonly roles: readonly BlockRole[];
   readonly after: HousePlan;
   readonly rest: Materials;
@@ -680,7 +710,7 @@ interface ImprovePlan {
 }
 
 /** {@link improveHouse} from the protection of the house to the end. */
-async function improveOnSite(context: SkillContext, { place, house, style, roles, after, rest, bill, kind, what }: ImprovePlan): Promise<SkillResult> {
+async function improveOnSite(context: SkillContext, { place, house, template, roles, after, rest, bill, kind, what }: ImprovePlan): Promise<SkillResult> {
   // Protected again under the same label (the runtime keeps one region per box), as a build does.
   const protection = await context.runtime.protectRegion({
     ...houseBox(after.batches.flat()),
@@ -692,7 +722,7 @@ async function improveOnSite(context: SkillContext, { place, house, style, roles
   const stopped = await buildParts(context, after, what, { reserved: bill, leave: () => undefined, again: "; improve your house again" });
   if (stopped !== null) return stopped;
   context.remember?.({ ...place, house: { ...house, materials: rest } });
-  const swapped = roles.map((role) => style.palette[role]);
+  const swapped = roles.map((role) => template.palette[role] ?? "nothing"); // a role the house has no block for has nothing to swap back
   const still = Object.entries(rest).map(([role, block]) => `${role} ${block}`).join(", ");
   return { status: "done", detail: `improved ${what}: ${roles.join(", ")} now ${swapped.join(", ")}${still === "" ? "" : `; still temporary: ${still}`}` };
 }

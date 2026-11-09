@@ -4,9 +4,9 @@ import minecraftData from "minecraft-data";
 import { fuelsOf } from "#src/world/smelting.ts";
 import { describeStep, skillUsage, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { houseBox, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
+import { houseBox, listHouses, resumeStep, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import { RARE_DROP_BREAKS } from "./gathering.ts";
-import { DEFAULT_STYLE, STYLES } from "./building/styles.ts";
+import { catalogueLine, TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import { neededItems } from "./inventory-room.ts";
 import { BodyDown, type BotSnapshot, type ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -20,10 +20,37 @@ function builds(runtime: FakeRuntime) {
   return runtime.submitted.filter((call) => call.tool === "build_structure").map((call) => call.input as { blocks: { x: number; y: number; z: number; block_name: string; facing?: string }[]; remove_wrong_blocks: boolean });
 }
 
-test("a build step defaults to a small house; the style is always the persona's, never the model's", () => {
-  assert.deepEqual(stepSchema.parse({ skill: "build" }), { skill: "build", structure: "house", size: "small" });
+test("a build step with no template and no size is the persona's small house; the style is always the persona's, never the model's", () => {
+  // The small is the build skill's: the schema keeps size absent so that a template and a size can be told apart.
+  assert.deepEqual(stepSchema.parse({ skill: "build" }), { skill: "build", structure: "house" });
   assert.equal(stepSchema.safeParse({ skill: "build", style: "japanese" }).success, false);
   assert.equal(stepSchema.safeParse({ skill: "build", structure: "castle" }).success, false);
+});
+
+test("list_houses shows a family's houses: done at once, no body call, the catalogue lines as the detail", async () => {
+  const runtime = new FakeRuntime();
+  const result = await runStep(stepSchema.parse({ skill: "list_houses", family: "east-asia" }), contextFor(runtime));
+  assert.equal(result.status, "done");
+  const detail = result.status === "done" ? result.detail : "";
+  const eastAsia = [...TEMPLATES.values()].filter((template) => template.family === "east-asia");
+  assert.ok(eastAsia.length >= 2, "the classic japanese houses at least");
+  assert.equal(detail, eastAsia.map(catalogueLine).join("\n"), "the registry's order: its files by name");
+  assert.doesNotMatch(detail, /^built/u, "a result starting with built counts as a house in the run analysis");
+  assert.deepEqual(runtime.submitted, [], "no call to the body");
+  // a fixture registry: its family's lines, and the known families named for an unknown one
+  const rondavel: Template = { ...templateFor("japanese-small")!, id: "rondavel", family: "africa", name: "rondavel", kind: "rondavel", description: "Round hut." };
+  const templates = new Map([["rondavel", rondavel]]);
+  const found = listHouses({ skill: "list_houses", family: "africa" }, templates);
+  assert.equal(found.status === "done" && found.detail, catalogueLine(rondavel));
+  const unknown = listHouses({ skill: "list_houses", family: "atlantis" }, templates);
+  assert.equal(unknown.status, "failed");
+  assert.match(unknown.status === "failed" ? unknown.detail : "", /no houses of the family atlantis; the families you know: africa/u);
+});
+
+test("the step that resumes an unfinished house names its template, an old note's by its kind", () => {
+  assert.equal(resumeStep({ kind: "rondavel", template: "rondavel" }), '{"skill":"build","template":"rondavel"}', "the record's own id: recall dropped the ones whose template is gone");
+  assert.equal(resumeStep({ kind: "small medieval house" }), '{"skill":"build","template":"medieval-small"}');
+  assert.equal(resumeStep({ kind: "gone house" }), '{"skill":"abandon_house"}', "a house nobody knows how to finish can only be given up");
 });
 
 /** Enough of Minecraft's recipes for a small medieval house. */
@@ -1666,7 +1693,7 @@ test("a house built for a requester without own stays theirs", async () => {
 
 test('{"skill":"build","own":true} parses and is described as for yourself', () => {
   const step = stepSchema.parse({ skill: "build", own: true });
-  assert.deepEqual(step, { skill: "build", structure: "house", size: "small", own: true });
+  assert.deepEqual(step, { skill: "build", structure: "house", own: true });
   assert.match(describeStep(step), /^build a small house for yourself$/u);
   assert.doesNotMatch(describeStep(stepSchema.parse({ skill: "build" })), /yourself/u);
 });
@@ -1686,9 +1713,9 @@ test("materials the game refuses are named before anything is protected or sent"
   const result = await runStep({ skill: "build", structure: "house", size: "small", materials: { wall: "stone_blok", roof: "oak_stairs", door: "dirt" } }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
   const detail = result.status === "failed" ? result.detail : "";
-  assert.match(detail, /wall: stone_blok is no block id \(your style uses oak_planks\)/u);
-  assert.match(detail, /roof: oak_stairs is not a full block \(your style uses spruce_planks\)/u);
-  assert.match(detail, /door: dirt is not a door \(your style uses oak_door\)/u);
+  assert.match(detail, /wall: stone_blok is no block id \(this house uses oak_planks\)/u);
+  assert.match(detail, /roof: oak_stairs is not a full block \(this house uses spruce_planks\)/u);
+  assert.match(detail, /door: dirt is not a door \(this house uses oak_door\)/u);
   assert.equal(runtime.submitted.length, 0);
 });
 
@@ -2349,7 +2376,7 @@ test("get_items tries the next mob source once after a hunt that finds none load
 
 test("the explore template marks for as optional, and the refusal of a word like none says to leave it out", async () => {
   // Run 15: 86 explore steps with "for": "none", 6 with "unknown".
-  assert.match(skillUsage("explore", STYLES.get(DEFAULT_STYLE)!), /"for":"<block or creature id, optional: leave it out to just explore>"/u);
+  assert.match(skillUsage("explore", "europe"), /"for":"<block or creature id, optional: leave it out to just explore>"/u);
   const runtime = new FakeRuntime();
   runtime.notBlocks = new Set(["none"]);
   const refused = await runStep(stepSchema.parse({ skill: "explore", toward: "east", for: "none" }), contextFor(runtime));
@@ -2884,7 +2911,7 @@ test("an own area in the way of a new house is named as the unfinished or the fi
   const place: KnownPlace = { name: "the small medieval house you built", detail: "door 10 64 10 facing east", house: { size: "small", style: "medieval", door, facing: "east", materials: {} } };
   const unfinished = { kind: "small medieval house", site: { door, facing: "east" as const }, part: 1, prepared: true, materials: {} };
   const cases = [
-    { name: "unfinished", building: { unfinished }, places: [] as KnownPlace[], says: [/that is your unfinished small medieval house \(area #5/u, /abandon_house/u, /door at 10 64 10/u], never: null },
+    { name: "unfinished", building: { unfinished }, places: [] as KnownPlace[], says: [/that is your unfinished small medieval house \(area #5/u, /\{"skill":"build","template":"medieval-small"\} within 6 blocks of that door/u, /abandon_house/u, /door at 10 64 10/u], never: null },
     { name: "finished", building: { unfinished: null }, places: [place], says: [/your small medieval house, door at 10 64 10/u, /build somewhere else/u], never: /unfinished/u },
   ];
   for (const { name, building, places, says, never } of cases) {

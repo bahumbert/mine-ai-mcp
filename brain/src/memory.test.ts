@@ -74,6 +74,33 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
 });
 
+test("an unfinished house keeps its template, family and stage; a note whose template is gone is dropped at recall, saying so", () => {
+  const site = { door: { x: 1, y: 64, z: 2 }, facing: "north" as const };
+  const known = { kind: "small japanese house", site, part: 4, prepared: true, template: "japanese-small", family: "east-asia", stage: 1, stages: 4, stageName: "walls" };
+  const recalled = recall([memoryNote({ kind: "unfinished_house", house: known }).context], LIMITS);
+  assert.deepEqual(recalled.unfinished, known, "template, family, stage, stages and stage name survive a restart");
+  assert.deepEqual(recalled.gone, []);
+  const lost = recall([memoryNote({ kind: "unfinished_house", house: { ...known, kind: "rondavel", template: "no-such-house" } }).context], LIMITS);
+  assert.equal(lost.unfinished, null);
+  assert.deepEqual(lost.gone, ["your unfinished rondavel is no longer a house you know how to build; its protected area stays until you release_area it"]);
+  const oldGone = recall([memoryNote({ kind: "unfinished_house", house: { kind: "gone house", site, part: 2 } }).context], LIMITS);
+  assert.deepEqual([oldGone.unfinished, oldGone.gone.length], [null, 1], "an old note names no template: its kind must be one we know");
+  const oldKnown = recall([memoryNote({ kind: "unfinished_house", house: { kind: "small medieval house", site, part: 2 } }).context], LIMITS);
+  assert.equal(oldKnown.unfinished?.kind, "small medieval house");
+});
+
+test("a house place keeps its template and family; an old place with a size and style still parses; a place with no size parses", () => {
+  const door = { x: -2, y: 64, z: 0 };
+  const modern = { name: "the japanese house you built", detail: "door -2 64 0 facing east", house: { template: "japanese-small", family: "east-asia", door, facing: "east" as const, materials: {} } };
+  assert.deepEqual(recall([memoryNote({ kind: "place", place: modern }).context], LIMITS).places, [modern]);
+  const classic = { name: "the small medieval house you built", detail: "d", house: { size: "small" as const, style: "medieval", template: "medieval-small", family: "europe", door, facing: "east" as const, materials: {} } };
+  assert.deepEqual(recall([memoryNote({ kind: "place", place: classic }).context], LIMITS).places, [classic]);
+  const old = 'brain memory: place {"kind":"place","place":{"name":"the small medieval house you built","detail":"d","house":{"size":"small","style":"medieval","door":{"x":1,"y":64,"z":2},"facing":"north","materials":{}}}}';
+  assert.equal(recall([old], LIMITS).places[0]?.house?.size, "small");
+  const bad = 'brain memory: place {"kind":"place","place":{"name":"x","detail":"d","house":{"size":"huge","style":"medieval","door":{"x":1,"y":64,"z":2},"facing":"north","materials":{}}}}';
+  assert.deepEqual(recall([bad], LIMITS).places, [], "a size that is not a classic size is no house");
+});
+
 test("a conversation is remembered as a sentence without the character, and the newest 5 are read back newest first", () => {
   const talk = (index: number) => ({ id: `Theo-${index}`, members: ["Theo", "Bruno"], topic: "the mine", gist: `gist ${index}`, endedAt: `2026-10-18T12:0${index}:00.000Z`, reason: "goodbye" as const });
   assert.equal(memoryNote({ kind: "conversation", talk: { ...talk(1), members: ["Theo"] } }).note, "I talked with Theo about the mine: gist 1 (2026-10-18T12:01:00.000Z).");

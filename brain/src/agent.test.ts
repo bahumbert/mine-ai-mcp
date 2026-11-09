@@ -9,6 +9,8 @@ import { ConversationBudget, type ConversationController } from "./conversation/
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
+import { templateFor } from "./building/templates.ts";
+import type { KnownPlace } from "./mind.ts";
 import { memoryNote, recall } from "./memory.ts";
 import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
@@ -1064,9 +1066,73 @@ test("a temporary own house is a home: the goal tier sees what is temporary and 
   planner.reply({ objective: "rest a while" });
   await until(() => planner.requests.length === 1);
   const request = planner.requests[0]?.[1]?.content ?? "";
-  assert.match(request, /- \(building\) your house at door 0 64 2 is temporary: wall dirt \(your style: oak_planks\)/u);
+  assert.match(request, /- \(building\) your house at door 0 64 2 is temporary: wall dirt \(the house's own: oak_planks\)/u);
   assert.match(request, /improving your house needs \d+ more oak_planks/u);
   assert.doesNotMatch(request, /no house of your own/u);
+});
+
+/** The goal tier's first request of an agent whose memory holds `place` as its own house. */
+async function goalRequestWithHouse(t: { after(fn: () => Promise<void>): void }, house: NonNullable<KnownPlace["house"]>): Promise<string> {
+  const runtime = new FakeRuntime();
+  runtime.notes = [memoryNote({ kind: "place", place: { name: "the house you built", detail: "door 0 64 2 facing north", own: true, house } })];
+  const { planner } = agentFor(t, runtime, { goal: "live well", style: "medieval" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  return planner.requests[0]?.[1]?.content ?? "";
+}
+
+test("a temporary house gives its facts, by its template or (an old note) by its style and size: the roles and the template's own blocks, whatever the persona's style", async (t) => {
+  const own = templateFor("japanese-small")!.palette.wall!;
+  const door = { x: 0, y: 64, z: 2 };
+  const byTemplate = await goalRequestWithHouse(t, { template: "japanese-small", family: "east-asia", door, facing: "north", materials: { wall: "dirt" } });
+  assert.match(byTemplate, new RegExp(`- \\(building\\) your house at door 0 64 2 is temporary: wall dirt \\(the house's own: ${own}\\)`, "u"));
+  assert.match(byTemplate, new RegExp(`improving your house needs \\d+ more ${own}`, "u"));
+  const old = await goalRequestWithHouse(t, { size: "small", style: "japanese", door, facing: "north", materials: { wall: "dirt" } });
+  assert.match(old, new RegExp(`is temporary: wall dirt \\(the house's own: ${own}\\)`, "u"));
+});
+
+test("a house whose template is gone gives no facts and no failure", async (t) => {
+  const request = await goalRequestWithHouse(t, { template: "no-such-house", door: { x: 0, y: 64, z: 2 }, facing: "north", materials: { wall: "dirt" } });
+  assert.doesNotMatch(request, /is temporary/u);
+  assert.match(request, /Places you know: the house you built/u);
+});
+
+test("an unfinished house is named in the places with the step that resumes it, and in the opportunities", async (t) => {
+  const runtime = new FakeRuntime();
+  const house = { kind: "small japanese house", template: "japanese-small", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" as const }, part: 2, prepared: true, stage: 1, stages: 4, stageName: "walls" };
+  runtime.notes = [memoryNote({ kind: "unfinished_house", house })];
+  const { planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /your unfinished small japanese house \(door 5 64 5; go within 6 blocks of the door, then build it again to finish it: \{"skill":"build","template":"japanese-small"\}\)/u);
+  assert.match(request, /- \(building\) your unfinished small japanese house \(stage 2 of 4, walls\), door at 5 64 5: \{"skill":"build","template":"japanese-small"\}/u);
+});
+
+test("an unfinished house of a template nobody has any more is dropped at the start and said", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.notes = [memoryNote({ kind: "unfinished_house", house: { kind: "rondavel", template: "no-such-house", site: { door: { x: 5, y: 64, z: 5 }, facing: "north" }, part: 2 } })];
+  const { planner } = agentFor(t, runtime, { goal: "build yourself a base" });
+  planner.reply({ objective: "rest a while" });
+  await until(() => planner.requests.length === 1);
+  const request = planner.requests[0]?.[1]?.content ?? "";
+  assert.doesNotMatch(request, /Places you know: [^\n]*your unfinished/u);
+  assert.match(request, /your unfinished rondavel is no longer a house you know how to build/u, "the model reads why it has no house to finish");
+});
+
+test("the items an unfinished house needs are its template's bill; one nobody knows needs none and never throws", async (t) => {
+  const { agent } = agentFor(t, new FakeRuntime());
+  const inside = agent as unknown as { building: { unfinished: unknown }; neededFor(snapshot: unknown, work: unknown): Set<string> };
+  const site = { door: { x: 5, y: 64, z: 5 }, facing: "north" as const };
+  const needed = (unfinished: unknown) => {
+    inside.building.unfinished = unfinished;
+    return inside.neededFor({ inventory: [], foods: [] }, { wanted: new Set<string>(), objective: { text: "build" } });
+  };
+  const own = templateFor("japanese-small")!.palette.wall!;
+  assert.ok(needed({ kind: "small japanese house", template: "japanese-small", site, part: 1 }).has(own), "by its template");
+  assert.ok(needed({ kind: "small japanese house", site, part: 1 }).has(own), "an old note, by its kind");
+  assert.equal(needed({ kind: "gone house", site, part: 1 }).has(own), false, "no template: no bill, no throw");
+  assert.equal(needed(null).has(own), false);
 });
 
 test("a step failing for a full inventory names the junk with its whole count (live 2026-10-10: 18 of 238 snowballs dropped per step)", async (t) => {

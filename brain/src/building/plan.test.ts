@@ -20,6 +20,15 @@ test("a role built with another block takes it in every cell of the role, the ot
   assert.equal(dirt.bill.find((entry) => entry.item === "oak_planks")?.count, 36 - plain.cells.filter((cell) => cell.role === "wall").length);
 });
 
+test("a block named for a role the template has none for changes nothing and is not kept as a material", () => {
+  // medieval has no accent or railing: no cell asks them, so a house "built with" them is the plain house, not a temporary one
+  const plain = planHouse(medieval, "small", site);
+  const named = planHouse(medieval, "small", site, { accent: "dirt", railing: "air", wall: "dirt" });
+  assert.deepEqual(named.materials, { wall: "dirt" });
+  assert.deepEqual(planHouse(medieval, "small", site, { accent: "dirt" }).materials, {});
+  assert.deepEqual(planHouse(medieval, "small", site, { accent: "dirt" }).cells, plain.cells);
+});
+
 test("pillars and trim built with another block ask no log axis (live 2026-10-10: cobblestone corners never audited right)", () => {
   const plain = planHouse(medieval, "small", site);
   assert.ok(plain.cells.some((cell) => (cell.role === "pillar" || cell.role === "trim") && cell.axis !== undefined));

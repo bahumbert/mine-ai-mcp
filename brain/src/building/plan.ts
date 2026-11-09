@@ -77,7 +77,8 @@ export type Materials = Partial<Record<BlockRole, string>>;
  * template's own block is the template's.
  */
 export function planTemplate(template: Template, site: Site, materials: Materials = {}): HousePlan {
-  const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => template.palette[role as BlockRole] !== block)) as Materials;
+  // A role the template has no block for (no cell asks it) is left out: naming one does not make the house temporary.
+  const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => template.palette[role as BlockRole] !== undefined && template.palette[role as BlockRole] !== block)) as Materials;
   const variants = Object.fromEntries(Object.entries(template.variants).filter(([role]) => other[role as BlockRole] === undefined));
   const cells = placeBlueprint(template.blueprint, { ...template.palette, ...other }, site.door, site.facing, variants)
     .map((cell) => other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, facing: _facing, half: _half, ...rest }) => rest)(cell));

@@ -1,5 +1,6 @@
 // Protected areas as the skills read them: which ones a box overlaps, whose they are, and what they are called to the
 // model (her own unfinished or finished house, someone else's area). Pure functions over `ProtectedArea`.
+import { resumeStep, templateOfHouse } from "./building/templates.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { Position, ProtectedArea } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -75,11 +76,12 @@ export function describeSiteBlocker(houses: SiteHouses, area: ProtectedArea): st
   const holds = (label: string, door: Position) => earlierProtections(houses, label, door, -1, [area]).length > 0;
   const { unfinished } = houses;
   if (unfinished !== null && unfinished !== undefined && holds(unfinished.kind, unfinished.site.door)) {
-    return `an area of yours, that is your unfinished ${unfinished.kind} (area #${area.regionId}, door at ${coords(unfinished.site.door)}): build a ${unfinished.kind} again within ${houses.resumeRange} blocks of that door to go on with it, or {"skill":"abandon_house"} to give it up`;
+    return `an area of yours, that is your unfinished ${unfinished.kind} (area #${area.regionId}, door at ${coords(unfinished.site.door)}): ${resumeStep(unfinished)} within ${houses.resumeRange} blocks of that door to go on with it, or {"skill":"abandon_house"} to give it up`;
   }
   for (const { house } of houses.places) {
-    if (house !== undefined && holds(houseKind(house.size, house.style), house.door)) {
-      return `an area of yours, your ${houseKind(house.size, house.style)}, door at ${coords(house.door)} (area #${area.regionId}): build somewhere else`;
+    const kind = house === undefined ? undefined : templateOfHouse(house)?.kind;
+    if (house !== undefined && kind !== undefined && holds(kind, house.door)) {
+      return `an area of yours, your ${kind}, door at ${coords(house.door)} (area #${area.regionId}): build somewhere else`;
     }
   }
   return `protected area ${describeArea(houses, area)}`;

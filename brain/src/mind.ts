@@ -1,7 +1,7 @@
 import type { Step } from "./actions.ts";
 import type { Activity } from "./activities.ts";
 import type { Facing } from "./building/blueprint.ts";
-import type { HouseSize } from "./building/house.ts";
+import type { ClassicSize } from "./building/templates.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
 import type { ConversationKind, PlannedLength } from "./conversation/state.ts";
@@ -49,11 +49,15 @@ export interface KnownPlace {
   readonly own?: boolean;
   /**
    * A house it built: what is needed to build it again in place. `materials` holds only the roles built with other
-   * blocks than the style's; any such role makes the house temporary. Older notes have none.
+   * blocks than the template's; any such role makes the house temporary. Older notes have none. A house is known by
+   * its `template` (and `family`); one of the six classic houses also carries its `size` and `style`, and an older
+   * note carries those two only (`templateOfHouse` finds its template).
    */
   readonly house?: {
-    readonly size: HouseSize;
-    readonly style: string;
+    readonly template?: string;
+    readonly family?: string;
+    readonly size?: ClassicSize;
+    readonly style?: string;
     readonly door: Position;
     readonly facing: Facing;
     readonly materials: Materials;

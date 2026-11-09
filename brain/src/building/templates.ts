@@ -171,6 +171,15 @@ export function templateOfHouse(house: { readonly template?: string; readonly ki
   return size === undefined ? undefined : classicTemplate(house.style, size, templates);
 }
 
+/**
+ * The step that goes on with an unfinished house: its template built again (an old note names none: the template of its
+ * kind). A record with neither (recall drops those) can only be given up.
+ */
+export function resumeStep(house: { readonly kind: string; readonly template?: string }, templates: ReadonlyMap<string, Template> = TEMPLATES): string {
+  const id = house.template ?? templateOfKind(house.kind, templates)?.id;
+  return id === undefined ? '{"skill":"abandon_house"}' : `{"skill":"build","template":"${id}"}`;
+}
+
 /** The families of `templates`, sorted. */
 export function familiesOf(templates: ReadonlyMap<string, Template>): string[] {
   return [...new Set([...templates.values()].map((template) => template.family))].sort();

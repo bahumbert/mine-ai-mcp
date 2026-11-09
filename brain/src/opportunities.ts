@@ -1,5 +1,6 @@
 import { describeActivity, type Activity } from "./activities.ts";
 import type { BlockRole } from "./building/blueprint.ts";
+import { resumeStep } from "./building/templates.ts";
 import type { KnownFarm } from "./memory.ts";
 import type { BotSnapshot, Position } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -39,7 +40,8 @@ export interface OpportunityFacts {
   /** Her own house built with other blocks than her style's (it counts as her home), and what improving it needs. */
   readonly temporaryHouse: {
     readonly door: Position;
-    readonly roles: readonly { readonly role: BlockRole; readonly block: string; readonly style: string }[];
+    /** Per role built with another block, the block the house has and the one it was built with. */
+    readonly roles: readonly { readonly role: BlockRole; readonly block: string; readonly own: string }[];
     readonly shortfall: readonly Shortfall[];
   } | null;
   /** What partners in reach said they need and she carries, newest first (relations/trading.ts `heardNeeds`). */
@@ -157,7 +159,8 @@ function unfinishedHouse(facts: OpportunityFacts): Opportunity[] {
   const house = facts.unfinished;
   if (house === null) return [];
   const { x, y, z } = house.site.door;
-  return [{ activities: ["building"], text: `your unfinished ${house.kind}, door at ${x} ${y} ${z}` }];
+  const stage = house.stage === undefined || house.stages === undefined ? "" : ` (stage ${house.stage + 1} of ${house.stages}${house.stageName === undefined ? "" : `, ${house.stageName}`})`;
+  return [{ activities: ["building"], text: `your unfinished ${house.kind}${stage}, door at ${x} ${y} ${z}: ${resumeStep(house)}` }];
 }
 
 /**
@@ -191,7 +194,7 @@ function temporaryHouse(facts: OpportunityFacts): Opportunity[] {
   return [
     {
       activities: ["building"],
-      text: `your house at door ${x} ${y} ${z} is temporary: ${house.roles.map((entry) => `${entry.role} ${entry.block}`).join(", ")} (your style: ${house.roles.map((entry) => entry.style).join(", ")})`,
+      text: `your house at door ${x} ${y} ${z} is temporary: ${house.roles.map((entry) => `${entry.role} ${entry.block}`).join(", ")} (the house's own: ${house.roles.map((entry) => entry.own).join(", ")})`,
     },
     ...shortfallLines("improving your house", house.shortfall),
   ];

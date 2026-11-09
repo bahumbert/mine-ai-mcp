@@ -5,8 +5,8 @@ import { activityChances, availableActivities, drawTwo } from "./activity-draw.t
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
 import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
 import { improvement, temporaryRoles } from "./building/materials.ts";
-import type { HouseSize } from "./building/house.ts";
-import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
+import { chooseSite, planTemplate, type HousePlan } from "./building/plan.ts";
+import { classicTemplate, resumeStep, templateOfHouse } from "./building/templates.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
 import { heardFarAway, lineDistance, noteNoPosition, type Conversation, type NoPositionSince } from "./conversation/state.ts";
@@ -222,7 +222,7 @@ export class Agent {
     const house = this.building.unfinished;
     if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;
-    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
+    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it: ${resumeStep(house)}` }];
   }
   /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
   private readonly areas: ProtectedArea[] = [];
@@ -1371,7 +1371,9 @@ export class Agent {
   /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
     const house = this.building.unfinished;
-    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
+    const template = house === null ? undefined : templateOfHouse(house);
+    // A house nobody has a template for any more needs no blocks: this runs every step and never throws.
+    const houseBill = house === null || template === undefined ? [] : planTemplate(template, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
     return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
   }
 
@@ -1419,9 +1421,15 @@ export class Agent {
     return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...trading }, drawn);
   }
 
-  /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */
+  /** The persona's own small house: its classic template at the style it likes (none shipped: no small house to tell about). */
+  private ownSmallHouse(snapshot: Pick<BotSnapshot, "position">): HousePlan | null {
+    const template = classicTemplate(this.options.persona.style, "small");
+    return template === undefined ? null : planTemplate(template, chooseSite(snapshot.position, null));
+  }
+
+  /** What her small house is made of: its cells per role (air excluded), in the order of the roles. */
   private smallHouseRoles(snapshot: BotSnapshot): OpportunityFacts["smallHouse"] {
-    const cells = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).cells;
+    const cells = this.ownSmallHouse(snapshot)?.cells ?? [];
     return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
   }
 
@@ -1438,19 +1446,21 @@ export class Agent {
     const place = this.temporaryHouse();
     const house = place?.house;
     if (house === undefined) return null;
-    const style = styleOrDefault(house.style);
-    const roles = temporaryRoles(house.materials, style);
-    const missing = shortfall(improvement(style, house, roles).bill, (await this.options.runtime.status()).inventory);
+    const template = templateOfHouse(house);
+    if (template === undefined) return null; // a house nobody has a template for any more: nothing to swap back
+    const roles = temporaryRoles(house.materials, template);
+    const missing = shortfall(improvement(template, house, roles).bill, (await this.options.runtime.status()).inventory);
     return {
       door: house.door,
-      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] ?? "nothing" })),
+      // temporaryRoles names only roles the template has a block for and the materials name one for.
+      roles: roles.map((role) => ({ role, block: house.materials[role]!, own: template.palette[role]! })),
       shortfall: await this.withActivities(missing),
     };
   }
 
-  /** What a small house in its own style needs beyond what it carries, each with the work that gets it. */
+  /** What her small house needs beyond what she carries, each with the work that gets it. */
   private async houseShortfall(snapshot: BotSnapshot): Promise<Shortfall[]> {
-    const bill = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).bill;
+    const bill = this.ownSmallHouse(snapshot)?.bill ?? [];
     return this.withActivities(shortfall(bill, snapshot.inventory));
   }
 
@@ -1519,7 +1529,8 @@ export class Agent {
       this.building.unfinished = recalled.unfinished;
       this.unfinishedSaver.known(recalled.unfinished);
       const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
-      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}`);
+      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}${recalled.gone.map((line) => `; ${line}`).join("")}`);
+      this.lately.push(...recalled.gone); // what the model reads about its own past: a house it can no longer finish
     } catch (error) {
       this.options.log(`could not recall its memory: ${String(error)}`);
     }

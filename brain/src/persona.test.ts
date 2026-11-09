@@ -68,10 +68,13 @@ test("feeling multipliers default to the owner's pick and each may be set from 0
   assert.equal(personaSchema.safeParse({ ...base, settings: { feelingMultipliers: { adores: 3 } } }).success, false, "a feeling of ours");
 });
 
-test("a persona allowed to build may improve its house too", () => {
+test("a persona allowed to build may improve its house, give it up and look up other families' houses too", () => {
   const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
-  assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to", "build"] })), ["go_to", "build", "improve_house"]);
+  assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to", "build"] })), ["go_to", "build", "improve_house", "abandon_house", "list_houses"]);
   assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["go_to"] })), ["go_to"]);
+  assert.deepEqual(personaSkills(personaSchema.parse({ ...base, skills: ["build", "abandon_house"] })), ["build", "abandon_house", "improve_house", "list_houses"]);
+  assert.ok(personaSkills(personaSchema.parse(base)).includes("list_houses"));
+  assert.ok(personaSkills(personaSchema.parse(base)).includes("abandon_house"));
   assert.ok(personaSkills(personaSchema.parse(base)).includes("improve_house"));
 });
 

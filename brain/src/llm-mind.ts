@@ -481,7 +481,8 @@ export function personaPrompt(persona: Persona): string {
   const traits = persona.traits.length > 0 ? `\nTraits: ${persona.traits.join(", ")}.` : "";
   const feelings = describePreferences(persona);
   const preferences = feelings === "" ? "" : `\n${feelings}`;
-  const style = persona.style === undefined ? "" : `\nYou build in the ${styleOrDefault(persona.style).id} style: ${styleOrDefault(persona.style).description}`;
+  const liking = persona.style === undefined ? undefined : styleOrDefault(persona.style);
+  const style = liking === undefined ? "" : `\nYou like building in the ${liking.family} way: ${liking.description}\nChoose what suits the request; you may build any house you know.`;
   const goal = persona.goal === undefined ? "You have no goal of your own: you wait for requests." : `Your own goal, when nobody needs you: ${persona.goal}`;
   return `You are ${persona.displayName}, a character living in a Minecraft world, playing as ${persona.username}.
 ${persona.description}${traits}${preferences}
@@ -596,8 +597,8 @@ Reply with only a JSON object: {"say": "<your chat line>"}.`;
 }
 
 function skillList(persona: Persona, improveHouse = true): string {
-  const style = styleOrDefault(persona.style);
-  return personaSkills(persona).filter((skill) => improveHouse || skill !== "improve_house").map((skill) => `- ${skillUsage(skill, style)}`).join("\n");
+  const { family } = styleOrDefault(persona.style);
+  return personaSkills(persona).filter((skill) => improveHouse || skill !== "improve_house").map((skill) => `- ${skillUsage(skill, family)}`).join("\n");
 }
 
 /** The work tier (ADR-011): one step at a time, with the results of the last ones in view. */

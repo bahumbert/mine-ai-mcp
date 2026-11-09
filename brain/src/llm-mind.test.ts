@@ -6,6 +6,7 @@ import { EveryoneLines } from "./everyone-lines.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
 import { describeStep, stepKey } from "./actions.ts";
+import { familiesOf, TEMPLATES } from "./building/templates.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
@@ -143,7 +144,9 @@ test("the work tier knows crops ripen over time near water and bread is made fro
 
 test("the init prompt carries the style, the own goal, whose requests come first, and the freedom to decide", () => {
   const prompt = personaPrompt(testPersona({ style: "medieval", goal: "build yourself a base", authority: ["Server", "Tom", "*"] }));
-  assert.match(prompt, /You build in the medieval style/u);
+  assert.match(prompt, /You like building in the europe way: Timber-framed cottage/u);
+  assert.match(prompt, /you may build any house you know/u);
+  assert.doesNotMatch(personaPrompt(testPersona()), /building in the/u, "no style, no line");
   assert.match(prompt, /Your own goal, when nobody needs you: build yourself a base/u);
   assert.match(prompt, /Server \(the world's operator\), then Tom, then any other player/u);
   assert.match(prompt, /When a request is unclear, impossible, or you do not know how, say so or ask/u);
@@ -252,11 +255,46 @@ test("a reply sent back for answering a line it read as for someone else keeps t
   assert.deepEqual([held.route, held.to, held.say], ["ignore", ["Vex"], ""]);
 });
 
-test("the house skill line lists what the character's own style needs", async () => {
+/** The system prompt of the work tier for a persona (the first message of its request). */
+async function workPrompt(persona = testPersona({ style: "medieval" })): Promise<string> {
   const { action, mind } = scriptedMind();
   action.reply({ done: "nothing to do" });
-  await mind.next(workInput("anything", { persona: testPersona({ style: "medieval" }) }), signal);
-  assert.match(action.requests[0]?.[0]?.content ?? "", /build a house in your medieval style .*small = 42 spruce_stairs, 36 oak_planks, 24 oak_log, 16 cobblestone, 7 spruce_slab, 3 glass_pane, 1 oak_door/u);
+  await mind.next(workInput("anything", { persona }), signal);
+  return action.requests[0]?.[0]?.content ?? "";
+}
+
+test("prompt size before and after: the work system prompt of a medieval persona", async () => {
+  const prompt = await workPrompt();
+  console.log(`work system prompt of a medieval persona: ${prompt.length} characters`);
+  assert.ok(prompt.length > 0);
+});
+
+test("the build line lists the own family only, then names the other families and how to read them", async () => {
+  const prompt = await workPrompt();
+  const build = prompt.split("\n").findIndex((line) => line.startsWith('- {"skill":"build"'));
+  const section = prompt.split("\n").slice(build).join("\n");
+  const own = section.slice(0, section.indexOf("Other house families you know"));
+  for (const id of ["medieval-small", "medieval-medium", "rustic-small", "rustic-medium"]) assert.match(own, new RegExp(`${id} \\(\\d+x\\d+, \\d floors?, \\d+ blocks: `, "u"));
+  assert.doesNotMatch(own, /japanese-/u, "another family's ids are not in the own list");
+  assert.match(section, /Your europe houses:/u);
+  const others = familiesOf(TEMPLATES).filter((family) => family !== "europe").join(", ");
+  assert.ok(others.includes("east-asia"));
+  assert.ok(section.includes(`Other house families you know: ${others}: {"skill":"list_houses","family":"<family>"} shows their houses`), "the other families, sorted");
+  assert.doesNotMatch(section, /build a house in your medieval style/u);
+});
+
+test("a persona with no style gets the default style's family, and a japanese one its own", async () => {
+  assert.match(await workPrompt(testPersona()), /Your europe houses:/u);
+  const japanese = await workPrompt(testPersona({ style: "japanese" }));
+  assert.match(japanese, /Your east-asia houses:/u);
+  assert.ok(japanese.includes(`Other house families you know: ${familiesOf(TEMPLATES).filter((family) => family !== "east-asia").join(", ")}:`));
+  assert.match(japanese, /japanese-small \(/u);
+});
+
+test("the work tier offers abandon_house and list_houses with build", async () => {
+  const prompt = await workPrompt();
+  assert.match(prompt, /\{"skill":"abandon_house"\}/u);
+  assert.match(prompt, /\{"skill":"list_houses","family":"<family>"\}  read the houses of another family/u);
 });
 
 test("\"later\" is offered only while working for someone else; said anyway, the reply is repaired to act", async () => {
