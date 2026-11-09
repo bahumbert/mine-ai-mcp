@@ -75,6 +75,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   #observedAt: number | null = null;
   #observedWorld = -1;
   #ticks = 0;
+  readonly #limitsByScope = new Map<string, number>();
 
   constructor(
     private readonly definition: ReflexDefinition<Danger, Response, Outcome>,
@@ -282,7 +283,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
 
   /** The base probe and the reflex's own, both off when the claim ends (or never starts). */
   #watchProgress(response: Response, progress: ReflexProgress): () => void {
-    const base = observeBodyProgress(this.host.bot, progress.mark);
+    const base = observeBodyProgress(this.host.bot, progress.mark, this.definition.bodyTravel?.(response) ?? true);
     let own: (() => void) | undefined;
     try {
       own = this.definition.progress?.(response, progress.mark);
@@ -393,10 +394,15 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     const { definition, host } = this;
     const seconds = Math.round(limit.elapsedMs / 1000);
     const why = `${definition.name} hit its ${limit.limit} limit after ${seconds} s (last progress: ${run.progress.lastReason ?? "none"}).`;
+    const scope = definition.facts(run.response);
+    const key = JSON.stringify([scope.capability, scope.scope]);
+    const escalates = limit.limit === "no_progress" && definition.escalateStandDown?.(run.response) === true;
+    const count = escalates ? (this.#limitsByScope.get(key) ?? 0) + 1 : 1;
+    if (escalates) this.#limitsByScope.set(key, count);
     host.answered.remember(
-      { ...definition.facts(run.response), facts: () => null },
+      { ...scope, facts: () => null },
       { kind: "reflex_limit", why },
-      { premise: "reflex_limit", durationMs: run.limits.standDownMs, why },
+      { premise: "reflex_limit", durationMs: Math.min(run.limits.standDownMs * 2 ** (count - 1), 300_000), why },
     );
   }
 }

@@ -9,6 +9,7 @@ import type { HostileSettlement } from "../control/combat/response-result.js";
 import { describeResponse, responseContinuation, responseFailure } from "../control/combat/settlement.js";
 import type { ReflexLimits } from "../control/contract.js";
 import { observeCombatProgress } from "../control/combat-progress.js";
+import { COMBAT_LIMITS } from "../control/combat/limits.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { changes, watchBodyTicks } from "../control/reflex-progress.js";
 import type { CombatPerception } from "../perception/combat/observations.js";
@@ -21,8 +22,6 @@ import { decideHostile, hostileDecisionFacts, hostileScope, senseHostile } from 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
 
-/** A fight, evade, hide or deflect may hold the body 10 min; 30 s without a combat progress mark ends it; its target (or cell) then stands down 10 s (owner 2026-10-19). */
-const COMBAT_LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 30_000, standDownMs: 10_000 };
 /** Equipping a shield is one inventory move: 10 s at most, 5 s without the off-hand changing. */
 const SHIELD_LIMITS: ReflexLimits = { ceilingMs: 10_000, noProgressMs: 5_000, standDownMs: 10_000 };
 
@@ -131,10 +130,12 @@ export function attachHostileReflex(
     decide: decideHostile,
     facts: (response) => hostileScope(scene, response),
     limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
+    bodyTravel: (response) => response.kind !== "fight",
+    escalateStandDown: (response) => response.kind === "fight",
     progress: (response, mark) =>
       response.kind === "prepare_shield"
         ? watchBodyTicks(bot, mark, { off_hand_changed: changes(() => offHandItem(bot)) })
-        : observeCombatProgress(bot, response.threats.map((threat) => threat.id), mark),
+        : observeCombatProgress(bot, response.threats.map((threat) => threat.id), mark, response.kind),
     act: (directive, signal): Promise<HostileSettlement | ShieldPrepared> =>
       directive.kind === "prepare_shield" ? prepareShield(scene, signal) : respondToHostile(scene, directive, signal),
     continuation: (outcome) => outcome.kind === "shield_prepared" ? { kind: "resume" } : responseContinuation(outcome),

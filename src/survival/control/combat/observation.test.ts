@@ -5,6 +5,20 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { assessContacts, observeCombatDecision } from "./observation.js";
 import { CombatPerception } from "../../perception/combat/observations.js";
+import { survivalResources } from "../../state/resources.js";
+import { DEFAULT_SURVIVAL_POLICY } from "../../policy/contract.js";
+import { responseScope } from "./scopes/response.js";
+
+test("an answered fight for a contact is still found", () => {
+  const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const survival = survivalResources();
+  const entry = survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 2),
+    { kind: "unreachable", why: "No route reached this target." },
+    { premise: "unreachable", durationMs: 30_000, why: "The previous approach failed." });
+  const facts = observeCombatDecision(bot, { survival, resolvedIds: new Set(), attackerIds: new Set() });
+  assert.ok(facts.contacts.some(contact => contact.id === 2));
+  assert.equal(facts.answeredFights.get(2), entry.id);
+});
 
 /** A bot alone on dry ground, hurt enough that hiding is the policy's answer to a threat. */
 function loneBot(body: { readonly isInWater?: boolean; readonly isInLava?: boolean } = {}): Bot {

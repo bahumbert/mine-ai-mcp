@@ -14,6 +14,8 @@ const BOX = `x=${LANE.cell.minX},y=-64,z=${LANE.cell.minZ},dx=${LANE.cell.maxX -
 
 /** Files the shift refuses today, each with the reason the scenario gets a server of its own. */
 const REFUSED: ReadonlyMap<string, RegExp> = new Map([
+  // A server-tick scoreboard paces this target every twenty ticks.
+  ["scenarios/combat/pacing-target.yaml", /exclusive/u],
   // Passenger-gated hurts use execute on; the lane grammar cannot translate entity relations.
   ["scenarios/boat/hostile-at-sea-seated.yaml", /execute on/u],
   ["scenarios/boat/hostile-near-shore-take-back.yaml", /execute on/u],

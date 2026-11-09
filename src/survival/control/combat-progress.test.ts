@@ -32,7 +32,7 @@ function fixture() {
   };
   const progress = new ReflexProgress();
   const tick = () => bot.emit("physicsTick");
-  const watch = () => observeCombatProgress(bot, [ZOMBIE], progress.mark);
+  const watch = (kind: "fight" | "evade" | "hide" | "deflect" = "fight") => observeCombatProgress(bot, [ZOMBIE], progress.mark, kind);
   return { bot, emitter, client, zombie, world, progress, tick, watch, scene, clock };
 }
 
@@ -62,23 +62,23 @@ test("a threat that dies or leaves is progress", async () => {
   stop();
 });
 
-test("a target that moves a block marks; jitter does not; each block moved marks again", () => {
-  const { zombie, progress, tick, watch } = fixture();
-  const stop = watch();
-  tick();
-  zombie.position = new Vec3(5.9, 64, 0.5);
-  tick();
-  assert.equal(progress.marks, 0, "0.4 blocks");
-  zombie.position = new Vec3(6.6, 64, 0.5);
-  tick();
-  assert.equal(progress.marks, 1);
-  assert.equal(progress.lastReason, "target_moved");
-  tick();
-  assert.equal(progress.marks, 1, "standing still after the move");
-  zombie.position = new Vec3(7.7, 64, 0.5);
-  tick();
-  assert.equal(progress.marks, 2);
-  stop();
+test("fight distance rewards nearing, never pacing or shuttling; other responses retain repeated target travel", () => {
+  const nearer = [[0.5, 5.1, 0], [0.5, 4.4, 1], [0.5, 4.4, 1], [0.5, 3.3, 2]];
+  const pacing = [[0.5, 6.5, 0], [0.5, 5.5, 0], [1.5, 6.5, 0], [0.5, 5.5, 0]];
+  const travel = [[0.5, 5.9, 0], [0.5, 6.6, 1], [0.5, 6.6, 1], [0.5, 7.7, 2]];
+  for (const [kind, steps] of [["fight", nearer], ["fight", pacing], ["evade", travel], ["hide", travel], ["deflect", travel]] as const) {
+    const { bot, zombie, progress, tick, watch } = fixture();
+    const stop = watch(kind);
+    tick();
+    for (const [self, target, marks] of steps) {
+      bot.entity.position.x = self!;
+      zombie.position.x = target!;
+      tick();
+      assert.equal(progress.marks, marks, kind);
+      if (marks) assert.equal(progress.lastReason, kind === "fight" ? "target_nearer" : "target_moved");
+    }
+    stop();
+  }
 });
 
 test("a target that has left the entity list does not break the sampling", () => {
@@ -91,9 +91,13 @@ test("a target that has left the entity list does not break the sampling", () =>
   stop();
 });
 
-test("a blocked hit (entity status 29 on the bot) is progress; other statuses and other entities are not", () => {
+test("a shield-blocked hit does not mark a fight; it still marks an evade", () => {
   const { client, progress, watch } = fixture();
-  const stop = watch();
+  const fight = watch();
+  client.emit("entity_status", { entityId: SELF, entityStatus: 29 });
+  assert.equal(progress.marks, 0);
+  fight();
+  const stop = watch("evade");
   client.emit("entity_status", { entityId: SELF, entityStatus: 2 });
   client.emit("entity_status", { entityId: BYSTANDER, entityStatus: 29 });
   assert.equal(progress.marks, 0);
@@ -105,7 +109,7 @@ test("a blocked hit (entity status 29 on the bot) is progress; other statuses an
 
 test("every tick inside a closed shelter is progress: a hold is protected waiting", () => {
   const { world, progress, tick, watch } = fixture();
-  const stop = watch();
+  const stop = watch("evade");
   tick();
   tick();
   assert.equal(progress.marks, 0, "in the open");
@@ -122,7 +126,7 @@ test("a world that cannot be read marks nothing and does not throw out of the ti
   bot.blockAt = () => {
     throw new Error("chunk unloaded");
   };
-  const stop = watch();
+  const stop = watch("evade");
   assert.doesNotThrow(tick);
   assert.equal(progress.marks, 0);
   stop();

@@ -38,7 +38,7 @@ function observeEncounter(scene: HostileScene): void {
       encounterThreats.delete(id);
   }
   if (encounterThreats.size) policy.beginEncounter();
-  else if (policy.snapshot().encounter) {
+  else if (policy.encounter) {
     policy.constrain(null);
     scene.transition(policy.endEncounter());
   }

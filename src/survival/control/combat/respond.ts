@@ -18,6 +18,8 @@ import {
 } from "./response-result.js";
 import { responseScope } from "./scopes/response.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
+import { COMBAT_LIMITS } from "./limits.js";
+import { watchEntityRemoval } from "../../../world/entity-removal.js";
 
 /**
  * Consecutive physics ticks a melee target may stay out of defensive reach before the fight ends as `contact_ended`.
@@ -26,6 +28,41 @@ import { creeperEscape } from "../../policy/combat/tactics.js";
  * fight's 30 s no-progress limit bounds it.
  */
 export const CONTACT_GRACE_TICKS = 20;
+
+/** Keep blast clearance during contact loss, but a missing quarry cannot hold the body beyond its stand-down window. */
+function watchFightContact(bot: Bot, targetId: number, context: ResponseContext, ended: AbortController): () => void {
+  const removal = watchEntityRemoval(bot, targetId);
+  let readsOutOfReach = 0;
+  let missingTimer: ReturnType<typeof setTimeout> | undefined;
+  const observe = () => {
+    const target = bot.entities[targetId];
+    if (removal.removed()) {
+      missingTimer ??= setTimeout(() => {
+        missingTimer = undefined;
+        if (removal.removed()) ended.abort("target_lost");
+      }, COMBAT_LIMITS.standDownMs);
+    } else {
+      clearTimeout(missingTimer);
+      missingTimer = undefined;
+    }
+    const { perception } = context;
+    const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
+    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target)) readsOutOfReach++;
+    else readsOutOfReach = 0;
+    if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
+    if (readsOutOfReach >= CONTACT_GRACE_TICKS) ended.abort("contact_ended");
+  };
+  const onGone = (entity: { id: number }) => { if (entity.id === targetId) observe(); };
+  bot.on("physicsTick", observe);
+  bot.on("entityGone", onGone);
+  observe();
+  return () => {
+    removal[Symbol.dispose]();
+    clearTimeout(missingTimer);
+    bot.off("physicsTick", observe);
+    bot.off("entityGone", onGone);
+  };
+}
 
 async function fight(
   bot: Bot,
@@ -38,18 +75,7 @@ async function fight(
   const contactEnded = new AbortController();
   const policyRevision = controller.policy.snapshot().revision;
   const target = bot.entities[request.targetId];
-  // Consecutive reads (physics ticks, and the synchronous one below) with the target out of defensive reach.
-  let readsOutOfReach = 0;
-  const observeContact = () => {
-    const { perception } = context;
-    const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
-    // The count runs while a fuse holds the owner too: the contact then ends the tick the clearance is discharged.
-    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target)) readsOutOfReach += 1;
-    else readsOutOfReach = 0;
-    if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
-    if (readsOutOfReach >= CONTACT_GRACE_TICKS) contactEnded.abort("Melee target left defensive reach.");
-  };
-  bot.on("physicsTick", observeContact);
+  const stopWatching = watchFightContact(bot, request.targetId, context, contactEnded);
   let result: CombatOutcome;
   try {
     const pending = controller.engage(
@@ -61,10 +87,9 @@ async function fight(
         target: target ? { name: target.name ?? "unknown", defendsOnContact: defendsOnContact(bot, target) } : null,
       }),
     );
-    observeContact();
     result = await pending;
   } finally {
-    bot.off("physicsTick", observeContact);
+    stopWatching();
   }
   // A settled controller still owns useful statistics after cancellation.
   // The claim owner classifies cancellation/death without discarding them.
@@ -83,7 +108,7 @@ async function fight(
     killedTargetIds: result.kind === "died" ? [result.targetId] : [],
     result:
       result.kind === "cancelled" && contactEnded.signal.aborted && !signal.aborted
-        ? { kind: "contact_ended" }
+        ? contactEnded.signal.reason === "target_lost" ? { ...result, kind: "target_lost" } : { kind: "contact_ended" }
         : result.kind === "cancelled" && !signal.aborted && controller.policy.snapshot().revision === policyRevision
           ? { ...result, kind: "failed", observation: "Combat was cancelled without an aborted session signal." }
           : result,

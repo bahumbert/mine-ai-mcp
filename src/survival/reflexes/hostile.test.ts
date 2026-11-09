@@ -8,7 +8,7 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, engagingCombat } from "../../test-support/combat.js";
-import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
@@ -222,7 +222,7 @@ test("an automatic target disappearing resumes the original request without clai
 });
 
 /** What a test sets on the fake bot at the start, and how its runner is configured (its clock is the fake bot's). */
-interface FixtureOptions extends Pick<FakeBotOptions, "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food"> {
+interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food"> {
   readonly runner?: Omit<ActionRunnerOptions, "clock">;
 }
 
@@ -240,6 +240,7 @@ function recordedEncounters(data: SqlBotData): string[] {
 
 function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
   const { bot, clock, combat, world, inventory, entities, server } = createFakeBot({
+    clock: options.clock,
     username: "ReflexBot",
     position: new Vec3(0, 64, 0),
     // Open air without building material: hiding cannot dig or place here.
@@ -1426,6 +1427,8 @@ for (const inUse of [false, true]) {
 
 /** A fight neither side can win: the engage waits for its abort, then reports itself cancelled. Time is the fake bot's clock. */
 function standoffScene(...zombies: number[]) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const installed = clock.install();
   const engaged: number[] = [];
   const fixture = reflexFixture(
     async (targetId, signal) => {
@@ -1436,6 +1439,7 @@ function standoffScene(...zombies: number[]) {
     undefined,
     {
       runner: { cancelGraceMs: 500 },
+      clock,
       entities: Object.fromEntries(zombies.map((id, index) => [id, hostile("zombie", 3 + index)])),
     },
   );
@@ -1444,28 +1448,11 @@ function standoffScene(...zombies: number[]) {
   const decision = () => JSON.stringify(fixture.driver.snapshot()[0]?.decision ?? null);
   const active = () => fixture.runner.status().activeAction?.action === "hostile_reflex";
   const close = async () => {
-    await fixture.observer[Symbol.asyncDispose]();
-    fixture.data.close();
+    try { await fixture.observer[Symbol.asyncDispose](); }
+    finally { fixture.data.close(); installed[Symbol.dispose](); }
   };
   return { ...fixture, engaged, pass, active, decision, close };
 }
-
-test("a fight with no damage, no movement and no threat gone is released after 30 s and its target stands down 10 s", async () => {
-  const scene = standoffScene(7);
-  try {
-    await scene.pass(29_000);
-    assert.ok(scene.active(), "29 s: the window is open");
-    await scene.pass(2_000);
-    assert.equal(scene.active(), false, "released at 30 s");
-    assert.deepEqual(scene.engaged, [7]);
-    await scene.pass(8_000);
-    assert.deepEqual(scene.engaged, [7], "no new fight on target 7 within the stand-down");
-    await scene.pass(3_000);
-    assert.deepEqual(scene.engaged, [7, 7], "after 10 s the reflex fights target 7 again");
-  } finally {
-    await scene.close();
-  }
-});
 
 test("a wounded defender after its fight's limit picks evade, and target A is not fought again during stand-down", async () => {
   const scene = standoffScene(7);
@@ -1497,24 +1484,26 @@ async function keptAlive(mark: (scene: ReturnType<typeof standoffScene>) => void
   }
 }
 
-test("blocked hits keep a shielded fight alive past 30 s", async () => {
-  assert.equal(await keptAlive((scene) => scene.bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 })), true);
-});
-
-test("an answered swing resets the clock", async () => {
-  assert.equal(await keptAlive((scene) => scene.combat.hurt(7, null, 1)), true);
-});
-
-test("a target that moves resets the clock", async () => {
-  let x = 3;
-  // Back and forth inside contact range: each move is 1.5 blocks from the last mark.
-  assert.equal(await keptAlive((scene) => { x = x === 3 ? 1.5 : 3; scene.bot.entities[7]!.position = new Vec3(x, 64, 0); }), true);
-});
-
-test("a threat that dies resets the clock", async () => {
-  // One threat dies at each of the four marks (a dead threat dies once; the fifth mark, at second 100, has none left): the target 7 is the nearest and the last to go.
-  const dying = [8, 9, 10, 7];
-  assert.equal(await keptAlive((scene) => { const id = dying.shift(); if (id !== undefined) scene.combat.kill(id); }, 7, 8, 9, 10), true);
+test("fight liveness credits hurt and threat deaths, but not blocked hits, pacing, shuttling or shelter holds", async () => {
+  type Scene = ReturnType<typeof standoffScene>;
+  const rows: { name: string; mark(scene: Scene): void; alive: boolean; targets?: number[] }[] = [
+    { name: "shield_block", mark: scene => scene.bot._client.emit("entity_status", { entityId: 1, entityStatus: 29 }), alive: false },
+    { name: "hurt", mark: scene => scene.combat.hurt(7, null, 1), alive: true },
+    { name: "pacing", mark: scene => { const target = scene.bot.entities[7]!; target.position.x = target.position.x === 3 ? 1.5 : 3; }, alive: false },
+    { name: "shuttling", mark: scene => {
+      const x = scene.bot.entity.position.x === 0 ? 1 : 0;
+      scene.bot.entity.position.x = x;
+      scene.bot.entities[7]!.position.x = x + 3;
+    }, alive: false },
+    { name: "threat_dead", mark: scene => {
+      const id = [11, 10, 9, 8].find(id => scene.bot.entities[id]?.isValid);
+      if (id !== undefined) scene.combat.kill(id);
+    }, alive: true, targets: [7, 8, 9, 10, 11] },
+    { name: "enclosed", mark: scene => {
+      for (const [key, block] of Object.entries(sealedCells())) scene.world.setCell(new Vec3(...(key.split(",").map(Number) as [number, number, number])), block);
+    }, alive: false },
+  ];
+  for (const row of rows) assert.equal(await keptAlive(row.mark, ...(row.targets ?? [7])), row.alive, row.name);
 });
 
 test("the probes of a limited fight are off after it: no listener is left on the bot or its connection", async () => {
@@ -1529,9 +1518,61 @@ test("the probes of a limited fight are off after it: no listener is left on the
   }
 });
 
-test("a closed-shelter hold is progress", async () => {
-  const closed = (scene: ReturnType<typeof standoffScene>) => {
-    for (const [key, block] of Object.entries(sealedCells())) scene.world.setCell(new Vec3(...(key.split(",").map(Number) as [number, number, number])), block);
-  };
-  assert.equal(await keptAlive(closed), true);
+test("a second no_progress limit against the same target stands down 20 s, a third 40 s, capped at 5 min", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(50);
+    await scene.pass(28_950);
+    assert.ok(scene.active(), "29 s: the window is open");
+    for (const duration of [10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]) {
+      for (let ms = 0; scene.active() && ms <= 30_100; ms += 50) await scene.pass(50);
+      assert.equal(scene.active(), false);
+      const claims = scene.engaged.length;
+      scene.bot.physicsEnabled = false;
+      await scene.clock.advance(duration - 50, duration - 50);
+      assert.equal(scene.engaged.length, claims, `no claim before ${duration} ms`);
+      scene.bot.physicsEnabled = true;
+      await scene.pass(50);
+      assert.equal(scene.engaged.length, claims + 1);
+    }
+  } finally { await scene.close(); }
+});
+
+test("another target is not stood down", async () => {
+  const scene = standoffScene(7);
+  try {
+    await scene.pass(31_000);
+    scene.entities.remove(7);
+    scene.entities.spawn({ id: 8, ...hostile("zombie", 2) });
+    await scene.pass(100);
+    assert.deepEqual(scene.engaged, [7, 8]);
+  } finally { await scene.close(); }
+});
+
+test("a creeper that exploded and is no longer observed ends the fight by the stand-down, not the reflex limit", async () => {
+  for (const ending of ["normal", "stopped", "reappeared", "cancelled"] as const) {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const fixture = reflexFixture((id, signal) => new Promise(resolve => {
+    signal.addEventListener("abort", () => resolve({ ...died(id), kind: "cancelled" }), { once: true });
+  }), undefined, { clock, entities: { 7: hostile("creeper", 3) } });
+  try {
+    await fixture.clock.advance(100);
+    assert.equal(fixture.runner.status().busy, true);
+    fixture.combat.explode(fixture.bot.entities[7]!.position.clone());
+    fixture.bot.physicsEnabled = ending === "normal";
+    fixture.entities.remove(7);
+    if (ending === "reappeared") fixture.entities.spawn({ id: 7, ...hostile("creeper", 3) });
+    if (ending === "cancelled") await fixture.driver.cancel("hostile_reflex", new BodyAbort({ kind: "cancelled", by: "model" }, "Stop fighting."));
+    await fixture.clock.advance(10_100);
+    if (ending === "reappeared") {
+      assert.equal(fixture.runner.status().busy, true, "same-id reappearance cancels the missing-target verdict");
+      fixture.entities.remove(7);
+      await fixture.clock.advance(10_100);
+    }
+    assert.equal(fixture.runner.status().busy, false);
+    assert.deepEqual(fixture.recorded(), [ending === "cancelled" ? "fight -> cancelled" : "fight -> target_lost"]);
+    assert.equal(fixture.driver.answered.snapshot().some(entry => entry.failure.kind === "reflex_limit"), false);
+  } finally { await fixture.observer.close(); fixture.data.close(); }
+  }
 });

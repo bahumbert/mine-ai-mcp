@@ -288,7 +288,7 @@ test("fight_margin rejects nonfinite and out-of-range policy edits", () => {
   for (const fight_margin of [-1, 11, NaN, Infinity]) assert.equal(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, fight_margin }).success, false);
 });
 
-test("changing only assessment numbers or distances publishes one decision; target and reason changes publish", async () => {
+test("changing only assessment numbers or distances publishes one decision; target and reason changes publish", async (t) => {
   const { bot } = createFakeBot();
   await using driver = new ReflexDriver(bot, new ActionRunner());
   const events: SurvivalTransition[] = [];
@@ -312,10 +312,16 @@ test("changing only assessment numbers or distances publishes one decision; targ
   const outcome = events.find((event) => event.kind === "outcome")!;
   const captured = outcome.evidence as { decision: { inputs: { assessment: { margin: number } } } };
   assert.equal(captured.decision.inputs.assessment.margin, 0.6, "outcomes carry the admission assessment for the world feed");
-  facts = { ...facts, contacts: [{ ...facts.contacts[0]!, distance: 2.1 }],
-    assessment: { ...facts.assessment, margin: 0.5, healthLostToClear: 40 } };
-  await tick();
-  assert.equal(events.filter((event) => event.kind === "decision").length, 1);
+  await t.test("the decision identity does not change when a threat moves 0.1 block", async () => {
+    facts = { ...facts, contacts: [{ ...facts.contacts[0]!, distance: 2.1 }] };
+    await tick();
+    assert.equal(events.filter((event) => event.kind === "decision").length, 1);
+  });
+  await t.test("the decision identity does not change when 06a's margin changes", async () => {
+    facts = { ...facts, assessment: { ...facts.assessment, margin: 0.5, healthLostToClear: 40 } };
+    await tick();
+    assert.equal(events.filter((event) => event.kind === "decision").length, 1);
+  });
   facts = { ...facts, contacts: [{ ...facts.contacts[0]!, id: 8 }] };
   await tick();
   assert.equal(events.filter((event) => event.kind === "decision").length, 2);

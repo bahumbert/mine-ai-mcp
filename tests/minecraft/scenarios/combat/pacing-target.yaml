@@ -1,0 +1,51 @@
+template: ../../templates/flat-single-action.yaml
+name: pacing-target
+tags: [regression, reliability, exclusive]
+description: An invulnerable attacker paces one block inside reach. Its fights end without progress and the second stand-down lasts twenty seconds.
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -5 -60 -5 5 -55 5 air"
+setup:
+  - "difficulty normal"
+  - "fill -4 -60 -4 4 -60 -4 oak_fence"
+  - "fill -4 -60 4 4 -60 4 oak_fence"
+  - "fill -4 -60 -4 -4 -60 4 oak_fence"
+  - "fill 4 -60 -4 4 -60 4 oak_fence"
+entities:
+  - type: zombie
+    pos: [2.5, -60, 0.5]
+    nbt: "{PersistenceRequired:1b,NoAI:1b,Invulnerable:1b}"
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: diamond_sword, count: 1 }
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  # Tick functions tolerate an already-existing objective on a reused server; each new mob resets its phase once.
+  - "execute unless entity @e[type=zombie,tag=pace_ready] run scoreboard objectives add pace dummy"
+  - "execute unless entity @e[type=zombie,tag=pace_ready] run scoreboard players set phase pace 0"
+  - "tag @e[type=zombie] add pace_ready"
+  - "scoreboard players add phase pace 1"
+  - "execute if score phase pace matches 1..20 run tp @e[type=zombie] 2.5 -60 0.5"
+  - "execute if score phase pace matches 21..40 run tp @e[type=zombie] 1.5 -60 0.5"
+  - "execute if score phase pace matches 40.. run scoreboard players set phase pace 0"
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/pacing-target.ts]
+goal:
+  kind: completion
+  who: Actor
+  # First ten corrected-fixture driver durations, ms (2026-11-09): 91597, 91750, 91417, 91641, 91554,
+  # 91659, 91646, 91600, 91563, 91588. Maximum 91751 rounded upward + 50% = 137627 ms; ceiling 138 s.
+  timeout: 138

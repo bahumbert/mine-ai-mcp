@@ -50,6 +50,10 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   facts(response: Response): AnsweredScope;
   /** What this response may hold the body for: the runner releases a claim that runs into either limit. */
   limits(response: Response): ReflexLimits;
+  /** A fight measures travel toward its targets in its own probe instead of crediting shuttling. */
+  bodyTravel?(response: Response): boolean;
+  /** Repeated no-progress fights against one target back off; life-saving and other responses keep their base pause. */
+  escalateStandDown?(response: Response): boolean;
   /**
    * The reflex's own progress probes for one claim, besides the base probe (the body travelled a block, its health
    * changed, it died): call `mark(reason)` when the response gets somewhere. Returns the unsubscribe, called when the

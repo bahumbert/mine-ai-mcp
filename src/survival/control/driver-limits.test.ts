@@ -76,6 +76,25 @@ test("a claim with no progress is released, stands down for standDownMs whatever
   assert.equal(counts.claims, 2, "after the stand-down it claims again");
 });
 
+test("repeated life-saving limits keep their declared pause, including an independent footing impulse", async () => {
+  for (const name of ["breath_reflex", "fire_reflex", "recover_footing", "hunger_reflex"] as const) {
+    const { driver, definition, pass } = scene();
+    let needed = true;
+    driver.register({ ...definition(), name,
+      sense: () => needed ? { kind: "observed", danger: true, evidence: true } : null });
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await pass(1_100);
+        const answer = driver.answered.snapshot()[0]!;
+        assert.equal(answer.temporal!.expiresAt - answer.since, 3_000, name);
+        needed = false;
+        await pass(3_000);
+        needed = true;
+      }
+    } finally { await driver[Symbol.asyncDispose](); }
+  }
+});
+
 /** A driver built as production builds it (no `now`) on an installed mocked clock whose wall clock steps after the limit. */
 async function claimsAfterStandDown(wallStepMs: number, passAfterStepMs: number) {
   const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });

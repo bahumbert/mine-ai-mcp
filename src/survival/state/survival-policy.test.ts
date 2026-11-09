@@ -324,12 +324,15 @@ test("setting a field again replaces only that field's lifetime, and stale edits
 
 test("encounter and condition overrides expire once without requiring a model reset", async () => {
   const { policy, bot, set } = fixture();
+  assert.equal(policy.encounter, null);
   const encounter = policy.beginEncounter();
+  assert.equal(policy.encounter, encounter);
   await set({ combat: { hide: "never" } }, { kind: "encounter", encounter_id: encounter });
   assert.equal(policy.beginEncounter(), encounter);
   await policy.refresh();
   assert.equal(policy.combat.hide, "never");
   await policy.endEncounter();
+  assert.equal(policy.encounter, null);
   assert.deepEqual(policy.snapshot().overrides, []);
   await assert.rejects(
     set({ combat: { hide: "never" } }, { kind: "encounter", encounter_id: encounter }),
