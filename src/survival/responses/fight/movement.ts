@@ -5,7 +5,6 @@ import {
   setSneaking,
   SupportedPositionHold,
 } from "../../../navigation/index.js";
-import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { isThreat } from "../../perception/combat/threats.js";
@@ -16,7 +15,7 @@ import { MELEE_RANGE, permittedRangedLoadout } from "../../weapons/equipment.js"
 import {
   canMeleeTarget,
   combatItemsForTarget,
-  hasMeleeKnockbackRoom,
+  meleeStanceSafe,
   meleeApproachGoal,
   meleeDistance,
   waitingForDescendingCube,
@@ -24,8 +23,51 @@ import {
 import { retreatFromCreepers } from "./creeper-retreat.js";
 
 import type { FightScene } from "./scene.js";
+import { meleeAttackers } from "./melee-stance.js";
 import type { FightWeapons } from "./weapons.js";
 import { defendWhileRetreating } from "../../weapons/retreat-melee.js";
+
+interface MeleeApproachWatch {
+  readonly guarded: boolean;
+  readonly beganOutsideContact: boolean;
+  readonly stop: AbortController;
+  readonly stopWhen: { readonly reason: string; readonly when: () => boolean } | null;
+}
+
+/** Contact stops a closing route, but a stance route must satisfy every imminent push direction. */
+function watchMeleeApproach(scene: FightScene, weapons: FightWeapons, request: MeleeApproachWatch): void {
+  const { stop, stopWhen, guarded, beganOutsideContact } = request;
+  if (scene.footingRecovery.needed) {
+    stop.abort("external impulse requires footing recovery");
+    return;
+  }
+  // A different shooter can expose the route even when its selected target has no ranged attack.
+  const defence = weapons.currentLoadout().shield ? weapons.projectileDefence() : null;
+  if (defence && (defence.imminent || !defence.aligned || !guarded)) {
+    if (!stop.signal.aborted) scene.reportDecision({ kind: "response", evidence: {
+      boundary: "projectile_guard", stage: "stop_requested",
+      projectileIds: defence.projectiles.map(({ entity }) => entity.id),
+      windingUpIds: defence.windingUp.map((entity) => entity.id),
+      impactInTicks: defence.projectiles.map(({ impactInTicks }) => impactInTicks),
+      coversAll: defence.coversAll, aligned: defence.aligned,
+    } });
+    stop.abort("incoming projectile needs combat facing");
+    return;
+  }
+  if (stopWhen?.when()) {
+    stop.abort(stopWhen.reason);
+    return;
+  }
+  const safe = meleeStanceSafe(scene.navigation.world, scene.bot.entity.position, meleeAttackers(scene), scene.bot.health);
+  if (canMeleeTarget(scene.bot, scene.target) && (beganOutsideContact || safe))
+    stop.abort("target entered melee reach");
+  else if (weapons.contact() && (beganOutsideContact || safe))
+    stop.abort("another hostile entered melee reach");
+  else if (waitingForDescendingCube(scene.bot, scene.target) && safe)
+    stop.abort("cube is descending above melee stance");
+  else if (weapons.currentLoadout().kind === "bow" && weapons.hasClearShot())
+    stop.abort("target now calls for the carried bow with a clear shot");
+}
 
 /** Routes, stationary support and impulse recovery share one physical movement owner. */
 export class FightMovement {
@@ -83,7 +125,7 @@ export class FightMovement {
    * its firing line here arrived at once, the melee turn found nothing in reach,
    * and the fight spun between guard and a zero-length approach without moving. */
   readonly approachGoal = (beganOutsideContact: boolean): Goal => {
-    const melee = meleeApproachGoal(this.scene.bot, this.scene.target.id, this.scene.navigation.world);
+    const melee = meleeApproachGoal(this.scene.bot, this.scene.target.id, this.scene.navigation.world, () => meleeAttackers(this.scene));
     const permittedBow = permittedRangedLoadout(
       this.scene.bot,
       combatItemsForTarget(this.scene.bot, this.scene.target),
@@ -112,45 +154,7 @@ export class FightMovement {
       // stop that route even if its intended fighting stance is not safe yet.
       // The next approach selects existing footing with digging disabled.
       const beganOutsideContact = !canMeleeTarget(this.scene.bot, this.scene.target);
-      const watch = () => {
-        if (this.scene.footingRecovery.needed) {
-          stop.abort("external impulse requires footing recovery");
-          return;
-        }
-        // Navigation's heading may cover the selected enemy while exposing a
-        // different shooter. Incoming fire needs combat's projectile-facing
-        // guard even when the selected enemy has no ranged attack.
-        const defence = this.weapons.currentLoadout().shield ? this.weapons.projectileDefence() : null;
-        if (defence && (defence.imminent || !defence.aligned || !guarded)) {
-          if (!stop.signal.aborted) this.scene.reportDecision({ kind: "response", evidence: {
-            boundary: "projectile_guard", stage: "stop_requested",
-            projectileIds: defence.projectiles.map(({ entity }) => entity.id),
-            windingUpIds: defence.windingUp.map((entity) => entity.id),
-            impactInTicks: defence.projectiles.map(({ impactInTicks }) => impactInTicks),
-            coversAll: defence.coversAll, aligned: defence.aligned,
-          } });
-          stop.abort("incoming projectile needs combat facing");
-        } else if (stopWhen?.when()) stop.abort(stopWhen.reason);
-        else if (
-          meleeDistance(this.scene.bot, this.scene.target) <= MELEE_RANGE &&
-          hasExposedBody(this.scene.bot, this.scene.target) &&
-          (beganOutsideContact ||
-            hasMeleeKnockbackRoom(
-              this.scene.navigation.world,
-              this.scene.bot.entity.position,
-              this.scene.target.position,
-            ))
-        )
-          stop.abort("target entered melee reach");
-        else if (this.weapons.contact()) stop.abort("another hostile entered melee reach");
-        else if (
-          waitingForDescendingCube(this.scene.bot, this.scene.target) &&
-          hasMeleeKnockbackRoom(this.scene.navigation.world, this.scene.bot.entity.position, this.scene.target.position)
-        )
-          stop.abort("cube is descending above melee stance");
-        else if (this.weapons.currentLoadout().kind === "bow" && this.weapons.hasClearShot())
-          stop.abort("target now calls for the carried bow with a clear shot");
-      };
+      const watch = () => watchMeleeApproach(this.scene, this.weapons, { guarded, beganOutsideContact, stop, stopWhen });
       // Navigation lowers the guard only through the hands: a dig or a
       // placement swaps or swings the main hand and a door is opened with
       // it, and Mineflayer clears its use flag on any slot change. A route

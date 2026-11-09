@@ -20,6 +20,7 @@ function fixture(bow: boolean) {
   const scene = {
     bot,
     target,
+    perception: { read: () => [] },
     navigation: { world },
     policy: { combat: { bow, melee: true, shield: true } },
   } as unknown as FightScene;

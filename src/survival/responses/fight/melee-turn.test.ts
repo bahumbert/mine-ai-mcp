@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { addItemsToServerTag } from "../../../test-support/datapack-tags.js";
 import { createFakeBot, itemOf, type FakeCell, type FakeEntitySpec } from "../../../test-support/fake-bot/index.js";
 import { liveBlockReader } from "../../../navigation/index.js";
+import { observation } from "../../../test-support/navigation.js";
 import type { CombatLoadout } from "../../weapons/equipment.js";
 import type { EndermanFight } from "./enderman.js";
 import { FightMovement } from "./movement.js";
@@ -68,6 +69,7 @@ function guardedTurn(options: {
   stopped?: string;
   circleDuringGuard?: boolean;
   realMovement?: boolean;
+  shield?: boolean;
 } = {}) {
   const entities: Record<number, FakeEntitySpec> = {
     7: { name: "zombie", position: options.secondAttacker || options.circleDuringGuard ? new Vec3(2.5, 64, 0.5) : new Vec3(0.5, 64, 2.5) },
@@ -101,18 +103,20 @@ function guardedTurn(options: {
   const weapons = {
     volleyActive: () => false,
     raiseGuard: async () => { if (options.circleDuringGuard) scene.target.position.set(0.5, 64, 2.5); },
-    readyWeapon: async () => {}, faceGuard: async () => {}, holdFacing: async () => {},
+    readyWeapon: async () => {}, face: async () => {}, faceGuard: async () => {}, holdFacing: async () => {},
     strike: (target: typeof bot.entity) => { bot.attack(target); return true; },
     currentLoadout: () => loadout, projectileDefence: () => null, contact: () => null,
-    itemUse: { shieldRaised: true, invalidateShield: () => {} },
+    itemUse: { shieldRaised: options.shield !== false, invalidateShield: () => {} },
   } as unknown as FightWeapons;
   const locomotion = options.realMovement ? new FightMovement(scene, weapons) :
     { approach: async (...args: unknown[]) => { approaches.push(args); return options.stopped ?? null; } } as unknown as FightMovement;
   const roof = { state: { kind: "idle" } } as unknown as EndermanFight;
   const loadout: Extract<CombatLoadout, { kind: "melee" }> = {
-    kind: "melee", weapon: itemOf(bot.registry, "diamond_sword"), shield: itemOf(bot.registry, "shield"), cooldownTicks: 10,
+    kind: "melee", weapon: itemOf(bot.registry, "diamond_sword"),
+    shield: options.shield === false ? null : itemOf(bot.registry, "shield"), cooldownTicks: 10,
   };
-  return { scene, approaches, attacks, locomotion, turn: () => harness.clock.settle(runMeleeTurn(scene, weapons, locomotion, roof, loadout), 500) };
+  return { scene, approaches, attacks, locomotion, world: harness.world,
+    turn: () => harness.clock.settle(runMeleeTurn(scene, weapons, locomotion, roof, loadout), 500) };
 }
 
 for (const secondAttacker of [false, true]) {
@@ -157,11 +161,42 @@ test("the attacker circles to the lava side during guard readiness, no swing", a
   assert.deepEqual(fixture.attacks, []);
 });
 
-test("a secondary hazard whose real approach stops without moving falls back to the guard next turn", async () => {
+for (const shield of [true, false]) test(`an unchanged secondary-hazard approach resumes ${shield ? "guarded" : "unshielded"} melee within two turns`, async () => {
+  const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, secondAttacker: true, realMovement: true, shield });
+  try {
+    for (let turn = 0; turn < 2; turn++) assert.equal(await fixture.turn(), null);
+    assert.deepEqual(fixture.attacks, [7]);
+    assert.equal(fixture.approaches.length, 1);
+  } finally { fixture.locomotion.footing.release(); }
+});
+
+test("melee approach arrival and its watch reject a secondary attacker's unsafe stance", async () => {
   const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, secondAttacker: true, realMovement: true });
   try {
-    for (let turn = 0; turn < 3; turn++) assert.equal(await fixture.turn(), null);
-    assert.equal(fixture.approaches.length, 1);
-    assert.deepEqual(fixture.attacks, [7, 7]);
+    const goal = fixture.locomotion.approachGoal(false).resolve({
+      ...observation(), position: fixture.scene.bot.entity.position, stance: "supported",
+    });
+    assert.equal(goal.kind, "active");
+    if (goal.kind !== "active") return;
+    assert.equal(goal.isSatisfied({ feet: { x: 0, y: 64, z: 0 }, remainingScaffolds: 0, overlayId: "overlay:0" }, fixture.scene.navigation.world), false);
+    await fixture.turn();
+    assert.deepEqual(fixture.approaches, [[undefined]], "contact cannot stop a route on unsafe footing");
+  } finally { fixture.locomotion.footing.release(); }
+});
+
+test("a refused stance is retried when an imminent attacker leaves or its hazard changes", async () => {
+  const fixture = guardedTurn({ cells: { "0,63,-2": "lava" }, secondAttacker: true, realMovement: true });
+  fixture.scene.target.position.set(0.5, 64, 2.5);
+  try {
+    await fixture.turn();
+    await fixture.turn();
+    delete fixture.scene.bot.entities[8];
+    await fixture.turn();
+    assert.equal(fixture.approaches.length, 2, "a changed attacker set retries even at the same cells");
+    fixture.world.setCell(new Vec3(0, 63, -2), "stone");
+    await fixture.turn();
+    fixture.world.setCell(new Vec3(0, 63, -2), "lava");
+    await fixture.turn();
+    assert.equal(fixture.approaches.length, 3, "a cleared hazard invalidates the previous refusal");
   } finally { fixture.locomotion.footing.release(); }
 });

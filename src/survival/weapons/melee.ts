@@ -61,13 +61,14 @@ export function distanceToBody(
 }
 
 /** The approach and swing must agree on reach, including targets above or below a ledge. */
-export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView): Goal {
+export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView, attackers?: () => readonly Position3[]): Goal {
   const rays = worldViewRaycaster((x, y, z) => obstaclesOf(world.blockAt(x, y, z)));
   return {
     resolve(observation) {
       const entity = bot.entities[targetId];
       if (!entity?.isValid) return { kind: "invalid", observation: `Entity ${targetId} is not currently observed.` };
       const body = { position: entity.position.clone(), ...entityDimensions(bot, entity) };
+      const contacts = attackers?.() ?? (isHostile(entity) ? [body.position] : []);
       // Approach the horizontal footprint of a hopping cube. The controller
       // waits behind its shield until the real body descends into swing reach.
       if (body.position.y > observation.position.y && airborneCube(bot, entity))
@@ -84,7 +85,7 @@ export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView):
       };
       return {
         kind: "active",
-        revision: `melee:${targetId}:${body.position}:${body.width}:${body.height}:${current.x},${current.y},${current.z}:${distanceAt(current) <= MELEE_RANGE}`,
+        revision: `melee:${targetId}:${body.position}:${body.width}:${body.height}:${current.x},${current.y},${current.z}:${distanceAt(current) <= MELEE_RANGE}:${contacts.map(p => `${p.x},${p.y},${p.z}`).sort().join(";")}:${bot.health}`,
         isSatisfied: (node) => {
           if (distanceAt(node.feet) > MELEE_RANGE) return false;
           const position = positionAt(node.feet);
@@ -95,7 +96,7 @@ export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView):
           );
           return (
             exposedBodyFrom(rays, eye, body) &&
-            (!isHostile(entity) || hasMeleeKnockbackRoom(world, position, body.position))
+            meleeStanceSafe(world, position, contacts, bot.health)
           );
         },
         heuristic: (node) => Math.max(0, distanceAt(node.feet) - MELEE_RANGE) * HORIZONTAL_TICKS_PER_BLOCK,
@@ -112,6 +113,12 @@ export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView):
 export function hasMeleeKnockbackRoom(world: WorldView, position: Position3, attacker: Position3): boolean {
   const displacement = meleeKnockbackDisplacement(position, attacker);
   return displacement !== null && hasSupportedCorridor(world, position, displacement);
+}
+
+/** Every imminent push needs supported landing room and must avoid lethal terrain. */
+export function meleeStanceSafe(world: WorldView, position: Position3, attackers: readonly Position3[], health: number): boolean {
+  return meleeKnockbackHazard(world, position, attackers, health) === null &&
+    attackers.every(attacker => hasMeleeKnockbackRoom(world, position, attacker));
 }
 
 /** The same three-block contact buffer for stance admission and lethal-terrain checks. */

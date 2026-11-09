@@ -1,6 +1,5 @@
 export const HOLD_GROUND_RANGE = 16;
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
-import { cellKey, type Position3 } from "../../../utils/index.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { isHostile } from "../../perception/combat/threats.js";
@@ -9,14 +8,15 @@ import { facing } from "../../weapons/aim.js";
 import { MELEE_RANGE, type CombatLoadout } from "../../weapons/equipment.js";
 import {
   canMeleeTarget,
-  hasMeleeKnockbackRoom,
   hasSweepBystander,
   meleeDistance,
   meleeKnockbackHazard,
+  meleeStanceSafe,
   sweepsOnSwing,
   waitingForDescendingCube,
 } from "../../weapons/melee.js";
 import type { EndermanFight } from "./enderman.js";
+import { meleeAttackers, meleeStanceKey } from "./melee-stance.js";
 
 import type { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
@@ -26,28 +26,17 @@ import type { FightWeapons } from "./weapons.js";
 const meleeThreatInReach = (scene: FightScene): boolean =>
   scene.perception.read().some((threat) => threat.meleeImminent);
 
-/** Target and imminent contacts can push from different sides of the body. */
-function meleeAttackers(scene: FightScene, defender = scene.target): readonly Position3[] {
-  const attackers = new Map([[scene.target.id, scene.target.position], [defender.id, defender.position]]);
-  for (const threat of scene.perception.read()) {
-    const entity = scene.bot.entities[threat.id];
-    if (threat.meleeImminent && entity?.isValid) attackers.set(entity.id, entity.position);
-  }
-  return [...attackers.values()];
-}
-
-/** A refused stance is reconsidered when the body or any attacker's cell changes. */
-function meleeStanceKey(scene: FightScene, defender = scene.target): string {
-  return `${cellKey(scene.bot.entity.position)}|${meleeAttackers(scene, defender).map(cellKey).sort().join(";")}`;
-}
-
 /** Read current directions again after guard readiness; holding commitments and refused routes retain the guard. */
 export function needsMeleeStance(scene: FightScene, roof: EndermanFight, immediateGuard: boolean, defender = scene.target): boolean {
   if (!scene.bot.entity.onGround || !isHostile(defender) || scene.movement === "hold" || roof.state.kind === "committed")
     return false;
-  const hazard = meleeKnockbackHazard(scene.navigation.world, scene.bot.entity.position, meleeAttackers(scene, defender), scene.bot.health);
-  if (immediateGuard && (hazard === null || scene.refusedStance === meleeStanceKey(scene, defender))) return false;
-  return hazard !== null || !hasMeleeKnockbackRoom(scene.navigation.world, scene.bot.entity.position, defender.position);
+  const key = meleeStanceKey(scene, defender);
+  if (scene.refusedStance !== key) scene.refusedStance = null;
+  if (scene.refusedStance === key) return false;
+  const attackers = meleeAttackers(scene, defender);
+  const { world } = scene.navigation;
+  if (immediateGuard) return meleeKnockbackHazard(world, scene.bot.entity.position, attackers, scene.bot.health) !== null;
+  return !meleeStanceSafe(world, scene.bot.entity.position, attackers, scene.bot.health);
 }
 
 /** Selected-target and closer-contact attacks share routing, refused-route memory and guard fallback. */
@@ -61,7 +50,7 @@ export async function prepareMeleeStance(
   if (scene.settled()) return null;
   // Contact stops can return no refusal while leaving a secondary attacker's corridor unsafe (P1 review, 2026-11-09).
   const unchangedHazard = attemptedStance === meleeStanceKey(scene, defender) && needsMeleeStance(scene, roof, immediateGuard, defender);
-  if (immediateGuard && (stopped || unchangedHazard)) scene.refusedStance = meleeStanceKey(scene, defender);
+  if (stopped || unchangedHazard) scene.refusedStance = meleeStanceKey(scene, defender);
   if (stopped && !immediateGuard)
     return { ...scene.result("unreachable"), observation: `No supported melee stance: ${stopped}.` };
   if (!stopped) {
