@@ -76,6 +76,36 @@ const observedBoolean = (entity: object, field: string): boolean | null => {
   return typeof value === "boolean" ? value : null;
 };
 
+const ENTITY_SAMPLE_TICKS = 5;
+
+/** Read the player's collision cells without treating partial blocks as cubes. */
+function collisionCells(position: { x: number; y: number; z: number }, world: NavigationRuntime["world"]) {
+  const cells: { x: number; y: number; z: number; block: ReturnType<NavigationRuntime["world"]["blockAt"]> }[] = [];
+  for (let x = Math.floor(position.x - 0.3); x <= Math.floor(position.x + 0.3); x++) {
+    for (let z = Math.floor(position.z - 0.3); z <= Math.floor(position.z + 0.3); z++) {
+      for (let y = Math.floor(position.y) - 1; y <= Math.floor(position.y + 1.8); y++) {
+        cells.push({ x, y, z, block: world.blockAt(x, y, z) });
+      }
+    }
+  }
+  return cells;
+}
+
+/** Capture nearby threats and approaching projectiles within thirty-two blocks. */
+function nearbyEntities(bot: Bot) {
+  const position = bot.entity.position;
+  return Object.values(bot.entities)
+    .filter((entity) =>
+      Math.hypot(entity.position.x - position.x, entity.position.y - position.y, entity.position.z - position.z) <= 32)
+    .map((entity) => ({
+      id: entity.id,
+      name: entity.name,
+      position: vector(entity.position),
+      velocity: vector(entity.velocity),
+      projectile: projectileSnapshot(bot, entity),
+    }));
+}
+
 export interface IncidentObserverOptions {
   readonly survival?: () => SurvivalStatus;
   readonly directory: string;
@@ -178,37 +208,16 @@ export function observeIncidents(
           }
         : null;
     previous = { atMs, dimension, position: { x: position.x, y: position.y, z: position.z } };
-    // Read the collision cells touched by the 0.6-wide, 1.8-high player and
-    // the layer directly beneath it. A stalagmite must not become a cube here.
-    const cells: { x: number; y: number; z: number; block: ReturnType<NavigationRuntime["world"]["blockAt"]> }[] = [];
-    for (let x = Math.floor(position.x - 0.3); x <= Math.floor(position.x + 0.3); x++) {
-      for (let z = Math.floor(position.z - 0.3); z <= Math.floor(position.z + 0.3); z++) {
-        for (let y = Math.floor(position.y) - 1; y <= Math.floor(position.y + 1.8); y++) {
-          cells.push({ x, y, z, block: navigation.world.blockAt(x, y, z) });
-        }
-      }
-    }
+    const cells = collisionCells(position, navigation.world);
     const controls = Object.fromEntries(
       (["forward", "back", "left", "right", "jump", "sprint", "sneak"] as const).map((control) => [
         control,
         bot.getControlState(control),
       ]),
     );
-    // Thirty-two blocks covers nearby threats and approaching projectiles;
-    // entities outside this observation radius are explicitly not captured.
-    const entities = Object.values(bot.entities)
-      .filter(
-        (entity) =>
-          Math.hypot(entity.position.x - position.x, entity.position.y - position.y, entity.position.z - position.z) <=
-          32,
-      )
-      .map((entity) => ({
-        id: entity.id,
-        name: entity.name,
-        position: vector(entity.position),
-        velocity: vector(entity.velocity),
-        projectile: projectileSnapshot(bot, entity),
-      }));
+    // Entity serialization dominated per-tick cost; omit unsampled ticks rather
+    // than presenting an older snapshot as current (P4-06c T12, 2026-11-08).
+    const entities = physicsSamples % ENTITY_SAMPLE_TICKS === 0 ? nearbyEntities(bot) : undefined;
     const owner = options.owner();
     const phase = owner.combat.execution?.phase;
     if (phase) phaseTicks[phase] = (phaseTicks[phase] ?? 0) + 1;

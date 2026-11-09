@@ -13,10 +13,10 @@ import { createFakeBot, createFakeClock, listenerCounts } from "../test-support/
 import { observeDamageRegistry } from "../world/damage-registry.js";
 import { observeIncidents } from "./incident-observer.js";
 
-test("failure evidence separates lost support, server corrections, and local motion and detaches every listener", async (t) => {
+test("incident evidence keeps body telemetry every tick, samples entities every five ticks, distinguishes corrections and detaches listeners", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "incident-observer-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const { bot, combat: scene } = createFakeBot();
+  const { bot, combat: scene } = createFakeBot({ entities: { 7: { name: "zombie", position: new Vec3(2, 64, 0) } } });
   // The server's flags: on fire (`shared_flags`) and using an item in the off hand (`living_entity_flags`).
   bot.entity.metadata = playerMetadata(bot, { living_entity_flags: 3, shared_flags: 1 });
   bot.entity.velocity = new Vec3(0.02, -0.08, 0);
@@ -72,9 +72,15 @@ test("failure evidence separates lost support, server corrections, and local mot
       }),
     },
   );
-  bot.emit("physicsTick");
-  bot.entity.position.x += 0.1;
-  bot.emit("physicsTick");
+  for (let tick = 1; tick <= 11; tick++) {
+    bot.entity.position.x = (tick + 4) / 10;
+    bot.health = 20 - tick;
+    bot.setControlState("forward", tick % 2 === 1);
+    if (tick === 2) bot.entities[7]!.position.x = 12;
+    if (tick === 7) delete bot.entities[7];
+    bot.emit("physicsTick");
+  }
+  bot.health = 20;
   // A failed step and mob hit stay silent; a death freezes their preceding history.
   for (const listener of events)
     listener({
@@ -113,9 +119,20 @@ test("failure evidence separates lost support, server corrections, and local mot
   assert.equal(first.kind, "written");
   if (first.kind !== "written") return;
   const intact = await readFile(first.path, "utf8");
+  const physics = intact.trim().split("\n")
+    .map((line) => JSON.parse(line)).filter((entry) => entry.kind === "physics");
+  assert.deepEqual(physics.map((entry) => [entry.position.x, entry.health, entry.controls.forward]), [
+    [0.5, 19, true], [0.6, 18, false], [0.7, 17, true], [0.8, 16, false], [0.9, 15, true],
+    [1, 14, false], [1.1, 13, true], [1.2, 12, false], [1.3, 11, true], [1.4, 10, false], [1.5, 9, true],
+  ]);
+  const entitySamples = physics.flatMap((entry, index) => entry.entities === undefined ? [] : [[index + 1, entry.entities]]);
+  assert.deepEqual(entitySamples.map(([tick]) => tick), [1, 6, 11]);
+  assert.equal(entitySamples[0]![1].find((entity: { id: number }) => entity.id === 7).position.x, 2);
+  assert.equal(entitySamples[1]![1].find((entity: { id: number }) => entity.id === 7).position.x, 12);
+  assert.equal(entitySamples[2]![1].some((entity: { id: number }) => entity.id === 7), false);
   assert.match(intact, /"forward":true/);
   assert.match(intact, /"combat":\{"targetId":42,"position":null,"execution":/);
-  assert.match(intact, /"phaseTicks":\{"guard":2\}/);
+  assert.match(intact, /"phaseTicks":\{"guard":11\}/);
   assert.match(intact, /"positionDelta":\{"elapsedMs":\d+,"x":0\.099/);
   assert.match(intact, /"mineflayerVelocity":\{"x":0\.02/);
   assert.match(intact, /"mineflayerUsingHeldItem":false,"serverLivingEntityFlags":3/);
