@@ -1,0 +1,27 @@
+template: ../../templates/combat-assessment.yaml
+
+name: explosive-hoe
+tags: [acceptance, regression]
+description: >-
+  A wooden hoe has only bare-hand damage. A creeper summoned three blocks away
+  must produce an explosive evade and leave the actor alive after twenty seconds.
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: wooden_hoe, count: 1 }
+
+params:
+  mob: creeper
+  response: evade
+  reason: explosive
+  observeSeconds: 20
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: survive, who: Actor, seconds: 20 }
+    - { kind: completion, who: Actor }

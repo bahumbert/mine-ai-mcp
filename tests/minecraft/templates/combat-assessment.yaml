@@ -1,0 +1,38 @@
+# Normal difficulty and no regeneration keep combat measurements independent of random equipment and healing.
+spectator:
+  mods:
+    - { id: blockhighlighter, path: ../../../.mine-labs/mods/blockhighlighter.jar }
+  systemProperties:
+    blockhighlighter.serverPortOffset: "10000"
+minecraft:
+  version: "1.21.4"
+
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -16 -59 -16 20 -40 16 air"
+
+setup:
+  - "difficulty normal"
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/combat-margin.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"

@@ -24,7 +24,7 @@ const MINECRAFT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), ".
 /** A lane's z offset (`LANE_SPACING` 512) and an x offset no lane has, so a driver that forgets or doubles either axis is seen. */
 const SIDEWAYS = arenaFrame({ x: 64, z: 1536 });
 /** Physical waits have their own tests (boat cancellation) or real-server scenario (cleanup preemption); coordinates use arenaPoint. */
-const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts", "life-saving-cleanup.ts", "hostile-boat.ts"]);
+const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts", "life-saving-cleanup.ts", "hostile-boat.ts", "combat-margin.ts", "zombie-hit-formula.ts"]);
 /** Wall-clock waits of a driver's params, cut to nothing: the census reads what the driver asks, not how long it waits. */
 const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0 };
 
