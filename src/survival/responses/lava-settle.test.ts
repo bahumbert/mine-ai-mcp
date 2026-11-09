@@ -3,16 +3,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { awaitLavaSettled, escapeThenSettle, LAVA_SETTLE_MAXIMUM_MS, rerunFireReason, type LavaSettle } from "./lava-settle.js";
-import { recordFireContact } from "../perception/burn.js";
-
-test("an advancing re-run keeps lethal_burn while the burn is lethal", () => {
-  const scene = settleScene();
-  scene.metadata[scene.sharedFlagsIndex] = 1;
-  scene.bot.health = 8;
-  recordFireContact(scene.bot, "lava", scene.bot.time.age);
-  assert.equal(rerunFireReason(scene.bot), "lethal_burn");
-});
+import { awaitLavaSettled, escapeThenSettle, LAVA_SETTLE_MAXIMUM_MS, type LavaSettle } from "./lava-settle.js";
 
 for (const contact of ["none", "lava", "fire"] as const) {
   test(`a second escape at the settle deadline ${contact === "none" ? "out of lava is spreading" : `still in ${contact} stays timed_out`}`, async () => {

@@ -4,7 +4,6 @@ import type { WorldView } from "../../navigation/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt, lavaFlowDelayTicks } from "../../world/lava-flow.js";
 import { airSupplyPoints, isBurning, isInFire, isInLava } from "../perception/body.js";
-import { burnLeft } from "../perception/burn.js";
 import type { FireEscapeReason } from "../positioning/fire-escape.js";
 import { escapeFire, type FireEscapeOutcome } from "./fire.js";
 
@@ -107,9 +106,8 @@ export interface EscapeAndSettle {
 }
 
 /** Select the current danger for an escape restarted by the settle wait. */
-export function rerunFireReason(bot: Bot): FireEscapeReason {
+function rerunFireReason(bot: Bot): FireEscapeReason {
   if (advancingLavaAt(bot)) return "advancing_lava";
-  if (!isInLava(bot) && !isInFire(bot) && isBurning(bot) && bot.health <= burnLeft(bot).hp) return "lethal_burn";
   return "contact";
 }
 

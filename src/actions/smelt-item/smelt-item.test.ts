@@ -37,6 +37,17 @@ test("a named furnace and a temporary one are exclusive, and a temporary one mus
   assert.equal(result.smelt.inputInventoryAfter, 3);
 });
 
+test("a temporary furnace is refused by the smelt caller when no harvest tool is carried", async () => {
+  const { bot, dependencies, adjust } = smeltingBot();
+  adjust("furnace", 1);
+  const request = parseSmeltItemRequest({ item_name: "raw_iron", count: 3, fuel_item_name: "coal", temporary_workstation: true });
+  const result = await smeltItem(bot, navigation, request, {}, dependencies);
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /WORKSTATION_NO_HARVEST_TOOL.*furnace/);
+  assert.equal(result.smelt.furnace, null);
+  assert.equal(result.smelt.inputInventoryAfter, 3);
+});
+
 const registry = minecraftData("1.21.4");
 
 test("a non-smeltable input is refused before any insert and an output names its inputs", async () => {

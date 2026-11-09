@@ -16,6 +16,7 @@ import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } f
 import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
+// check-reads: src/**/*.ts
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
 const idleListeners = new WeakMap<Bot, (event: string) => number>();
 
