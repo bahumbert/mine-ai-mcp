@@ -1,32 +1,24 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { z } from "zod";
-import { OPTIONAL_ROLES, ROLES, type BlockRole, type OptionalRole, type Palette, type RequiredRole, type Variants } from "./blueprint.ts";
-import { ROOFS } from "./house.ts";
+import { ROLES, type BlockRole } from "./blueprint.ts";
 
 // check-reads: brain/building-styles/*.json
 export const blockId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft block id such as oak_planks").refine((id) => id !== "air", "air is not a material");
 export const kebabId = z.string().regex(/^[a-z0-9-]+$/u, "kebab-case id");
 const blockRoles = ROLES.filter((role): role is BlockRole => role !== "air");
-const isOptional = (role: BlockRole): role is OptionalRole => (OPTIONAL_ROLES as readonly BlockRole[]).includes(role);
 
 /** Per role, its stairs and slab blocks (ADR-013): a stair roof needs `roof`'s; a role without them builds full blocks. */
 export const variantsSchema = z.partialRecord(z.enum(blockRoles), z.strictObject({ stairs: blockId.optional(), slab: blockId.optional() }));
 
-/** A building style, as data (ADR-006): the persona's taste (its family of houses and a description). Still carries the classic generator's palette until the classic houses are files only. */
+/** A building style, as data (ADR-006): the persona's taste, its family of house templates and a description. The blocks and the shape of a house are in the template files. */
 export const styleSchema = z.strictObject({
   id: kebabId,
   /** The family of house templates the persona lists first in its prompt (`brain/building-templates/`). */
   family: kebabId,
   description: z.string().trim().min(1).max(200),
-  palette: z.strictObject({
-    ...(Object.fromEntries(blockRoles.filter((role) => !isOptional(role)).map((role) => [role, blockId])) as Record<RequiredRole, typeof blockId>),
-    ...(Object.fromEntries(OPTIONAL_ROLES.map((role) => [role, blockId.optional()])) as Record<OptionalRole, z.ZodOptional<typeof blockId>>),
-  }),
-  variants: variantsSchema.optional(),
-  house: z.strictObject({ roof: z.enum(ROOFS), overhang: z.number().int().min(0).max(2) }),
 });
 
-export type Style = z.infer<typeof styleSchema> & { readonly palette: Palette; readonly variants?: Variants };
+export type Style = z.infer<typeof styleSchema>;
 
 /**
  * The first folder called `name` (`building-styles`, `building-templates`) at or above the folder of `from`. The source

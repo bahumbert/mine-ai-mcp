@@ -37,12 +37,12 @@ test("a folder with no styles above it fails, naming where it looked", () => {
   }
 });
 
-test("a style palette may add accent and railing and may leave them out; the eight others are required", () => {
+test("a style holds only a persona's taste: id, family and description, no blocks and no house options", () => {
+  for (const style of STYLES.values()) assert.deepEqual(Object.keys(style).sort(), ["description", "family", "id"], style.id);
   const medieval = STYLES.get("medieval")!;
-  assert.equal(styleSchema.safeParse({ ...medieval, palette: { ...medieval.palette, accent: "ladder", railing: "oak_fence" } }).success, true);
   assert.equal(styleSchema.safeParse(medieval).success, true);
-  const { wall: _wall, ...withoutWall } = medieval.palette;
-  assert.equal(styleSchema.safeParse({ ...medieval, palette: withoutWall }).success, false);
+  assert.equal(styleSchema.safeParse({ ...medieval, palette: { wall: "oak_planks" } }).success, false, "a palette belongs to a template");
+  assert.equal(styleSchema.safeParse({ ...medieval, house: { roof: "gable", overhang: 1 } }).success, false, "house options belong to a template");
 });
 
 test("the shipped styles load from the source tree", () => {

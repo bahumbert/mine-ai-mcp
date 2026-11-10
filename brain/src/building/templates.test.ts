@@ -119,6 +119,29 @@ test("every shipped template is valid at every facing", () => {
   }
 });
 
+test("every shipped template is built from blocks that exist in 1.21.4 and are placed from an item of the same id; its variants are stairs and slabs", () => {
+  const data = minecraftData(TEMPLATE_REGISTRY_VERSION);
+  for (const template of TEMPLATES.values()) {
+    for (const [role, block] of Object.entries(template.palette)) {
+      assert.ok(data.blocksByName[block], `${template.id} ${role}: ${block} is not a block`);
+      assert.ok(data.itemsByName[block], `${template.id} ${role}: ${block} has no item`);
+    }
+    for (const [role, shapes] of Object.entries(template.variants)) {
+      for (const [shape, block] of Object.entries(shapes)) {
+        assert.ok(data.blocksByName[block]?.name.endsWith(shape === "stairs" ? "_stairs" : "_slab"), `${template.id} ${role} ${shape}: ${block}`);
+        assert.ok(data.itemsByName[block], `${template.id} ${role} ${shape}: ${block} has no item`);
+      }
+    }
+  }
+  for (const template of TEMPLATES.values()) if (template.classic !== undefined) assert.ok(template.variants.roof?.stairs && template.variants.roof.slab, `${template.id} has a stair roof`);
+});
+
+test("a template palette may add accent and railing and may leave them out (a missing required role: \"a bad file names itself\")", () => {
+  const withBoth = loadOne({ palette: { ...PALETTE, accent: "ladder", railing: "oak_fence" } }).get("hut")!;
+  assert.deepEqual([withBoth.palette.accent, withBoth.palette.railing], ["ladder", "oak_fence"]);
+  assert.equal(loadOne().get("hut")!.palette.accent, undefined);
+});
+
 test("every shipped block can be made or found: a recipe, a smelting output or some block's drop", () => {
   const data = minecraftData(TEMPLATE_REGISTRY_VERSION);
   for (const template of TEMPLATES.values()) {

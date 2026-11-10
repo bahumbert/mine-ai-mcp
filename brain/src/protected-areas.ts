@@ -44,11 +44,6 @@ export function describeOverlaps(owner: Owner, overlapping: readonly ProtectedAr
   return `overlaps protected area${overlapping.length === 1 ? "" : "s"} ${overlapping.map((area) => describeArea(owner, area)).join(", ")}`;
 }
 
-/** The kind of a house, as notes and protected-area labels call it ("small medieval house"). */
-export function houseKind(size: string, style: string): string {
-  return `${size} ${style} house`;
-}
-
 /**
  * Her own earlier protections of this same house: a region of hers, with its label, around its door (live 2026-10-04:
  * resuming her unfinished house, its site was refused for overlapping #12, the same house protected before with a

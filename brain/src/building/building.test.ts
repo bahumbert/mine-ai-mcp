@@ -1,40 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import minecraftData from "minecraft-data";
 import { batchCells, billOfMaterials, buildBatches, FACING_VECTOR, MAX_BATCH_CELLS, placeBlueprint, shortfall, type Blueprint, type Facing, type WorldCell } from "./blueprint.ts";
-import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
-import { chooseSite, planHouse } from "./plan.ts";
-import { STYLES } from "./styles.ts";
+import { chooseSite, planTemplate } from "./plan.ts";
+import { TEMPLATES, templateFor, type Template } from "./templates.ts";
 
 const FACINGS: readonly Facing[] = ["north", "south", "east", "west"];
-const SIZES = Object.keys(HOUSE_SIZES) as HouseSize[];
+
+/** The six classic houses, the ones with the symmetric, stair-roofed shape these tests describe. */
+const classicFiles: readonly Template[] = [...TEMPLATES.values()].filter((template) => template.classic !== undefined);
+const shipped = (id: string): Template => {
+  const template = templateFor(id);
+  if (template === undefined) throw new Error(`the template ${id} is not shipped`);
+  return template;
+};
+const medieval = shipped("medieval-small");
 
 function blueprints(): [string, Blueprint][] {
-  return [...STYLES.values()].flatMap((style) => SIZES.map((size): [string, Blueprint] => [`${size} ${style.id}`, house({ ...HOUSE_SIZES[size], ...style.house })]));
+  return classicFiles.map((template): [string, Blueprint] => [template.id, template.blueprint]);
 }
 
 const key = (cell: { x: number; y: number; z: number }) => `${cell.x},${cell.y},${cell.z}`;
 
-test("every style is shipped with blocks that exist in 1.21.4 and are placed from an item of the same id", () => {
-  const data = minecraftData("1.21.4");
-  assert.deepEqual([...STYLES.keys()].sort(), ["japanese", "medieval", "rustic"]);
-  for (const style of STYLES.values()) {
-    for (const [role, block] of Object.entries(style.palette)) {
-      assert.ok(data.blocksByName[block], `${style.id} ${role}: ${block} is not a block`);
-      assert.ok(data.itemsByName[block], `${style.id} ${role}: ${block} has no item`);
-    }
-    for (const [role, shapes] of Object.entries(style.variants ?? {})) {
-      for (const [shape, block] of Object.entries(shapes)) {
-        assert.ok(data.blocksByName[block]?.name.endsWith(shape === "stairs" ? "_stairs" : "_slab"), `${style.id} ${role} ${shape}: ${block}`);
-        assert.ok(data.itemsByName[block], `${style.id} ${role} ${shape}: ${block} has no item`);
-      }
-    }
-    assert.ok(style.variants?.roof?.stairs && style.variants.roof.slab, `${style.id} has a stair roof`);
-  }
-});
-
 test("a small medieval house has the expected bill of materials", () => {
-  const plan = planHouse(STYLES.get("medieval")!, "small", chooseSite({ x: 0, y: 64, z: 0 }, null));
+  const plan = planTemplate(medieval, chooseSite({ x: 0, y: 64, z: 0 }, null));
   assert.deepEqual(plan.bill, [
     { item: "spruce_stairs", count: 42 },
     { item: "oak_planks", count: 36 },
@@ -78,11 +66,10 @@ test("houses are symmetric about the door, roofed over every floor cell, and bui
 });
 
 test("a placed house keeps its door on the site, its doorstep in front and its rooms behind, whatever the facing", () => {
-  const style = STYLES.get("japanese")!;
-  const blueprint = house({ ...HOUSE_SIZES.medium, ...style.house });
+  const { blueprint, palette } = shipped("japanese-medium");
   const door = { x: 100, y: 64, z: -40 };
   for (const facing of FACINGS) {
-    const cells = placeBlueprint(blueprint, style.palette, door, facing);
+    const cells = placeBlueprint(blueprint, palette, door, facing);
     const [fx, fz] = FACING_VECTOR[facing];
     assert.deepEqual(cells.filter((cell) => cell.role === "door").map(key), [key(door)]);
     assert.deepEqual(cells.filter((cell) => cell.role === "air" && (cell.x - door.x) * fx + (cell.z - door.z) * fz === 1).map(key).sort(),
@@ -91,7 +78,7 @@ test("a placed house keeps its door on the site, its doorstep in front and its r
       assert.ok((cell.x - door.x) * fx + (cell.z - door.z) * fz <= 0, `${facing}: floor ${key(cell)} in front of the door`);
     }
     assert.equal(new Set(cells.map(key)).size, cells.length);
-    assert.deepEqual(billOfMaterials(cells), billOfMaterials(placeBlueprint(blueprint, style.palette, door, "north")));
+    assert.deepEqual(billOfMaterials(cells), billOfMaterials(placeBlueprint(blueprint, palette, door, "north")));
   }
 });
 
@@ -101,16 +88,16 @@ test("the site is behind the bot, the door facing the requester, and the bot sta
   assert.deepEqual(chooseSite(bot, { x: 9, y: 64, z: 2 }), { door: { x: 10, y: 64, z: 12 }, facing: "north" });
   assert.deepEqual(chooseSite(bot, null), { door: { x: 10, y: 64, z: 12 }, facing: "north" });
   for (const toward of [{ x: 20, y: 64, z: 10 }, { x: 0, y: 64, z: 10 }, { x: 10, y: 64, z: 20 }, { x: 10, y: 64, z: 0 }]) {
-    for (const style of STYLES.values()) {
-      const plan = planHouse(style, "medium", chooseSite(bot, toward));
+    for (const template of classicFiles) {
+      const plan = planTemplate(template, chooseSite(bot, toward));
       const feet = [key({ x: 10, y: 64, z: 10 }), key({ x: 10, y: 65, z: 10 })];
-      assert.ok(plan.cells.every((cell) => !feet.includes(key(cell))), `${style.id} toward ${key(toward)} covers the bot`);
+      assert.ok(plan.cells.every((cell) => !feet.includes(key(cell))), `${template.id} toward ${key(toward)} covers the bot`);
     }
   }
 });
 
 test("batches go one layer at a time bottom up within the runtime limit, then clear every air cell again, then hang the door", () => {
-  const plan = planHouse(STYLES.get("medieval")!, "medium", chooseSite({ x: 0, y: 64, z: 0 }, null));
+  const plan = planTemplate(shipped("medieval-medium"), chooseSite({ x: 0, y: 64, z: 0 }, null));
   const { batches } = plan;
   assert.ok(batches.length >= 3);
   assert.ok(batches.every((batch) => batch.length <= MAX_BATCH_CELLS));
@@ -160,7 +147,7 @@ test("a shaped cell turns with the site: stairs keep facing up their slope and a
   const variants = { roof: { stairs: "spruce_stairs", slab: "spruce_slab" } };
   const turned = { north: ["north", "x"], south: ["south", "x"], east: ["east", "z"], west: ["west", "z"] } as const;
   for (const facing of FACINGS) {
-    const cells = placeBlueprint(blueprint, STYLES.get("medieval")!.palette, { x: 0, y: 64, z: 0 }, facing, variants);
+    const cells = placeBlueprint(blueprint, medieval.palette, { x: 0, y: 64, z: 0 }, facing, variants);
     const stairs = cells.find((cell) => cell.block === "spruce_stairs")!;
     const beam = cells.find((cell) => cell.role === "trim")!;
     const slab = cells.find((cell) => cell.block === "spruce_slab")!;
@@ -181,7 +168,7 @@ test("a shaped cell whose role has no variant in the style is the role's full bl
       { x: 1, y: 1, z: 1, role: "roof", shape: "stairs", facing: "north", half: "bottom" },
     ],
   };
-  const roof = placeBlueprint(blueprint, STYLES.get("medieval")!.palette, { x: 0, y: 64, z: 0 }, "north").find((cell) => cell.role === "roof")!;
+  const roof = placeBlueprint(blueprint, medieval.palette, { x: 0, y: 64, z: 0 }, "north").find((cell) => cell.role === "roof")!;
   assert.deepEqual(roof, { x: 1, y: 65, z: 1, block: "spruce_planks", role: "roof" });
 });
 
@@ -210,13 +197,4 @@ test("roofs are stairs facing up their slope with a slab ridge; beams lie along 
     }
     assert.ok(cells.filter((cell) => cell.role === "pillar").every((cell) => cell.axis === "y"), `${name} pillars stand`);
   }
-});
-
-test("a gable roof's slopes face each other and a one-cell ridge row is a slab", () => {
-  const blueprint = house({ width: 5, depth: 5, wallHeight: 3, roof: "gable", overhang: 1 });
-  const top = Math.max(...blueprint.cells.filter((cell) => cell.role === "roof").map((cell) => cell.y));
-  const ridge = blueprint.cells.filter((cell) => cell.role === "roof" && cell.y === top);
-  assert.ok(ridge.length > 0 && ridge.every((cell) => cell.shape === "slab"), "the top row is slab");
-  const facings = new Set(blueprint.cells.filter((cell) => cell.shape === "stairs").map((cell) => cell.facing));
-  assert.deepEqual([...facings].sort(), ["east", "west"], "5x5 slopes across x");
 });

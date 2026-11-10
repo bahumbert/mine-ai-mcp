@@ -121,7 +121,7 @@ export interface UnfinishedHouse {
   readonly part: number;
   /** False while its site is still to be leveled (an older note has none: its site counts as ready). */
   readonly prepared?: boolean;
-  /** The roles built with other blocks than the style's (an older note has none: as the style). */
+  /** The roles built with other blocks than the template's (an older note has none: as the template). */
   readonly materials?: Materials;
   /**
    * The cells the runtime refused in the last run that stopped on them (an older note has none). A refusal is often
@@ -767,8 +767,8 @@ async function buildStages(context: SkillContext, run: { plan: HousePlan; what: 
 }
 
 /**
- * Swaps the temporary parts of its own house for the style's blocks, in place: the house's cells are sent again with
- * the style's blocks in those roles, and `build_structure` digs the wrong block of a cell and places the right one
+ * Swaps the temporary parts of its own house for the template's blocks, in place: the house's cells are sent again with
+ * the template's blocks in those roles, and `build_structure` digs the wrong block of a cell and places the right one
  * (cells already right are skipped), so an interrupted swap is simply asked again.
  */
 async function improveHouse(context: SkillContext, step: Extract<Step, { skill: "improve_house" }>): Promise<SkillResult> {

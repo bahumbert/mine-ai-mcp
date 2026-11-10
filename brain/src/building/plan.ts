@@ -1,5 +1,4 @@
 import { billOfMaterials, buildBatches, cellsCountedOnce, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
-import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 import { supportGroups } from "./support.ts";
 import { stagesOf, type Stage, type Template } from "./templates.ts";
@@ -66,7 +65,7 @@ export function styleOrDefault(name: string | undefined): Style {
   return style;
 }
 
-/** Blocks other than the style's for some roles (what a bot carries, what the ground gave): the house is temporary. */
+/** Blocks other than the template's for some roles (what a bot carries, what the ground gave): the house is temporary. */
 export type Materials = Partial<Record<BlockRole, string>>;
 
 /**
@@ -89,21 +88,6 @@ export function planTemplate(template: Template, site: Site, materials: Material
     stages: stagesOf(template, batches, supportGroups(cells).groups),
     stageBill: (stage) => billOfMaterials(counted.slice(stage.first, stage.last + 1).flat()),
   };
-}
-
-/** The classic generator's house for `style` and `size` as a template, the regression's reference until the classic houses are files only. */
-function generatedTemplate(style: Style, size: HouseSize): Template {
-  const name = `${size} ${style.id} house`;
-  return {
-    id: `${style.id}-${size}`, family: style.family, name, description: style.description, kind: name,
-    blueprint: house({ ...HOUSE_SIZES[size], ...style.house }), palette: style.palette, variants: style.variants ?? {},
-    classic: { style: style.id, size },
-  };
-}
-
-/** The house the classic generator makes for `style` at `site` (see {@link planTemplate} for `materials`). */
-export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
-  return planTemplate(generatedTemplate(style, size), site, materials);
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof); a house with no roof role, the highest cell. */

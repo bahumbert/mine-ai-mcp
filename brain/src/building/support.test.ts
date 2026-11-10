@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildBatches, MAX_BATCH_CELLS, placeBlueprint, type Blueprint, type Facing, type Role, type Variants, type WorldCell } from "./blueprint.ts";
-import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
+import { buildBatches, MAX_BATCH_CELLS, placeBlueprint, type Blueprint, type Role, type Variants, type WorldCell } from "./blueprint.ts";
 import { fullCube, placeAgainst, supportGroups, validateBlueprint } from "./support.ts";
-import { STYLES } from "./styles.ts";
 
 const BLOCKS: Partial<Record<Role, string>> = { foundation: "cobblestone", floor: "oak_planks", wall: "oak_planks", pillar: "oak_log", roof: "spruce_planks", accent: "ladder", door: "oak_door" };
 
@@ -101,44 +99,6 @@ test("a 300-cell chain keeps its order across calls", () => {
     assert.ok(callOf.get(`${x},2,0`)! >= callOf.get(`${x - 1},2,0`)!, `cell ${x} is placed in an earlier call than its support`);
   }
   assert.ok(callOf.get("299,2,0")! > callOf.get("0,2,0")!, "the chain is split across calls");
-});
-
-/** Today's `batchCells` and `buildBatches` (one call per layer), copied so the classic houses can be pinned to them. */
-function layerBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): WorldCell[][] {
-  const layers = new Map<number, WorldCell[]>();
-  for (const c of cells) layers.set(c.y, [...(layers.get(c.y) ?? []), c]);
-  const batches: WorldCell[][] = [];
-  for (const y of [...layers.keys()].sort((a, b) => a - b)) {
-    const layer = layers.get(y) ?? [];
-    for (let start = 0; start < layer.length; start += max) batches.push(layer.slice(start, start + max));
-  }
-  return batches;
-}
-function oldBuildBatches(cells: readonly WorldCell[]): WorldCell[][] {
-  const doors = cells.filter((c) => c.role === "door");
-  const doorway = doors.flatMap((door): WorldCell[] => [
-    { x: door.x, y: door.y, z: door.z, block: "air", role: "air" },
-    { x: door.x, y: door.y + 1, z: door.z, block: "air", role: "air" },
-  ]);
-  const supports = cells.filter((c) => doors.some((door) => c.x === door.x && c.y === door.y - 1 && c.z === door.z));
-  const body = layerBatches([...cells.filter((c) => c.role !== "door"), ...doorway]);
-  const air = cells.filter((c) => c.role === "air");
-  const clearing: WorldCell[][] = [];
-  for (let start = 0; start < air.length; start += MAX_BATCH_CELLS) clearing.push(air.slice(start, start + MAX_BATCH_CELLS));
-  return [...body, ...clearing, ...(doors.length === 0 ? [] : [[...supports, ...doors]])];
-}
-
-test("classic batches are unchanged", () => {
-  const facings: readonly Facing[] = ["north", "south", "east", "west"];
-  for (const style of STYLES.values()) {
-    for (const size of Object.keys(HOUSE_SIZES) as HouseSize[]) {
-      const blueprint: Blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-      for (const facing of facings) {
-        const cells = placeBlueprint(blueprint, style.palette, { x: 0, y: 64, z: 0 }, facing, style.variants);
-        assert.deepEqual(buildBatches(cells), oldBuildBatches(cells), `${size} ${style.id} facing ${facing}`);
-      }
-    }
-  }
 });
 
 test("a ladder keeps its facing", () => {
@@ -251,14 +211,4 @@ test("18 layers is invalid", () => {
 test("31 wide is invalid", () => {
   const messages = problems({ ...blueprintOf(HUT), size: { x: 31, y: 4, z: 6 } });
   assert.ok(messages.some((message) => /30 x 30/u.test(message)), messages.join("; "));
-});
-
-// Every facing: templates.test.ts "every shipped template is valid at every facing" and classic-templates.test.ts.
-test("the six classic houses the generator makes are valid", () => {
-  for (const style of STYLES.values()) {
-    for (const size of Object.keys(HOUSE_SIZES) as HouseSize[]) {
-      const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
-      assert.deepEqual(validateBlueprint(blueprint, style.palette, style.variants ?? {}), [], `${size} ${style.id}`);
-    }
-  }
 });

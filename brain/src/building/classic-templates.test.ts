@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Facing } from "./blueprint.ts";
-import { cellsHash, projectCells } from "./cells-hash.ts";
-import { HOUSE_SIZES } from "./house.ts";
-import { planHouse, planTemplate } from "./plan.ts";
-import { STYLES } from "./styles.ts";
+import { cellsHash } from "./cells-hash.ts";
+import { planTemplate } from "./plan.ts";
 import { supportGroups } from "./support.ts";
 import { TEMPLATES } from "./templates.ts";
 
 const FACINGS: readonly Facing[] = ["north", "south", "east", "west"];
 
-/** The cells hash of each classic file at each facing, door at 0 64 0: pinned from the generator's output (export-classic-houses.ts, 2026-11-09), so it holds after `house()` is deleted. */
+/** The cells hash of each classic file at each facing, door at 0 64 0: pinned on 2026-11-09 from the output of the generator `house()`, deleted by Task 4d of the house-templates plan: the files are the classic houses now. */
 const PINNED_HASHES: Readonly<Record<string, string>> = {
   "japanese-small north": "ee05a26cc24e156bbfa7f39636a7a27cc580b4d26bb7182a82aa4a392e592a8f",
   "japanese-small south": "15d439107e95eb20136dc246e180a2484be858e5a7ff53fed01a14b44ac6388e",
@@ -53,25 +51,14 @@ test("the classic files place the cells they placed: the pinned hashes", () => {
   }
 });
 
-test("the classic files place what house() placed", () => {
+test("every classic file goes in layer by layer at every facing, then the clearing pass, then the door", () => {
   for (const template of classicFiles) {
-    const style = STYLES.get(template.classic!.style)!;
     for (const facing of FACINGS) {
-      const fromFile = projectCells(planTemplate(template, siteOf(facing)).cells);
-      const generated = projectCells(planHouse(style, template.classic!.size as keyof typeof HOUSE_SIZES, siteOf(facing)).cells);
-      assert.deepEqual(fromFile, generated, `${template.id} ${facing}`);
-    }
-  }
-});
-
-test("the classic files go in the same calls", () => {
-  const sortedCalls = (batches: readonly (readonly Parameters<typeof projectCells>[0][number][])[]) => batches.map((batch) => projectCells(batch));
-  for (const template of classicFiles) {
-    const style = STYLES.get(template.classic!.style)!;
-    for (const facing of FACINGS) {
-      const fromFile = planTemplate(template, siteOf(facing)).batches;
-      const generated = planHouse(style, template.classic!.size as keyof typeof HOUSE_SIZES, siteOf(facing)).batches;
-      assert.deepEqual(sortedCalls(fromFile), sortedCalls(generated), `${template.id} ${facing}`);
+      const { batches, cells } = planTemplate(template, siteOf(facing));
+      assert.deepEqual(batches.at(-1)!.map((cell) => cell.role), ["foundation", "door"], `${template.id} ${facing}`);
+      assert.ok(batches.at(-2)!.every((cell) => cell.block === "air"), `${template.id} ${facing} clearing`);
+      const layers = batches.slice(0, -2).map((batch) => batch[0]!.y);
+      assert.deepEqual([...new Set(layers)], [...new Set(cells.map((cell) => cell.y))].sort((a, b) => a - b), `${template.id} ${facing} layers bottom up`);
     }
   }
 });
