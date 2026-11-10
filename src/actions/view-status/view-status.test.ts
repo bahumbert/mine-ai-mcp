@@ -18,7 +18,7 @@ test("status names unknown melee cost instead of pricing a hoglin harmless", (t)
   const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
   assert.equal(Reflect.get(situation.nearby.hostiles[0]!.threat, "unknownMelee"), true);
   assert.equal(situation.nearby.fight!.margin, null);
-  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /unknown melee.*hoglin.*keep away/i);
+  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /unknown melee.*hoglin.*keep away, or hunt_mob it to fight anyway/i);
   assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation }), /no damaging contact is priced/);
 });
 

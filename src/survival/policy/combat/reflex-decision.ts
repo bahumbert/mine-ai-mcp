@@ -80,7 +80,7 @@ function describeOutmatched(facts?: CombatDecisionFacts): string {
   const { assessment, policy } = facts;
   const unknown = assessment.contacts.filter((contact) => contact.inContact && contact.unknownMelee);
   if (unknown.length)
-    return `outmatched: unknown melee damage from ${unknown.map((contact) => contact.species).join(", ")}; keep away or choose explicit pursuit/contact defence`;
+    return `outmatched: unknown melee damage from ${unknown.map((contact) => contact.species).join(", ")}; keep away, or hunt_mob it to fight anyway`;
   const counts = new Map<string, number>();
   for (const contact of assessment.contacts.filter((contact) => contact.inContact && contact.damagePerHit !== null && contact.damagePerHit > 0))
     counts.set(contact.species, (counts.get(contact.species) ?? 0) + 1);

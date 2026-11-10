@@ -1,11 +1,15 @@
 // Observed attackers and hazard identity shared by stance admission and movement.
 import { cellKey, type Position3 } from "../../../utils/index.js";
 import { hasMeleeKnockbackRoom, meleeKnockbackHazard } from "../../weapons/melee.js";
+import { isHostile } from "../../perception/combat/threats.js";
 import type { FightScene } from "./scene.js";
 
-/** The selected quarry and imminent contacts can push from different sides of the body. */
+/** Hostile quarry, defenders and imminent contacts can push from different sides of the body. */
 function meleeAttackerEntries(scene: FightScene, defender = scene.target) {
-  const attackers = new Map([[scene.target.id, scene.target.position], [defender.id, defender.position]]);
+  const attackers = new Map<number, Position3>();
+  for (const entity of [scene.target, defender]) {
+    if (isHostile(entity)) attackers.set(entity.id, entity.position);
+  }
   for (const threat of scene.perception.read()) {
     const entity = scene.bot.entities[threat.id];
     if (threat.meleeImminent && entity?.isValid) attackers.set(entity.id, entity.position);

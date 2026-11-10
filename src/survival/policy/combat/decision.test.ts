@@ -275,6 +275,9 @@ test("combat explanations give rounded costs without nested parentheses", () => 
       contacts: [...base.assessment.contacts, { ...base.assessment.contacts[0]!, id: 8 }] } };
   assert.equal(describeDirectiveReason("outmatched", facts),
     "outmatched: killing 2 zombie with bare hands would cost ~99 of your 20 health; margin 0.2 under fight_margin 1.5");
+  assert.match(describeDirectiveReason("outmatched", { ...base,
+    assessment: { ...base.assessment, contacts: [{ ...base.assessment.contacts[0]!, unknownMelee: true }] } }),
+    /unknown melee damage.*keep away, or hunt_mob it to fight anyway/);
   assert.equal(describeDirectiveReason("explosive", { ...base,
     contacts: [{ ...base.contacts[0]!, name: "creeper", distance: 3 }],
     assessment: { ...base.assessment, contacts: [{ ...base.assessment.contacts[0]!, species: "creeper",

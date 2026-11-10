@@ -34,7 +34,7 @@ export function statusThreatLines(nearby: Nearby): string[] {
   if (!fight) return lines;
   const unknown = nearby.hostiles.filter((hostile) => hostile.threat.unknownMelee);
   if (unknown.length) {
-    lines.push(`- Unknown melee cost for ${unknown.map((hostile) => hostile.name).join(", ")}; keep away or choose explicit pursuit/contact defence. A complete fight margin is unavailable for an unknown contact.`);
+    lines.push(`- Unknown melee cost for ${unknown.map((hostile) => hostile.name).join(", ")}; keep away, or hunt_mob it to fight anyway. A complete fight margin is unavailable for an unknown contact.`);
     return lines;
   }
   const groups = new Map<string, { name: string; hits: number; count: number }>();
