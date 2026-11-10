@@ -1,0 +1,49 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-builds-minka
+tags: [acceptance]
+description: >-
+  The minka template built call by call, as the build skill sends it, from exactly its bill (plus 32 dirt for the
+  routes' scaffold): shows the placement rules agree with the support engine for what no game has placed yet. Every cell
+  of the house and of the ring around it is read back (name, facing, half, axis), so a block that did not take, a
+  ladder facing the wrong way or a scaffold left standing fails the run.
+
+# The house stands on dirt (the floor replaces its top layer), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: spruce_stairs, count: 60 }
+      - { item: dark_oak_log, count: 41 }
+      - { item: polished_diorite, count: 31 }
+      - { item: spruce_planks, count: 28 }
+      - { item: cobblestone, count: 20 }
+      - { item: spruce_fence, count: 6 }
+      - { item: hay_block, count: 3 }
+      - { item: birch_door, count: 1 }
+      - { item: dirt, count: 32 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: minka
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

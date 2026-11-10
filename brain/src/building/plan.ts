@@ -1,6 +1,6 @@
 import { billOfMaterials, buildBatches, cellsCountedOnce, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
-import { supportGroups } from "./support.ts";
+import { supportGroups, withStatesItHas } from "./support.ts";
 import { stagesOf, type Stage, type Template } from "./templates.ts";
 
 /** Blocks between the bot's feet and the door: the bot stands on the doorstep's far side, clear of every cell. */
@@ -80,7 +80,7 @@ export function planTemplate(template: Template, site: Site, materials: Material
   const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => template.palette[role as BlockRole] !== undefined && template.palette[role as BlockRole] !== block)) as Materials;
   const variants = Object.fromEntries(Object.entries(template.variants).filter(([role]) => other[role as BlockRole] === undefined));
   const cells = placeBlueprint(template.blueprint, { ...template.palette, ...other }, site.door, site.facing, variants)
-    .map((cell) => other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, facing: _facing, half: _half, ...rest }) => rest)(cell));
+    .map((cell) => other[cell.role as BlockRole] === undefined ? withStatesItHas(cell) : (({ axis: _axis, facing: _facing, half: _half, ...rest }) => rest)(cell));
   const batches = buildBatches(cells);
   const counted = cellsCountedOnce(batches);
   return {

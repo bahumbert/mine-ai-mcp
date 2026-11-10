@@ -36,16 +36,85 @@ export function fullCube(block: string): boolean {
   });
 }
 
+const HORIZONTAL_FACINGS = ["north", "south", "west", "east"] as const;
+const clingingBlocks = new Map<string, boolean>();
+
+/** Whether `box` is a plate spanning the whole cell but the `thickness` along `facing`'s axis, flush with the face behind `facing`. */
+function isPlateBehind(box: readonly number[], facing: (typeof HORIZONTAL_FACINGS)[number]): boolean {
+  const [dx, dz] = FACING_VECTOR[facing];
+  const axis = dx !== 0 ? 0 : 2;
+  const sign = dx !== 0 ? dx : dz;
+  const [lo, hi] = [box[axis]!, box[axis + 3]!];
+  const flush = sign < 0 ? lo > 0 && hi === 1 : lo === 0 && hi < 1;
+  const full = [0, 1, 2].filter((index) => index !== axis).every((index) => box[index] === 0 && box[index + 3] === 1);
+  return flush && full;
+}
+
+/**
+ * Whether the block clings to the face behind its `facing` (a ladder): its horizontal `facing` is the face it was
+ * placed against, and in every state of one facing its collision is the one thin plate flush with the cell's face behind
+ * it (a door or trapdoor changes shape with `open` or `half`, stairs and gates are no plate). Read from the registry's
+ * collision shapes, no list of names; a clinging block with no collision (torch, sign) is not seen. A copy of
+ * `clingsBehindFacing` in `src/world/block-states.ts`; `face-fits-agree.test.ts` keeps them one.
+ */
+export function clingsBehindFacing(block: string): boolean {
+  const known = clingingBlocks.get(block);
+  if (known !== undefined) return known;
+  const clings = computeClings(block);
+  clingingBlocks.set(block, clings);
+  return clings;
+}
+
+function computeClings(block: string): boolean {
+  const states = registry.blocksByName[block]?.states ?? [];
+  const facingIndex = states.findIndex((state) => state.name === "facing");
+  const facing = states[facingIndex];
+  const values = facing?.values;
+  if (facing === undefined || values === undefined || values.length !== HORIZONTAL_FACINGS.length || !HORIZONTAL_FACINGS.every((name) => values.includes(name))) return false;
+  const reference = registry.blockCollisionShapes.blocks[block];
+  if (reference === undefined) return false;
+  const shapeIds = Array.isArray(reference) ? reference : [reference];
+  // State ids run through the properties in order, the last one fastest: the facing changes every `stride` states.
+  const stride = states.slice(facingIndex + 1).reduce((product, state) => product * (state.num_values ?? 1), 1);
+  return HORIZONTAL_FACINGS.every((name) => {
+    const index = values.indexOf(name);
+    const shapes = new Set(shapeIds.filter((_, stateIndex) => Math.floor(stateIndex / stride) % values.length === index));
+    const [only] = [...shapes];
+    const boxes = only === undefined ? undefined : registry.blockCollisionShapes.shapes[only];
+    return shapes.size === 1 && boxes?.length === 1 && isPlateBehind(boxes[0]!, name);
+  });
+}
+
 /**
  * Whether placing against this face (pointing from the support into the cell) gives the cell its asked states: a copy of
  * `faceFits` in `src/navigation/processes/building/build-process.ts` (the brain imports no `src/` module);
- * `face-fits-agree.test.ts` keeps them one.
+ * `face-fits-agree.test.ts` keeps them one. A block that clings (`clings`, a ladder) is placed against the face behind
+ * its facing only: the server refuses its click on any other.
  */
-export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: { readonly half?: "top" | "bottom"; readonly axis?: "x" | "y" | "z" }): boolean {
+export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: { readonly half?: "top" | "bottom"; readonly axis?: "x" | "y" | "z"; readonly facing?: (typeof HORIZONTAL_FACINGS)[number] }, clings = false): boolean {
+  if (clings && cell.facing !== undefined) {
+    const [dx, dz] = FACING_VECTOR[cell.facing];
+    if (face.x !== dx || face.y !== 0 || face.z !== dz) return false;
+  }
   if (cell.axis !== undefined && (cell.axis === "x" ? face.x : cell.axis === "y" ? face.y : face.z) === 0) return false;
   if (cell.half === "top" && face.y > 0) return false;
   if (cell.half === "bottom" && face.y < 0) return false;
   return true;
+}
+
+/**
+ * The cell as it asks states: the facing, half (a slab's `type`) and axis its block has a property for, never one it
+ * lacks (planks with an `axis`: the audit would read the cell wrong for ever). Task 7b bug 2.
+ */
+export function withStatesItHas(cell: WorldCell): WorldCell {
+  const names = new Set((registry.blocksByName[cell.block]?.states ?? []).map((state) => state.name));
+  const { facing, half, axis, ...rest } = cell;
+  return {
+    ...rest,
+    ...(facing !== undefined && names.has("facing") && { facing }),
+    ...(half !== undefined && (names.has("half") || names.has("type")) && { half }),
+    ...(axis !== undefined && names.has("axis") && { axis }),
+  };
 }
 
 const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
@@ -88,7 +157,7 @@ function isGround(layout: Layout, x: number, y: number, z: number): boolean {
 /** Whether `cell` can be placed against something already placed (or the ground) in a face that gives it its states. */
 function restsOnPlaced(cell: WorldCell, placed: ReadonlyMap<string, WorldCell>, layout: Layout): boolean {
   return SUPPORT_OFFSETS.some(([dx, dy, dz]) => {
-    if (!faceFits({ x: -dx, y: -dy, z: -dz }, cell)) return false;
+    if (!faceFits({ x: -dx, y: -dy, z: -dz }, cell, clingsBehindFacing(cell.block))) return false;
     const [x, y, z] = [cell.x + dx, cell.y + dy, cell.z + dz];
     const support = placed.get(key(x, y, z));
     return support === undefined ? isGround(layout, x, y, z) : placeAgainst(support.block);

@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-builds-saltbox
+tags: [acceptance]
+description: >-
+  The saltbox template built call by call, as the build skill sends it, from exactly its bill (plus 32 dirt for the
+  routes' scaffold): shows the placement rules agree with the support engine for what no game has placed yet. Every cell
+  of the house and of the ring around it is read back (name, facing, half, axis), so a block that did not take, a
+  ladder facing the wrong way or a scaffold left standing fails the run.
+
+# The house stands on dirt (the floor replaces its top layer), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: birch_planks, count: 64 }
+      - { item: birch_planks, count: 64 }
+      - { item: birch_planks, count: 23 }
+      - { item: oak_planks, count: 64 }
+      - { item: oak_planks, count: 18 }
+      - { item: dark_oak_stairs, count: 64 }
+      - { item: dark_oak_stairs, count: 17 }
+      - { item: cobblestone, count: 30 }
+      - { item: oak_log, count: 22 }
+      - { item: oak_fence, count: 11 }
+      - { item: glass_pane, count: 10 }
+      - { item: dark_oak_planks, count: 9 }
+      - { item: ladder, count: 5 }
+      - { item: dark_oak_door, count: 1 }
+      - { item: dirt, count: 32 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: saltbox
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chooseSite, planTemplate } from "./plan.ts";
-import { templateFor } from "./templates.ts";
+import minecraftData from "minecraft-data";
+import { TEMPLATES, templateFor } from "./templates.ts";
 
 const site = chooseSite({ x: 0, y: 64, z: 0 }, null);
 const medieval = templateFor("medieval-small")!;
@@ -43,6 +44,28 @@ test("a roof built with another block builds full blocks: the template's stairs 
   assert.ok(roof.length > 0 && roof.every((cell) => cell.block === "dirt" && cell.facing === undefined && cell.half === undefined));
   assert.ok(plan.bill.every((entry) => entry.item !== "spruce_stairs" && entry.item !== "spruce_slab"));
   assert.ok(planTemplate(medieval, site, { wall: "dirt" }).bill.some((entry) => entry.item === "spruce_stairs"));
+});
+
+// Task 7b bug 2: the classic japanese files give their trim `axis` over dark_oak_planks; the audit asked a state the planks
+// lack and the 16 trim cells never counted as right (backlog "Vex's medium japanese house fails part 4/9", runs 15, 16).
+test("a cell asks only the states its block has: japanese trim planks ask no axis", () => {
+  const plan = planTemplate(templateFor("japanese-medium")!, site);
+  const trim = plan.cells.filter((cell) => cell.role === "trim");
+  assert.equal(trim.length, 16);
+  assert.ok(trim.every((cell) => cell.block === "dark_oak_planks" && cell.axis === undefined));
+});
+
+test("every cell of every template names only properties its block has", () => {
+  const registry = minecraftData("1.21.4");
+  for (const template of TEMPLATES.values()) {
+    for (const cell of planTemplate(template, site).cells) {
+      const names = new Set((registry.blocksByName[cell.block]?.states ?? []).map((state) => state.name));
+      const where = `${template.id} ${cell.x},${cell.y},${cell.z} ${cell.block}`;
+      if (cell.axis !== undefined) assert.ok(names.has("axis"), `${where} asks axis`);
+      if (cell.facing !== undefined) assert.ok(names.has("facing"), `${where} asks facing`);
+      if (cell.half !== undefined) assert.ok(names.has("half") || names.has("type"), `${where} asks half`);
+    }
+  }
 });
 
 test("air windows leave no glass in the bill", () => {

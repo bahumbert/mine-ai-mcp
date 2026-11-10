@@ -26,7 +26,7 @@ const SIDEWAYS = arenaFrame({ x: 64, z: 1536 });
 /** Drivers that wait on the wall clock for a boat ride have their own test (`cancel-mid-ride.test.ts`, `cancel-after-get-off.test.ts`). */
 const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts"]);
 /** Wall-clock waits of a driver's params, cut to nothing: the census reads what the driver asks, not how long it waits. */
-const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0 };
+const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0, cancelAfterMs: 0 };
 
 /** A step of `params.actions` (action-sequence, buried-items-stay-buried): the status it must end with, and the text its error must hold. */
 interface ParamsStep {

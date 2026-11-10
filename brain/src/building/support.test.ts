@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildBatches, MAX_BATCH_CELLS, placeBlueprint, type Blueprint, type Role, type Variants, type WorldCell } from "./blueprint.ts";
-import { fullCube, placeAgainst, supportGroups, validateBlueprint } from "./support.ts";
+import { clingsBehindFacing, fullCube, placeAgainst, supportGroups, validateBlueprint, withStatesItHas } from "./support.ts";
 
 const BLOCKS: Partial<Record<Role, string>> = { foundation: "cobblestone", floor: "oak_planks", wall: "oak_planks", pillar: "oak_log", roof: "spruce_planks", accent: "ladder", door: "oak_door" };
 
@@ -112,6 +112,40 @@ test("a ladder keeps its facing", () => {
   assert.equal(ladder?.block, "ladder");
   // South in the blueprint frame is west once the front faces east.
   assert.equal(ladder?.facing, "west");
+});
+
+// Task review: the facing and half branches of the state filter (the axis one is held by plan.test.ts).
+test("a cell keeps the states its block has and loses the ones it lacks", () => {
+  const asked = { facing: "east", half: "top", axis: "x" } as const;
+  const kept = (block: string) => { const { x, y, z, role, ...states } = withStatesItHas(cell(0, 0, 0, "wall", { block, ...asked })); void [x, y, z, role]; return states; };
+  assert.deepEqual(kept("spruce_stairs"), { block: "spruce_stairs", facing: "east", half: "top" });
+  assert.deepEqual(kept("spruce_slab"), { block: "spruce_slab", half: "top" }, "a slab's half is its `type`");
+  assert.deepEqual(kept("oak_log"), { block: "oak_log", axis: "x" });
+  assert.deepEqual(kept("dark_oak_planks"), { block: "dark_oak_planks" });
+});
+
+// Task 7b bug 1 (scenarios pagoda-house, adobe-pueblo, saltbox): the engine took the floor as a ladder's support; the
+// server refuses a ladder placed on a floor face, it clings to the wall behind its facing.
+test("a block that clings to the face behind its facing is read from the game's collision shapes, not from a list of names", () => {
+  // (that the ladder is the one block that clings in 1.21.4 is held by face-fits-agree.test.ts)
+  for (const block of ["oak_stairs", "oak_door", "oak_trapdoor", "oak_fence_gate", "furnace", "lantern", "cobblestone", "oak_log", "spruce_slab"]) {
+    assert.equal(clingsBehindFacing(block), false, block);
+  }
+  assert.equal(clingsBehindFacing("no_such_block"), false);
+});
+
+test("a ladder goes after the wall behind its facing, never against the floor under it", () => {
+  const ladder = (y: number) => cell(1, y, 0, "accent", { facing: "east" });
+  const base = [cell(0, 0, 0, "floor"), cell(1, 0, 0, "floor")];
+  // Wall behind (x = 0) listed in the same layer: the ladder is in a later round than its wall.
+  const held = supportGroups([...base, cell(0, 1, 0, "wall"), ladder(1)]);
+  assert.deepEqual(held.unsupported, []);
+  assert.equal(at(held.groups, 1, 1, 0)?.group, at(held.groups, 0, 1, 0)?.group);
+  assert.ok(at(held.groups, 1, 1, 0)!.round > at(held.groups, 0, 1, 0)!.round, "the ladder waits for its wall");
+  // No wall behind it: the floor under it is no support for a ladder.
+  assert.deepEqual(supportGroups([...base, ladder(1)]).unsupported.map((c) => c.block), ["ladder"]);
+  // A wall on another side is none either.
+  assert.equal(supportGroups([...base, cell(1, 1, 1, "wall"), cell(2, 1, 0, "wall"), ladder(1)]).unsupported.length, 1);
 });
 
 // ---- validateBlueprint: a 5x5 hut behind a one-row yard, layers[y][z] rows, x along the row ----

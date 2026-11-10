@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Facing } from "./blueprint.ts";
+import { placeBlueprint, type Facing } from "./blueprint.ts";
 import { cellsHash } from "./cells-hash.ts";
 import { planTemplate } from "./plan.ts";
 import { supportGroups } from "./support.ts";
@@ -45,9 +45,15 @@ test("there are six classic files and each has its hashes pinned", () => {
   for (const template of classicFiles) for (const facing of FACINGS) assert.ok(PINNED_HASHES[`${template.id} ${facing}`], `${template.id} ${facing}`);
 });
 
+// The file's own cells, as `house()` listed them: before `planTemplate` drops a state its block lacks (task 7b: the
+// japanese trim asks an `axis` that dark_oak_planks has no property for, so the plan leaves it out and the audit can hold it).
 test("the classic files place the cells they placed: the pinned hashes", () => {
   for (const template of classicFiles) {
-    for (const facing of FACINGS) assert.equal(cellsHash(planTemplate(template, siteOf(facing)).cells), PINNED_HASHES[`${template.id} ${facing}`], `${template.id} ${facing}`);
+    for (const facing of FACINGS) {
+      const { door } = siteOf(facing);
+      const cells = placeBlueprint(template.blueprint, template.palette, door, facing, template.variants);
+      assert.equal(cellsHash(cells), PINNED_HASHES[`${template.id} ${facing}`], `${template.id} ${facing}`);
+    }
   }
 });
 
