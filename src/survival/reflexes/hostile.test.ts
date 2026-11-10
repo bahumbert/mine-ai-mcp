@@ -69,6 +69,22 @@ test("a formerly unreachable attacker in reach is fought by a healthy defender w
   }
 });
 
+test("a remembered unreachable fight against target 7 does not prevent fighting target 8", async () => {
+  const fixture = reflexFixture(async (id) => { fixture.entities.remove(id); return died(id); }, undefined,
+    { entities: { 8: hostile("blaze", 6) } });
+  try {
+    fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
+      { kind: "unreachable", why: "Earlier approach stopped." },
+      { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+    fixture.tick();
+    await fixture.clock.advance(50);
+    assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
+  } finally {
+    await fixture.observer.close();
+    fixture.data.close();
+  }
+});
+
 test("a cancel or a death mid-fight remembers nothing", async () => {
   for (const stop of ["cancel", "death"] as const) {
     const fixture = standoffScene(7);

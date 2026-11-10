@@ -22,6 +22,10 @@ import { build, type BuildCell } from "./build-process.js";
 const SITE = { x0: 2737, x1: 2745, z0: -380, z1: -372, y: 62 };
 const AREA = { x0: 2728, x1: 2756, z0: -392, z1: -362 };
 const FEET = { x: 2743, y: 61, z: -375 };
+// The 3x3x3 neighbourhood has 26 other cells; visibility can try six faces per cell.
+// Measured 2026-11-10: at most 8 reads and 8 rays across the four starting positions.
+const NEIGHBOURS_PER_CELL = 26;
+const FACES_PER_NEIGHBOUR = 6;
 
 /** Stone floor at y 60, water at y 61-62 over all of it (one-deep around the bot), air above. */
 function cellName(x: number, y: number, z: number): string {
@@ -101,7 +105,7 @@ for (const away of [0, 8, 16, 24]) {
       const update = search.advance({ maximumExpansions: 5 });
       if (update.kind !== "progress") break;
     }
-    assert.ok(reads <= cells.length * 26, `block reads: ${reads}`);
-    assert.ok(rays <= cells.length * 26 * 6, `raycasts: ${rays}`);
+    assert.ok(reads <= cells.length * NEIGHBOURS_PER_CELL, `block reads: ${reads}`);
+    assert.ok(rays <= cells.length * NEIGHBOURS_PER_CELL * FACES_PER_NEIGHBOUR, `raycasts: ${rays}`);
   });
 }
