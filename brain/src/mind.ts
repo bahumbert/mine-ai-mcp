@@ -54,6 +54,7 @@ export interface KnownPlace {
    * note carries those two only (`templateOfHouse` finds its template).
    */
   readonly house?: {
+    /** A classic house (one of the six exported files) is remembered by its size and style, any other template by its id and family. */
     readonly template?: string;
     readonly family?: string;
     readonly size?: ClassicSize;

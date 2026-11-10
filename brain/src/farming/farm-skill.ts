@@ -5,7 +5,8 @@ import type { KnownFarm } from "../memory.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { describeWay, firstOfOwnSeed } from "../gathering.ts";
 import { describeOverlaps, overlapsOf } from "../protected-areas.ts";
-import { findPlayer, levelZone, navigateInput, nearestClearSpot, noteArea, releaseArea, SITE_SEARCH, type SkillContext, type SkillResult } from "../skills.ts";
+import { nearestClearSpot, SITE_SEARCH } from "../building/house-site.ts";
+import { findPlayer, levelZone, navigateInput, noteArea, releaseArea, type SkillContext, type SkillResult } from "../skills.ts";
 import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 

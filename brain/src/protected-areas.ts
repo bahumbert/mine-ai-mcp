@@ -1,6 +1,6 @@
 // Protected areas as the skills read them: which ones a box overlaps, whose they are, and what they are called to the
 // model (her own unfinished or finished house, someone else's area). Pure functions over `ProtectedArea`.
-import { resumeStep, templateOfHouse } from "./building/templates.ts";
+import { resumeStep, templateOfHouse, type Template } from "./building/templates.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { Position, ProtectedArea } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
@@ -22,6 +22,11 @@ export function overlapsBox(area: ProtectedArea, { min, max }: Box): boolean {
 /** Protected areas a box overlaps, her leveling margins and `except` (the region of the work itself) left out. */
 export function overlapsOf(areas: readonly ProtectedArea[], box: Box, except: readonly number[] = []): ProtectedArea[] {
   return areas.filter((area) => !except.includes(area.regionId) && !area.label.startsWith(LEVELING_LABEL) && overlapsBox(area, box));
+}
+
+/** Her own leveling margins over a box: what a leveling job left behind when its release failed (a job that runs is not between steps). */
+export function ownLevelingOver(owner: Owner, areas: readonly ProtectedArea[], box: Box): ProtectedArea[] {
+  return areas.filter((area) => area.owner === owner.self && area.label.startsWith(LEVELING_LABEL) && overlapsBox(area, box));
 }
 
 /** "#4 'small medieval house' (yours: leveling would dig it up)": what an area is, whose, for the model to weigh. */
@@ -65,6 +70,8 @@ interface SiteHouses extends Owner {
   readonly places: readonly KnownPlace[];
   /** How near its door a `build` must be to go on with the unfinished house. */
   readonly resumeRange: number;
+  /** The houses she may build (default: the shipped registry): a finished house's kind is read from its template. */
+  readonly templates?: ReadonlyMap<string, Template> | undefined;
 }
 
 /**
@@ -76,10 +83,13 @@ export function describeSiteBlocker(houses: SiteHouses, area: ProtectedArea): st
   const holds = (label: string, door: Position) => earlierProtections(houses, label, door, -1, [area]).length > 0;
   const { unfinished } = houses;
   if (unfinished !== null && unfinished !== undefined && holds(unfinished.kind, unfinished.site.door)) {
-    return `an area of yours, that is your unfinished ${unfinished.kind} (area #${area.regionId}, door at ${coords(unfinished.site.door)}): ${resumeStep(unfinished)} within ${houses.resumeRange} blocks of that door to go on with it, or {"skill":"abandon_house"} to give it up`;
+    const heading = `an area of yours, that is your unfinished ${unfinished.kind} (area #${area.regionId}, door at ${coords(unfinished.site.door)})`;
+    // A house whose template is gone has no step that goes on with it: only giving it up is left.
+    if (templateOfHouse(unfinished, houses.templates) === undefined) return `${heading}: its template is no longer a house you know how to build: {"skill":"abandon_house"} gives it up`;
+    return `${heading}: ${resumeStep(unfinished, houses.templates)} within ${houses.resumeRange} blocks of that door to go on with it, or {"skill":"abandon_house"} to give it up`;
   }
   for (const { house } of houses.places) {
-    const kind = house === undefined ? undefined : templateOfHouse(house)?.kind;
+    const kind = house === undefined ? undefined : templateOfHouse(house, houses.templates)?.kind;
     if (house !== undefined && kind !== undefined && holds(kind, house.door)) {
       return `an area of yours, your ${kind}, door at ${coords(house.door)} (area #${area.regionId}): build somewhere else`;
     }

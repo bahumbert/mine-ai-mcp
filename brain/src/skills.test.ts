@@ -4,7 +4,8 @@ import minecraftData from "minecraft-data";
 import { fuelsOf } from "#src/world/smelting.ts";
 import { describeStep, skillUsage, stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { houseBox, listHouses, resumeStep, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
+import { houseBox } from "./building/house-site.ts";
+import { listHouses, resumeStep, runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import { RARE_DROP_BREAKS } from "./gathering.ts";
 import { catalogueLine, TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import { neededItems } from "./inventory-room.ts";
@@ -641,12 +642,12 @@ test("a furnace item whose input cannot be gathered ends get_items with the runt
   assert.deepEqual(runtime.submitted.map(describeCall), ["collect beef"]);
 });
 
-test("a house without its blocks is refused with the exact shortfall, before any block is touched", async () => {
+test("a house without the blocks of its first stage is refused with the exact shortfall, before any block is touched", async () => {
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 30 }, { name: "cobblestone", count: 64 }] };
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 30 }, { name: "cobblestone", count: 4 }] };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
   assert.equal(result.status, "failed");
-  assert.match(result.status === "failed" ? result.detail : "", /^missing 42 spruce_stairs, 6 oak_planks, 24 oak_log, 7 spruce_slab, 3 glass_pane, 1 oak_door for a small medieval house/u);
+  assert.match(result.status === "failed" ? result.detail : "", /^missing 11 cobblestone for stage 1 of 4 \(floor\) of a small medieval house \(the rest is carried\): fetch exactly the missing items with get_items, then \{"skill":"build","template":"medieval-small"\} again$/u);
   assert.equal(runtime.submitted.length, 0);
 });
 
@@ -691,7 +692,8 @@ test("building again resumes an unfinished house at the same site and part, with
   const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.match(first.status === "failed" ? first.detail : "", /stopped at part 1\/\d+: .*; building it again resumes it there$/u);
   // Back near the site (get_items walks back to where it started), it resumes there.
-  runtime.snapshot = { ...runtime.snapshot, position: { x: 3.5, y: 64, z: 0.5 }, inventory: [{ name: "oak_door", count: 1 }] };
+  // The stage it stopped in is billed again (nothing of it stands in the fake world): the blocks are carried.
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 3.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
   const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.equal(second.status, "done");
   const calls = builds(runtime);
@@ -722,8 +724,8 @@ test("one refused cell keeps the unfinished house and records the cell (run 13 r
   assert.doesNotMatch(detail, /build somewhere else/u);
   assert.ok(building.unfinished !== null, "the house is kept");
   assert.deepEqual(building.unfinished.refused, [{ x: 1, y: 64, z: 1 }], "with the cell that was refused");
-  // Resumed, the cell is built this time: the house is done.
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_door", count: 1 }] };
+  // Resumed, the cell is built this time: the house is done (the stage it stopped in is billed again: its blocks are carried).
+  runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
   assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", building }))).status, "done");
   assert.equal(building.unfinished, null);
 });
@@ -835,7 +837,7 @@ test("asked to build far from an unfinished house, she starts a new one where sh
   assert.match(second.status === "done" ? second.detail : "", /door at 2[0-9] 64/u);
 });
 
-test("an unfinished house is checked again from its first part, so what was dug out since is put back", async () => {
+test("an unfinished house goes on from the first part of its stage and is checked again part by part at the end, so what was dug out since is put back", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
   const building = { unfinished: null };
@@ -850,7 +852,9 @@ test("an unfinished house is checked again from its first part, so what was dug 
   const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.equal(second.status, "done");
   const calls = builds(runtime);
-  assert.deepEqual(calls[3]!.blocks, calls[0]!.blocks, "the second build starts again at part 1");
+  // The third part of nine is in the walls stage (parts 2-4): the floor stage is not built again, the walls are, from their first part.
+  assert.deepEqual(calls[3]!.blocks, calls[1]!.blocks, "the second build starts again at the first part of its stage");
+  assert.ok(calls.slice(11).some((call) => JSON.stringify(call.blocks) === JSON.stringify(calls[0]!.blocks)), "the final check sends the floor again");
 });
 
 test("a fetch that got its items is done when only the walk back failed (live 2026-10-10 run 10: counted as failed, the explore loop followed)", async () => {
@@ -1056,7 +1060,7 @@ test("a site that could not be leveled is leveled again by the next build, befor
   const first = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.equal(first.status, "failed");
   assert.match(first.status === "failed" ? first.detail : "", /^could not prepare the site of a small medieval house: leveling stopped at 1\/1: \[BUILD_STOPPED\]/u);
-  assert.deepEqual(building.unfinished, { kind: "small medieval house", site: { door: { x: -2, y: 64, z: 0 }, facing: "east" }, part: 0, prepared: false, materials: {} });
+  assert.deepEqual(building.unfinished, { ...MEDIEVAL_SMALL_RECORD, site: { door: { x: -2, y: 64, z: 0 }, facing: "east" }, part: 0, prepared: false, materials: {} });
   const second = await runStep({ skill: "build", structure: "house", size: "small" }, context);
   assert.equal(second.status, "done");
   assert.deepEqual(builds(runtime)[1]!.blocks, [{ x: -4, y: 64, z: 0, block_name: "air" }], "the site is leveled again first");
@@ -1072,11 +1076,11 @@ test("a house at given coordinates has its door there and is built from in front
   assert.deepEqual(runtime.submitted.find((call) => call.tool === "navigate")?.input, { x: 20, y: 64, z: 6, range: 1 });
 });
 
-test("a missing material names only what is missing, as the get_items step to take", async () => {
+test("a missing material names only what is missing, as the get_items step to take, when the stage that needs it comes", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL.filter((stack) => stack.name !== "spruce_slab") };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval" }));
-  assert.deepEqual(result, { status: "failed", detail: "missing 7 spruce_slab for a small medieval house (the rest is carried): fetch exactly the missing items with get_items, then build again" });
+  assert.deepEqual(result, { status: "done", detail: "stages 1-2 of 4 of the small medieval house are built (door at 0 64 2): the roof (stage 3) needs 7 spruce_slab: fetch exactly those with get_items, then {\"skill\":\"build\",\"template\":\"medieval-small\"} again to go on" });
 });
 
 test("a house's blocks carry their states to build_structure: stairs facing and half, beams along their wall", async () => {
@@ -1778,6 +1782,116 @@ test("improving the walls sends the style's blocks for them, remembers the roof 
   assert.ok(roofBlocks.includes("spruce_stairs") && roofBlocks.includes("spruce_slab"), "the style's variants come back");
   assert.deepEqual(places.at(-1)!.house?.materials, {});
   assert.deepEqual(roof, { status: "done", detail: "improved your small medieval house: roof now spruce_planks" });
+});
+
+/** A house the context's registry holds and the shipped one does not: the swap must read the template through the context. */
+const TEST_HUT: Template = { ...templateFor("japanese-small")!, id: "test-hut", family: "test", name: "test hut", kind: "test hut", description: "A hut of the test registry." };
+const HUT_DOOR = { x: 0, y: 64, z: 2 };
+
+test("improve_house swaps a house's temporary parts for its own template's blocks: a template of the context's registry, an old classic note", async () => {
+  const classicWall = templateFor("rustic-small")!.palette.wall!;
+  for (const { name, kind, house, templates, wall } of [
+    { name: "a template house", kind: "test hut", house: { template: "test-hut", family: "test" }, templates: new Map([["test-hut", TEST_HUT]]), wall: TEST_HUT.palette.wall! },
+    { name: "an old classic note (size and style, no template)", kind: "small rustic house", house: { size: "small" as const, style: "rustic" }, templates: undefined, wall: classicWall },
+  ]) {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: wall, count: 400 }] };
+    const place: KnownPlace = { name: `the ${kind} you built`, detail: "door 0 64 2 facing north; stand on its roof at 0 70 0", own: true, house: { ...house, door: HUT_DOOR, facing: "north", materials: { wall: "dirt" } } };
+    const places: KnownPlace[] = [];
+    const result = await runStep({ skill: "improve_house" }, contextFor(runtime, { ...(templates !== undefined && { templates }), ownHouse: () => place, remember: (next) => places.push(next) }));
+    assert.deepEqual(result, { status: "done", detail: `improved your ${kind}: wall now ${wall}` }, name);
+    assert.ok(builds(runtime).flatMap((call) => call.blocks.map((cell) => cell.block_name)).includes(wall), `${name}: the template's wall block is sent`);
+    assert.deepEqual(places.at(-1)!.house, { ...house, door: HUT_DOOR, facing: "north", materials: {} }, `${name}: the record keeps how the house is known and has no temporary part left`);
+  }
+});
+
+test("improve_house on a house whose template is gone fails, saying its temporary parts stay, and sends nothing", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
+  const place: KnownPlace = { name: "the gone hut you built", detail: "door 0 64 2 facing north; stand on its roof at 0 70 0", own: true, house: { template: "gone-hut", family: "test", door: HUT_DOOR, facing: "north", materials: { wall: "dirt" } } };
+  const result = await runStep({ skill: "improve_house" }, contextFor(runtime, { ownHouse: () => place }));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /^the gone hut you built is no longer a house you know how to build: its temporary parts stay as they are$/u);
+  assert.equal(runtime.submitted.length, 0);
+});
+
+/** An unfinished house at door 0 64 2, with its record and the area it protects; `leaves` counts the saves. */
+function unfinishedAt(kind: string, template?: string): { building: { unfinished: UnfinishedHouse | null }; leaves: { count: number } } {
+  const unfinished: UnfinishedHouse = { kind, ...(template !== undefined && { template }), site: { door: HUT_DOOR, facing: "north" }, part: 2, prepared: true, materials: {} };
+  return { building: { unfinished }, leaves: { count: 0 } };
+}
+
+test("abandon_house forgets the house and releases its areas, and only hers: the house region and a stale leveling region over it", async () => {
+  for (const { name, kind, template } of [{ name: "a classic house of an old note", kind: "small medieval house", template: undefined }, { name: "a house whose template is gone", kind: "gone hut", template: "gone-hut" }]) {
+    const runtime = new FakeRuntime();
+    ownAreaAround(runtime, 5, kind, HUT_DOOR);
+    runtime.areas.push({ regionId: 7, owner: "self", label: "leveling 9x9", min: { x: -6, y: 56, z: -4 }, max: { x: 6, y: 70, z: 8 } });
+    runtime.areas.push({ regionId: 8, owner: "self", label: "farm", min: { x: 40, y: 60, z: 40 }, max: { x: 48, y: 70, z: 48 } });
+    runtime.areas.push({ regionId: 9, owner: "Tom", label: kind, min: { x: -3, y: 63, z: -1 }, max: { x: 3, y: 72, z: 5 } });
+    const { building, leaves } = unfinishedAt(kind, template);
+    const result = await runStep({ skill: "abandon_house" }, contextFor(runtime, { self: "self", building, saveBuilding: () => { leaves.count += 1; } }));
+    assert.equal(result.status, "done", `${name}: ${JSON.stringify(result)}`);
+    assert.match(result.status === "done" ? result.detail : "", new RegExp(`^gave up your unfinished ${kind} at 0 64 2: it is no longer tracked and its areas #5, #7 are released; what stands stays$`, "u"), name);
+    assert.deepEqual(runtime.submitted.filter((call) => call.tool === "unprotect_region").map((call) => call.input.region_id), [7, 5], `${name}: the leveling region first, so a retry still finds it through the house region`);
+    assert.deepEqual(runtime.areas.map((area) => area.regionId), [8, 9], `${name}: another area of hers and Tom's stay`);
+    assert.equal(building.unfinished, null, name);
+    assert.equal(leaves.count, 1, `${name}: the empty record is saved`);
+  }
+});
+
+test("abandon_house without an unfinished house fails and touches nothing", async () => {
+  const runtime = new FakeRuntime();
+  ownAreaAround(runtime, 5, "small medieval house", HUT_DOOR);
+  for (const building of [{ unfinished: null as UnfinishedHouse | null }, undefined]) {
+    const result = await runStep({ skill: "abandon_house" }, contextFor(runtime, { self: "self", ...(building !== undefined && { building }) }));
+    assert.deepEqual(result, { status: "failed", detail: "you have no unfinished house to give up" });
+  }
+  assert.deepEqual(runtime.submitted, []);
+  assert.equal(runtime.areas.length, 1, "a finished house's area is not an unfinished house's");
+});
+
+test("abandon_house that is cut short keeps the record, and the same step again releases what is left, the leveling region included", async () => {
+  // Each case: which call goes wrong on the first ask (the retry has the runtime back).
+  for (const { name, breaks, says } of [
+    { name: "the house region cannot be released", breaks: "unprotectRegion:5", says: /could not release area #5: \[REGION_BUSY\] try later; your unfinished small medieval house is still on record: abandon_house again/u },
+    { name: "the leveling region cannot be released", breaks: "unprotectRegion:7", says: /could not release area #7: \[REGION_BUSY\] try later/u },
+    { name: "the body is down when the areas are read", breaks: "protectedRegions", says: null },
+  ]) {
+    const runtime = new FakeRuntime();
+    ownAreaAround(runtime, 5, "small medieval house", HUT_DOOR);
+    runtime.areas.push({ regionId: 7, owner: "self", label: "leveling 9x9", min: { x: -6, y: 56, z: -4 }, max: { x: 6, y: 70, z: 8 } });
+    const unprotect = runtime.unprotectRegion.bind(runtime);
+    const regions = runtime.protectedRegions.bind(runtime);
+    let broken = true;
+    runtime.unprotectRegion = async (regionId) => (broken && breaks === `unprotectRegion:${regionId}` ? { status: "failed", error: "[REGION_BUSY] try later" } : unprotect(regionId));
+    runtime.protectedRegions = async () => { if (broken && breaks === "protectedRegions") throw bodyDownError(); return regions(); };
+    const { building, leaves } = unfinishedAt("small medieval house");
+    const context = contextFor(runtime, { self: "self", building, saveBuilding: () => { leaves.count += 1; } });
+    if (says === null) await assert.rejects(runStep({ skill: "abandon_house" }, context), (thrown: unknown) => thrown instanceof BodyDown, name);
+    else {
+      const first = await runStep({ skill: "abandon_house" }, context);
+      assert.equal(first.status, "failed", name);
+      assert.match(first.status === "failed" ? first.detail : "", says, name);
+    }
+    assert.notEqual(building.unfinished, null, `${name}: the record stays`);
+    assert.equal(leaves.count, 0, `${name}: nothing saved`);
+    broken = false;
+    assert.equal((await runStep({ skill: "abandon_house" }, context)).status, "done", name);
+    assert.deepEqual(runtime.areas, [], `${name}: no area of the house is left behind`);
+    assert.equal(building.unfinished, null, name);
+  }
+});
+
+test("after abandon_house a new house goes up on the same site: its area is free and nothing says an old house is lost", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL };
+  ownAreaAround(runtime, 5, "small medieval house", HUT_DOOR);
+  const { building } = unfinishedAt("small medieval house", "medieval-small");
+  const context = contextFor(runtime, { style: "medieval", self: "self", building });
+  assert.equal((await runStep({ skill: "abandon_house" }, context)).status, "done");
+  const result = await runStep(stepSchema.parse({ skill: "build", template: "medieval-small" }), context);
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.doesNotMatch(result.status === "done" ? result.detail : "", /no longer tracked/u);
 });
 
 test("drop_item keeps the last tool of a class, the last bed and the last boat (live 2026-10-10 run 8: pickaxe, axe, shovel, boat and bed dropped)", async () => {
@@ -2684,12 +2798,12 @@ test("eat is refused with the fact when the named food has no spare, and eats wh
 
 const owedSlabs = (count: number) => [{ item: "spruce_slab", count, partner: "Ayla", tradeId: "t1" }];
 
-test("a build whose bill blocks are owed to a trade fails with the owed count and builds nothing", async () => {
+test("a build whose bill blocks are owed to a trade stops before the stage that needs them, with the owed count", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, inventory: SMALL_MEDIEVAL };
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { style: "medieval", owed: () => owedSlabs(7) }));
-  assert.deepEqual(result, { status: "failed", detail: "missing 7 spruce_slab for a small medieval house (the rest is carried; 7 spruce_slab you carry are owed: 7 spruce_slab to Ayla (trade)): fetch exactly the missing items with get_items, then build again" });
-  assert.equal(runtime.submitted.some((call) => call.tool === "build_structure"), false);
+  assert.deepEqual(result, { status: "done", detail: "stages 1-2 of 4 of the small medieval house are built (door at 0 64 2): the roof (stage 3) needs 7 spruce_slab (7 spruce_slab you carry are owed: 7 spruce_slab to Ayla (trade)): fetch exactly those with get_items, then {\"skill\":\"build\",\"template\":\"medieval-small\"} again to go on" });
+  assert.equal(runtime.submitted.filter((call) => call.tool === "build_structure").length, 4, "the floor and the walls were built, not the roof");
   const free = new FakeRuntime();
   free.snapshot = { ...free.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [...SMALL_MEDIEVAL, { name: "spruce_slab", count: 7 }] };
   assert.equal((await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(free, { style: "medieval", owed: () => owedSlabs(7) }))).status, "done", "7 more carried than the bill: the owed ones stay and the house is built");
@@ -2818,6 +2932,8 @@ function dieOnBuildCall(runtime: FakeRuntime, nth: number, error: Error): void {
 const bodyDownError = () => new BodyDown({ at: new Date(Date.now() + 30_000).toISOString(), attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent"));
 const bodyRestartedError = () => new Error("[BODY_RESTARTED] the body restarted: build_structure was not done");
 const SMALL_HOUSE_STEP = { skill: "build", structure: "house", size: "small" } as const;
+/** What the record of a small medieval house names besides its site, part and materials: its template and its first stage (the plan cuts it into 4). */
+const MEDIEVAL_SMALL_RECORD = { kind: "small medieval house", template: "medieval-small", family: "europe", stage: 0, stages: 4, stageName: "floor" };
 const LEVELED_SITE_TOOLS = [...SMALL_MEDIEVAL, { name: "wooden_shovel", count: 1 }];
 
 /** A build whose records are kept, so a test sees what `saveBuilding` was asked to save, in order, with what the other events were. */
@@ -2859,7 +2975,7 @@ test("a body that dies mid-part keeps the unfinished house, saved after it is se
     const { building, saved, context } = recordingContext(runtime, { self: "self" });
     await assert.rejects(runStep(SMALL_HOUSE_STEP, context), (thrown: unknown) => thrown instanceof Error && thrown.message.includes("RUNTIME_UNRESPONSIVE") === (error === bodyDownError));
     const { site, ...record } = building.unfinished ?? ({} as UnfinishedHouse);
-    assert.deepEqual(record, { kind: "small medieval house", part: 1, prepared: true, materials: {} });
+    assert.deepEqual(record, { ...MEDIEVAL_SMALL_RECORD, stage: 1, stageName: "walls", part: 1, prepared: true, materials: {} });
     assert.ok(site !== undefined, "with its site");
     assert.deepEqual(saved.at(-1), building.unfinished, "the saved record is the one the throw left");
     // The next action from that state: no overlap with her own half-built house (run 17b), parts from the first, wrong blocks removed.
@@ -2867,7 +2983,7 @@ test("a body that dies mid-part keeps the unfinished house, saved after it is se
     const second = await runStep(SMALL_HOUSE_STEP, context);
     assert.equal(second.status, "done", second.status === "failed" ? second.detail : "");
     const calls = builds(runtime);
-    assert.deepEqual(calls[before]!.blocks, calls[0]!.blocks, "the parts start again from the first");
+    assert.deepEqual(calls[before]!.blocks, calls[1]!.blocks, "the parts start again from the first part of the stage that was cut (the floor stage stands)");
     assert.ok(calls.slice(before).every((call) => call.remove_wrong_blocks), "wrong blocks are removed");
     assert.equal(building.unfinished, null);
     assert.equal(saved.at(-1), null, "the finished house is saved as no unfinished house at once, not only after the step");
@@ -2897,7 +3013,7 @@ test("a body that dies while leveling keeps the house, unprepared, and its prote
   dieOnBuildCall(runtime, 1, bodyDownError());
   const { building, context } = recordingContext(runtime, { requester: "steve" });
   await assert.rejects(runStep(SMALL_HOUSE_STEP, context));
-  assert.deepEqual(building.unfinished, { kind: "small medieval house", site: { door: { x: -2, y: 64, z: 0 }, facing: "east" }, part: 0, prepared: false, materials: {} });
+  assert.deepEqual(building.unfinished, { ...MEDIEVAL_SMALL_RECORD, site: { door: { x: -2, y: 64, z: 0 }, facing: "east" }, part: 0, prepared: false, materials: {} });
   assert.ok(runtime.areas.some((area) => area.label === "small medieval house"), "the house's area is not released");
 });
 
