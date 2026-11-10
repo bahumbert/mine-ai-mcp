@@ -20,8 +20,14 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   let broken: string | null = null;
   let attackerDied = false;
   let sawSeat = false;
+  let stopOnDeath: ReturnType<ScenarioContext["call"]> | undefined;
   const onMount = () => { sawSeat = true; boatId ??= bot.entity.vehicle?.id; };
-  const onDead = (entity: typeof bot.entity) => { if (entity.id === attacker) attackerDied = true; };
+  const onDead = (entity: typeof bot.entity) => {
+    if (entity.id !== attacker) return;
+    attackerDied = true;
+    // The suspended approach can resume and dismount before the next sample (T17e t00044, 2026-11-10).
+    if (atSea) stopOnDeath = context.call("cancel_foreground_action", { reason: "scenario observed the hostile response" });
+  };
   const onHurt = (entity: typeof bot.entity, source?: typeof bot.entity) => {
     if (entity.id === bot.entity.id && !hurtAt) {
       hurtAt = performance.now();
@@ -56,7 +62,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     if (!hurtAt || !effectAt || !attackerDied || !sawSeat || broken || elapsed! > responseWithinMs ||
       (!atSea && (!offAt || offMs! > (offWithinMs ?? responseWithinMs) || !carriedBoats(bot))))
       return { status: "failed", detail: JSON.stringify({ hurtAt, elapsed, offMs, broken, seated: bot.entity.vehicle?.id, carried: carriedBoats(bot) }) };
-    await context.call("cancel_foreground_action", { reason: "scenario observed the hostile response" });
+    await (stopOnDeath ?? context.call("cancel_foreground_action", { reason: "scenario observed the hostile response" }));
     await first;
     const next = await context.call("navigate", { ...target, range: 2 });
     return { status: next.result.status === "succeeded" ? "succeeded" : "failed",

@@ -28,9 +28,10 @@ params:
   approach: { x: 40, y: -61, z: 0 }
   target: { x: 39, y: -60, z: 50 }
   atSea: true
-  # First 10 hurt-to-effect ms: 985, 982, 951, 985, 1032, 976, 976, 950, 957, 956.
-  # Maximum 1032 + 50% = 1548 ms (2026-11-09, /tmp/p4b-06c-t10b-timing).
-  responseWithinMs: 1548
+  # Post-T12/T15 shared + locked hurt-to-effect ms: 2934, 2435, 2718, 2295, 2860; 2281, 2478, 2630, 2637, 2365.
+  # Maximum 2934 + 50% = 4401 ms; T12 now settles the cancelled ride before the seated strike.
+  # WSL /tmp/p4f-t17e-{measure,measure-locked}; record: navigation-and-boats.md T17e (2026-11-10).
+  responseWithinMs: 4401
 goal:
   kind: all
   timeout: 180

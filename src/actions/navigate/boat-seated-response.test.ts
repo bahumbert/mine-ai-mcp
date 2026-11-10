@@ -11,6 +11,7 @@ import { watchVehicle } from "./vehicle-sync.js";
 import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
 import { crossByBoat } from "./boat-crossing.js";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
 
 const THREAT_ID = 20;
 const BOAT_ID = SEATED_BOAT_ID;
@@ -121,10 +122,26 @@ test("no threat left ends clear and nothing is rowed", async () => {
 test("the wall ceiling ends it with the boat stopped", async () => {
   const world = await seatedWithThreat(new Vec3(0.5, 63, 12.5));
   using _timers = world.clock.install();
-  const startedAt = performance.now();
+  const startedAt = world.clock.now();
+  const initialPosition = world.bot.vehicle!.position.clone();
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 600 }), SETTLE_MS);
   assert.equal(result.outcome, "timed_out");
-  assert.ok(performance.now() - startedAt <= 10_800, "the rowing ceiling also waits for the bounded server stop answer");
+  const packets = world.server.packets.filter((packet) => packet.name === "vehicle_move");
+  const lastMovingIndex = packets.findLastIndex((packet, index) => {
+    const previous = index === 0 ? initialPosition : packets[index - 1]!.data as { x: number; y: number; z: number };
+    const current = packet.data as { x: number; y: number; z: number };
+    return current.x !== previous.x || current.y !== previous.y || current.z !== previous.z;
+  });
+  assert.ok(lastMovingIndex >= 0, "the response rows before reaching its ceiling");
+  const stepMs = 50;
+  assert.ok(packets[lastMovingIndex]!.atMs - startedAt <= 600 + stepMs,
+    "the last moving write is within the ceiling plus one rowing step");
+  const firstStopped = packets[lastMovingIndex + 1];
+  assert.ok(firstStopped, "the rowing is followed by stopped writes");
+  assert.ok(firstStopped.atMs - startedAt <= 600 + stepMs,
+    "the stop starts within the ceiling plus one rowing step");
+  assert.ok(world.clock.now() - firstStopped.atMs <= (4 + SERVER_ANSWER_TICKS) * stepMs,
+    "four stopped writes settle within forty server ticks on the fake clock");
   stopped(world);
 });
 

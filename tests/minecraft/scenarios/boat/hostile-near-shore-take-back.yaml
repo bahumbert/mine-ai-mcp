@@ -29,11 +29,13 @@ params:
   approach: { x: 40, y: -61, z: 0 }
   target: { x: -3, y: -60, z: 0 }
   atSea: false
-  # First 10 hurt-to-effect ms: 5178, 5204, 5285, 5213, 5224, 5230, 5207, 5220, 5178, 5244.
-  # Maximum 5285 + 50% rounded up = 7928 ms (2026-11-09, /tmp/p4b-06c-t10b-shore-timing).
+  # Post-T12/T15 shared + locked hurt-to-effect ms: 6293, 6560, 6417, 5979, 6112; 6141, 6474, 6908, 6799, 6588.
+  # Original 7928 ms bound still covers these and the 6955 ms baseline maximum; retain it (2026-11-10, T17e).
   responseWithinMs: 7928
-  # Hurt-to-off ms: 345, 333, 409, 358, 356, 362, 359, 359, 357, 362. Max 409 + 50% = 614 ms rounded up.
-  offWithinMs: 614
+  # Hurt-to-off ms: 1747, 1946, 1832, 1399, 1546; 1599, 1911, 2368, 2254, 2004.
+  # Include baseline max 2373: ceil(2373 * 1.5) = 3560 ms; T12 now settles the cancelled ride before shift.
+  # WSL /tmp/p4f-t17e-{shared,locked-before,measure,measure-locked}; record: navigation-and-boats.md T17e.
+  offWithinMs: 3560
 goal:
   kind: all
   timeout: 180
