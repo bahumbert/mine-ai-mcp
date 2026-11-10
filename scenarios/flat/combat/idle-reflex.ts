@@ -3,9 +3,10 @@ import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
 import { Vec3 } from "vec3";
 import { fullProtectionBlock } from "../../../src/survival/positioning/combat/build-protection.js";
-import { declaredEntitiesArranged, openRuntime, wearArmor } from "../../src/runtime.ts";
+import { wearArmor } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
-import { describe, excessExplosions, hurt, readEncounters, watchExplosions, watchShield } from "./reflex.ts";
+import { describe, excessExplosions, readEncounters, watchExplosions, watchShield } from "./reflex.ts";
+import { openAtArrangedHealth } from "./arranged-health.ts";
 
 const paramsSchema = z.strictObject({
   provoke: z.string().optional(),
@@ -61,19 +62,3 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   }
 }
 
-/** Hold the native scene still until the runtime can observe the declared health (T16d, 2026-11-09). */
-async function openAtArrangedHealth(context: MineAiScenarioContext, health: number | undefined) {
-  if (health === undefined) return openRuntime(context, "combat-idle");
-  await declaredEntitiesArranged(context);
-  context.bot.chat("/tick freeze");
-  context.bot.chat("/gamerule naturalRegeneration false");
-  try {
-    if (!(await hurt(context, health))) throw new Error(`Arrangement could not establish ${health} health.`);
-    const runtime = await openRuntime(context, "combat-idle");
-    context.log(`Runtime attached at arranged health ${context.bot.health} (requested ${health}).`);
-    return runtime;
-  } finally {
-    context.bot.chat(`/gamerule naturalRegeneration ${context.scenario.world.gamerules.naturalRegeneration ?? true}`);
-    context.bot.chat("/tick unfreeze");
-  }
-}

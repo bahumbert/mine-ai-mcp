@@ -5,11 +5,24 @@ import { Vec3 } from "vec3";
 import { createNavigationRuntime, type NavigationRuntime } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext, onAttack } from "../../test-support/combat.js";
-import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeBot, type FakeClock } from "../../test-support/fake-bot/index.js";
 import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { hideInPlace, enclosedInPlace } from "./hide.js";
 import { centerShelterCell, type ShelterBuild } from "./shelter-build.js";
+import { constructShelterPass } from "./shelter-construction.js";
+
+/** A construction attempt shared by centering and pass-bound tests. */
+function createTestShelterBuild(bot: FakeBot, clock: FakeClock): ShelterBuild {
+  return {
+    bot, options: { signal: new AbortController().signal, threatContext: combatTestContext(bot),
+      maximumMs: 5_000, recoverTo: 7 },
+    itemUse: new CombatItemUse(bot, (ticks) => clock.sleep(ticks * 50)),
+    constructionDeadline: clock.now() + 5_000, enclosed: false,
+    dug: 0, walled: 0, capped: false, ate: null, swings: 0, recovery: null, refusal: null,
+    pass: 0, blockedCells: new Map(),
+  };
+}
 
 test("a fence wall is broken with a server answer, closed, and recovery continues from the completed shelter", async () => {
   const clock = createFakeClock({ mode: "mocked" });
@@ -97,14 +110,7 @@ test("a known intruder cannot mask a new attacker arriving while the shelter rec
   });
   using _installed = clock.install();
   clock.after(50, () => { bot.entities[3]!.position = new Vec3(0.5, 64, 1.2); });
-  const build: ShelterBuild = {
-    bot, options: { signal: new AbortController().signal, threatContext: combatTestContext(bot),
-      maximumMs: 5_000, recoverTo: 7 },
-    itemUse: new CombatItemUse(bot, (ticks) => clock.sleep(ticks * 50)),
-    constructionDeadline: clock.now() + 5_000, enclosed: false,
-    dug: 0, walled: 0, capped: false, ate: null, swings: 0, recovery: null, refusal: null,
-    pass: 0, blockedCells: new Map(),
-  };
+  const build = createTestShelterBuild(bot, clock);
   assert.equal(await clock.settle(centerShelterCell(build, new Vec3(0, 64, 0)), 6_000), false);
 });
 
@@ -141,6 +147,53 @@ test("delayed walls keep progressing between repels of two-hit intruders at seve
   assert.equal(bot.health, 7);
   assert.ok(blocksAtSwings.length >= 2, "the first hit does not kill the intruder");
   assert.ok(blocksAtSwings[1]! < blocksAtSwings[0]!, "another wall completes before the second repel");
+});
+
+for (const occupant of ["cow", "ender_dragon"]) for (const leaves of [false, true])
+  test(`a ${occupant} in a wall cell waits for ${leaves ? "departure" : "the deadline"} while the hazard holds`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    const { bot } = createFakeBot({
+      clock, health: 7, carried: { cobblestone: 32 },
+      cells: { "1,65,0": "stone" },
+      entities: { 2: { name: occupant, position: new Vec3(occupant === "cow" ? 1.5 : 9.5, 64, 0.5) } },
+    });
+    using _installed = clock.install();
+    if (leaves) clock.after(1_500, () => { bot.entities[2]!.position = new Vec3(30, 64, 30); });
+    const started = clock.now();
+    const result = await clock.settle(hideInPlace(bot, {
+      signal: new AbortController().signal, threatContext: combatTestContext(bot), maximumMs: 5_000, recoverTo: 7,
+      holdWhile: () => !enclosedInPlace(bot),
+    }), 6_000);
+    const variant = `${occupant}, leaves ${leaves}`;
+    assert.equal(result.kind, leaves ? "recovered" : "failed", `${variant}: ${result.error ?? ""}`);
+    assert.equal(enclosedInPlace(bot), leaves, variant);
+    assert.equal(result.capped, true, variant);
+    assert.equal(result.swings, 0, variant);
+    assert.ok(clock.now() - started >= (leaves ? 1_500 : 5_000), variant);
+    if (!leaves) assert.match(result.error ?? "", /not finished within/, variant);
+  });
+
+test("an intruder replacing a passive occupant in the same pass still stops construction on the third blocked pass", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({
+    clock, health: 7, carried: { cobblestone: 32 }, cells: { "1,65,0": "stone" },
+    entities: {
+      2: { name: "cow", position: new Vec3(1.5, 64, 0.5) },
+      3: { name: "zombie", position: new Vec3(30, 64, 30) },
+    },
+  });
+  using _installed = clock.install();
+  const build = createTestShelterBuild(bot, clock);
+  clock.after(50, () => {
+    bot.entities[2]!.position = new Vec3(30, 64, 30);
+    bot.entities[3]!.position = new Vec3(1.5, 64, 0.5);
+  });
+  for (let pass = 0; pass < 2; pass++)
+    assert.equal(await clock.settle(constructShelterPass(build), 6_000), "again");
+  const third = await clock.settle(constructShelterPass(build), 6_000);
+  assert.notEqual(third, "again");
+  assert.notEqual(third, "built");
+  if (typeof third === "object") assert.match(third.error, /still open.*1,64,0/);
 });
 
 for (const offCenter of [false, true]) test(`three blocked passes leave a named open cell and hand recovery to withdrawal (off center ${offCenter})`, async () => {

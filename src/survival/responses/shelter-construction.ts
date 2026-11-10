@@ -292,9 +292,9 @@ function constructionStopped(build: ShelterBuild): StepEnd | null {
   return null;
 }
 
-/** Finish the other walls, but hand an open shelter back after three consecutive occupied passes. */
+/** Finish the other walls, but hand an open shelter back after three consecutive intruder-blocked passes. */
 async function blockedShelterEnd(build: ShelterBuild): Promise<StepEnd | null> {
-  const blocked = [...build.blockedCells].filter(([, cell]) => cell.pass === build.pass);
+  const blocked = [...build.blockedCells].filter(([, cell]) => cell.pass === build.pass && cell.count > 0);
   const skipped = blocked.filter(([, cell]) => cell.count >= 3);
   if (skipped.length) return {
     kind: "failed",
@@ -352,7 +352,7 @@ export async function constructShelterPass(build: ShelterBuild): Promise<StepEnd
   // observed partial shell and retry after a tick within the same attempt,
   // instead of opening it to escape or digging a new shaft underneath it.
   if (
-    options.holdWhile &&
+    (options.holdWhile || [...build.blockedCells.values()].some((cell) => cell.pass === build.pass)) &&
     (build.walled > 0 || build.capped) &&
     !enclosedInPlace(bot, options.blockNames) &&
     shelterHazard(build) === null &&

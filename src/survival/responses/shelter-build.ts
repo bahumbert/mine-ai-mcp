@@ -3,6 +3,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { centerOnCell, steeringPortFor, type NavigationRuntime } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
+import { cellIntersectsBody } from "../../utils/geometry.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import type { ResponseContext } from "../control/combat/context.js";
 import { tickBudgetWallMs } from "../control/combat/progress.js";
@@ -54,6 +55,7 @@ export interface ShelterBuild {
   /** Why the first placement that could have closed the box did not, for the record. */
   refusal: string | null;
   pass: number;
+  /** Occupied cells in each pass; count is consecutive intruder passes, zero for other bodies. */
   readonly blockedCells: Map<string, { pass: number; count: number; reason: string }>;
 }
 
@@ -201,7 +203,7 @@ export async function sealShelterCell(build: ShelterBuild, cell: Vec3): Promise<
   }
 }
 
-/** Count an occupied cell once per pass; a cleared cell starts a fresh consecutive-pass bound. */
+/** Only intruder occupancy counts toward skipping a cell; other bodies retain the hazard owner's retry path. */
 function shelterCellOccupied(build: ShelterBuild, cell: Vec3): boolean {
   const key = `${cell.x},${cell.y},${cell.z}`;
   const reason = occupiedCell(build.bot, cell);
@@ -209,8 +211,11 @@ function shelterCellOccupied(build: ShelterBuild, cell: Vec3): boolean {
     build.blockedCells.delete(key);
     return false;
   }
+  const intruder = [...shelterIntruders(build.bot, build.options.threatContext)]
+    .some((entity) => cellIntersectsBody(cell, entity));
   const previous = build.blockedCells.get(key);
-  const count = previous?.pass === build.pass ? previous.count : previous?.pass === build.pass - 1 ? previous.count + 1 : 1;
+  const count = !intruder ? 0
+    : previous?.pass === build.pass ? Math.max(1, previous.count) : previous?.pass === build.pass - 1 ? previous.count + 1 : 1;
   build.blockedCells.set(key, { pass: build.pass, count, reason });
   return true;
 }

@@ -1,9 +1,8 @@
 /** Judge survival under real pressure; the production runtime chooses its response. */
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
-import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
-import { hurt } from "./reflex.ts";
+import { openAtArrangedHealth } from "./arranged-health.ts";
 
 const paramsSchema = z.strictObject({ startingHealth: z.number().int().min(1).max(20) });
 
@@ -49,11 +48,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     if (ticks === 39) return { status: "failed", detail: `Setup failed: the declared threats were not observed (${threats})` };
     await bot.waitForTicks(1);
   }
-  if (!(await hurt(context, startingHealth)) || bot.health <= 0) {
-    return { status: "failed", detail: `Setup failed: could not establish ${startingHealth} health; observed ${bot.health}` };
-  }
-
-  const runtime = await openRuntime(context, "low-health-night-survival");
+  const runtime = await openAtArrangedHealth(context, startingHealth, "low-health-night-survival");
   try {
     context.log(`Survival window started: ${survival.seconds}s, health ${bot.health}, ${threats}; any strategy allowed`);
     const outcome = await observeSurvival(context, survival.seconds);
