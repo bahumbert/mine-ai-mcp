@@ -2,7 +2,7 @@ import { monotonicNow } from "../../../../src/utils/monotonic-clock.ts";
 import type { BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
-import { readRecentEventsResultSchema } from "@aibengineering/mine-ai-mcp";
+import { readReflexOutcomes } from "../../../flat/combat/reflex.ts";
 import { declaredEntitiesArranged, openRuntime, standStill, wearArmor } from "../../../src/runtime.ts";
 import type { MineAiScenario } from "../../../src/scenario-client.ts";
 import { observe } from "./pit.ts";
@@ -10,14 +10,6 @@ import { isAngry } from "./observe.ts";
 
 const paramsSchema = z.strictObject({
   trial: z.enum(["traverse", "wounded_gaze"]).default("traverse"),
-});
-
-const encounterSchema = z.object({
-  response: z.string(),
-  outcome: z.string(),
-  explosions: z.number(),
-  healthAfter: z.number(),
-  interrupted: z.object({ action: z.string() }).nullable(),
 });
 
 /** Independent inspection of the full two-high shell, cap, floor, and standing body. */
@@ -125,24 +117,9 @@ export const run: MineAiScenario = async (context) => {
       await bot.waitForTicks(1);
       if (enclosed(bot)) coveredTicks++;
     }
-    const read = runtime.actions.find((a) => a.name === "read_recent_events")!;
-    const events = await runtime.run(read, { limit: 50 }, signal);
-    const encounters = readRecentEventsResultSchema
-      .parse(events.result)
-      .events.flatMap((e) =>
-        e.type === "survival_outcome" && e.payload.source === "hostile_reflex" ? [e.payload] : [],
-      );
+    const reflex = await readReflexOutcomes(context, runtime);
     const arrived = bot.entity.position.distanceTo(new Vec3(36.5, 101, 0.5)) < 2;
-    const responses = encounters.map((e) => {
-      const receipt = z
-        .object({
-          outcome: encounterSchema.omit({ interrupted: true }),
-          interrupted: encounterSchema.shape.interrupted,
-        })
-        .parse(e.evidence);
-      return { ...receipt.outcome, interrupted: receipt.interrupted };
-    });
-    const handoff = responses.findLast((response) => response.interrupted?.action === "navigate");
+    const handoff = reflex.encounters.findLast((response) => response.interrupted?.action === "navigate");
     // Classify handoff evidence for diagnosis. Only arrival satisfies the travel goal.
     const blastHandoff =
       travel.result.status === "cancelled" &&
@@ -193,7 +170,9 @@ export const run: MineAiScenario = async (context) => {
         endermanAttackedFirst,
         seen: [...seen],
         travel,
-        encounters,
+        encounters: reflex.encounters,
+        reflexLimits: reflex.limits.length,
+        reflexFailures: reflex.failures.length,
       }),
     };
   } finally {

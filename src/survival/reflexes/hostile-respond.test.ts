@@ -249,3 +249,19 @@ test("near shore a stalled server ends preparation without queueing take-back hi
   assert.ok(attackedIds(server).filter((id) => id === 7).length < HOSTILE_TAKE_BACK_HITS);
   assert.ok(bot.entities[7], "a stalled server leaves the boat for the next movement");
 });
+
+test("near shore a progressing slow server stops take-back at the hostile hit cap", async () => {
+  await using fixture = responseFixture(false, createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), lagMs: 1_100,
+    position: new Vec3(0.5, 64, 0.5),
+    entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
+      8: { name: "zombie", position: new Vec3(100.5, 64, 0.5) } },
+  }));
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  fixture.bot.entity.position.y = 64 + fixture.bot.entities[7]!.height;
+  const result = await fixture.clock.settle(respondToHostile(fixture.scene,
+    { kind: "fight", targetId: 8, threats: [] }, new AbortController().signal), 60_000);
+  assert.equal(result.kind, "failed");
+  assert.equal(attackedIds(fixture.server).filter((id) => id === 7).length, HOSTILE_TAKE_BACK_HITS);
+});

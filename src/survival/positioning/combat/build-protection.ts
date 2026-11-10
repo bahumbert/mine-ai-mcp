@@ -60,7 +60,7 @@ async function fillProtectionCell(bot: Bot, cell: Vec3, options: ProtectionBuild
   try {
     const result = await placeBlock(bot, {
       item, ...support, expectedCells: [cell],
-      matches: (block) => fullProtectionBlock(block) && (!options.blockNames || options.blockNames.includes(block.name)),
+      matches: (block) => protects(block, options.blockNames),
       signal,
     });
     return result.kind === "failed" ? open(`${context}: ${result.error}`) : null;
@@ -86,6 +86,11 @@ export function fullProtectionBlock(block: ReturnType<Bot["blockAt"]>): boolean 
   );
 }
 
+/** The same material and shape requirements apply to existing and newly placed cover. */
+function protects(block: ReturnType<Bot["blockAt"]>, names?: readonly string[]): boolean {
+  return fullProtectionBlock(block) && (!names || names.includes(block!.name));
+}
+
 /**
  * One construction transaction for every protective shape. Its caller owns
  * the body and decides whether changed contact or footing permits another cell.
@@ -98,8 +103,6 @@ export async function buildProtection(
   options: ProtectionBuildOptions,
 ): Promise<ProtectionBuild> {
   const { signal, mayContinue, terrain } = options;
-  const protects = (block: ReturnType<Bot["blockAt"]>) =>
-    fullProtectionBlock(block) && (!options.blockNames || options.blockNames.includes(block!.name));
   // Cells outside every region first, the bot's own region's next, another owner's last: its placement is refused by
   // the core (ADR-012), after everything that can still be built has been.
   const pending = cellsOutsideRegionsFirst(bot, [...new Map(cells.map((cell) => [cell.toString(), cell])).values()]);
@@ -109,7 +112,7 @@ export async function buildProtection(
     signal.throwIfAborted();
     const changed = mayContinue();
     if (changed) return blocked(changed);
-    const complete = pending.findIndex((cell) => protects(bot.blockAt(cell)));
+    const complete = pending.findIndex((cell) => protects(bot.blockAt(cell), options.blockNames));
     if (complete >= 0) {
       pending.splice(complete, 1);
       continue;

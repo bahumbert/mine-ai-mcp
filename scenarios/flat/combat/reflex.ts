@@ -8,7 +8,7 @@ import type { Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 
 const encounterSchema = z.object({
-  response: z.enum(["fight", "evade", "hide"]),
+  response: z.enum(["fight", "evade", "hide", "deflect"]),
   outcome: z.string(),
   reason: z.string(),
   interrupted: z.object({ action: z.string(), startedAt: z.string() }).nullable(),

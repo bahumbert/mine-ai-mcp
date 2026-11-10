@@ -30,14 +30,16 @@ test("mixed event pages separate outcomes while encounter readers retain only en
       encounter: null, response: null, settling: false, lastChange: "Default policy.", constraint: null },
     vitals: { health: 20, food: 20, air: null, inWater: false },
     runtime: { liveness: "observed_in_process", observedAt: 1, physicsObservedAt: 1 } };
-  const events = [completed, limit, failed].map((evidence, index) => ({ type: "survival_outcome", eventId: index + 1,
+  const shield = { response: "prepare_shield", cancelled: false,
+    outcome: { kind: "shield_prepared", equipped: true, error: null }, interrupted: null };
+  const events = [completed, limit, failed, shield].map((evidence, index) => ({ type: "survival_outcome", eventId: index + 1,
     botId: "TestBot", observedAt: "now", summary: "outcome", payload: { kind: "outcome", source: "hostile_reflex", evidence, status } }));
   const reader = () => {
     let unread = events;
     return { actions: [{ name: "read_recent_events" }], run: async () => {
       const page = unread;
       unread = [];
-      return { result: { status: "succeeded", source: { queryIds: ["test"] }, readThroughEventId: 3,
+      return { result: { status: "succeeded", source: { queryIds: ["test"] }, readThroughEventId: 4,
         remainingEventCount: 0, events: page } };
     } } as unknown as Runtime;
   };
@@ -49,8 +51,10 @@ test("mixed event pages separate outcomes while encounter readers retain only en
   assert.deepEqual(await readEncounters(context, reader()), result.encounters);
 });
 
-test("shield preparation is not parsed as a fight, while malformed fights still fail", () => {
-  assert.equal(parseEncounterEvidence({ response: "prepare_shield", cancelled: false,
-    outcome: { kind: "shield_prepared", equipped: true, error: null }, interrupted: null }), null);
+test("malformed fight evidence still fails", () => {
   assert.throws(() => parseEncounterEvidence({ response: "fight", outcome: { kind: "shield_prepared" }, interrupted: null }));
+});
+
+test("a completed fireball deflection is retained as an encounter", () => {
+  assert.equal(parseEncounterEvidence({ ...completed, outcome: { ...fight, response: "deflect", outcome: "reflected" } })?.response, "deflect");
 });
