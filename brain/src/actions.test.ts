@@ -24,7 +24,7 @@ test("a build gives a template of any family or a size, never both; with neither
 
 test("list_houses takes a family, abandon_house nothing", () => {
   const step = stepSchema.parse({ skill: "list_houses", family: "africa" });
-  assert.equal(describeStep(step), "look up the africa houses");
+  assert.equal(describeStep(step), 'look up the houses of the family "africa"');
   assert.equal(stepSchema.safeParse({ skill: "list_houses" }).success, false);
   assert.equal(stepSchema.safeParse({ skill: "list_houses", family: "" }).success, false);
   assert.equal(stepSchema.safeParse({ skill: "list_houses", family: "x".repeat(41) }).success, false, "a family name is short");

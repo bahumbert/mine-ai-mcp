@@ -47,7 +47,7 @@ test("list_houses shows a family's houses: done at once, no body call, the catal
   assert.equal(found.status === "done" && found.detail, `${catalogueLine(rondavel)}: {"skill":"build","template":"rondavel"}`);
   const unknown = listHouses({ skill: "list_houses", family: "atlantis" }, templates);
   assert.equal(unknown.status, "failed");
-  assert.match(unknown.status === "failed" ? unknown.detail : "", /no houses of the family atlantis; the families you know: africa/u);
+  assert.match(unknown.status === "failed" ? unknown.detail : "", /no houses of the family "atlantis";the families you know: africa/u);
 });
 
 test("the step that resumes an unfinished house names its template and its door, an old note's template by its kind", () => {

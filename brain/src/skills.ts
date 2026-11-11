@@ -519,7 +519,7 @@ export { resumeStep };
  */
 export function listHouses(step: Extract<Step, { skill: "list_houses" }>, templates: ReadonlyMap<string, Template> = TEMPLATES): SkillResult {
   const houses = [...templates.values()].filter((template) => template.family === step.family);
-  if (houses.length === 0) return { status: "failed", detail: `no houses of the family ${step.family}; the families you know: ${familiesOf(templates).join(", ")}` };
+  if (houses.length === 0) return { status: "failed", detail: `no houses of the family ${JSON.stringify(step.family)};the families you know: ${familiesOf(templates).join(", ")}` };
   return { status: "done", detail: houses.map(listedLine).join("\n") };
 }
 

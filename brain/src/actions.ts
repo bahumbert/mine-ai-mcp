@@ -234,7 +234,7 @@ export function describeStep(step: Step): string {
     case "build": return `build ${step.template === undefined ? `a ${step.size ?? "small"}` : `the ${step.template}`} ${step.structure}${step.x === undefined || step.y === undefined || step.z === undefined ? "" : ` at ${step.x} ${step.y} ${step.z}`}${describeMaterialChoice(step.materials)}${step.own === true ? " for yourself" : ""}`;
     case "improve_house": return `improve your house${step.roles === undefined ? "" : ` (${step.roles.join(", ")})`}`;
     case "abandon_house": return "give up your unfinished house";
-    case "list_houses": return `look up the ${step.family} houses`;
+    case "list_houses": return `look up the houses of the family ${JSON.stringify(step.family)}`;
   }
 }
 
