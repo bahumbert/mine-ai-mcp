@@ -1,6 +1,15 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, posix, resolve, win32 } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
+
+/**
+ * Creates the folder `file` goes in. For a path a person or the setup gives, which may be a bare name: `dirname("x.json")`
+ * is `"."`, and Windows Bun 1.4.2 throws `EEXIST` on `mkdirSync(".", { recursive: true })` (and `".."`), so the folder is
+ * made from the absolute path. A path built under the data root (`join(root, ...)`) is never bare and needs no helper.
+ */
+export function ensureParentDir(file: string): void {
+  mkdirSync(dirname(resolve(file)), { recursive: true });
+}
 
 /** Names the data folder when set; wins over the setup's file (tests, a second install on one PC). */
 export const DATA_ROOT_ENV = "MINE_AI_DATA_ROOT";

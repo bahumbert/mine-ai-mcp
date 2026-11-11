@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadManifest } from "./manifest.ts";
 import { loadSettings, saveSettings, settingsPath, type Settings } from "./settings.ts";
-import { realDoctorDeps, runDoctor, type DoctorDeps } from "./doctor.ts";
+import { doctorFolders, realDoctorDeps, runDoctor, type DoctorDeps } from "./doctor.ts";
 import { saveInstallState } from "./install/state.ts";
 
 function fixture(change: (settings: Settings) => Settings = (settings) => settings) {
@@ -18,7 +18,8 @@ function fixture(change: (settings: Settings) => Settings = (settings) => settin
     platform: "win32",
     ollamaVersion: async () => "0.35.0",
     javaInstalled: () => true,
-    gpuSummary: async () => ["Adapter 1: 24.0 GiB", "Local model gemma4:12b can run here."],
+    gpuSummary: async () => ["Adapter 1: AMD Radeon RX 7900 XTX, 24.0 GiB", "Local model gemma4:12b can run here."],
+    diskLines: async () => ["C: 115.1 GB free (app folder, data folder)"],
     portOwner: async () => "free",
   };
   return { root, manifest, settings, deps };
@@ -32,7 +33,7 @@ test("lists the versions, the GPU answer and the settings path", async () => {
   assert.match(text, new RegExp(`Mine AI ${manifest.version.replaceAll(".", "\\.")}`, "u"));
   assert.match(text, /Bun 1\.4\.2/u);
   assert.match(text, /Ollama 0\.35\.0/u);
-  assert.match(text, /Adapter 1: 24\.0 GiB/u);
+  assert.match(text, /Adapter 1: AMD Radeon RX 7900 XTX, 24\.0 GiB/u);
   assert.match(text, /settings\.json/u);
 });
 
@@ -94,6 +95,40 @@ test("the real doctor finds the Ollama our install recorded in a folder the play
   assert.equal(await realDoctorDeps(root, manifest).ollamaVersion(), "(version not readable)");
 });
 
+test("a Disk block follows the GPU block and holds one indented line per drive, from the disk lines of the deps", async () => {
+  const { root, manifest, settings, deps } = fixture();
+  const lines = await runDoctor(root, manifest, settings, { ...deps, diskLines: async () => ["C: 115.1 GB free (app folder, data folder)", "X: not found (Ollama models)"] });
+  const disk = lines.indexOf("Disk:");
+  assert.ok(disk > lines.indexOf("GPU:"), "after the GPU block");
+  assert.deepEqual(lines.slice(disk, disk + 3), ["Disk:", "  C: 115.1 GB free (app folder, data folder)", "  X: not found (Ollama models)"]);
+  assert.equal(lines[disk + 3], "Ports:", "before the ports");
+});
+
+test("the folders the doctor measures: the app folder, the data folder, the Ollama folder and the model store", () => {
+  const { root, manifest } = fixture();
+  const folders = doctorFolders(root, manifest, "/apps/mine-ai", { findOllama: () => "/apps/ollama/ollama.exe", storeOf: () => "/models" });
+  assert.deepEqual(folders, [
+    { what: "app folder", folder: "/apps/mine-ai" },
+    { what: "data folder", folder: root },
+    { what: "Ollama", folder: "/apps/ollama" },
+    { what: "Ollama models", folder: "/models" },
+  ]);
+});
+
+test("no Ollama found: no Ollama folder line; an install state that throws leaves out the Ollama and model folders without a crash", async () => {
+  const { root, manifest } = fixture();
+  const none = doctorFolders(root, manifest, "/apps/mine-ai", { findOllama: () => null, storeOf: () => "/models" });
+  assert.deepEqual(none.map((folder) => folder.what), ["app folder", "data folder", "Ollama models"]);
+  const broken = () => {
+    throw new Error("install-state.json is not a valid install state");
+  };
+  assert.deepEqual(doctorFolders(root, manifest, "/apps/mine-ai", { findOllama: broken, storeOf: broken }).map((folder) => folder.what), ["app folder", "data folder"]);
+  writeFileSync(join(root, "install-state.json"), "{ not json");
+  const lines = await realDoctorDeps(root, manifest, root).diskLines();
+  assert.equal(lines.length, 1, "app and data folder are one folder here, on one drive");
+  assert.match(lines[0]!, /GB free \(app folder, data folder\)$/u);
+});
+
 test("no settings file: the Settings line says the file is not found and the values are the defaults; with the file, it does not", async () => {
   const { root, manifest, settings, deps } = fixture();
   const missing = (await runDoctor(root, manifest, settings, deps)).find((line) => line.startsWith("Settings:"));
@@ -101,4 +136,27 @@ test("no settings file: the Settings line says the file is not found and the val
   saveSettings(root, settings);
   const present = (await runDoctor(root, manifest, settings, deps)).find((line) => line.startsWith("Settings:"));
   assert.equal(present, `Settings: ${settingsPath(root)}`);
+});
+
+const REMOTE = { kind: "remote", baseUrl: "https://api.example.test/v1", model: "big" } as const;
+
+for (const [state, llm, line] of [
+  ["a blob this user or PC cannot read", { apiKey: "", apiKeyProtected: "QUJD", keyUnreadable: true }, "key: saved for another Windows user or PC, cannot be read here"],
+  ["no key", { apiKey: "" }, "key: none"],
+  ["a clear key in the file on Windows (the next save encrypts it)", { apiKey: "sk-secret", clearKeyInFile: true }, "key: in clear (encrypted at the next start)"],
+  ["an encrypted key", { apiKey: "sk-secret", apiKeyProtected: "QUJD", loadedKey: "sk-secret" }, "key: saved, encrypted"],
+  ["a clear key where there is no cipher (Linux, macOS)", { apiKey: "sk-secret" }, "key: in the file, readable by this user only"],
+] as const) {
+  test(`a remote endpoint with ${state}: the doctor says '${line}' under the model line, and never shows the key`, async () => {
+    const { root, manifest, settings, deps } = fixture((s) => ({ ...s, llm: { ...REMOTE, ...llm } }));
+    const lines = await runDoctor(root, manifest, settings, deps);
+    const model = lines.findIndex((entry) => entry.startsWith("  model: remote"));
+    assert.equal(lines[model + 1], `  ${line}`);
+    assert.ok(!lines.join("\n").includes("sk-secret"));
+  });
+}
+
+test("a local model has no key line", async () => {
+  const { root, manifest, settings, deps } = fixture();
+  assert.ok(!(await runDoctor(root, manifest, settings, deps)).some((line) => line.trim().startsWith("key:")));
 });

@@ -11,7 +11,17 @@ export interface InstallContext {
   onProgress(fraction: number, label: string): void;
 }
 
-export type StepResult = { readonly ok: true; readonly detail: string } | { readonly ok: false; readonly error: string; readonly hint: string };
+/**
+ * What a step says when it corrected the player's input on its own (owner 2026-11-06, memory `show-auto-corrections`: a
+ * correction is always told): the new value and the sentence to show. The installer puts `correctedUrl` in its box and
+ * shows `notice`; the same sentence also starts `detail` or `error`, which is all the command line prints.
+ */
+export interface InputCorrection {
+  readonly correctedUrl?: string;
+  readonly notice?: string;
+}
+
+export type StepResult = InputCorrection & ({ readonly ok: true; readonly detail: string } | { readonly ok: false; readonly error: string; readonly hint: string });
 
 /** The failed side of `StepResult`: what steps return from a helper that can only fail. */
 export type StepFailure = Extract<StepResult, { readonly ok: false }>;

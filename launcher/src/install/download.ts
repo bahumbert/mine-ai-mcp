@@ -121,8 +121,27 @@ async function writeBody(url: string, response: Response, partPath: string, star
   }
 }
 
+/** Hooks of a download; `beforeBody` lets a step stop it once the size is known and before a byte is written. */
+export interface DownloadOptions {
+  /** Awaited once, with the whole file's size and the bytes the body starts after, only when the size is known. A throw cancels the body, keeps the `.part` and is passed on. */
+  readonly beforeBody?: (totalBytes: number, startsAt: number) => Promise<void> | void;
+}
+
+/** Calls `beforeBody` with the size the response announces; a throw cancels the response body first, so no connection is left reading. */
+async function announceSize(response: Response, startsAt: number, beforeBody: DownloadOptions["beforeBody"]): Promise<void> {
+  const total = totalBytesOf(response, startsAt);
+  if (beforeBody === undefined || total === null) return;
+  try {
+    await beforeBody(total, startsAt);
+  } catch (error) {
+    // a body that already errored rejects its cancel: the step must still get the hook's error (the disk text), not the network's
+    await response.body?.cancel().catch(() => undefined);
+    throw error;
+  }
+}
+
 /** Fetches `url` into `partPath`, resuming it when possible; a stall ends it with a `stalled` error and keeps the part. */
-async function fetchToPart(url: string, partPath: string, fetchImpl: typeof fetch, onProgress: ((fraction: number) => void) | undefined, idleTimeoutMs: number): Promise<void> {
+async function fetchToPart(url: string, partPath: string, fetchImpl: typeof fetch, onProgress: ((fraction: number) => void) | undefined, idleTimeoutMs: number, options: DownloadOptions): Promise<void> {
   const idle = idleWatch(idleTimeoutMs);
   idle.arm();
   const source = describeSource(url, partPath);
@@ -135,6 +154,7 @@ async function fetchToPart(url: string, partPath: string, fetchImpl: typeof fetc
       await rm(partPath, { force: true });
       request = await requestBody(url, 0, fetchImpl, idle, source);
     }
+    await announceSize(request.response, request.startsAt, options.beforeBody);
     await writeBody(url, request.response, partPath, request.startsAt, onProgress, idle, source);
   } catch (error) {
     if (!idle.fired()) throw error;
@@ -147,7 +167,7 @@ async function fetchToPart(url: string, partPath: string, fetchImpl: typeof fetc
 /**
  * Makes `dest` a file with the pinned hash. A `dest` already right makes no request. A cut or stalled download leaves
  * its `.part` for the next call to continue; a wrong hash deletes the `.part` and fails with the URL and both hashes.
- * `onProgress` gets 0..1 while the size is known.
+ * `onProgress` gets 0..1 while the size is known; `options.beforeBody` runs once the size is known (a free-space check).
  */
 export async function downloadVerified(
   url: string,
@@ -156,6 +176,7 @@ export async function downloadVerified(
   onProgress?: (fraction: number) => void,
   fetchImpl: typeof fetch = fetch,
   idleTimeoutMs: number = DOWNLOAD_IDLE_TIMEOUT_MS,
+  options: DownloadOptions = {},
 ): Promise<void> {
   const { algorithm, expected } = expectedHash(hash);
   const partPath = `${dest}.part`;
@@ -163,7 +184,7 @@ export async function downloadVerified(
     if ((await hashFile(dest, algorithm)) === expected) return;
     await rm(dest, { force: true });
   }
-  await fetchToPart(url, partPath, fetchImpl, onProgress, idleTimeoutMs);
+  await fetchToPart(url, partPath, fetchImpl, onProgress, idleTimeoutMs, options);
   const actual = await hashFile(partPath, algorithm);
   if (actual !== expected) {
     await rm(partPath, { force: true });

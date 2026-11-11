@@ -66,3 +66,21 @@ test("the shipped manifest bounds a silent model pull at 300 s, and a missing or
   zero.waits.modelPullIdleMs = 0;
   assert.equal(manifestSchema.safeParse(zero).success, false);
 });
+
+test("the install sizes and the space kept free per drive are required positive numbers: a manifest without `disk` fails naming it, a missing or zero one fails", () => {
+  const manifest = loadManifest();
+  const withoutDisk = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+  delete withoutDisk.disk;
+  const dir = mkdtempSync(join(tmpdir(), "manifest-"));
+  const path = join(dir, "manifest.json");
+  writeFileSync(path, JSON.stringify(withoutDisk));
+  assert.throws(() => loadManifest(path), (error: Error) => error.message.includes("disk"));
+  for (const [section, key] of [["ollama", "installedBytes"], ["java", "installedBytes"], ["disk", "reserveBytes"]] as const) {
+    const missing = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+    delete missing[section][key];
+    assert.equal(manifestSchema.safeParse(missing).success, false, `${section}.${key} missing`);
+    const zero = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+    zero[section][key] = 0;
+    assert.equal(manifestSchema.safeParse(zero).success, false, `${section}.${key} zero`);
+  }
+});

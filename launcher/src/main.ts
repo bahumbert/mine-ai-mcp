@@ -22,9 +22,13 @@ export const USAGE = `Usage: mine-ai <command>
   status                        what is running
   doctor                        versions, GPU answer, ports, settings and the last errors, for a bug report
   bot start|stop <persona id or name>   start or stop one bot while Mine AI runs
-  install <gpu|ollama|ollama-remove|model|model-remove|java|server|endpoint-test> [--accept-eula] [--json <file>]
-  configure --llm-local | --llm-remote <url> <key> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
-            and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)`;
+  install <gpu|disk|ollama|ollama-remove|model|model-remove|java|server|endpoint-test|endpoint-models> [--accept-eula] [--dir <ollama folder>] [--no-model] [--json <file>]
+            (--dir: ollama and disk only; --no-model: disk only; disk lists the free space and what a local model and server need)
+  install endpoint-models --list <file> [--url <url>] [--key <key> | --saved-key] [--json <file>]
+            (writes the models the remote endpoint lists, one per line; without --url it reads the saved settings)
+  configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
+            and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)
+            and/or   --check-updates on|off   (whether each start checks GitHub for a newer release)`;
 
 const HELP_FLAGS: readonly string[] = ["--help", "-h"];
 
@@ -34,7 +38,7 @@ export interface CliDeps {
   startDeps: () => StartDeps;
   controlDeps: (root: string) => ControlCommandDeps;
   consoleDeps: (root: string, appRoot: string) => ConsoleDeps;
-  doctorDeps: (root: string, manifest: Manifest) => DoctorDeps;
+  doctorDeps: (root: string, manifest: Manifest, appRoot: string) => DoctorDeps;
   configureDeps?: ConfigureDeps;
   /** The kill-on-close job object for commands that start programs; the warning text when Windows refuses. */
   guardChildren: () => string | null;
@@ -59,7 +63,7 @@ async function runDoctorCommand(context: CliContext, deps: CliDeps): Promise<num
     // The rest of the report still helps a bug report: show it with the defaults.
     settings = loadSettings(join(context.root, "no-settings-file"), manifest);
   }
-  (await runDoctor(context.root, manifest, settings, deps.doctorDeps(context.root, manifest))).forEach(context.out);
+  (await runDoctor(context.root, manifest, settings, deps.doctorDeps(context.root, manifest, context.appRoot))).forEach(context.out);
   return 0;
 }
 

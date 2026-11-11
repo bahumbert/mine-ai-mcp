@@ -6,8 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadManifest } from "../manifest.ts";
 import type { Settings } from "../settings.ts";
-import { server, serverMemoryMb } from "./server.ts";
+import { diskWithRoomForAnything, twoDrives } from "./fixtures/fake-disk.ts";
+import { server as serverStep, serverMemoryMb, type ServerDeps } from "./server.ts";
 import type { InstallContext } from "./step.ts";
+
+/** The step over a disk with room for anything unless a test gives its own: only the free-space tests depend on the disk. */
+const server = (ctx: InstallContext, acceptEula: boolean, deps: ServerDeps = {}) => serverStep(ctx, acceptEula, { disk: diskWithRoomForAnything(), ...deps });
 
 const jarBytes = Buffer.from("pretend server.jar");
 const jarSha1 = createHash("sha1").update(jarBytes).digest("hex");
@@ -83,6 +87,41 @@ test("settings with a server that is not local fail the step with the configure 
   const result = await server(ctx, true, { fetchImpl: serving().fetchImpl });
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.hint, /configure --server-local/u);
+});
+
+// Free-space guard (plan T1b): the jar is 56880250 bytes (its Content-Length, measured 2026-11-06); Mine AI keeps 1 GiB free.
+const JAR_BYTES = 56880250;
+
+function onDiskWith(ctx: InstallContext, free: number) {
+  const { disk } = twoDrives(ctx.root, { data: free, other: 0 });
+  return { ctx: { ...ctx, manifest: { ...ctx.manifest, disk: { reserveBytes: GIB } } }, disk };
+}
+
+test("a drive too small for the jar and the reserve fails once the size is announced, before a byte is written, and writes no eula or properties", async () => {
+  const { ctx, disk } = onDiskWith(context(), 1.0 * GIB);
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    calls.push(String(url));
+    return new Response(new Uint8Array(jarBytes), { status: 200, headers: { "content-length": String(JAR_BYTES) } });
+  }) as unknown as typeof fetch;
+  const result = await server(ctx, true, { fetchImpl, disk });
+  assert.ok(!result.ok);
+  assert.match(result.error, /^Not enough free space on \S+ for the Minecraft server: it needs 1\.1 GB \(including the 1\.0 GB Mine AI keeps free\) and \S+ has 1\.0 GB free\.$/u);
+  assert.match(result.hint, /^Free some space on \S+, then run the step again\.$/u);
+  assert.equal(calls.length, 1, "the size comes from the download's own answer: no extra request");
+  assert.equal(existsSync(serverFile(ctx, "server.jar.part")), false);
+  assert.equal(existsSync(serverFile(ctx, "eula.txt")), false);
+  assert.equal(existsSync(serverFile(ctx, "server.properties")), false);
+});
+
+test("a jar already there is never checked (it needs no more room): the disk is not read", async () => {
+  const first = context();
+  await server(first, true, { fetchImpl: serving().fetchImpl });
+  const { ctx, disk } = onDiskWith(first, 0);
+  const again = serving();
+  assert.ok((await server(ctx, true, { fetchImpl: again.fetchImpl, disk })).ok);
+  assert.equal(again.calls.length, 0);
+  assert.deepEqual(disk.statfsCalls, []);
 });
 
 test("server memory is perRamGb per GiB of RAM, clamped to min and max", () => {

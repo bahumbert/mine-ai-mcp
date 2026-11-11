@@ -48,9 +48,9 @@ test("a trial that returns before it was prepared frees the mutex for the next l
 
 test("a never-settling trial is aborted at goal timeout plus slack on the wall clock, then marks its server sick", async () => {
   const neverSettles: TrialRunner = async input => { await input.onPrepared(); return new Promise<RunResult>(() => {}); };
-  const started = Date.now();
+  const started = performance.now();
   const end = await executeTrial({ runTrial: neverSettles, config }, job());
-  const elapsed = Date.now() - started;
+  const elapsed = performance.now() - started;
   assert.ok(elapsed >= 30 + 20 + 60, `waited the goal timeout, the slack and the restore bound: ${elapsed} ms`);
   assert.ok(elapsed < 500, `and no longer: ${elapsed} ms`);
   assert.equal(end.result.outcome, "error");
