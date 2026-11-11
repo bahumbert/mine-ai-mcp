@@ -2,16 +2,16 @@
   "id": "ndebele-house",
   "family": "africa",
   "name": "ndebele house",
-  "description": "Whitewashed house with a yellow painted band and orange door frame, under a deep stepped hip roof of acacia with eaves all round.",
+  "description": "Pale birch house with a yellow sandstone band and orange acacia door frame, under a deep stepped hip roof of acacia with eaves all round.",
   "palette": {
     "foundation": "cobblestone",
     "floor": "acacia_planks",
-    "wall": "white_terracotta",
-    "trim": "orange_terracotta",
+    "wall": "birch_planks",
+    "trim": "acacia_planks",
     "roof": "acacia_planks",
     "window": "glass_pane",
     "door": "acacia_door",
-    "accent": "yellow_terracotta"
+    "accent": "sandstone"
   },
   "variants": {
     "roof": { "stairs": "acacia_stairs", "slab": "acacia_slab" }

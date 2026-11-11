@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FACING_VECTOR } from "./blueprint.ts";
-import { templateFor, type Template } from "./templates.ts";
+import { TEMPLATES, templateFor, type Template } from "./templates.ts";
 
-// Owner decision 2026-11-10: the regional houses are built by bots that start with nothing; only the rondavel keeps its costly thatch and mud.
+// Owner decisions 2026-11-10 and 2026-11-11: the regional houses are built by bots that start with nothing; only the rondavel (thatch and mud), the minka (3 hay_block) and the hanok (12 white_wool) keep costly blocks.
 const blocksOf = (template: Template): string[] => {
   const shapes = Object.values(template.variants).flatMap((variant) => Object.values(variant));
   return [...Object.values(template.palette), ...shapes];
 };
+// What this file calls costly: thatch, mud, painted terracotta (the checks below) and wool (the hanok's walls).
+const COSTLY_BLOCK = /hay_block|mud|terracotta|wool/u;
+const costlyBlocksOf = (template: Template): string[] => blocksOf(template).filter((block) => COSTLY_BLOCK.test(block));
+const cellsOfBlock = (template: Template, block: string): number => {
+  const roles = Object.entries(template.palette).filter(([, name]) => name === block).map(([role]) => role);
+  return template.blueprint.cells.filter((cell) => roles.includes(cell.role)).length;
+};
 
-test("the ndebele house has a cheap acacia roof and no mud, hay or thatch, its painted terracotta walls kept", () => {
+test("the ndebele house is built of cheap common blocks: no mud, hay, thatch, terracotta or wool", () => {
   const template = templateFor("ndebele-house")!;
-  const blocks = blocksOf(template);
-  for (const costly of ["hay_block", "packed_mud"]) assert.equal(blocks.includes(costly), false, costly);
-  assert.deepEqual({ wall: template.palette.wall, accent: template.palette.accent, trim: template.palette.trim }, { wall: "white_terracotta", accent: "yellow_terracotta", trim: "orange_terracotta" });
+  assert.deepEqual(costlyBlocksOf(template), []);
+  assert.doesNotMatch(template.description, /terracotta/iu, "the description says what it is made of");
 });
 
 test("the ndebele roof steps up toward its ridge: each stair's high side leads into the roof, never out to the eaves", () => {
@@ -27,19 +33,14 @@ test("the ndebele roof steps up toward its ridge: each stair's high side leads i
   }
 });
 
-test("the sahel mud house is built of sandstone, not mud", () => {
+test("the sahel mud house is built of sandstone, not mud (its blocks: the costly-house list below holds them)", () => {
   const template = templateFor("sahel-mud-house")!;
-  for (const block of blocksOf(template)) assert.doesNotMatch(block, /mud/u, block);
   assert.ok(blocksOf(template).includes("sandstone"));
   assert.doesNotMatch(template.description, /mud/u, "the description says what it is made of");
 });
 
-test("the adobe pueblo is sandstone with at most 30 terracotta cells", () => {
-  const template = templateFor("adobe-pueblo")!;
-  const terracottaRoles = Object.entries(template.palette).filter(([, block]) => block.endsWith("terracotta")).map(([role]) => role);
-  const terracotta = template.blueprint.cells.filter((cell) => terracottaRoles.includes(cell.role)).length;
-  assert.ok(terracotta <= 30, `${terracotta} terracotta cells`);
-  assert.match(template.palette.wall ?? "", /sandstone/u);
+test("the adobe pueblo is sandstone (no terracotta: the costly-house list below holds it)", () => {
+  assert.match(templateFor("adobe-pueblo")!.palette.wall ?? "", /sandstone/u);
 });
 
 test("the pagoda house has no cherry block", () => {
@@ -48,7 +49,11 @@ test("the pagoda house has no cherry block", () => {
   assert.doesNotMatch(template.description, /cherry/u);
 });
 
-test("the rondavel keeps its thatch and mud: one costly african house stays", () => {
+test("the rondavel keeps its thatch and mud, the minka its 3 hay blocks, the hanok its 12 white wool: no other regional house has a costly block", () => {
   const blocks = blocksOf(templateFor("rondavel")!);
   assert.ok(blocks.includes("hay_block") && blocks.some((block) => block.includes("mud")), blocks.join(", "));
+  assert.equal(cellsOfBlock(templateFor("minka")!, "hay_block"), 3);
+  assert.equal(cellsOfBlock(templateFor("hanok")!, "white_wool"), 12);
+  const costlyHouses = [...TEMPLATES.values()].filter((template) => costlyBlocksOf(template).length > 0).map((template) => template.id).sort();
+  assert.deepEqual(costlyHouses, ["hanok", "minka", "rondavel"]);
 });

@@ -21,13 +21,12 @@ players:
     inventory:
       - { item: iron_shovel, count: 1 }
       - { item: acacia_planks, count: 64 }
-      - { item: acacia_planks, count: 45 }
+      - { item: acacia_planks, count: 52 }
       - { item: acacia_stairs, count: 64 }
       - { item: acacia_stairs, count: 16 }
-      - { item: white_terracotta, count: 42 }
+      - { item: birch_planks, count: 42 }
       - { item: cobblestone, count: 24 }
-      - { item: yellow_terracotta, count: 16 }
-      - { item: orange_terracotta, count: 7 }
+      - { item: sandstone, count: 16 }
       - { item: glass_pane, count: 5 }
       - { item: acacia_door, count: 1 }
       - { item: acacia_slab, count: 1 }
