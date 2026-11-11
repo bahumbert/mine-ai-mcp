@@ -14,9 +14,12 @@ import { Vec3 } from "vec3";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
+import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { DIG_REACH } from "../../navigation/movements/excavation.js";
+import { preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
 import {
   build,
+  BUILD_REACH,
   BuildProgress,
   type BuildCell,
   type BuildCellState,
@@ -41,6 +44,7 @@ import {
   buildStructureInputSchema,
   buildStructureResultSchema,
   type LeftReason,
+  type NoScaffoldCarried,
   type BuildStructureRequest,
   type BuildStructureResult,
   type StructureAudit,
@@ -61,6 +65,11 @@ export function siteBreakRequest(request: Pick<BuildStructureRequest, "cells" | 
   return (_block, position) => site.has(packKey(position.x, position.y, position.z));
 }
 
+/** What the structure is made of: the blocks no route may spend as scaffold (air is no block to keep). */
+function structureBlockNames(request: Pick<BuildStructureRequest, "cells">): ReadonlySet<string> {
+  return new Set(request.cells.map((cell) => cell.blockName).filter((name) => name !== "air"));
+}
+
 function productionPhysics(
   bot: Bot,
   navigation: NavigationRuntime,
@@ -74,9 +83,7 @@ function productionPhysics(
         isRequestedBreak: siteBreakRequest(request),
         // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
         ignoreRegionsOwnedBy: bot.username,
-        protectedScaffoldNames: [...new Set(request.cells.map((cell) => cell.blockName))].filter(
-          (name) => name !== "air",
-        ),
+        protectedScaffoldNames: [...structureBlockNames(request)],
       }),
     route: navigation.navigate,
     breakInPlace: navigation.breakBlockInPlace,
@@ -192,6 +199,24 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
   };
 }
 
+/**
+ * Set when a cell the route could not reach lies a build's reach or more above the feet and no block the policy admits
+ * is carried to stand on: the refusal is then the missing scaffold, not distance (live 2026-11-10: the model walked
+ * nearer). A route refused at ground level (a pond, a lagged timeout) is no scaffold matter. Every cell of the result
+ * is looked at, not the audit's named sample.
+ */
+function noScaffoldCarried(bot: Bot, request: BuildStructureRequest, result: BuildResult): NoScaffoldCarried | undefined {
+  // The feet cell as the build process counts it (a floor lower than a full block lifts it by one), so a cell the build
+  // judged within reach is never reported as out of it.
+  const feetY = navigationFeet(bot.entity.position, bot.entity.onGround === true).y;
+  const outOfReach = result.cells.some(
+    ({ cell, state }) => state.kind === "refused" && state.cause === "route" && cell.position.y - feetY >= BUILD_REACH,
+  );
+  const building = structureBlockNames(request);
+  if (!outOfReach || preferredScaffoldItem(bot, building) !== null) return undefined;
+  return { admitted: scaffoldBlockNames(bot).filter((name) => !building.has(name)) };
+}
+
 const REASON_WORDS: Record<LeftReason, string> = {
   holds_another_block: "hold another block",
   nothing_to_place_against: "have nothing solid to place against",
@@ -276,6 +301,7 @@ async function buildAttempt(run: BuildRun, context: ActionContext): Promise<Buil
         structure.wrong,
         structure.left.map(describeLeft).join("; "),
         structure.missing.map((entry) => `${entry.count} ${entry.block}`).join(", "),
+        noScaffoldCarried(bot, request, result),
       );
   return { status: "failed", error, structure };
 }
