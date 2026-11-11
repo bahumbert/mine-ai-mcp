@@ -12,7 +12,7 @@ const cellAt = (above: number, block = "spruce_planks"): WorldCell => ({ x: 0, y
 const without = (...kinds: string[]) => DEFAULT_SCAFFOLD_BLOCKS.filter((block) => !kinds.includes(block));
 const dirt = (count: number) => [{ name: "dirt", count }];
 
-test("BUILD_REACH is the runtime's (src/navigation/processes/building/build-process.ts:67)", () => {
+test("BUILD_REACH is the runtime's (src/navigation/processes/building/build-process.ts)", () => {
   assert.equal(BUILD_REACH, 4);
 });
 

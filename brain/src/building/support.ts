@@ -87,7 +87,7 @@ function computeClings(block: string): boolean {
 
 /**
  * Whether placing against this face (pointing from the support into the cell) gives the cell its asked states: a copy of
- * `faceFits` in `src/navigation/processes/building/build-process.ts` (the brain imports no `src/` module);
+ * `faceFits` in `src/navigation/processes/building/build-cell.ts` (the brain imports no `src/` module);
  * `face-fits-agree.test.ts` keeps them one. A block that clings (`clings`, a ladder) is placed against the face behind
  * its facing only: the server refuses its click on any other.
  */

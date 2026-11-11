@@ -3,10 +3,9 @@ import { describeStep, stepKey, targetItems, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
-import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
-import { improvement, temporaryRoles } from "./building/materials.ts";
-import { chooseSite, planTemplate, type HousePlan } from "./building/plan.ts";
-import { classicTemplate, resumeStep, templateOfHouse } from "./building/templates.ts";
+import { shortfall, type MaterialCount } from "./building/blueprint.ts";
+import { houseBillItems, ownSmallHouse, rolesOf, temporaryHouseLack } from "./building/house-facts.ts";
+import { resumeStep } from "./building/templates.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
 import { heardFarAway, lineDistance, noteNoPosition, type Conversation, type NoPositionSince } from "./conversation/state.ts";
@@ -1370,11 +1369,7 @@ export class Agent {
 
   /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
-    const house = this.building.unfinished;
-    const template = house === null ? undefined : templateOfHouse(house);
-    // A house nobody has a template for any more needs no blocks: this runs every step and never throws.
-    const houseBill = house === null || template === undefined ? [] : planTemplate(template, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
-    return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
+    return neededItems(snapshot, { houseBill: houseBillItems(this.building.unfinished), wanted: work.wanted, objective: work.objective.text });
   }
 
   /** The game's block tags of these blocks, asked of the runtime once per name. */
@@ -1411,7 +1406,7 @@ export class Agent {
     try {
       if (!ownHome && unfinished === null) {
         houseShortfall = await this.houseShortfall(snapshot);
-        smallHouse = this.smallHouseRoles(snapshot);
+        smallHouse = rolesOf(ownSmallHouse(this.options.persona.style, snapshot.position));
         carriedBlocks = await this.carriedBlocks(snapshot);
       }
       temporaryHouse = await this.temporaryHouseFacts();
@@ -1419,18 +1414,6 @@ export class Agent {
       this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
     return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...trading }, drawn);
-  }
-
-  /** The persona's own small house: its classic template at the style it likes (none shipped: no small house to tell about). */
-  private ownSmallHouse(snapshot: Pick<BotSnapshot, "position">): HousePlan | null {
-    const template = classicTemplate(this.options.persona.style, "small");
-    return template === undefined ? null : planTemplate(template, chooseSite(snapshot.position, null));
-  }
-
-  /** What her small house is made of: its cells per role (air excluded), in the order of the roles. */
-  private smallHouseRoles(snapshot: BotSnapshot): OpportunityFacts["smallHouse"] {
-    const cells = this.ownSmallHouse(snapshot)?.cells ?? [];
-    return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
   }
 
   /** The most carried blocks that fill a whole cell (what `build` may use for a wall, floor or roof), at most five. */
@@ -1446,21 +1429,13 @@ export class Agent {
     const place = this.temporaryHouse();
     const house = place?.house;
     if (house === undefined) return null;
-    const template = templateOfHouse(house);
-    if (template === undefined) return null; // a house nobody has a template for any more: nothing to swap back
-    const roles = temporaryRoles(house.materials, template);
-    const missing = shortfall(improvement(template, house, roles).bill, (await this.options.runtime.status()).inventory);
-    return {
-      door: house.door,
-      // temporaryRoles names only roles the template has a block for and the materials name one for.
-      roles: roles.map((role) => ({ role, block: house.materials[role]!, own: template.palette[role]! })),
-      shortfall: await this.withActivities(missing),
-    };
+    const lack = temporaryHouseLack(house, (await this.options.runtime.status()).inventory);
+    return lack === null ? null : { door: lack.door, roles: lack.roles, shortfall: await this.withActivities(lack.missing) };
   }
 
   /** What her small house needs beyond what she carries, each with the work that gets it. */
   private async houseShortfall(snapshot: BotSnapshot): Promise<Shortfall[]> {
-    const bill = this.ownSmallHouse(snapshot)?.bill ?? [];
+    const bill = ownSmallHouse(this.options.persona.style, snapshot.position)?.bill ?? [];
     return this.withActivities(shortfall(bill, snapshot.inventory));
   }
 

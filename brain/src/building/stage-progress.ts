@@ -46,7 +46,7 @@ export async function stageCellsNow(plan: HousePlan, stage: Stage, runtime: Pick
 
 /**
  * How far above the bot's feet a block is placed from where it stands: the runtime's `BUILD_REACH`
- * (`src/navigation/processes/building/build-process.ts:67`, used at `:258`). `brain/` does not import `src/`; the Mine Labs
+ * (`src/navigation/processes/building/build-process.ts`, used by `withinReach`). `brain/` does not import `src/`; the Mine Labs
  * scenario `template-roof-no-scaffold-*` (plan 2026-11-11-house-templates-live-fixes Task 5) measures it against the runtime.
  */
 export const BUILD_REACH = 4;
