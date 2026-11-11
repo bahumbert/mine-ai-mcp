@@ -60,7 +60,7 @@ test("the pickaxe lost again in the same step ends the build, saying what was re
   const detail = result.status === "failed" ? result.detail : "";
   assert.match(detail, /^a small medieval house stopped at part 1\/\d+: \[TOOL_TIER_LOST\] wooden_pickaxe was lost/u);
   assert.match(detail, /wooden_pickaxe was remade earlier in this step and lost again/u);
-  assert.match(detail, /building it again resumes it there$/u);
+  assert.match(detail, /; \{"skill":"build","template":"medieval-small","x":-?\d+,"y":\d+,"z":-?\d+\} resumes it$/u);
   assert.equal(calls(runtime).filter((call) => call === "craft wooden_pickaxe").length, 1);
 });
 

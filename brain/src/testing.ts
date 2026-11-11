@@ -20,6 +20,12 @@ const FAKE_NOT_SOLID = new Set(["air", "water", "lava", "short_grass", "dandelio
 /** Drops of blocks that do not drop themselves, for the fake `collect_block`. */
 const FAKE_DROPS: Readonly<Record<string, string>> = { stone: "cobblestone", short_grass: "wheat_seeds", fern: "wheat_seeds", iron_ore: "raw_iron" };
 
+/** The runtime's default scaffold blocks (`DEFAULT_SCAFFOLD_BLOCKS`, `src/survival/policy/contract.ts:3-10`; `brain/` does not import `src/`). */
+export const DEFAULT_SCAFFOLD_BLOCKS: readonly string[] = ["dirt", "cobblestone", "cobbled_deepslate", "netherrack", "basalt", "end_stone"];
+
+/** The survival policy the runtime reports with its default scaffold blocks, for a test of the stages' scaffold check. */
+export const DEFAULT_POLICY: NonNullable<BotSnapshot["policy"]> = { revision: "r1", digStraightDown: false, scaffoldBlocks: DEFAULT_SCAFFOLD_BLOCKS };
+
 /** Exactly the blocks of a small medieval house: carrying them, the build skill gathers nothing. */
 export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
   { name: "spruce_stairs", count: 42 },

@@ -7,9 +7,9 @@ import test from "node:test";
 import minecraftData from "minecraft-data";
 import { recipesFor } from "#src/world/smelting.ts";
 import { billOfMaterials, placeBlueprint, type Facing, type MaterialCount, type WorldCell } from "./blueprint.ts";
-import { chooseSite, planTemplate } from "./plan.ts";
+import { catalogueLine, chooseSite, planTemplate } from "./plan.ts";
 import { supportGroups, TEMPLATE_REGISTRY_VERSION, validateBlueprint } from "./support.ts";
-import { catalogueLine, classicTemplate, familiesOf, loadTemplates, stagesOf, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./templates.ts";
+import { classicTemplate, familiesOf, loadTemplates, stagesOf, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./templates.ts";
 
 const PALETTE = { foundation: "cobblestone", floor: "oak_planks", wall: "oak_planks", pillar: "oak_log", trim: "oak_log", roof: "spruce_planks", window: "glass_pane", door: "oak_door" };
 const KEY = { f: { role: "foundation" }, F: { role: "floor" }, w: { role: "wall" }, p: { role: "pillar", axis: "y" }, r: { role: "roof" }, D: { role: "door" }, _: { role: "air" } };
@@ -101,11 +101,9 @@ test("templateOfHouse maps old houses", () => {
   assert.equal(classicTemplate(undefined, "small")?.id, "medieval-small");
 });
 
-test("a catalogue line names id, size, floors, blocks, top bill and description", () => {
-  const medieval = templateFor("medieval-small")!;
-  assert.equal(catalogueLine(medieval), `medieval-small (7x7, 1 floor, 129 blocks: 42 spruce_stairs, 36 oak_planks, 24 oak_log) ${medieval.description}`);
+test("a catalogue line of a template on stilts names its footprint and floors (the exact line: plan.test.ts)", () => {
   const stilts = withFolder({ "stilts.json": templateFile("stilts", {}, STILT_LAYERS) }, (directory) => loadTemplates(directory)).get("stilts")!;
-  assert.match(catalogueLine(stilts), /^stilts \(5x6, 1 floor, \d+ blocks: /u);
+  assert.match(catalogueLine(stilts), /^stilts \(5x6, 1 floor, \d+ blocks, mostly /u);
 });
 
 test("every shipped template is valid at every facing", () => {

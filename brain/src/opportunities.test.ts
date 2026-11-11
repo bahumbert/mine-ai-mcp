@@ -102,9 +102,9 @@ test("the drawn activities keep their seats: a farming lover's no-farm line is n
 
 test("an unfinished house comes before having no home; a home's materials are one building line, by the work that gets them", () => {
   const unfinished = { kind: "small medieval house", site: { door: { x: 4, y: 64, z: 2 }, facing: "north" as const }, part: 3 };
-  assert.deepEqual(texts(settled({ ownHome: false, unfinished })), ['(building) your unfinished small medieval house, door at 4 64 2: {"skill":"build","template":"medieval-small"}'], "an old note without a template resumes the classic house of its kind");
+  assert.deepEqual(texts(settled({ ownHome: false, unfinished })), ['(building) your unfinished small medieval house, door at 4 64 2: {"skill":"build","template":"medieval-small","x":4,"y":64,"z":2}'], "an old note without a template resumes the classic house of its kind");
   const staged = { kind: "rondavel", template: "rondavel", site: { door: { x: 1, y: 64, z: 2 }, facing: "north" as const }, part: 3, stage: 1, stages: 4, stageName: "walls" };
-  assert.deepEqual(texts(settled({ ownHome: false, unfinished: staged })), ['(building) your unfinished rondavel (stage 2 of 4, walls), door at 1 64 2: {"skill":"build","template":"rondavel"}']);
+  assert.deepEqual(texts(settled({ ownHome: false, unfinished: staged })), ['(building) your unfinished rondavel (stage 2 of 4, walls), door at 1 64 2: {"skill":"build","template":"rondavel","x":1,"y":64,"z":2}']);
   const shortfall = [
     { item: "oak_log", count: 22, activity: "woodcutting" as const },
     { item: "cobblestone", count: 16, activity: "mining" as const },

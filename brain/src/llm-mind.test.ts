@@ -274,7 +274,8 @@ test("the build line lists the own family only, then names the other families an
   const build = prompt.split("\n").findIndex((line) => line.startsWith('- {"skill":"build"'));
   const section = prompt.split("\n").slice(build).join("\n");
   const own = section.slice(0, section.indexOf("Other house families you know"));
-  for (const id of ["medieval-small", "medieval-medium", "rustic-small", "rustic-medium"]) assert.match(own, new RegExp(`${id} \\(\\d+x\\d+, \\d floors?, \\d+ blocks: `, "u"));
+  for (const id of ["medieval-small", "medieval-medium", "rustic-small", "rustic-medium"]) assert.match(own, new RegExp(`${id} \\(\\d+x\\d+, \\d floors?, \\d+ blocks, mostly [a-z_, ]+; its first stage, the \\w+, takes \\d+ `, "u"));
+  assert.match(section, /send it first, before fetching anything/u);
   assert.doesNotMatch(own, /japanese-/u, "another family's ids are not in the own list");
   assert.match(section, /Your europe houses:/u);
   const others = familiesOf(TEMPLATES).filter((family) => family !== "europe").join(", ");
@@ -418,6 +419,24 @@ test("a build refused for missing materials is said to be ready once they are al
   assert.doesNotMatch(action.requests[0]?.at(-1)?.content ?? "", /is carried now/u);
   await mind.next(workInput("build a house", { steps, snapshot: carrying([{ name: "oak_log", count: 2 }, { name: "oak_log", count: 1 }, { name: "oak_door", count: 1 }]) }), signal);
   assert.match(action.requests[1]?.at(-1)?.content ?? "", /Everything a small medieval house was missing \(3 oak_log, 1 oak_door\) is carried now: build it again\./u);
+});
+
+test("the nudge of a refused build quotes the step its result gave, and none after a refusal that offered a new site", async () => {
+  const everything = { ...new FakeRuntime().snapshot, inventory: [{ name: "oak_log", count: 3 }, { name: "spruce_slab", count: 7 }] };
+  const nudged = async (detail: string) => {
+    const { action, mind } = scriptedMind();
+    action.reply({ done: "ok" });
+    await mind.next(workInput("build a house", { steps: [{ step: "build a small house", outcome: "failed" as const, detail }], snapshot: everything }), signal);
+    return action.requests[0]?.at(-1)?.content ?? "";
+  };
+  const head = "missing 3 oak_log for stage 1 of 4 (floor) of a small medieval house (the rest is carried)";
+  assert.match(await nudged(`${head}: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /was missing \(3 oak_log\) is carried now: \{"skill":"build","template":"medieval-small","x":1,"y":2,"z":3\}/u);
+  assert.match(await nudged(`${head}: fetch exactly the missing items with get_items, then build again`), /is carried now: build it again\./u, "no step in the detail: the old sentence");
+  const farNote = `${head}; this would be a new house here: your unfinished medium japanese house is 380 blocks north-west (door -18 76 -7), and {"skill":"build","template":"japanese-medium","x":-18,"y":76,"z":-7} goes on with it; a new house here leaves it untracked: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":251,"y":62,"z":-273} again`;
+  assert.doesNotMatch(await nudged(farNote), /is carried now/u, "quoting the first step would push the replacement");
+  // Two items before the phrase: the list parser reads the first, finds it carried and would nudge, were the phrase not checked.
+  const scaffold = "missing 7 spruce_slab, 3 oak_log and about 3 blocks to stand on for its cells 5 above the ground (scaffold the build lays and takes back: one of dirt, basalt) for stage 3 of 4 (roof) of a small medieval house (the rest is carried)";
+  assert.doesNotMatch(await nudged(`${scaffold}: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /is carried now/u, "the blocks to stand on are not in the inventory check");
 });
 
 

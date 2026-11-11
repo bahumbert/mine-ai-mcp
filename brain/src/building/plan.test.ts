@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chooseSite, planTemplate } from "./plan.ts";
+import { billOfMaterials, describeMaterials, placeBlueprint } from "./blueprint.ts";
+import { catalogueLine, chooseSite, planTemplate } from "./plan.ts";
 import minecraftData from "minecraft-data";
 import { TEMPLATES, templateFor } from "./templates.ts";
 
@@ -72,4 +73,16 @@ test("air windows leave no glass in the bill", () => {
   const plan = planTemplate(medieval, site, { window: "air" });
   assert.ok(plan.bill.every((entry) => entry.item !== "glass_pane" && entry.item !== "air"));
   assert.ok(plan.cells.some((cell) => cell.role === "window" && cell.block === "air"));
+});
+
+test("a catalogue line names id, size, floors, blocks, the three main blocks without counts, and the first stage's bill", () => {
+  const origin = { x: 0, y: 0, z: 0 };
+  const bill = billOfMaterials(placeBlueprint(medieval.blueprint, medieval.palette, origin, "north", medieval.variants));
+  const blocks = bill.reduce((sum, { count }) => sum + count, 0);
+  const plan = planTemplate(medieval, { door: origin, facing: "north" });
+  const first = plan.stages[0]!;
+  const mostly = bill.slice(0, 3).map(({ item }) => item).join(", ");
+  assert.equal(catalogueLine(medieval), `medieval-small (7x7, 1 floor, ${blocks} blocks, mostly ${mostly}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${medieval.description}`);
+  assert.match(catalogueLine(medieval), /its first stage, the floor, takes 15 cobblestone, 9 oak_planks\)/u);
+  assert.doesNotMatch(catalogueLine(medieval).split("; its first stage")[0]!, /mostly [^;]*\d/u, "no count of the main blocks to paste into get_items");
 });

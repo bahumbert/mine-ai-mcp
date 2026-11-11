@@ -1,6 +1,6 @@
 import type { KnownPlace } from "../mind.ts";
 import type { BlockKind } from "../runtime-client.ts";
-import { billOfMaterials, BUILD_ROLES, STRUCTURAL_ROLES, type BlockRole, type MaterialCount } from "./blueprint.ts";
+import { billOfMaterials, BUILD_ROLES, STRUCTURAL_ROLES, type BlockRole, type MaterialCount, type WorldCell } from "./blueprint.ts";
 import { planTemplate, type HousePlan, type Materials } from "./plan.ts";
 import type { Template } from "./templates.ts";
 
@@ -45,6 +45,8 @@ export interface Improvement {
   readonly rest: Materials;
   /** The blocks the swap places, per block, most needed first: only the cells whose block changes. */
   readonly bill: readonly MaterialCount[];
+  /** The cells whose block changes: what the swap places (the reach check reads their heights). */
+  readonly changed: readonly WorldCell[];
 }
 
 /** The house `house` describes, with `roles` swapped back to the template's blocks (variants included). */
@@ -55,5 +57,5 @@ export function improvement(template: Template, house: Pick<NonNullable<KnownPla
   const after = planTemplate(template, site, rest);
   const was = new Map(before.cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell.block]));
   const changed = after.cells.filter((cell) => was.get(`${cell.x},${cell.y},${cell.z}`) !== cell.block);
-  return { after, rest, bill: billOfMaterials(changed) };
+  return { after, rest, bill: billOfMaterials(changed), changed };
 }

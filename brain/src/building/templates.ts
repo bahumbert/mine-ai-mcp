@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { stackSizeOf } from "../newest-registry.ts";
-import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, describeMaterials, FACINGS, placeBlueprint, ROLES, SHAPES, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, FACINGS, placeBlueprint, ROLES, SHAPES, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
 import { blockId, DEFAULT_STYLE, findDataDirectory, kebabId, STYLES, variantsSchema } from "./styles.ts";
 import { groupEntryOf, supportGroups, validateBlueprint, type SupportGroup } from "./support.ts";
 
@@ -172,28 +172,20 @@ export function templateOfHouse(house: { readonly template?: string; readonly ki
 }
 
 /**
- * The step that goes on with an unfinished house: its template built again (an old note names none: the template of its
- * kind). A record with neither (recall drops those) can only be given up.
+ * The step that goes on with an unfinished house: its template built again at its door (an old note names no template: the
+ * template of its kind). With the door the step resumes the house from wherever it is sent (`build` walks to the site
+ * itself); without it a build far from the house would start a new one there. A record with no template known (recall
+ * drops those) can only be given up.
  */
-export function resumeStep(house: { readonly kind: string; readonly template?: string }, templates: ReadonlyMap<string, Template> = TEMPLATES): string {
+export function resumeStep(house: { readonly kind: string; readonly template?: string; readonly site: { readonly door: { readonly x: number; readonly y: number; readonly z: number } } }, templates: ReadonlyMap<string, Template> = TEMPLATES): string {
   const id = house.template ?? templateOfKind(house.kind, templates)?.id;
-  return id === undefined ? '{"skill":"abandon_house"}' : `{"skill":"build","template":"${id}"}`;
+  const { x, y, z } = house.site.door;
+  return id === undefined ? '{"skill":"abandon_house"}' : `{"skill":"build","template":"${id}","x":${x},"y":${y},"z":${z}}`;
 }
 
 /** The families of `templates`, sorted. */
 export function familiesOf(templates: ReadonlyMap<string, Template>): string[] {
   return [...new Set([...templates.values()].map((template) => template.family))].sort();
-}
-
-/** One line the model reads to choose a house: id, footprint, floors, blocks, the three largest bill items, description. */
-export function catalogueLine(template: Template): string {
-  const origin = { x: 0, y: 0, z: 0 };
-  const cells = placeBlueprint(template.blueprint, template.palette, origin, "north", template.variants);
-  const bill = billOfMaterials(cells);
-  const floors = new Set(cells.filter((cell) => cell.role === "floor").map((cell) => cell.y)).size;
-  const blocks = bill.reduce((sum, { count }) => sum + count, 0);
-  const { x, z } = template.blueprint.size;
-  return `${template.id} (${x}x${z}, ${floors} floor${floors === 1 ? "" : "s"}, ${blocks} blocks: ${describeMaterials(bill.slice(0, 3))}) ${template.description}`;
 }
 
 /** Whether a call is the closing pass: the air clearing or the door's. */

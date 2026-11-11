@@ -36,7 +36,7 @@ import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, Prote
 import { BodyDown, bodyDownState, bodyDownWait } from "./body-down.ts";
 import type { EveryoneLines } from "./everyone-lines.ts";
 import { TillFacts } from "./farming/site.ts";
-import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
+import { runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { UnfinishedHouseSaver } from "./unfinished-house-saver.ts";
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
@@ -222,7 +222,7 @@ export class Agent {
     const house = this.building.unfinished;
     if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;
-    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it: ${resumeStep(house)}` }];
+    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; ${resumeStep(house)} walks there and goes on with it` }];
   }
   /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
   private readonly areas: ProtectedArea[] = [];

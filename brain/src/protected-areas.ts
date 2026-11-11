@@ -63,10 +63,23 @@ const coords = ({ x, y, z }: Position) => `${x} ${y} ${z}`;
 interface SiteHouses extends Owner {
   readonly unfinished: UnfinishedHouse | null | undefined;
   readonly places: readonly KnownPlace[];
-  /** How near its door a `build` must be to go on with the unfinished house. */
-  readonly resumeRange: number;
   /** The houses she may build (default: the shipped registry): a finished house's kind is read from its template. */
   readonly templates?: ReadonlyMap<string, Template> | undefined;
+}
+
+/** The words {@link newSiteNote} opens with: a result holding them offered a new site, so its first step is the old house's. */
+export const NEW_HOUSE_NOTE = "this would be a new house here";
+
+/**
+ * What a new house here would do to the unfinished one: said, with the step that goes on with it, before anything is
+ * replaced (live 2026-11-10: a step copied from 380 blocks away started a second house and left the first untracked).
+ * `way` is where the unfinished house lies from the new door ("380 blocks north-west"). Starting the new house stays the
+ * model's choice: this only informs. Starts with "; " (it follows a sentence of the result).
+ */
+export function newSiteNote(unfinished: UnfinishedHouse, way: string, templates?: ReadonlyMap<string, Template>): string {
+  const { door } = unfinished.site;
+  const goesOn = templateOfHouse(unfinished, templates) === undefined ? "gives it up" : "goes on with it";
+  return `; ${NEW_HOUSE_NOTE}: your unfinished ${unfinished.kind} is ${way} (door ${coords(door)}), and ${resumeStep(unfinished, templates)} ${goesOn}; a new house here leaves it untracked`;
 }
 
 /**
@@ -81,7 +94,7 @@ export function describeSiteBlocker(houses: SiteHouses, area: ProtectedArea): st
     const heading = `an area of yours, that is your unfinished ${unfinished.kind} (area #${area.regionId}, door at ${coords(unfinished.site.door)})`;
     // A house whose template is gone has no step that goes on with it: only giving it up is left.
     if (templateOfHouse(unfinished, houses.templates) === undefined) return `${heading}: its template is no longer a house you know how to build: {"skill":"abandon_house"} gives it up`;
-    return `${heading}: ${resumeStep(unfinished, houses.templates)} within ${houses.resumeRange} blocks of that door to go on with it, or {"skill":"abandon_house"} to give it up`;
+    return `${heading}: ${resumeStep(unfinished, houses.templates)} goes on with it, or {"skill":"abandon_house"} to give it up`;
   }
   for (const { house } of houses.places) {
     const kind = house === undefined ? undefined : templateOfHouse(house, houses.templates)?.kind;

@@ -1105,8 +1105,8 @@ test("an unfinished house is named in the places with the step that resumes it, 
   planner.reply({ objective: "rest a while" });
   await until(() => planner.requests.length === 1);
   const request = planner.requests[0]?.[1]?.content ?? "";
-  assert.match(request, /your unfinished small japanese house \(door 5 64 5; go within 6 blocks of the door, then build it again to finish it: \{"skill":"build","template":"japanese-small"\}\)/u);
-  assert.match(request, /- \(building\) your unfinished small japanese house \(stage 2 of 4, walls\), door at 5 64 5: \{"skill":"build","template":"japanese-small"\}/u);
+  assert.match(request, /your unfinished small japanese house \(door 5 64 5; \{"skill":"build","template":"japanese-small","x":5,"y":64,"z":5\} walks there and goes on with it\)/u);
+  assert.match(request, /- \(building\) your unfinished small japanese house \(stage 2 of 4, walls\), door at 5 64 5: \{"skill":"build","template":"japanese-small","x":5,"y":64,"z":5\}/u);
 });
 
 test("an unfinished house of a template nobody has any more is dropped at the start and said", async (t) => {

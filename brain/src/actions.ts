@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { BUILD_ROLES, describeMaterials } from "./building/blueprint.ts";
-import { catalogueLine, CLASSIC_SIZES, familiesOf, TEMPLATES, type Template } from "./building/templates.ts";
+import { catalogueLine } from "./building/plan.ts";
+import { CLASSIC_SIZES, familiesOf, TEMPLATES, type Template } from "./building/templates.ts";
 import { FARM_SIZES } from "./farming/plot.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
@@ -138,8 +139,9 @@ export const SKILL_NAMES = [
 ] as const satisfies readonly SkillName[];
 
 /**
- * The `build` line: the houses of the character's own family, one line each (what each takes, so the model can weigh
- * it and fetch it with `get_items`), then the other families and the step that reads their houses.
+ * The `build` line: the houses of the character's own family, one line each (what each is made of and what its first
+ * stage takes, so the model can weigh a house, never to fetch it: the build result names what to fetch), then the other
+ * families and the step that reads their houses.
  */
 function buildUsage(family: string, templates: ReadonlyMap<string, Template>): string {
   const own = [...templates.values()].filter((template) => template.family === family);
@@ -149,7 +151,7 @@ function buildUsage(family: string, templates: ReadonlyMap<string, Template>): s
     ? `Your ${family} houses:\n    ${own.map(catalogueLine).join("\n    ")}${others.length > 0 ? `\n${lookup("Other")}` : ""}`
     : `You know no ${family} houses${others.length > 0 ? `; ${lookup("other")}` : "."}`;
   const separator = own.length > 0 && others.length === 0 ? "\n" : " ";
-  return `{"skill":"build","template":"<id>"}  build a house where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes) and builds in stages (floor, walls, roof...): it starts when you carry the first stage's blocks and stops between stages when the next one's are missing, saying what to fetch; the same step again goes on. ${houses}${separator}{"skill":"build","size":"<${CLASSIC_SIZES.join("|")}>"} is short for your own ${CLASSIC_SIZES.join(" or ")} house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window, door, accent and railing; window, accent and railing may be "air"; a door must be a door block); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
+  return `{"skill":"build","template":"<id>"}  build a house where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes) and builds in stages (floor, walls, roof...): send it first, before fetching anything: it starts when you carry the first stage's blocks, and otherwise its result names exactly what the next stage lacks (fetch exactly that); it stops between stages the same way, and the step its result gives goes on. ${houses}${separator}{"skill":"build","size":"<${CLASSIC_SIZES.join("|")}>"} is short for your own ${CLASSIC_SIZES.join(" or ")} house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window, door, accent and railing; window, accent and railing may be "air"; a door must be a door block); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
 }
 
 /**
@@ -178,7 +180,7 @@ export function skillUsage(skill: SkillName, family: string, templates: Readonly
     case "build": return buildUsage(family, templates);
     case "improve_house": return `{"skill":"improve_house","roles":["<role>", ...]}  swap the temporary parts of your own house (all of them, or the roles listed) for the house's own blocks, in place; every block needed must be carried first`;
     case "abandon_house": return `{"skill":"abandon_house"}  give up your unfinished house for good: it is no longer tracked and its protected area is released; what stands stays`;
-    case "list_houses": return `{"skill":"list_houses","family":"<family>"}  read the houses of another family you know (one line each, as above); then build any of them with its id`;
+    case "list_houses": return `{"skill":"list_houses","family":"<family>"}  read the houses of another family you know (one line each, as above); each line ends with the step that builds it`;
   }
 }
 

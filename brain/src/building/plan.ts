@@ -1,4 +1,4 @@
-import { billOfMaterials, buildBatches, cellsCountedOnce, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, cellsCountedOnce, describeMaterials, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 import { supportGroups, withStatesItHas } from "./support.ts";
 import { stagesOf, type Stage, type Template } from "./templates.ts";
@@ -88,6 +88,20 @@ export function planTemplate(template: Template, site: Site, materials: Material
     stages: stagesOf(template, batches, supportGroups(cells).groups),
     stageBill: (stage) => billOfMaterials(counted.slice(stage.first, stage.last + 1).flat()),
   };
+}
+
+/**
+ * One line the model reads to choose a house: id, footprint, floors, blocks, the three largest bill items by name only
+ * (the model may weigh far materials but has no list to paste into `get_items`), the first stage's bill (what `build`
+ * asks first), description.
+ */
+export function catalogueLine(template: Template): string {
+  const plan = planTemplate(template, { door: { x: 0, y: 0, z: 0 }, facing: "north" });
+  const floors = new Set(plan.cells.filter((cell) => cell.role === "floor").map((cell) => cell.y)).size;
+  const blocks = plan.bill.reduce((sum, { count }) => sum + count, 0);
+  const first = plan.stages[0]!;
+  const { x, z } = template.blueprint.size;
+  return `${template.id} (${x}x${z}, ${floors} floor${floors === 1 ? "" : "s"}, ${blocks} blocks, mostly ${plan.bill.slice(0, 3).map(({ item }) => item).join(", ")}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${template.description}`;
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof); a house with no roof role, the highest cell. */

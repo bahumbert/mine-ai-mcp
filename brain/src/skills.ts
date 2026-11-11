@@ -3,14 +3,15 @@ import minecraftData from "minecraft-data";
 import { z } from "zod";
 import type { Activity } from "./activities.ts";
 import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./actions.ts";
-import { describeMaterials, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
+import { billOfMaterials, describeMaterials, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { abandonHouse } from "./building/abandon-house.ts";
 import { builtBefore, onlyRefused, refusedCells, sameCell, type Cell } from "./building/build-audit.ts";
-import { groundedDoor, houseBox, nearestClearSite, SITE_SEARCH, siteBox } from "./building/house-site.ts";
-import { builderStand, chooseSite, planTemplate, siteAt, type HousePlan, type Materials, type Site } from "./building/plan.ts";
-import { billFrom, missingForStage, stageAt, stageBillNow, stagesBuilt } from "./building/stage-progress.ts";
-import { catalogueLine, classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
+import { houseBox } from "./building/house-site.ts";
+import { replacedHouseNote, siteRefusal } from "./building/new-site.ts";
+import { builderStand, catalogueLine, chooseSite, planTemplate, siteAt, type HousePlan, type Materials, type Site } from "./building/plan.ts";
+import { billFrom, buildAgain, describeShortfall, missingForStage, scaffoldNeed, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
+import { classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
 import type { Body } from "./body.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
@@ -24,7 +25,7 @@ import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
 import { lostToolClass, ToolLosses, toolToMake } from "./building/tool-loss.ts";
-import { describeOverlaps, describeSiteBlocker, earlierProtections, LEVELING_LABEL, overlapsOf, ownLevelingOver } from "./protected-areas.ts";
+import { describeOverlaps, earlierProtections, LEVELING_LABEL, newSiteNote, overlapsOf, ownLevelingOver } from "./protected-areas.ts";
 import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
@@ -49,7 +50,7 @@ const COME_RANGE = 2;
 /** Arrival tolerance for `go_to` coordinates. */
 const GO_TO_RANGE = 1;
 /** An unfinished house is resumed only by a build step this close to its door; farther away a new one is started. */
-export const RESUME_RANGE = 6;
+const RESUME_RANGE = 6;
 /** `get_items` walks back to where it started when it ends farther than this. */
 const RETURN_RANGE = 3;
 
@@ -512,15 +513,18 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
 export { resumeStep };
 
 /**
- * Reads the houses of one family: ends `done` at once with its catalogue lines (the ones of the `build` line), so the
- * model may then build any id it read; a family nobody knows fails with the families that exist. No body call. Its
- * detail never starts with "built": the run analysis counts `done` + "built..." as a house.
+ * Reads the houses of one family: ends `done` at once with its catalogue lines (the ones of the `build` line), each ending
+ * with the step that builds it; a family nobody knows fails with the families that exist. No body call. Its detail never
+ * starts with "built": the run analysis counts `done` + "built..." as a house.
  */
 export function listHouses(step: Extract<Step, { skill: "list_houses" }>, templates: ReadonlyMap<string, Template> = TEMPLATES): SkillResult {
   const houses = [...templates.values()].filter((template) => template.family === step.family);
   if (houses.length === 0) return { status: "failed", detail: `no houses of the family ${step.family}; the families you know: ${familiesOf(templates).join(", ")}` };
-  return { status: "done", detail: houses.map(catalogueLine).join("\n") };
+  return { status: "done", detail: houses.map(listedLine).join("\n") };
 }
+
+/** A catalogue line of `list_houses`, ending with the step that builds that house (the `build` line's own lines lead with it). */
+const listedLine = (template: Template): string => `${catalogueLine(template)}: {"skill":"build","template":"${template.id}"}`;
 
 /**
  * Builds a house from the persona's style where the bot stands, facing the requester, with carried blocks only (the
@@ -557,12 +561,17 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     // clear one is (live 2026-10-03: told only "choose another zone clear of it", she stepped one block at a time,
     // and each refused start left its site protected for good: 16 house boxes, most of them never built).
     const areas = await context.runtime.protectedRegions();
-    const refused = await siteRefusal(context, { template, plan, what, areas, unfinished, toward, from: snapshot.position });
+    // What a new house here would leave untracked, said before anything is replaced (the old house's step is read first).
+    const untracked = unfinished === null || unfinished === undefined ? "" : newSiteNote(unfinished, describeWay(plan.site.door, unfinished.site.door), context.templates);
+    const refused = await siteRefusal(context, { template, plan, what, areas, unfinished, untracked, toward, from: snapshot.position });
     if (refused !== null) return refused;
     // Only what the first stage needs, named as the step that fetches it: get_items adds to what she carries, so asking
     // for the whole bill fetched it twice and filled her inventory (live 2026-10-02).
-    const { missing, owedNote } = billShortfall(plan.stageBill(plan.stages[0]!), snapshot.inventory, context.owed?.() ?? []);
-    if (missing.length > 0) return { status: "failed", detail: missingForStage(plan, 0, what, missing, owedNote) };
+    // And what it needs to stand on, when some of its cells are out of reach of the ground (the whole bill is kept off the scaffold list while the house is built).
+    const first = stageCells(plan, plan.stages[0]!);
+    const { missing, owedNote } = billShortfall(billOfMaterials(first), snapshot.inventory, context.owed?.() ?? []);
+    const scaffold = scaffoldNeed(first, plan.site.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, plan.bill.map((entry) => entry.item));
+    if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: missingForStage(plan, 0, what, { missing, owedNote, scaffold }, { fresh: true, newSite: untracked }) };
     replaced = replacedHouseNote(context, unfinished, areas);
   }
   if (at !== null) {
@@ -570,7 +579,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     context.progress?.(`walking to the site of ${what} at ${at.x} ${at.y} ${at.z}`);
     const there = await context.body.act("navigate", navigateInput(stand, 1), `Walk to the site of ${what}.`, { signal: context.signal });
     if (context.signal.aborted) return { status: "stopped" };
-    if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}` };
+    if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}; ${buildAgain(plan)} tries again` };
   }
   // The bill is not scaffolding while the house is built: the walks of the site's leveling used the very blocks it needs
   // (live 2026-10-04: 16 of 36 cobblestone).
@@ -597,32 +606,9 @@ function noTemplate(id: string | undefined, templates: ReadonlyMap<string, Templ
     : `no house template "${id}": the ones you know are ${known} (families: ${familiesOf(templates).join(", ")})`;
 }
 
-/** What a new house's site meets: a refusal naming the protected areas in the way and where the nearest clear site is, null when it is clear. */
-async function siteRefusal(context: SkillContext, site: { template: Template; plan: HousePlan; what: string; areas: readonly ProtectedArea[]; unfinished: UnfinishedHouse | null | undefined; toward: Position | null; from: Position }): Promise<SkillResult | null> {
-  const { template, plan, what, areas, unfinished, toward, from } = site;
-  const blocked = overlapsOf(areas, siteBox(plan));
-  if (blocked.length === 0) return null;
-  const found = nearestClearSite(areas, template, plan.site, toward);
-  const clear = found === null ? null : await groundedDoor(context.runtime, found);
-  const where = clear === null
-    ? `no site clear of protected areas within ${SITE_SEARCH} blocks: ask whoever asked you, or build somewhere else`
-    : `the nearest site clear of them has its door ${describeWay(from, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
-  const houses = { self: context.self, unfinished, places: context.places?.() ?? [], resumeRange: RESUME_RANGE, templates: context.templates };
-  const blockers = blocked.map((area) => describeSiteBlocker(houses, area)).join("; ");
-  return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) overlaps ${blockers}; ${where}` };
-}
-
 /** `result` with `note` at the end of its detail, whichever way the step ends (the old record is replaced as soon as the new house starts). */
 function noted(result: SkillResult, note: string): SkillResult {
   return result.status === "stopped" ? result : { ...result, detail: `${result.detail}${note}` };
-}
-
-/** A new house replaces the record of an unfinished one: the result says so, and where the old house's area stays protected. */
-function replacedHouseNote(context: SkillContext, unfinished: UnfinishedHouse | null | undefined, areas: readonly ProtectedArea[]): string {
-  if (unfinished === null || unfinished === undefined) return "";
-  const { door } = unfinished.site;
-  const held = earlierProtections(context, unfinished.kind, door, -1, areas).map((id) => `#${id}`);
-  return `; your unfinished ${unfinished.kind} at ${door.x} ${door.y} ${door.z} is no longer tracked${held.length === 0 ? "" : `; its area ${held.join(", ")} stays protected until released (release_area)`}`;
 }
 
 /** What {@link build} worked out before the house is protected and built. */
@@ -726,7 +712,7 @@ async function prepareSite(context: SkillContext, site: { plan: HousePlan; what:
       return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}; that unfinished house is given up: build a new one somewhere clear` };
     }
     house.leave(0, false);
-    return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}` };
+    return { status: "failed", detail: `could not prepare the site of ${what}: ${prepared.detail}; ${buildAgain(plan)} tries again` };
   }
   house.leave(0, true); // prepared, at once: a restart after this must never level again (it digs the house's walls too)
   context.phase?.("building");
@@ -746,18 +732,22 @@ async function buildStages(context: SkillContext, run: { plan: HousePlan; what: 
     reserved: remaining,
     leave: (part: number, refused?: readonly Cell[]) => house.leave(part, true, refused),
     refusedBefore: resumed?.refused,
-    again: context.building === undefined ? "" : "; building it again resumes it there",
+    again: context.building === undefined ? "" : `; ${buildAgain(plan)} resumes it`,
     abandon: house.forget,
   };
   for (let index = start; index < plan.stages.length; index += 1) {
     const stage = plan.stages[index]!;
     if (index > start) house.leave(stage.first);
-    const bill = await stageBillNow(plan, stage, index === start && resumed !== null ? context.runtime : null);
-    const { missing, owedNote } = billShortfall(bill, (await context.runtime.status()).inventory, context.owed?.() ?? []);
-    if (missing.length > 0) {
+    // The cells still to place are read once: the bill and the blocks to stand on both come from them, on a fresh status (the routes may have spent scaffold since the last stage).
+    const cells = await stageCellsNow(plan, stage, index === start && resumed !== null ? context.runtime : null);
+    const status = await context.runtime.status();
+    const { missing, owedNote } = billShortfall(billOfMaterials(cells), status.inventory, context.owed?.() ?? []);
+    const scaffold = scaffoldNeed(cells, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, remaining.map((entry) => entry.item));
+    if (missing.length > 0 || scaffold !== null) {
+      const shortfall = { missing, owedNote, scaffold };
       return index === start
-        ? { status: "failed", detail: missingForStage(plan, index, what, missing, owedNote) }
-        : { status: "done", detail: stagesBuilt(plan, start, index, missing, owedNote) };
+        ? { status: "failed", detail: missingForStage(plan, index, what, shortfall, { fresh: false }) }
+        : { status: "done", detail: stagesBuilt(plan, start, index, shortfall) };
     }
     const stopped = await buildParts(context, plan, what, { ...options, from: stage.first, to: stage.last, audit: false });
     if (stopped !== null) return stopped;
@@ -781,12 +771,14 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const roles = step.roles ?? temporary;
   const notTemporary = roles.filter((role) => !temporary.includes(role));
   if (notTemporary.length > 0) return { status: "failed", detail: `your house is not temporary in ${notTemporary.join(", ")}: its temporary parts are ${temporary.join(", ")}` };
-  const { after, rest, bill } = improvement(template, house, roles);
+  const { after, rest, bill, changed } = improvement(template, house, roles);
   const kind = template.kind;
   const what = `your ${kind}`;
   const snapshot = await context.runtime.status();
   const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
-  if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): fetch exactly the missing items with get_items, then improve again` };
+  // A roof swapped in place is reached the same way a roof built is: from the ground, by the routes' scaffold.
+  const scaffold = scaffoldNeed(changed, house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
+  if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: `missing ${describeShortfall({ missing, scaffold })} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): fetch exactly the missing items with get_items, then improve again` };
   const { x, y, z } = house.door;
   context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
   const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
