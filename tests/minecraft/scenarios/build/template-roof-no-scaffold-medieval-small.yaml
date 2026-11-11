@@ -1,0 +1,48 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-roof-no-scaffold-medieval-small
+tags: [acceptance]
+description: >-
+  The medieval-small template built stage by stage from exactly its bill and no block to stand on (no dirt): the stages the
+  brain's reach rule (scaffoldNeed) does not flag are built whole, and the first one it flags must stop with
+  "no scaffold block carried to stand on", as a bot that carries only the bill meets it. A stage that builds all the same
+  fails the run (the rule overflagged it).
+
+# The house stands on coarse_dirt (the floor replaces its top layer), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: coarse_dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: spruce_stairs, count: 42 }
+      - { item: oak_planks, count: 36 }
+      - { item: oak_log, count: 24 }
+      - { item: cobblestone, count: 16 }
+      - { item: spruce_slab, count: 7 }
+      - { item: glass_pane, count: 3 }
+      - { item: oak_door, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: medieval-small
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+  expectScaffoldStop: true
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

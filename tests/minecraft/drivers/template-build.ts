@@ -5,7 +5,9 @@ import type { ClientCompletion } from "mine-labs/client";
 import { builtBefore } from "#brain/building/build-audit.ts";
 import { FACINGS, type WorldCell } from "#brain/building/blueprint.ts";
 import { planTemplate, type HousePlan } from "#brain/building/plan.ts";
-import { templateFor } from "#brain/building/templates.ts";
+import { scaffoldNeed, stageCells, type ScaffoldNeed } from "#brain/building/stage-progress.ts";
+import { templateFor, type Stage } from "#brain/building/templates.ts";
+import { DEFAULT_SCAFFOLD_BLOCKS } from "#src/survival/policy/contract.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
 import type { ScenarioCall, ScenarioContext } from "../scenario.ts";
@@ -21,6 +23,8 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   /** The stage the cancelled call must belong to (a template edit that moves the call out of it fails the scenario instead of testing another stage). */
   interruptStage: z.string().min(1).optional(),
   cancelAfterMs: z.number().int().nonnegative().default(3_000),
+  /** The scenario carries the bill and no block to stand on: the first stage the brain's reach rule flags must stop with "no scaffold block carried to stand on" (every stage before it builds whole). */
+  expectScaffoldStop: z.boolean().default(false),
 });
 
 /** `view_blocks` reads at most this many cells per call (`MAX_CELLS`, src/actions/view-blocks/contract.ts). */
@@ -30,7 +34,7 @@ const CELLS_PER_READ = 32;
 const answerSchema = z.object({
   structure: z.object({
     cells: z.number(), correct: z.number(), placed: z.number(), wrong: z.number(), passes: z.number(), complete: z.boolean(),
-    scaffold: z.object({ leftCount: z.number() }).optional(),
+    scaffold: z.object({ placed: z.number(), leftCount: z.number() }).optional(),
   }).nullable().optional(),
 });
 
@@ -75,23 +79,37 @@ function structureOf(call: ScenarioCall): z.output<typeof answerSchema>["structu
   return answerSchema.safeParse(call.result).data?.structure;
 }
 
+/** One `build_structure` call, with the history of its cells (a small call's) kept in `history.events` and the highest the bot's feet were during it. */
+async function sendCall(context: ScenarioContext, part: PartInput, auditing: boolean): Promise<{ call: ScenarioCall; history: { events: string[] }; highestFeetY: number }> {
+  const history = watchCells(context, part);
+  let highestFeetY = context.bot.entity.position.y;
+  const onMove = () => { highestFeetY = Math.max(highestFeetY, context.bot.entity.position.y); };
+  context.bot.on("move", onMove);
+  const call = await context.call("build_structure", buildInput(part, auditing)).finally(() => { history.stop(); context.bot.off("move", onMove); });
+  return { call, history, highestFeetY };
+}
+
+/** What a call's audit says of the scaffold the routes laid for it: "3 scaffold placed" (the measure of the roof's stand-on need), "0 scaffold placed" when it reports none. */
+const scaffoldPlaced = (call: ScenarioCall): string => `${structureOf(call)?.scaffold?.placed ?? 0} scaffold placed`;
+
 /** Every call of the plan in order, each sent whole; the second pass (`auditing`) is the final check, with no `keep`. */
-async function sendAll(context: ScenarioContext, inputs: readonly (PartInput | null)[], auditing: boolean, label: string): Promise<{ passes: number; scaffold: string[]; slowestMs: number }> {
+async function sendAll(context: ScenarioContext, inputs: readonly (PartInput | null)[], auditing: boolean, label: string): Promise<{ passes: number; scaffold: string[]; placed: string[]; slowestMs: number }> {
   let passes = 0;
   let slowestMs = 0;
   const scaffold: string[] = [];
+  const placed: string[] = [];
   for (const [index, part] of inputs.entries()) {
     if (part === null) continue;
-    const history = watchCells(context, part);
-    const call = await context.call("build_structure", buildInput(part, auditing)).finally(history.stop);
+    const { call, history } = await sendCall(context, part, auditing);
     if (call.result.status !== "succeeded") throw new Failed(`${label} call ${index + 1}/${inputs.length} read ${call.result.status}: ${call.summary}; carrying ${carried(context)}; now holding ${holdings(context, part)}; history ${history.events.join(" | ")}`);
     const structure = structureOf(call);
     if (structure?.complete === false) throw new Failed(`${label} call ${index + 1}/${inputs.length} succeeded with an incomplete audit: ${call.summary}`);
     passes = Math.max(passes, structure?.passes ?? 0);
     slowestMs = Math.max(slowestMs, call.durationMs);
     if ((structure?.scaffold?.leftCount ?? 0) > 0) scaffold.push(`${label} call ${index + 1}: ${structure?.scaffold?.leftCount} left`);
+    if ((structure?.scaffold?.placed ?? 0) > 0) placed.push(`${label} call ${index + 1}: ${scaffoldPlaced(call)}`);
   }
-  return { passes, scaffold, slowestMs };
+  return { passes, scaffold, placed, slowestMs };
 }
 
 /** What stands in the cells of a failed call that do not hold what the call asked (name and states, as the client's world has them). */
@@ -213,13 +231,68 @@ function wrongStates(context: ScenarioContext, cell: WorldCell): string[] {
 const seconds = (since: number) => ((performance.now() - since) / 1000).toFixed(1);
 
 /**
+ * The stages the brain's reach rule (`scaffoldNeed`) says need blocks to stand on, for a bot that stands at `walkingY` and
+ * carries no block the policy admits besides the house's own: the scenario gives the bill and no dirt, and sets no
+ * policy, so the runtime admits `DEFAULT_SCAFFOLD_BLOCKS`.
+ */
+export function flaggedStages(plan: HousePlan, walkingY: number): { stage: Stage; need: ScaffoldNeed }[] {
+  const kept = plan.bill.map((entry) => entry.item);
+  return plan.stages.flatMap((stage) => {
+    const need = scaffoldNeed(stageCells(plan, stage), walkingY, [], DEFAULT_SCAFFOLD_BLOCKS, kept);
+    return need === null ? [] : [{ stage, need }];
+  });
+}
+
+/** What the runtime says when a route could not reach a high cell and no scaffold block is carried (`describeNoScaffold`, src/actions/build-structure/contract.ts). */
+const NO_SCAFFOLD_CLAUSE = "no scaffold block carried to stand on";
+
+/**
+ * The first stage the rule flags, judged as a stage (live 2026-11-10: Bruno's roof part 5 built without scaffold and part
+ * 6 failed): its calls are sent in order up to the first one that fails, which must be `[BUILD_INCOMPLETE]` with the
+ * runtime's clause. Every call succeeding means the rule overflagged the stage.
+ */
+async function expectScaffoldStop(context: ScenarioContext, plan: HousePlan, inputs: readonly (PartInput | null)[], flagged: { stage: Stage; need: ScaffoldNeed }): Promise<string> {
+  const { stage, need } = flagged;
+  const built: string[] = [];
+  const carriedAtStart = carried(context);
+  for (let index = stage.first; index <= stage.last; index += 1) {
+    const part = inputs[index];
+    if (part === null || part === undefined) continue;
+    const { call, highestFeetY } = await sendCall(context, part, false);
+    if (call.result.status === "succeeded" && structureOf(call)?.complete === false) throw new Failed(`stage ${stage.name} call ${index + 1}/${plan.batches.length} succeeded with an incomplete audit: ${call.summary}`);
+    if (call.result.status === "succeeded") { built.push(`${index + 1} (${scaffoldPlaced(call)}, feet up to y ${highestFeetY.toFixed(1)})`); continue; }
+    const text = `${call.summary} ${JSON.stringify(call.result)}`;
+    if (!text.includes("[BUILD_INCOMPLETE]") || !text.includes(NO_SCAFFOLD_CLAUSE)) throw new Failed(`stage ${stage.name} call ${index + 1}/${plan.batches.length} failed without the no-scaffold clause (${call.result.status}): ${call.summary}; carrying ${carried(context)}; the stop for want of scaffold is the only failure this scenario accepts: read the call's error, then the template and the door's y in the scenario`);
+    return `the roof-without-scaffold stop: stage ${stage.name} (the helper's count ${need.count}, ${need.height} above the ground) built calls [${built.join(", ")}], then call ${index + 1}/${plan.batches.length} stopped: ${call.summary}`;
+  }
+  throw new Failed(`the reach rule flagged ${stage.name} (count ${need.count}, ${need.height} above the ground) but it built without scaffold: calls [${built.join(", ")}] all succeeded (an overflag: report it, the rule is not changed here); carried when the stage began: ${carriedAtStart}`);
+}
+
+/** Builds the stages in order, every call succeeding, up to the first flagged stage, which must stop for want of scaffold. */
+async function buildUntilScaffoldStop(context: ScenarioContext, plan: HousePlan, inputs: readonly (PartInput | null)[], walkingY: number): Promise<string> {
+  const flagged = flaggedStages(plan, walkingY);
+  if (flagged.length === 0) throw new Failed(`expectScaffoldStop is set but the reach rule flags no stage of ${plan.template.id} from y ${walkingY}: pick a template with a stage out of reach, or check the door's y in the scenario`);
+  const first = flagged[0]!;
+  const unflagged = plan.stages.slice(0, plan.stages.indexOf(first.stage));
+  for (const stage of unflagged) {
+    const built = await sendAll(context, inputs.map((part, index) => (index >= stage.first && index <= stage.last ? part : null)), false, `stage ${stage.name}`);
+    if (built.scaffold.length > 0) throw new Failed(`scaffold stands after the unflagged stage ${stage.name}: ${built.scaffold.join(", ")}`);
+  }
+  const stop = await expectScaffoldStop(context, plan, inputs, first);
+  return `${unflagged.length} stages with no need built whole; ${stop}`;
+}
+
+/**
  * Builds one house template call by call, as `build` does (`buildParts`), then reads every cell: the support rules of
  * the engine (support.ts) against the real placement rules, which no unit test can show. With `interruptAfterBatch` a
  * call is cancelled mid-way and the whole plan is sent again, as a resumed build does. Nothing is asserted from a
- * result's wording: the cells are read back, the audit's status and its scaffold count are checked.
+ * result's wording: the cells are read back, the audit's status and its scaffold count are checked. The one wording
+ * checked is the `expectScaffoldStop` run's: the runtime gives no structured field for "no scaffold block carried to
+ * stand on" (`describeNoScaffold`, src/actions/build-structure/contract.ts), so that clause is read from the error text.
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const params = paramsIn(context.arena).parse(context.scenario.params);
+  if (params.expectScaffoldStop && params.interruptAfterBatch !== undefined) return { status: "failed", detail: "expectScaffoldStop and interruptAfterBatch cannot be combined: the run stops at the first stage out of reach, a cut and resume would never reach it" };
   const template = templateFor(params.template);
   if (template === undefined) return { status: "failed", detail: `no template ${params.template}` };
   const plan = planTemplate(template, { door: params.door, facing: params.facing });
@@ -227,6 +300,10 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const started = performance.now();
   const notes: string[] = [];
   try {
+    if (params.expectScaffoldStop) {
+      const detail = await buildUntilScaffoldStop(context, plan, inputs, params.door.y);
+      return { status: "succeeded", detail: `${template.id} (${params.facing}): ${detail} in ${seconds(started)} s` };
+    }
     if (params.interruptAfterBatch !== undefined) {
       const stage = stageOfCutCall(plan, params.interruptAfterBatch);
       if (params.interruptStage !== undefined && stage !== params.interruptStage) throw new Failed(`the cut call is in stage "${stage}", not "${params.interruptStage}": move interruptAfterBatch`);
@@ -240,6 +317,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     if (wrong.length > 0) throw new Failed(`${wrong.length} of the box's cells are wrong after the build: ${wrong.slice(0, 8).join("; ")}; scaffold the audits reported: ${scaffold.join(", ") || "none"}`);
     if (scaffold.length > 0) throw new Failed(`scaffold stands after the build: ${scaffold.join(", ")}`);
     notes.push(`${plan.cells.length} cells in ${plan.batches.length} calls, ${plan.stages.length} stages, all read right`);
+    const placed = first.placed.join(", ");
+    if (placed !== "") notes.push(`routes' scaffold (taken down again): ${placed}`);
     return { status: "succeeded", detail: `${template.id} (${params.facing}): ${notes.join("; ")} in ${seconds(started)} s (${first.passes} passes, final check ${final.passes}; slowest call ${Math.max(first.slowestMs, final.slowestMs)} ms)` };
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
