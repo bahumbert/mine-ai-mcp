@@ -149,14 +149,40 @@ export class FakeRuntime implements BotRuntime {
     if (unknown.length > 0) return { status: "unknown", missing: [], error: `[UNKNOWN_CRAFT_ITEMS] Minecraft has no registry items named: ${unknown.join(", ")}.` };
     if (items.some(({ item }) => this.unplannable.includes(item))) return { status: "planner_failed", missing: [] };
     if (items.some(({ item }) => this.recipes[item] === undefined)) return { status: "uncraftable", missing: [] };
-    const leaves = new Map<string, number>();
-    for (const { item, count } of items) this.leaves(item, count, leaves);
-    const missing = [...leaves]
-      .map(([item, count]) => ({ item, count: count - this.carried(item) }))
-      .filter((entry) => entry.count > 0);
+    const { missing, carried } = this.plan(items);
     const inputs = new Set<string>();
     for (const { item } of items) this.inputsOf(item, inputs);
-    return { status: missing.length === 0 ? "ready" : "missing_materials", missing, inputs: [...inputs] };
+    return { status: missing.length === 0 ? "ready" : "missing_materials", missing, inputs: [...inputs], carried };
+  }
+
+  /**
+   * What crafting `items` takes from the bag and lacks, as the runtime's planner does (`src/utils/craft-plan.ts`
+   * `planNeededItem`, `:182-197`): what is carried comes first for every ingredient, intermediates included, target
+   * after target; a requested target is always crafted from its recipe, never taken from the bag (`:367`,
+   * `useInventory` false); only what is short is crafted from its recipe, down to leaves.
+   */
+  private plan(items: readonly ItemCount[]): { readonly missing: ItemCount[]; readonly carried: ItemCount[] } {
+    const available = new Map(this.snapshot.inventory.map((stack) => [stack.name, stack.count]));
+    const carried = new Map<string, number>();
+    const missing = new Map<string, number>();
+    const take = (item: string, count: number, target = false): void => {
+      const used = target ? 0 : Math.min(available.get(item) ?? 0, count);
+      if (used > 0) {
+        available.set(item, (available.get(item) ?? 0) - used);
+        carried.set(item, (carried.get(item) ?? 0) + used);
+      }
+      const short = count - used;
+      if (short === 0) return;
+      const recipe = this.recipes[item];
+      if (recipe === undefined) {
+        missing.set(item, (missing.get(item) ?? 0) + short);
+        return;
+      }
+      const applications = Math.ceil(short / recipe.makes);
+      for (const need of recipe.needs) take(need.item, need.count * applications);
+    };
+    for (const { item, count } of items) take(item, count, true);
+    return { missing: [...missing].map(([item, count]) => ({ item, count })), carried: [...carried].map(([item, count]) => ({ item, count })) };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {
@@ -387,16 +413,6 @@ export class FakeRuntime implements BotRuntime {
     }
   }
 
-  private leaves(item: string, count: number, into: Map<string, number>): void {
-    const recipe = this.recipes[item];
-    if (recipe === undefined) {
-      into.set(item, (into.get(item) ?? 0) + count);
-      return;
-    }
-    const applications = Math.ceil(count / recipe.makes);
-    for (const need of recipe.needs) this.leaves(need.item, need.count * applications, into);
-  }
-
   /** Adds (or with a negative delta removes) carried items. */
   addItem(item: string, delta: number): void {
     const total = this.carried(item) + delta;
@@ -465,9 +481,8 @@ export class FakeRuntime implements BotRuntime {
     }
     if (tool === "craft_item") {
       for (const { item_name: item, count } of input.items as { item_name: string; count: number }[]) {
-        const leaves = new Map<string, number>();
-        this.leaves(item, count, leaves);
-        for (const [leaf, used] of leaves) this.addItem(leaf, -used);
+        // What the plan takes from the bag, carried intermediates first (as the planner does): packed_mud before mud.
+        for (const used of this.plan([{ item, count }]).carried) this.addItem(used.item, -used.count);
         this.addItem(item, count);
       }
     }

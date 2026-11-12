@@ -40,7 +40,8 @@ test("a pickaxe worn out in the middle of a house is made again and the part don
   assert.equal(result.status, "done", JSON.stringify(result));
   const log = calls(runtime);
   assert.equal(log[0], "build");
-  assert.deepEqual(log.slice(1, 3), ["craft wooden_pickaxe", "build"]);
+  // The pickaxe takes the 2 sticks carried (kept): they are crafted again first (plan 2026-11-12-house-build-fixes Task 4).
+  assert.deepEqual(log.slice(1, 4), ["craft stick", "craft wooden_pickaxe", "build"]);
   assert.equal(building.unfinished, null);
 });
 
@@ -59,12 +60,16 @@ test("a tool lost mid-stage refetches keeping the stage's scaffold: the walk bac
   const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { building: { unfinished: null as UnfinishedHouse | null } }));
   assert.equal(result.status, "done", JSON.stringify(result));
   const walks = runtime.submitted.filter((call) => call.tool === "navigate");
-  assert.equal(walks.length, 1, "one walk: the fetch's way back");
-  const keep = walks[0]!.input.keep_items as string[];
-  assert.ok(keep.includes("wooden_pickaxe"), "the tool it fetched");
+  // Two walks, both far from the site: back home between the stick craft and the pickaxe craft, then the fetch's way back.
+  assert.equal(walks.length, 2, "the walk home before the pickaxe craft, and the fetch's way back");
   // The admitted kinds besides the house's own (its cobblestone is kept by the build's own policy keep).
   const admitted = DEFAULT_POLICY.scaffoldBlocks!.filter((kind) => !SMALL_MEDIEVAL_HOUSE.some((stack) => stack.name === kind));
-  assert.ok(admitted.includes("dirt") && admitted.every((kind) => keep.includes(kind)), `the roof's scaffold kinds are kept (${keep.join(", ")})`);
+  for (const walk of walks) {
+    const keep = (walk.input.keep_items ?? []) as string[];
+    assert.ok(admitted.includes("dirt") && admitted.every((kind) => keep.includes(kind)), `the roof's scaffold kinds are kept (${keep.join(", ")})`);
+  }
+  assert.ok((walks.at(-1)!.input.keep_items as string[]).includes("wooden_pickaxe"), "the tool it fetched");
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "dirt")?.count, 4, "no walk laid the roof's dirt");
 });
 
 test("the pickaxe lost again in the same step ends the build, saying what was remade", async () => {

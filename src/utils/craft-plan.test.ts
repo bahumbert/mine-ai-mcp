@@ -269,3 +269,13 @@ test("the planner follows what is near the bot: stone at the surface, deepslate 
   blocksNear(carrying.harness)({ cobblestone: 64, cobbled_deepslate: 64 });
   assert.equal(planCraftingFromInventory(carrying.bot, pickaxe, { seen: seenInWorld(carrying.bot, { chunksWithMaterial: () => 0 }) }).kind, "ready");
 });
+
+test("planning an item from a carried intermediate lists the intermediate in carriedMaterials (get_items reads it to keep house blocks)", () => {
+  // Plan 2026-11-12-house-build-fixes Task 4: mud_bricks come from the packed_mud carried before any mud is looked for.
+  // The 1.21.4 registry has both items; the recipe is the game's (minecraft-data 1.21.4 `recipes`: a 2x2 of packed_mud makes 4 mud_bricks).
+  const { bot } = craftingBot({ packed_mud: 10 }, true, [craftingRecipe("mud_bricks", 4, { packed_mud: 4 })]);
+  const preparation = planCraftingFromInventory(bot, [{ ...registry.itemsByName.mud_bricks, count: 8 }]);
+  assert.equal(preparation.kind, "ready");
+  assert.deepEqual(preparation.plan.carriedMaterials, [{ item: "packed_mud", count: 8 }]);
+  assert.deepEqual(preparation.plan.missingMaterials, []);
+});

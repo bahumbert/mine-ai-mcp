@@ -23,6 +23,23 @@ test("a source from a runtime that names no seed still parses", async () => {
   assert.deepEqual((await runtime.blockSources(["wheat"]))["wheat"], [{ block: "wheat", chance: 1, planted: true }]);
 });
 
+function craftingClient(plan: Record<string, unknown>): ToolClient {
+  const data = { result: { status: "succeeded", requirements: { plan } } };
+  return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
+}
+
+test("craftingNeeds reads the carried materials the plan takes, intermediates included (plan 2026-11-12-house-build-fixes Task 4)", async () => {
+  const runtime = McpBotRuntime.over(craftingClient({ status: "ready", missingMaterials: [], carriedMaterials: [{ item: "packed_mud", count: 16 }] }));
+  assert.deepEqual((await runtime.craftingNeeds([{ item: "mud_bricks", count: 16 }])).carried, [{ item: "packed_mud", count: 16 }]);
+});
+
+test("craftingNeeds from a runtime that lists no carried materials answers none", async () => {
+  const runtime = McpBotRuntime.over(craftingClient({ status: "missing_materials", missingMaterials: [{ item: "mud", count: 16 }] }));
+  const needs = await runtime.craftingNeeds([{ item: "mud_bricks", count: 16 }]);
+  assert.deepEqual(needs.carried, []);
+  assert.deepEqual(needs.missing, [{ item: "mud", count: 16 }]);
+});
+
 function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>)[]): ToolClient & { calls: number; closed: boolean } {
   const client = {
     calls: 0,

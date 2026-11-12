@@ -100,8 +100,8 @@ test("get_items fetches items like a player: logs, a table to carry, a wooden pi
   const items = SMALL_MEDIEVAL.map(({ name, count }) => ({ item: name, count }));
   const result = await runStep({ skill: "get_items", items }, contextFor(runtime));
   assert.equal(result.status, "done");
-  // Glass panes for the windows: sand with the rest, the furnace crafted with the house blocks, glass smelted with
-  // planks, then the panes and the planks the fuel used up.
+  // Glass panes for the windows: sand with the rest, the furnace crafted with the house blocks, the planks that crafting took
+  // made up (the fake plans like the runtime: carried planks are used before logs), glass smelted with planks, then the panes.
   assert.deepEqual([...new Set(runtime.submitted.map(describeCall))], [
     "collect oak_log",
     "collect sand",
@@ -110,8 +110,9 @@ test("get_items fetches items like a player: logs, a table to carry, a wooden pi
     "craft wooden_pickaxe at table",
     "collect stone",
     "craft spruce_stairs+oak_planks+spruce_slab+oak_door+furnace at table",
+    "craft oak_planks at table",
     "smelt_item",
-    "craft oak_planks+glass_pane at table",
+    "craft glass_pane at table",
   ]);
   assert.ok(runtime.submitted.filter((call) => call.tool === "collect_block").every((call) => Number(call.input.count) <= 32));
 });
@@ -1202,7 +1203,7 @@ test("a tool worn out while leveling is made again and the batch done again, not
   runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 4,64,3; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
   const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
   assert.deepEqual(result, { status: "done", detail: "leveled 5x4 at y 64: dug 1, filled 0" });
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft wooden_shovel at table", "build_structure"]);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft oak_planks at table", "craft wooden_shovel at table", "build_structure"]);
 });
 
 test("a shovel that breaks with no digging left in the level is not made again, the filling goes on", async () => {
@@ -2375,7 +2376,11 @@ test("a fetch whose craft finds no room makes room and crafts again once", async
   runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "dirt", dropped: 64 }] });
   const result = await runStep({ skill: "get_items", items: [{ item: "wooden_pickaxe", count: 1 }] }, { ...contextFor(runtime), needed: needsOnlyTools });
   assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(runtime.submitted.map((call) => call.tool).filter((tool) => tool === "craft_item" || tool === "drop_item"), ["craft_item", "drop_item", "craft_item"]);
+  // Room is made once. The pickaxe takes carried planks and sticks, so (plan 2026-11-12-house-build-fixes Task 4) they are replaced
+  // first, in one batch that finds no room, then again after the room is made; the sticks took planks, which one more craft makes up.
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item" || call.tool === "drop_item").map(describeCall), [
+    "craft oak_planks+stick at table", "drop_item", "craft oak_planks+stick at table", "craft oak_planks at table", "craft wooden_pickaxe at table",
+  ]);
 });
 
 test("a craft step with no crafting table carried makes one first, then crafts (run 12: bruno's bed, oskar)", async () => {
@@ -2386,7 +2391,7 @@ test("a craft step with no crafting table carried makes one first, then crafts (
   runtime.failNext.craft_item = { error: "[WORKSTATION_NOT_CARRIED] No crafting_table is carried for temporary use." };
   const result = await runStep({ skill: "craft_item", item: "oak_door", count: 3 }, contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item").map(describeCall), ["craft oak_door", "craft crafting_table", "craft oak_door"]);
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "craft_item").map(describeCall), ["craft oak_door", "craft crafting_table", "craft oak_planks at table", "craft oak_door"]);
 });
 
 test("a rare fetch tells the runtime how many blocks it may still break: max_breaks is what is left of the bound", async () => {

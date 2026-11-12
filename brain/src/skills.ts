@@ -496,7 +496,7 @@ async function getItems(context: SkillContext, items: readonly { readonly item: 
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carriedOf(inventory, item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
-  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
+  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs), walkKeep }, targets, purpose, start, keep);
   const after = await context.runtime.status();
   if (gathered.status === "failed") return { status: "failed", detail: `${gathered.detail}${failedFetchNote(start, startDimension, after)}` };
   if (gathered.status !== "done") return gathered;
