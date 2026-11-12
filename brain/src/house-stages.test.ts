@@ -6,7 +6,8 @@ import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
 import { billOfMaterials, cellsCountedOnce } from "./building/blueprint.ts";
 import { houseBox } from "./building/house-site.ts";
-import { builderStand, planTemplate } from "./building/plan.ts";
+import { builderStand, planTemplate, type HousePlan } from "./building/plan.ts";
+import { billFrom } from "./building/stage-progress.ts";
 import { describeWay } from "./gathering.ts";
 import { TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import type { KnownPlace } from "./mind.ts";
@@ -65,7 +66,7 @@ test("a build stops between stages for materials and goes on at the next stage w
   const context = contextFor(runtime, { building });
   const first = await runStep(rondavel(), context);
   assert.equal(first.status, "done");
-  assert.match(detailOf(first), /^stages 1-1 of \d+ of the rondavel are built .*: the walls \(stage 2\) needs .*: fetch exactly those with get_items, then \{"skill":"build","template":"rondavel","x":0,"y":64,"z":2\} again to go on; or choose another house \(\{"skill":"abandon_house"\} gives this one up\)$/u);
+  assert.match(detailOf(first), /^stages 1-1 of \d+ of the rondavel are built .*: the walls \(stage 2\) needs .*: fetch exactly the missing items with get_items, then \{"skill":"build","template":"rondavel","x":0,"y":64,"z":2\} again to go on; or choose another house \(\{"skill":"abandon_house"\} gives this one up\)$/u);
   assert.equal(builds(runtime).length, 1, "the floor is one call");
   assert.deepEqual({ template: building.unfinished?.template, family: building.unfinished?.family, stage: building.unfinished?.stage, stages: building.unfinished?.stages, stageName: building.unfinished?.stageName, part: building.unfinished?.part, prepared: building.unfinished?.prepared },
     { template: "rondavel", family: "africa", stage: 1, stages: 4, stageName: "walls", part: 1, prepared: true });
@@ -200,6 +201,8 @@ async function unfinishedFar(runtime: FakeRuntime, extra: Partial<SkillContext> 
   const protections = () => runtime.submitted.filter((call) => call.tool === "protect_region").map((call) => (call.input as { min: { x: number } }).min.x);
   return { context, building, stopped, plan, record, protections };
 }
+/** The kinds the bill holds from stage `stage` on: what a walk to the site keeps (`keep_items`). */
+const itemsFrom = (plan: HousePlan, stage: number) => billFrom(plan, plan.stages[stage]!.first).map(({ item }) => item);
 const navigations = (runtime: FakeRuntime) => runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input);
 
 test("the step a stop gives carries the door: copied 380 blocks away it still resumes that house, no new site", async () => {
@@ -211,7 +214,7 @@ test("the step a stop gives carries the door: copied 380 blocks away it still re
   const before = protections().length;
   const result = await runStep(firstStep(text), context);
   const stand = builderStand(plan.site);
-  assert.deepEqual(navigations(runtime)[0], { x: stand.x, y: stand.y, z: stand.z, range: 1 }, `she walks to the old site herself: ${detailOf(result)}`);
+  assert.deepEqual(navigations(runtime)[0], { x: stand.x, y: stand.y, z: stand.z, range: 1, keep_items: itemsFrom(plan, 1) }, `she walks to the old site herself, keeping the bill: ${detailOf(result)}`);
   assert.deepEqual(building.unfinished?.site.door ?? FAR_DOOR, FAR_DOOR, "the same house: its door unchanged");
   const boxes = protections().slice(before);
   assert.ok(boxes.length > 0 && boxes.every((x) => x < 0), "no protection box at the far place: the old house's box again");
@@ -233,7 +236,7 @@ test("a far build without coordinates names the unfinished house and its step be
   runtime.snapshot = { ...runtime.snapshot, inventory: asInventory(plan.stageBill(plan.stages[1]!)) };
   await runStep(firstStep(text), context);
   const stand = builderStand(plan.site);
-  assert.deepEqual(navigations(runtime)[0], { x: stand.x, y: stand.y, z: stand.z, range: 1 });
+  assert.deepEqual(navigations(runtime)[0], { x: stand.x, y: stand.y, z: stand.z, range: 1, keep_items: itemsFrom(plan, 1) });
   assert.equal(building.unfinished?.site.door.x ?? FAR_DOOR.x, FAR_DOOR.x, "still the old door");
 });
 
@@ -333,7 +336,7 @@ function standingWithPolicy(runtime: FakeRuntime, inventory: BotSnapshot["invent
   standingWith(runtime, inventory);
   runtime.snapshot = { ...runtime.snapshot, policy: DEFAULT_POLICY };
 }
-const PLANTED = /about 3 blocks to stand on for its cells 5 above the ground \(scaffold the build lays and takes back: one of dirt, cobbled_deepslate, netherrack, basalt, end_stone\)/u;
+const PLANTED = /about 4 blocks to stand on for its cells 5 above the ground \(scaffold the build lays and takes back: one of dirt, cobbled_deepslate, netherrack, basalt, end_stone\)/u;
 const medievalStep = () => stepSchema.parse({ skill: "build", template: "medieval-small" });
 
 test("a roof with no block to stand on stops before the roof, not halfway, and names an item short as well", async () => {
@@ -341,15 +344,16 @@ test("a roof with no block to stand on stops before the roof, not halfway, and n
   standingWithPolicy(stopped, SMALL_MEDIEVAL);
   const result = await runStep(medievalStep(), contextFor(stopped, { building: { unfinished: null } }));
   assert.equal(result.status, "done", detailOf(result));
-  assert.match(detailOf(result), /^stages 1-2 of 4 of the small medieval house are built .*: the roof \(stage 3\) needs about 3 blocks to stand on/u);
+  assert.match(detailOf(result), /^stages 1-2 of 4 of the small medieval house are built .*: the roof \(stage 3\) needs about 4 blocks to stand on/u);
   assert.match(detailOf(result), PLANTED);
-  assert.match(detailOf(result), /fetch exactly those with get_items, then \{"skill":"build","template":"medieval-small","x":0,"y":64,"z":2\} again to go on/u);
+  assert.match(detailOf(result), /fetch 4 or more blocks to stand on with get_items, then \{"skill":"build","template":"medieval-small","x":0,"y":64,"z":2\} again to go on/u);
   assert.equal(builds(stopped).length, 4, "the floor and the walls are sent, no call of the roof");
   // An item short as well: both are named, in one list.
   const short = new FakeRuntime();
   standingWithPolicy(short, SMALL_MEDIEVAL.filter((stack) => stack.name !== "spruce_slab"));
   const both = await runStep(medievalStep(), contextFor(short, { building: { unfinished: null } }));
-  assert.match(detailOf(both), /the roof \(stage 3\) needs 7 spruce_slab and about 3 blocks to stand on for its cells 5 above the ground/u);
+  assert.match(detailOf(both), /the roof \(stage 3\) needs 7 spruce_slab and about 4 blocks to stand on for its cells 5 above the ground/u);
+  assert.match(detailOf(both), /fetch exactly the missing items and 4 or more blocks to stand on with get_items, then/u);
 });
 
 test("the stop before the roof, the scaffold fetched, the step it gave sends the roof", async () => {
@@ -359,8 +363,8 @@ test("the stop before the roof, the scaffold fetched, the step it gave sends the
   const context = contextFor(runtime, { building });
   const stop = await runStep(medievalStep(), context);
   assert.match(detailOf(stop), PLANTED);
-  // The next action from it: get_items brought 3 dirt, then the step the stop gave.
-  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 3 }] };
+  // The next action from it: get_items brought 4 dirt, then the step the stop gave.
+  runtime.snapshot = { ...runtime.snapshot, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 4 }] };
   const next = await runStep(firstStep(detailOf(stop)), context);
   assert.match(detailOf(next), /^built a small medieval house/u);
   assert.ok(builds(runtime).length > 4, "the roof calls were sent");
@@ -374,7 +378,7 @@ test("a resumed house whose next stage is the roof fails before it for want of b
   const calls = builds(runtime).length;
   const resumed = await runStep(medievalStep(), context);
   assert.equal(resumed.status, "failed");
-  assert.match(detailOf(resumed), /^missing about 3 blocks to stand on for its cells 5 above the ground \(scaffold .*\) for stage 3 of 4 \(roof\) of a small medieval house \(the rest is carried\): fetch exactly the missing items with get_items, then /u);
+  assert.match(detailOf(resumed), /^missing about 4 blocks to stand on for its cells 5 above the ground \(scaffold .*\) for stage 3 of 4 \(roof\) of a small medieval house \(the rest is carried\): fetch 4 or more blocks to stand on with get_items, then /u);
   assert.equal(builds(runtime).length, calls, "nothing of the roof was sent");
 });
 
@@ -391,6 +395,123 @@ test("a resumed roof whose high cells already stand asks no scaffold: only the c
   const resumed = await runStep(medievalStep(), context);
   assert.doesNotMatch(detailOf(resumed), /stand on/u, detailOf(resumed));
   assert.ok(builds(runtime).length > calls, "the roof calls were sent");
+});
+
+/**
+ * `navigate` as the runtime answers it with `keep_items` (plan 2026-11-12-house-build-fixes Task 0): a walk over a drop lays
+ * `spend` dirt unless dirt is kept (the fallback scaffold included), and arrives at `stand`. `noPathWhileKept`: the route
+ * has no way without the kept dirt (`[NAVIGATION_STOPPED]`); `failure`: another failure, whatever is kept.
+ */
+function walkingOverADrop(runtime: FakeRuntime, stand: { x: number; y: number; z: number }, options: { spend: number; noPathWhileKept?: true; failure?: string }) {
+  const keeps: string[][] = [];
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool !== "navigate") return submit(tool, input, ...rest);
+    const keep = (input.keep_items as string[] | undefined) ?? [];
+    keeps.push(keep);
+    if (options.failure !== undefined) runtime.failNext.navigate = { error: options.failure };
+    else if (options.noPathWhileKept === true && keep.includes("dirt")) runtime.failNext.navigate = { error: "[NAVIGATION_STOPPED] Pathfinder stopped: no path." };
+    else {
+      if (!keep.includes("dirt")) runtime.addItem("dirt", -Math.min(options.spend, carried(runtime, "dirt")));
+      runtime.snapshot = { ...runtime.snapshot, position: stand };
+    }
+    return submit(tool, input, ...rest);
+  };
+  return keeps;
+}
+
+/** A small medieval house stopped before its roof for want of dirt, the bot then 30 blocks off carrying `dirt` dirt, and the step the stop gave. */
+async function roofStoppedFar(runtime: FakeRuntime, dirt: number) {
+  standingWithPolicy(runtime, SMALL_MEDIEVAL);
+  const context = contextFor(runtime, { building: { unfinished: null } });
+  const stop = await runStep(medievalStep(), context);
+  assert.match(detailOf(stop), PLANTED);
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 30.5, y: 64, z: 0.5 } };
+  if (dirt > 0) runtime.addItem("dirt", dirt);
+  return { context, step: firstStep(detailOf(stop)), stand: builderStand(roofOf().plan.site) };
+}
+/** What the bill holds from the roof stage on (the roof and the finish): what a walk resumed at the roof keeps. */
+const ROOF_BILL = itemsFrom(roofOf().plan, roofOf().roof);
+
+test("a resumed roof walked to with the counted dirt keeps it: the roof is sent; with 64 dirt only the bill is kept: the surplus may bridge", async () => {
+  for (const { dirt, kept, left } of [{ dirt: 4, kept: [...ROOF_BILL, ...DEFAULT_POLICY.scaffoldBlocks!], left: 4 }, { dirt: 64, kept: ROOF_BILL, left: 62 }]) {
+    const runtime = new FakeRuntime();
+    const { context, step, stand } = await roofStoppedFar(runtime, dirt);
+    const keeps = walkingOverADrop(runtime, stand, { spend: 2 });
+    const result = await runStep(step, context);
+    assert.match(detailOf(result), /^built a small medieval house/u, `${dirt} dirt`);
+    assert.deepEqual(new Set(keeps[0]), new Set(kept), `${dirt} dirt: the kinds kept`);
+    assert.equal(carried(runtime, "dirt"), left, `${dirt} dirt: what reached the roof`);
+  }
+});
+
+test("a no-path walk is walked again only when a scaffold block was carried to keep, and never after a stop", async () => {
+  // None carried: the second walk would be the same walk.
+  const bare = new FakeRuntime();
+  standingWithPolicy(bare, SMALL_MEDIEVAL);
+  const bareKeeps = walkingOverADrop(bare, builderStand(roofOf().plan.site), { spend: 0, failure: "[NAVIGATION_STOPPED] Pathfinder stopped: no path." });
+  const refused = await runStep(stepSchema.parse({ skill: "build", template: "medieval-small", x: 0, y: 64, z: 2 }), contextFor(bare, { building: { unfinished: null } }));
+  assert.equal(bareKeeps.length, 1);
+  assert.match(detailOf(refused), /^could not reach the site of a small medieval house/u);
+  // Dirt carried but the stop signal given during the first walk: no second walk.
+  const runtime = new FakeRuntime();
+  const { context, step, stand } = await roofStoppedFar(runtime, 4);
+  const controller = new AbortController();
+  const keeps = walkingOverADrop(runtime, stand, { spend: 2, noPathWhileKept: true });
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "navigate") controller.abort();
+    return submit(tool, input, ...rest);
+  };
+  const stopped = await runStep(step, { ...context, signal: controller.signal });
+  assert.equal(stopped.status, "stopped");
+  assert.equal(keeps.length, 1);
+});
+
+test("the walk falls back when keeping the dirt leaves no way: the bill alone is kept, and the stop that follows names the count", async () => {
+  const runtime = new FakeRuntime();
+  const { context, step, stand } = await roofStoppedFar(runtime, 4);
+  const keeps = walkingOverADrop(runtime, stand, { spend: 2, noPathWhileKept: true });
+  const stopped = await runStep(step, context);
+  assert.equal(keeps.length, 2, "two walks");
+  assert.ok(keeps[0]!.includes("dirt") && !keeps[1]!.includes("dirt"), "the second walk keeps the bill only");
+  assert.deepEqual(new Set(keeps[1]), new Set(ROOF_BILL));
+  assert.match(detailOf(stopped), PLANTED, "the walk spent 2 of the 4: the stop names the count again");
+  // The next action from it: 4 more dirt, the step it gave builds the roof (6 carried: a surplus, so the walk keeps the bill only).
+  runtime.addItem("dirt", 4);
+  const next = await runStep(firstStep(detailOf(stopped)), context);
+  assert.match(detailOf(next), /^built a small medieval house/u);
+});
+
+test("a walk that fails in deep water is not walked again", async () => {
+  const runtime = new FakeRuntime();
+  const { context, step, stand } = await roofStoppedFar(runtime, 4);
+  const keeps = walkingOverADrop(runtime, stand, { spend: 2, failure: "[NAVIGATION_DEEP_WATER] Deep open water ahead" });
+  const result = await runStep(step, context);
+  assert.equal(keeps.length, 1);
+  assert.equal(result.status, "failed");
+  assert.match(detailOf(result), /^could not reach the site of a small medieval house at 0 64 2: \[NAVIGATION_DEEP_WATER\]/u);
+});
+
+test("a resumed roof already standing keeps no scaffold: only the bill", async () => {
+  const runtime = new FakeRuntime();
+  const { context, step, stand } = await roofStoppedFar(runtime, 0);
+  const { high, plan, roof } = roofOf();
+  for (const cell of high) runtime.world.set(`${cell.x},${cell.y},${cell.z}`, cell.block);
+  runtime.snapshot = { ...runtime.snapshot, inventory: billFrom(plan, plan.stages[roof]!.first).map(({ item, count }) => ({ name: item, count })) };
+  const keeps = walkingOverADrop(runtime, stand, { spend: 2 });
+  const result = await runStep(step, context);
+  assert.match(detailOf(result), /^built a small medieval house/u);
+  assert.deepEqual(new Set(keeps[0]), new Set(ROOF_BILL), "the roof's bill, and no scaffold kind");
+});
+
+test("a new house's walk keeps its bill, and the admitted kinds too while a later stage is out of reach (none carried: nothing to keep)", async () => {
+  const runtime = new FakeRuntime();
+  standingWithPolicy(runtime, SMALL_MEDIEVAL);
+  const stand = builderStand(roofOf().plan.site);
+  const keeps = walkingOverADrop(runtime, stand, { spend: 2 });
+  await runStep(stepSchema.parse({ skill: "build", template: "medieval-small", x: 0, y: 64, z: 2 }), contextFor(runtime, { building: { unfinished: null } }));
+  assert.deepEqual(new Set(keeps[0]), new Set([...roofOf().plan.bill.map(({ item }) => item), ...DEFAULT_POLICY.scaffoldBlocks!]));
 });
 
 test("a house built from exactly its bill reaches its door: the cell under the door is billed once", async () => {

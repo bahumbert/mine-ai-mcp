@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Body } from "../body.ts";
 import { runStep, type SkillContext, type UnfinishedHouse } from "../skills.ts";
-import { FakeRuntime, SMALL_MEDIEVAL_HOUSE } from "../testing.ts";
+import { DEFAULT_POLICY, FakeRuntime, SMALL_MEDIEVAL_HOUSE } from "../testing.ts";
 
 // Live 2026-10-09: Tom's stone pickaxe wore out at part 1/9 of his house and the build ended there.
 const RECIPES = {
@@ -42,6 +42,29 @@ test("a pickaxe worn out in the middle of a house is made again and the part don
   assert.equal(log[0], "build");
   assert.deepEqual(log.slice(1, 3), ["craft wooden_pickaxe", "build"]);
   assert.equal(building.unfinished, null);
+});
+
+test("a tool lost mid-stage refetches keeping the stage's scaffold: the walk back does not lay the roof's dirt", async () => {
+  const runtime = builder();
+  runtime.snapshot = { ...runtime.snapshot, policy: DEFAULT_POLICY, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 4 }] };
+  // The pickaxe is lost on the first part of the roof (the fifth call: the floor and the walls took four); making the new one
+  // takes the bot 40 blocks off, so the fetch walks back.
+  let sent = 0;
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && (sent += 1) === 5) runtime.failNext.build_structure = wear(runtime);
+    if (tool === "craft_item") runtime.snapshot = { ...runtime.snapshot, position: { x: 40.5, y: 64, z: 0.5 } };
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { building: { unfinished: null as UnfinishedHouse | null } }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  const walks = runtime.submitted.filter((call) => call.tool === "navigate");
+  assert.equal(walks.length, 1, "one walk: the fetch's way back");
+  const keep = walks[0]!.input.keep_items as string[];
+  assert.ok(keep.includes("wooden_pickaxe"), "the tool it fetched");
+  // The admitted kinds besides the house's own (its cobblestone is kept by the build's own policy keep).
+  const admitted = DEFAULT_POLICY.scaffoldBlocks!.filter((kind) => !SMALL_MEDIEVAL_HOUSE.some((stack) => stack.name === kind));
+  assert.ok(admitted.includes("dirt") && admitted.every((kind) => keep.includes(kind)), `the roof's scaffold kinds are kept (${keep.join(", ")})`);
 });
 
 test("the pickaxe lost again in the same step ends the build, saying what was remade", async () => {

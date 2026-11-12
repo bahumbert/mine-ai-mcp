@@ -53,7 +53,7 @@ export const BUILD_REACH = 4;
 
 /** Blocks to stand on that a stage lacks: the column the routes' scaffold needs for its cells out of reach of the ground. */
 export interface ScaffoldNeed {
-  /** About how many blocks the column takes (one more than the height the cells lack, for the route's own step). */
+  /** About how many blocks the routes lay: two columns of the height the cells lack (Mine Labs placed 4 in one medieval-small roof call, facts houses.md "A stage out of reach from the ground"). */
   readonly count: number;
   /** How far above the ground the highest cell is. */
   readonly height: number;
@@ -77,9 +77,23 @@ export function scaffoldNeed(cells: readonly WorldCell[], walkingY: number, inve
   const admitted = scaffoldBlocks.filter((block) => !kept.includes(block));
   if (admitted.length === 0) return null;
   const height = Math.max(...high.map((cell) => cell.y)) - walkingY;
-  const count = height - BUILD_REACH + 2;
+  const count = 2 * (height - BUILD_REACH + 1);
   const carried = inventory.filter((stack) => admitted.includes(stack.name)).reduce((sum, stack) => sum + stack.count, 0);
   return carried >= count ? null : { count, height, admitted };
+}
+
+/**
+ * The kinds a walk must not spend, because the cells still to place need them to stand on (`navigate`'s `keep_items`: the
+ * route may not lay them, its fallback scaffold included): the admitted kinds besides `kept` when a placed cell is
+ * `BUILD_REACH` or more above `walkingY` and every carried admitted block is needed (the carried total is at most the
+ * count {@link scaffoldNeed} gives for none carried); `[]` otherwise: a surplus may bridge, as `gatherMaterials` keeps
+ * "only a kind with no spare", and nothing is asked when no cell is out of reach or the policy is unread.
+ */
+export function scaffoldKinds(cells: readonly WorldCell[], walkingY: number, inventory: readonly { readonly name: string; readonly count: number }[], scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): readonly string[] {
+  const needed = scaffoldNeed(cells, walkingY, [], scaffoldBlocks, kept);
+  if (needed === null) return [];
+  const carried = inventory.filter((stack) => needed.admitted.includes(stack.name)).reduce((sum, stack) => sum + stack.count, 0);
+  return carried > needed.count ? [] : needed.admitted;
 }
 
 /** What a stage lacks to be built now: items not carried, and blocks to stand on. */
@@ -90,13 +104,23 @@ export interface StageShortfall {
   readonly scaffold: ScaffoldNeed | null;
 }
 
-/** The words of a shortfall that are not items ("about 3 blocks to stand on for ..."): a result holding them lacks what an inventory list cannot show. */
+/** The words of a shortfall that are not items ("about 4 blocks to stand on for ..."): a result holding them lacks what an inventory list cannot show. */
 export const STAND_ON_WORDS = "blocks to stand on";
 
-/** "7 spruce_slab and about 3 blocks to stand on for its cells 5 above the ground (...)": what is lacking, as the model reads it. */
+/** "7 spruce_slab and about 4 blocks to stand on for its cells 5 above the ground (...)": what is lacking, as the model reads it. */
 export function describeShortfall({ missing, scaffold }: Pick<StageShortfall, "missing" | "scaffold">): string {
   const standOn = scaffold === null ? "" : `about ${scaffold.count} ${STAND_ON_WORDS} for its cells ${scaffold.height} above the ground (scaffold the build lays and takes back: one of ${scaffold.admitted.join(", ")})`;
   return [describeMaterials(missing), standOn].filter((part) => part !== "").join(" and ");
+}
+
+/**
+ * What to fetch, as the model reads it: "exactly" only for the items (the bill is exact), "N or more" for the blocks to
+ * stand on (the count is about: the routes lay and take back what they need, review 2026-11-11 S4).
+ */
+export function fetchClause({ missing, scaffold }: Pick<StageShortfall, "missing" | "scaffold">): string {
+  if (scaffold === null) return "fetch exactly the missing items with get_items";
+  const standOn = `${scaffold.count} or more ${STAND_ON_WORDS} with get_items`;
+  return missing.length === 0 ? `fetch ${standOn}` : `fetch exactly the missing items and ${standOn}`;
 }
 
 /** The phrase naming stage `index` ("the walls (stage 2)"). */
@@ -116,7 +140,7 @@ const OTHER_BLOCKS = '; or build that stage from blocks you carry with "material
  */
 export function missingForStage(plan: HousePlan, index: number, what: string, shortfall: StageShortfall, how: { readonly fresh: boolean; readonly newSite?: string }): string {
   const { owedNote } = shortfall;
-  return `missing ${describeShortfall(shortfall)} for stage ${index + 1} of ${plan.stages.length} (${plan.stages[index]!.name}) of ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`})${how.newSite ?? ""}: fetch exactly the missing items with get_items, then ${buildAgain(plan)} again${how.fresh && shortfall.scaffold === null ? OTHER_BLOCKS : OTHER_HOUSE}`;
+  return `missing ${describeShortfall(shortfall)} for stage ${index + 1} of ${plan.stages.length} (${plan.stages[index]!.name}) of ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`})${how.newSite ?? ""}: ${fetchClause(shortfall)}, then ${buildAgain(plan)} again${how.fresh && shortfall.scaffold === null ? OTHER_BLOCKS : OTHER_HOUSE}`;
 }
 
 /**
@@ -126,5 +150,5 @@ export function missingForStage(plan: HousePlan, index: number, what: string, sh
 export function stagesBuilt(plan: HousePlan, from: number, index: number, shortfall: StageShortfall): string {
   const { door } = plan.site;
   const { owedNote } = shortfall;
-  return `stages ${from + 1}-${index} of ${plan.stages.length} of the ${plan.template.kind} are built (door at ${door.x} ${door.y} ${door.z}): ${stageName(plan, index)} needs ${describeShortfall(shortfall)}${owedNote === "" ? "" : ` (${owedNote})`}: fetch exactly those with get_items, then ${buildAgain(plan)} again to go on${OTHER_HOUSE}`;
+  return `stages ${from + 1}-${index} of ${plan.stages.length} of the ${plan.template.kind} are built (door at ${door.x} ${door.y} ${door.z}): ${stageName(plan, index)} needs ${describeShortfall(shortfall)}${owedNote === "" ? "" : ` (${owedNote})`}: ${fetchClause(shortfall)}, then ${buildAgain(plan)} again to go on${OTHER_HOUSE}`;
 }

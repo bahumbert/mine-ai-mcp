@@ -84,9 +84,9 @@ for (const name of noScaffoldFiles) {
   });
 }
 
-test("the reach rule flags only the roof of the medieval-small house, with the helper's count of 3", () => {
+test("the reach rule flags only the roof of the medieval-small house, with the helper's count of 4", () => {
   const plan = planTemplate(templateFor("medieval-small")!, { door: { x: 0, y: -59, z: 6 }, facing: "north" });
   const flagged = flaggedStages(plan, -59);
   assert.deepEqual(flagged.map(({ stage }) => stage.name), ["roof"]);
-  assert.equal(flagged[0]!.need.count, 3);
+  assert.equal(flagged[0]!.need.count, 4);
 });

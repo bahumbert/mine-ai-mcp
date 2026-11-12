@@ -10,9 +10,10 @@ import { builtBefore, onlyRefused, refusedCells, sameCell, type Cell } from "./b
 import { houseBox } from "./building/house-site.ts";
 import { replacedHouseNote, siteRefusal } from "./building/new-site.ts";
 import { builderStand, catalogueLine, chooseSite, planTemplate, siteAt, type HousePlan, type Materials, type Site } from "./building/plan.ts";
-import { billFrom, buildAgain, describeShortfall, missingForStage, scaffoldNeed, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
+import { billFrom, buildAgain, describeShortfall, fetchClause, missingForStage, scaffoldKinds, scaffoldNeed, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
 import { classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
 import type { Body } from "./body.ts";
+import { awayFrom, backStep, failedFetchNote, navigateInput, scaffoldKindsBetween, stageScaffoldKinds, walkKeeping } from "./walks.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
@@ -51,8 +52,6 @@ const COME_RANGE = 2;
 const GO_TO_RANGE = 1;
 /** An unfinished house is resumed only by a build step this close to its door; farther away a new one is started. */
 const RESUME_RANGE = 6;
-/** `get_items` walks back to where it started when it ends farther than this. */
-const RETURN_RANGE = 3;
 
 export interface SkillContext {
   readonly runtime: BotRuntime;
@@ -491,20 +490,21 @@ export async function giveTo(context: SkillContext, player: string, item: string
  * Gets `count` more of each item like a player (`gathering.ts`), then comes back to where it started: fetching is a
  * basic function; when and what to fetch is the model's choice (ADR-011).
  */
-async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], purpose = `getting ${describeMaterials(items)}`): Promise<SkillResult> {
-  const { position: start, inventory } = await context.runtime.status();
+async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], purpose = `getting ${describeMaterials(items)}`, walkKeep: readonly string[] = []): Promise<SkillResult> {
+  const { position: start, inventory, dimension: startDimension } = await context.runtime.status();
   const targets = items.map(({ item, count }) => ({ item, count: carriedOf(inventory, item) + count }));
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carriedOf(inventory, item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
   const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs) }, targets, purpose, start, keep);
+  const after = await context.runtime.status();
+  if (gathered.status === "failed") return { status: "failed", detail: `${gathered.detail}${failedFetchNote(start, startDimension, after)}` };
   if (gathered.status !== "done") return gathered;
-  const here = (await context.runtime.status()).position;
-  if (Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE) {
-    const back = await once(context, "navigate", navigateInput(start, GO_TO_RANGE), "Come back to where I started fetching.", "back");
+  if (awayFrom(start, after.position)) {
+    const back = await once(context, "navigate", { ...navigateInput(start, GO_TO_RANGE), keep_items: [...new Set([...items.map(({ item }) => item), ...walkKeep])] }, "Come back to where I started fetching.", "back");
     if (back.status === "stopped") return back;
     // The items are carried: that is the fetch done; the next step walks where it needs to (live 2026-10-10 run 10: a failed fetch looped the explore).
-    if (back.status === "failed") return { status: "done", detail: `got ${describeMaterials(items)}; could not walk back: ${back.detail}` };
+    if (back.status === "failed") return { status: "done", detail: `got ${describeMaterials(items)}; could not walk back: ${back.detail}; ${backStep(start)} tries again` };
   }
   return { status: "done", detail: `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})` };
 }
@@ -574,16 +574,18 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: missingForStage(plan, 0, what, { missing, owedNote, scaffold }, { fresh: true, newSite: untracked }) };
     replaced = replacedHouseNote(context, unfinished, areas);
   }
+  // The bill is not scaffolding while the house is built: the walks of the site's leveling used the very blocks it needs
+  // (live 2026-10-04: 16 of 36 cobblestone); nor is the scaffold its cells out of reach need, on the walk to the site (live 2026-11-11).
+  const startStage = resumed === null ? 0 : stageAt(plan, resumed.part);
+  const remaining = billFrom(plan, plan.stages[startStage]!.first);
   if (at !== null) {
     const stand = builderStand(plan.site);
     context.progress?.(`walking to the site of ${what} at ${at.x} ${at.y} ${at.z}`);
-    const there = await context.body.act("navigate", navigateInput(stand, 1), `Walk to the site of ${what}.`, { signal: context.signal });
+    const bill = remaining.map((entry) => entry.item);
+    const there = await walkKeeping(context, stand, `Walk to the site of ${what}.`, { bill, scaffold: await scaffoldKindsBetween(context, plan, { first: plan.stages[startStage]!.first, last: plan.stages.at(-1)!.last }, bill, resumed !== null) });
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}; ${buildAgain(plan)} tries again` };
   }
-  // The bill is not scaffolding while the house is built: the walks of the site's leveling used the very blocks it needs
-  // (live 2026-10-04: 16 of 36 cobblestone).
-  const remaining = billFrom(plan, plan.stages[resumed === null ? 0 : stageAt(plan, resumed.part)]!.first);
   return withMaterialsKept(context.runtime, remaining.map((entry) => entry.item), () => buildOnSite(context, { own, resumed, plan, remaining, replaced }));
 }
 
@@ -778,10 +780,10 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
   // A roof swapped in place is reached the same way a roof built is: from the ground, by the routes' scaffold.
   const scaffold = scaffoldNeed(changed, house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
-  if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: `missing ${describeShortfall({ missing, scaffold })} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): fetch exactly the missing items with get_items, then improve again` };
+  if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: `missing ${describeShortfall({ missing, scaffold })} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): ${fetchClause({ missing, scaffold })}, then improve again` };
   const { x, y, z } = house.door;
   context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
-  const there = await context.body.act("navigate", navigateInput(builderStand(after.site), 1), `Walk to ${what}.`, { signal: context.signal });
+  const there = await walkKeeping(context, builderStand(after.site), `Walk to ${what}.`, { bill: bill.map((entry) => entry.item), scaffold: scaffoldKinds(changed, house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item)) });
   if (context.signal.aborted) return { status: "stopped" };
   if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
   return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, template, roles, after, rest, bill, kind, what }));
@@ -891,7 +893,7 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: (items, purpose) => getItems(context, items, purpose) }));
+      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: async (items, purpose) => getItems(context, items, purpose, await stageScaffoldKinds(context, plan, partIndex, options.reserved)) }));
       if (lost.status === "remade") {
         index -= 1;
         continue;
@@ -1506,9 +1508,7 @@ function whereIs(snapshot: BotSnapshot, username: string, self: string | undefin
   return findPlayer(snapshot, username)?.position ?? null;
 }
 
-export function navigateInput(target: Position, range: number): Record<string, unknown> {
-  return { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z), range };
-}
+export { navigateInput };
 
 function distanceBetween(a: Position, b: Position): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
