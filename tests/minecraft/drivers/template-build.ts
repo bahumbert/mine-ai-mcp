@@ -25,6 +25,8 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   cancelAfterMs: z.number().int().nonnegative().default(3_000),
   /** The scenario carries the bill and no block to stand on: the first stage the brain's reach rule flags must stop with "no scaffold block carried to stand on" (every stage before it builds whole). */
   expectScaffoldStop: z.boolean().default(false),
+  /** The scenario carries exactly this many dirt for the roof's scaffold: the run first checks it equals the brain's count (`scaffoldNeed`) for the first stage the reach rule flags, then builds the whole template (the measure of that count at that height), with the policy's scaffold list as `build` leaves it (`scaffoldListKeepingBill`). */
+  scaffoldCarried: z.number().int().positive().optional(),
 });
 
 /** `view_blocks` reads at most this many cells per call (`MAX_CELLS`, src/actions/view-blocks/contract.ts). */
@@ -98,10 +100,12 @@ async function sendAll(context: ScenarioContext, inputs: readonly (PartInput | n
   let slowestMs = 0;
   const scaffold: string[] = [];
   const placed: string[] = [];
+  const trail: string[] = [];
   for (const [index, part] of inputs.entries()) {
     if (part === null) continue;
     const { call, history } = await sendCall(context, part, auditing);
-    if (call.result.status !== "succeeded") throw new Failed(`${label} call ${index + 1}/${inputs.length} read ${call.result.status}: ${call.summary}; carrying ${carried(context)}; now holding ${holdings(context, part)}; history ${history.events.join(" | ")}`);
+    if (call.result.status !== "succeeded") throw new Failed(`${label} call ${index + 1}/${inputs.length} read ${call.result.status}: ${call.summary}; carrying ${carried(context)}; now holding ${holdings(context, part)}; history ${history.events.join(" | ")}; scaffold trail (after each call: placed, left standing, admitted blocks carried) ${trail.join(" | ") || "none"}`);
+    trail.push(`${index + 1}: ${scaffoldPlaced(call)}, ${structureOf(call)?.scaffold?.leftCount ?? 0} left standing, ${admittedCarried(context)}`);
     const structure = structureOf(call);
     if (structure?.complete === false) throw new Failed(`${label} call ${index + 1}/${inputs.length} succeeded with an incomplete audit: ${call.summary}`);
     passes = Math.max(passes, structure?.passes ?? 0);
@@ -141,6 +145,12 @@ function watchCells(context: ScenarioContext, part: PartInput): { events: string
 /** What the bot carries, for a failure that names a block it lacks. */
 function carried(context: ScenarioContext): string {
   return context.bot.inventory.items().map((item) => `${item.count} ${item.name}`).join(", ");
+}
+
+/** The carried blocks the runtime's default policy admits as scaffold, as "4 dirt, 16 cobblestone": what the routes may spend. */
+function admittedCarried(context: ScenarioContext): string {
+  const admitted = context.bot.inventory.items().filter((item) => (DEFAULT_SCAFFOLD_BLOCKS as readonly string[]).includes(item.name));
+  return admitted.map((item) => `${item.count} ${item.name}`).join(", ") || "none";
 }
 
 /** The first call after call `after` that sends cells, or -1. */
@@ -243,6 +253,36 @@ export function flaggedStages(plan: HousePlan, walkingY: number): { stage: Stage
   });
 }
 
+/** Null when `carried` is the count the reach rule gives for the first stage it flags from `walkingY`; else what differs, so a run does not measure a count the scenario never carried. */
+export function scaffoldCarriedMismatch(plan: HousePlan, walkingY: number, carriedCount: number): string | null {
+  const first = flaggedStages(plan, walkingY)[0];
+  if (first === undefined) return `scaffoldCarried is set but the reach rule flags no stage of ${plan.template.id} from y ${walkingY}: pick a template with a stage out of reach, or check the door's y in the scenario`;
+  if (first.need.count === carriedCount) return null;
+  return `the scenario carries ${carriedCount} scaffold dirt but the helper's count for stage ${first.stage.name} (${first.need.height} above the ground) is ${first.need.count}: set scaffoldCarried (and the scenario's dirt) to the count, if the count changed on purpose, or fix the typo`;
+}
+
+/**
+ * The scaffold list the brain leaves the runtime while it builds: the kinds the default policy admits minus the bill's own
+ * (`withMaterialsKept`, brain/src/gathering.ts, around `build`): a block the house needs is never laid as scaffold, so the
+ * bill's last cobblestone is not spent on a route.
+ */
+export function scaffoldListKeepingBill(plan: HousePlan): readonly string[] {
+  const billKinds = plan.bill.map((entry) => entry.item);
+  return DEFAULT_SCAFFOLD_BLOCKS.filter((block) => !billKinds.includes(block));
+}
+
+/** Sets the session policy's scaffold list as `build` leaves it (`scaffoldListKeepingBill`); the failure text, or undefined when it is set. */
+async function setScaffoldListKeepingBill(context: ScenarioContext, plan: HousePlan): Promise<string | undefined> {
+  const status = await context.call("view_status", {});
+  const revision = status.survivalPolicy?.revision;
+  if (!revision) return `view_status gave no survivalPolicy revision: ${status.summary}`;
+  const set = await context.call("set_survival_policy", {
+    operation: "set", expected_revision: revision, changes: { navigation: { scaffold_blocks: [...scaffoldListKeepingBill(plan)] } },
+    lifetime: { kind: "session" }, reason: "What I am building with is not scaffolding on the way.",
+  });
+  return set.result.status === "succeeded" ? undefined : `set_survival_policy read ${set.result.status}: ${set.summary}`;
+}
+
 /** What the runtime says when a route could not reach a high cell and no scaffold block is carried (`describeNoScaffold`, src/actions/build-structure/contract.ts). */
 const NO_SCAFFOLD_CLAUSE = "no scaffold block carried to stand on";
 
@@ -296,6 +336,13 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const template = templateFor(params.template);
   if (template === undefined) return { status: "failed", detail: `no template ${params.template}` };
   const plan = planTemplate(template, { door: params.door, facing: params.facing });
+  if (params.scaffoldCarried !== undefined && (params.expectScaffoldStop || params.interruptAfterBatch !== undefined)) return { status: "failed", detail: "scaffoldCarried builds the whole template in one pass: it cannot be combined with expectScaffoldStop or interruptAfterBatch" };
+  const mismatch = params.scaffoldCarried === undefined ? null : scaffoldCarriedMismatch(plan, params.door.y, params.scaffoldCarried);
+  if (mismatch !== null) return { status: "failed", detail: mismatch };
+  if (params.scaffoldCarried !== undefined) {
+    const refused = await setScaffoldListKeepingBill(context, plan);
+    if (refused !== undefined) return { status: "failed", detail: refused };
+  }
   const inputs = partInputs(plan);
   const started = performance.now();
   const notes: string[] = [];

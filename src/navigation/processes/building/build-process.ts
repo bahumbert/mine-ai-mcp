@@ -57,6 +57,7 @@ import type { Position3 } from "../../world/world.js";
 import { facingVector } from "../../../world/facing.js";
 import { clingsBehindFacing } from "../../../world/block-states.js";
 import { described, faceFits, holdsCell, type BuildCell } from "./build-cell.js";
+import { takeScaffoldDown } from "./scaffold-takedown.js";
 
 export { faceFits, holdsCell, type BuildCell } from "./build-cell.js";
 
@@ -90,9 +91,6 @@ const IDLE_PASSES = 2;
  * several block reads; the mine process throttles its rescan the same way.
  */
 const REFRESH_MS = 250;
-
-/** Rounds of scaffold takedown: the highest block first, and a round's own pillars are taken down in the next (live count unmeasured: a pillar is a few blocks). */
-const MAX_TAKEDOWN_ROUNDS = 4;
 
 const NEIGHBOURS = [
   new Vec3(1, 0, 0),
@@ -172,6 +170,8 @@ export class BuildProgress {
   passes = 0;
   readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
   readonly scaffold = new Map<number, PlacedScaffold>();
+  /** The item entities lying about when the request's first takedown began: a resumed takedown still picks up the drops a cut one left. */
+  lyingBeforeTakedown: ReadonlySet<number> | null = null;
 }
 
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
@@ -595,7 +595,7 @@ export async function build(
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
     targeting.progress.passes += 1;
     targeting.refresh();
-    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), scaffold);
+    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), progress);
     const workBefore = targeting.workDone;
 
     // Standing in a cell the structure needs means every placement around it
@@ -671,47 +671,3 @@ async function runRoute(
   });
 }
 
-/** Whether the scaffold block placed at a cell still stands there. */
-const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(asVec3(placed.position))?.stateId === placed.stateId;
-
-/**
- * Takes the scaffold down after a complete build: every block the routes placed (in any attempt) that is no cell of
- * the structure and still stands, highest first, through the build's own loop with those cells as air (the
- * structure's cells stay as they are, so they stay protected). A round's own routes may pillar up to reach the highest
- * block, and what they place is scaffold too (house-templates scenario ndebele-house: one dirt block stayed, later calls
- * forgot it): rounds repeat while the standing scaffold changes, at most `MAX_TAKEDOWN_ROUNDS` (a round that removes
- * nothing and places nothing ends it; each round is bounded by the build loop's own idle passes and the abort signal).
- * Scaffold already gone (taken down by an earlier attempt, a reflex or another bot) is skipped and counts as removed;
- * what cannot be reached stays and is reported. A failure here never fails the build, except an abort, which a resume
- * runs again: what a round placed is written into the request's own `scaffold` map at once, abort or not, so the resume
- * takes it down too.
- */
-async function takeScaffoldDown(
-  bot: Bot,
-  request: BuildRequest,
-  built: BuildResult,
-  scaffold: Map<number, PlacedScaffold>,
-): Promise<BuildResult> {
-  if (scaffold.size === 0) return built;
-  const structure = new Set(request.cells.map((cell) => keyOf(cell.position)));
-  const known = scaffold;
-  const temporary = () => [...known.entries()].filter(([key]) => !structure.has(key)).map(([, placed]) => placed);
-  const standing = () => temporary().filter((placed) => standsStill(bot, placed)).sort((a, b) => b.position.y - a.position.y);
-  for (let round = 0; round < MAX_TAKEDOWN_ROUNDS; round += 1) {
-    const before = standing();
-    if (before.length === 0) break;
-    const takedown = new BuildProgress();
-    try {
-      await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...before.map(({ position }) => ({ position, blockName: "air" }))] }, true, takedown);
-    } catch (error) {
-      request.signal?.throwIfAborted();
-      void error;
-    } finally {
-      for (const [key, placed] of takedown.scaffold) known.set(key, placed);
-    }
-    const after = standing();
-    if (after.length === before.length && after.every((placed, index) => keyOf(placed.position) === keyOf(before[index]!.position))) break;
-  }
-  const left = standing().map(({ position }) => position);
-  return { ...built, scaffold: { placed: known.size, removed: temporary().length - left.length, left } };
-}
