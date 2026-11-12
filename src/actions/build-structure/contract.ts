@@ -259,7 +259,9 @@ export const buildStructureOutcomes = {
     (missing ? `; short of ${missing}` : "") +
     (noScaffold ? `; ${describeNoScaffold(noScaffold)}` : "") +
     ".",
-  stopped: (reason: string) => `[BUILD_STOPPED] The build stopped: ${reason}.`,
+  /** `noScaffold` is set for a route stop whose cells out of reach lack a block to stand on: the clause leads, the route's words follow. */
+  stopped: (reason: string, noScaffold?: NoScaffoldCarried) =>
+    `[BUILD_STOPPED] The build stopped: ${noScaffold ? `${describeNoScaffold(noScaffold)}; last route: ${reason}` : reason}.`,
   protectedRegion: (cells: number, region: string) =>
     `[BUILD_PROTECTED_REGION] ${cells} cell${cells === 1 ? " lies" : "s lie"} inside ${region}, which this bot does not own; unprotect it or build elsewhere.`,
 } as const;

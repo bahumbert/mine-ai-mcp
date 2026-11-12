@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { structureWorld } from "../../test-support/structure-world.js";
-import { parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
+import { buildStructureOutcomes, parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
 import { formatBuildStructureResult, buildStructure, beginBuildStructure, createBuildStructureAction } from "./build-structure.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
@@ -486,6 +486,70 @@ test("high cells the audit does not name still bring the clause", async () => {
   const error = await buildOutOfReach(world, supportedCells(world, [...low, ...high], "oak_planks"));
   assert.match(error, /16 cells still wrong/);
   assert.match(error, NO_SCAFFOLD_CLAUSE);
+});
+
+// A stop the build process words itself (`[BUILD_STOPPED]`) after route failures says the missing scaffold too (plan
+// 2026-11-12-house-build-fixes Task 5): live 2026-11-11 the model read the route's "walk part of the way first".
+const STOPPED_NO_SCAFFOLD = /^\[BUILD_STOPPED\] The build stopped: no scaffold block carried to stand on \(your movement policy admits [^)]*\): carry some to reach the cells out of reach; last route: .+\.$/;
+
+async function stoppedBuild(world: World, physics: Physics, request: StructureCell[]): Promise<string> {
+  const result = await buildStructure(world.bot, { cells: request, removeWrongBlocks: false }, {}, physics);
+  if (result.status !== "failed") assert.fail(`the build is stopped, it cannot be ${result.status}`);
+  return result.error;
+}
+
+const HIGH_ROOF: [number, number, number][] = [[3, 70, 0], [4, 70, 0], [5, 70, 0], [6, 70, 0]];
+
+// The stop at `build-process.ts` "no target left to refuse" cannot be reached by a run (the targets that made the route
+// stop are the ones refuseClosest refuses; refused routes end in BUILD_INCOMPLETE, tested above), so its wording is
+// tested here, where `buildAttempt` hands the route's reason and the clause to the outcome.
+test("a route stop's reason follows the scaffold clause; without the clause it stands alone", () => {
+  const withClause = buildStructureOutcomes.stopped(ROUTE_REFUSAL, { admitted: ["dirt", "cobblestone"] });
+  assert.equal(withClause, `[BUILD_STOPPED] The build stopped: no scaffold block carried to stand on (your movement policy admits dirt, cobblestone): carry some to reach the cells out of reach; last route: ${ROUTE_REFUSAL}.`);
+  assert.match(withClause, STOPPED_NO_SCAFFOLD);
+  assert.equal(buildStructureOutcomes.stopped(ROUTE_REFUSAL), `[BUILD_STOPPED] The build stopped: ${ROUTE_REFUSAL}.`);
+  // A policy that admits nothing: the same words as BUILD_INCOMPLETE's, the route's after them.
+  assert.equal(
+    buildStructureOutcomes.stopped(ROUTE_REFUSAL, { admitted: [] }),
+    `[BUILD_STOPPED] The build stopped: no block may be used as scaffold to stand on now: your movement policy admits none besides the blocks being built with; last route: ${ROUTE_REFUSAL}.`,
+  );
+});
+
+/** The physics whose routes answer "completed" without moving or placing anything: the build's passes change nothing. */
+function idleRoutes(world: World): Physics {
+  return { ...world.physics, route: async () => ({ status: "completed", elapsedMs: 0 }) };
+}
+
+test("the idle-passes stop with high cells still to do says so too: no cell was refused", async () => {
+  const world = structureWorld({ carried: { oak_planks: 5 } });
+  const error = await stoppedBuild(world, idleRoutes(world), supportedCells(world, HIGH_ROOF, "oak_planks"));
+  assert.match(error, STOPPED_NO_SCAFFOLD);
+  assert.match(error, /last route: 2 passes changed nothing; last route completed\.$/);
+});
+
+test("a step-out stop with roof cells left keeps the plain wording", async () => {
+  const world = structureWorld({ carried: { oak_planks: 5 } });
+  // The bot stands inside the structure (a cell at its feet), so the first pass steps out; that route is refused.
+  const { x, y, z } = world.bot.entity.position.floored();
+  const request = [...supportedCells(world, HIGH_ROOF, "oak_planks"), { x, y, z, blockName: "oak_planks" }];
+  const error = await stoppedBuild(world, unreachingRoutes(world), request);
+  assert.match(error, /^\[BUILD_STOPPED\] The build stopped: could not step out of the structure: /);
+  assert.doesNotMatch(error, /scaffold block/);
+});
+
+const IDLE_PLAIN = /^\[BUILD_STOPPED\] The build stopped: 2 passes changed nothing; last route completed\.$/;
+
+test("an idle-passes stop keeps the plain wording when a scaffold block of the policy is carried", async () => {
+  const world = structureWorld({ carried: { oak_planks: 5, dirt: 3 } });
+  assert.match(await stoppedBuild(world, idleRoutes(world), supportedCells(world, HIGH_ROOF, "oak_planks")), IDLE_PLAIN);
+});
+
+// The cell out of reach is wrong for another reason (it holds stone and the request leaves it): no scaffold would help it.
+test("an idle-passes stop keeps the plain wording when the high cell is blocked, not still to do", async () => {
+  const world = structureWorld({ carried: { oak_planks: 5 } });
+  world.put(new Vec3(3, 70, 0), "stone");
+  const low = supportedCells(world, [10, 11, 12, 13].map((x): [number, number, number] => [x, 64, 0]), "oak_planks");
+  assert.match(await stoppedBuild(world, idleRoutes(world), [...cells([[3, 70, 0]], "oak_planks"), ...low]), IDLE_PLAIN);
 });
 
 test("a cobblestone structure is not told to be scaffolded with cobblestone", async () => {

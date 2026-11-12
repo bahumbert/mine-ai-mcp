@@ -203,15 +203,16 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
  * Set when a cell the route could not reach lies a build's reach or more above the feet and no block the policy admits
  * is carried to stand on: the refusal is then the missing scaffold, not distance (live 2026-11-10: the model walked
  * nearer). A route refused at ground level (a pond, a lagged timeout) is no scaffold matter. Every cell of the result
- * is looked at, not the audit's named sample.
+ * is looked at, not the audit's named sample. After a route stop (`result.routeStop`: the idle-passes stop leaves its
+ * high cells to do, not refused) a cell still to do (placeable, diggable) counts too; one wrong for another reason does not.
  */
 function noScaffoldCarried(bot: Bot, request: BuildStructureRequest, result: BuildResult): NoScaffoldCarried | undefined {
   // The feet cell as the build process counts it (a floor lower than a full block lifts it by one), so a cell the build
   // judged within reach is never reported as out of it.
   const feetY = navigationFeet(bot.entity.position, bot.entity.onGround === true).y;
-  const outOfReach = result.cells.some(
-    ({ cell, state }) => state.kind === "refused" && state.cause === "route" && cell.position.y - feetY >= BUILD_REACH,
-  );
+  const lacksRoute = (state: BuildCellState): boolean =>
+    state.kind === "refused" ? state.cause === "route" : result.routeStop === true && (state.kind === "placeable" || state.kind === "diggable");
+  const outOfReach = result.cells.some(({ cell, state }) => lacksRoute(state) && cell.position.y - feetY >= BUILD_REACH);
   const building = structureBlockNames(request);
   if (!outOfReach || preferredScaffoldItem(bot, building) !== null) return undefined;
   return { admitted: scaffoldBlockNames(bot).filter((name) => !building.has(name)) };
@@ -296,7 +297,7 @@ async function buildAttempt(run: BuildRun, context: ActionContext): Promise<Buil
   if (lost && request.onToolLoss !== "continue") return { status: "partial", error: lost.reason, structure };
   if (structure.complete) return { status: "succeeded", structure };
   const error = result.reason
-    ? buildStructureOutcomes.stopped(result.reason)
+    ? buildStructureOutcomes.stopped(result.reason, result.routeStop ? noScaffoldCarried(bot, request, result) : undefined)
     : buildStructureOutcomes.incomplete(
         structure.wrong,
         structure.left.map(describeLeft).join("; "),

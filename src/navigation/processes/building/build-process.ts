@@ -145,8 +145,9 @@ export interface BuildRequest {
 
 export interface BuildResult {
   readonly status: "complete" | "stopped";
-  /** Why the run stopped short, when one event rather than the cell states explains it. */
+  /** Why the run stopped short, when one event rather than the cell states explains it; `routeStop` when it is a route failure. */
   readonly reason: string | null;
+  readonly routeStop?: true;
   readonly placed: number;
   readonly dug: number;
   readonly passes: number;
@@ -467,11 +468,12 @@ export class BuildTargeting {
       .join("|");
   }
 
-  result(status: BuildResult["status"], reason: string | null): BuildResult {
+  result(status: BuildResult["status"], reason: string | null, routeStop = false): BuildResult {
     this.refresh();
     return {
       status,
       reason,
+      ...(routeStop && { routeStop: true as const }),
       placed: this.progress.placed,
       dug: this.progress.dug,
       passes: this.progress.passes,
@@ -627,13 +629,13 @@ export async function build(
       // A goal the search could not reach is not a reason to abandon the build,
       // only that cell — unless the targets already changed underneath it.
       if (targeting.identity() === routed && !targeting.refuseClosest(feetOf(bot), route.reason, "route")) {
-        return targeting.result("stopped", route.reason);
+        return targeting.result("stopped", route.reason, true);
       }
     }
 
     idlePasses = targeting.workDone === workBefore ? idlePasses + 1 : 0;
     if (idlePasses >= IDLE_PASSES) {
-      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`);
+      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`, true);
     }
   }
 }
