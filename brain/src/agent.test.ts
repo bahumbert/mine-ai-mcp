@@ -3203,16 +3203,30 @@ test("a body down met by a conversation routine is not a failed conversation", a
 });
 
 test("a body that comes back at a known time is asked again within a poll of it", async (t) => {
+  // The waits the agent asks for are read on a simulated wall clock that moves by exactly each wait: no real time passes,
+  // so neither load nor a step of the host's wall clock (WSL's, about 2 s every 30 s) can move the answer (2026-11-12:
+  // the version that timed the sixth read in real time against a 2.5 s bound failed once at 2610 ms).
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const started = monotonicNow();
-  const at = new Date(Date.now() + 2_000).toISOString();
+  let wall = Date.now();
+  t.mock.method(Date, "now", () => wall);
+  const at = new Date(wall + 2_000).toISOString();
   const errors = Array.from({ length: 5 }, () => new BodyDown({ at, attempt: 2, of: 6 }, new Error("[RUNTIME_UNRESPONSIVE] Runtime event-loop heartbeat absent")));
   const reads = failStatusReads(runtime, logs, errors);
-  journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), pollMs: 100 });
+  const waits: number[] = [];
+  const { agent } = journaledAgent(t, runtime, { goal: "gather dirt" }, { log: (line) => logs.push(line), pollMs: 100 });
+  const idle = agent as unknown as { idle(ms: number): Promise<void> };
+  const waitFor = idle.idle.bind(agent);
+  t.mock.method(idle, "idle", (ms: number) => {
+    // After the sixth read the loop's own errors (no scripted planner reply) wait as the agent asks, so it does not spin.
+    if (reads.calls < 1 || reads.calls >= 6) return waitFor(ms);
+    waits.push(ms);
+    wall += ms;
+    return waitFor(0);
+  });
   await until(() => reads.calls >= 6, 4_000);
-  // Without the cap the five failures wait 100 + 200 + 400 + 800 + 1600 ms: the sixth read comes after 3.1 s.
-  assert.ok(monotonicNow() - started < 2_500, `the sixth read came after ${Math.round(monotonicNow() - started)} ms`);
+  // Without the cap the five failures wait 100, 200, 400, 800 and 1600 ms; the cap cuts the fifth to the 500 ms left.
+  assert.deepEqual(waits, [100, 200, 400, 800, 500]);
 });
 
 test("a chat line whose call finds the model unavailable once is answered after the wait, and is in the history once", async (t) => {
