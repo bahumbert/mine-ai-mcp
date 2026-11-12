@@ -6,6 +6,11 @@ export const NAVIGATE = "navigate" as const;
 export const NAVIGATE_DESCRIPTION =
   "Navigate to one absolute block position using standard Pathfinder movements. Omit y for an unambiguous outdoor ground column; roofs, foliage, or multiple floors require an explicit y. A given y must be a cell the bot can stand in or loaded open water with sufficient air and a clear ascent to the surface; a mid-air y is refused unless build is true, in which case the bot scaffolds up to it on purpose. Active portal cells require enter_nether_portal or enter_end_portal. Underwater descent is slow, limiting how deep the bot can dive before needing air. Pathfinder may dig obstructions unless dig is false and place carried blocks from the survival policy's scaffold list unless scaffold is false. Disable both to preserve existing blocks along the route. Planned water-bucket drops up to 80 blocks are controlled separately by navigation.bucket_drops in the survival policy and require automatic water recovery before continuing.";
 
+/** The most item ids one `navigate` may ask to keep off its scaffold. */
+const MAX_KEEP_ITEMS = 64;
+/** The longest item id a `keep_items` entry may be. */
+const MAX_ITEM_ID_LENGTH = 64;
+
 export const navigateInputSchema = z
   .strictObject({
     x: z.number().int().describe("Absolute target block X coordinate."),
@@ -47,6 +52,13 @@ export const navigateInputSchema = z
       .describe(
         "Accept a target with nothing to stand on and scaffold up to it deliberately, for example to build a lookout or reach a floating structure. Off by default because a mid-air y usually means the surface height was guessed; the bot can dig its way back down a pillar it built.",
       ),
+    keep_items: z
+      .array(z.string().regex(/^[a-z0-9_]+$/).max(MAX_ITEM_ID_LENGTH))
+      .max(MAX_KEEP_ITEMS)
+      .default([])
+      .describe(
+        "Items the route must not place as scaffold (blocks kept for later work); the fallback scaffold skips them too.",
+      ),
   });
 
 export interface NavigateRequest {
@@ -61,6 +73,8 @@ export interface NavigateRequest {
   readonly dig: boolean;
   /** The caller means to end on scaffolding it places: a mid-air target is accepted. */
   readonly build: boolean;
+  /** Items the route never places as scaffold, the fallback scaffold included (blocks the caller keeps for later work). */
+  readonly keepItems: readonly string[];
 }
 
 export function parseNavigateRequest(input: unknown): NavigateRequest {
@@ -74,6 +88,7 @@ export function parseNavigateRequest(input: unknown): NavigateRequest {
     scaffold: value.scaffold,
     dig: value.dig,
     build: value.build,
+    keepItems: value.keep_items,
   };
 }
 
