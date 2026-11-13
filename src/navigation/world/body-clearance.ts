@@ -4,7 +4,8 @@
  * A bamboo stalk is 3/16 wide and stands off centre, so a body can stand with its centre in the stalk's cell, flush
  * with the stalk (live 2026-10-19, Ayla at 191.249, 292.64375 beside the stalk at 191,78,292). Search never puts the
  * body in a blocked cell, and the first step from there steers in a straight line to the next cell's centre: two of
- * the four ways out cross the stalk, so the step stalls. These two functions find that state and a side to step out to.
+ * the four ways out cross the stalk, so the step stalls. These functions find that state, the blocks that hold the body
+ * there (`partialCellBlockers`, what a run digs out when no side is free) and a side to step out to.
  */
 import { isHeadPassable, isPassable, isSafeSupport, navigationFeet } from "./block-geometry.js";
 import { type BlockPosition, type CollisionBox, type Position3, type WorldView, collisionBoxesAt } from "./world.js";
@@ -31,26 +32,50 @@ const SIDES: readonly (readonly [number, number])[] = [
 /**
  * The feet cell when the body stands inside it beside a box that reaches above the feet and could be touched in one
  * step, else null: a cell the body passes through (carpet, ladder, open door, water), a body resting on its own block
- * (slab, stair step, bed), and an unloaded cell are not partial.
+ * (slab, stair step, bed), and an unloaded cell are not partial. A passable feet cell is never partial, whatever hangs
+ * in the head cell beside the body (a chain, a lantern, an open trapdoor: a thin box at head height cannot be told from
+ * a half-dug stalk by its shape, and a body walking past one must not be stepped out of or dug out).
  */
 export function partialCellAt(world: WorldView, position: Position3): BlockPosition | null {
   const feet = navigationFeet(position, true);
   const feetBlock = world.blockAt(feet.x, feet.y, feet.z);
   if (feetBlock.kind !== "loaded" || isPassable(feetBlock)) return null;
-  const feetBoxes = collisionBoxesAt(feetBlock, feet.x, feet.z);
-  if (feetBoxes.some((box) => restsOn(box, feet, position))) return null;
-  const headBlock = world.blockAt(feet.x, feet.y + 1, feet.z);
-  const headBoxes = headBlock.kind === "loaded" ? collisionBoxesAt(headBlock, feet.x, feet.z) : [];
-  const besideTheBody = (box: CollisionBox, cellY: number) =>
-    cellY + box.maxY > position.y + ABOVE_FEET &&
-    cellY + box.minY < position.y + BODY_HEIGHT &&
-    feet.x + box.maxX > position.x - HALF_WIDTH - REACH &&
-    feet.x + box.minX < position.x + HALF_WIDTH + REACH &&
-    feet.z + box.maxZ > position.z - HALF_WIDTH - REACH &&
-    feet.z + box.minZ < position.z + HALF_WIDTH + REACH;
-  return feetBoxes.some((box) => besideTheBody(box, feet.y)) || headBoxes.some((box) => besideTheBody(box, feet.y + 1))
-    ? feet
-    : null;
+  return partialCellBlockers(world, position).length > 0 ? feet : null;
+}
+
+/**
+ * The feet cell and the head cell, in that order, whose collision boxes stand beside the body: the blocks that hold it
+ * where it is (what a dig-out from a partial cell breaks). Empty when the body rests on its own block, the cells hold
+ * nothing beside it, or the feet cell is unloaded. Called for a body `partialCellAt` found in a partial cell, and again
+ * while the dig-out waits for the head box to go.
+ */
+export function partialCellBlockers(world: WorldView, position: Position3): BlockPosition[] {
+  const feet = navigationFeet(position, true);
+  const feetBlock = world.blockAt(feet.x, feet.y, feet.z);
+  if (feetBlock.kind !== "loaded") return [];
+  const blockers: BlockPosition[] = [];
+  if (!isPassable(feetBlock)) {
+    if (collisionBoxesAt(feetBlock, feet.x, feet.z).some((box) => restsOn(box, feet, position))) return [];
+    if (holdsBeside(world, position, feet)) blockers.push(feet);
+  }
+  const head = { x: feet.x, y: feet.y + 1, z: feet.z };
+  if (holdsBeside(world, position, head)) blockers.push(head);
+  return blockers;
+}
+
+/** Whether a box of the loaded `cell` could be touched in one step by the body at `position`. */
+function holdsBeside(world: WorldView, position: Position3, cell: BlockPosition): boolean {
+  const block = world.blockAt(cell.x, cell.y, cell.z);
+  if (block.kind !== "loaded") return false;
+  return collisionBoxesAt(block, cell.x, cell.z).some(
+    (box) =>
+      cell.y + box.maxY > position.y + ABOVE_FEET &&
+      cell.y + box.minY < position.y + BODY_HEIGHT &&
+      cell.x + box.maxX > position.x - HALF_WIDTH - REACH &&
+      cell.x + box.minX < position.x + HALF_WIDTH + REACH &&
+      cell.z + box.maxZ > position.z - HALF_WIDTH - REACH &&
+      cell.z + box.minZ < position.z + HALF_WIDTH + REACH,
+  );
 }
 
 function restsOn(box: CollisionBox, cell: BlockPosition, position: Position3): boolean {

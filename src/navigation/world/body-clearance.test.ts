@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { partialCellAt, partialCellExit } from "./body-clearance.js";
+import { partialCellAt, partialCellBlockers, partialCellExit } from "./body-clearance.js";
 import { MemoryWorld, type MemoryBlock } from "./memory-world.js";
 
 const FLOOR_Y = 62;
@@ -101,4 +101,29 @@ test("a cell the body passes through is never partial: carpet, snow layer, ladde
 
 test("an unloaded feet cell is not a partial cell", () => {
   assert.equal(partialCellAt(new MemoryWorld(), AYLA), null);
+});
+
+/** The grove with the feet cell cleared: only the head cell holds a stalk box (a half-dug stalk). */
+function stalkAtHeadOnly() {
+  const world = grove();
+  world.load({ x: 191, y: FEET_Y, z: 292 }, AIR);
+  return world;
+}
+
+test("partialCellBlockers names the feet cell then the head cell whose boxes stand beside the body, none for a free body", () => {
+  assert.deepEqual(partialCellBlockers(grove(), AYLA), [
+    { x: 191, y: FEET_Y, z: 292 },
+    { x: 191, y: FEET_Y + 1, z: 292 },
+  ]);
+  assert.deepEqual(partialCellBlockers(stalkAtHeadOnly(), AYLA), [{ x: 191, y: FEET_Y + 1, z: 292 }]);
+  assert.deepEqual(partialCellBlockers(standingIn(BOTTOM_SLAB), { x: 191.5, y: FEET_Y + 0.5, z: 292.5 }), [], "on its own block");
+  assert.deepEqual(partialCellBlockers(grove(), { x: 190.5, y: FEET_Y, z: 292.5 }), [], "in a free cell");
+  assert.deepEqual(partialCellBlockers(new MemoryWorld(), AYLA), [], "unloaded");
+});
+
+test("a passable feet cell is never partial, whatever stands in the head cell beside the body (a chain, a trapdoor, a half-dug stalk)", () => {
+  // Live risk: a body walking past a thin box at head height must not be stepped out of, or dug out of, though its shape
+  // is a stalk's. A half-dug pocket is planned from; its stalled steps fail within a bound (navigation-run-partial-cell.test.ts).
+  assert.equal(partialCellAt(stalkAtHeadOnly(), AYLA), null);
+  assert.equal(partialCellAt(stalkAtHeadOnly(), { x: 191.7, y: FEET_Y, z: 292.65 }), null, "overlapping the box too");
 });

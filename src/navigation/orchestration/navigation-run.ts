@@ -39,19 +39,15 @@
  * left behind rather than asserting zero.
  */
 import type { MutationClassification } from "../execution/mutations.js";
-import { executeWorldEffect } from "../execution/world-effect.js";
 import { OpenedPassages } from "../execution/opened-passages.js";
 import { RouteExecutor, type RouteContext, type StepDecision } from "../execution/route-executor.js";
 import type { PlanningNode, ResolvedGoal } from "../goals/goal.js";
-import { priceExcavation } from "../movements/excavation.js";
 import type { MovementCatalogue } from "../movements/catalogue.js";
 import {
-  airMatcher,
   type MovementKind,
   type PlannedStep,
   type PredictedWorldEffect,
   type RoutePlan,
-  stateMatcher,
 } from "../movements/movement.js";
 import { ESCAPE_RELAXED_RULES, RelaxedRulesUsed, isShutInByEscapableRefusals, relaxedForEscape } from "./escape-policy.js";
 import type { FailedEdges } from "./failed-edges.js";
@@ -64,6 +60,8 @@ import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/inde
 import { navigationFeet } from "../world/block-geometry.js";
 import { partialCellAt, partialCellExit } from "../world/body-clearance.js";
 import { overheadPinningCell } from "../world/overhead-pin.js";
+import { awaitBodyClear, breakHeldCell } from "./held-cell-break.js";
+import { digOutOfPartialCell } from "./partial-cell-dig-out.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
 import { ArrivalRepeat } from "./arrival-repeat.js";
 import { describeAbort } from "./describe-abort.js";
@@ -91,7 +89,6 @@ import type {
   SearchReason,
 } from "./outcome.js";
 import type { NavigationCalculationFailure } from "./process-events.js";
-import { markPhase } from "../../diagnostics/freeze-watch.js";
 
 /** The evidence fields the run counts as it goes: mutable here, copied into every outcome. */
 interface Counters {
@@ -177,10 +174,6 @@ type SearchAnswer =
   | { readonly kind: "planning_stalled"; readonly failure: NavigationFailure }
   | { readonly kind: "stopped" };
 
-/** How long a break to free a held body may take: a hand on a leaf is instant, a hand on stone is not. */
-const PIN_RELEASE_DEADLINE_MS = 15_000;
-/** Ticks to wait for the world to show the ceiling gone once the break has completed. */
-const PIN_RELEASE_TICKS = 40;
 /** Releases one run will attempt before a ceiling that keeps coming back is reported instead. */
 const PIN_RELEASE_LIMIT = 3;
 
@@ -263,6 +256,8 @@ export class NavigationRun {
   readonly #arrivalRepeat: ArrivalRepeat;
   /** Whether the run already stepped out of a partial cell; see `#leavePartialCell`. */
   #leftPartialCell = false;
+  /** Whether the run already dug out of a partial cell; see `#leavePartialCell`. */
+  #partialCellDug = false;
   readonly #movementFailures = new Set<string>();
   #pinReleases = 0;
   /** The movement failure being replanned around, until a new route commits. */
@@ -585,9 +580,11 @@ export class NavigationRun {
     }
   }
   /**
-   * Step out of a blocked cell the body stands in beside a box (a bamboo stalk, which stands off centre): search never
-   * plans from such a cell and the straight first step can cross the box. Once per run, so a second one is a failure
-   * and never a loop. "left": stepped out, observe again.
+   * Leave a blocked cell the body stands in beside a box (a bamboo stalk, which stands off centre): search never plans
+   * from such a cell and the straight first step can cross the box. Step out to a free side when there is one; with none
+   * (or the step out already spent) and a policy that allows digging, dig out: break the blocks that hold the body
+   * (`partial-cell-dig-out.ts`). Each once per run, so a second partial cell is a failure and never a loop. "left":
+   * observe again.
    */
   async #leavePartialCell(cell: BlockPosition, position: Position3): Promise<"left" | NavigationOutcome> {
     const exit = this.#leftPartialCell ? null : partialCellExit(this.context.world, position);
@@ -598,13 +595,33 @@ export class NavigationRun {
       if (this.context.signal.aborted) return this.#stopped();
       if (arrived) return "left";
     }
+    let digOutRefusal = "";
+    if (this.#policy.allowDigging && this.#partialCellDug) {
+      digOutRefusal = " Digging out: this run has already dug out of one partial block.";
+    } else if (this.#policy.allowDigging) {
+      this.status({ kind: "stabilizing", runId: this.context.runId, reason: "inside_partial_block" });
+      const dug = await digOutOfPartialCell({
+        context: this.context,
+        policy: this.#policy,
+        openOwnRegions: (inside) => this.#openOwnRegionsAt(inside),
+        // The budget is spent by the first break: a dig-out that found nothing left to break (the failed step out moved
+        // the body clear) leaves it for a later partial cell, and cannot loop, since no break means no partial cell.
+        onBreak: () => {
+          this.#partialCellDug = true;
+          this.#counters.breaks += 1;
+        },
+      });
+      if (dug === "stopped") return this.#stopped();
+      if (dug === "left") return "left";
+      digOutRefusal = ` Digging out: ${dug.refused}`;
+    }
     return this.#failed({
       kind: "movement_failed",
       movement: {
         kind: "unstable",
         stepId: "leave_partial_cell",
         phase: "moving",
-        observation: `Standing inside the partial block at ${cell.x},${cell.y},${cell.z} with no clear side to step out to.`,
+        observation: `Standing inside the partial block at ${cell.x},${cell.y},${cell.z} with no clear side to step out to.${digOutRefusal}`,
       },
     });
   }
@@ -1000,76 +1017,32 @@ export class NavigationRun {
     const { bot, world, signal } = this.context;
     const cell = overheadPinningCell(world, bot.observe().position);
     if (cell === null) return null;
-    const block = world.blockAt(cell.x, cell.y, cell.z);
     const label = blockLabel(cell);
     const held = (why: string): ExecutionResult => {
       const observation = `The body is held under ${label}, ${why}.`;
       this.#events.emit({ kind: "pinned_body", cell, released: false, observation });
       return { kind: "outcome", outcome: this.#failed({ kind: "no_progress", reason: "pinned_body", observation }) };
     };
-    if (block.kind !== "loaded") return held("which is not loaded");
-    if (!this.#policy.allowDigging) return held("which this route may not dig");
-    if (!block.traits.safeToBreak) return held("which is not safe to break");
-    if (this.#pinReleases >= PIN_RELEASE_LIMIT) return held("which has come back each time it was broken");
-    const observation = bot.observe();
-    const excavation = priceExcavation({
-      world, policy: this.#policy, position: cell,
-      digContext: {
-        submergedAtEyes: observation.stance === "swimming",
-        onGround: observation.stance === "supported",
-        aquaAffinity: observation.player.aquaAffinity,
-        effects: observation.player.effects,
+    const broken = await breakHeldCell({
+      context: this.context,
+      policy: this.#policy,
+      cell,
+      admit: () => {
+        if (this.#pinReleases >= PIN_RELEASE_LIMIT) return "which has come back each time it was broken";
+        this.#pinReleases += 1;
+        return { runId: this.context.runId, planId: plan.id, stepId: "overhead_pin", attempt: this.#pinReleases };
       },
     });
-    if (excavation.kind === "unavailable") return held(excavation.reason);
-    // A collapsing column needs its own reachable excavation. Do not release
-    // a ceiling into falling blocks while the body has nowhere to move.
-    if (excavation.digs.length !== 1) return held("which supports a falling column");
-    const dig = excavation.digs[0]!;
-    this.#pinReleases += 1;
-    const token = { runId: this.context.runId, planId: plan.id, stepId: "overhead_pin", attempt: this.#pinReleases };
-    bot.clearOwnedControls();
-    const { result } = await executeWorldEffect({
-      ...this.context,
-      token,
-      operation: { kind: "break", position: cell, expectedStateId: dig.stateId, toolType: dig.toolType, brings: [] },
-      targets: [{ position: cell, before: stateMatcher(dig.stateId), after: airMatcher }],
-      deadlineMs: monotonicNow() + Math.max(PIN_RELEASE_DEADLINE_MS, dig.expectedTicks * 100),
-    });
-    if (signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
-    if (result.kind !== "confirmed")
-      return held(result.kind === "effect_failed" ? result.observation : `whose break was ${result.kind}`);
+    if (broken === "stopped") return { kind: "outcome", outcome: this.#stopped() };
+    if (broken !== "confirmed") return held(broken.refused);
     this.#counters.breaks += 1;
-    const released = await this.#awaitRelease();
+    const released = await awaitBodyClear(this.context, () => overheadPinningCell(world, bot.observe().position) === null);
     if (signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
     if (!released) return held("which did not release the body");
     this.#events.emit({ kind: "pinned_body", cell, released: true, observation: `Broke ${label} to stand up.` });
     // The failed step was the hold's, not the route's; it may be tried afresh.
     this.#movementFailures.clear();
     return { kind: "retry", reason: "movement_failed" };
-  }
-  /** Whether the body is clear within a couple of seconds of the break completing. */
-  #awaitRelease(): Promise<boolean> {
-    const { bot, world, signal } = this.context;
-    const clear = () => overheadPinningCell(world, bot.observe().position) === null;
-    if (clear()) return Promise.resolve(true);
-    return new Promise((resolve) => {
-      const resources = new DisposableStack();
-      const finish = () => {
-        resources.dispose();
-        resolve(!signal.aborted && clear());
-      };
-      let ticks = 0;
-      resources.defer(bot.subscribePhysicsTick(() => {
-        markPhase("physicsTick: pin release");
-        if (clear() || ++ticks >= PIN_RELEASE_TICKS) finish();
-      }));
-      signal.addEventListener("abort", finish, { once: true });
-      resources.defer(() => signal.removeEventListener("abort", finish));
-      const timer = setTimeout(finish, PIN_RELEASE_TICKS * 50);
-      resources.defer(() => clearTimeout(timer));
-      if (signal.aborted) finish();
-    });
   }
 
   async #resolveArrival(node: PlanningNode, observation: NavigationObservation): Promise<ExecutionResult> {
@@ -1095,14 +1068,8 @@ export class NavigationRun {
   ): Promise<PlanningResult> {
     // Shut in by blocks inside a region of its own (live 2026-10-11, Theo in his house's scaffold): one more search
     // with the bot's own regions open, once per run. Other owners' regions stay forbidden.
-    const escape = this.#policy.ownRegionEscape;
     const feet = navigationFeet(observation.position, observation.stance === "supported");
-    if (failure.kind === "no_path" && !this.#ownRegionsOpened && escape?.inside(feet.x, feet.y, feet.z)) {
-      this.#ownRegionsOpened = true;
-      escape.open();
-      this.#events.emit({ kind: "own_regions_opened", start: { x: feet.x, y: feet.y, z: feet.z } });
-      return { kind: "retry", reason: "calculation_failure" };
-    }
+    if (failure.kind === "no_path" && this.#openOwnRegionsAt(feet)) return { kind: "retry", reason: "calculation_failure" };
     if (failure.kind === "no_path" && this.#relaxedRules.length === 0 && isShutInByEscapableRefusals(failure, this.context.world, this.#policy, feet)) {
       this.#relaxStyleRules();
       return { kind: "retry", reason: "calculation_failure" };
@@ -1120,6 +1087,18 @@ export class NavigationRun {
     return result.kind === "continue"
       ? { kind: "retry", reason: "calculation_failure" }
       : { kind: "outcome", outcome: { kind: "completed", evidence: this.#evidence() } };
+  }
+  /**
+   * Open the bot's own protected regions to this run, once, when `at` lies in one. True when it did now: the caller
+   * asks its question again. They close with the run (`#navigateWithResources`).
+   */
+  #openOwnRegionsAt(at: BlockPosition): boolean {
+    const escape = this.#policy.ownRegionEscape;
+    if (this.#ownRegionsOpened || !escape?.inside(at.x, at.y, at.z)) return false;
+    this.#ownRegionsOpened = true;
+    escape.open();
+    this.#events.emit({ kind: "own_regions_opened", start: { x: at.x, y: at.y, z: at.z } });
+    return true;
   }
   /** The request's policy as one search reads it, with the escape's relaxations applied on top. */
   #snapshotPolicy(policy: MovementPolicy): MovementPolicy {

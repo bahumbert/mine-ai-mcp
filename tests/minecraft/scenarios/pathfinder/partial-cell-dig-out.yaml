@@ -1,0 +1,55 @@
+template: ../../templates/flat-single-action.yaml
+
+name: partial-cell-dig-out
+tags: [regression]
+description: >-
+  Live 2026-11-10, Ayla stood 90 minutes inside a bamboo stalk's cell at 344,83,298 with bamboo or oak leaves on every
+  side; every navigate failed in a few ms with "Standing inside the partial block ... with no clear side to step out
+  to", though the request could dig. The bot starts at x + 0.7, z + 0.74 of a two-high stalk with bamboo west and south
+  and persistent oak leaves north and east. navigate to a point 6 blocks west must break the stalk cells that hold the
+  body and arrive. The driver records, by world age, when the stalk above turned to air after the feet cell.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -8 -60 -8 8 -55 8 air"
+
+geometry:
+  - fill: { block: bamboo, from: [0, -60, 0], to: [0, -59, 0] }
+  - fill: { block: bamboo, from: [-1, -60, 0], to: [-1, -59, 0] }
+  - fill: { block: bamboo, from: [0, -60, 1], to: [0, -59, 1] }
+  - fill: { block: "oak_leaves[persistent=true]", from: [0, -60, -1], to: [0, -59, -1] }
+  - fill: { block: "oak_leaves[persistent=true]", from: [1, -60, 0], to: [1, -59, 0] }
+
+players:
+  - name: Actor
+    pos: [0.7, -60, 0.74]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/partial-cell-dig-out.ts]
+
+params:
+  pocket: { x: 0, y: -60, z: 0 }
+  target: [-6, -60, 0]
+  dig: true
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: reach
+      who: Actor
+      pos: [-5.5, -60, 0.5]
+      radius: 2.5
+    - kind: completion
+      who: Actor
