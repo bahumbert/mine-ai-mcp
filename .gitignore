@@ -34,6 +34,9 @@ Thumbs.db
 /.claude/skills
 /.claude/agents
 /.claude/rules
+/.agents/skills
+/AGENTS.md
+/.codex
 CLAUDE.md
 CLAUDE.local.md
 .worktreeinclude
