@@ -1,10 +1,11 @@
 import { MemoryWorld as GoalTestWorld } from "../../world/memory-world.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers/promises";
 import { Vec3 } from "vec3";
 import { packKey } from "../../index.js";
 import { structureWorld } from "../../../test-support/structure-world.js";
-import { createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { createFakeClock, itemOf } from "../../../test-support/fake-bot/index.js";
 import { build, BuildProgress, BuildTargeting, enclosesBot, holdsCell, type BuildCell, type BuildRequest, type BuildResult } from "./build-process.js";
 import { observation } from "../../../test-support/navigation.js";
 
@@ -416,8 +417,8 @@ test("a step out of the structure that does not move the bot ends the run instea
 
 // Live 2026-10-11 (Theo): the routes of a house build pillared up in a ring round it with dirt and never took it down;
 // the ring shut him in. The routes now report what they place, and a complete build takes those blocks down.
-function scaffoldedWorld(scaffold: [number, number, number][], breakFails: string[] = [], reportOnly: [number, number, number][] = []) {
-  const world = structureWorld();
+function scaffoldedWorld(scaffold: [number, number, number][], breakFails: string[] = [], reportOnly: [number, number, number][] = [], options: Parameters<typeof structureWorld>[0] = {}) {
+  const world = structureWorld(options);
   const broken: string[] = [];
   const route = world.physics.route;
   let placedScaffold = false;
@@ -466,6 +467,134 @@ test("scaffold that cannot be reached is reported and the build is still complet
   const result = await build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false });
   assert.equal(result.status, "complete");
   assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 9, y: 67, z: 2 }] });
+});
+
+/**
+ * Mine Labs 2026-11-12 (template-roof-counted-scaffold-medieval-small): the takedown's last dig was made from three
+ * blocks away and its dirt lay where it fell when the call ended, so the next call started one block short. A scaffold
+ * block dug out drops its item (`drops`: one dirt entity at the block, as the server spawns it, out of the bot's reach
+ * from where the fake route stands); a pickup walk (the goal reads `Entity <id> is not currently observed` on the
+ * route fake's empty observation) either stands on the item and takes it (`pickup: "reaches"`) or stops.
+ */
+function droppingScaffold(scaffold: [number, number, number][], pickup: "reaches" | "stops" = "reaches", onWalk?: (walk: { readonly id: number; readonly options: Parameters<ScaffoldedRoute>[0]; readonly collect: (id: number) => void }) => Promise<void>) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const world = scaffoldedWorld(scaffold, [], [], { clock });
+  const { harness, bot } = world;
+  const drops: number[] = [];
+  const walkedTo: number[] = [];
+  const breakInPlace = world.physics.breakInPlace;
+  const route = world.physics.route;
+  const physics = {
+    ...world.physics,
+    breakInPlace: async (options: Parameters<typeof breakInPlace>[0]) => {
+      const result = await breakInPlace(options);
+      const { x, y, z } = options.position;
+      if (scaffold.some(([sx, sy, sz]) => sx === x && sy === y && sz === z)) drops.push(harness.entities.spawn({ name: "item", position: new Vec3(x + 0.5, y + 0.3, z + 0.5), item: { name: "dirt", count: 1 } }).id);
+      return result;
+    },
+    route: async (options: Parameters<typeof route>[0]) => {
+      const goal = options.goal.resolve(observation());
+      const item = goal.kind === "invalid" ? /Entity (\d+) is not currently observed/u.exec(goal.observation) : null;
+      if (item === null) return route(options);
+      walkedTo.push(Number(item[1]));
+      if (pickup === "stops") return { status: "stopped" as const, reason: "no path to the item", elapsedMs: 0 };
+      await onWalk?.({ id: Number(item[1]), options, collect });
+      // What the server does when the walk arrives (`fake-bot-entities.ts` `pickUp`): `playerCollect`, the stack in the bag, the entity gone.
+      if (options.stopSignal?.aborted === true) return { status: "stopped" as const, reason: "the pickup was observed", elapsedMs: 0 };
+      if (bot.entities[Number(item[1])] !== undefined) collect(Number(item[1]));
+      return { status: "completed" as const, elapsedMs: 0 };
+    },
+  };
+  const collect = (id: number) => {
+    bot.emit("playerCollect", bot.entity, bot.entities[id]!);
+    harness.entities.remove(id);
+    harness.inventory.updateSlot(harness.inventory.firstEmptySlotRange(9, 45)!, itemOf(bot.registry, "dirt", 1));
+  };
+  return { ...world, physics, clock, drops, walkedTo };
+}
+
+type ScaffoldedRoute = ReturnType<typeof structureWorld>["physics"]["route"];
+
+const COMPLETE_BUILD = { cells: cells([[10, 64, 0]]), removeWrongBlocks: false } as const;
+
+test("the scaffold taken down leaves no dropped block behind: each drop of the takedown is walked to once and picked up, one that lay there before is not chased", async () => {
+  const { bot, physics, clock, harness, drops, walkedTo } = droppingScaffold([[9, 65, 2], [9, 66, 2]]);
+  using _timers = clock.install();
+  const earlier = harness.entities.spawn({ name: "item", position: new Vec3(9.5, 64.3, 2.5), item: { name: "dirt", count: 1 } }).id;
+  const result = await clock.settle(build(bot, { ...physics, ...COMPLETE_BUILD }), 60_000);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 2, left: [] });
+  assert.equal(drops.length, 2);
+  assert.deepEqual([...walkedTo].sort(), [...drops].sort(), "every drop of the takedown, and not the earlier one");
+  assert.notEqual(bot.entities[earlier], undefined, "the earlier drop is still there");
+});
+
+test("a walk that passes over another drop does not stop at it: the drop it was sent to is picked up too", async () => {
+  const dropped = droppingScaffold([[9, 65, 2], [9, 66, 2]], "reaches", async ({ id, collect }) => {
+    // The first walk crosses the other drop: its pickup is seen while the route still goes on to the one it was sent to.
+    const other = dropped.drops.find((drop) => drop !== id)!;
+    if (dropped.walkedTo.length === 1) { collect(other); await setImmediate(); }
+  });
+  using _timers = dropped.clock.install();
+  await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }), 60_000);
+  assert.deepEqual(Object.values(dropped.bot.entities).filter((entity) => entity.name === "item"), [], "no item is left lying");
+  assert.equal(dropped.walkedTo.length, 1, "the other drop, picked up on the way, needed no walk of its own");
+});
+
+test("what a pickup walk places is scaffold too: it is reported as left, not forgotten", async () => {
+  const dropped = droppingScaffold([[9, 65, 2]], "reaches", async ({ options }) => {
+    dropped.harness.world.setCell(new Vec3(20, 64, 0), 10);
+    options.onPlacement?.({ position: { x: 20, y: 64, z: 0 }, stateId: 10 });
+  });
+  using _timers = dropped.clock.install();
+  const result = await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }), 60_000);
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 20, y: 64, z: 0 }] });
+});
+
+test("a build cut during the sweep is resumed into it: the drops the first attempt left are picked up by the next", async () => {
+  const abort = new AbortController();
+  const dropped = droppingScaffold([[9, 65, 2], [9, 66, 2]], "reaches", async () => abort.abort(new Error("a reflex cut the build")));
+  using _timers = dropped.clock.install();
+  const progress = new BuildProgress();
+  await assert.rejects(dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD, signal: abort.signal }, false, progress), 60_000), /a reflex cut the build/u);
+  assert.equal(dropped.drops.length, 2, "both blocks were dug before the cut");
+  const resumed = await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }, false, progress), 60_000);
+  assert.equal(resumed.status, "complete");
+  assert.deepEqual(Object.values(dropped.bot.entities).filter((entity) => entity.name === "item"), [], "the resumed attempt picked up what the cut one left");
+});
+
+test("a build the policy stopped does not walk for drops", async () => {
+  const stop = new AbortController();
+  const dropped = droppingScaffold([[9, 65, 2], [9, 66, 2]]);
+  using _timers = dropped.clock.install();
+  const breakInPlace = dropped.physics.breakInPlace;
+  const stopping = { ...dropped.physics, breakInPlace: async (options: Parameters<typeof breakInPlace>[0]) => { const result = await breakInPlace(options); stop.abort("tool lost"); return result; } };
+  const result = await dropped.clock.settle(build(dropped.bot, { ...stopping, ...COMPLETE_BUILD, stopSignal: stop.signal }), 60_000);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(dropped.walkedTo, [], "the stop reached the sweep: no walk");
+});
+
+test("a drop that cannot be reached is left and the build is still complete, the walk tried once", async () => {
+  const { bot, physics, clock, drops, walkedTo } = droppingScaffold([[9, 65, 2], [9, 66, 2]], "stops");
+  using _timers = clock.install();
+  const result = await clock.settle(build(bot, { ...physics, cells: cells([[10, 64, 0]]), removeWrongBlocks: false }), 60_000);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 2, left: [] });
+  assert.deepEqual([...walkedTo].sort(), [...drops].sort(), "each drop tried once, none again");
+});
+
+test("an abort during the drop pickup ends the build with the abort", async () => {
+  const { bot, physics, clock } = droppingScaffold([[9, 65, 2]]);
+  using _timers = clock.install();
+  const abort = new AbortController();
+  const aborting = {
+    ...physics,
+    route: async (options: Parameters<typeof physics.route>[0]) => {
+      if (options.goal.resolve(observation()).kind === "invalid") abort.abort(new Error("the call was cancelled"));
+      return physics.route(options);
+    },
+  };
+  await assert.rejects(clock.settle(build(bot, { ...aborting, cells: cells([[10, 64, 0]]), removeWrongBlocks: false, signal: abort.signal }), 60_000), /the call was cancelled/u);
 });
 
 /** What refused a cell decides whether asking again can help: only a policy refusal is for good (run 14 review SF1). */

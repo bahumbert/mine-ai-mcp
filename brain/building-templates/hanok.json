@@ -1,0 +1,180 @@
+{
+  "id": "hanok",
+  "family": "east-asia",
+  "name": "hanok",
+  "description": "Korean house: rough stone base, white plaster and lattice windows between oak posts, a railed front veranda, a grey stone-brick hip roof with raised corner tips.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "oak_planks",
+    "wall": "white_wool",
+    "pillar": "oak_log",
+    "trim": "oak_log",
+    "roof": "stone_bricks",
+    "window": "oak_fence",
+    "door": "oak_door",
+    "railing": "oak_fence"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "stone_brick_stairs",
+      "slab": "stone_brick_slab"
+    }
+  },
+  "key": {
+    "D": {
+      "role": "door"
+    },
+    "F": {
+      "role": "floor"
+    },
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "e": {
+      "role": "window"
+    },
+    "h": {
+      "role": "air"
+    },
+    "i": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "east",
+      "half": "bottom"
+    },
+    "j": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "k": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    },
+    "l": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "west",
+      "half": "bottom"
+    },
+    "m": {
+      "role": "roof"
+    },
+    "r": {
+      "role": "railing"
+    },
+    "s": {
+      "role": "roof",
+      "shape": "slab",
+      "half": "bottom"
+    },
+    "t": {
+      "role": "trim",
+      "axis": "x"
+    },
+    "u": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "w": {
+      "role": "wall"
+    }
+  },
+  "layers": [
+    [
+      ".............",
+      ".aFFFFFFFFFa.",
+      ".aFFFFFFFFFa.",
+      ".aaaaaaaaaaa.",
+      ".aaFFFFFFFaa.",
+      ".aaFFFFFFFaa.",
+      ".aaFFFFFFFaa.",
+      ".aaaaaaaaaaa.",
+      ".aaaaaaaaaaa."
+    ],
+    [
+      ".............",
+      "..brrr.rrrb..",
+      "..r.......r..",
+      "..bwbwDwbwb..",
+      "..w.......w..",
+      "..b.......b..",
+      "..w.......w..",
+      "..bwbwbwbwb..",
+      "............."
+    ],
+    [
+      ".............",
+      "..b.......b..",
+      ".............",
+      "..bebehebeb..",
+      "..e.......e..",
+      "..b.......b..",
+      "..e.......e..",
+      "..bebebebeb..",
+      "............."
+    ],
+    [
+      ".ijjjjjjjjjl.",
+      ".ibtttttttbl.",
+      ".iu.......ul.",
+      ".iutttttttul.",
+      ".iu.......ul.",
+      ".iu.......ul.",
+      ".iu.......ul.",
+      ".ibtttttttbl.",
+      ".ikkkkkkkkkl."
+    ],
+    [
+      ".l.........i.",
+      "..ijjjjjjjl..",
+      "..immmmmmml..",
+      "..immmmmmml..",
+      "..immmmmmml..",
+      "..immmmmmml..",
+      "..immmmmmml..",
+      "..ikkkkkkkl..",
+      ".l.........i."
+    ],
+    [
+      ".............",
+      ".............",
+      "...ijjjjjl...",
+      "...immmmml...",
+      "...immmmml...",
+      "...immmmml...",
+      "...ikkkkkl...",
+      ".............",
+      "............."
+    ],
+    [
+      ".............",
+      ".............",
+      ".............",
+      "....ijjjl....",
+      "....immml....",
+      "....ikkkl....",
+      ".............",
+      ".............",
+      "............."
+    ],
+    [
+      ".............",
+      ".............",
+      ".............",
+      ".............",
+      ".....sss.....",
+      ".............",
+      ".............",
+      ".............",
+      "............."
+    ]
+  ]
+}

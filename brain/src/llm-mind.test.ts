@@ -6,6 +6,7 @@ import { EveryoneLines } from "./everyone-lines.ts";
 import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPrompt } from "./llm-mind.ts";
 import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
 import { describeStep, stepKey } from "./actions.ts";
+import { familiesOf, TEMPLATES } from "./building/templates.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
@@ -143,7 +144,9 @@ test("the work tier knows crops ripen over time near water and bread is made fro
 
 test("the init prompt carries the style, the own goal, whose requests come first, and the freedom to decide", () => {
   const prompt = personaPrompt(testPersona({ style: "medieval", goal: "build yourself a base", authority: ["Server", "Tom", "*"] }));
-  assert.match(prompt, /You build in the medieval style/u);
+  assert.match(prompt, /You like building in the europe way: Timber-framed cottage/u);
+  assert.match(prompt, /you may build any house you know/u);
+  assert.doesNotMatch(personaPrompt(testPersona()), /building in the/u, "no style, no line");
   assert.match(prompt, /Your own goal, when nobody needs you: build yourself a base/u);
   assert.match(prompt, /Server \(the world's operator\), then Tom, then any other player/u);
   assert.match(prompt, /When a request is unclear, impossible, or you do not know how, say so or ask/u);
@@ -252,11 +255,47 @@ test("a reply sent back for answering a line it read as for someone else keeps t
   assert.deepEqual([held.route, held.to, held.say], ["ignore", ["Vex"], ""]);
 });
 
-test("the house skill line lists what the character's own style needs", async () => {
+/** The system prompt of the work tier for a persona (the first message of its request). */
+async function workPrompt(persona = testPersona({ style: "medieval" })): Promise<string> {
   const { action, mind } = scriptedMind();
   action.reply({ done: "nothing to do" });
-  await mind.next(workInput("anything", { persona: testPersona({ style: "medieval" }) }), signal);
-  assert.match(action.requests[0]?.[0]?.content ?? "", /build a house in your medieval style .*small = 42 spruce_stairs, 36 oak_planks, 24 oak_log, 16 cobblestone, 7 spruce_slab, 3 glass_pane, 1 oak_door/u);
+  await mind.next(workInput("anything", { persona }), signal);
+  return action.requests[0]?.[0]?.content ?? "";
+}
+
+test("prompt size before and after: the work system prompt of a medieval persona", async () => {
+  const prompt = await workPrompt();
+  console.log(`work system prompt of a medieval persona: ${prompt.length} characters`);
+  assert.ok(prompt.length > 0);
+});
+
+test("the build line lists the own family only, then names the other families and how to read them", async () => {
+  const prompt = await workPrompt();
+  const build = prompt.split("\n").findIndex((line) => line.startsWith('- {"skill":"build"'));
+  const section = prompt.split("\n").slice(build).join("\n");
+  const own = section.slice(0, section.indexOf("Other house families you know"));
+  for (const id of ["medieval-small", "medieval-medium", "rustic-small", "rustic-medium"]) assert.match(own, new RegExp(`${id} \\(\\d+x\\d+, \\d floors?, \\d+ blocks, mostly [a-z_, ]+; its first stage, the \\w+, takes \\d+ `, "u"));
+  assert.match(section, /send it first, before fetching anything/u);
+  assert.doesNotMatch(own, /japanese-/u, "another family's ids are not in the own list");
+  assert.match(section, /Your europe houses:/u);
+  const others = familiesOf(TEMPLATES).filter((family) => family !== "europe").join(", ");
+  assert.ok(others.includes("east-asia"));
+  assert.ok(section.includes(`Other house families you know: ${others}: {"skill":"list_houses","family":"<family>"} shows their houses`), "the other families, sorted");
+  assert.doesNotMatch(section, /build a house in your medieval style/u);
+});
+
+test("a persona with no style gets the default style's family, and a japanese one its own", async () => {
+  assert.match(await workPrompt(testPersona()), /Your europe houses:/u);
+  const japanese = await workPrompt(testPersona({ style: "japanese" }));
+  assert.match(japanese, /Your east-asia houses:/u);
+  assert.ok(japanese.includes(`Other house families you know: ${familiesOf(TEMPLATES).filter((family) => family !== "east-asia").join(", ")}:`));
+  assert.match(japanese, /japanese-small \(/u);
+});
+
+test("the work tier offers abandon_house and list_houses with build", async () => {
+  const prompt = await workPrompt();
+  assert.match(prompt, /\{"skill":"abandon_house"\}/u);
+  assert.match(prompt, /\{"skill":"list_houses","family":"<family>"\}  read the houses of another family/u);
 });
 
 test("\"later\" is offered only while working for someone else; said anyway, the reply is repaired to act", async () => {
@@ -380,6 +419,24 @@ test("a build refused for missing materials is said to be ready once they are al
   assert.doesNotMatch(action.requests[0]?.at(-1)?.content ?? "", /is carried now/u);
   await mind.next(workInput("build a house", { steps, snapshot: carrying([{ name: "oak_log", count: 2 }, { name: "oak_log", count: 1 }, { name: "oak_door", count: 1 }]) }), signal);
   assert.match(action.requests[1]?.at(-1)?.content ?? "", /Everything a small medieval house was missing \(3 oak_log, 1 oak_door\) is carried now: build it again\./u);
+});
+
+test("the nudge of a refused build quotes the step its result gave, and none after a refusal that offered a new site", async () => {
+  const everything = { ...new FakeRuntime().snapshot, inventory: [{ name: "oak_log", count: 3 }, { name: "spruce_slab", count: 7 }] };
+  const nudged = async (detail: string) => {
+    const { action, mind } = scriptedMind();
+    action.reply({ done: "ok" });
+    await mind.next(workInput("build a house", { steps: [{ step: "build a small house", outcome: "failed" as const, detail }], snapshot: everything }), signal);
+    return action.requests[0]?.at(-1)?.content ?? "";
+  };
+  const head = "missing 3 oak_log for stage 1 of 4 (floor) of a small medieval house (the rest is carried)";
+  assert.match(await nudged(`${head}: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /was missing \(3 oak_log\) is carried now: \{"skill":"build","template":"medieval-small","x":1,"y":2,"z":3\}/u);
+  assert.match(await nudged(`${head}: fetch exactly the missing items with get_items, then build again`), /is carried now: build it again\./u, "no step in the detail: the old sentence");
+  const farNote = `${head}; this would be a new house here: your unfinished medium japanese house is 380 blocks north-west (door -18 76 -7), and {"skill":"build","template":"japanese-medium","x":-18,"y":76,"z":-7} goes on with it; a new house here leaves it untracked: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":251,"y":62,"z":-273} again`;
+  assert.doesNotMatch(await nudged(farNote), /is carried now/u, "quoting the first step would push the replacement");
+  // Two items before the phrase: the list parser reads the first, finds it carried and would nudge, were the phrase not checked.
+  const scaffold = "missing 7 spruce_slab, 3 oak_log and about 4 blocks to stand on for its cells 5 above the ground (scaffold the build lays and takes back: one of dirt, basalt) for stage 3 of 4 (roof) of a small medieval house (the rest is carried)";
+  assert.doesNotMatch(await nudged(`${scaffold}: fetch exactly the missing items and 4 or more blocks to stand on with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /is carried now/u, "the blocks to stand on are not in the inventory check");
 });
 
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
+import { nowCarried } from "./carried-now-note.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
@@ -481,7 +482,8 @@ export function personaPrompt(persona: Persona): string {
   const traits = persona.traits.length > 0 ? `\nTraits: ${persona.traits.join(", ")}.` : "";
   const feelings = describePreferences(persona);
   const preferences = feelings === "" ? "" : `\n${feelings}`;
-  const style = persona.style === undefined ? "" : `\nYou build in the ${styleOrDefault(persona.style).id} style: ${styleOrDefault(persona.style).description}`;
+  const liking = persona.style === undefined ? undefined : styleOrDefault(persona.style);
+  const style = liking === undefined ? "" : `\nYou like building in the ${liking.family} way: ${liking.description}\nChoose what suits the request; you may build any house you know.`;
   const goal = persona.goal === undefined ? "You have no goal of your own: you wait for requests." : `Your own goal, when nobody needs you: ${persona.goal}`;
   return `You are ${persona.displayName}, a character living in a Minecraft world, playing as ${persona.username}.
 ${persona.description}${traits}${preferences}
@@ -596,8 +598,8 @@ Reply with only a JSON object: {"say": "<your chat line>"}.`;
 }
 
 function skillList(persona: Persona, improveHouse = true): string {
-  const style = styleOrDefault(persona.style);
-  return personaSkills(persona).filter((skill) => improveHouse || skill !== "improve_house").map((skill) => `- ${skillUsage(skill, style)}`).join("\n");
+  const { family } = styleOrDefault(persona.style);
+  return personaSkills(persona).filter((skill) => improveHouse || skill !== "improve_house").map((skill) => `- ${skillUsage(skill, family)}`).join("\n");
 }
 
 /** The work tier (ADR-011): one step at a time, with the results of the last ones in view. */
@@ -688,21 +690,6 @@ function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
   if (failures.length === 0) return "";
   const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago${failure.count >= MAX_STEP_FAILURES ? " (refused now)" : ""}: ${failure.detail}`);
   return `Steps that failed lately in this objective (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
-}
-
-/**
- * A build refused for missing materials, when all of them are carried now: said, since the model did not see it (live
- * 2026-10-04: given everything a house lacked, Ayla went on looking for logs for 20 more steps and never built).
- */
-function nowCarried(input: WorkInput): string {
-  const refused = input.steps.findLast((record) => record.outcome === "failed" && /^missing .+ for .+ \(the rest is carried\)/u.test(record.detail));
-  if (refused === undefined) return "";
-  const [, list = "", what = ""] = /^missing (.+?) for (.+?) \(the rest is carried\)/u.exec(refused.detail) ?? [];
-  const carried = new Map<string, number>();
-  for (const stack of input.snapshot.inventory) carried.set(stack.name, (carried.get(stack.name) ?? 0) + stack.count);
-  const needed = list.split(", ").map((part) => /^(\d+) ([a-z0-9_]+)$/u.exec(part.trim())).filter((match) => match !== null);
-  if (needed.length === 0 || needed.some((match) => (carried.get(match[2]!) ?? 0) < Number(match[1]))) return "";
-  return `Everything ${what} was missing (${list}) is carried now: build it again.`;
 }
 
 function describeGoal(input: GoalInput): string {

@@ -238,13 +238,30 @@ export const buildStructureAnnotations = {
   openWorldHint: true,
 } satisfies ToolAnnotations;
 
+/**
+ * The bot carries no block its movement policy lets a route stand on: `admitted` is what the policy admits besides the
+ * blocks being built with (empty when it admits none).
+ */
+export interface NoScaffoldCarried {
+  readonly admitted: readonly string[];
+}
+
+function describeNoScaffold({ admitted }: NoScaffoldCarried): string {
+  return admitted.length === 0
+    ? "no block may be used as scaffold to stand on now: your movement policy admits none besides the blocks being built with"
+    : `no scaffold block carried to stand on (your movement policy admits ${admitted.join(", ")}): carry some to reach the cells out of reach`;
+}
+
 export const buildStructureOutcomes = {
   unknownBlock: (blockName: string) => `[BUILD_UNKNOWN_BLOCK] Minecraft has no block named ${blockName}.`,
-  incomplete: (wrong: number, left: string, missing: string) =>
+  incomplete: (wrong: number, left: string, missing: string, noScaffold?: NoScaffoldCarried) =>
     `[BUILD_INCOMPLETE] ${wrong} cell${wrong === 1 ? "" : "s"} still wrong: ${left}` +
     (missing ? `; short of ${missing}` : "") +
+    (noScaffold ? `; ${describeNoScaffold(noScaffold)}` : "") +
     ".",
-  stopped: (reason: string) => `[BUILD_STOPPED] The build stopped: ${reason}.`,
+  /** `noScaffold` is set for a route stop whose cells out of reach lack a block to stand on: the clause leads, the route's words follow. */
+  stopped: (reason: string, noScaffold?: NoScaffoldCarried) =>
+    `[BUILD_STOPPED] The build stopped: ${noScaffold ? `${describeNoScaffold(noScaffold)}; last route: ${reason}` : reason}.`,
   protectedRegion: (cells: number, region: string) =>
     `[BUILD_PROTECTED_REGION] ${cells} cell${cells === 1 ? " lies" : "s lie"} inside ${region}, which this bot does not own; unprotect it or build elsewhere.`,
 } as const;

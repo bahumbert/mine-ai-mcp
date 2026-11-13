@@ -3,10 +3,9 @@ import { describeStep, stepKey, targetItems, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
-import { BUILD_ROLES, shortfall, type MaterialCount } from "./building/blueprint.ts";
-import { improvement, temporaryRoles } from "./building/materials.ts";
-import type { HouseSize } from "./building/house.ts";
-import { chooseSite, planHouse, styleOrDefault } from "./building/plan.ts";
+import { shortfall, type MaterialCount } from "./building/blueprint.ts";
+import { houseBillItems, ownSmallHouse, rolesOf, temporaryHouseLack } from "./building/house-facts.ts";
+import { resumeStep } from "./building/templates.ts";
 import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
 import { heardFarAway, lineDistance, noteNoPosition, type Conversation, type NoPositionSince } from "./conversation/state.ts";
@@ -36,7 +35,8 @@ import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, Prote
 import { BodyDown, bodyDownState, bodyDownWait } from "./body-down.ts";
 import type { EveryoneLines } from "./everyone-lines.ts";
 import { TillFacts } from "./farming/site.ts";
-import { RESUME_RANGE, runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
+import { runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
+import { UnfinishedHouseSaver } from "./unfinished-house-saver.ts";
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
 import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
@@ -221,7 +221,7 @@ export class Agent {
     const house = this.building.unfinished;
     if (house === null) return [...this.places, ...farms];
     const { x, y, z } = house.site.door;
-    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; go within ${RESUME_RANGE} blocks of the door, then build it again to finish it` }];
+    return [...this.places, ...farms, { name: `your unfinished ${house.kind}`, detail: `door ${x} ${y} ${z}; ${resumeStep(house)} walks there and goes on with it` }];
   }
   /** The areas it never digs or places blocks in (ADR-012), kept in step with the skills that change them. */
   private readonly areas: ProtectedArea[] = [];
@@ -239,8 +239,8 @@ export class Agent {
   private readonly foods = new Set<string>();
   private readonly itemActivities = new Map<string, Activity | null>();
   private readonly building: { unfinished: UnfinishedHouse | null } = { unfinished: null };
-  /** The unfinished house as last saved to memory, to save it again only when it changed. */
-  private savedUnfinished = "null";
+  /** Saves the unfinished house to memory when it changed (also while a step runs: a throw skips the save after it). */
+  private readonly unfinishedSaver = new UnfinishedHouseSaver((house) => this.memorize({ kind: "unfinished_house", house }), () => this.building.unfinished);
   private readonly stack: Work[] = [];
   private readonly lately: string[] = [];
   /** Its last own objective, when it failed (the goal tier sends it back once if chosen again as it was). */
@@ -838,6 +838,7 @@ export class Agent {
     if (!this.bodyDownShown) return;
     this.bodyDownShown = false;
     this.journalState(null);
+    this.unfinishedSaver.request(); // a house recorded while the body was down could not be saved
   }
 
   /**
@@ -1079,6 +1080,8 @@ export class Agent {
       rememberFarm: (farm) => this.learnFarm(farm),
       soil: this.soil,
       building: this.building,
+      saveBuilding: () => this.unfinishedSaver.request(),
+      places: () => this.places,
       areas: this.areas,
       levelSites: work.levelSites,
       toolsLost: work.toolsLost,
@@ -1145,7 +1148,7 @@ export class Agent {
       work.carried.splice(0, work.carried.length - STEP_MEMORY);
     }
     this.options.log(`  -> ${record.outcome}: ${record.detail}`);
-    this.memorizeUnfinishedHouse();
+    this.unfinishedSaver.request();
     return restarted ? null : record;
   }
 
@@ -1247,14 +1250,6 @@ export class Agent {
     // Set aside (a member's favour, a night) it stays on the stack and runs again; stopped and removed, it ends here.
     if (result.status === "stopped" && this.stack.includes(work) && !this.runSignal.aborted) return;
     this.finish(work, result.status === "done" ? "done" : "failed", detail);
-  }
-
-  /** Saves the unfinished house to memory when it differs from the last saved one. */
-  private memorizeUnfinishedHouse(): void {
-    const unfinished = JSON.stringify(this.building.unfinished);
-    if (unfinished === this.savedUnfinished) return;
-    this.savedUnfinished = unfinished;
-    this.memorize({ kind: "unfinished_house", house: this.building.unfinished });
   }
 
   /** A failed step, kept {@link FAILED_STEP_MINUTES} minutes (the latest of each step, with when it failed; at most {@link FAILED_STEP_MEMORY}). */
@@ -1374,9 +1369,7 @@ export class Agent {
 
   /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
-    const house = this.building.unfinished;
-    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
-    return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
+    return neededItems(snapshot, { houseBill: houseBillItems(this.building.unfinished), wanted: work.wanted, objective: work.objective.text });
   }
 
   /** The game's block tags of these blocks, asked of the runtime once per name. */
@@ -1413,7 +1406,7 @@ export class Agent {
     try {
       if (!ownHome && unfinished === null) {
         houseShortfall = await this.houseShortfall(snapshot);
-        smallHouse = this.smallHouseRoles(snapshot);
+        smallHouse = rolesOf(ownSmallHouse(this.options.persona.style, snapshot.position));
         carriedBlocks = await this.carriedBlocks(snapshot);
       }
       temporaryHouse = await this.temporaryHouseFacts();
@@ -1421,12 +1414,6 @@ export class Agent {
       this.options.log(`could not work out what a house of its own needs: ${String(error)}`);
     }
     return findOpportunities({ now: Date.now(), snapshot, farms: this.farms, unfinished, ownHome, houseShortfall, smallHouse, carriedBlocks, temporaryHouse, ...trading }, drawn);
-  }
-
-  /** What the style's small house is made of: its cells per role (air excluded), in the order of the roles. */
-  private smallHouseRoles(snapshot: BotSnapshot): OpportunityFacts["smallHouse"] {
-    const cells = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).cells;
-    return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
   }
 
   /** The most carried blocks that fill a whole cell (what `build` may use for a wall, floor or roof), at most five. */
@@ -1442,19 +1429,13 @@ export class Agent {
     const place = this.temporaryHouse();
     const house = place?.house;
     if (house === undefined) return null;
-    const style = styleOrDefault(house.style);
-    const roles = temporaryRoles(house.materials, style);
-    const missing = shortfall(improvement(style, house, roles).bill, (await this.options.runtime.status()).inventory);
-    return {
-      door: house.door,
-      roles: roles.map((role) => ({ role, block: house.materials[role]!, style: style.palette[role] })),
-      shortfall: await this.withActivities(missing),
-    };
+    const lack = temporaryHouseLack(house, (await this.options.runtime.status()).inventory);
+    return lack === null ? null : { door: lack.door, roles: lack.roles, shortfall: await this.withActivities(lack.missing) };
   }
 
-  /** What a small house in its own style needs beyond what it carries, each with the work that gets it. */
+  /** What her small house needs beyond what she carries, each with the work that gets it. */
   private async houseShortfall(snapshot: BotSnapshot): Promise<Shortfall[]> {
-    const bill = planHouse(styleOrDefault(this.options.persona.style), "small", chooseSite(snapshot.position, null)).bill;
+    const bill = ownSmallHouse(this.options.persona.style, snapshot.position)?.bill ?? [];
     return this.withActivities(shortfall(bill, snapshot.inventory));
   }
 
@@ -1521,9 +1502,10 @@ export class Agent {
       this.relations?.load(recalled);
       for (const time of recalled.times) this.spent(time, false);
       this.building.unfinished = recalled.unfinished;
-      this.savedUnfinished = JSON.stringify(recalled.unfinished);
+      this.unfinishedSaver.known(recalled.unfinished);
       const house = recalled.unfinished === null ? "" : `, an unfinished ${recalled.unfinished.kind}`;
-      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}`);
+      this.options.log(`remembers ${recalled.places.length} place(s), ${recalled.farms.length} farm(s), ${recalled.lately.length} own objective(s)${house}${recalled.gone.map((line) => `; ${line}`).join("")}`);
+      this.lately.push(...recalled.gone); // what the model reads about its own past: a house it can no longer finish
     } catch (error) {
       this.options.log(`could not recall its memory: ${String(error)}`);
     }
@@ -1551,13 +1533,17 @@ export class Agent {
     }
   }
 
-  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). */
-  private memorize(memory: Memory): void {
-    this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
+  /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). Resolves whether the note was saved; never rejects. */
+  private memorize(memory: Memory): Promise<boolean> {
+    return this.body.act("note_save", memoryNote(memory), "Remember this across restarts.")
       .then((outcome) => {
         if (outcome.status !== "succeeded") this.options.log(`could not save a memory (${outcome.status}): ${outcome.error ?? ""}`);
+        return outcome.status === "succeeded";
       })
-      .catch((error: unknown) => this.options.log(`could not save a memory: ${String(error)}`));
+      .catch((error: unknown) => {
+        this.options.log(`could not save a memory: ${String(error)}`);
+        return false;
+      });
   }
 
   /**

@@ -16,7 +16,7 @@ import {
   type NavigationResult,
   type NavigationRuntime,
 } from "../../navigation/index.js";
-import { DEFAULT_MAXIMUM_DROP, fallbackScaffoldItem, preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
+import { DEFAULT_MAXIMUM_DROP, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import type { ObserveRequest } from "../../session/request.js";
@@ -24,6 +24,7 @@ import { asVec3, elapsedSince, monotonicNow, type Position3 } from "../../utils/
 import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
+import { keptScaffoldOption, scaffoldFallbackFor } from "./keep-items.js";
 import { boatLeftEvidence, retryBoatTakeBack } from "./boat-left-retry.js";
 import { describeBoatLeft } from "./boat-take-back.js";
 import { describeEscape } from "./describe-escape.js";
@@ -292,7 +293,7 @@ async function swimToLandFirst(leg: NavigateLeg, context: ActionContext): Promis
   const { bot, request, dependencies } = leg;
   if (leg.crossings !== 0 || carriesBoat(bot) || !standsAtSea(bot)) return { kind: "none" };
   const swim = await dependencies.navigate({
-    movements: dependencies.createMovements(bot, { scaffolding: request.scaffold, allowDigging: request.dig }),
+    movements: dependencies.createMovements(bot, { scaffolding: request.scaffold, allowDigging: request.dig, ...keptScaffoldOption(request) }),
     goal: dryLandGoal(Math.floor(bot.entity.position.y)),
     signal: context.signal,
   });
@@ -417,14 +418,12 @@ async function planRoute(leg: NavigateLeg, context: ActionContext, startedAt: nu
     let route = await attemptRoute(leg, goal, context, stopSignal, false);
     // No path and none of the policy's scaffold blocks carried (a bot stranded on a perch with only stone): plan
     // once more with the common block it holds the most of, and report the stock it spends beside the others.
-    if (route.status === "stopped" && route.calculationFailed && request.scaffold && preferredScaffoldItem(bot) === null) {
-      const fallback = fallbackScaffoldItem(bot);
-      if (fallback !== null) {
-        leg.scaffoldInventoryBefore.set(fallback.name, bot.inventory.count(fallback.type, null));
-        const firstElapsedMs = route.elapsedMs;
-        route = await attemptRoute(leg, goal, context, stopSignal, true);
-        route = { ...route, elapsedMs: route.elapsedMs + firstElapsedMs };
-      }
+    const fallback = route.status === "stopped" && route.calculationFailed ? scaffoldFallbackFor(bot, request) : null;
+    if (fallback !== null) {
+      leg.scaffoldInventoryBefore.set(fallback.name, bot.inventory.count(fallback.type, null));
+      const firstElapsedMs = route.elapsedMs;
+      route = await attemptRoute(leg, goal, context, stopSignal, true);
+      route = { ...route, elapsedMs: route.elapsedMs + firstElapsedMs };
     }
     const lost = toolLoss?.loss();
     if (lost) {
@@ -456,6 +455,7 @@ function attemptRoute(
     movements: dependencies.createMovements(bot, {
       scaffolding: request.scaffold,
       allowDigging: request.dig,
+      ...keptScaffoldOption(request),
       ...(scaffoldFallback && { scaffoldFallback }),
     }),
     goal,

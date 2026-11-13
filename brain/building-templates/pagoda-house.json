@@ -1,0 +1,241 @@
+{
+  "id": "pagoda-house",
+  "family": "east-asia",
+  "name": "pagoda house",
+  "description": "Two-storey tea house: birch walls between dark oak posts on a stone-brick terrace, an inner ladder to the upper room, two dark oak roof tiers with upturned eaves.",
+  "palette": {
+    "foundation": "stone_bricks",
+    "floor": "spruce_planks",
+    "wall": "birch_planks",
+    "pillar": "dark_oak_log",
+    "trim": "dark_oak_log",
+    "roof": "dark_oak_planks",
+    "window": "dark_oak_fence",
+    "door": "birch_door",
+    "accent": "ladder"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "dark_oak_stairs",
+      "slab": "dark_oak_slab"
+    }
+  },
+  "key": {
+    "D": {
+      "role": "door"
+    },
+    "F": {
+      "role": "floor"
+    },
+    "L": {
+      "role": "accent",
+      "facing": "west"
+    },
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "e": {
+      "role": "window"
+    },
+    "h": {
+      "role": "air"
+    },
+    "i": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "east",
+      "half": "bottom"
+    },
+    "j": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "k": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    },
+    "l": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "west",
+      "half": "bottom"
+    },
+    "m": {
+      "role": "roof"
+    },
+    "s": {
+      "role": "roof",
+      "shape": "slab",
+      "half": "bottom"
+    },
+    "t": {
+      "role": "trim",
+      "axis": "x"
+    },
+    "u": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "w": {
+      "role": "wall"
+    }
+  },
+  "layers": [
+    [
+      "...........",
+      ".aaaaaaaaa.",
+      ".aaaaaaaaa.",
+      ".aaFFFFFaa.",
+      ".aaFFFFFaa.",
+      ".aaFFFFFaa.",
+      ".aaFFFFFaa.",
+      ".aaFFFFFaa.",
+      ".aaaaaaaaa.",
+      ".aaaaaaaaa.",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "..bwwDwwb..",
+      "..w.....w..",
+      "..w.....w..",
+      "..b...Lbb..",
+      "..w.....w..",
+      "..w.....w..",
+      "..bwwbwwb..",
+      "...........",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "..bewhweb..",
+      "..e.....e..",
+      "..w.....w..",
+      "..b...Lbb..",
+      "..w.....w..",
+      "..e.....e..",
+      "..bewbweb..",
+      "...........",
+      "..........."
+    ],
+    [
+      "lkkkkkkkkki",
+      "lijjjjjjjli",
+      "libtttttbli",
+      "liuFFFFFuli",
+      "liuFFFFFuli",
+      "liuFFhLFuli",
+      "liuFFFFFuli",
+      "liuFFFFFuli",
+      "libtttttbli",
+      "likkkkkkkli",
+      "ljjjjjjjjji"
+    ],
+    [
+      "...........",
+      "...........",
+      "..ijjjjjl..",
+      "..ibwbwbl..",
+      "..iw...wl..",
+      "..ib..Lbl..",
+      "..iw...wl..",
+      "..ibwbwbl..",
+      "..ikkkkkl..",
+      "...........",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...bebeb...",
+      "...e...e...",
+      "...b...b...",
+      "...e...e...",
+      "...bebeb...",
+      "...........",
+      "...........",
+      "..........."
+    ],
+    [
+      "...........",
+      ".lkkkkkkki.",
+      ".lijjjjjli.",
+      ".libtttbli.",
+      ".liu...uli.",
+      ".liu...uli.",
+      ".liu...uli.",
+      ".libtttbli.",
+      ".likkkkkli.",
+      ".ljjjjjjji.",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...ijjjl...",
+      "...immml...",
+      "...immml...",
+      "...immml...",
+      "...ikkkl...",
+      "...........",
+      "...........",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      "....ijl....",
+      "....iml....",
+      "....ikl....",
+      "...........",
+      "...........",
+      "...........",
+      "..........."
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      ".....s.....",
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      "..........."
+    ]
+  ],
+  "stages": [
+    {
+      "name": "terrace",
+      "top": 0
+    },
+    {
+      "name": "lower storey",
+      "top": 3
+    },
+    {
+      "name": "upper storey",
+      "top": 5
+    },
+    {
+      "name": "roof",
+      "top": 9
+    }
+  ]
+}

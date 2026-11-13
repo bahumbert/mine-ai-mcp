@@ -6,8 +6,11 @@ import type { ActOutcome, Body } from "./body.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { stackSizeOf } from "./newest-registry.ts";
-import { freeStacks, heldCounts, heldKinds, type OwedItem } from "./relations/items.ts";
-import { errorCode, type BotRuntime, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
+import { ReplacementGuard, type ReplaceFirst } from "./kept-replacement.ts";
+import { carriedOf as carried, freeStacks, heldCounts, heldKinds, type OwedItem } from "./relations/items.ts";
+import { errorCode, type BotRuntime, type BotSnapshot, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
+
+type Stacks = BotSnapshot["inventory"];
 
 /** The runtime's `collect_block` limit per call (src/actions/collect-block/contract.ts `MAX_COLLECT_BLOCKS`). */
 const MAX_COLLECT = 32;
@@ -52,7 +55,12 @@ export interface GatherContext {
   readonly toolsLost?: Set<string>;
   /** See {@link SkillContext.owed}: what the gathering and its crafts and smelts never spend. */
   readonly owed?: () => readonly OwedItem[];
+  /** What the walks home and to a table between crafts must not lay (`navigate` `keep_items`: a stage's scaffold, see `getItems`' `walkKeep`). */
+  readonly walkKeep?: readonly string[];
 }
+
+/** The `keep_items` a gathering's walk back to its crafting place carries (none when nothing is kept). */
+const keepOf = (context: GatherContext): Record<string, unknown> => (context.walkKeep !== undefined && context.walkKeep.length > 0 ? { keep_items: context.walkKeep } : {});
 
 export type GatherResult =
   | { readonly status: "done"; readonly detail: string }
@@ -222,17 +230,27 @@ function keptWithOwed(kept: readonly ItemCount[], held: ReadonlyMap<string, numb
   return [...merged].map(([item, count]) => ({ item, count }));
 }
 
-/** The one step of a round (or why there is none): collect, hunt, make a table or tool, craft or smelt, whichever the plan puts first. */
+/** What a round's work shares: what it is for, where crafting happens, how a craft's loss is told, and the kept items a craft waits on. */
+interface RoundWork {
+  readonly purpose: string;
+  readonly site: Site;
+  readonly spent: Spent;
+  readonly guard: ReplacementGuard;
+}
+
+/**
+ * The one step of a round (or why there is none): collect, hunt, make a table or tool, craft or smelt, whichever the plan puts first.
+ * `work.guard`: the kept items a craft is waiting on (short now, raised in `wanted`): only their own crafts run until they are carried.
+ */
 async function roundStep(
   context: GatherContext,
   plan: Round,
   inventory: Stacks,
   missing: readonly ItemCount[],
-  purpose: string,
-  site: Site,
   knowledge: Knowledge,
-  spent: Spent,
-): Promise<GatherResult | string> {
+  work: RoundWork,
+): Promise<GatherResult | ReplaceFirst | string> {
+  const { purpose, site, spent, guard } = work;
   const ungated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) === null);
   const gated = [...plan.collect].filter(([block]) => toolMissing(block, inventory, knowledge) !== null);
   if (ungated.length > 0) return collectAll(context, ungated, purpose, knowledge);
@@ -242,9 +260,48 @@ async function roundStep(
   if (gated.length > 0) return collectAll(context, gated, purpose, knowledge);
   const ready = await readyCrafts(context.runtime, plan.craft);
   const job = plan.smelt.find((candidate) => smeltReady(candidate, freeBag(context, inventory)));
-  if (ready.length > 0) return craftAtHome(context, ready, purpose, site, spent);
+  // A kept item is replaced before the craft that uses it: the replacement alone, then the asked items (a single batch
+  // would plan the asked item from the stock carried again). Tables and tools above keep their own path: a tool is the means to fetch.
+  const crafts = guard.allowed(ready);
+  if (crafts.length > 0) return (await guard.replaceFirst(context.runtime, crafts, inventory)) ?? craftAtHome(context, crafts, purpose, site, spent);
   if (job !== undefined) return smeltAtHome(context, job, purpose, site);
   return `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt`;
+}
+
+/** One fetch's running state: what it still wants, what it did so far, and the kept items a craft waits on. */
+interface Run {
+  /** What the fetch was asked for and what the character carried before and wants afterwards (`gatherMaterials`' `keep`). */
+  readonly bill: readonly ItemCount[];
+  readonly keep: readonly ItemCount[];
+  wanted: ItemCount[];
+  readonly actions: string[];
+  /** Her own items a craft used and that were not replaced, none being near. */
+  readonly usedOwn: ItemCount[];
+  readonly guard: ReplacementGuard;
+}
+
+function finish(run: Run, detail: string): GatherResult {
+  const { usedOwn } = run;
+  return { status: "done", detail: usedOwn.length === 0 ? detail : `${detail}; used ${describeMaterials(usedOwn)} of what you carried (none near to replace it)` };
+}
+
+/** A failure while a kept item is still short says what the asked craft would take first, the failure's own words as the reason. */
+async function failing(context: GatherContext, run: Run, result: GatherResult): Promise<GatherResult> {
+  if (result.status !== "failed") return result;
+  run.wanted = run.guard.release(run.wanted, (await context.runtime.status()).inventory);
+  const detail = run.guard.failure(result.detail);
+  return detail === null ? result : { status: "failed", detail };
+}
+
+/** Fills an empty bucket with `liquid`: null when it did (told in `actions`), else the failure or stop that ends the fetch. */
+async function fillBucket(context: GatherContext, liquid: string, purpose: string, actions: string[]): Promise<GatherResult | null> {
+  context.progress?.(`filling a bucket with ${liquid}, for ${purpose}`);
+  const filled = await act(context, "use_bucket", { action: "fill", liquid }, `Fill a bucket with ${liquid}, for ${purpose}.`);
+  if (filled === null) {
+    actions.push(`filled a bucket with ${liquid}`);
+    return null;
+  }
+  return filled.status === "failed" && actions.length > 0 ? { status: "failed", detail: `got ${actions.join(", ")} so far; ${filled.detail}` } : filled;
 }
 
 async function gatherRounds(
@@ -255,98 +312,108 @@ async function gatherRounds(
   keep: readonly ItemCount[],
   knowledge: Knowledge,
 ): Promise<GatherResult> {
-  const site: Site = { home };
-  const actions: string[] = [];
-  /** Her own items a craft used and that were not replaced, none being near. */
-  const usedOwn: ItemCount[] = [];
-  const finish = (detail: string): GatherResult => ({
-    status: "done",
-    detail: usedOwn.length === 0 ? detail : `${detail}; used ${describeMaterials(usedOwn)} of what you carried (none near to replace it)`,
-  });
-  let wanted = [...bill];
+  const run: Run = { bill, keep, wanted: [...bill], actions: [], usedOwn: [], guard: new ReplacementGuard(bill, keep) };
+  // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
+  // is not fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
+  const spent: Spent = (before, after) => {
+    run.wanted = keepWhatCraftingUsed(run.wanted, keep, before, after);
+  };
+  const work: RoundWork = { purpose, site: { home }, spent, guard: run.guard };
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     const inventory = (await context.runtime.status()).inventory;
-    const missing = shortfall(wanted, inventory);
-    if (missing.length === 0) return finish(actions.length === 0 ? "had everything" : actions.join(", "));
+    run.wanted = run.guard.release(run.wanted, inventory);
+    const missing = shortfall(run.wanted, inventory);
+    if (missing.length === 0) return finish(run, run.actions.length === 0 ? "had everything" : run.actions.join(", "));
     // A full bucket is no drop and no craft: a bucket (made like any item) filled at the liquid.
     const liquids = await context.runtime.toolEnum("use_bucket", "liquid");
     const filling = missing.find((entry) => bucketLiquid(entry.item, liquids) !== null);
     if (filling !== undefined && carried(inventory, "bucket") > 0) {
-      const liquid = bucketLiquid(filling.item, liquids)!;
-      context.progress?.(`filling a bucket with ${liquid}, for ${purpose}`);
-      const filled = await act(context, "use_bucket", { action: "fill", liquid }, `Fill a bucket with ${liquid}, for ${purpose}.`);
-      if (filled !== null) return filled.status === "failed" && actions.length > 0 ? { status: "failed", detail: `got ${actions.join(", ")} so far; ${filled.detail}` } : filled;
-      actions.push(`filled a bucket with ${liquid}`);
+      const filled = await fillBucket(context, bucketLiquid(filling.item, liquids)!, purpose, run.actions);
+      if (filled !== null) return filled;
       continue;
     }
     const plan = await planRound(context.runtime, missing.map((entry) => entry === filling ? { item: "bucket", count: entry.count } : entry), inventory, freeBag(context, inventory), knowledge);
-    if (typeof plan === "string") return { status: "failed", detail: plan };
-
-    // Only the craft itself counts as using kept items up: dirt spent as scaffold on the walk back home
-    // is not fetched again (observed live 2026-10-01: a detour to collect 11 dirt).
-    const spent: Spent = (before, after) => {
-      wanted = keepWhatCraftingUsed(wanted, keep, before, after);
-    };
-    const stepped = await roundStep(context, plan, inventory, missing, purpose, site, knowledge, spent);
-    if (typeof stepped === "string") return { status: "failed", detail: stepped };
-    const step = stepped;
-    if (step.status === "stopped") return step;
-    const worn = wornOutTool(knowledge);
-    if (worn !== null && step.status === "failed" && shortfall(wanted, (await context.runtime.status()).inventory).length > 0) {
-      return { status: "failed", detail: `${worn}: stopping here; ${step.detail}` };
-    }
-    // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
-    const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
-    if (remade !== null && knowledge.lost.delete(remade) && step.status === "failed") {
-      // A block that drops nothing without the tool cannot go on without it: the gather ends here, not a round later.
-      const now = (await context.runtime.status()).inventory;
-      if ([...plan.collect.keys()].some((block) => requiresTool(block, now, knowledge))) return step;
-      actions.push(`setback (could not make another ${plan.toolFirst}: ${step.detail}); going on without it`);
+    if (typeof plan === "string") return failing(context, run, { status: "failed", detail: plan });
+    const stepped = await roundStep(context, plan, inventory, missing, knowledge, work);
+    if (typeof stepped === "string") return failing(context, run, { status: "failed", detail: stepped });
+    if (stepped.status === "replace_first") {
+      // The craft would take kept items below their count: they are fetched first (raised, and the crafts held to
+      // them until carried), then the craft runs on the spare. Raised already and still taken: the replacement's own craft uses them too.
+      const raised = run.guard.raise(run.wanted, stepped);
+      run.wanted = raised.wanted;
+      if (!raised.raised) return failing(context, run, { status: "failed", detail: `the craft that makes ${stepped.items.map((entry) => entry.item).join(", ")} takes some of it again` });
       continue;
     }
-    const fruitless = rareFruitless(knowledge, (await context.runtime.status()).inventory);
-    if (fruitless !== null) return { status: "failed", detail: fruitless };
-    // What a craft took from her own items is replaced only from what is near: when the replacement is out of range,
-    // she goes on with what was asked for and says what she used (live 2026-10-03: a wooden pickaxe used one of Vex's
-    // own dark oak logs, and replacing it walked 700 blocks; with the range, it ended the fetch instead).
-    if (step.status === "failed" && /^no \S+ within /u.test(step.detail)) {
-      const used = shortfall(keep, (await context.runtime.status()).inventory);
-      if (used.length > 0 && wanted.some((entry) => !bill.some((asked) => asked.item === entry.item && asked.count >= entry.count))) {
-        wanted = [...bill];
-        usedOwn.push(...used);
-        continue;
-      }
-    }
-    if (step.status === "failed") {
-      // A setback that still got something (a pickaxe that broke after 15 of 16 stones) or a fight that interrupted
-      // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
-      // without progress for any other reason ends the gathering.
-      const after = shortfall(wanted, (await context.runtime.status()).inventory);
-      // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
-      // round goes on without it, or makes another.
-      if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) {
-        if (actions.length === 0) return step;
-        // What the earlier rounds got is not lost with the last failure (live 2026-10-10: a fetch ended with only the
-        // last place's failure, and no word of the logs already carried).
-        const now = (await context.runtime.status()).inventory;
-        const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
-        return { status: "failed", detail: `got ${actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(wanted, now))}: ${step.detail}` };
-      }
-      actions.push(`setback (${step.detail})`);
-      continue;
-    }
-    actions.push(step.detail);
+    const ended = await settleStep(context, run, plan, missing, stepped, knowledge);
+    if (ended !== null) return ended;
   }
-  const left = shortfall(wanted, (await context.runtime.status()).inventory);
+  const left = shortfall(run.wanted, (await context.runtime.status()).inventory);
   return left.length === 0
-    ? finish(actions.join(", "))
-    : { status: "failed", detail: `still missing ${describeMaterials(left)} after ${MAX_ROUNDS} rounds of gathering` };
+    ? finish(run, run.actions.join(", "))
+    : failing(context, run, { status: "failed", detail: `still missing ${describeMaterials(left)} after ${MAX_ROUNDS} rounds of gathering` });
 }
 
-type Stacks = readonly { readonly name: string; readonly count: number }[];
-
-function carried(inventory: Stacks, item: string): number {
-  return inventory.filter((stack) => stack.name === item).reduce((sum, stack) => sum + stack.count, 0);
+/**
+ * What a round's `step` means for the fetch: the result that ends it (a stop, or a failure with no way on), or null to go
+ * on with the next round (the step worked, or was a setback the next round answers).
+ */
+async function settleStep(
+  context: GatherContext,
+  run: Run,
+  plan: Round,
+  missing: readonly ItemCount[],
+  step: GatherResult,
+  knowledge: Knowledge,
+): Promise<GatherResult | null> {
+  const { actions, bill, keep } = run;
+  if (step.status === "stopped") return step;
+  const worn = wornOutTool(knowledge);
+  if (worn !== null && step.status === "failed" && shortfall(run.wanted, (await context.runtime.status()).inventory).length > 0) {
+    return failing(context, run, { status: "failed", detail: `${worn}: stopping here; ${step.detail}` });
+  }
+  // A broken tool is replaced once: if the replacement cannot be made, the work goes on without it (a hand digs dirt).
+  const remade = plan.toolFirst === null ? null : plan.toolFirst.split("_").at(-1)!;
+  if (remade !== null && knowledge.lost.delete(remade) && step.status === "failed") {
+    // A block that drops nothing without the tool cannot go on without it: the gather ends here, not a round later.
+    const now = (await context.runtime.status()).inventory;
+    if ([...plan.collect.keys()].some((block) => requiresTool(block, now, knowledge))) return failing(context, run, step);
+    actions.push(`setback (could not make another ${plan.toolFirst}: ${step.detail}); going on without it`);
+    return null;
+  }
+  const fruitless = rareFruitless(knowledge, (await context.runtime.status()).inventory);
+  if (fruitless !== null) return failing(context, run, { status: "failed", detail: fruitless });
+  // What a craft took from her own items is replaced only from what is near: when the replacement is out of range,
+  // she goes on with what was asked for and says what she used (live 2026-10-03: a wooden pickaxe used one of Vex's
+  // own dark oak logs, and replacing it walked 700 blocks; with the range, it ended the fetch instead).
+  // A kept item still short before a craft that would use it (guarded) is no craft's loss yet: that ends below, naming the craft.
+  if (!run.guard.active && step.status === "failed" && /^no \S+ within /u.test(step.detail)) {
+    const used = shortfall(keep, (await context.runtime.status()).inventory);
+    if (used.length > 0 && run.wanted.some((entry) => !bill.some((asked) => asked.item === entry.item && asked.count >= entry.count))) {
+      run.wanted = [...bill];
+      run.usedOwn.push(...used);
+      return null;
+    }
+  }
+  if (step.status === "failed") {
+    // A setback that still got something (a pickaxe that broke after 15 of 16 stones) or a fight that interrupted
+    // the work is survival as usual: the next round sees what is missing now, a new pickaxe included. Failing
+    // without progress for any other reason ends the gathering.
+    const after = shortfall(run.wanted, (await context.runtime.status()).inventory);
+    // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
+    // round goes on without it, or makes another.
+    if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) {
+      if (actions.length === 0) return failing(context, run, step);
+      // What the earlier rounds got is not lost with the last failure (live 2026-10-10: a fetch ended with only the
+      // last place's failure, and no word of the logs already carried).
+      const now = (await context.runtime.status()).inventory;
+      const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
+      return failing(context, run, { status: "failed", detail: `got ${actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(run.wanted, now))}: ${step.detail}` });
+    }
+    actions.push(`setback (${step.detail})`);
+    return null;
+  }
+  actions.push(step.detail);
+  return null;
 }
 
 /** `wanted`, raised back to the kept count of every kept item a craft between `before` and `after` used up. */
@@ -971,7 +1038,7 @@ export function describeWay(from: { readonly x: number; readonly z: number }, to
 async function goHome(context: GatherContext, home: Position, purpose: string, work: string): Promise<GatherResult | null> {
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - home.x, here.y - home.y, here.z - home.z) <= HOME_RANGE) return null;
-  const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 };
+  const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1, ...keepOf(context) };
   return act(context, "navigate", target, `Go back to the site to ${work} for ${purpose}.`);
 }
 
@@ -1054,7 +1121,7 @@ export async function walkToStation(context: GatherContext, block: "crafting_tab
   // Coordinates only: the result is spread into `navigate` and `smelt_item` inputs, which refuse unknown keys (live
   // 2026-10-03: the block's `name` made every walk to a crafting table fail validation).
   const station = { x: found.x, y: found.y, z: found.z };
-  const outcome = await context.body.act("navigate", { ...station, range: 2 }, `Walk to the ${block.replaceAll("_", " ")} close by to use it.`, { signal: context.signal });
+  const outcome = await context.body.act("navigate", { ...station, range: 2, ...keepOf(context) }, `Walk to the ${block.replaceAll("_", " ")} close by to use it.`, { signal: context.signal });
   return outcome.status === "succeeded" ? station : null;
 }
 

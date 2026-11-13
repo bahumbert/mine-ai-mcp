@@ -1,0 +1,68 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-keep-items-no-bridge
+tags: [regression]
+description: >-
+  navigate with keep_items naming the only scaffold block carried (house-build fixes Task 0, spec 2026-11-12 section 1):
+  a bot on a perch carries only dirt and asks to keep it, so the only way to the ledge, a bridge, is not laid. The
+  route stops with [NAVIGATION_STOPPED], no dirt is placed, no dirt spent and the bot stays on its perch. The policy
+  route has no other block, and the fallback scaffold skips the kept dirt too. Control: perch-bridge-with-dirt.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The perch: one block wide, eight high.
+  - fill: { block: stone, from: [ 0, -60, 0 ], to: [ 0, -53, 0 ] }
+  # The ledge across a five-block gap (x 1..5), at the perch's height, three wide.
+  - fill: { block: stone, from: [ 6, -60, -1 ], to: [ 8, -53, 1 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 0.5, -52, 0.5 ]
+    inventory:
+      - item: dirt
+        count: 24
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 7
+    y: -52
+    z: 0
+    range: 1.5
+    keep_items: [ dirt ]
+  expect:
+    status: failed
+    errorContains: "[NAVIGATION_STOPPED]"
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    # No bridge cell was laid, in the first row of the gap.
+    - { kind: blocksAt, block: air, positions: [ [ 1, -53, 0 ], [ 2, -53, 0 ], [ 3, -53, 0 ] ] }
+    - kind: hasItem
+      who: PerchBot
+      item: dirt
+      count: 24
+    - kind: reach
+      who: PerchBot
+      pos: [ 0.5, -52, 0.5 ]
+      radius: 1.0
+    - kind: completion
+      who: PerchBot

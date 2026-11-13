@@ -57,15 +57,15 @@ come back), eat, equip, sleep, hunt
 mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
 respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
 blocks; `materials` names other full blocks per role for a temporary house) and `improve_house` it later (swap the
-temporary parts back to the style's blocks, in place), make a crop farm or tend one it made (below). A persona
+temporary parts back to the template's blocks, in place), make a crop farm or tend one it made (below). A persona
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
-**Building** (`src/building/`, ADR-010): a style is a JSON palette (`building-styles/<id>.json`: block per material role +
-roof type, plus `variants`: the stairs and slab of a role) fed to a parametric generator (`house.ts`): stair roofs
+**Building** (`src/building/`, ADR-010): a style is a persona's taste (`building-styles/<id>.json`: id, family of house templates, description) and a house is a template file (`building-templates/<id>.json`: layers of role cells, a block per material role,
+plus `variants`: the stairs and slab of a role): stair roofs
 facing up their slope with a slab ridge, pillars standing and trim beams along the walls (block states, ADR-013; a
-style without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
-style needs; the model fetches it with `get_items` (`src/gathering.ts`: chop the logs, craft a crafting table to
+template without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
+templates need; the model fetches it with `get_items` (`src/gathering.ts`: chop the logs, craft a crafting table to
 carry and a wooden pickaxe when stone is needed, dig the stone, craft planks, fences and doors, smelt in a carried
 furnace what only a furnace makes: glass for the panes, with the sand, the fuel and the furnace gathered or crafted
 first; the runtime's `view_crafting_requirements` and `view_smelting_recipes` pick the recipes from game data; each
@@ -151,8 +151,9 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/mind.ts`, `llm-mind.ts` | Chat, work and goal tiers + narration, init prompt, JSON repair round |
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
-| `src/building/` | Blueprint schema, rotation, bill of materials, batching; house generator; styles loader; site plan |
-| `building-styles/*.json` | Style palettes (material role → block) and house options |
+| `src/building/` | Blueprint schema, rotation, bill of materials, batching; templates loader; styles loader; site plan |
+| `building-styles/*.json` | A persona's building taste: id, description and the family of house templates it lists first |
+| `building-templates/*.json` | House templates: layers of role cells with their own palette (`src/building/templates.ts`), checked at load by `validateBlueprint` (`support.ts`); the six classic houses are files since the generator `house()` was retired |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
 | `src/say.ts` | Dev CLI: make another bot host say a chat line (a scripted player for live tests) |
 | `src/gathering.ts` | Gather and craft items like a player (`get_items` skill) |

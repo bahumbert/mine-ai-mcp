@@ -1,0 +1,136 @@
+{
+  "id": "ndebele-house",
+  "family": "africa",
+  "name": "ndebele house",
+  "description": "Pale birch house with a yellow sandstone band and orange acacia door frame, under a deep stepped hip roof of acacia with eaves all round.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "acacia_planks",
+    "wall": "birch_planks",
+    "trim": "acacia_planks",
+    "roof": "acacia_planks",
+    "window": "glass_pane",
+    "door": "acacia_door",
+    "accent": "sandstone"
+  },
+  "variants": {
+    "roof": { "stairs": "acacia_stairs", "slab": "acacia_slab" }
+  },
+  "key": {
+    "i": { "role": "roof", "shape": "stairs", "facing": "east", "half": "bottom" },
+    "j": { "role": "roof", "shape": "stairs", "facing": "south", "half": "bottom" },
+    "k": { "role": "roof", "shape": "stairs", "facing": "north", "half": "bottom" },
+    "l": { "role": "roof", "shape": "stairs", "facing": "west", "half": "bottom" },
+    "s": { "role": "roof", "shape": "slab", "half": "bottom" },
+    "f": { "role": "foundation" },
+    "F": { "role": "floor" },
+    "w": { "role": "wall" },
+    "t": { "role": "trim" },
+    "a": { "role": "accent" },
+    "e": { "role": "window" },
+    "r": { "role": "roof" },
+    "D": { "role": "door" },
+    "_": { "role": "air" }
+  },
+  "layers": [
+    [
+      ".........",
+      ".fffffff.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fFFFFFf.",
+      ".fffffff.",
+      "........."
+    ],
+    [
+      ".........",
+      ".wwtDtww.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".wwwwwww.",
+      "........."
+    ],
+    [
+      ".........",
+      ".aet_tea.",
+      ".a_____a.",
+      ".a_____a.",
+      ".e_____e.",
+      ".a_____a.",
+      ".a_____a.",
+      ".aaaeaaa.",
+      "........."
+    ],
+    [
+      ".........",
+      ".wwtttww.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".w_____w.",
+      ".wwwwwww.",
+      "........."
+    ],
+    [
+      "ijjjjjjjl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "irrrrrrrl",
+      "ikkkkkkkl"
+    ],
+    [
+      ".........",
+      ".ijjjjjl.",
+      ".irrrrrl.",
+      ".irrrrrl.",
+      ".irrrrrl.",
+      ".irrrrrl.",
+      ".irrrrrl.",
+      ".ikkkkkl.",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      "..ijjjl..",
+      "..irrrl..",
+      "..irrrl..",
+      "..irrrl..",
+      "..ikkkl..",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      "...ijl...",
+      "...irl...",
+      "...ikl...",
+      ".........",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      ".........",
+      "....s....",
+      ".........",
+      ".........",
+      ".........",
+      "........."
+    ]
+  ]
+}

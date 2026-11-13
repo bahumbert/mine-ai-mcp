@@ -54,8 +54,12 @@ import {
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { navigationFeet } from "../../world/block-geometry.js";
 import type { Position3 } from "../../world/world.js";
-import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
-import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
+import { facingVector } from "../../../world/facing.js";
+import { clingsBehindFacing } from "../../../world/block-states.js";
+import { described, faceFits, holdsCell, type BuildCell } from "./build-cell.js";
+import { takeScaffoldDown } from "./scaffold-takedown.js";
+
+export { faceFits, holdsCell, type BuildCell } from "./build-cell.js";
 
 /**
  * How far a cell may be from the feet to be worked without moving, measured
@@ -96,62 +100,6 @@ const NEIGHBOURS = [
   new Vec3(0, 0, 1),
   new Vec3(0, 0, -1),
 ] as const;
-
-export interface BuildCell {
-  readonly position: BlockPosition;
-  readonly blockName: string;
-  /**
-   * The facing an oriented block must have. Minecraft gives a door or stairs the
-   * placing player's facing, so the bot looks that way while placing it; the
-   * same block facing elsewhere is a wrong block. A door hung sideways in a
-   * wall swings its open panel across the doorway, and navigation, which
-   * passes an open door from any side, walked into it for good.
-   */
-  readonly facing?: HorizontalFacing;
-  /** The upper or lower half of stairs, a slab (its `type`) or a trapdoor, set by where the side face is clicked. */
-  readonly half?: BlockHalf;
-  /** The axis of a log or pillar, set by the face it is placed against. */
-  readonly axis?: BlockAxis;
-}
-
-/**
- * Whether placing against this face (pointing from the support into the cell) can give the cell its asked states
- * (ADR-013): an axis comes from the face's own axis; a top half never rests on the block below, a bottom half never
- * hangs from the block above, and a side face takes either half from where it is clicked.
- */
-export function faceFits(face: { readonly x: number; readonly y: number; readonly z: number }, cell: BuildCell): boolean {
-  if (cell.axis !== undefined && (cell.axis === "x" ? face.x : cell.axis === "y" ? face.y : face.z) === 0) return false;
-  if (cell.half === "top" && face.y > 0) return false;
-  if (cell.half === "bottom" && face.y < 0) return false;
-  return true;
-}
-
-/** The states a block has, in the cell's terms: a slab's `type` is its half. */
-function statesOf(block: WorldBlock): { readonly facing: unknown; readonly half: unknown; readonly axis: unknown } {
-  const properties = block.getProperties() as Readonly<Record<string, unknown>>;
-  return { facing: properties.facing, half: properties.half ?? properties.type, axis: properties.axis };
-}
-
-/** Whether `block` is what `cell` asks for: its block, in every state the cell asks (ADR-013), any other state free. */
-export function holdsCell(block: WorldBlock, cell: BuildCell): boolean {
-  if (block.name !== cell.blockName) return false;
-  if (cell.facing === undefined && cell.half === undefined && cell.axis === undefined) return true;
-  const states = statesOf(block);
-  return (cell.facing === undefined || states.facing === cell.facing) &&
-    (cell.half === undefined || states.half === cell.half) &&
-    (cell.axis === undefined || states.axis === cell.axis);
-}
-
-/** A block for the audit: its name, and the states the cell asks about, as they are. */
-function described(block: WorldBlock, cell: BuildCell): string {
-  const states = statesOf(block);
-  const shown = [
-    cell.facing !== undefined && typeof states.facing === "string" ? `facing ${states.facing}` : null,
-    cell.half !== undefined && typeof states.half === "string" ? states.half : null,
-    cell.axis !== undefined && typeof states.axis === "string" ? `along ${states.axis}` : null,
-  ].filter((part): part is string => part !== null);
-  return [block.name, ...shown].join(" ");
-}
 
 /** What one cell of the structure is, as of the last look at the world. */
 export type BuildCellState =
@@ -195,8 +143,9 @@ export interface BuildRequest {
 
 export interface BuildResult {
   readonly status: "complete" | "stopped";
-  /** Why the run stopped short, when one event rather than the cell states explains it. */
+  /** Why the run stopped short, when one event rather than the cell states explains it; `routeStop` when it is a route failure. */
   readonly reason: string | null;
+  readonly routeStop?: true;
   readonly placed: number;
   readonly dug: number;
   readonly passes: number;
@@ -221,10 +170,18 @@ export class BuildProgress {
   passes = 0;
   readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
   readonly scaffold = new Map<number, PlacedScaffold>();
+  /** The item entities lying about when the request's first takedown began: a resumed takedown still picks up the drops a cut one left. */
+  lyingBeforeTakedown: ReadonlySet<number> | null = null;
 }
 
 const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
 const isSolid = (block: WorldBlock | null): boolean => block?.boundingBox === "block";
+/**
+ * Whether a bot cannot walk through this block's cell. A ladder reads "block" in the registry yet is climbed through:
+ * taking it for a wall sealed in every bot standing on one (house-templates scenario saltbox: the roof call ran 290 s,
+ * stepping out and back in for every placement).
+ */
+const obstructs = (bot: Bot, block: WorldBlock | null): boolean => isSolid(block) && !clingsBehindFacing(bot.registry, block!.name);
 
 /**
  * The cell the bot's feet are in, as navigation counts it: standing on a floor lower than a full block (farmland,
@@ -253,7 +210,7 @@ export function enclosesBot(
 ): boolean {
   const min = bounds.min.offset(-ENCLOSURE_MARGIN, -ENCLOSURE_MARGIN, -ENCLOSURE_MARGIN);
   const max = bounds.max.offset(ENCLOSURE_MARGIN, ENCLOSURE_MARGIN, ENCLOSURE_MARGIN);
-  const blocked = (position: Vec3) => filled.has(keyOf(position)) || isSolid(bot.blockAt(position));
+  const blocked = (position: Vec3) => filled.has(keyOf(position)) || obstructs(bot, bot.blockAt(position));
   if (blocked(feet)) return true;
   const seen = new Set<number>([keyOf(feet)]);
   const queue = [feet];
@@ -299,7 +256,10 @@ export class BuildTargeting {
   readonly #states = new Map<number, BuildCellState>();
   /** The correct cells as packed keys, handed to the movement policy and kept current. */
   readonly protectedCells = new Set<number>();
+  /** Those of them a bot cannot walk through (a ladder is protected, yet no wall): what the enclosure check fills. */
+  readonly #obstructingCells = new Set<number>();
   readonly #bounds: { readonly min: Vec3; readonly max: Vec3 };
+  readonly #cellAt: ReadonlyMap<number, BuildCell>;
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -311,6 +271,7 @@ export class BuildTargeting {
     readonly progress: BuildProgress = new BuildProgress(),
   ) {
     this.#bounds = boundsOf(request.cells);
+    this.#cellAt = new Map(request.cells.map((cell) => [keyOf(cell.position), cell]));
   }
 
   /** Work done or given up on, whose standing still across passes means the run is idle. */
@@ -354,10 +315,13 @@ export class BuildTargeting {
 
     this.#states.clear();
     this.protectedCells.clear();
+    this.#obstructingCells.clear();
     for (const cell of this.request.cells) {
       if (cell.blockName === "air") continue;
       const block = bot.blockAt(asVec3(cell.position));
-      if (block !== null && holdsCell(block, cell)) this.protectedCells.add(keyOf(cell.position));
+      if (block === null || !holdsCell(block, cell)) continue;
+      this.protectedCells.add(keyOf(cell.position));
+      if (obstructs(bot, block)) this.#obstructingCells.add(keyOf(cell.position));
     }
     for (const cell of this.request.cells) {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
@@ -381,13 +345,30 @@ export class BuildTargeting {
         : { kind: "blocked", holds: described(block, cell) };
     }
     if (position.equals(feet) || position.equals(head)) return { kind: "occupied" };
-    const placement = findPlacementSupport(this.bot, position, undefined, (face) => faceFits(face, cell));
+    // A door is hung from a side wall as readily as from the floor, yet it pops when the block under it goes: nothing is
+    // placed on a cell whose block under it is still to be replaced, whatever else it could rest on. An empty cell under
+    // is no block to replace (a lantern hangs from its beam, which stands above it).
+    const under = this.bot.blockAt(position.offset(0, -1, 0));
+    if (under !== null && !isAir(under) && this.awaitsFinalBlock(under)) return { kind: "unsupported" };
+    const clings = clingsBehindFacing(this.bot.registry, cell.blockName);
+    const placement = findPlacementSupport(this.bot, position, (support) => isSolid(support) && !this.awaitsFinalBlock(support), (face) => faceFits(face, cell, clings));
     if (!placement) return { kind: "unsupported" };
     if ((carried.get(cell.blockName) ?? 0) === 0) return { kind: "not_carried" };
-    const after = new Set(this.protectedCells);
-    after.add(keyOf(cell.position));
+    const after = new Set(this.#obstructingCells);
+    if (!clings) after.add(keyOf(cell.position));
     if (enclosesBot(this.bot, feet, after, this.#bounds)) return { kind: "would_enclose" };
     return { kind: "placeable", support: placement.support, face: placement.face };
+  }
+
+  /**
+   * Whether this block is one the request still replaces: a cell of the structure that does not yet hold its block and
+   * will be dug out for it (a wrong block under `removeWrongBlocks`, or a cell asked to be air). A block placed against it
+   * goes when it is replaced: a door put on the stone its call then digs for the support popped and its item was lost
+   * (house-templates scenario log-cabin), so such a block is no support until the cell holds its own block.
+   */
+  private awaitsFinalBlock(support: WorldBlock): boolean {
+    const cell = this.#cellAt.get(keyOf(support.position));
+    return cell !== undefined && !holdsCell(support, cell) && (this.request.removeWrongBlocks || cell.blockName === "air");
   }
 
   stateOf(cell: BuildCell): BuildCellState {
@@ -487,11 +468,12 @@ export class BuildTargeting {
       .join("|");
   }
 
-  result(status: BuildResult["status"], reason: string | null): BuildResult {
+  result(status: BuildResult["status"], reason: string | null, routeStop = false): BuildResult {
     this.refresh();
     return {
       status,
       reason,
+      ...(routeStop && { routeStop: true as const }),
       placed: this.progress.placed,
       dug: this.progress.dug,
       passes: this.progress.passes,
@@ -601,7 +583,8 @@ export async function build(
   // Every block the routes of this request placed (live 2026-10-11, Theo: a ring of dirt at head height round his new
   // house shut him in): taken down once the structure is complete, those of earlier attempts included.
   const scaffold = progress.scaffold;
-  const onPlacement = takingScaffoldDown ? undefined : (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
+  // The takedown's own routes pillar up to the highest block too: what they place is kept, for the next round of the takedown.
+  const onPlacement = (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
   let idlePasses = 0;
 
   for (;;) {
@@ -612,7 +595,7 @@ export async function build(
     if (request.stopSignal?.aborted) return targeting.result("stopped", String(request.stopSignal.reason));
     targeting.progress.passes += 1;
     targeting.refresh();
-    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), scaffold);
+    if (targeting.wrong().length === 0) return takingScaffoldDown ? targeting.result("complete", null) : takeScaffoldDown(bot, request, targeting.result("complete", null), progress);
     const workBefore = targeting.workDone;
 
     // Standing in a cell the structure needs means every placement around it
@@ -620,7 +603,7 @@ export async function build(
     // likewise when every remaining placement would seal the bot in.
     if (targeting.standingInStructure() || targeting.onlyEnclosing()) {
       const before = feetOf(bot);
-      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal, ...(onPlacement && { onPlacement }) });
+      const exit = await request.route({ movements, goal: targeting.outsideGoal(), signal: request.signal, stopSignal: request.stopSignal, onPlacement });
       if (exit.status === "stopped") {
         return targeting.result("stopped", `could not step out of the structure: ${exit.reason}`);
       }
@@ -646,13 +629,13 @@ export async function build(
       // A goal the search could not reach is not a reason to abandon the build,
       // only that cell — unless the targets already changed underneath it.
       if (targeting.identity() === routed && !targeting.refuseClosest(feetOf(bot), route.reason, "route")) {
-        return targeting.result("stopped", route.reason);
+        return targeting.result("stopped", route.reason, true);
       }
     }
 
     idlePasses = targeting.workDone === workBefore ? idlePasses + 1 : 0;
     if (idlePasses >= IDLE_PASSES) {
-      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`);
+      return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`, true);
     }
   }
 }
@@ -663,11 +646,11 @@ async function runRoute(
   request: BuildRequest,
   targeting: BuildTargeting,
   movements: MovementPolicy,
-  onPlacement?: (placed: PlacedScaffold) => void,
+  onPlacement: (placed: PlacedScaffold) => void,
 ): Promise<NavigationResult> {
   return request.route({
     movements,
-    ...(onPlacement && { onPlacement }),
+    onPlacement,
     goal: targeting.goal(),
     onArrival: async ({ signal }) => {
       // An arrival that works nothing ends the route: continuing would ask the
@@ -688,34 +671,3 @@ async function runRoute(
   });
 }
 
-/** Whether the scaffold block placed at a cell still stands there. */
-const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(asVec3(placed.position))?.stateId === placed.stateId;
-
-/**
- * Takes the scaffold down after a complete build: every block the routes placed (in any attempt) that is no cell of
- * the structure and still stands, highest first, through the build's own loop with those cells as air (the
- * structure's cells stay as they are, so they stay protected). One pass: scaffold this pass places itself, or cannot
- * reach, stays and is reported; scaffold already gone (taken down by an earlier attempt, a reflex or another bot) is
- * skipped and counts as removed. A failure here never fails the build, except an abort, which a resume runs again.
- */
-async function takeScaffoldDown(
-  bot: Bot,
-  request: BuildRequest,
-  built: BuildResult,
-  scaffold: ReadonlyMap<number, PlacedScaffold>,
-): Promise<BuildResult> {
-  if (scaffold.size === 0) return built;
-  const structure = new Set(request.cells.map((cell) => keyOf(cell.position)));
-  const temporary = [...scaffold.entries()].filter(([key]) => !structure.has(key)).map(([, placed]) => placed);
-  const standing = temporary.filter((placed) => standsStill(bot, placed)).sort((a, b) => b.position.y - a.position.y);
-  if (standing.length > 0) {
-    try {
-      await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...standing.map(({ position }) => ({ position, blockName: "air" }))] }, true);
-    } catch (error) {
-      request.signal?.throwIfAborted();
-      void error;
-    }
-  }
-  const left = standing.filter((placed) => standsStill(bot, placed)).map(({ position }) => position);
-  return { ...built, scaffold: { placed: scaffold.size, removed: temporary.length - left.length, left } };
-}

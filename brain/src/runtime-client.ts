@@ -147,6 +147,11 @@ export interface CraftingNeeds {
   readonly error?: string;
   /** Every item the plan consumes, carried or not: the raw leaves and what the intermediate steps take (what a craft must never drop to make room). */
   readonly inputs?: readonly string[];
+  /**
+   * What the plan takes from the inventory, intermediates included (`carriedMaterials` of the runtime's plan, which uses
+   * what is carried first: packed_mud for mud_bricks). Absent: the plan names none.
+   */
+  readonly carried?: readonly ItemCount[];
 }
 
 /** One furnace recipe: any one of `inputs` cooks into `count` of `output`. */
@@ -400,6 +405,7 @@ const craftingRequirementsSchema = z.object({
         status: z.enum(["ready", "missing_materials", "uncraftable", "planner_failed"]),
         missingMaterials: z.array(z.object({ item: z.string(), count: z.number() })),
         requiredMaterials: z.array(z.object({ item: z.string() })).default([]),
+        carriedMaterials: z.array(z.object({ item: z.string(), count: z.number() })).default([]),
         steps: z.array(z.object({ ingredients: z.array(z.object({ item: z.string() })).default([]) })).default([]),
       }).optional(),
     }).optional(),
@@ -593,7 +599,12 @@ export class McpBotRuntime implements BotRuntime {
     const plan = result.requirements?.plan;
     if (plan === undefined) return { status: "unknown", missing: [], ...(result.error !== undefined && { error: result.error }) };
     const inputs = new Set([...plan.requiredMaterials, ...plan.steps.flatMap(({ ingredients }) => ingredients)].map(({ item }) => item));
-    return { status: plan.status, missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })), inputs: [...inputs] };
+    return {
+      status: plan.status,
+      missing: plan.missingMaterials.map(({ item, count }) => ({ item, count })),
+      inputs: [...inputs],
+      carried: plan.carriedMaterials.map(({ item, count }) => ({ item, count })),
+    };
   }
 
   async smeltingRecipes(items: readonly string[]): Promise<SmeltingKnowledge> {

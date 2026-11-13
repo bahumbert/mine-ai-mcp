@@ -1,0 +1,155 @@
+{
+  "id": "japanese-small",
+  "family": "east-asia",
+  "name": "small japanese house",
+  "description": "Minka-like house: pale birch walls between dark oak posts, spruce floor, dark hip roof with deep eaves.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "spruce_planks",
+    "wall": "birch_planks",
+    "pillar": "dark_oak_log",
+    "trim": "dark_oak_planks",
+    "roof": "dark_oak_planks",
+    "window": "spruce_fence",
+    "door": "spruce_door"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "dark_oak_stairs",
+      "slab": "dark_oak_slab"
+    }
+  },
+  "key": {
+    "D": {
+      "role": "door"
+    },
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "c": {
+      "role": "wall"
+    },
+    "d": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "e": {
+      "role": "window"
+    },
+    "f": {
+      "role": "trim",
+      "axis": "x"
+    },
+    "g": {
+      "role": "floor"
+    },
+    "h": {
+      "role": "air"
+    },
+    "i": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "east",
+      "half": "bottom"
+    },
+    "j": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "k": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    },
+    "l": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "west",
+      "half": "bottom"
+    },
+    "m": {
+      "role": "roof"
+    },
+    "n": {
+      "role": "roof",
+      "shape": "slab",
+      "half": "bottom"
+    }
+  },
+  "layers": [
+    [
+      ".......",
+      ".aaaaa.",
+      ".aggga.",
+      ".aggga.",
+      ".aggga.",
+      ".aaaaa.",
+      "......."
+    ],
+    [
+      "...h...",
+      ".bcDcb.",
+      ".chhhc.",
+      ".chhhc.",
+      ".chhhc.",
+      ".bcccb.",
+      "......."
+    ],
+    [
+      "...h...",
+      ".bc.cb.",
+      ".chhhc.",
+      ".ehhhe.",
+      ".chhhc.",
+      ".bcecb.",
+      "......."
+    ],
+    [
+      "ijjjjjl",
+      "ibfffbl",
+      "idhhhdl",
+      "idhhhdl",
+      "idhhhdl",
+      "ibfffbl",
+      "ikkkkkl"
+    ],
+    [
+      ".......",
+      ".ijjjl.",
+      ".immml.",
+      ".im.ml.",
+      ".immml.",
+      ".ikkkl.",
+      "......."
+    ],
+    [
+      ".......",
+      ".......",
+      "..ijl..",
+      "..iml..",
+      "..ikl..",
+      ".......",
+      "......."
+    ],
+    [
+      ".......",
+      ".......",
+      ".......",
+      "...n...",
+      ".......",
+      ".......",
+      "......."
+    ]
+  ],
+  "classic": {
+    "style": "japanese",
+    "size": "small"
+  }
+}

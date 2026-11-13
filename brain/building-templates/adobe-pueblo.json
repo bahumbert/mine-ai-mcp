@@ -1,0 +1,167 @@
+{
+  "id": "adobe-pueblo",
+  "family": "north-america",
+  "name": "adobe pueblo",
+  "description": "Stepped adobe house of sandstone on a cut-sandstone base: a flat-roofed ground room with log beam ends, a parapeted terrace reached by an inner ladder, and a smaller room above.",
+  "palette": {
+    "foundation": "cut_sandstone",
+    "floor": "smooth_sandstone",
+    "wall": "sandstone",
+    "trim": "spruce_log",
+    "roof": "cut_sandstone",
+    "window": "glass_pane",
+    "door": "acacia_door",
+    "accent": "ladder"
+  },
+  "variants": {},
+  "key": {
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "floor"
+    },
+    "w": {
+      "role": "wall"
+    },
+    "r": {
+      "role": "roof"
+    },
+    "t": {
+      "role": "trim",
+      "axis": "z"
+    },
+    "D": {
+      "role": "door"
+    },
+    "g": {
+      "role": "window"
+    },
+    "L": {
+      "role": "accent",
+      "facing": "east"
+    },
+    "_": {
+      "role": "air"
+    }
+  },
+  "stages": [
+    {
+      "name": "floor",
+      "top": 0
+    },
+    {
+      "name": "walls",
+      "top": 3
+    },
+    {
+      "name": "terrace",
+      "top": 4
+    },
+    {
+      "name": "upper level",
+      "top": 8
+    }
+  ],
+  "layers": [
+    [
+      ".....a.....",
+      "aaaaaaaaaaa",
+      "abbbbbbbbba",
+      "abbbbbbbbba",
+      "abbbbbbbbba",
+      "abbbbbbbbba",
+      "abbbbbbbbba",
+      "abbbbbbbbba",
+      "aaaaaaaaaaa"
+    ],
+    [
+      "...........",
+      "wwwwwDwwwww",
+      "wL________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "wwwwwwwwwww"
+    ],
+    [
+      "...........",
+      "wwwgw.wgwww",
+      "wL________g",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "g_________w",
+      "w_________w",
+      "wwwgwwwwwww"
+    ],
+    [
+      ".t.t...t.t.",
+      "wwwwwwwwwww",
+      "wL________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "w_________w",
+      "wwwwwwwwwww"
+    ],
+    [
+      "...........",
+      "rrrrrrrrrrr",
+      "rLrrrrrrrrr",
+      "r_rrrrrrrrr",
+      "rrrrrrrrrrr",
+      "rrrrrrbbbbr",
+      "rrrrrrbbbbr",
+      "rrrrrrbbbbr",
+      "rrrrrrrrrrr"
+    ],
+    [
+      "...........",
+      "wwwwwwwwwww",
+      "wL........w",
+      "w.........w",
+      "w....ww.www",
+      "w....w____w",
+      "w....w____w",
+      "w....w____w",
+      "wwwwwwwwwww"
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      ".....ww.gww",
+      ".....w____w",
+      ".....w____g",
+      ".....w____w",
+      ".....wwgwww"
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "......t.t..",
+      ".....wwwwww",
+      ".....w____w",
+      ".....w____w",
+      ".....w____w",
+      ".....wwwwww"
+    ],
+    [
+      "...........",
+      "...........",
+      "...........",
+      "...........",
+      ".....rrrrrr",
+      ".....rrrrrr",
+      ".....rrrrrr",
+      ".....rrrrrr",
+      ".....rrrrrr"
+    ]
+  ]
+}

@@ -322,7 +322,11 @@ Error: `[REGION_NOT_FOUND]`. Runs beside the foreground action. Defined in
 Use `navigate` to walk, jump, bridge, or dig to an absolute world
 location. Primary arguments are `x`, `z`, optional feet coordinate `y` (omit to
 target ground level), acceptance `range`, `scaffold` to allow block placement,
-and `build` to deliberately scaffold into mid-air. Success proves the bot's
+and `build` to deliberately scaffold into mid-air. `keep_items` lists item ids
+(at most 64) the route must not place as scaffold: blocks the caller keeps for
+later work. The fallback scaffold, which bridges with a common carried block
+when none of the policy's scaffold blocks is carried, skips them too. An id that
+names no carried block changes nothing. Success proves the bot's
 feet arrived within the specified range of the destination.
 When digging is enabled, loss of the starting best pickaxe, shovel, or axe
 harvest capability stops at Pathfinder's safe cancellation point and returns

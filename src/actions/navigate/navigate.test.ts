@@ -281,6 +281,7 @@ test("parses one absolute destination and defaults its reached range", () => {
     scaffold: true,
     dig: true,
     build: false,
+    keepItems: [],
   });
   assert.deepEqual(parseNavigateRequest({ x: 12, z: -4, scaffold: false, dig: false }), {
     x: 12,
@@ -291,6 +292,7 @@ test("parses one absolute destination and defaults its reached range", () => {
     scaffold: false,
     dig: false,
     build: false,
+    keepItems: [],
   });
   for (const input of [
     {},
@@ -617,6 +619,69 @@ test("a route with no path is not replanned with a fallback when the policy list
   ), movementOptions));
   await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1 });
   assert.equal(movementOptions.length, 1);
+});
+
+/** A navigate whose first attempt finds no path; `afterReplan` moves the bot and spends stock when a second attempt runs. */
+async function noPathThenReplan(carried: Record<string, number>, keepItems: string[] | undefined, afterReplan: (scene: ReturnType<typeof flatGroundBot>) => void) {
+  const scene = flatGroundBot(64, { carried });
+  const movementOptions: unknown[] = [];
+  let attempts = 0;
+  const action = createNavigateAction(scene.bot, fakeNavigation, dependencies(async () => {
+    attempts++;
+    if (attempts === 1) return { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true };
+    scene.bot.entity.position.set(5.5, 64, 0.5);
+    afterReplan(scene);
+    return { status: "completed", elapsedMs: 1 };
+  }, movementOptions));
+  const output = await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1, ...(keepItems && { keep_items: keepItems }) });
+  return { output, movementOptions, attempts };
+}
+
+test("keep_items: the fallback scaffold skips a kept item and bridges with the next block carried", async () => {
+  // Dirt is the only policy block carried and it is kept, so the policy finds none; stone is not kept.
+  const { output, movementOptions, attempts } = await noPathThenReplan({ dirt: 10, oak_planks: 5 }, ["dirt"], ({ useUntil }) => useUntil("oak_planks", 2));
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(attempts, 2);
+  assert.deepEqual(movementOptions.map((options) => (options as { scaffoldFallback?: boolean }).scaffoldFallback), [undefined, true]);
+  const text = formatNavigateResult(output.result as never);
+  assert.match(text, /oak_planks: 5 → 2 \(used 3\)/);
+  assert.match(text, /dirt: 10 → 10/);
+});
+
+test("keep_items: with every carried block kept there is no fallback and the route stops", async () => {
+  const { output, movementOptions, attempts } = await noPathThenReplan({ dirt: 10, oak_planks: 5 }, ["dirt", "oak_planks"], () => undefined);
+  assert.equal(attempts, 1);
+  assert.equal(movementOptions.length, 1);
+  assert.equal(output.result.status, "failed");
+  assert.match("error" in output.result ? output.result.error : "", /^\[NAVIGATION_STOPPED\] Pathfinder stopped: no path found\./);
+});
+
+test("keep_items: the movement policy never places a kept item, in the first attempt and in the fallback", async () => {
+  const { movementOptions } = await noPathThenReplan({ dirt: 10, stone: 80 }, ["dirt", "cobblestone"], () => undefined);
+  assert.equal(movementOptions.length, 2);
+  for (const options of movementOptions) {
+    assert.deepEqual((options as { protectedScaffoldNames?: string[] }).protectedScaffoldNames, ["dirt", "cobblestone"]);
+  }
+});
+
+test("keep_items: the swim to land first builds its movements with the kept names too", async () => {
+  const { bot } = wideSeaBot();
+  const movementOptions: unknown[] = [];
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => (
+    { status: "stopped", reason: "no path found", elapsedMs: 5 }
+  ), movementOptions));
+  await new ActionRunner().run(action, { x: -60, y: 64, z: 0, keep_items: ["dirt"] });
+  assert.ok(movementOptions.length >= 2, "the swim to land and the asked route each build movements");
+  for (const options of movementOptions) assert.deepEqual((options as { protectedScaffoldNames?: string[] }).protectedScaffoldNames, ["dirt"]);
+});
+
+test("keep_items: the contract accepts item ids, bounds the list and refuses anything else", () => {
+  assert.deepEqual(parseNavigateRequest({ x: 1, y: 2, z: 3, keep_items: ["dirt", "oak_planks"] }).keepItems, ["dirt", "oak_planks"]);
+  assert.deepEqual(parseNavigateRequest({ x: 1, y: 2, z: 3 }).keepItems, []);
+  assert.doesNotThrow(() => parseNavigateRequest({ x: 1, y: 2, z: 3, keep_items: Array.from({ length: 64 }, () => "dirt") }));
+  for (const keep_items of [Array.from({ length: 65 }, () => "dirt"), ["a".repeat(65)], ["Dirt"], ["minecraft:dirt"], [""], "dirt", [4]]) {
+    assert.throws(() => parseNavigateRequest({ x: 1, y: 2, z: 3, keep_items }), /./u, JSON.stringify(keep_items));
+  }
 });
 
 /**

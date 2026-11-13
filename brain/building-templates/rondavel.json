@@ -1,0 +1,104 @@
+{
+  "id": "rondavel",
+  "family": "africa",
+  "name": "rondavel",
+  "description": "Small round hut of packed mud on a mud-brick ring, acacia posts at the low door, under a stepped hay-thatch cone. One cosy room; built in three stages.",
+  "palette": {
+    "foundation": "mud_bricks",
+    "floor": "packed_mud",
+    "wall": "packed_mud",
+    "pillar": "acacia_log",
+    "roof": "hay_block",
+    "window": "acacia_fence",
+    "door": "acacia_door"
+  },
+  "key": {
+    "f": { "role": "foundation" },
+    "F": { "role": "floor" },
+    "w": { "role": "wall" },
+    "p": { "role": "pillar", "axis": "y" },
+    "e": { "role": "window" },
+    "r": { "role": "roof" },
+    "D": { "role": "door" },
+    "_": { "role": "air" }
+  },
+  "layers": [
+    [
+      "..fff..",
+      ".fFFFf.",
+      "fFFFFFf",
+      "fFFFFFf",
+      "fFFFFFf",
+      ".fFFFf.",
+      "..fff.."
+    ],
+    [
+      "..pDp..",
+      ".w___w.",
+      "w_____w",
+      "w_____w",
+      "w_____w",
+      ".w___w.",
+      "..www.."
+    ],
+    [
+      "..p_p..",
+      ".w___w.",
+      "w_____w",
+      "e_____e",
+      "w_____w",
+      ".w___w.",
+      "..wew.."
+    ],
+    [
+      "..www..",
+      ".w___w.",
+      "w_____w",
+      "w_____w",
+      "w_____w",
+      ".w___w.",
+      "..www.."
+    ],
+    [
+      "..rrr..",
+      ".rrrrr.",
+      "rrrrrrr",
+      "rrrrrrr",
+      "rrrrrrr",
+      ".rrrrr.",
+      "..rrr.."
+    ],
+    [
+      ".......",
+      "..rrr..",
+      ".rrrrr.",
+      ".rrrrr.",
+      ".rrrrr.",
+      "..rrr..",
+      "......."
+    ],
+    [
+      ".......",
+      ".......",
+      "...r...",
+      "..rrr..",
+      "...r...",
+      ".......",
+      "......."
+    ],
+    [
+      ".......",
+      ".......",
+      ".......",
+      "...r...",
+      ".......",
+      ".......",
+      "......."
+    ]
+  ],
+  "stages": [
+    { "name": "floor", "top": 0 },
+    { "name": "walls", "top": 3 },
+    { "name": "roof", "top": 7 }
+  ]
+}

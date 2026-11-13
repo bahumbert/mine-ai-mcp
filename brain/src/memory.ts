@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ACTIVITIES } from "./activities.ts";
 import { BUILD_ROLES } from "./building/blueprint.ts";
-import { HOUSE_SIZES, type HouseSize } from "./building/house.ts";
+import { CLASSIC_SIZES, templateOfHouse, TEMPLATES, type Template } from "./building/templates.ts";
 import type { EndReason } from "./conversation/state.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
@@ -60,6 +60,8 @@ export interface Recalled {
   /** Oldest first. */
   readonly lately: readonly string[];
   readonly unfinished: UnfinishedHouse | null;
+  /** What recall dropped because it can no longer be used, as lines to tell the model (an unfinished house of a template that is gone). */
+  readonly gone: readonly string[];
   /** Oldest first, one per farm (by its centre; the latest note wins). */
   readonly farms: readonly KnownFarm[];
   /** Oldest first. */
@@ -90,7 +92,8 @@ const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_t
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
 const materials = z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1));
-const houseSchema = z.object({ size: z.enum(Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]]), style: z.string().min(1), door: position, facing, materials });
+/** A house built: by its template, or (an older note) by its classic size and style; a classic one carries both. */
+const houseSchema = z.object({ template: z.string().min(1).optional(), family: z.string().min(1).optional(), size: z.enum(CLASSIC_SIZES).optional(), style: z.string().min(1).optional(), door: position, facing, materials });
 const memorySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional(), house: houseSchema.optional() }) }),
   z.object({ kind: z.literal("own_objective"), outcome: z.string().min(1) }),
@@ -103,6 +106,11 @@ const memorySchema = z.discriminatedUnion("kind", [
       prepared: z.boolean().optional(),
       materials: materials.optional(),
       refused: z.array(position).optional(),
+      template: z.string().min(1).optional(),
+      family: z.string().min(1).optional(),
+      stage: z.number().int().min(0).optional(),
+      stages: z.number().int().positive().optional(),
+      stageName: z.string().min(1).optional(),
     }).nullable(),
   }),
   z.object({
@@ -177,10 +185,15 @@ export function recallQuery(username: string, limits: RecallLimits): string {
   return `${[latest("place", limits.places), latest("own_objective", limits.lately), latest("unfinished_house", 1), latest("farm", limits.farms * 8), latest("activity_time", limits.times), latest("conversation", CONVERSATIONS_RECALLED), latest("relation:", RELATION_NOTES_READ)].join(" UNION ALL ")} ORDER BY note_id DESC`;
 }
 
-/** Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. */
-export function recall(contexts: readonly string[], limits: RecallLimits): Recalled {
+/**
+ * Rebuilds the memory from note contexts, newest first; anything that does not parse is skipped. The unfinished house
+ * of a template `templates` no longer has (a file removed or renamed) is dropped, and `gone` says so: its protected
+ * area stays (release_area frees it).
+ */
+export function recall(contexts: readonly string[], limits: RecallLimits, templates: ReadonlyMap<string, Template> = TEMPLATES): Recalled {
   const places = new Map<string, KnownPlace>();
   const lately: string[] = [];
+  const gone: string[] = [];
   let unfinished: UnfinishedHouse | null | undefined;
   const farms = new Map<string, KnownFarm>();
   const times: ActivityTime[] = [];
@@ -196,7 +209,13 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
     if (memory.kind === "relation" && !relations.has(memory.relation.partner.toLowerCase())) relations.set(memory.relation.partner.toLowerCase(), memory.relation);
     if (memory.kind === "place" && !places.has(memory.place.name) && places.size < limits.places) places.set(memory.place.name, memory.place);
     if (memory.kind === "own_objective" && lately.length < limits.lately) lately.push(memory.outcome);
-    if (memory.kind === "unfinished_house" && unfinished === undefined) unfinished = memory.house;
+    if (memory.kind === "unfinished_house" && unfinished === undefined) {
+      const { house } = memory;
+      if (house !== null && templateOfHouse(house, templates) === undefined) {
+        gone.push(`your unfinished ${house.kind} is no longer a house you know how to build; its protected area stays until you release_area it`);
+        unfinished = null;
+      } else unfinished = house;
+    }
     if (memory.kind === "farm") {
       const key = `${memory.farm.centre.x},${memory.farm.centre.y},${memory.farm.centre.z}`;
       if (!farms.has(key) && farms.size < limits.farms) farms.set(key, memory.farm);
@@ -208,7 +227,7 @@ export function recall(contexts: readonly string[], limits: RecallLimits): Recal
     }
   }
   const recent = [...relations.values()].sort((a, b) => b.lastDealt - a.lastDealt).slice(0, RELATIONS_RECALLED);
-  return { conversations, places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, farms: [...farms.values()].reverse(), times: times.reverse(), relations: recent, skipped };
+  return { conversations, places: [...places.values()].reverse(), lately: lately.reverse(), unfinished: unfinished ?? null, gone, farms: [...farms.values()].reverse(), times: times.reverse(), relations: recent, skipped };
 }
 
 function parse(context: string): Memory | null {

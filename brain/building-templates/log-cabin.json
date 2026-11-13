@@ -1,0 +1,139 @@
+{
+  "id": "log-cabin",
+  "family": "north-america",
+  "name": "log cabin",
+  "description": "One-room cabin of horizontal spruce logs on a cobblestone base, glass-pane windows, a steep spruce gable roof and a cobblestone chimney against one end.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "spruce_planks",
+    "wall": "spruce_log",
+    "pillar": "spruce_log",
+    "roof": "spruce_planks",
+    "window": "glass_pane",
+    "door": "spruce_door"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "spruce_stairs",
+      "slab": "spruce_slab"
+    }
+  },
+  "key": {
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "floor"
+    },
+    "p": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "x": {
+      "role": "wall",
+      "axis": "x"
+    },
+    "z": {
+      "role": "wall",
+      "axis": "z"
+    },
+    "D": {
+      "role": "door"
+    },
+    "g": {
+      "role": "window"
+    },
+    "_": {
+      "role": "air"
+    },
+    "r": {
+      "role": "roof"
+    },
+    "s": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "n": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    }
+  },
+  "layers": [
+    [
+      "...aaa..",
+      ".aaaaaaa",
+      "aabbbbba",
+      "aabbbbba",
+      "aabbbbba",
+      ".aaaaaaa",
+      "........"
+    ],
+    [
+      "........",
+      ".pxxDxxp",
+      "az_____z",
+      "az_____z",
+      "az_____z",
+      ".pxxxxxp",
+      "........"
+    ],
+    [
+      "........",
+      ".pxg.gxp",
+      ".z_____z",
+      "az_____g",
+      ".z_____z",
+      ".pxxgxxp",
+      "........"
+    ],
+    [
+      ".sssssss",
+      ".pxxxxxp",
+      ".z_____z",
+      "az_____z",
+      ".z_____z",
+      ".pxxxxxp",
+      ".nnnnnnn"
+    ],
+    [
+      "........",
+      ".sssssss",
+      ".p.....p",
+      "ap.....p",
+      ".p.....p",
+      ".nnnnnnn",
+      "........"
+    ],
+    [
+      "........",
+      "........",
+      ".sssssss",
+      "ap.....p",
+      ".nnnnnnn",
+      "........",
+      "........"
+    ],
+    [
+      "........",
+      "........",
+      "........",
+      "arrrrrrr",
+      "........",
+      "........",
+      "........"
+    ],
+    [
+      "........",
+      "........",
+      "........",
+      "a.......",
+      "........",
+      "........",
+      "........"
+    ]
+  ]
+}

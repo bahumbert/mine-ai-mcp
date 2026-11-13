@@ -69,6 +69,14 @@ test("the brain bundle loads its building styles from brain/building-styles, one
   assert.match(output, /--agent/u);
 });
 
+test("the brain bundle loads its house templates from brain/building-templates, one folder above its own", () => {
+  assert.ok(existsSync(join(appDir, "brain", "building-templates", "medieval-small.json")), "the template files are not in the app folder");
+  const { code, output } = runBundled("brain/src/main.js", ["--help"]);
+  assert.equal(code, 0, output);
+  assert.match(output, /--agent/u);
+  assert.doesNotMatch(output, /DATA_FOLDER_MISSING|TEMPLATE_INVALID/u);
+});
+
 test("the host bundle starts and reads its arguments (it has no --help, so it names the unknown option)", () => {
   const { code, output } = runBundled("src/server/host.js", ["--help"]);
   assert.equal(code, 1, output);

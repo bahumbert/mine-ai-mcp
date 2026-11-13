@@ -22,6 +22,8 @@ export interface ObservedItemPickupOptions {
   readonly signal?: AbortSignal;
   /** Optional caller-owned patience for a route with a concrete local bound. */
   readonly timeoutMs?: number;
+  /** Told of each block the route places to get to the item (scaffold the caller may owe a takedown). */
+  readonly onPlacement?: Parameters<Navigate>[0]["onPlacement"];
   /** How long inventory settlement gets once the item is gone, and after reaching a pickup stance. */
   readonly settleMs?: { readonly itemGone?: number; readonly pickup?: number };
 }
@@ -135,7 +137,7 @@ export async function pickupObservedItem(
         if (current && !withinItemPickupReach(bot.entity.position, current)) return { kind: "continue" };
         return { kind: "completed" };
       },
-      timeoutMs: options.timeoutMs,
+      timeoutMs: options.timeoutMs, onPlacement: options.onPlacement,
       signal: options.signal,
       stopSignal: routeAbort.signal,
       // A dropped item can move or despawn while search is running. Keep route

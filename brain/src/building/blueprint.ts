@@ -1,15 +1,21 @@
 import { z } from "zod";
+import { groupEntryOf, supportGroups, type SupportGroup } from "./support.ts";
 
 /**
  * Material roles (ADR-006): a blueprint says what each cell is for, a style says which block plays that role. `air`
  * cells are dug clear (interior, doorway); cells a blueprint does not list are left as they are.
  */
-export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "air"] as const;
+export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "accent", "railing", "air"] as const;
 export type Role = (typeof ROLES)[number];
 export type BlockRole = Exclude<Role, "air">;
 
 /** The roles a house is built with: every role but `air`; `build` may name a block for each. */
-export const BUILD_ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door"] as const satisfies readonly BlockRole[];
+export const BUILD_ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "accent", "railing"] as const satisfies readonly BlockRole[];
+
+/** Decorative roles (coloured bands, ladders, fences around a veranda): a palette may leave them out. */
+export const OPTIONAL_ROLES = ["accent", "railing"] as const satisfies readonly BlockRole[];
+export type OptionalRole = (typeof OPTIONAL_ROLES)[number];
+export type RequiredRole = Exclude<BlockRole, OptionalRole>;
 
 /** The roles that hold the house up and shut it: a block for one of these must fill its cell. */
 export const STRUCTURAL_ROLES = BUILD_ROLES.slice(0, 6) as readonly BlockRole[];
@@ -21,7 +27,7 @@ export type Shape = (typeof SHAPES)[number];
 /** Per role, the blocks a style uses for each shape; a role without one builds the shape as its full block. */
 export type Variants = Readonly<Partial<Record<BlockRole, Readonly<Partial<Record<Shape, string>>>>>>;
 
-const FACINGS = ["north", "south", "east", "west"] as const;
+export const FACINGS = ["north", "south", "east", "west"] as const;
 
 /** The runtime's `build_structure` limit (src/actions/build-structure/contract.ts `MAX_STRUCTURE_CELLS`). */
 export const MAX_BATCH_CELLS = 256;
@@ -64,7 +70,7 @@ export const blueprintSchema = z.strictObject({
 });
 
 export type Blueprint = z.infer<typeof blueprintSchema>;
-export type Palette = Readonly<Record<BlockRole, string>>;
+export type Palette = Readonly<Record<RequiredRole, string>> & Readonly<Partial<Record<OptionalRole, string>>>;
 
 /** Where the door faces once built. */
 export type Facing = "north" | "south" | "east" | "west";
@@ -117,7 +123,7 @@ const OPPOSITE: Readonly<Record<Facing, Facing>> = { north: "south", south: "nor
  * A shaped cell takes its role's stairs or slab from `variants`, its facing and axis turned with the site; without a
  * variant it is the role's full block and asks no stair or slab state.
  */
-export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Position, facing: Facing, variants: Variants = {}): WorldCell[] {
+export function placeBlueprint(blueprint: Blueprint, palette: Readonly<Partial<Record<BlockRole, string>>>, door: Position, facing: Facing, variants: Variants = {}): WorldCell[] {
   const anchor = blueprint.cells.find((cell) => cell.role === "door");
   if (anchor === undefined) throw new Error(`${blueprint.name} has no door`);
   const rotate = ROTATE[facing];
@@ -127,19 +133,27 @@ export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Pos
     return x > 0 ? "east" : x < 0 ? "west" : z > 0 ? "south" : "north";
   };
   const quarter = facing === "east" || facing === "west";
+  const paletteBlock = (role: BlockRole): string => {
+    const block = palette[role];
+    if (block === undefined) throw new Error(`${blueprint.name}: the palette has no block for the role ${role}`);
+    return block;
+  };
   return blueprint.cells.map((cell): WorldCell => {
     const [dx, dz] = rotate(cell.x - anchor.x, cell.z - anchor.z);
     const position = { x: door.x + dx, y: door.y + cell.y - anchor.y, z: door.z + dz };
     if (cell.role === "air") return { ...position, block: "air", role: "air" };
-    if (cell.role === "door") return { ...position, block: palette.door, role: "door", facing: OPPOSITE[facing] };
+    if (cell.role === "door") return { ...position, block: paletteBlock("door"), role: "door", facing: OPPOSITE[facing] };
     const shaped = cell.shape === undefined ? undefined : variants[cell.role]?.[cell.shape];
+    const block = shaped ?? paletteBlock(cell.role);
     const axis = cell.axis === undefined || cell.axis === "y" || !quarter ? cell.axis : cell.axis === "x" ? "z" : "x";
+    // A cell with a shape but no variant is a full block and asks no state; a cell with no shape (a ladder) asks what it names.
+    const asksStates = cell.shape === undefined || shaped !== undefined;
     return {
       ...position,
-      block: shaped ?? palette[cell.role],
+      block,
       role: cell.role,
-      ...(shaped !== undefined && cell.facing !== undefined && { facing: turn(cell.facing) }),
-      ...(shaped !== undefined && cell.half !== undefined && { half: cell.half }),
+      ...(asksStates && cell.facing !== undefined && { facing: turn(cell.facing) }),
+      ...(asksStates && cell.half !== undefined && { half: cell.half }),
       ...(axis !== undefined && { axis }),
     };
   });
@@ -171,17 +185,35 @@ export function describeMaterials(materials: readonly MaterialCount[]): string {
 }
 
 /**
- * Splits cells into `build_structure` calls, one layer each, bottom up (a layer larger than the limit is split). A layer
- * is finished before the next starts: packed together, the first live house raised a wall on terrain the foundation
- * had not yet replaced, sealing that stone in where it could never be dug.
+ * The cells each call is answerable for: a cell that is in several calls (the door's support sits in its layer's call and
+ * again in the door's; an air cell in its layer and in the clearing pass) counts in its last call only, as `buildParts`
+ * does, so the bills of the calls add up to the bill of the house.
  */
-export function batchCells(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): WorldCell[][] {
-  const layers = new Map<number, WorldCell[]>();
-  for (const cell of cells) layers.set(cell.y, [...(layers.get(cell.y) ?? []), cell]);
+export function cellsCountedOnce(batches: readonly (readonly WorldCell[])[]): WorldCell[][] {
+  const lastCall = new Map<string, number>();
+  batches.forEach((batch, index) => batch.forEach((cell) => lastCall.set(`${cell.x},${cell.y},${cell.z}`, index)));
+  return batches.map((batch, index) => batch.filter((cell) => lastCall.get(`${cell.x},${cell.y},${cell.z}`) === index));
+}
+
+/**
+ * Splits cells into `build_structure` calls, one support group each (the layer `y` when no `groups` are given), bottom
+ * up. A group is finished before the next starts: packed together, the first live house raised a wall on terrain the
+ * foundation had not yet replaced, sealing that stone in where it could never be dug. A group larger than the limit is
+ * cut by round (stable), so no cell lands in an earlier call than the cells it rests on; a smaller group keeps its
+ * order, the runtime works a call in passes.
+ */
+export function batchCells(cells: readonly WorldCell[], max = MAX_BATCH_CELLS, groups?: ReadonlyMap<string, SupportGroup>): WorldCell[][] {
+  const callOf = new Map<number, WorldCell[]>();
+  for (const cell of cells) {
+    const group = groupEntryOf(cell, groups)?.group ?? cell.y;
+    callOf.set(group, [...(callOf.get(group) ?? []), cell]);
+  }
+  const roundOf = (cell: WorldCell) => groupEntryOf(cell, groups)?.round ?? 0;
   const batches: WorldCell[][] = [];
-  for (const y of [...layers.keys()].sort((a, b) => a - b)) {
-    const layer = layers.get(y) ?? [];
-    for (let start = 0; start < layer.length; start += max) batches.push(layer.slice(start, start + max));
+  for (const group of [...callOf.keys()].sort((a, b) => a - b)) {
+    const members = callOf.get(group) ?? [];
+    const ordered = members.length > max ? [...members].sort((a, b) => roundOf(a) - roundOf(b)) : members;
+    for (let start = 0; start < ordered.length; start += max) batches.push(ordered.slice(start, start + max));
   }
   return batches;
 }
@@ -201,7 +233,7 @@ export function buildBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS)
     { x: door.x, y: door.y + 1, z: door.z, block: "air", role: "air" },
   ]);
   const supports = cells.filter((cell) => doors.some((door) => cell.x === door.x && cell.y === door.y - 1 && cell.z === door.z));
-  const body = batchCells([...cells.filter((cell) => cell.role !== "door"), ...doorway], max);
+  const body = batchCells([...cells.filter((cell) => cell.role !== "door"), ...doorway], max, supportGroups(cells).groups);
   const air = cells.filter((cell) => cell.role === "air");
   const clearing: WorldCell[][] = [];
   for (let start = 0; start < air.length; start += max) clearing.push(air.slice(start, start + max));

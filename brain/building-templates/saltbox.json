@@ -1,0 +1,203 @@
+{
+  "id": "saltbox",
+  "family": "north-america",
+  "name": "saltbox",
+  "description": "Two-storey clapboard house of birch planks with oak corner posts: a short front roof and a long back slope sweeping down to one storey, a railed front deck, an inner ladder to the upper floor.",
+  "palette": {
+    "foundation": "cobblestone",
+    "floor": "oak_planks",
+    "wall": "birch_planks",
+    "pillar": "oak_log",
+    "roof": "dark_oak_planks",
+    "window": "glass_pane",
+    "door": "dark_oak_door",
+    "accent": "ladder",
+    "railing": "oak_fence"
+  },
+  "variants": {
+    "roof": {
+      "stairs": "dark_oak_stairs",
+      "slab": "dark_oak_slab"
+    }
+  },
+  "key": {
+    "a": {
+      "role": "foundation"
+    },
+    "b": {
+      "role": "floor"
+    },
+    "w": {
+      "role": "wall"
+    },
+    "p": {
+      "role": "pillar",
+      "axis": "y"
+    },
+    "D": {
+      "role": "door"
+    },
+    "g": {
+      "role": "window"
+    },
+    "L": {
+      "role": "accent",
+      "facing": "east"
+    },
+    "f": {
+      "role": "railing"
+    },
+    "r": {
+      "role": "roof"
+    },
+    "s": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "south",
+      "half": "bottom"
+    },
+    "n": {
+      "role": "roof",
+      "shape": "stairs",
+      "facing": "north",
+      "half": "bottom"
+    },
+    "_": {
+      "role": "air"
+    }
+  },
+  "layers": [
+    [
+      ".bbbbbbb.",
+      "aaaaaaaaa",
+      "abbbbbbba",
+      "abbbbbbba",
+      "abbbbbbba",
+      "abbbbbbba",
+      "abbbbbbba",
+      "abbbbbbba",
+      "aaaaaaaaa",
+      "........."
+    ],
+    [
+      ".ff...ff.",
+      "pwwwDwwwp",
+      "w_______w",
+      "wL______w",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "pwwwwwwwp",
+      "........."
+    ],
+    [
+      ".........",
+      "pwgw.wgwp",
+      "w_______w",
+      "wL______w",
+      "g_______g",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "pwwwgwwwp",
+      "........."
+    ],
+    [
+      ".........",
+      "pwwwwwwwp",
+      "w_______w",
+      "wL______w",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "pwwwwwwwp",
+      "........."
+    ],
+    [
+      ".........",
+      "pwwwwwwwp",
+      "wbbbbbbbw",
+      "wLbbbbbbw",
+      "w_bbbbbbw",
+      "wbbbbbbbw",
+      "wbbbbbbbw",
+      "w_______w",
+      "pwwwwwwwp",
+      "nnnnnnnnn"
+    ],
+    [
+      ".........",
+      "pwwwwwwwp",
+      "w_______w",
+      "wL______w",
+      "w_______w",
+      "w_______w",
+      "wfffffffw",
+      "w_______w",
+      "nnnnnnnnn",
+      "........."
+    ],
+    [
+      ".........",
+      "pwgwgwgwp",
+      "w_______w",
+      "g_______g",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "nnnnnnnnn",
+      ".........",
+      "........."
+    ],
+    [
+      "sssssssss",
+      "pwwwwwwwp",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "nnnnnnnnn",
+      ".........",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      "sssssssss",
+      "w_______w",
+      "w_______w",
+      "w_______w",
+      "nnnnnnnnn",
+      ".........",
+      ".........",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      "sssssssss",
+      "w_______w",
+      "nnnnnnnnn",
+      ".........",
+      ".........",
+      ".........",
+      ".........",
+      "........."
+    ],
+    [
+      ".........",
+      ".........",
+      ".........",
+      "rrrrrrrrr",
+      ".........",
+      ".........",
+      ".........",
+      ".........",
+      ".........",
+      "........."
+    ]
+  ]
+}

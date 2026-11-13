@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BlockKind } from "../runtime-client.ts";
 import { checkMaterials, improvement, temporaryRoles } from "./materials.ts";
-import { STYLES } from "./styles.ts";
+import { templateFor } from "./templates.ts";
 
-const medieval = STYLES.get("medieval")!;
+const medieval = templateFor("medieval-small")!;
 const full: BlockKind = { tool: "shovel", solid: true, fullCube: true, harvest: null };
 const kinds: Record<string, BlockKind> = {
   dirt: full,
@@ -22,17 +22,23 @@ test("valid materials are accepted, none are accepted", () => {
   assert.equal(checkMaterials({ window: "glass_pane" }, medieval, kinds), null);
 });
 
-test("an unknown block id is refused, naming the role and the style's block", () => {
-  assert.equal(checkMaterials({ wall: "stone_blok" }, medieval, kinds), "wall: stone_blok is no block id (your style uses oak_planks).");
+test("an unknown block id is refused, naming the role and the house's block", () => {
+  assert.equal(checkMaterials({ wall: "stone_blok" }, medieval, kinds), "wall: stone_blok is no block id (this house uses oak_planks).");
 });
 
 test("a structural role needs a full block", () => {
-  assert.equal(checkMaterials({ roof: "oak_stairs" }, medieval, kinds), "roof: oak_stairs is not a full block (your style uses spruce_planks).");
-  assert.match(checkMaterials({ foundation: "oak_slab" }, medieval, kinds)!, /^foundation: oak_slab is not a full block \(your style uses cobblestone\)\.$/u);
+  assert.equal(checkMaterials({ roof: "oak_stairs" }, medieval, kinds), "roof: oak_stairs is not a full block (this house uses spruce_planks).");
+  assert.match(checkMaterials({ foundation: "oak_slab" }, medieval, kinds)!, /^foundation: oak_slab is not a full block \(this house uses cobblestone\)\.$/u);
 });
 
 test("a door needs the game's doors tag", () => {
-  assert.equal(checkMaterials({ door: "dirt" }, medieval, kinds), "door: dirt is not a door (your style uses oak_door).");
+  assert.equal(checkMaterials({ door: "dirt" }, medieval, kinds), "door: dirt is not a door (this house uses oak_door).");
+});
+
+test("accent and railing may be air or any block, like the window, and name no block the house lacks", () => {
+  assert.equal(checkMaterials({ accent: "air", railing: "air" }, medieval, kinds), null);
+  assert.equal(checkMaterials({ accent: "dirt", railing: "glass_pane" }, medieval, kinds), null);
+  assert.equal(checkMaterials({ accent: "stone_blok" }, medieval, kinds), "accent: stone_blok is no block id.");
 });
 
 test("every bad role gets its own sentence", () => {
@@ -41,13 +47,20 @@ test("every bad role gets its own sentence", () => {
   assert.match(refusal, /door: dirt is not a door/u);
 });
 
-test("the temporary roles are those whose block differs from the style", () => {
+test("the temporary roles are those whose block differs from the house's", () => {
   assert.deepEqual(temporaryRoles({}, medieval), []);
   assert.deepEqual(temporaryRoles({ wall: "oak_planks", roof: "dirt", window: "air" }, medieval), ["roof", "window"]);
 });
 
+test("a role the house has no block for cannot make it temporary", () => {
+  // medieval-small has no accent or railing: a block named for them changes nothing, and improving has nothing to swap back
+  assert.equal(medieval.palette.accent, undefined);
+  assert.deepEqual(temporaryRoles({ accent: "dirt", railing: "air", wall: "dirt" }, medieval), ["wall"]);
+  assert.deepEqual(temporaryRoles({ accent: "air" }, medieval), []);
+});
+
 test("improving swaps back only the roles asked, the bill is the cells that change", () => {
-  const house = { size: "small" as const, door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: "dirt" } };
+  const house = { door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: "dirt" } };
   const all = improvement(medieval, house, ["wall", "roof"]);
   assert.deepEqual(all.rest, {});
   assert.ok(all.bill.some((entry) => entry.item === "spruce_stairs") && all.bill.every((entry) => entry.item !== "dirt"));
