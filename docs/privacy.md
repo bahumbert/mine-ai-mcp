@@ -33,6 +33,9 @@ checked against its hash (SHA-256; Mojang's SHA-1 for the server file) before it
 - **Java (Temurin JRE 21)**, from Adoptium, when a Minecraft server on this PC is chosen.
 - **Minecraft server 1.21.4**, from Mojang, when a Minecraft server on this PC is chosen and the Minecraft EULA is
   accepted.
+- **Paper server 1.21.4**, from PaperMC, when a Minecraft server on this PC is chosen with the Paper program and the
+  Minecraft EULA is accepted. It is started from Mojang's server file above, which the installer puts where Paper looks
+  for it.
 
 ## The AI endpoint
 
