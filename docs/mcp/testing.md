@@ -59,7 +59,7 @@ Three rules keep the suite small:
   that asserts nothing its fixture could contradict is deleted, and tests that
   vary one input of one fixture are one table.
 - **One double per interface, in one home.** The Mineflayer `Bot` double is
-  `botFixture` in [src/test-support/bot.ts](../../src/test-support/bot.ts); the
+  `createFakeBot` in [src/test-support/fake-bot/](../../src/test-support/fake-bot/); the
   engine-side actuator double is `FakeNavigationBot` in
   [src/test-support/navigation.ts](../../src/test-support/navigation.ts); the
   bot-data stores are in [src/test-support/bot-data.ts](../../src/test-support/bot-data.ts).
