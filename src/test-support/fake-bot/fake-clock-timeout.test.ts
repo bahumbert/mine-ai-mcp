@@ -40,5 +40,8 @@ const report = `${child.stdout}\n${child.stderr}`;
 
 test("a test that passes its time limit and installs its clock late does not block the tests after it", () => {
   assert.match(report, /\(fail\) slow before it installs/u, "the child's first test timed out");
-  assert.match(report, /\(pass\) next test installs its own clock/u, report);
+  // The second test passed: its "(pass)" line is not read, a child started from a Claude Code session (CLAUDECODE=1
+  // in the environment) prints failures and the summary only.
+  assert.doesNotMatch(report, /\(fail\) next test installs its own clock/u, report);
+  assert.match(report, /^\s*1 pass$/mu, report);
 });
