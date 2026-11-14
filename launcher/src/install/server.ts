@@ -146,8 +146,10 @@ async function preparePaperclip(ctx: InstallContext, deps: ServerDeps, dir: stri
   }
 }
 
-/** The installed Paper's first-start files are all there: the patched jar is in `versions/`. */
-const isPaperPrepared = (dir: string, manifest: Manifest) => existsSync(join(dir, "versions", manifest.minecraft.version, `paper-${manifest.minecraft.version}.jar`));
+/** The patched jar Paperclip's first start leaves in `<dir>/versions`: when it is there, Paper's first-start files are installed. */
+export const paperPreparedFile = (dir: string, manifest: Manifest): string => join(dir, "versions", manifest.minecraft.version, `paper-${manifest.minecraft.version}.jar`);
+
+const isPaperPrepared = (dir: string, manifest: Manifest) => existsSync(paperPreparedFile(dir, manifest));
 
 /** Paper's part of the step: its jar, the old builds out, its settings merged, Paperclip prepared. Returns the detail's extra sentences or the failure. */
 async function installPaper(ctx: InstallContext, deps: ServerDeps, dir: string): Promise<string[] | StepFailure> {
