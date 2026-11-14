@@ -7,6 +7,7 @@ import { UsageError } from "./cli-context.ts";
 import { cliContext } from "./cli-test-support.ts";
 import { runConfigureCommand } from "./configure-command.ts";
 import { fakeKeyCipher, unreadingCipher } from "./key-cipher-test-support.ts";
+import { worldRanOnPaper } from "./install/world-layout.ts";
 import { loadManifest } from "./manifest.ts";
 
 function setup() {
@@ -297,21 +298,84 @@ test("--server-program bogus is refused naming both values; a missing or repeate
   assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
 });
 
-test("going to vanilla from paper or from no local server on a world that ran on Paper is refused with the Nether and End folders named, settings unchanged", async () => {
-  const paper = { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" };
-  const rows = [
-    { folder: "world_nether", saved: paper, args: ["--server-program", "vanilla"] },
-    { folder: "world_the_end", saved: paper, args: ["--server-program", "vanilla"] },
-    { folder: "world_nether", saved: { kind: "none" }, args: ["--server-local", "--server-program", "vanilla"] },
-  ];
-  for (const { folder, saved, args } of rows) {
-    const t = setup();
-    const before = writeServerSetting(t, saved);
-    mkdirSync(join(t.root, "server", folder), { recursive: true });
-    assert.equal(await runConfigureCommand(args, t.context, LOCAL_8GB), 1, JSON.stringify({ folder, saved, args }));
-    assert.match(t.out.join("\n"), /This world has run on Paper, which keeps the Nether and the End in folders of their own \(world_nether, world_the_end\)\. Going back to vanilla is not offered yet: keep Paper, or move the world folders aside to start a new world on vanilla\./u);
-    assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+const NO_LAUNCHER = { ...LOCAL_8GB, findRunningLauncher: async () => null };
+const LAUNCHER_RUNS = { ...LOCAL_8GB, findRunningLauncher: async () => ({ pid: 4242, controlPort: 5151, startedAt: 0 }) };
+
+/** A server folder as Paper leaves it: `world` for the Overworld, the Nether (and the End when asked) in folders of their own. */
+function paperServerFolder(t: ReturnType<typeof setup>, { withEnd }: { withEnd: boolean }): string {
+  const server = join(t.root, "server");
+  mkdirSync(join(server, "world"), { recursive: true });
+  mkdirSync(join(server, "world_nether", "DIM-1"), { recursive: true });
+  writeFileSync(join(server, "world_nether", "DIM-1", "nether.txt"), "nether");
+  if (withEnd) {
+    mkdirSync(join(server, "world_the_end", "DIM1"), { recursive: true });
+    writeFileSync(join(server, "world_the_end", "DIM1", "end.txt"), "end");
   }
+  return server;
+}
+
+// Covers the plan's `paper to vanilla moves the dimensions back` and `configure says what it moved`.
+test("paper to vanilla moves the dimensions back and says what it moved", async () => {
+  const rows = [
+    { saved: { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" }, args: ["--server-program", "vanilla"] },
+    { saved: { kind: "none" }, args: ["--server-local", "--server-program", "vanilla"] },
+  ];
+  for (const { saved, args } of rows) {
+    const t = setup();
+    writeServerSetting(t, saved);
+    const server = paperServerFolder(t, { withEnd: true });
+    assert.equal(await runConfigureCommand(args, t.context, NO_LAUNCHER), 0, JSON.stringify({ saved, args }));
+    assert.equal(t.settings().server.program, "vanilla");
+    assert.equal(readFileSync(join(server, "world", "DIM-1", "nether.txt"), "utf8"), "nether");
+    assert.equal(readFileSync(join(server, "world", "DIM1", "end.txt"), "utf8"), "end");
+    assert.equal(worldRanOnPaper(server), false);
+    const said = t.out.join("\n");
+    assert.match(said, /Moved world_nether\/DIM-1 to world\/DIM-1\./u);
+    assert.match(said, /Moved world_the_end\/DIM1 to world\/DIM1\./u);
+    assert.match(said, /Saved /u);
+  }
+});
+
+test("refuses while a launcher runs", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  const server = paperServerFolder(t, { withEnd: true });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LAUNCHER_RUNS), 1);
+  assert.match(t.out.join("\n"), /mine-ai stop/u);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  assert.equal(worldRanOnPaper(server), true);
+});
+
+test("a launcher that runs does not block a switch that moves nothing", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  mkdirSync(join(t.root, "server", "world"), { recursive: true });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LAUNCHER_RUNS), 0);
+});
+
+test("a save that fails after the move says what it moved and that settings.json is unchanged", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  const server = paperServerFolder(t, { withEnd: false });
+  mkdirSync(join(t.root, "settings.json.tmp")); // the save writes its temporary file here: a folder in the way makes it fail
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, NO_LAUNCHER), 1);
+  const said = t.out.join("\n");
+  assert.match(said, /Moved world_nether\/DIM-1 to world\/DIM-1\./u);
+  assert.match(said, /settings\.json is unchanged/u);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  assert.equal(worldRanOnPaper(server), false);
+});
+
+test("a move that fails leaves settings.json as it was and names the folder", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  const server = join(t.root, "server");
+  mkdirSync(join(server, "world_nether", "DIM-1"), { recursive: true });
+  writeFileSync(join(server, "world"), "a file where the world folder should be"); // the move into world/DIM-1 cannot work
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, NO_LAUNCHER), 1);
+  assert.match(t.out.join("\n"), /world_nether\/DIM-1/u);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  assert.equal(worldRanOnPaper(server), true);
 });
 
 test("vanilla to paper on any world is allowed", async () => {

@@ -1,9 +1,10 @@
 // `mine-ai configure`: the installer's (and the player's) way to write settings.json without opening it.
-import { existsSync } from "node:fs";
 import { totalmem } from "node:os";
 import { join } from "node:path";
 import { UsageError, type CliContext } from "./cli-context.ts";
+import { findRunningLauncher, type LauncherLock } from "./control.ts";
 import { serverMemoryMb } from "./install/server.ts";
+import { moveDimensionsBack, WorldMoveError, worldRanOnPaper } from "./install/world-layout.ts";
 import type { Manifest } from "./manifest.ts";
 import { keyUnreadableStartText } from "./secret.ts";
 import { clearKeyMigrationLine, COMMAND_PLAYER_NAME, loadSettings, realSettingsOptions, saveSettings, SERVER_PROGRAMS, settingsPath, type ServerProgram, type Settings, type SettingsOptions } from "./settings.ts";
@@ -15,6 +16,8 @@ export interface ConfigureDeps {
   totalRamBytes(): number;
   /** How the API key is protected on this system; tests pass a fake Windows. Default: the real one. */
   settings?: SettingsOptions;
+  /** The launcher that runs on this root, or null; tests pass a fake. Default: the lock file's (`control.ts`). */
+  findRunningLauncher?(): Promise<LauncherLock | null>;
 }
 
 type LlmChoice = { kind: "local" } | { kind: "remote"; baseUrl: string; apiKey: string; model: string } | { kind: "remoteSavedKey"; baseUrl: string; model: string };
@@ -124,11 +127,6 @@ function chosenLlm(settings: Settings, choice: LlmChoice, manifest: Manifest, ro
 /** A refusal the player can act on (not a wrong command line): `runConfigureCommand` says it and leaves settings.json as it is. */
 class ConfigureRefusal extends Error {}
 
-/** True when the world in `serverDir` ran on Paper: Paper keeps the Nether and the End in `world_nether` and `world_the_end`, vanilla inside `world`. */
-export function worldRanOnPaper(serverDir: string): boolean {
-  return existsSync(join(serverDir, "world_nether")) || existsSync(join(serverDir, "world_the_end"));
-}
-
 function parseServerProgram(text: string): ServerProgram {
   if (!(SERVER_PROGRAMS as readonly string[]).includes(text)) throw new UsageError(`--server-program takes ${SERVER_PROGRAMS.join(" or ")}, not "${text}". ${USAGE}`);
   return text as ServerProgram;
@@ -140,16 +138,31 @@ function chosenProgram(settings: Settings, choices: Choices): ServerProgram {
   return settings.server.kind === "local" ? settings.server.program : "paper";
 }
 
-/** Going back to vanilla from anything but vanilla is refused on a world that ran on Paper: vanilla would start a new Nether and End beside the old ones. */
-function checkWorldAllowsVanilla(settings: Settings, program: ServerProgram, root: string): void {
-  const wasVanilla = settings.server.kind === "local" && settings.server.program === "vanilla";
-  if (program !== "vanilla" || wasVanilla || !worldRanOnPaper(join(root, "server"))) return;
-  throw new ConfigureRefusal("This world has run on Paper, which keeps the Nether and the End in folders of their own (world_nether, world_the_end). Going back to vanilla is not offered yet: keep Paper, or move the world folders aside to start a new world on vanilla.");
+/**
+ * Going back to vanilla from anything but vanilla on a world that ran on Paper: vanilla would start a new Nether and End beside
+ * the old ones, so the dimensions go back into `world` first (facts `paper-server.md` E: same blocks, same position). It moves
+ * files a running launcher's server holds, so it refuses while one runs. Returns the lines for the player.
+ */
+async function moveWorldBackForVanilla(before: Settings, after: Settings, root: string, deps: ConfigureDeps): Promise<string[]> {
+  const wasVanilla = before.server.kind === "local" && before.server.program === "vanilla";
+  const goesToVanilla = after.server.kind === "local" && after.server.program === "vanilla";
+  const serverDir = join(root, "server");
+  if (!goesToVanilla || wasVanilla || !worldRanOnPaper(serverDir)) return [];
+  const launcherRuns = deps.findRunningLauncher ?? (() => findRunningLauncher(root));
+  if (await launcherRuns() !== null) {
+    throw new ConfigureRefusal("Mine AI is running, and this world has run on Paper (its Nether and End are in world_nether and world_the_end): going back to vanilla moves them into the world folder. Run `mine-ai stop`, then run this again.");
+  }
+  try {
+    return await moveDimensionsBack(serverDir);
+  } catch (error) {
+    if (!(error instanceof WorldMoveError)) throw error;
+    throw new ConfigureRefusal(`${error.message} Settings are unchanged: close what holds those folders (a file explorer, a backup tool), then run this again.`);
+  }
 }
 
 const SERVER_PROGRAM_NEEDS_LOCAL = `--server-program needs a local server: give --server-local with it, or set one up first. ${USAGE}`;
 
-function chosenServer(settings: Settings, choices: Choices, manifest: Manifest, deps: ConfigureDeps, root: string): Settings["server"] {
+function chosenServer(settings: Settings, choices: Choices, manifest: Manifest, deps: ConfigureDeps): Settings["server"] {
   if (choices.server !== undefined && choices.server.kind !== "local") {
     if (choices.serverProgram !== undefined) throw new UsageError(SERVER_PROGRAM_NEEDS_LOCAL);
     return choices.server;
@@ -157,18 +170,15 @@ function chosenServer(settings: Settings, choices: Choices, manifest: Manifest, 
   if (choices.server === undefined) {
     if (choices.serverProgram === undefined) return settings.server;
     if (settings.server.kind !== "local") throw new UsageError(SERVER_PROGRAM_NEEDS_LOCAL);
-    checkWorldAllowsVanilla(settings, choices.serverProgram, root);
     return { ...settings.server, program: choices.serverProgram };
   }
-  const program = chosenProgram(settings, choices);
-  checkWorldAllowsVanilla(settings, program, root);
-  return { kind: "local", port: settings.server.kind === "local" ? settings.server.port : DEFAULT_LOCAL_SERVER_PORT, memoryMb: serverMemoryMb(manifest, deps.totalRamBytes()), program };
+  return { kind: "local", port: settings.server.kind === "local" ? settings.server.port : DEFAULT_LOCAL_SERVER_PORT, memoryMb: serverMemoryMb(manifest, deps.totalRamBytes()), program: chosenProgram(settings, choices) };
 }
 
 function applyChoices(settings: Settings, choices: Choices, manifest: Manifest, deps: ConfigureDeps, root: string): Settings {
   const next = { ...settings };
   if (choices.llm) next.llm = chosenLlm(settings, choices.llm, manifest, root);
-  next.server = chosenServer(settings, choices, manifest, deps, root);
+  next.server = chosenServer(settings, choices, manifest, deps);
   if (choices.commandPlayers) next.commands = { ...settings.commands, players: choices.commandPlayers };
   if (choices.checkUpdates !== undefined) next.checkUpdates = choices.checkUpdates;
   return next;
@@ -187,17 +197,21 @@ export async function runConfigureCommand(args: readonly string[], context: CliC
     return 1;
   }
   let next: Settings;
+  let moved: string[];
   try {
     next = applyChoices(loaded, choices, manifest, deps, context.root); // a UsageError (no saved key, no local server) leaves the file as it is
+    moved = await moveWorldBackForVanilla(loaded, next, context.root, deps); // before the save: a move that fails leaves the file as it is
   } catch (error) {
     if (!(error instanceof ConfigureRefusal)) throw error;
     context.err(error.message);
     return 1;
   }
+  moved.forEach((line) => context.out(line)); // before the save: a save that fails must not hide that the folders moved
   try {
     saveSettings(context.root, next, options);
   } catch (error) {
     context.err((error as Error).message);
+    if (moved.length > 0) context.err(`settings.json is unchanged (the server is not on vanilla yet), and the world folders are in vanilla's layout as listed above, which Paper reads again at its next start. Fix the error, then run this again to switch to vanilla.`);
     return 1;
   }
   context.out(`Saved ${settingsPath(context.root)}`);
