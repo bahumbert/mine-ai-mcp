@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { z } from "zod";
 import { defineAction, actionResultSchema, type ActionExecution } from "../actions/index.js";
+import { BodyAbort } from "./abort.js";
 import { ActionRunner } from "./action-runner.js";
 import { stubAction, stubResultSchema, stubInputSchema, StubAction, started, untilOwner } from "./action-runner-fixtures.test.js";
 
@@ -225,6 +226,59 @@ test("a control cancellation during the handoff is final: the task is not resume
   assert.equal(runs.count, 1);
   assert.equal(output.result.status, "cancelled");
   assert.equal(output.interruptions, undefined);
+});
+
+test("cancelling the request during a reflex handoff stops the action for good", async () => {
+  const runs = { count: 0 };
+  const lifetimes: AbortSignal[] = [];
+  const task = defineAction({
+    name: "stub",
+    description: "stub",
+    inputSchema: stubInputSchema,
+    resultSchema: stubResultSchema,
+    formatResult: (result) => result.status,
+    execution: { kind: "resumable_task" },
+    parse: (input: unknown) => {
+      const value = stubInputSchema.parse(input);
+      if (!value.block_name) throw new Error("required");
+      return value;
+    },
+    begin: (_request, lifetime) => {
+      lifetimes.push(lifetime);
+      return async (context) => {
+        runs.count += 1;
+        await new Promise<void>((resolve) => context.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw context.signal?.reason;
+      };
+    },
+  });
+  const runner = new ActionRunner();
+  const outcome = runner.run(task, { block_name: "iron_ore" }, undefined, 1236, "request-cancelled-in-handoff");
+  await started(runs, 1);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const claim = runner.claim("hostile_reflex", "hostile contact", async () => {
+    await gate;
+    return { value: "killed", continuation: { kind: "resume" as const } };
+  });
+  assert.equal(claim.kind, "claimed");
+  assert.equal(runner.cancelRequest("request-cancelled-in-handoff", "operator stop").kind, "cancellation_requested");
+
+  const lifetime = lifetimes[0];
+  assert.equal(lifetime?.aborted, true);
+  assert.ok(lifetime?.reason instanceof BodyAbort);
+  assert.deepEqual(lifetime.reason.detail, { kind: "cancelled", by: "model" });
+
+  release();
+  const output = await outcome;
+  if (claim.kind !== "claimed") throw new Error("Expected claim");
+  await claim.outcome;
+  assert.equal(runs.count, 1);
+  assert.equal(output.result.status, "cancelled");
+  assert.deepEqual(output.interruptions, ["hostile contact"]);
+  assert.deepEqual(runner.status(), { busy: false, activeAction: null, owner: "idle" });
 });
 
 test("disconnect settles an action awaiting a reflex that never returns", async () => {
