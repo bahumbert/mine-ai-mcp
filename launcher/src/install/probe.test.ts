@@ -159,7 +159,7 @@ test("another version is reported with both versions, and no login probe is sent
     assert.equal(result.onlineMode, undefined);
     assert.match(result.detail, /1\.20\.4/u);
     assert.match(result.detail, /1\.21\.4/u);
-    assert.match(result.detail, /Use a .*1\.21\.4 server/u);
+    assert.match(result.detail, /Use a vanilla or Paper 1\.21\.4 server/u);
     assert.equal(server.received.length, 1);
   });
 });

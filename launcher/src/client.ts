@@ -61,7 +61,7 @@ export function bannerLines(status: StackStatus, mark: (line: string) => string 
   if (settingsFound) lines.push(`Model: ${status.llm.kind === "local" ? `${status.llm.model} on this PC` : `${status.llm.model} on your remote endpoint`}`);
   if (status.server === "local") lines.push(mark(`Join from Minecraft Java ${status.minecraftVersion} at ${status.join}.`));
   else if (status.server === "remote") {
-    lines.push(mark(`The bots join ${status.join}. That server must be vanilla Minecraft ${status.minecraftVersion} with online-mode=false.`));
+    lines.push(mark(`The bots join ${status.join}. That server must be vanilla or Paper Minecraft ${status.minecraftVersion} with online-mode=false.`));
   } else if (settingsFound) lines.push(`No Minecraft server is set. Put one in ${status.settingsPath} ("server"), then open Mine AI again.`);
   if (status.server !== "none") lines.push(mark(chatCommandsLine(status.commands)));
   lines.push(`Settings: ${status.settingsPath}`, "Close this window to stop Mine AI.", "");

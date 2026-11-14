@@ -156,7 +156,7 @@ test("a launcher that is stopping is waited for, then a new one is started", asy
 });
 
 for (const [label, status, patterns, absent] of [
-  ["a remote server says what the server must be", { ...STATUS, server: "remote", join: "play.example:25570" }, [/play\.example:25570/u, /vanilla Minecraft 1\.21\.4/u, /online-mode=false/u], []],
+  ["a remote server says what the server must be", { ...STATUS, server: "remote", join: "play.example:25570" }, [/play\.example:25570/u, /vanilla or Paper Minecraft 1\.21\.4/u, /online-mode=false/u], []],
   ["no server in the settings file says where to set one, with the model line", { ...STATUS, server: "none", join: null }, [/Model: gemma4:12b on this PC/u, /No Minecraft server is set/u, /C:\/MineAI\/settings\.json/u], []],
   ["a launcher from before settingsFound existed (field absent) keeps the no-server line", { ...STATUS, server: "none", join: null, settingsFound: undefined as unknown as boolean }, [/No Minecraft server is set/u], []],
   [
@@ -198,7 +198,7 @@ const CHAT_LINE = "In the game chat: !bots lists the bots, !bot start <name> and
 
 for (const [label, status, emphasised] of [
   ["local server", STATUS, [JOIN_LINE, CHAT_LINE]],
-  ["remote server", { ...STATUS, server: "remote", join: "play.example:25570", commands: { prefix: "!", audience: "disabled" } }, ["The bots join play.example:25570. That server must be vanilla Minecraft 1.21.4 with online-mode=false.", "Chat commands are off (commands.enabled is false in the settings file)."]],
+  ["remote server", { ...STATUS, server: "remote", join: "play.example:25570", commands: { prefix: "!", audience: "disabled" } }, ["The bots join play.example:25570. That server must be vanilla or Paper Minecraft 1.21.4 with online-mode=false.", "Chat commands are off (commands.enabled is false in the settings file)."]],
 ] as const) {
   test(`the ${label} banner: the join line and the chat-commands line are bold with color on and no other line is; with color off nothing changes`, () => {
     const plain = bannerLines(status);

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import { loadPaperSettings } from "../install/paper-settings.ts";
 import { APP_ASSETS, bundleEntries, copyAssets, ENTRY_POINTS, minecraftDataFiles, packageApp, WORKER_ENTRY_POINTS, WORKER_FOLDER } from "./bundle.ts";
 
 // Real `Bun.build` of the repository into a temp folder under the OS temp dir: no `node_modules` above it, so a module
@@ -137,6 +138,11 @@ test("copyAssets copies the manifest, styles, personas, bun.exe and licence, and
   } finally {
     for (const folder of [stage, app, secondApp]) rmSync(folder, { recursive: true, force: true });
   }
+});
+
+test("the real pack ships the Paper settings file where the install step and the stack read it, and it loads", () => {
+  assert.ok(appFiles().includes("packaging/paper-settings.json"));
+  assert.ok(Object.keys(loadPaperSettings(join(appDir, "packaging", "paper-settings.json"))).length > 0);
 });
 
 test("the real pack ships THIRD-PARTY-NOTICES.txt in the app folder only, with the libraries, minecraft-data and Bun", () => {

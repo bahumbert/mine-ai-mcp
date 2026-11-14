@@ -26,8 +26,8 @@ export const ENTRY_POINTS = [
 export const WORKER_ENTRY_POINTS = ["src/bot-data/wal-checkpoint-worker.ts", "src/diagnostics/freeze-watch-worker.ts"] as const;
 export const WORKER_FOLDER = "src/server";
 
-/** Copied as they are from the stage: read at run time by path (`manifest.ts`, `styles.ts`), run (`bun.exe`) or given to the player. */
-export const APP_ASSETS = ["packaging/manifest.json", "brain/building-styles", "personas", "bun.exe", "LICENSE"] as const;
+/** Copied as they are from the stage: read at run time by path (`manifest.ts`, `styles.ts`, `install/server.ts` and `stack-state.ts` for the Paper settings), run (`bun.exe`) or given to the player. */
+export const APP_ASSETS = ["packaging/manifest.json", "packaging/paper-settings.json", "brain/building-styles", "personas", "bun.exe", "LICENSE"] as const;
 
 const MINECRAFT_DATA_PACKAGE = "minecraft-data";
 /** `minecraft-data` holds 446 MB for every Minecraft version behind lazy `require`s, so it stays out of the bundle. */

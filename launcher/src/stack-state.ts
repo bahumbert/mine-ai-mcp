@@ -6,6 +6,7 @@ import { monotonicNow, wallNow } from "./clocks.ts";
 import { appRoot } from "./paths.ts";
 import { probeServer } from "./install/probe.ts";
 import { ollamaExeFor } from "./install/ollama.ts";
+import { applyPaperSettings, loadPaperSettings } from "./install/paper-settings.ts";
 import type { Manifest } from "./manifest.ts";
 import { freePort } from "./ports.ts";
 import { listProcesses, type ProcessLister } from "./process-list.ts";
@@ -34,6 +35,8 @@ export interface StackDeps {
   /** The Bun that runs the launcher: it runs the hosts and brains too. */
   bunPath: string;
   appRoot: string;
+  /** Merges the app's Paper settings (`packaging/paper-settings.json`) into the config files of `serverDir`; rejects with the file and key it could not merge. */
+  applyPaperSettings(serverDir: string): Promise<void>;
   /** One line for the player: the console shows it and the launcher log keeps it. */
   say(line: string): void;
   /** Starts the chat command sources once the stack runs; absent: the real ones (`chat/sources.ts`). A stack test supplies a recording stand-in, since the real loops poll for as long as the stack runs. */
@@ -61,6 +64,7 @@ export function realStackDeps(say: (line: string) => void, root: string): StackD
     killProcess,
     bunPath: process.execPath,
     appRoot: appRoot(),
+    applyPaperSettings: async (serverDir) => void (await applyPaperSettings(serverDir, loadPaperSettings(join(appRoot(), "packaging", "paper-settings.json")))),
     say,
   };
 }

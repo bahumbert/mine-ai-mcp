@@ -222,7 +222,7 @@ export async function probeServer(host: string, port: number, version: string, t
     const status = (await pingStatus(host, port, wanted ?? 0, deadlineAt)).version;
     const versionOk = wanted === null ? status.name === version : status.protocol === wanted;
     if (!versionOk) {
-      return { up: true, versionOk: false, detail: `The server at ${address} runs ${status.name} (protocol ${status.protocol}); the bots need Minecraft ${version}${wanted === null ? "" : ` (protocol ${wanted})`}. Use a vanilla ${version} server, or the server's owner must allow ${version} clients.` };
+      return { up: true, versionOk: false, detail: `The server at ${address} runs ${status.name} (protocol ${status.protocol}); the bots need Minecraft ${version}${wanted === null ? "" : ` (protocol ${wanted})`}. Use a vanilla or Paper ${version} server, or the server's owner must allow ${version} clients.` };
     }
     const login = await probeLogin(host, port, status.protocol, deadlineAt);
     if ("refusal" in login) return { up: true, versionOk: true, detail: `The server at ${address} is up (${status.name}), but ${login.refusal}. Check that the server accepts new players (whitelist, bans): the bots join the same way.` };
