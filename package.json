@@ -43,6 +43,7 @@
     "typecheck:scripts": "bunx --bun tsc -p scripts/tsconfig.json --noEmit",
     "check": "bun scripts/check.ts",
     "test": "bun scripts/check.ts --all",
+    "test:fast": "bun scripts/test-fast.ts",
     "brain": "bun brain/src/main.ts",
     "monitor": "bun monitor/src/main.ts",
     "evidence:render": "bun scenarios/src/action-evidence-page.ts",

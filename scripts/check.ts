@@ -22,7 +22,7 @@ import {
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport, type DataReadPlan } from "./data-readers.js";
 import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
 
-const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
+export const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
   { dir: "src/", typecheck: "typecheck", tests: "./src" },
   { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: "./scenarios/src" },
   { dir: "tests/", typecheck: "typecheck:tests", tests: "./tests" },
