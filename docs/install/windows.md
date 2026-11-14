@@ -27,6 +27,7 @@ file) before anything runs. A file that fails the check is deleted and the step 
 | The AI model | local model chosen | Ollama's model library, through Ollama |
 | Java (Temurin JRE 21) | local Minecraft server chosen | Adoptium (`java.url`) |
 | Minecraft server 1.21.4 | local Minecraft server chosen, after you accept the Minecraft EULA | Mojang (`minecraft.jar.url`) |
+| Paper server 1.21.4 | local Minecraft server chosen with the Paper program (the default) | PaperMC (the build pinned in `packaging/manifest.json`) |
 
 Bun, the bots and their AI code come inside the installer. The installer never ships the Minecraft server.
 
@@ -42,11 +43,16 @@ the same on the AI model page and on the Ready page, and writes it in its log in
 The installer asks which server the bots join:
 
 - **None for now.** The bots do not start until you set a server (see "Settings" below).
-- **A server on this PC.** Mine AI installs a vanilla server for you after you accept the
+- **A server on this PC.** Mine AI installs a server for you after you accept the
   [Minecraft EULA](https://aka.ms/MinecraftEULA). It listens on this PC only (`127.0.0.1`), with `online-mode=false`
   so the bots can join without Minecraft accounts. Join it from Minecraft at `localhost`; the console shows the port
-(25565, or the next free one).
-- **An existing server.** Give its address and port. It must be a **vanilla Minecraft 1.21.4** server with
+(25565, or the next free one). Below this choice the installer asks for the server program:
+  **Paper (recommended)**, the same game run by a faster server program (animals and monsters far from every player
+  move less), or **Vanilla**, Mojang's own server. A new local server starts on Paper; an update keeps the program
+  already saved, and a server saved before Paper existed stays vanilla. The choice can be changed later with
+  `mine-ai configure --server-local --server-program paper|vanilla` — it picks the server program of the local server;
+  Paper is the default for a new local server; going back to vanilla on a world that ran on Paper is refused.
+- **An existing server.** Give its address and port. It must be a **vanilla or Paper Minecraft 1.21.4** server with
   **`online-mode=false`**. At every start Mine AI checks the server and, when it is down, is another version or has
   online mode on, prints one clear line and starts no bot.
 
@@ -224,6 +230,7 @@ you leave out keeps the choice saved by an earlier install, else the first value
 | `/SERVER=` | `none`, `local` or `remote` | Which Minecraft server the bots join. |
 | `/SERVERHOST=` | address | The existing server (`/SERVER=remote`). |
 | `/SERVERPORT=` | number | Its port (default 25565). |
+| `/SERVERPROGRAM=` | `paper` or `vanilla` | The program of the local server (`/SERVER=local`). Left out: the saved program at an update (vanilla when none is saved), Paper at a first install. |
 | `/EULA=` | `accept` | Accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA). A local server (`/SERVER=local`) fails the install without it. |
 | `/CHECKUPDATES=` | `0` or `1` | Whether Mine AI checks for a newer release at each start. Left out: the saved choice at an update, on at a first install. |
 | `/STARTNOW=` | `0` or `1` | Start Mine AI when the install ends (default `0`). |
