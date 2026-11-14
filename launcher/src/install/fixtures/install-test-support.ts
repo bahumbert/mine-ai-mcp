@@ -13,6 +13,7 @@ export function testManifest(ollama: Partial<Manifest["ollama"]> = {}, waits: Pa
     minecraft: {
       version: "1.21.4",
       jar: { url: "https://example.test/server.jar", sha1: "0".repeat(40) },
+      paper: { build: 232, url: "https://example.test/paper-1.21.4-232.jar", sha256: "3".repeat(64), bytes: 51437498, installedBytes: 1 },
       memoryMb: { min: 2048, perRamGb: 256, max: 6144 },
     },
     java: { url: "https://example.test/java.zip", sha256: "0".repeat(64), installedBytes: 151829892 },
