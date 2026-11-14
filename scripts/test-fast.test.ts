@@ -5,10 +5,13 @@ import { join } from "node:path";
 import {
   defaultShardCount,
   fileTimes,
+  isFiltered,
   junitFileKey,
+  nextTimes,
   parseArgs,
   planShards,
   readJunit,
+  shardArguments,
   summaryLines,
   testFiles,
 } from "./test-fast.js";
@@ -209,6 +212,56 @@ test("summaryLines: a report with no test for a shard that had files is not ok",
   const result = summaryLines([shard(0, 5, empty)], 1000, 1);
   expect(result.ok).toBe(false);
   expect(result.lines).toContain("shard 0: report with no test (log shard.log)");
+});
+
+const NO_MATCH_REPORT =
+  '<testsuites name="bun test" tests="2" assertions="0" failures="0" skipped="2" time="0.1">' +
+  '<testsuite name="a.test.ts" file="a.test.ts">' +
+  '<testcase name="one" classname="" time="0" file="a.test.ts"><skipped /></testcase>' +
+  '<testcase name="two" classname="" time="0" file="a.test.ts"><skipped /></testcase>' +
+  "</testsuite></testsuites>";
+
+test("a run with a test-name filter in any form Bun reads adds --pass-with-no-tests (a shard with no match exits 0, not 1), others do not", () => {
+  const filtered = [["-t", "name"], ["-t=name"], ["-tname"], ["--test-name-pattern", "name"], ["--test-name-pattern=name"]];
+  for (const args of filtered) {
+    expect(isFiltered(args)).toBe(true);
+    expect(shardArguments(args)).toEqual([...args, "--pass-with-no-tests"]);
+  }
+  for (const args of [["--timeout", "5000"], []]) {
+    expect(isFiltered(args)).toBe(false);
+    expect(shardArguments(args)).toEqual(args);
+  }
+});
+
+test("summaryLines: a filtered run is ok when one shard ran its matches and the others matched nothing", () => {
+  const ran = readJunit(
+    '<testsuites name="bun test" tests="2" assertions="1" failures="0" skipped="1" time="0.1">' +
+      '<testsuite name="a.test.ts" file="a.test.ts">' +
+      '<testcase name="one" classname="" time="0.1" file="a.test.ts" />' +
+      '<testcase name="two" classname="" time="0" file="a.test.ts"><skipped /></testcase>' +
+      "</testsuite></testsuites>",
+  );
+  const result = summaryLines([shard(0, 1, ran), shard(0, 1, readJunit(NO_MATCH_REPORT))], 1000, 1, true);
+  expect(result.ok).toBe(true);
+});
+
+test("summaryLines: a filtered run that no shard matched is not ok and says so", () => {
+  const none = readJunit(NO_MATCH_REPORT);
+  const result = summaryLines([shard(0, 1, none), shard(0, 1, none)], 1000, 1, true);
+  expect(result.ok).toBe(false);
+  expect(result.lines).toContain("no test matched the filter (every case skipped)");
+  expect(summaryLines([shard(0, 1, none)], 1000, 1).ok).toBe(true);
+});
+
+test("a filtered run leaves the old times, so the plan from them is the plan of the run before it", () => {
+  const files = ["a", "b", "c", "d", "e", "f"].map((file) => ({ file, bytes: 10 }));
+  const old = { a: 9, b: 8, c: 3, d: 2, e: 1, f: 1 };
+  const zero = files.map(({ file }) => ({ file, time: 0 }));
+  const after = nextTimes(old, zero, true);
+  expect(after).toEqual(old);
+  expect(planShards(files, after, 3)).toEqual(planShards(files, old, 3));
+  // the fault: the zero times of the filtered run put every file on one shard
+  expect(planShards(files, nextTimes(old, zero, false), 3).map((bin) => bin.length)).toEqual([6]);
 });
 
 test("defaultShardCount is half the parallelism, at most 12, at least 1", () => {

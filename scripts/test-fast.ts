@@ -3,8 +3,10 @@
  * projects present in this checkout), with no typecheck, split over several `bun test` processes (default
  * `min(12, floor(parallelism / 2))`, 12 being the audit's best measured on 24 threads, `test-audit.md:101`; `--shards N`
  * overrides). Its pass count compares one to one with a plain `bun test` junit report. Arguments after `--` go to every
- * shard's `bun test` (write `bun run test:fast --shards 2 -- -t name`: `bun run` takes the first `--` itself). Each run keeps its folder `.tmp/test-fast/run-<id>/` (shard reports and logs) and reads and
- * rewrites `.tmp/test-fast/times.json`, the seconds each file took in the last run, to plan the next run's shards.
+ * shard's `bun test` (write `bun run test:fast --shards 2 -- -t name`: `bun run` takes the first `--` itself; a `-t`
+ * run passes when some shard ran a match and fails when none did). Each run keeps its folder `.tmp/test-fast/run-<id>/`
+ * (shard reports and logs) and reads and rewrites `.tmp/test-fast/times.json`, the seconds each file took in the last
+ * run, to plan the next run's shards; a `-t` run leaves it as it was (its skipped cases would time every file at ~0 s).
  */
 
 import {
@@ -166,6 +168,7 @@ export function summaryLines(
   shards: readonly ShardResult[],
   wallMs: number,
   load: number,
+  filtered = false,
 ): { lines: string[]; ok: boolean } {
   const problems: string[] = [];
   let ok = true;
@@ -204,6 +207,10 @@ export function summaryLines(
     }
   });
   const pass = tests - failures - skipped;
+  if (filtered && ok && pass === 0) {
+    ok = false;
+    problems.push("no test matched the filter (every case skipped)");
+  }
   const summary =
     `test:fast: ${tests} tests, ${pass} pass, ${failures} fail, ${skipped} skip in ${(wallMs / 1000).toFixed(1)} s ` +
     `(${shards.length} shards, slowest ${slowest.toFixed(1)} s, load ${load.toFixed(2)})`;
@@ -234,6 +241,32 @@ export function parseArgs(argv: readonly string[], parallelism: number): { shard
     throw new Error(`test:fast: --shards takes a whole number of 1 or more, got "${own[at + 1] ?? ""}"`);
   }
   return { shards: value, passThrough };
+}
+
+/** Whether the arguments for `bun test` hold a test-name filter: `-t name`, `-t=name`, `-tname` (Bun reads all three), `--test-name-pattern name` or `=name`. */
+export function isFiltered(passThrough: readonly string[]): boolean {
+  return passThrough.some((arg) => /^(-t|--test-name-pattern(=|$))/u.test(arg));
+}
+
+/**
+ * The arguments after `--`, as each shard's `bun test` gets them. A filtered run adds `--pass-with-no-tests`: Bun 1.4.2
+ * exits 1 for a process whose files hold no match, and most shards hold none (`summaryLines` fails the run when no
+ * shard matched).
+ */
+export function shardArguments(passThrough: readonly string[]): string[] {
+  return isFiltered(passThrough) ? [...passThrough, "--pass-with-no-tests"] : [...passThrough];
+}
+
+/**
+ * The times to keep after a run. A filtered run times only the cases it ran: every other case is skipped at ~0 s, so
+ * its times would plan the next run on one shard; it leaves the old times.
+ */
+export function nextTimes(
+  old: Record<string, number>,
+  cases: readonly { readonly file: string; readonly time: number }[],
+  filtered: boolean,
+): Record<string, number> {
+  return filtered ? old : fileTimes(cases);
 }
 
 function readTimes(path: string): Record<string, number> {
@@ -268,7 +301,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 1;
   }
   const sized = files.map((file) => ({ file, bytes: statSync(join(root, file)).size }));
-  const plan = planShards(sized, readTimes(join(root, TIMES_FILE)), options.shards);
+  const oldTimes = readTimes(join(root, TIMES_FILE));
+  const filtered = isFiltered(options.passThrough);
+  const plan = planShards(sized, oldTimes, options.shards);
   mkdirSync(join(root, RUNS_DIR), { recursive: true });
   const runDir = mkdtempSync(join(root, RUNS_DIR, "run-"));
   const load = os.loadavg()[0];
@@ -277,7 +312,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     const log = openSync(join(runDir, `shard-${index}.log`), "w");
     const report = join(runDir, `shard-${index}.xml`);
     const proc = Bun.spawn(
-      [process.execPath, "test", ...bin, "--reporter=junit", `--reporter-outfile=${report}`, ...options.passThrough],
+      [process.execPath, "test", ...bin, "--reporter=junit", `--reporter-outfile=${report}`, ...shardArguments(options.passThrough)],
       { cwd: root, stdout: log, stderr: log },
     );
     return { proc, log };
@@ -296,10 +331,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       logTail: logTail(log),
     };
   });
-  const { lines, ok } = summaryLines(shards, wallMs, load);
+  const { lines, ok } = summaryLines(shards, wallMs, load, filtered);
   for (const line of lines) console.log(line);
   console.log(`test:fast: run folder ${runDir}`);
-  writeTimes(join(root, TIMES_FILE), fileTimes(shards.flatMap((shard) => shard.report?.cases ?? [])));
+  writeTimes(join(root, TIMES_FILE), nextTimes(oldTimes, shards.flatMap((shard) => shard.report?.cases ?? []), filtered));
   return ok ? 0 : 1;
 }
 
