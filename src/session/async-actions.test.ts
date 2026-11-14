@@ -435,3 +435,21 @@ test("a lookup whose store read throws answers EXECUTION_LOOKUP_FAILED and leave
   broken = false;
   assert.equal((await service.wait("action-1", 0)).state, "settled");
 });
+
+test("wait accepts a timeout from 0 to 120000 ms and refuses others", async () => {
+  const f = fixture();
+  const accepted = f.service.submit(f.action, {}, { submission_id: "first" }, 1);
+  assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+  f.finish();
+  await f.service.settled();
+  const settled = await f.service.wait(accepted.actionId, 120000);
+  assert.equal(settled.state, "settled");
+  for (const timeoutMs of [120001, -1, 1.5]) {
+    const refusal = await f.service.wait(accepted.actionId, timeoutMs);
+    assert.equal(refusal.state, "refused");
+    if (refusal.state === "refused") {
+      assert.equal(refusal.code, "INVALID_ARGUMENTS");
+      assert.equal(refusal.error, "timeout_ms must be an integer from 0 to 120000.");
+    }
+  }
+});
