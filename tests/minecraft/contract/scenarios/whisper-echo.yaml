@@ -2,6 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-whisper-echo
 tags:
   - contract
+  - exclusive
 description: "Two whispers sent back to back, to the bot itself (a contract scenario has one player), are each answered with the outgoing line (You whisper to X: text) and then the received line (X whispers to you: text), in order, as chat-position messages whose translate is the English format string. Contract check tests/minecraft/contract/checks/whisper-echo.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
 client:
   command: bun
