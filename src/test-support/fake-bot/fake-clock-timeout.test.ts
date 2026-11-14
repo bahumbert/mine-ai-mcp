@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
  * and it runs at the top level, outside the 5 s of any body here (it takes about a second).
  */
 const clockModule = fileURLToPath(new URL("./fake-clock.ts", import.meta.url));
+/** The child runs in a temp dir, outside `bunfig.toml`: it loads the test start cleanup itself, and not `test-limit.ts`, which would override its `--timeout`. */
+const testStartCleanupPreload = fileURLToPath(new URL("../../../scripts/test-clock-cleanup.ts", import.meta.url));
 const dir = mkdtempSync(join(tmpdir(), "fake-clock-timeout-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -20,11 +22,11 @@ after(() => rmSync(dir, { recursive: true, force: true }));
  * Runs `source` as a child `bun test` and returns its junit report (written to `<fixtureName>.xml`). Bun 1.4.2 prints no
  * `(pass)` line under `CLAUDECODE=1`, so a test reads the report, which no environment variable changes.
  */
-function childReport(fixtureName: string, source: string): string {
+function childReport(fixtureName: string, source: string, extraArgs: readonly string[] = []): string {
   const fixture = join(dir, fixtureName);
   const reportFile = join(dir, `${fixtureName}.xml`);
   writeFileSync(fixture, source);
-  const child = spawnSync(process.execPath, ["test", fixture, "--reporter=junit", `--reporter-outfile=${reportFile}`], {
+  const child = spawnSync(process.execPath, ["test", fixture, ...extraArgs, "--reporter=junit", `--reporter-outfile=${reportFile}`], {
     cwd: dir,
     encoding: "utf8",
   });
@@ -43,8 +45,8 @@ function casesOf(report: string): Map<string, boolean> {
 }
 
 /** The case name -> passed of a child `bun test` run on `source` (see `childReport`). */
-function childRun(fixtureName: string, source: string): Map<string, boolean> {
-  return casesOf(childReport(fixtureName, source));
+function childRun(fixtureName: string, source: string, extraArgs: readonly string[] = []): Map<string, boolean> {
+  return casesOf(childReport(fixtureName, source, extraArgs));
 }
 
 function decodeXmlText(text: string): string {
@@ -75,6 +77,45 @@ test("a test that passes its time limit and installs its clock late does not blo
   assert.equal(cases.get("slow before it installs, then waits on its clock"), false, "the child's first test timed out");
   assert.equal(cases.get("next test installs its own clock"), true);
   assert.equal(cases.size, 2);
+});
+
+test("a test that passes its time limit with its clock installed leaves the next tests a clean clock", () => {
+  // The child's limit is Bun's native one (the CLI `--timeout`, as the preload's `setDefaultTimeout` sets it), not a test's own `{ timeout }`.
+  const cases = childRun(
+    "installed-then-timed-out.test.ts",
+    `
+  import test from "node:test";
+  import { createFakeClock } from ${JSON.stringify(clockModule)};
+  const realSetTimeout = setTimeout;
+  const realWait = (ms: number) => new Promise((resolve) => realSetTimeout(resolve, ms));
+  test("installs, then passes its limit on a real wait", async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    await realWait(500);
+  });
+  test("next test installs no clock and waits on a real timer", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  test("next test installs its own clock", () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+  });
+  test("a third test installs its own clock", () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+  });
+  `,
+    ["--timeout", "200", "--preload", testStartCleanupPreload],
+  );
+  assert.equal(cases.get("installs, then passes its limit on a real wait"), false, "the child's first test passed its limit");
+  assert.equal(cases.get("next test installs no clock and waits on a real timer"), true);
+  assert.equal(cases.get("next test installs its own clock"), true);
+  assert.equal(cases.get("a third test installs its own clock"), true);
+  assert.equal(cases.size, 4);
+});
+
+test("bunfig.toml preloads the test start cleanup, or the fake clock is never restored in a real run", () => {
+  assert.match(readFileSync(fileURLToPath(new URL("../../../bunfig.toml", import.meta.url)), "utf8"), /"\.\/scripts\/test-clock-cleanup\.ts"/u);
 });
 
 test("a clock never disposed fails its own test and leaves the next one clean", () => {

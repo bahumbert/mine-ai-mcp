@@ -54,6 +54,13 @@ const MOCKED_APIS = ["setTimeout", "setInterval", "Date"] as const;
 /** One installed clock at a time: node's mock timers are global, so two would fight over them. `by` is where it was installed (a `file:line`). */
 let installed: { restore(): void; readonly by: string } | null = null;
 
+/**
+ * Bun fails a test at its time limit and runs no hook of it, so a clock that test had installed is still installed when
+ * the next test starts. The preload `scripts/test-clock-cleanup.ts` (`bunfig.toml`) calls this at the start of every
+ * test, found under a `Symbol.for` key because `src/` is typechecked with Node types only and cannot import it.
+ */
+(globalThis as { [key: symbol]: unknown })[Symbol.for("mine-ai.restore-leftover-fake-clock")] = () => installed?.restore();
+
 /** The `file:line` of the test that called `install()`: the first stack frame in a `*.test.ts` file (a shared helper may call `install()` for it), else the first frame outside this file. */
 function installerOfThisCall(): string {
   const frames = (new Error().stack ?? "").split("\n").slice(1).filter((frame) => !frame.includes("fake-clock.ts"));
