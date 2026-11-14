@@ -333,15 +333,10 @@ Mine Labs still retains its normal results, scenario snapshots and client/server
 Existing artifacts from earlier runs are not removed by this setting.
 
 To retain the SQLite database and incident files for an investigation, set the
-host's `MINE_AI_SCENARIO_EVIDENCE=1` environment variable before launching Mine Labs:
+host's `MINE_AI_SCENARIO_EVIDENCE=1` environment variable before launching Mine Labs (in WSL):
 
-```powershell
-$env:MINE_AI_SCENARIO_EVIDENCE = "1"
-try {
-  bunx --bun mine-labs run tests/minecraft/scenarios/collect/sand-single.yaml --repeat 1
-} finally {
-  Remove-Item Env:MINE_AI_SCENARIO_EVIDENCE
-}
+```bash
+MINE_AI_SCENARIO_EVIDENCE=1 bunx --bun mine-labs run tests/minecraft/scenarios/collect/sand-single.yaml --repeat 1
 ```
 
 Only the exact value `1` enables retention. Evidence goes under that trial's
