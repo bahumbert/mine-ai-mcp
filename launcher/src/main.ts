@@ -26,7 +26,7 @@ export const USAGE = `Usage: mine-ai <command>
             (--dir: ollama and disk only; --no-model: disk only; disk lists the free space and what a local model and server need)
   install endpoint-models --list <file> [--url <url>] [--key <key> | --saved-key] [--json <file>]
             (writes the models the remote endpoint lists, one per line; without --url it reads the saved settings)
-  configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>
+  configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>   and/or   --server-program paper|vanilla
             and/or   --command-players <name,name,...>   (players who may give !bot commands in chat; "" clears them)
             and/or   --check-updates on|off   (whether each start checks GitHub for a newer release)`;
 

@@ -41,9 +41,13 @@ const llmSchema = z.discriminatedUnion("kind", [
     clearKeyInFile: z.boolean().optional(),
   }),
 ]);
+/** The server program a local server runs: Mojang's own, or Paper. A settings file of an earlier launcher has none: it reads as vanilla. */
+export const SERVER_PROGRAMS = ["paper", "vanilla"] as const;
+export type ServerProgram = (typeof SERVER_PROGRAMS)[number];
+const serverProgram = z.enum(SERVER_PROGRAMS);
 const serverSchema = z.discriminatedUnion("kind", [
   z.looseObject({ kind: z.literal("none") }),
-  z.looseObject({ kind: z.literal("local"), port, memoryMb: z.number().int().min(512) }),
+  z.looseObject({ kind: z.literal("local"), port, memoryMb: z.number().int().min(512), program: serverProgram.default("vanilla") }),
   z.looseObject({ kind: z.literal("remote"), host: z.string().min(1), port }),
 ]);
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -48,7 +48,7 @@ test("--server-local sets the heap from the machine's RAM with the manifest's ru
   const t = setup();
   assert.equal(await runConfigureCommand(["--server-local"], t.context, { totalRamBytes: () => 32 * GIB }), 0);
   const { min, perRamGb, max } = loadManifest().minecraft.memoryMb;
-  assert.deepEqual(t.settings().server, { kind: "local", port: 25_565, memoryMb: Math.min(max, Math.max(min, perRamGb * 32)) });
+  assert.deepEqual(t.settings().server, { kind: "local", port: 25_565, memoryMb: Math.min(max, Math.max(min, perRamGb * 32)), program: "paper" });
 });
 
 test("--server-local keeps the port an earlier local server already had", async () => {
@@ -231,4 +231,101 @@ test("--llm-remote with a new key over a key in clear says nothing about encrypt
   writeFileSync(join(t.root, "settings.json"), JSON.stringify({ llm: { kind: "remote", baseUrl: "https://x.test/v1", model: "m", apiKey: "sk-old" } }));
   await t.run("--llm-remote", "https://x.test/v1", "sk-new", "m");
   assert.equal(t.out.some((line) => line.includes("encrypted")), false);
+});
+
+const LOCAL_8GB = { totalRamBytes: () => 8 * GIB, settings: { platform: "linux", cipher: null } } as const;
+
+function writeServerSetting(t: ReturnType<typeof setup>, server: Record<string, unknown>): string {
+  const text = JSON.stringify({ server });
+  writeFileSync(join(t.root, "settings.json"), text);
+  return text;
+}
+
+test("--server-local on settings without a local server writes paper", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "paper");
+});
+
+test("--server-local keeps the program of an existing local server", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "vanilla" });
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048 }); // a file of an earlier launcher: no program is vanilla
+  assert.equal(await runConfigureCommand(["--server-local"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+});
+
+test("--server-program vanilla sets it", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_570, memoryMb: 2048, program: "paper" });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LOCAL_8GB), 0);
+  assert.deepEqual(t.settings().server, { kind: "local", port: 25_570, memoryMb: 2048, program: "vanilla" });
+});
+
+test("--server-local with --server-program in one call sets the chosen program on a new local server", async () => {
+  const t = setup();
+  assert.equal(await runConfigureCommand(["--server-local", "--server-program", "vanilla"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
+});
+
+test("--server-program without a local server (remote, none, no file, or --server-remote/--server-none in the same call) is refused, names --server-local and writes nothing", async () => {
+  const remote = { kind: "remote", host: "play.example", port: 25_565 };
+  const rows: { saved: Record<string, unknown> | null; args: string[] }[] = [
+    { saved: remote, args: ["--server-program", "paper"] },
+    { saved: { kind: "none" }, args: ["--server-program", "paper"] },
+    { saved: null, args: ["--server-program", "paper"] },
+    { saved: { kind: "none" }, args: ["--server-remote", "play.example", "25565", "--server-program", "paper"] },
+    { saved: remote, args: ["--server-none", "--server-program", "paper"] },
+  ];
+  for (const { saved, args } of rows) {
+    const t = setup();
+    const before = saved === null ? null : writeServerSetting(t, saved);
+    await assert.rejects(runConfigureCommand(args, t.context, LOCAL_8GB), (error: unknown) => error instanceof UsageError && /--server-local/u.test(error.message), JSON.stringify({ saved, args }));
+    if (before === null) assert.throws(() => readFileSync(join(t.root, "settings.json")), /ENOENT/u);
+    else assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  }
+});
+
+test("--server-program bogus is refused naming both values; a missing or repeated one is a usage error; nothing is written", async () => {
+  const t = setup();
+  const before = writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  await assert.rejects(runConfigureCommand(["--server-program", "bogus"], t.context, LOCAL_8GB), (error: unknown) => error instanceof UsageError && /"bogus"/u.test(error.message) && /paper/u.test(error.message) && /vanilla/u.test(error.message));
+  await assert.rejects(runConfigureCommand(["--server-program"], t.context, LOCAL_8GB), UsageError);
+  await assert.rejects(runConfigureCommand(["--server-program", "paper", "--server-program", "vanilla"], t.context, LOCAL_8GB), UsageError);
+  assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+});
+
+test("going to vanilla from paper or from no local server on a world that ran on Paper is refused with the Nether and End folders named, settings unchanged", async () => {
+  const paper = { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" };
+  const rows = [
+    { folder: "world_nether", saved: paper, args: ["--server-program", "vanilla"] },
+    { folder: "world_the_end", saved: paper, args: ["--server-program", "vanilla"] },
+    { folder: "world_nether", saved: { kind: "none" }, args: ["--server-local", "--server-program", "vanilla"] },
+  ];
+  for (const { folder, saved, args } of rows) {
+    const t = setup();
+    const before = writeServerSetting(t, saved);
+    mkdirSync(join(t.root, "server", folder), { recursive: true });
+    assert.equal(await runConfigureCommand(args, t.context, LOCAL_8GB), 1, JSON.stringify({ folder, saved, args }));
+    assert.match(t.out.join("\n"), /This world has run on Paper, which keeps the Nether and the End in folders of their own \(world_nether, world_the_end\)\. Going back to vanilla is not offered yet: keep Paper, or move the world folders aside to start a new world on vanilla\./u);
+    assert.equal(readFileSync(join(t.root, "settings.json"), "utf8"), before);
+  }
+});
+
+test("vanilla to paper on any world is allowed", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "vanilla" });
+  mkdirSync(join(t.root, "server", "world_nether"), { recursive: true });
+  assert.equal(await runConfigureCommand(["--server-program", "paper"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "paper");
+});
+
+test("paper to vanilla on a world that never ran on Paper is allowed", async () => {
+  const t = setup();
+  writeServerSetting(t, { kind: "local", port: 25_565, memoryMb: 2048, program: "paper" });
+  mkdirSync(join(t.root, "server", "world"), { recursive: true });
+  assert.equal(await runConfigureCommand(["--server-program", "vanilla"], t.context, LOCAL_8GB), 0);
+  assert.equal(t.settings().server.program, "vanilla");
 });

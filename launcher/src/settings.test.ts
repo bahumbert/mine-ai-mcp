@@ -60,8 +60,9 @@ test("a saved file loads back to the same settings, and save creates the data ro
   const clearKeys = { platform: "linux", cipher: null } as const; // on Windows it loads back with its blob too: tests below
   const settings = loadSettings(root, MANIFEST, clearKeys);
   settings.llm = { kind: "remote", baseUrl: "https://api.example/v1", apiKey: "k", model: "m" };
-  settings.server = { kind: "local", port: 25565, memoryMb: 4096 };
+  settings.server = { kind: "local", port: 25565, memoryMb: 4096, program: "paper" }; // not the default: program survives a save and load
   saveSettings(root, settings, clearKeys);
+  assert.equal(JSON.parse(readFileSync(settingsPath(root), "utf8")).server.program, "paper");
   assert.deepEqual(loadSettings(root, MANIFEST, clearKeys), settings);
 });
 
@@ -215,4 +216,16 @@ test("on Linux the key stays in clear and a file that was wider before is narrow
   saveSettings(root, settings, options);
   assert.equal(fileLlm(root).apiKey, "sk-linux");
   assert.equal(statSync(settingsPath(root)).mode & 0o777, 0o600);
+});
+
+test("a local server without program reads as vanilla", () => {
+  const root = tempRoot();
+  writeSettings(root, JSON.stringify({ server: { kind: "local", port: 25565, memoryMb: 2048 } }));
+  assert.deepEqual(loadSettings(root, MANIFEST, { platform: "linux", cipher: null }).server, { kind: "local", port: 25565, memoryMb: 2048, program: "vanilla" });
+});
+
+test("an unknown program fails at load naming server.program", () => {
+  const root = tempRoot();
+  writeSettings(root, JSON.stringify({ server: { kind: "local", port: 25565, memoryMb: 2048, program: "spigot" } }));
+  assert.throws(() => loadSettings(root, MANIFEST, { platform: "linux", cipher: null }), /server\.program/u);
 });

@@ -169,7 +169,7 @@ export function stackFixture(change: (settings: Settings) => Settings = (setting
   mkdirSync(join(root, "personas"), { recursive: true });
   for (const [id, username] of Object.entries(PERSONAS)) writeFileSync(join(root, "personas", `${id}.json`), JSON.stringify({ id, username }));
   const manifest = loadManifest();
-  const settings = change({ ...loadSettings(root, manifest), server: { kind: "local", port: 25_565, memoryMb: 4096 } });
+  const settings = change({ ...loadSettings(root, manifest), server: { kind: "local", port: 25_565, memoryMb: 4096, program: "vanilla" } });
   const events: string[] = [];
   const children = new FakeChildren(events);
   const network = new FakeNetwork(events);
