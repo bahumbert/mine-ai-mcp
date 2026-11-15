@@ -70,6 +70,10 @@ export const combatPolicySchema = z.strictObject({
     .finite()
     .positive()
     .describe("Observed block distance required from each threat before combat withdrawal counts as separation."),
+  evade_clear_range: z.number().finite().positive()
+    .describe("Block distance beyond which a threat that stopped advancing counts as unable to reach the bot; the evade uses the smaller of this and evade_safe_range."),
+  evade_cover_range: z.number().finite().positive()
+    .describe("Block distance beyond which a shooter that cannot see the bot and stopped advancing counts as unable to reach it; the evade uses the smaller of this and evade_safe_range."),
 });
 export type CombatPolicy = z.infer<typeof combatPolicySchema>;
 export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
@@ -91,4 +95,6 @@ export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
   recovery_timeout_ms: 90_000,
   evade_timeout_ms: 15_000,
   evade_safe_range: 36,
+  evade_clear_range: 16,
+  evade_cover_range: 8,
 });

@@ -2,7 +2,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DEFAULT_COMBAT_POLICY } from "./contract.js";
-import { replayCombatDecision } from "./replay.js";
+import { recordedCombatPolicySchema, replayCombatDecision } from "./replay.js";
+
+test("old recordings inherit missing evade ranges and new recordings keep their ranges", () => {
+  const old = { ...DEFAULT_COMBAT_POLICY, evade_safe_range: 36 };
+  Reflect.deleteProperty(old, "evade_clear_range");
+  Reflect.deleteProperty(old, "evade_cover_range");
+  for (const [input, expected] of [
+    [old, [36, 36]], [{ ...old, evade_clear_range: 12, evade_cover_range: 6 }, [12, 6]],
+    [{ ...old, evade_clear_range: 12 }, [12, 36]],
+  ] as const) {
+    const parsed = recordedCombatPolicySchema.parse(input);
+    assert.deepEqual([parsed.evade_clear_range, parsed.evade_cover_range], expected);
+  }
+});
 
 test("old creeper and zombie incidents replay with legacy weapons and renamed explosive reasons", () => {
   for (const name of ["creeper", "zombie"]) {

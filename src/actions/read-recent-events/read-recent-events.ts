@@ -42,7 +42,7 @@ export const unreadEventsPageQuery = defineSqlQuery({
     LIMIT ?
   `,
   parseRow: (row) => {
-    const payload: unknown = withNavigationDefaults(JSON.parse(String(row.payload_json)));
+    const payload: unknown = withRecordedPolicyRanges(withNavigationDefaults(JSON.parse(String(row.payload_json))), String(row.event_type));
     return botEventSchema.parse({
       eventId: row.event_id,
       botId: row.bot_id,
@@ -59,6 +59,26 @@ export const unreadEventsPageQuery = defineSqlQuery({
     });
   },
 });
+
+/** Fill ranges absent from historical snapshots before validating durable events. */
+function withRecordedPolicyRanges(payload: unknown, eventType: string): unknown {
+  if (payload === null || typeof payload !== "object") return payload;
+  const record = payload as Record<string, unknown>;
+  const status = record.status as { policy?: unknown } | undefined;
+  const snapshot = eventType === "combat_policy" || eventType === "survival_policy" ? record : status?.policy;
+  if (snapshot === null || typeof snapshot !== "object") return payload;
+  for (const key of ["defaults", "effective"]) {
+    const group = (snapshot as Record<string, unknown>)[key];
+    if (group === null || typeof group !== "object") continue;
+    const combat = eventType === "combat_policy" ? group : (group as Record<string, unknown>).combat;
+    if (combat === null || typeof combat !== "object") continue;
+    const policy = combat as Record<string, unknown>;
+    for (const field of ["evade_clear_range", "evade_cover_range"]) {
+      if (!(field in policy)) policy[field] = policy.evade_safe_range;
+    }
+  }
+  return payload;
+}
 
 /**
  * A status recorded before `dig_straight_down` existed reads back with its default (live 2026-10-04: Tom's old events

@@ -25,8 +25,16 @@ const assessmentSchema = z.object({
   ticksToDie: finite.nullable(), ticksToClear: finite, healthLostToClear: finite, margin: finite.nullable(),
   source: z.object({ version: z.string(), measured: z.boolean() }),
 });
+export const recordedCombatPolicySchema = combatPolicySchema.extend({
+  fight_margin: combatPolicySchema.shape.fight_margin.default(DEFAULT_COMBAT_POLICY.fight_margin),
+  evade_clear_range: combatPolicySchema.shape.evade_clear_range.optional(),
+  evade_cover_range: combatPolicySchema.shape.evade_cover_range.optional(),
+}).transform((policy) => ({ ...policy,
+  evade_clear_range: policy.evade_clear_range ?? policy.evade_safe_range,
+  evade_cover_range: policy.evade_cover_range ?? policy.evade_safe_range,
+}));
 const inputs = z.object({
-  policy: combatPolicySchema.extend({ fight_margin: combatPolicySchema.shape.fight_margin.default(DEFAULT_COMBAT_POLICY.fight_margin) }),
+  policy: recordedCombatPolicySchema,
   assessment: assessmentSchema.optional(),
   health: z.number(),
   burning: z.boolean(),
