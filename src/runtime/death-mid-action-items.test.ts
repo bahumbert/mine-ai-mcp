@@ -13,7 +13,7 @@ import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runti
 
 // A death in the middle of a resumable item action, through the runtime on the shared fake (plan p4-01b task 3): the
 // death cancels the request within the action's own bound, the request after the respawn starts from the world's
-// state, and 20 bots with the same action keep their own records while one of them dies.
+// state, and concurrent bots with the same action keep their own records while one of them dies.
 //
 // The death is the measured one (`fake-bot-combat.ts` `sendHealth`: the cause packet, the inventory clear, health 0;
 // then the server's answer to the respawn request: `respawn`, `position` at the spawn, health 20 and `spawn`). Each action's first wait is where the test kills the bot:
@@ -25,8 +25,9 @@ import { createMinecraftRuntime, type MinecraftRuntime } from "./minecraft-runti
 
 const CHEST = "1,64,1";
 const WATER = "3,63,0";
-const BOTS = 20;
-const DYING_BOT = 7;
+// Two survivors expose shared records while a third bot dies (mutation check 2026-11-15).
+const BOTS = 3;
+const DYING_BOT = BOTS - 1;
 /** What the respawned bot carries again: not the count it started with, so a credit from before the death shows. */
 const REGIVEN = 7;
 const MAIN_SLOT = 9;
@@ -344,7 +345,7 @@ for (const case_ of CASES) {
     await case_.afterRespawn(harness, async () => (await ran(rig, case_.action, request, REQUEST_MS)).result);
   });
 
-  test(`${case_.title}: ${BOTS} bots keep their own records`, { timeout: TEST_MS }, async (t) => {
+  test(`${case_.title}: ${BOTS} bots keep their own records`, async (t) => {
     const clock = createFakeClock({ mode: "manual" });
     const rigs: Rig[] = [];
     for (let index = 0; index < BOTS; index += 1) rigs.push(await rigOn(t, case_.world(index, clock)));
