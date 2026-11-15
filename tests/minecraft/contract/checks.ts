@@ -53,6 +53,7 @@ import { lavaBesideHead } from "./checks/lava-beside-head.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { lavaOverPassable } from "./checks/lava-over-passable.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
+import { itemTakenByMob } from "./checks/item-taken-by-mob.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { itemVariantComponents } from "./checks/item-variant-components.ts";
@@ -167,6 +168,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   chestOpenTakeClose,
   itemVariantComponents,
   itemPickupAfterDelay,
+  itemTakenByMob,
   tossedItemKeptBeforeDelay,
   attackCooldownDamage,
   attackHurtsAndKills,

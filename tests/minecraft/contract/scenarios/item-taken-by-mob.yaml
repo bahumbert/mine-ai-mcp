@@ -1,0 +1,45 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-item-taken-by-mob
+tags:
+  - contract
+description: A piglin picks up a dropped stack; setup from setupCommands(fixture).
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: item-taken-by-mob
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 3 -60 -1 stone
+  - setblock 3 -59 -1 stone
+  - setblock 3 -60 0 stone
+  - setblock 3 -59 0 stone
+  - setblock 3 -60 1 stone
+  - setblock 3 -59 1 stone
+  - setblock 5 -60 -1 stone
+  - setblock 5 -59 -1 stone
+  - setblock 5 -60 0 stone
+  - setblock 5 -59 0 stone
+  - setblock 5 -60 1 stone
+  - setblock 5 -59 1 stone
+  - setblock 4 -60 -1 stone
+  - setblock 4 -59 -1 stone
+  - setblock 4 -60 1 stone
+  - setblock 4 -59 1 stone
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory: []
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor
