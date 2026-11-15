@@ -1,11 +1,13 @@
+import type { Bot } from "mineflayer";
 import type { Position3 } from "../../utils/index.js";
 import { physicsTicksUntil } from "../../utils/physics-ticks.js";
-import { timeoutSignal } from "../../utils/wall-timers.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForWorldAge } from "../../world/world-age.js";
 import { holdSwimDepth, solidFloorUnder } from "../world/swimming.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
 import { horizontalControlsToward, type HorizontalSteeringControl } from "./local-steering.js";
 
 interface WaterPositionBot {
+  readonly time: Bot["time"];
   readonly entity: { readonly position: Position3; readonly velocity?: Position3; readonly onGround?: boolean; readonly yaw?: number; readonly isInWater?: boolean };
   on(event: "physicsTick", listener: () => void): unknown;
   off(event: "physicsTick", listener: () => void): unknown;
@@ -28,12 +30,10 @@ export function stanceFloorAt(read: WorldView["blockAt"], feet: BlockPosition): 
 
 /**
  * How long a body let down onto its stance floor is waited for (`landOnStanceFloor`): 0.38 blocks of water sink in
- * about 8 ticks (lava-interrupts-mining's escape cell), so 40 ticks is five times that, and 3 s of wall clock ends the
- * wait when ticks come slowly. It runs inside a break's confirmation deadline, at least max(5 s, 2 x the longest dig),
- * which for a body in water is x25 the dry dig (obsidian with a diamond pickaxe: 9.4 s x25 = 235 s), so 3 s fits.
+ * about 8 ticks (lava-interrupts-mining's escape cell), so 40 server ticks is five times that. A still world age ends
+ * the wait after SERVER_CLOCK_STOPPED_MS; a slow server keeps its tick budget (scenario-ticks C8, 2026-11-15).
  */
 export const STANCE_LANDING_TICKS = 40;
-export const STANCE_LANDING_WALL_MS = 3_000;
 
 /**
  * Wait for a body in water to land on its stance's solid floor, which `holdWaterPosition` with that `floor` lets it
@@ -45,17 +45,16 @@ export async function landOnStanceFloor(
   bot: WaterPositionBot,
   floor: StanceFloor,
   signal: AbortSignal,
-  bounds: { readonly ticks: number; readonly wallMs: number } = { ticks: STANCE_LANDING_TICKS, wallMs: STANCE_LANDING_WALL_MS },
+  bounds: { readonly ticks: number } = { ticks: STANCE_LANDING_TICKS },
 ): Promise<boolean> {
-  if (bot.entity.onGround) return true;
+  const landed = () => bot.entity.onGround === true;
+  if (landed()) return true;
   if (!bot.entity.isInWater || !solidFloorUnder(floor.read, floor.stance)) return false;
-  const deadline = timeoutSignal(bounds.wallMs);
-  try {
-    return await physicsTicksUntil(bot, () => bot.entity.onGround === true, bounds.ticks, AbortSignal.any([signal, deadline]));
-  } catch (cause) {
-    if (signal.aborted || !deadline.aborted) throw cause;
-    return false;
-  }
+  await waitForWorldAge(bot, bounds.ticks, {
+    wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, signal,
+    until: landed,
+  });
+  return landed();
 }
 
 /**
@@ -81,8 +80,8 @@ export async function settleInWaterForDig(
     bot.setControlState(control, control === "jump" ? false : active), floor);
   const lifetime = signal ?? new AbortController().signal;
   try {
-    // Eyes under water keep the 60 ticks a body sinking a whole cell may need (2 x the 3 s bound on the wall clock).
-    if (floor) await landOnStanceFloor(bot, floor, lifetime, eyesInWater ? { ticks: 60, wallMs: 2 * STANCE_LANDING_WALL_MS } : undefined);
+    // Eyes under water keep the 60 server ticks a body sinking a whole cell may need (scenario-ticks C8, 2026-11-15).
+    if (floor) await landOnStanceFloor(bot, floor, lifetime, eyesInWater ? { ticks: 60 } : undefined);
     else await physicsTicksUntil(bot, landed, 60, lifetime);
   } finally {
     release();
