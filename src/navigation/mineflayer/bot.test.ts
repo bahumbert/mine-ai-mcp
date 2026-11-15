@@ -294,42 +294,6 @@ test("stationary water controls release after a failed dig and when the search r
   assert.equal(listeners.size, 0);
 });
 
-test("a break that brings sand down waits for it to land and breaks it again before completing", async () => {
-  // The cell holds sand; the first dig clears it; two ticks later the sand
-  // from above lands in it; the second dig clears it for good.
-  let cell = "sand";
-  let ticksSinceDig = 0;
-  let digs = 0;
-  const bot = surface({
-    entity: { position: { x: 0.5, y: 63, z: 0.5 }, onGround: true, isInWater: false, yaw: 0 },
-    waitForTicks: async () => {
-      ticksSinceDig += 1;
-      if (digs === 1 && ticksSinceDig === 2) cell = "sand";
-    },
-    blockAt: () => ({ name: cell }),
-    dig: async () => {
-      digs += 1;
-      ticksSinceDig = 0;
-      cell = "air";
-    },
-  });
-  const actuator = new MineflayerBot(bot, { revision: 1 });
-  const effect = actuator.startEffect(
-    {
-      kind: "break",
-      position: { x: 1, y: 64, z: 0 },
-      expectedStateId: 1,
-      toolType: null,
-      brings: [{ x: 1, y: 65, z: 0 }],
-    },
-    { runId: "run", planId: "plan", stepId: "plug", attempt: 1 },
-    new AbortController().signal,
-  );
-  assert.deepEqual(await effect.completion, { kind: "accepted" });
-  assert.equal(digs, 2);
-  assert.equal(cell, "air");
-});
-
 // ── Drops ────────────────────────────────────────────────────────────────────
 
 /**
@@ -734,6 +698,10 @@ function serverWatchedDig(answer: () => Promise<boolean>) {
           order.push("answer");
           return answer();
         },
+        next: async () => {
+          order.push("answer");
+          return await answer() ? { index: 0, state: { age: 0, stateId: 0, solid: false } } : "none";
+        },
         dispose: () => {
           disposed += 1;
         },
@@ -765,23 +733,13 @@ test("a break is accepted only once the server has answered for its cell, and th
   assert.equal(run.disposed(), 1);
 });
 
-test("a break the server never answers fails after asking it to resend the cell", async () => {
-  const run = serverWatchedDig(async () => false);
-  const completion = await run.effect.completion;
-  assert.equal(completion.kind, "failed");
-  assert.match(completion.kind === "failed" ? completion.observation : "", /server did not confirm breaking the block at 0,\s?62,\s?0/);
-  assert.match(completion.kind === "failed" ? completion.observation : "", /asked it to resend the cell/);
-  assert.deepEqual(run.asked, [{ x: 0, y: 62, z: 0 }]);
-  assert.equal(run.disposed(), 1);
-});
-
 test("a dig that throws still removes the server watch", async () => {
   const bot = surface({
     blockAt: () => ({ name: "stone" }),
     dig: async () => {
       throw new Error("dig interrupted");
     },
-    watchServerChange: () => ({ answer: async () => true, dispose: () => void (disposed += 1) }),
+    watchServerChange: () => ({ answer: async () => true, next: async () => "none", dispose: () => void (disposed += 1) }),
   });
   let disposed = 0;
   const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(

@@ -7,6 +7,7 @@
  * listens here, never to `blockUpdate`.
  */
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 import { SERVER_ANSWER_TICKS, waitForServerTicks, type WorldAgeOptions } from "../../world/world-age.js";
 import type { Position3 } from "../world/world.js";
 
@@ -80,24 +81,53 @@ export function subscribeServerBlockChanges(
 export interface ServerChangeWatch {
   /** True once the server has changed the watched cell (even before this was asked); false after 40 ticks or a stopped clock. An abort rejects with its reason. */
   answer(signal: AbortSignal, clock?: Partial<Pick<WorldAgeOptions, "now" | "sleep">>): Promise<boolean>;
+  /** First matching packet after `after`, retaining its state even if the client subsequently predicts another. */
+  next(signal: AbortSignal, after: number, accepts: (state: ServerCellState) => boolean,
+    clock?: Partial<Pick<WorldAgeOptions, "now" | "sleep">>): Promise<ServerCellAnswer | "none" | "stalled">;
   dispose(): void;
+}
+
+export interface ServerCellState {
+  readonly age: number | null;
+  readonly stateId: number | null;
+  readonly solid: boolean;
+}
+
+export interface ServerCellAnswer {
+  readonly index: number;
+  readonly state: ServerCellState;
 }
 
 /**
  * Listens from now on for the server's packet about `cell`. Start it before the request that should provoke the packet
  * (a dig, a use-on-block) so a fast answer is not missed; `dispose` is safe to call twice.
  */
-export function watchServerChange(bot: Pick<Bot, "_client" | "supportFeature" | "time">, cell: Position3): ServerChangeWatch {
-  let answered = false;
+export function watchServerChange(bot: Pick<Bot, "_client" | "supportFeature" | "time" | "blockAt">, cell: Position3): ServerChangeWatch {
+  const states: ServerCellState[] = [];
   const unsubscribe = subscribeServerBlockChanges(bot, (change) => {
-    if (changeCovers(change, cell)) answered = true;
+    if (!changeCovers(change, cell)) return;
+    // Mineflayer updates its world before these listeners (12b packet trace, 2026-11-15).
+    const block = bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+    states.push({ age: bot.time?.age ?? null, stateId: block?.stateId ?? null, solid: block?.boundingBox === "block" });
   });
   return {
     answer: async (signal, clock = {}) => {
       await waitForServerTicks(bot, SERVER_ANSWER_TICKS, {
-        signal, until: () => answered, ...clock,
+        signal, until: () => states.length > 0, ...clock,
       });
-      return answered;
+      return states.length > 0;
+    },
+    next: async (signal, after, accepts, clock = {}) => {
+      let found: ServerCellAnswer | undefined;
+      let cursor = after + 1;
+      const result = await waitForServerTicks(bot, SERVER_ANSWER_TICKS, { signal, ...clock, until: () => {
+        for (; cursor < states.length; cursor++) {
+          const state = states[cursor]!;
+          if (accepts(state)) { found = { index: cursor, state }; return true; }
+        }
+        return false;
+      } });
+      return found ?? (result === "stalled" ? "stalled" : "none");
     },
     dispose: unsubscribe,
   };

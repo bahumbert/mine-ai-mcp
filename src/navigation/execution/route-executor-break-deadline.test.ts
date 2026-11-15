@@ -93,7 +93,7 @@ test("route confirmation budgets cover live digs, planned work, falling columns 
     ["dry grounded", 600, 12, [], 100],
     ["floating", FLOATING_ANDESITE_MS, 12, [], 564],
     ["planned above actual", 600, 400, [], 800],
-    ["falling column", FLOATING_ANDESITE_MS, 12, brings, 684],
+    ["falling column", FLOATING_ANDESITE_MS, 12, brings, 1288],
     ["unloaded", null, 12, [], 100],
     ["no duration method", undefined, 12, [], 100],
   ] as const) {
