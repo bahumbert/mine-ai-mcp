@@ -2,13 +2,13 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import type { ContractCheck } from "../checks.ts";
-import { serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, serverQuiet } from "../server-answer.ts";
+import { settleWithin } from "../subject.ts";
 import { recordWindowAnswers, recordWindowPackets, slotsOf, stackOf } from "../window-packets.ts";
 
 export const furnaceTakeCorrected: ContractCheck = {
   name: "furnace-take-corrected",
   withoutRuntime: true,
-  waitsForFake: "a corrected furnace take on the fake (amendment a4 B3a)",
   fixture: {
     cells: { "0,-60,0": "furnace" },
     containers: { "0,-60,0": { raw_iron: 64, coal: 64, iron_ingot: 2 } },
@@ -17,7 +17,9 @@ export const furnaceTakeCorrected: ContractCheck = {
   },
   async run(subject) {
     const { bot } = subject;
-    const window = await bot.openFurnace(bot.blockAt(subject.world([0, -60, 0]))!);
+    const opened = await settleWithin(subject, bot.openFurnace(bot.blockAt(subject.world([0, -60, 0]))!), ANSWER_WALL_MS);
+    assert.ok(opened?.value !== undefined, `furnace opens: ${opened?.error?.message ?? "never"}`);
+    const window = opened.value;
     const output = window.outputItem()!;
     const outputCount = output.count;
     const input = window.inputItem()!;
