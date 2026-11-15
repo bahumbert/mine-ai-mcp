@@ -46,7 +46,8 @@ const sightingSchema = z.strictObject({
   item: z.string(),
   observedCount: z.number().int().positive(),
   position: positionSchema,
-  outcome: z.enum(['collected', 'gone_unconfirmed', 'unreachable', 'inventory_full'])
+  outcome: z.enum(['collected', 'taken_by_other', 'gone_unconfirmed', 'unreachable', 'inventory_full']),
+  takenBy: z.string().nullable()
 });
 const recoverySchema = z.strictObject({
                           dimension: z.string(),

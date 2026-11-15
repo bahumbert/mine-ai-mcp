@@ -525,7 +525,7 @@ Defined in
 
 ### `pick_up_items`
 
-`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, and disappearance without a confirmed gain.
+`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, a confirmed take by another entity (`taken_by_other`, with its name in nullable `takenBy`), and disappearance without a confirmed gain.
 
 Recovery refuses after five minutes of wall time as a conservative boundary. Minecraft advances a dropped item's despawn age only while its chunk is loaded, so wall-clock age cannot establish that older drops have despawned.
 
