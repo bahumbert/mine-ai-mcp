@@ -31,7 +31,8 @@ params:
     - { action: raw_action, waitTicks: 20, input: { operation: look, yaw: 1.5707963267948966, pitch: 0 } }
     - { action: raw_action, input: { operation: control, state: forward, ticks: 2 } }
     # The fall takes a few ticks after the step: the goal is read only after them (run 3 of 3 ended mid-fall, 2026-11-08).
-    - { action: raw_action, waitTicks: 20, input: { operation: look, yaw: 1.5707963267948966, pitch: 0 } }
+    # Server ticks, not client ticks (plan 2026-11-15-scenario-ticks P6). At 5 tps this scenario stays red: the server answers the fall with position corrections (P1 open, 2026-11-15).
+    - { action: raw_action, waitServerTicks: 20, input: { operation: look, yaw: 1.5707963267948966, pitch: 0 } }
 
 goal:
   kind: all
