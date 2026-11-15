@@ -1,5 +1,5 @@
 // Lane servers start from the template world (spec 2026-10-30-scenario-clients-ext4 D10 "Use"): which template a version has, and the copy of its chunks into a server's world.
-import { access, rm } from "node:fs/promises";
+import { access, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Scenario } from "mine-labs";
 import { loadAllScenarios } from "../arena/all-scenarios.ts";
@@ -19,13 +19,24 @@ export interface TemplateUsePorts {
   run: typeof runBounded;
   /** A monotonic millisecond clock. */
   now(): number;
+  /** The bytes of every file under each directory given; a directory that does not exist counts 0. */
+  directoryBytes(directories: readonly string[]): Promise<number>;
 }
+
+const BYTES_PER_MB = 1024 * 1024;
 
 const realPorts: TemplateUsePorts = {
   scenarios: async () => (await loadAllScenarios()).map(loaded => loaded.scenario),
   run: runBounded,
   now: () => performance.now(),
+  directoryBytes: async directories => (await Promise.all(directories.map(directoryBytes))).reduce((sum, bytes) => sum + bytes, 0),
 };
+
+async function directoryBytes(directory: string): Promise<number> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const sizes = await Promise.all(entries.map(entry => (entry.isDirectory() ? directoryBytes(join(directory, entry.name)) : stat(join(directory, entry.name)).then(info => info.size, () => 0))));
+  return sizes.reduce((sum, bytes) => sum + bytes, 0);
+}
 
 /** A world holding a template's chunks; the server's stop removes it, since each is 436 MB or more and nothing else deletes a server root's world. */
 export interface TemplatedWorld {
@@ -60,6 +71,8 @@ export class LaneWorldTemplates {
   readonly #facts = new Map<string, FlatWorldFacts>();
   readonly #resolved = new Map<string, Promise<ResolvedTemplate | null>>();
   readonly #said = new Set<string>();
+  /** A template's size in MB per key (a finished template never changes). */
+  readonly #worldMb = new Map<string, number>();
   readonly #ports: TemplateUsePorts;
 
   constructor(private readonly options: { readonly config: ScenarioServerConfig; readonly log: (line: string) => void }, ports: Partial<TemplateUsePorts> = {}) {
@@ -79,8 +92,38 @@ export class LaneWorldTemplates {
     this.#facts.set(version, { viewChunks: Number(viewDistance), generatorLines: generatorLinesOf(propertiesText) });
   }
 
-  /** Copies the version's template into `worldDir` when the server is a lane server of a flat world and a template of its key exists; null leaves the world empty. */
-  async prepare(request: ServerRequest, worldDir: string): Promise<TemplatedWorld | null> {
+  /** Copies the version's template into `worldDir` when the server is a lane server of a flat world and a template of its key exists; null leaves the world empty. `onCopied` is called once after a copy that worked. */
+  async prepare(request: ServerRequest, worldDir: string, onCopied?: () => void): Promise<TemplatedWorld | null> {
+    const source = await this.#source(request);
+    if (source === null) return null;
+    const world = await this.#copy(request.id, source.key, source.dir, worldDir);
+    if (world !== null) onCopied?.();
+    return world;
+  }
+
+  /** True exactly when `prepare` of this request would copy a template: the factory asks before it chooses the server's root (a RAM root only helps a copy). */
+  async wouldCopy(request: ServerRequest): Promise<boolean> {
+    return (await this.#source(request)) !== null;
+  }
+
+  /**
+   * The size in MB, rounded up, of the files under the version's template (the directories a copy takes): what a copy puts in a server's root. Read from
+   * disk once per key when its template exists; 0 while the version has no key or no template (not remembered, so a template built later is measured).
+   */
+  async worldMbFor(version: string): Promise<number> {
+    const resolved = await this.#resolve(version);
+    if (resolved === null) return 0;
+    const known = this.#worldMb.get(resolved.key);
+    if (known !== undefined) return known;
+    const dir = templateDir(this.options.config.templateDir, resolved.key);
+    if (dir === null) return 0;
+    const mb = Math.ceil((await this.#ports.directoryBytes(WORLD_DIRECTORIES.map(name => join(dir, name)))) / BYTES_PER_MB);
+    this.#worldMb.set(resolved.key, mb);
+    return mb;
+  }
+
+  /** The template a copy for this request comes from, with the log line of why not (said once); the one place that decides, so `wouldCopy` and `prepare` agree. */
+  async #source(request: ServerRequest): Promise<{ readonly key: string; readonly dir: string } | null> {
     if (this.options.config.worldTemplate !== 1 || !isLaneServer(request)) return null;
     const version = request.scenario.minecraft.version;
     const resolved = await this.#resolve(version);
@@ -94,7 +137,7 @@ export class LaneWorldTemplates {
       this.#sayOnce(`missing:${key}`, `world template ${key} missing (servers start empty until it is built)`);
       return null;
     }
-    return this.#copy(request.id, key, dir, worldDir);
+    return { key, dir };
   }
 
   /** Every version a flat server has written its properties for, with its key and whether its template is on disk: what the daemon's build looks at. A version whose census failed is left out (the log says why). */

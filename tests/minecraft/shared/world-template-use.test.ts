@@ -286,3 +286,70 @@ for (const outcome of ["copies", "exit-1"] as const) {
     }, { outcome });
   });
 }
+
+const MB = 1024 * 1024;
+
+/** Sizes the template's directories: `region` 1.5 MB, `poi` 100 bytes (so the sum is a bit over 1.5 MB and rounds up to 2), and a file outside the three directories that never counts. */
+function sizeTemplate(dir: string): void {
+  writeFileSync(join(dir, "region", "r.0.0.mca"), Buffer.alloc(1.5 * MB));
+  writeFileSync(join(dir, "poi", "r.0.0.mca"), Buffer.alloc(100));
+  writeFileSync(join(dir, "template.json"), Buffer.alloc(5 * MB));
+}
+
+for (const [name, overrides, env] of [
+  ["a server of its own", { kind: "single" }, undefined],
+  ["the gamerule probe server", { key: `probe:${VERSION}` }, undefined],
+  ["a template of another version", { scenario: OTHER_VERSION }, undefined],
+  ["a default world", { scenario: defaultWorld() }, undefined],
+  ["a daemon with templates off (WORLD_TEMPLATE=0)", {}, { MINE_AI_SCENARIO_WORLD_TEMPLATE: "0" }],
+] as const) {
+  test(`wouldCopy is false for ${name}, as prepare copies nothing for it`, async () => {
+    await withTemplates(async ({ cacheDir, worldDir, calls, census, templates }) => {
+      makeTemplate(cacheDir, keyOf(census));
+      templates.observe(request(), FLAT_PROPERTIES);
+      assert.equal(await templates.wouldCopy(request(overrides)), false);
+      assert.equal(await templates.prepare(request(overrides), worldDir), null);
+      assert.equal(calls.length, 0);
+    }, { env });
+  });
+}
+
+test("wouldCopy is false before the facts are known and while the template is missing, true once a copy would happen, and prepare then copies (one source, so they cannot drift)", async () => {
+  await withTemplates(async ({ cacheDir, worldDir, calls, census, templates }) => {
+    assert.equal(await templates.wouldCopy(request()), false, "no flat server wrote its properties yet");
+    templates.observe(request(), FLAT_PROPERTIES);
+    assert.equal(await templates.wouldCopy(request()), false, "the template of the key is not built");
+    makeTemplate(cacheDir, keyOf(census));
+    assert.equal(await templates.wouldCopy(request()), true);
+    assert.equal(calls.length, 0, "asking copies nothing");
+    assert.ok(await templates.prepare(request(), worldDir));
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("worldMbFor: the files under the template's region, entities and poi in MB rounded up, read once per key, 0 while no template exists", async () => {
+  await withTemplates(async ({ cacheDir, census, templates }) => {
+    assert.equal(await templates.worldMbFor(VERSION), 0, "no facts yet");
+    templates.observe(request(), FLAT_PROPERTIES);
+    assert.equal(await templates.worldMbFor(VERSION), 0, "template not built: 0, and not remembered");
+    const dir = makeTemplate(cacheDir, keyOf(census));
+    sizeTemplate(dir);
+    assert.equal(await templates.worldMbFor(VERSION), 2);
+    rmSync(dir, { recursive: true, force: true });
+    assert.equal(await templates.worldMbFor(VERSION), 2, "the second call reads nothing: the template is gone and the answer stands");
+  });
+});
+
+test("prepare calls onCopied once after a copy that worked, never after one that failed or that was not asked for", async () => {
+  for (const outcome of ["copies", "exit-1"] as const) {
+    await withTemplates(async ({ cacheDir, worldDir, census, templates }) => {
+      makeTemplate(cacheDir, keyOf(census));
+      templates.observe(request(), FLAT_PROPERTIES);
+      let copied = 0;
+      await templates.prepare(request(), worldDir, () => { copied++; });
+      assert.equal(copied, outcome === "copies" ? 1 : 0, outcome);
+      await templates.prepare(request({ kind: "single" }), worldDir, () => { copied++; });
+      assert.equal(copied, outcome === "copies" ? 1 : 0, "a server of its own is never copied into");
+    }, { outcome });
+  }
+});

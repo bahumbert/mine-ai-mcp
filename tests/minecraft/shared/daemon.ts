@@ -24,6 +24,7 @@ import { installShutdownSignals } from "./shutdown-signals.ts";
 import { rootSlug } from "./source-root.ts";
 import { handleSubmit, type RunningSubmission } from "./submission-handler.ts";
 import type { TrialRunner } from "./trial.ts";
+import { prepareWorldRamDir, type WorldRamDir } from "./world-ram-dir.ts";
 import { LaneWorldTemplates } from "./world-template-use.ts";
 
 export interface DaemonOptions {
@@ -103,8 +104,22 @@ function probeServers(pool: ServerPool, config: ScenarioServerConfig, now: () =>
   };
 }
 
-/** The daemon's server factory and template builds (the real ones unless a test gave its own), after killing the java servers a dead daemon left. */
-async function serverParts(options: DaemonOptions): Promise<{ readonly factory: ServerFactory; readonly templateBuilds: TemplateBuilds | undefined }> {
+/** The daemon's RAM dir for lane servers' roots (after the sweep of dead daemons' dirs), or null with the log line of why not; none for a test's own factory. */
+async function worldsInRam(options: DaemonOptions): Promise<WorldRamDir | null> {
+  const { config, log, socketPath } = options;
+  if (options.factory) return null;
+  if (config.worldRam !== 1) log("worlds on disk (WORLD_RAM=0)");
+  else if (config.worldTemplate !== 1) log("worlds on disk (WORLD_TEMPLATE=0: no template world to copy)");
+  else {
+    const ram = await prepareWorldRamDir({ config, socketPath, log });
+    if (ram) log(`worlds in RAM under ${ram.dir}`);
+    return ram;
+  }
+  return null;
+}
+
+/** The daemon's server factory and template builds (the real ones unless a test gave its own), after killing the java servers a dead daemon left; `ram` is the dir its stop removes. */
+async function serverParts(options: DaemonOptions): Promise<{ readonly factory: ServerFactory; readonly templateBuilds: TemplateBuilds | undefined; readonly ram: WorldRamDir | null }> {
   const { config, log, socketPath } = options;
   const serverRoot = join(options.stateDir, "servers");
   // Next to the socket, not in the checkout: a daemon started from another worktree still finds what a dead one left.
@@ -112,18 +127,19 @@ async function serverParts(options: DaemonOptions): Promise<{ readonly factory: 
   await mkdir(serverRoot, { recursive: true });
   const leftovers = await killLeftoverServers(pidFile, procFs, pid => process.kill(pid, "SIGKILL"));
   if (leftovers.killed.length) log(`killed java servers left by a daemon that died: ${leftovers.killed.join(", ")}`);
+  const ram = await worldsInRam(options);
   const ports = new PortPairs(options.portBlock);
   const templates = new LaneWorldTemplates({ config, log });
-  const factory = options.factory ?? new LabsServerFactory({ serverRoot, ports, pidFile, config, log, templates });
+  const factory = options.factory ?? new LabsServerFactory({ serverRoot, ports, pidFile, config, log, templates, ramWorlds: ram ? { dir: ram.dir } : undefined });
   const templateBuilds = options.templateBuilds ?? (options.factory || config.worldTemplate !== 1 ? undefined : createDaemonTemplateBuilds({ config, log, templates, ports, pidFile }));
   templateBuilds?.pruneLeftovers();
-  return { factory, templateBuilds };
+  return { factory, templateBuilds, ram };
 }
 
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const { config, log, socketPath } = options;
   const now = Date.now;
-  const { factory, templateBuilds } = await serverParts(options);
+  const { factory, templateBuilds, ram } = await serverParts(options);
   const pool = new ServerPool(factory, config, log);
   const clientsAhead = options.clientsAhead ?? (options.runTrial ? undefined : new ClientsAhead({ config, log, now }));
   const scheduler = new Scheduler({ pool, config, now, log, runTrial: options.runTrial ?? runLabsTrial, runIo: options.runIo, clientsAhead, templateBuilds });
@@ -187,6 +203,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     while (scheduler.runningCount > 0 && now() < drainUntil) await new Promise(done => setTimeout(done, SHUTDOWN_DRAIN_POLL_MS));
     await templateBuilds?.stop();
     await pool.stopAll();
+    // Every server is stopped, so every RAM root is removed; the dir itself goes too, so a stopped daemon holds no RAM.
+    await ram?.remove().catch((error: unknown) => log(`removing the RAM worlds dir failed: ${error instanceof Error ? error.message : String(error)}`));
     if (mirror) await settleAndPruneMirror(mirror, log);
     await socket.close();
     log("daemon stopped");
