@@ -40,6 +40,13 @@ export interface FarmCell {
 /** Why a till did not change the soil: no hoe in hand, the use failed, it went out but the server was not seen to answer, or it was answered and the block stayed. */
 export type TillFailure = { readonly kind: "no hoe" } | { readonly kind: "error"; readonly error: string } | { readonly kind: "unchanged" } | { readonly kind: "unconfirmed" };
 
+/**
+ * Why a seed's use grew nothing: none of the item is carried, the use failed before or without an answer (`error`: refused,
+ * thrown), it went out but the server was not seen to answer in time (`unconfirmed`: the crop may still arrive), or the
+ * server clock moved on far enough and nothing grew (`unchanged`: the only answer that teaches).
+ */
+export type PlantFailure = { readonly kind: "none carried" } | { readonly kind: "error"; readonly error: string } | { readonly kind: "unconfirmed" } | { readonly kind: "unchanged" };
+
 /** The physical gestures; each answers null when done, else why not. */
 export interface FarmBody {
   read(x: number, y: number, z: number): CellBlock | null;
@@ -49,8 +56,8 @@ export interface FarmBody {
   breakBlock(cell: FarmCell): Promise<string | null>;
   /** Use the best carried hoe on the soil's top face; null when the soil changed, else why not. */
   till(soil: FarmCell): Promise<TillFailure | null>;
-  /** Use one `item` on the farmland's top face; done when something grows above it. */
-  plant(soil: FarmCell, item: string): Promise<string | null>;
+  /** Use one `item` on the farmland's top face; null when something grows above it, else why not. */
+  plant(soil: FarmCell, item: string): Promise<PlantFailure | null>;
   /** Pick up what the breaks dropped on and around the plot; `left`: the names of the drops it could not get. */
   collectDrops(): Promise<{ readonly left: readonly string[] }>;
   carried(item: string): number;
@@ -121,8 +128,10 @@ interface TendState {
   readonly inventoryBefore: Map<string, number>;
   /** The seed each harvested cell gave, by "x,z", for replanting it. */
   readonly seedFor: Map<string, string>;
-  /** Items that did not take when planted: not tried again. */
+  /** Items the server refused at two different cells with no planting of them between: not tried again this request. */
   readonly unplantable: Set<string>;
+  /** Per item, the cells (by "x,z") where the server answered "nothing grew" since the item last planted: a set, so a cell refused again in a resumed attempt counts once. */
+  readonly refusedAt: Map<string, Set<string>>;
   skipped: Record<string, TendCell[]>;
   settled: Set<string>;
   dropsLeft: readonly string[];
@@ -193,6 +202,7 @@ export function beginTendPlot(
     inventoryBefore: new Map(),
     seedFor: new Map(),
     unplantable: new Set(),
+    refusedAt: new Map(),
     skipped: {},
     settled: new Set(),
     dropsLeft: [],
@@ -297,10 +307,34 @@ function plantChoices(state: TendState, cell: TendCell): string[] {
 
 /**
  * Then every cell tilled and planted: with the item asked for, else (a cell harvested here) the crop's own seed. An
- * item that does not take is not tried again (live 2026-10-03: asked to plant "wheat", the harvest, not the seed,
- * all 13 harvested cells stayed empty). Returns a stall reason, else null.
+ * item the server answers "nothing grew" at two different cells (no planting of it between) is not tried again (live
+ * 2026-10-03: asked to plant "wheat", the harvest, not the seed, all 13 harvested cells stayed empty); one answer, a
+ * failed use and an unanswered use teach nothing. Every cell left is reported with its reason. Returns a stall reason, else null.
  */
 async function plantingPass(a: TendAttempt): Promise<string | null> {
+  try {
+    return await plantCells(a);
+  } finally {
+    countLatePlants(a);
+  }
+}
+
+/** A seed whose answer came after the wait still grew: each cell skipped as not confirmed is read again, and a crop standing there counts as planted. */
+function countLatePlants(a: TendAttempt): void {
+  const { state, body } = a;
+  const unconfirmed = state.skipped[PLANT_NOT_CONFIRMED];
+  if (unconfirmed === undefined) return;
+  const stillEmpty = unconfirmed.filter((cell) => {
+    const above = body.read(cell.x, state.request.y + 1, cell.z);
+    return above === null || state.facts.isRipe(above) === null;
+  });
+  state.counts.planted += unconfirmed.length - stillEmpty.length;
+  if (stillEmpty.length === 0) delete state.skipped[PLANT_NOT_CONFIRMED];
+  else state.skipped[PLANT_NOT_CONFIRMED] = stillEmpty;
+  if (stillEmpty.length < unconfirmed.length) report(state);
+}
+
+async function plantCells(a: TendAttempt): Promise<string | null> {
   const { state, body } = a;
   for (const cell of state.cells) {
     if (state.settled.has(cellKey(cell))) continue;
@@ -376,7 +410,7 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
       why = `no ${item} left`;
       continue;
     }
-    let failed: string | null;
+    let failed: PlantFailure | null;
     try {
       failed = await body.plant(soilOf(state, cell), item);
     } catch (error) {
@@ -385,17 +419,38 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
       throw error;
     }
     if (failed === null) {
+      state.refusedAt.delete(item);
       state.counts.planted += 1;
       report(state);
       return null;
     }
-    state.unplantable.add(item);
-    why = `${item} cannot be planted`;
+    if (failed.kind === "none carried") {
+      why = `no ${item} left`;
+      continue;
+    }
+    // An error or an unanswered use teaches nothing and tries no other item on this cell: only the server's answer does.
+    if (failed.kind === "error") return `plant failed: ${failed.error}`;
+    if (failed.kind === "unconfirmed") return PLANT_NOT_CONFIRMED;
+    why = noteRefusal(state, item, cell);
   }
-  return why;
+  // Every item is off (a till cell was tilled before this): the cell is reported, never left with no reason.
+  return why ?? (state.request.plant === null ? null : `${state.request.plant} cannot be planted`);
+}
+
+/** The server answered that `item` grew nothing at `cell`: at two different cells the item is off for the request. Returns the skip reason. */
+function noteRefusal(state: TendState, item: string, cell: TendCell): string {
+  const cells = state.refusedAt.get(item) ?? new Set<string>();
+  state.refusedAt.set(item, cells.add(cellKey(cell)));
+  if (cells.size < REFUSALS_TO_SWITCH_OFF) return DID_NOT_TAKE(item);
+  state.unplantable.add(item);
+  return `${item} cannot be planted`;
 }
 
 const NO_HOE_LEFT = "no hoe left";
+const PLANT_NOT_CONFIRMED = "plant not confirmed (server behind)";
+const DID_NOT_TAKE = (item: string) => `${item} did not take`;
+/** The same answer at this many different cells: "a fact one bot learns for all needs repeated evidence" (`claude/rules/code-changes.md`). */
+const REFUSALS_TO_SWITCH_OFF = 2;
 const NO_HOE = "no hoe";
 const TILL_NOT_CONFIRMED = "till not confirmed (server behind)";
 

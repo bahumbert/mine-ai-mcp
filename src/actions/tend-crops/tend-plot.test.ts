@@ -191,7 +191,7 @@ test("progress is reported at each phase and each cell farmed", async () => {
   ]);
 });
 
-test("an item that does not take is not tried again, and a harvested cell falls back to its crop's own seed", async () => {
+test("an item that does not take at two cells is not tried again, and a harvested cell falls back to its crop's own seed", async () => {
   // Live 2026-10-03: asked to farm "wheat" (the harvest, not the seed), all 13 harvested cells stayed empty.
   const farm = new FakeFarm();
   farm.set(0, 0, "farmland", "wheat", 7);
@@ -199,7 +199,7 @@ test("an item that does not take is not tried again, and a harvested cell falls 
   farm.set(2, 0, "farmland");
   farm.inventory.set("wheat", 5);
   const { evidence } = await tendPlot(plot({ x2: 2, plant: "wheat" }), farm, PLOT_FACTS);
-  assert.deepEqual(farm.calls.filter((call) => call.startsWith("plant")), ["plant wheat 0,0", "plant wheat_seeds 0,0", "plant wheat_seeds 1,0"]);
+  assert.deepEqual(farm.calls.filter((call) => call.startsWith("plant")), ["plant wheat 0,0", "plant wheat_seeds 0,0", "plant wheat 1,0", "plant wheat_seeds 1,0"]);
   assert.equal(evidence.planted, 2);
   assert.deepEqual(evidence.skipped, { "wheat cannot be planted": [{ x: 2, z: 0 }] });
 });
@@ -266,6 +266,100 @@ test("a use the server was not seen to answer teaches nothing, beside one it did
   const { evidence } = await tendPlot(plot({ x2: 3 }), farm, PLOT_FACTS);
   assert.deepEqual(evidence.untillable, { podzol: [{ x: 3, z: 0 }] });
   assert.equal(evidence.skipped["till not confirmed (server behind)"]?.length, 3);
+});
+
+/** Three farmland cells x 0..2 and three seeds, to plant `wheat_seeds`. */
+function seededFarm(): FakeFarm {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 3);
+  return farm;
+}
+const seedPlot = () => plot({ x2: 2, plant: "wheat_seeds" });
+const plantCalls = (farm: FakeFarm) => farm.calls.filter((call) => call.startsWith("plant"));
+
+test("a late plant is counted from the world, never skipped", async () => {
+  const farm = seededFarm();
+  farm.plantUnconfirmed = new Set(["0,0"]);
+  const { evidence } = await tendPlot(seedPlot(), farm, PLOT_FACTS);
+  assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0", "plant wheat_seeds 2,0"]);
+  assert.equal(evidence.planted, 3);
+  assert.deepEqual(evidence.skipped, {});
+});
+
+test("a late plant is still counted when a reflex cuts the pass after it", async () => {
+  const farm = seededFarm();
+  farm.plantUnconfirmed = new Set(["0,0"]);
+  cutAfter(farm, "plant", 2); // cell 1 plants, then the reflex takes the body: the next attempt's `skipped` starts empty
+  const run = beginTendPlot(seedPlot(), farm, PLOT_FACTS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.equal(evidence.planted, 3, "cell 0 (late), cell 1 (counted where the throw came), cell 2");
+  assert.equal(evidence.skipped["plant not confirmed (server behind)"], undefined);
+});
+
+test("a seed use the server never answered, or that failed, is its own reason, teaches nothing and the next cell still plants", async () => {
+  const cases = [
+    { set: "plantSilent", reason: "plant not confirmed (server behind)" },
+    { set: "plantFailsAt", reason: "plant failed: boom" },
+  ] as const;
+  for (const { set, reason } of cases) {
+    const farm = seededFarm();
+    farm[set] = new Set(["0,0"]);
+    const { evidence } = await tendPlot(seedPlot(), farm, PLOT_FACTS);
+    assert.equal(evidence.planted, 2, reason);
+    assert.deepEqual(evidence.skipped, { [reason]: [{ x: 0, z: 0 }] }, reason);
+  }
+});
+
+test("a planted cell between two refusals clears the record", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 4);
+  farm.plantRefusedAt = new Set(["0,0", "2,0"]);
+  const { evidence } = await tendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+  assert.equal(plantCalls(farm).length, 4);
+  assert.equal(evidence.planted, 2);
+  assert.deepEqual(evidence.skipped, { "wheat_seeds did not take": [{ x: 0, z: 0 }, { x: 2, z: 0 }] });
+});
+
+test("a seed refused at two cells in a row is not tried again", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 4);
+  farm.plantRefusedAt = new Set(["0,0", "1,0"]);
+  const { evidence } = await tendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+  assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0"]);
+  assert.deepEqual(evidence.skipped, {
+    "wheat_seeds did not take": [{ x: 0, z: 0 }],
+    "wheat_seeds cannot be planted": [{ x: 1, z: 0 }, { x: 2, z: 0 }, { x: 3, z: 0 }],
+  });
+});
+
+test("an item switched off on a plot that needs tilling still reports every cell it leaves", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "dirt");
+  farm.inventory.set("wheat", 5);
+  const { evidence } = await tendPlot(plot({ x2: 3, plant: "wheat" }), farm, PLOT_FACTS);
+  assert.deepEqual(plantCalls(farm), ["plant wheat 0,0", "plant wheat 1,0"]);
+  assert.deepEqual([evidence.tilled, evidence.planted], [4, 0]);
+  assert.deepEqual(evidence.skipped, {
+    "wheat did not take": [{ x: 0, z: 0 }],
+    "wheat cannot be planted": [{ x: 1, z: 0 }, { x: 2, z: 0 }, { x: 3, z: 0 }],
+  });
+  assert.equal(evidence.after.emptyFarmland, 4);
+});
+
+// The plan's variant cut with `cutAfter(farm, "plant", 1)` throws before the refusal is recorded, so a counter instead of a set would pass it: the cut is on the walk to the next cell.
+test("a cell refused in a cut attempt and again in the resumed one counts as one place, not two", async () => {
+  const farm = seededFarm();
+  farm.plantRefusedAt = new Set(["0,0"]);
+  cutBefore(farm, "reach", 2);
+  const run = beginTendPlot(seedPlot(), farm, PLOT_FACTS);
+  await assert.rejects(run.attempt(farm, never), /HUNGER/);
+  const { evidence } = await run.attempt(farm, never);
+  assert.equal(evidence.planted, 2);
+  assert.deepEqual(evidence.skipped, { "wheat_seeds did not take": [{ x: 0, z: 0 }] });
 });
 
 // Reflex continuity (spec 2026-10-18, R2): a reflex that takes the body mid-tend hands it back; the next attempt

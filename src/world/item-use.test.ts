@@ -230,6 +230,22 @@ test("a server wait confirms an unchanged block only once the world age moved 40
   assert.equal(result.timedOut, undefined);
 });
 
+test("an effect 15 ticks after the use is missed by a 10-tick client wait and seen by a 40-tick server wait", async () => {
+  // The cause of the tend-crops red (plan 2026-11-14-tests-phase4-sibling): a seed's use judged on 10 client ticks.
+  const use = (world: ReturnType<typeof serverWaitWorld>, wait: Partial<Parameters<typeof useItemAt>[1]>) => useItemAt(world.bot, {
+    item: world.stack("bucket"),
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    ...wait,
+  });
+  const clientWait = serverWaitWorld(15);
+  const missed = await clientWait.clock.settle(use(clientWait, { timeoutTicks: 10 }), 12 * TICK_MS);
+  assert.equal(missed.kind, "failed");
+  const serverWorld = serverWaitWorld(15);
+  const seen = await serverWorld.clock.settle(use(serverWorld, { serverWait: { ticks: 40, wallMs: 10_000, ...serverWorld.timing } }), 2_100);
+  assert.deepEqual(seen, { kind: "used" });
+});
+
 test("a cancel ends the wait for the use's effect at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
   // A death turns physics off (`physics.js:480`): no tick comes, and `bot.waitForTicks(1)` alone ends only at 5050 ms.
   const { bot, clock, stack } = usingBot(40);

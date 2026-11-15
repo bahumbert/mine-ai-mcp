@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeClock } from "../../test-support/fake-bot/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
-import { mineflayerFarmBody, plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
+import { mineflayerFarmBody, plantFailure, plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
+import { watch } from "../../test-support/pending.js";
 import { Vec3 } from "vec3";
 import { PLOT_FACTS, cutAfter, FakeFarm } from "../../test-support/fake-farm.js";
 import type { StallClock } from "../stall-watch.js";
@@ -96,13 +97,13 @@ test("a cancel ends the quiet look for dropped items at once when physics has st
 });
 
 /** Protected regions at the farm's own digs and tills (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
-function farmerIn(owner: string | null, cells: Record<string, string>, carried: Record<string, number> = {}) {
-  const harness = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells, carried });
+function farmerIn(owner: string | null, cells: Record<string, string>, carried: Record<string, number> = {}, options: { signal?: AbortSignal; clock?: FakeClock } = {}) {
+  const harness = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells, carried, ...(options.clock && { clock: options.clock }) });
   const region = (name: string) => ({
     regionId: 3, dimension: "overworld", owner: name, label: "Tom's farm", min: { x: 0, y: 62, z: -1 }, max: { x: 2, y: 66, z: 1 },
   });
   setProtectedRegionsProvider(harness.bot, () => (owner === null ? [] : [region(owner === "own" ? harness.bot.username : owner)]));
-  return { ...harness, body: mineflayerFarmBody(harness.bot, {} as NavigationRuntime, wheatPlot()) };
+  return { ...harness, body: mineflayerFarmBody(harness.bot, {} as NavigationRuntime, wheatPlot(), options.signal) };
 }
 
 test("clearing a cell in another owner's region is refused naming the region, and the block stays", async () => {
@@ -127,6 +128,63 @@ test("tilling soil in another owner's region is an error naming the region, with
   assert.equal(result?.kind, "error");
   assert.ok(result?.kind === "error" && result.error.includes("(owner Tom)"), JSON.stringify(result));
   assert.equal(server.packets.filter((packet) => packet.name === "block_place" || packet.name === "use_item").length, 0);
+});
+
+test("the seed's use waits on the server clock, not 10 client ticks", async () => {
+  // No time packet from a stopped server (as `item-use.test.ts` "an unconfirmed use says how far ..."): the wait ends on
+  // the 10 s wall bound; a 10-client-tick wait (0.5 s) would have answered long before.
+  const wallClock = createFakeClock({ mode: "mocked" });
+  using _installed = wallClock.install();
+  const { body, clock, server } = farmerIn("own", { "1,63,0": "farmland" }, { wheat_seeds: 2 }, { clock: wallClock });
+  server.stop();
+  const pending = body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds");
+  const wait = watch(pending);
+  await clock.advance(1_000);
+  assert.equal(wait.over, false, "a 10-tick client wait would have ended by 500 ms");
+  assert.deepEqual(await clock.settle(pending, 10_500), { kind: "unconfirmed" });
+});
+
+test("a seed in another owner's region is an error naming the region, with no use packet", async () => {
+  const { body, server } = farmerIn("Tom", { "1,63,0": "farmland" }, { wheat_seeds: 1 });
+  const result = await body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds");
+  assert.equal(result?.kind, "error");
+  assert.ok(result?.kind === "error" && result.error.includes("(owner Tom)"), JSON.stringify(result));
+  assert.equal(server.packets.filter((packet) => packet.name === "block_place" || packet.name === "use_item").length, 0);
+});
+
+test("a cancel during the seed's server wait ends it at once and releases the hand", async () => {
+  const abort = new AbortController();
+  const wallClock = createFakeClock({ mode: "mocked" });
+  using _installed = wallClock.install();
+  const { body, bot, clock, server } = farmerIn("own", { "1,63,0": "farmland" }, { wheat_seeds: 2 }, { signal: abort.signal, clock: wallClock });
+  server.stop();
+  clock.after(3_000, () => abort.abort(new Error("bot died")));
+  await assert.rejects(clock.settle(body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds"), 4_000), /bot died/);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no tick listener");
+  assert.equal(bot.usingHeldItem, false);
+});
+
+test("no seed carried is its own failure kind", async () => {
+  const { body } = farmerIn("own", { "1,63,0": "farmland" });
+  assert.deepEqual(await body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds"), { kind: "none carried" });
+});
+
+test("a seed the running server leaves in the hand, with no crop, is unchanged: the body reads the seed count around the use", async () => {
+  // The shared fake's `block_place` places nothing for an item that is no block: the server answers by changing nothing.
+  const wallClock = createFakeClock({ mode: "mocked" });
+  using _installed = wallClock.install();
+  const { body, clock } = farmerIn("own", { "1,63,0": "farmland" }, { wheat_seeds: 2 }, { clock: wallClock });
+  assert.deepEqual(await clock.settle(body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds"), 2_500), { kind: "unchanged" });
+});
+
+test("a failed seed use is unchanged only when the server clock moved 20 ticks and no seed left the hand", () => {
+  const failed = (serverTicksWaited: number | null) => ({ error: "not confirmed", serverTicksWaited });
+  assert.deepEqual(plantFailure(failed(20), 5, 5), { kind: "unchanged" });
+  assert.deepEqual(plantFailure(failed(19), 5, 5), { kind: "unconfirmed" });
+  assert.deepEqual(plantFailure(failed(0), 5, 5), { kind: "unconfirmed" });
+  assert.deepEqual(plantFailure(failed(40), 5, 4), { kind: "unconfirmed" }, "the seed was consumed");
+  assert.deepEqual(plantFailure(failed(null), 5, 5), { kind: "error", error: "not confirmed" });
+  assert.deepEqual(plantFailure({ error: "not confirmed", serverTicksWaited: 30, timedOut: true }, 5, 5), { kind: "unconfirmed" });
 });
 
 test("a failed hoe use is unchanged only when the server clock moved 20 ticks and the hoe is still carried", () => {
