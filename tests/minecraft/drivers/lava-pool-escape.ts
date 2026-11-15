@@ -1,11 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
-import { viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { isBurning, isInLava } from "../../../src/survival/perception/body.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { activeActionOwner } from "./wait-until-body-free.ts";
 
 const paramsIn = (arena: ScenarioContext["arena"]) =>
   z.strictObject({
@@ -65,8 +65,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const escaped = () => contact && claimed && onBank();
     // Polled on the wall clock: physics ticks can stop on a lagging server.
     while (!escaped() && !died && monotonicNow() - startedAt < params.deadlineMs) {
-      const status = viewStatusResultSchema.parse((await context.call("view_status", {})).result);
-      const owner = status.status === "succeeded" ? status.situation.activity.activeAction?.action : undefined;
+      const owner = await activeActionOwner(context);
       if (owner === FIRE_REFLEX) claimed = true;
       else if (claimed && isInLava(bot)) lostInLava++;
       await delay(POLL_MS);

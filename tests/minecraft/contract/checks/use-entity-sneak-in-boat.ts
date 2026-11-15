@@ -21,8 +21,10 @@ export const useEntitySneakInBoat: ContractCheck = {
     assert.equal(ended?.error, reason, "cancelled get-off did not reject promptly");
     await getOffAndStand(subject, boat);
     await mountBoat(subject);
-    const target = Object.values(bot.entities).find((entity) => entity.name === "cow" && entity.position.distanceTo(boat.position) < 4);
-    assert.ok(target, "no nearby cow to attack");
+    // The fixture's cow is shown to the client by a packet of its own: wait for it as `mountBoat` waits for the boat (same shape as the red of `boat-follows-vehicle-move`).
+    const nearbyCow = () => Object.values(bot.entities).find((entity) => entity.name === "cow" && entity.position.distanceTo(boat.position) < 4);
+    await answerArrives(subject, () => nearbyCow() !== undefined, "no nearby cow to attack");
+    const target = nearbyCow()!;
     let hurts = 0;
     const onHurt = (entity: typeof bot.entity) => { if (entity.id === target.id) hurts++; };
     bot.on("entityHurt", onHurt);

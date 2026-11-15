@@ -7,7 +7,7 @@ import type { ContractFixture } from "./checks.ts";
 /** Entity ids the fixture's entities get on the fake (the bot is 1). */
 const FIRST_FIXTURE_ENTITY_ID = 100;
 
-/** The fake's world spawn is this far east of the fixture's feet: the real one is never where a check's bot stands (8.5 blocks from the origin, 512 from a lane's start; contract check `respawn-after-death`). */
+/** The fake's world spawn is this far east of the fixture's feet: the real one is never where a check's bot stands except in lane 0, which dies inside the spawn area (spawn plus or minus 10; 512 blocks from a lane's start in lanes 1 and up; contract check `respawn-after-death`). */
 const WORLD_SPAWN_AWAY_BLOCKS = 8;
 
 /** Server ticks between the seat's `position` packet and the passenger list of a mount (`FakeServerOptions.seatPositionLeadTicks`): the gap one red of a loaded server showed, not measured on a server on time. */

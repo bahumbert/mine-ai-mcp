@@ -7,7 +7,9 @@ import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { isInLava } from "../../../src/survival/perception/body.ts";
 import { run as escapePool } from "./lava-pool-escape.ts";
+import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
 
 /** Require the server's answer, rather than Mineflayer's predicted air after digging. */
 async function serverRemoved(context: ScenarioContext, cells: readonly Vec3[]): Promise<boolean> {
@@ -48,21 +50,37 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       context.bot.chat(`/fill ${params.gateMin.join(" ")} ${params.gateMax.join(" ")} minecraft:air replace minecraft:stone`);
     }
   };
+  // The burn lasts from the last contact with lava: the wait before `navigate` counts its bound from here. In 11 of 30 green runs the bot went back into the pool
+  // about 12 s after its escape (the step removed under it, or beside it), a second contact that restarts the burn: `lavaTicksAfterEscape` shows it in the detail, never hides it.
+  let lastInLava = burnStartNow(context.bot);
+  let escaped = false;
+  let lavaTicksAfterEscape = 0;
+  const noteLava = () => {
+    if (!isInLava(context.bot)) return;
+    lastInLava = burnStartNow(context.bot);
+    if (escaped) lavaTicksAfterEscape++;
+  };
   context.bot.on("blockUpdate", observe);
   context.bot.on("physicsTick", observe);
+  context.bot.on("physicsTick", noteLava);
   try {
     const escape = await escapePool({ ...context, scenario: { ...context.scenario, params: params.escape } });
     if (escape.status !== "succeeded") return escape;
+    escaped = true;
     const deadline = monotonicNow() + 30_000;
     while (pendingLifeSavingPlacements(context.bot).length > 0 && monotonicNow() < deadline) await delay(50);
     const cells = [...seen.values()];
     const removed = cells.length > 0 && pendingLifeSavingPlacements(context.bot).length === 0 && await serverRemoved(context, cells);
     if (!removed) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, pending: pendingLifeSavingPlacements(context.bot) }) };
+    // The bot still burns after the pool and the fire reflex claims the body again while it does: a `navigate` on a claim is refused `ACTION_BUSY` (two reds of 5, the claim 18 and 27 ms old).
+    const bodyFree = await waitUntilBodyFree(context, lastInLava);
+    if (!bodyFree.freed) return { status: "failed", detail: JSON.stringify({ escape, lavaTicksAfterEscape, bodyFree }) };
     const [x, y, z] = params.next;
     const next = await context.call("navigate", { x, y, z, range: 0, dig: false, scaffold: false });
-    return { status: next.result.status === "succeeded" ? "succeeded" : "failed", detail: JSON.stringify({ escape, placed: cells, serverRemoved: removed, next: next.result.status }) };
+    return { status: next.result.status === "succeeded" ? "succeeded" : "failed", detail: JSON.stringify({ escape, placed: cells, serverRemoved: removed, lavaTicksAfterEscape, bodyFree, next: next.result.status }) };
   } finally {
     context.bot.off("blockUpdate", observe);
     context.bot.off("physicsTick", observe);
+    context.bot.off("physicsTick", noteLava);
   }
 }

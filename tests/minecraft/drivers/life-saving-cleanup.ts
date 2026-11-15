@@ -7,6 +7,7 @@ import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
 
 /** Hold the arranged body until the fire packet arrives, so a delayed command cannot light the route behind it. */
 async function injectFire(context: ScenarioContext): Promise<boolean> {
@@ -38,6 +39,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   let injected = false;
   let fireOwned = false;
   let retainedDuringFire = false;
+  let firedAt = burnStartNow(bot);
   const deadline = monotonicNow() + 25_000;
   while (monotonicNow() < deadline && bot.health > 0) {
     const status = await context.call("view_status", {});
@@ -45,6 +47,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     if (owner === "remove_life_saving_placements") cleanupSeen = true;
     if (cleanupSeen && !injected && bot.entity.position.distanceTo(start) > 0.1) {
       injected = await injectFire(context);
+      firedAt = burnStartNow(bot);
     }
     if (owner === "fire_reflex") {
       fireOwned = true;
@@ -65,7 +68,10 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   } finally {
     bot.off("messagestr", answer);
   }
+  // The fire reflex claims the body again while the bot burns, and a `navigate` on a claim is refused `ACTION_BUSY` (same wait as `lava-pool-region.ts`).
+  const bodyFree = await waitUntilBodyFree(context, firedAt);
+  if (!bodyFree.freed) return { status: "failed", detail: JSON.stringify({ cleanupSeen, injected, fireOwned, bodyFree }) };
   const nextAction = await context.call("navigate", { x: next[0], y: next[1], z: next[2], range: 0, dig: false, scaffold: false });
   return { status: serverAir && nextAction.result.status === "succeeded" ? "succeeded" : "failed",
-    detail: JSON.stringify({ cleanupSeen, injected, fireOwned, retainedDuringFire, serverAir, nextAction: nextAction.result.status }) };
+    detail: JSON.stringify({ cleanupSeen, injected, fireOwned, retainedDuringFire, serverAir, bodyFree, nextAction: nextAction.result.status }) };
 }
