@@ -314,6 +314,23 @@ test("a runtime silent past the startup deadline before ready is killed as unres
   assert.match(JSON.stringify(status), /RUNTIME_UNRESPONSIVE/);
 });
 
+/** A runtime that serves its port, reports ready after `silentMs` of silence, then sends no heartbeat at all (its own timer never runs). */
+const readyThenSilent = (silentMs: number) => (): { executable: string; args: string[] } => ({
+  executable,
+  args: ["-e", `const server = require("node:http").createServer((request, response) => response.end('{"ok":true}')); server.listen(0, "127.0.0.1", () => setTimeout(() => process.send({ kind: "ready", port: server.address().port }), ${silentMs})); process.once("disconnect", () => process.exit(0)); setInterval(() => {}, 1_000);`],
+});
+
+test("a ready runtime's heartbeat deadline counts from ready, not from the silence before it", { timeout: 15_000 }, async (t) => {
+  // The silence before ready (1.5 s) is past the 1 s heartbeat deadline, so the last heartbeat the supervisor holds is
+  // from its own start. Kept, it would declare the runtime hung at the first watchdog tick after ready.
+  const { url } = await supervised(t, "ready-clock", readyThenSilent(1_500), { startupMs: 10_000, unresponsiveMs: 1_000 });
+  while ((await stateOf(url)) !== "ready") await delay(20);
+  await delay(500);
+  assert.equal(await stateOf(url), "ready", "Half the heartbeat deadline after ready the runtime is still ready: the clock starts at ready.");
+  const { status } = await whenFailed(url);
+  assert.match(JSON.stringify(status), /RUNTIME_UNRESPONSIVE/);
+});
+
 const mcpCall = (url: string, id: number, tool: string) =>
   fetch(`${url}/${tool}`, {
     method: "POST",
