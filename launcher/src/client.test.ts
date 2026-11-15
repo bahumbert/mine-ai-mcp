@@ -58,14 +58,14 @@ test("a running launcher: the client prints the banner, then the lines, and ends
   assert.ok(h.out.indexOf("Ayla is running (host port 25575).") > h.out.findIndex((line) => line.includes("localhost:25565")), "the banner comes first");
   assert.ok(h.out.includes("Brea is running (host port 25576)."));
   assert.match(h.out.at(-1)!, /stopped/u);
-  assert.equal(h.enterWaits, 1, "the window waits for Enter so the player can read why it ended");
+  assert.equal(h.enterWaits, 0);
 });
 
 /**
- * A launcher whose `/attach` answers with `attachAnswer` (a body, or an error the fetch throws); `/status` is the real
+ * A launcher whose `/attach` answers with `attachAnswer` (a body, response, or error); `/status` is the real
  * endpoint's. `inits` records the `/attach` request options.
  */
-async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Error) {
+async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Response | Error) {
   const control = await startControlServer({ startPort: 26_340, handlers: handlers(STATUS) });
   const inits: (RequestInit | undefined)[] = [];
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
@@ -73,6 +73,7 @@ async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Erro
       if (!String(input).endsWith("/attach")) return await fetch(input, init);
       inits.push(init);
       if (attachAnswer instanceof Error) throw attachAnswer;
+      if (attachAnswer instanceof Response) return attachAnswer;
       return new Response(attachAnswer, { status: 200 });
     }) as typeof fetch,
   });
@@ -81,20 +82,60 @@ async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Erro
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-test("a stream that ends normally says Mine AI has stopped; heartbeat comment blocks are not shown; the attach has fetch timeout false (Bun ends a stream silent for 360 s otherwise)", async () => {
+for (const [label, data] of [["empty", ""], ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n"]] as const) {
+test(`a ${label} stream ends without Enter and attaches without an idle timeout`, async () => {
   const body = new ReadableStream<Uint8Array>({
     start: (stream) => {
-      stream.enqueue(bytes(": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n"));
+      if (data) stream.enqueue(bytes(data));
       stream.close();
     },
   });
   const { control, h, inits } = await consoleWithAttach(body);
-  await runConsole(h.deps);
+  assert.equal(await runConsole(h.deps), 0);
   await control.close();
-  assert.deepEqual(h.out.slice(-3), ["first", "second", "Mine AI has stopped."]);
+  assert.deepEqual(h.out.slice(data ? -3 : -1), data ? ["first", "second", "Mine AI has stopped."] : ["Mine AI has stopped."]);
   assert.ok(!h.out.some((line) => line.includes("ping")));
-  assert.equal(inits.length, 1);
   assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
+  assert.equal(h.enterWaits, 0);
+});
+}
+
+for (const [label, response, status] of [
+  ["attach 503", new Response("stopping", { status: 503 }), 503],
+  ["null body", new Response(null, { status: 200 }), 200],
+] as const) {
+  test(`${label} does not say stopped and waits for Enter`, async () => {
+    const { control, h } = await consoleWithAttach(response);
+    assert.equal(await runConsole(h.deps), 0);
+    await control.close();
+    assert.equal(h.out.at(-1), `Could not attach to Mine AI (HTTP ${status}).`);
+    assert.ok(!h.out.includes("Mine AI has stopped."));
+    assert.equal(h.enterWaits, 1);
+  });
+}
+
+test("a new console attaches and finishes while an earlier error waits for Enter", async () => {
+  const { control, h } = await consoleWithAttach(new Response(null, { status: 503 }));
+  let release!: () => void, signalPaused!: () => void, signalUnexpected!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const paused = new Promise<void>((resolve) => { signalPaused = resolve; });
+  const unexpected = new Promise<"blocked">((resolve) => { signalUnexpected = () => resolve("blocked"); });
+  h.deps = { ...h.deps, waitForEnter: () => { h.enterWaits++; if (h.enterWaits === 1) signalPaused(); else signalUnexpected(); return gate; } };
+  const first = runConsole(h.deps);
+  try {
+    await paused;
+    const fetchFirst = h.deps.fetch;
+    h.deps = { ...h.deps, fetch: (async (input: string | URL | Request, init?: RequestInit) => String(input).endsWith("/attach")
+      ? new Response(new ReadableStream<Uint8Array>({ start: (stream) => { stream.enqueue(bytes("data: fresh attachment\n\n")); stream.close(); } }))
+      : await fetchFirst(input, init)) as typeof fetch };
+    assert.equal(await Promise.race([runConsole(h.deps), unexpected]), 0);
+    assert.ok(h.out.includes("fresh attachment"));
+    assert.equal(h.enterWaits, 1);
+  } finally {
+    release();
+    assert.equal(await first, 0);
+    await control.close();
+  }
 });
 
 for (const [label, attachAnswer, reason] of [

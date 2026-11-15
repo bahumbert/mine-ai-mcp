@@ -140,17 +140,21 @@ async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<st
 const NO_IDLE_TIMEOUT: BunFetchRequestInit = { timeout: false };
 
 /** Shows the launcher's lines until its stream ends. An error closes this window's socket; the launcher stops the stack when no other window is attached. */
-async function showAttachedStream(deps: ConsoleDeps, launcher: LauncherLock): Promise<void> {
+async function showAttachedStream(deps: ConsoleDeps, launcher: LauncherLock): Promise<"ended" | "error"> {
   try {
     const attached = await deps.fetch(`http://127.0.0.1:${launcher.controlPort}/attach`, { headers: { [CONTROL_HEADER]: "1" }, ...NO_IDLE_TIMEOUT });
-    if (!attached.ok || attached.body === null) deps.write(`Could not attach to Mine AI (HTTP ${attached.status}).`);
-    else for await (const line of streamLines(attached.body)) deps.write(line);
+    if (!attached.ok || attached.body === null) {
+      deps.write(`Could not attach to Mine AI (HTTP ${attached.status}).`);
+      return "error";
+    }
+    for await (const line of streamLines(attached.body)) deps.write(line);
   } catch (error) {
     // Not "is stopping": with another window attached, or a launcher that is already gone, the stack does not stop now.
     deps.write(`This window lost its connection to Mine AI (${fetchErrorText(error)}). Mine AI stops when no window is left open. Open it again from the Start menu.`);
-    return;
+    return "error";
   }
   deps.write("Mine AI has stopped.");
+  return "ended";
 }
 
 /** Runs the console: banner, then the launcher's lines until it ends. Returns the exit code. */
@@ -162,8 +166,7 @@ export async function runConsole(deps: ConsoleDeps): Promise<number> {
     return 1;
   }
   for (const line of bannerLines(ready.status, (line) => emphasise(line, deps.color))) deps.write(line);
-  await showAttachedStream(deps, ready.launcher);
-  await deps.waitForEnter();
+  if ((await showAttachedStream(deps, ready.launcher)) === "error") await deps.waitForEnter();
   return 0;
 }
 
