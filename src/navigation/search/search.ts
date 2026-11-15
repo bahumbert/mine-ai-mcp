@@ -29,7 +29,8 @@ import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
 import { lavaWatchCells, routeLavaDependencies } from "../world/lava-watch.js";
-import { blockKey, packKey } from "../world/world.js";
+import { blockKey, packKey, type NavigationObservation, type WorldView } from "../world/world.js";
+import { bodyDependsOnBlock } from "../world/body-support.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
@@ -197,10 +198,26 @@ export interface SearchContext extends GenerationContext {
 interface SearchOptions {
   readonly id: string;
   readonly start: PlanningState;
+  /** Physical root provenance, independent of its coordinates or predicted edits. */
+  readonly observedStart?: NavigationObservation;
   readonly goal: Extract<ResolvedGoal, { kind: "active" }>;
   readonly context: SearchContext;
   readonly limits?: SearchLimits;
   readonly now?: () => number;
+}
+
+/** Keep the actual body's edge support until a movement has carried it elsewhere. */
+function rootMovementRetainsSupport(step: PlannedStep, actualStart: NavigationObservation | undefined, world: WorldView): boolean {
+  if (!actualStart) return true;
+  const { position, stance } = actualStart;
+  for (const operation of step.operations) {
+    if (operation.kind === "move") break;
+    if (operation.kind !== "break") continue;
+    const target = operation.position;
+    if (target.x === Math.floor(position.x) && target.z === Math.floor(position.z)) continue;
+    if (bodyDependsOnBlock(position, stance === "swimming", target, (x, y, z) => world.blockAt(x, y, z))) return false;
+  }
+  return true;
 }
 
 /** The nodes from the first step out of the root to `node`, in walking order. */
@@ -228,7 +245,10 @@ function reconstructStep(options: SearchOptions, store: NodeStore, node: number)
     if (movements.remainingScaffolds[index] !== remaining) continue;
     if (packKey(movements.toX[index]!, movements.toY[index]!, movements.toZ[index]!) !== key) continue;
     if (!movements.settle(index)) continue;
-    return movements.movement(index).step;
+    const step = movements.movement(index).step;
+    const actualStart = store.parent[parent] === NO_NODE ? options.observedStart : undefined;
+    if (!rootMovementRetainsSupport(step, actualStart, options.context.world)) continue;
+    return step;
   }
   return null;
 }
@@ -573,7 +593,8 @@ export class IncrementalSearch {
     const state = store.state[current]!;
     const depth = store.depth[current]! + 1;
     const digContext = digContextAt(this.#options.context, state);
-    const finish = this.#goal.finish?.(state, context, digContext);
+    const actualStart = current === this.#root ? this.#options.observedStart : undefined;
+    const finish = this.#goal.finish?.(state, context, digContext, actualStart);
     if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z)) {
       const cost = store.cost[current]! + finish.cost;
       // A terminal excavation changes the world without changing feet. It
@@ -607,8 +628,10 @@ export class IncrementalSearch {
       // the dear part of a dig and can only refuse the row, never reprice it,
       // so the rows a known arrival beats are never asked.
       if (!movements.settle(index)) continue;
+      const movement = movements.movement(index);
+      if (actualStart && !rootMovementRetainsSupport(movement.step, actualStart, context.world)) continue;
       this.#generated += 1;
-      const arrival = movements.movement(index).state;
+      const arrival = movement.state;
       const heuristic = this.#goal.heuristic(arrival.node);
       const node = store.add(key, arrival, cost, heuristic, cost + heuristic, depth, current, null);
       this.#arrivals.keep(node);

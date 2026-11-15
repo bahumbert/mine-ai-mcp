@@ -1,4 +1,7 @@
 import { exactBlockGoal } from "./goals/index.js";
+import { excavateGoal } from "./goals/excavate.js";
+import type { Goal } from "./goals/goal.js";
+import type { BlockPosition } from "./world/world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { RouteOutcomes } from "./route-outcomes.js";
 import { createNavigationRuntime } from "./runtime.js";
@@ -8,6 +11,108 @@ import { Vec3 } from "vec3";
 import { type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { DEFAULT_NAVIGATION_POLICY } from "../survival/policy/contract.js";
 import { setNavigationPolicyProvider } from "../survival/state/navigation-policy.js";
+
+/** Finish the navigation request when excavation has actually cleared its target. */
+function clearedTargetGoal(target: BlockPosition): Goal {
+  return { resolve: (observation) => {
+    const goal = excavateGoal(target).resolve(observation);
+    return goal.kind === "invalid" ? goal : { ...goal, isSatisfied: (_node, world) => {
+      const block = world.blockAt(target.x, target.y, target.z);
+      return block.kind === "loaded" && block.traits.empty;
+    } };
+  } };
+}
+
+test("stationary non-floor excavation leaves an edge pose from which the next safe navigate completes", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock, simulatePhysics: true, position: new Vec3(0.85, 63, 0.5),
+    groundY: 62, cells: { "0,62,0": "air", "2,64,0": "dirt" } });
+  const navigation = createNavigationRuntime(bot);
+  const trace: string[] = [];
+  navigation.onEvent((event) => trace.push(`${event.kind} ${bot.entity.position}`));
+  try {
+    const result = await clock.settle(navigation.navigate({ movements: createMovementPolicy({
+      decideStep: () => ({ kind: "prohibited", reason: "exercise stationary completion" }),
+    }), goal: clearedTargetGoal({ x: 2, y: 64, z: 0 }) }), 20_000)
+      .catch((error) => { throw new Error(`${error}\n${trace.join("\n")}`); });
+    assert.equal(result.status, "completed", `${JSON.stringify(result)}\n${trace.join("\n")}`);
+    assert.equal(bot.blockAt(new Vec3(2, 64, 0))?.name, "air");
+    assert.ok(bot.entity.position.x > 0.7 && bot.entity.position.x < 1, `${bot.entity.position}\n${trace.join("\n")}`);
+    assert.equal(bot.entity.position.y, 63);
+    const next = await tickUntilSettled(clock, navigation.navigate({ movements: createMovementPolicy(),
+      goal: exactBlockGoal({ x: 2, y: 63, z: 0 }) }));
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally { await tickUntilSettled(clock, navigation.close()); }
+});
+
+test("same-node change in priced reach uses live aim before crediting a break", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock, simulatePhysics: true, position: new Vec3(0.85, 63, 0.5),
+    groundY: 62, cells: { "5,63,0": "dirt" } });
+  const navigation = createNavigationRuntime(bot);
+  let moved = false;
+  const swingAt: number[] = [];
+  const dig = bot.dig.bind(bot);
+  bot.dig = (block, ...rest) => { swingAt.push(bot.entity.position.x); return dig(block, ...rest); };
+  navigation.onEvent((event) => {
+    if (event.kind === "search_slice" && !moved) { moved = true; bot.entity.position.x = 0.5; }
+  });
+  try {
+    const result = await tickUntilSettled(clock, navigation.navigate({ movements: createMovementPolicy({
+      digTimeEstimator: { estimate: () => 1 },
+    }), goal: clearedTargetGoal({ x: 5, y: 63, z: 0 }) }));
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(swingAt.length, 1);
+    assert.equal(swingAt[0], 0.5, "the live target face is still reachable from the moved body");
+    assert.equal(bot.blockAt(new Vec3(5, 63, 0))?.name, "air");
+  } finally { bot.dig = dig; await tickUntilSettled(clock, navigation.close()); }
+});
+
+test("same-node motion during a search refuses an unsafe swing then replans to safe mining", async () => {
+  for (const towardEdge of [true, false]) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot } = createFakeBot({ clock, simulatePhysics: true,
+      position: new Vec3(0.85, 63, towardEdge ? 0.85 : 0.5), groundY: 62,
+      cells: { "0,62,0": "air", "0,62,1": "air", "1,62,0": "dirt" } });
+    const navigation = createNavigationRuntime(bot);
+    let moved = false;
+    let refused = false;
+    const trace: string[] = [];
+    const swingAt: Vec3[] = [];
+    const dig = bot.dig.bind(bot);
+    bot.dig = async (block, ...rest) => {
+      if (block.position.equals(new Vec3(1, 62, 0))) {
+        const at = bot.entity.position.clone();
+        assert.ok(at.y !== 63 || Math.floor(at.x) === 1 || bot.blockAt(new Vec3(Math.floor(at.x), 62, Math.floor(at.z)))?.name !== "air",
+          `unsafe target swing from ${at}`);
+        swingAt.push(at);
+      }
+      return dig(block, ...rest);
+    };
+    navigation.onEvent((event) => {
+      trace.push(`${event.kind} ${bot.entity.position}${event.kind === "step_failed" ? ` ${event.observation}` : ""}`);
+      if (event.kind === "search_slice" && !moved) {
+        moved = true;
+        bot.entity.position.z = towardEdge ? 0.5 : 0.85;
+      }
+      if (event.kind === "search_started" && event.reason === "world_changed") refused = true;
+    });
+    try {
+      const result = await tickUntilSettled(clock, navigation.navigate({ movements: createMovementPolicy({ maximumDrop: 0,
+        digTimeEstimator: { estimate: () => 1 },
+      }),
+        goal: clearedTargetGoal({ x: 1, y: 62, z: 0 }) }));
+      assert.equal(result.status, "completed", JSON.stringify(result));
+      assert.equal(moved, true);
+      assert.equal(swingAt.length, 1);
+      assert.equal(bot.blockAt(new Vec3(1, 62, 0))?.name, "air");
+      if (towardEdge) assert.equal(refused, true, `the previously admitted terminal must be invalidated live\n${trace.join("\n")}`);
+    } finally { bot.dig = dig; await tickUntilSettled(clock, navigation.close()); }
+  }
+});
 
 test("a foreground cover report leaves the tunnel route unchanged, tracks its step after policy disable, and excludes policy-off/reflex runs", async () => {
   const runs: { steps: unknown[]; at: Vec3 }[] = [];

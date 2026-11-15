@@ -129,7 +129,7 @@ test("collection and traversal charge each dig of the same falling column exactl
   assert.ok(traverse);
   assert.deepEqual(
     collection.step.operations.filter((op) => op.kind === "break"),
-    traverse.step.operations.filter((op) => op.kind === "break"),
+    traverse.step.operations.filter((op) => op.kind === "break").map((op) => ({ ...op, retainSupport: true })),
   );
   assert.equal(collection.cost, 36);
   assert.equal(traverse.cost - policy.movementTicks.walk, collection.cost);

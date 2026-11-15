@@ -247,10 +247,10 @@ export function anyGoal(goals: readonly Goal[]): Goal {
         isSatisfied: (node, world) => active.some((candidate) => candidate.isSatisfied(node, world)),
         ...(active.some((candidate) => candidate.finish) &&
           ({
-            finish: (state, context, digContext) => {
+            finish: (state, context, digContext, actualStart) => {
               let cheapest: GeneratedMovement | null = null;
               for (const candidate of active) {
-                const finish = candidate.finish?.(state, context, digContext);
+                const finish = candidate.finish?.(state, context, digContext, actualStart);
                 if (finish && (cheapest === null || finish.cost < cheapest.cost)) cheapest = finish;
               }
               return cheapest;
