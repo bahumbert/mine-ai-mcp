@@ -38,7 +38,7 @@ export interface Submission {
   readonly id: number;
   readonly spec: SubmissionSpec;
   readonly abort: AbortController;
-  readonly summary: { runs: number; passed: number; failed: number; cancelled: number };
+  readonly summary: { runs: number; passed: number; failed: number; cancelled: number; infra?: number; retried?: number };
   readonly done: PromiseWithResolvers<SubmissionSummary>;
   running: number;
   queued: number;

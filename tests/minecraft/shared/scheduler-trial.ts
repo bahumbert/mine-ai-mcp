@@ -7,10 +7,11 @@ import { shiftScenario } from "../arena/shift-scenario.ts";
 import { trialLine } from "./daemon-lines.ts";
 import type { ManagedServer } from "./pool.ts";
 import { fileRunIo, type RunIo } from "./run-io.ts";
+import { classifyEnd, type Classified } from "./result-class.ts";
 import type { Admitted, QueuedTrial, Submission } from "./scheduler-records.ts";
 import type { SchedulerDeps, SubmissionEntry } from "./scheduler-types.ts";
 import { awaitDeathOrCancel, blameDeadServer, deathConfirmBoundMs } from "./server-death.ts";
-import { executeTrial, type TrialEnd } from "./trial.ts";
+import { executeTrial, phasesLine, type TrialEnd } from "./trial.ts";
 
 /** What a trial in flight asks of the scheduler that holds the queue, the ledger and the counts. */
 export interface TrialHost {
@@ -43,6 +44,7 @@ class FreshBodyRefused extends Error {}
 
 /** The server did not start: the trial never touched it, so it can be placed on another one. */
 class ServerStartFailed extends Error {}
+class ShiftRefused extends Error {}
 
 function slug(name: string): string {
   return name.replace(/[^A-Za-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 60);
@@ -58,11 +60,18 @@ export async function runAdmittedTrial(env: TrialEnvironment, trial: PlacedTrial
   let end: TrialEnd;
   const wait = { serverMs: 0 };
   let ran = false;
+  let caught: unknown;
+  let didCatch = false;
+  let diedAt: number | undefined = managed.died.aborted ? performance.now() : undefined;
+  const onDeath = () => { diedAt = performance.now(); };
+  managed.died.addEventListener("abort", onDeath, { once: true });
   try {
     end = await executeOnServer(deps, trial, runDir, io, wait);
     ran = true;
   } catch (error) {
-    if (error instanceof ServerStartFailed && host.sendBack(queued, admitted, "its server failed to start")) return;
+    didCatch = true;
+    caught = error;
+    if (error instanceof ServerStartFailed && host.sendBack(queued, admitted, "its server failed to start")) { managed.died.removeEventListener("abort", onDeath); return; }
     const detail = error instanceof Error ? error.message : String(error);
     end = {
       result: { scenario: entry.name, outcome: "error", elapsedMs: 0, goal: { state: "pending", detail }, goalText: "", error: detail },
@@ -78,15 +87,25 @@ export async function runAdmittedTrial(env: TrialEnvironment, trial: PlacedTrial
     deps.log(`${entry.name}: failed before its arrangement, waiting up to ${boundMs} ms for the death of server ${managed.id} to be confirmed`);
     await awaitDeathOrCancel(AbortSignal.any([managed.died, submission.abort.signal]), boundMs);
   }
+  managed.died.removeEventListener("abort", onDeath);
   if (unrun && managed.died.aborted && host.sendBack(queued, admitted, "its server died before its arrangement")) return;
-  settleTrial(env, trial, wait.serverMs, blameDeadServer(managed, submission, end), runDir);
+  const detail = didCatch ? (caught instanceof Error ? caught.message : String(caught)) : null;
+  const classified = classifyEnd({
+    outcome: end.result.outcome, placement: entry.placement.kind, submissionCancelled: submission.abort.signal.aborted,
+    startFailed: caught instanceof ServerStartFailed ? detail : null,
+    diedBeforeSettle: diedAt !== undefined && (end.settledAt === undefined || diedAt <= end.settledAt) ? String(managed.died.reason) : null,
+    transportFailure: null, hitWallBound: end.hitWallBound, late: end.late === true,
+    harnessError: end.threw ?? (caught instanceof ServerStartFailed || caught instanceof FreshBodyRefused || caught instanceof ShiftRefused ? null : detail),
+    phases: end.phases ? phasesLine(end.phases) : null, detail: end.result.error ?? end.result.goal.detail,
+  });
+  settleTrial(env, trial, wait.serverMs, blameDeadServer(managed, submission, end), runDir, classified);
 }
 
 /** The scenario this trial runs: shifted into its lane, or on a server of its own under the body that server is up to. */
 function scenarioFor(deps: SchedulerDeps, entry: SubmissionEntry, lane: Lane | null, body: number): Scenario {
   if (lane) {
     const shifted = (deps.shift ?? shiftScenario)(entry.placement.kind === "lane" ? entry.placement.scenario : entry.scenario, lane);
-    if (!shifted.ok) throw new Error(`the scenario could not be shifted to lane ${lane.index}: ${shifted.reason}`);
+    if (!shifted.ok) throw new ShiftRefused(`the scenario could not be shifted to lane ${lane.index}: ${shifted.reason}`);
     return shifted.scenario;
   }
   const renamed = renameBodyOnOwnServer(entry.scenario, body);
@@ -118,7 +137,7 @@ async function executeOnServer(deps: SchedulerDeps, trial: PlacedTrial, runDir: 
 }
 
 /** The trial is over: the daemon's trial line, the server and lane given back, the submission's count and result event. */
-function settleTrial(env: TrialEnvironment, trial: PlacedTrial, serverWaitMs: number, end: TrialEnd, runDir: string): void {
+function settleTrial(env: TrialEnvironment, trial: PlacedTrial, serverWaitMs: number, end: TrialEnd, runDir: string, classified: Classified): void {
   const { deps, host } = env;
   const { queued, managed, lane, admitted } = trial;
   const { submission, entry } = queued;
@@ -132,11 +151,12 @@ function settleTrial(env: TrialEnvironment, trial: PlacedTrial, serverWaitMs: nu
   host.unadmit(queued, admitted);
   const { result } = end;
   submission.summary.runs += 1;
-  if (result.outcome === "pass") submission.summary.passed += 1;
-  else if (result.outcome === "cancelled") submission.summary.cancelled += 1;
+  if (classified.class === "pass") submission.summary.passed += 1;
+  else if (classified.class === "cancelled") submission.summary.cancelled += 1;
   else submission.summary.failed += 1;
+  if (classified.class === "infra") submission.summary.infra = (submission.summary.infra ?? 0) + 1;
   submission.spec.emit({
-    type: "result", name: entry.name, outcome: result.outcome, elapsedMs: result.elapsedMs, detail: result.goal.detail, error: result.error, runDir,
+    type: "result", name: entry.name, outcome: result.outcome, elapsedMs: result.elapsedMs, detail: result.goal.detail, error: result.error, runDir, class: classified.class, cause: classified.cause,
   });
   host.settled(submission);
 }

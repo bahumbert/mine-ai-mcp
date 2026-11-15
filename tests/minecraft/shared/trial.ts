@@ -66,6 +66,9 @@ export interface TrialEnd {
   readonly arranged: boolean;
   /** Where the trial's time went; absent on an end the scheduler made without running the trial. */
   readonly phases?: TrialPhases;
+  readonly late?: true;
+  readonly threw?: string;
+  readonly settledAt?: number;
 }
 
 /** The time of one trial, phase by phase, in ms (a phase the trial never reached is 0). */
@@ -112,6 +115,7 @@ class TrialMarks {
   /** The first client was asked for: its `init` is written right after. */
   initSent(): void { this.#initAt ??= performance.now(); }
   settled(): void { this.#settledAt ??= performance.now(); }
+  settledAt(): number | undefined { return this.#settledAt; }
 
   phases(): TrialPhases {
     const now = performance.now();
@@ -139,7 +143,7 @@ export function phaseFields(phases: TrialPhases): string {
   return `mutexWait=${phases.mutexWaitMs} arrange=${phases.arrangeMs}${settle} join=${phases.joinMs} trial=${phases.trialMs} restoreWait=${phases.restoreWaitMs} restore=${phases.restoreMs}`;
 }
 
-function phasesLine(phases: TrialPhases): string {
+export function phasesLine(phases: TrialPhases): string {
   return `phases: ${phaseFields(phases)}`;
 }
 
@@ -196,7 +200,7 @@ export async function executeTrial(deps: TrialDeps, job: TrialJob): Promise<Tria
   marks.settled();
   const phases = marks.phases();
   job.log(phasesLine(phases));
-  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases, arranged: marks.wasArranged() };
+  return { ...end, mutexWaitMs: phases.mutexWaitMs, phases, arranged: marks.wasArranged(), settledAt: marks.settledAt() };
 }
 
 async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): Promise<Omit<TrialEnd, "mutexWaitMs" | "phases" | "arranged">> {
@@ -231,11 +235,11 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
     const hitWallBound = wall.signal.aborted;
     if (settled === "late") {
       const result = errorResult(job, startedAt, `trial did not settle within ${deps.config.restoreBoundMs} ms after it was aborted`);
-      return { result, lane: "held", serverSick: true, hitWallBound, restored: false };
+      return { result, lane: "held", serverSick: true, hitWallBound, restored: false, late: true };
     }
     if ("error" in settled) {
       const detail = settled.error instanceof Error ? settled.error.message : String(settled.error);
-      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false };
+      return { result: errorResult(job, startedAt, `trial threw: ${detail}`), lane: "quarantined", serverSick: false, hitWallBound, restored: false, threw: detail };
     }
     // A trial that failed before `onArranged` still holds its arrangement turn; its own restore must not wait behind it.
     release();

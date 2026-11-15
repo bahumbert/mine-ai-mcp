@@ -9,6 +9,7 @@ import type { ServerPool } from "./pool.ts";
 import type { RunIo } from "./run-io.ts";
 import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
+import type { ResultClass } from "./result-class.ts";
 
 export interface SubmissionEntry {
   readonly name: string;
@@ -18,7 +19,7 @@ export interface SubmissionEntry {
 
 export type SubmissionEvent =
   | { readonly type: "info"; readonly text: string }
-  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string };
+  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string; readonly class?: ResultClass; readonly cause?: string; readonly retried?: string };
 
 export interface SubmissionSpec {
   readonly entries: readonly SubmissionEntry[];
@@ -33,7 +34,7 @@ export interface SubmissionSpec {
   readonly emit: (event: SubmissionEvent) => void;
 }
 
-export interface SubmissionSummary { readonly runs: number; readonly passed: number; readonly failed: number; readonly cancelled: number }
+export interface SubmissionSummary { readonly runs: number; readonly passed: number; readonly failed: number; readonly cancelled: number; readonly infra?: number; readonly retried?: number }
 
 export interface SubmissionHandle {
   readonly id: number;
