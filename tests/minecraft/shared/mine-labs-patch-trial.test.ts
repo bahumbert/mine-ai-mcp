@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import * as mineLabs from "mine-labs";
+import * as goalRunner from "../../../node_modules/mine-labs/src/trial/run.ts";
 
 const NO_OP_REFUSAL = "Could not set the block";
 
@@ -38,6 +39,7 @@ class RecordingRcon {
   async playerOnline(): Promise<boolean> {
     return false;
   }
+  async playerDeaths(): Promise<number> { return 0; }
 }
 
 const ARENA = {
@@ -258,4 +260,112 @@ test("a trial on a server of its own kills everywhere when it ends, before its r
   const restoreStartsAt = rcon.sent.lastIndexOf("reload");
   const killsBeforeRestore = rcon.sent.slice(0, restoreStartsAt).filter((command) => command === "kill @e[type=!minecraft:player]");
   assert.equal(killsBeforeRestore.length, 2, "one before the setup, one when the trial ended");
+});
+
+/** RCON's gametime wording was measured by the audit's section 6.3 prototype (scenario-ticks spec section 2). */
+class GameTimeRcon extends RecordingRcon {
+  private read = 0;
+  constructor(private readonly answers: readonly (number | string | Error)[], private readonly onRead?: (read: number) => void) { super(); }
+  override async command(command: string): Promise<string> {
+    if (command !== "time query gametime") return super.command(command);
+    const answer = this.answers[Math.min(this.read++, this.answers.length - 1)]!;
+    this.onRead?.(this.read);
+    if (answer instanceof Error) throw answer;
+    return typeof answer === "number" ? `The time is ${answer}` : answer;
+  }
+}
+
+/** Drive the real settlement loop with scripted server reads and a monotonic wall clock, without a server or wall sleeps. */
+async function settleGameTime(options: {
+  answers: readonly (number | string | Error)[];
+  wallStep?: number;
+  stallMs?: number;
+  survive?: boolean;
+  cancelAfter?: number;
+  cancelDuringRead?: number;
+  completionOnCancel?: "succeeded" | "failed";
+  initiallyCancelled?: boolean;
+}) {
+  const abort = new AbortController();
+  if (options.initiallyCancelled) abort.abort("before clock");
+  // Bounds the red run against the old loop, which does not yet accept the injected sleep.
+  const guard = setTimeout(() => abort.abort("test guard"), 1_500);
+  let wall = 0;
+  let polls = 0;
+  const observations: string[] = [];
+  const completions: Parameters<typeof goalRunner.awaitScenarioGoal>[0]["clients"]["completions"] = new Map();
+  let reads = 0;
+  try {
+    const result = await goalRunner.awaitScenarioGoal({
+      scenario: mineLabs.scenarioSchema.parse({
+        name: "game-time", players: [{ name: "Walker" }], client: { command: "true" },
+        goal: options.survive ? { kind: "survive", seconds: 1, timeout: 1 } : { kind: "completion", timeout: 1 },
+      }),
+      server: neverStartedServer("unused", new GameTimeRcon(options.answers, (read) => {
+        reads = read;
+        if (read !== options.cancelDuringRead) return;
+        abort.abort("during clock");
+        if (options.completionOnCancel) completions.set("Walker", { status: options.completionOnCancel, detail: "test completion" });
+      })),
+      clients: { processes: new Map(), chat: new Map(), completions },
+      signal: abort.signal,
+      goalStallMs: options.stallMs ?? 30_000,
+      now: () => wall,
+      sleep: async () => {
+        wall += options.wallStep ?? 250;
+        if (++polls === options.cancelAfter) abort.abort("observed pending");
+      },
+      onGoalProgress: (goal) => { observations.push(goal.state); },
+    });
+    return { ...result, observations, wall, reads };
+  } finally {
+    clearTimeout(guard);
+  }
+}
+
+test("budget counts game ticks from the first readable sample, including after an unreadable start", async () => {
+  for (const [answers, pending] of [[[100, 119, 120, 121], 3], [["", 100, 121], 2]] as const) {
+    const result = await settleGameTime({ answers });
+    assert.equal(result.outcome, "timeout");
+    assert.match(result.log, /within 1s of game time \(20 ticks\)/u);
+    assert.equal(result.observations.length, pending, "19/20 ticks and the late baseline must stay pending before 121");
+  }
+});
+
+test("slow server is not timed out by the wall while game time moves", async () => {
+  const result = await settleGameTime({ answers: [100, 100, 110], wallStep: 5_000, cancelAfter: 2 });
+  assert.equal(result.outcome, "cancelled");
+  assert.match(result.log, /observed pending/u);
+  assert.equal(result.wall, 10_000);
+});
+
+test("stopped or unreadable game time ends the goal at the monotonic stall bound", async () => {
+  for (const answer of [100, "Unknown command", new Error("rcon command timed out after 10000ms")]) {
+    const result = await settleGameTime({ answers: [answer], stallMs: 1_000 });
+    assert.equal(result.outcome, "timeout");
+    assert.match(result.log, /stood still for 1000 ms/u);
+    assert.equal(result.wall, 1_000);
+  }
+});
+
+test("cancellation before or during a clock read wins over completion and the tick budget", async () => {
+  const before = await settleGameTime({ answers: [100, 121], initiallyCancelled: true });
+  const results = [before];
+  for (const completionOnCancel of [undefined, "succeeded", "failed"] as const) {
+    results.push(await settleGameTime({ answers: [100, 121], cancelDuringRead: 2, completionOnCancel }));
+  }
+  assert.deepEqual(results.map((result) => result.outcome), ["cancelled", "cancelled", "cancelled", "cancelled"]);
+  assert.equal(before.reads, 0, "an already cancelled goal must not start an RCON request");
+});
+
+test("survive counts game seconds: 19 ticks is pending, 20 passes", async () => {
+  const result = await settleGameTime({ answers: [100, 119, 120], survive: true, wallStep: 5_000 });
+  assert.equal(result.outcome, "pass");
+  assert.deepEqual(result.observations, ["pending", "passed"]);
+});
+
+test("parseGameTime accepts a vanilla answer and refuses unreadable answers", () => {
+  for (const [answer, expected] of [["The time is 2400", 2400], ["", null], ["Unknown command", null]] as const) {
+    assert.equal(goalRunner.parseGameTime(answer), expected);
+  }
 });
