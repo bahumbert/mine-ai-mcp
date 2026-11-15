@@ -224,7 +224,16 @@ test("the JVM gets one stub directory for an empty or already-prefixed PATH", { 
     process.env.JAVA_HOME = root;
     for (const path of ["", `${stubDir}${delimiter}/usr/bin`]) {
       process.env.PATH = path;
-      await withUnstartedServer({}, async server => { await assert.rejects(server.start()); });
+      const controller = new AbortController();
+      let childExited!: () => void;
+      const exited = new Promise<void>(resolve => { childExited = resolve; });
+      await withUnstartedServer({}, async server => {
+        await assert.rejects(server.start(controller.signal), { name: "AbortError" });
+        await exited;
+      }, message => {
+        if (message.startsWith("starting ")) controller.abort();
+        if (message.startsWith("[server] exited ") || message.startsWith("[server] process error:")) childExited();
+      });
       const entries = (await readFile(join(root, "path"), "utf8")).split(delimiter);
       assert.equal(entries[0], stubDir);
       assert.equal(entries.filter(entry => entry === stubDir).length, 1);
