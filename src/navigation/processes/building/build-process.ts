@@ -553,7 +553,7 @@ async function digCell(
   try {
     const dug = await request.breakInPlace({ movements, position: target.position, signal });
     if (dug.status === "broken") targeting.progress.dug += 1;
-    else targeting.refuse(target, `${holds} there could not be cleared: ${dug.reason}`, dug.cause ?? "placement");
+    else targeting.refuse(target, `${holds} there could not be cleared: ${dug.reason}`, dug.cause === "policy" ? "policy" : "placement");
   } catch (error) {
     if (bot.blockAt(asVec3(target.position))?.name !== heldBefore) targeting.progress.dug += 1;
     throw error;

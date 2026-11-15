@@ -5,6 +5,35 @@ import type { PlannedOperation } from "../movements/movement.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { breakBlockInPlace } from "./in-place-break.js";
 
+test("in-place support refusal keeps its cause and support flag on every column dig; the next bank break succeeds", async () => {
+  const world = flatWorld();
+  const position = { x: 1, y: 63, z: 0 };
+  world.load(position, { stateId: 1 });
+  world.load({ x: 1, y: 64, z: 0 }, { stateId: 2, traits: { falling: true } });
+  const bot = new FakeNavigationBot();
+  const retained: (boolean | undefined)[] = [];
+  let refuse = true;
+  bot.startEffect = (operation) => {
+    assert.equal(operation.kind, "break");
+    if (operation.kind !== "break") throw new Error("expected a dig");
+    retained.push(operation.retainSupport);
+    if (refuse && operation.position.y === 63) return {
+      issued: false, cancel() {},
+      completion: Promise.resolve({ kind: "failed", observation: "Move onto the bank.", cause: "support" }),
+    };
+    world.load(operation.position, { stateId: 0 });
+    return { issued: true, cancel() {}, completion: Promise.resolve({ kind: "accepted" }) };
+  };
+  const options = { position, movements: createMovementPolicy(), retainSupport: true };
+  assert.deepEqual(await breakBlockInPlace({ world, bot }, options), {
+    status: "failed", reason: "Move onto the bank.", cause: "support",
+  });
+  assert.deepEqual(retained, [true, true]);
+  refuse = false;
+  bot.current = { ...bot.current, position: { x: 2.5, y: 64, z: 0.5 } };
+  assert.deepEqual(await breakBlockInPlace({ world, bot }, options), { status: "broken" });
+});
+
 test("in-place mining preserves liquid refusals on dry ground and only admits water from a still-water stance", async () => {
   for (const submerged of [false, true]) for (const liquid of ["water", "lava"] as const) {
     const world = flatWorld();

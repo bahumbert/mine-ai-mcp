@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
 import { watch } from "../../test-support/pending.js";
+import type { PlannedOperation } from "../movements/movement.js";
 
 /** A Mineflayer surface that does nothing, standing on the origin, with the given parts replaced. */
 function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface {
@@ -37,6 +38,157 @@ function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface
     ...overrides,
   };
 }
+
+/** A real shared-fake world and dig, with preparation ports controlled by each race test. */
+function edgeDig() {
+  const harness = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }),
+    position: new Vec3(0.85, 63, 0.5), groundY: null,
+    cells: { "1,62,0": "stone" }, carried: { stone_pickaxe: 1 },
+  });
+  const live = mineflayerBotSurface(harness.bot);
+  let digs = 0;
+  let holds = 0;
+  let reports = 0;
+  const port = surface({
+    ...live,
+    // The shared fake's dig models Mineflayer's prediction, not a server block-change packet.
+    watchServerChange: undefined,
+    lookAt: async () => {}, look: async () => {},
+    holdWaterStance: (_signal, control) => {
+      holds++;
+      control("left", true);
+      return () => { holds--; control("left", false); };
+    },
+    dig: async (block, force) => { digs++; await live.dig(block, force); },
+    reportDig: () => { reports++; },
+  });
+  const actuator = new MineflayerBot(port, { revision: 1 });
+  const operation: Extract<PlannedOperation, { kind: "break" }> = {
+    kind: "break", position: { x: 1, y: 62, z: 0 },
+    expectedStateId: harness.bot.registry.blocksByName.stone!.defaultState!, toolType: null, brings: [],
+  };
+  const start = (changes: Partial<typeof operation> = {}, signal = new AbortController().signal) =>
+    actuator.startEffect({ ...operation, ...changes }, { runId: "run", planId: "plan", stepId: "edge", attempt: 1 }, signal);
+  const clean = () => {
+    assert.equal(holds, 0);
+    assert.equal(actuator.ownedControlCount, 0);
+    assert.equal(harness.bot._client.listenerCount("block_change"), 0);
+  };
+  return { ...harness, port, actuator, operation, start, clean, counts: () => ({ digs, reports }) };
+}
+
+for (const floor of ["air", "void", "stone"] as const) {
+  test(`physical edge admission reads ${floor} alternative support before swinging`, async () => {
+    const run = edgeDig();
+    using _clock = run.clock.install();
+    run.world.setCell(new Vec3(0, 62, 0), floor);
+    const effect = run.start();
+    const result = await run.clock.settle(effect.completion, 10_000);
+    assert.equal(result.kind, floor === "stone" ? "accepted" : "failed");
+    if (result.kind === "failed") assert.equal(result.cause, "support");
+    assert.equal(effect.issued, floor === "stone");
+    assert.deepEqual(run.counts(), floor === "stone" ? { digs: 1, reports: 1 } : { digs: 0, reports: 0 });
+    run.clean();
+  });
+}
+
+for (const preparation of ["equip", "hold", "landing", "look", "centring", "corner"] as const) {
+  test(`support lost during ${preparation} is refused and the next safe-bank dig succeeds`, async () => {
+    const run = edgeDig();
+    using _clock = run.clock.install();
+    run.world.setCell(new Vec3(0, 62, 0), "stone");
+    const loseSupport = () => run.world.setCell(new Vec3(0, 62, 0), "air");
+    if (preparation === "equip") run.port.equip = async () => { loseSupport(); };
+    if (preparation === "hold") {
+      const hold = run.port.holdWaterStance;
+      run.port.holdWaterStance = (...args) => { loseSupport(); return hold(...args); };
+    }
+    if (preparation === "landing") run.port.landOnStanceFloor = async () => { loseSupport(); return true; };
+    if (preparation === "look") run.port.lookAt = async () => { loseSupport(); };
+    if (preparation === "centring") {
+      let aims = 0;
+      run.port.visibleDigAim = () => ++aims === 1 ? null : { x: 1.5, y: 62.5, z: 0.5 };
+      run.actuator.centerOnCell = async () => { loseSupport(); return true; };
+    }
+    if (preparation === "corner") {
+      run.bot.entity.position.z = 0.85;
+      loseSupport();
+      run.world.setCell(new Vec3(1, 62, 1), "stone");
+      run.port.lookAt = async () => { run.bot.entity.position.z = 0.5; };
+    }
+    const effect = run.start({
+      toolType: preparation === "equip" ? run.inventory.items()[0]!.type : null,
+      ...(preparation === "landing" ? { stance: { x: 0, y: 63, z: 0 } } : {}),
+    });
+    const refused = await run.clock.settle(effect.completion, 10_000);
+    assert.equal(refused.kind === "failed" && refused.cause, "support");
+    assert.equal(effect.issued, false);
+    assert.deepEqual(run.counts(), { digs: 0, reports: 0 });
+    assert.equal(run.world.blockAt(new Vec3(1, 62, 0))!.name, "stone");
+    run.clean();
+    run.bot.entity.position.set(1.5, 63, 0.5);
+    run.world.setCell(new Vec3(2, 62, 0), "stone");
+    const next = run.start({ position: { x: 2, y: 62, z: 0 } });
+    assert.deepEqual(await run.clock.settle(next.completion, 10_000), { kind: "accepted" });
+    run.clean();
+  });
+}
+
+test("replacement support and floating work remain admitted; centred descent only refuses retained support", async () => {
+  for (const mode of ["replacement", "floating", "centred", "retained"] as const) {
+    const run = edgeDig();
+    using _clock = run.clock.install();
+    if (mode === "replacement") {
+      run.world.setCell(new Vec3(0, 62, 0), "stone");
+      run.port.lookAt = async () => run.world.setCell(new Vec3(0, 62, 0), "dirt");
+    }
+    if (mode === "floating") Object.assign(run.bot.entity, { onGround: false, isInWater: true });
+    if (mode === "centred" || mode === "retained") run.bot.entity.position.x = 1.5;
+    const effect = run.start({ retainSupport: mode === "retained" });
+    const result = await run.clock.settle(effect.completion, 60_000);
+    assert.equal(result.kind, mode === "retained" ? "failed" : "accepted", mode);
+    if (result.kind === "failed") assert.equal(result.cause, "support");
+    assert.equal(run.counts().digs, mode === "retained" ? 0 : 1, mode);
+    run.clean();
+  }
+});
+
+test("a falling refill rechecks live support and retains the first swing's issued receipt", async () => {
+  const run = edgeDig();
+  using _clock = run.clock.install();
+  run.world.setCell(new Vec3(0, 62, 0), "stone");
+  run.port.waitForTicks = async () => {
+    run.world.setCell(new Vec3(0, 62, 0), "air");
+    run.world.setCell(new Vec3(1, 62, 0), "sand");
+  };
+  const effect = run.start({ brings: [{ x: 1, y: 63, z: 0 }] });
+  const result = await run.clock.settle(effect.completion, 10_000);
+  assert.equal(result.kind === "failed" && result.cause, "support");
+  assert.equal(effect.issued, true);
+  assert.deepEqual(run.counts(), { digs: 1, reports: 1 });
+  run.clean();
+});
+
+test("cancel or death during awaited aiming prevents a swing and releases watches and controls", async () => {
+  for (const reason of ["cancel", "death", "handle cancel"]) {
+    const run = edgeDig();
+    using _clock = run.clock.install();
+    if (reason !== "handle cancel") run.port.watchServerChange = mineflayerBotSurface(run.bot).watchServerChange;
+    run.world.setCell(new Vec3(0, 62, 0), "stone");
+    const controller = new AbortController();
+    run.port.lookAt = async () => {
+      if (reason === "handle cancel") effect.cancel();
+      else controller.abort(new Error(reason));
+    };
+    const effect = run.start({}, controller.signal);
+    const result = await run.clock.settle(effect.completion, 10_000);
+    assert.equal(result.kind, "failed");
+    assert.equal(effect.issued, false);
+    assert.equal(run.counts().digs, 0);
+    run.clean();
+  }
+});
 
 test("the pinned physics compatibility restores Nether vine ascent and descent velocity", () => {
   const entity = {

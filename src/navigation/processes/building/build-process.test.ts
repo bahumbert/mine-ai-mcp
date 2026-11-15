@@ -493,15 +493,17 @@ test("a refused cell carries the cause: placement, entity, policy or route", asy
   });
   assert.equal(refusalCause(entity), "entity");
 
-  const policyWorld = structureWorld();
-  policyWorld.put(new Vec3(2, 64, 0), "crafting_table");
-  const policy = await build(policyWorld.bot, {
-    ...policyWorld.physics,
-    breakInPlace: async () => ({ status: "failed", reason: "movement policy prohibits breaking this block", cause: "policy" }),
-    cells: one,
-    removeWrongBlocks: true,
-  });
-  assert.equal(refusalCause(policy), "policy");
+  for (const cause of ["policy", "support"] as const) {
+    const digWorld = structureWorld();
+    digWorld.put(new Vec3(2, 64, 0), "crafting_table");
+    const dug = await build(digWorld.bot, {
+      ...digWorld.physics,
+      breakInPlace: async () => ({ status: "failed", reason: "The dig was refused.", cause }),
+      cells: one,
+      removeWrongBlocks: true,
+    });
+    assert.equal(refusalCause(dug), cause === "policy" ? "policy" : "placement");
+  }
 
   const routeWorld = structureWorld();
   let stopped = false;

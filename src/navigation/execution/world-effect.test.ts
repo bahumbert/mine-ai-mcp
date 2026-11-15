@@ -7,6 +7,26 @@ import { airMatcher, stateMatcher } from "../movements/movement.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { executeWorldEffect } from "./world-effect.js";
 
+test("support refusal survives world-effect completion and detaches unissued expectations", async () => {
+  const bot = new FakeNavigationBot();
+  const ledger = new ExpectedMutationLedger();
+  bot.startEffect = () => ({
+    issued: false, cancel() {},
+    completion: Promise.resolve({ kind: "failed", observation: "Reposition before digging.", cause: "support" }),
+  });
+  const position = { x: 1, y: 62, z: 0 };
+  const { result, issued } = await executeWorldEffect({
+    bot, ledger, signal: new AbortController().signal,
+    token: { runId: "run", planId: "plan", stepId: "edge", attempt: 1 },
+    operation: { kind: "break", position, expectedStateId: 1, toolType: null, brings: [] },
+    targets: [{ position, before: stateMatcher(1), after: airMatcher }], deadlineMs: monotonicNow() + 1_000,
+  });
+  assert.deepEqual(result, { kind: "effect_failed", observation: "Reposition before digging.", cause: "support" });
+  assert.equal(issued, false);
+  assert.equal(ledger.activeCount, 0);
+  assert.equal(ledger.receiptCount, 0);
+});
+
 for (const failure of ["timeout", "conflict"] as const) {
   test(`a world effect stops and drains on ${failure}, without physics ticks`, async () => {
     const world = flatWorld();

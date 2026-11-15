@@ -1,12 +1,12 @@
 import { monotonicNow } from "../../utils/monotonic-clock.js";
-import type { NavigationBot } from "../bot.js";
+import type { EffectHandle, NavigationBot } from "../bot.js";
 import type { BlockMatcher, PlannedOperation } from "../movements/movement.js";
 import type { BlockPosition } from "../world/world.js";
 import type { AttemptToken, ExpectedMutationLedger, MutationResult } from "./mutations.js";
 
 export type WorldEffectResult =
   | MutationResult
-  | { readonly kind: "effect_failed"; readonly observation: string }
+  | { readonly kind: "effect_failed"; readonly observation: string; readonly cause?: "support" }
   | { readonly kind: "cancelled" }
   | { readonly kind: "invalidated" };
 
@@ -64,7 +64,7 @@ export async function executeWorldEffect(options: {
     resources.defer(() => clearTimeout(timer));
   });
   const effect = bot.startEffect(operation, token, AbortSignal.any([signal, stopped.signal]));
-  const completion = effect.completion.catch((cause: unknown) => ({
+  const completion: EffectHandle["completion"] = effect.completion.catch((cause: unknown) => ({
     kind: "failed" as const,
     observation: cause instanceof Error ? cause.message : String(cause),
   }));
@@ -73,12 +73,12 @@ export async function executeWorldEffect(options: {
     const result = await Promise.race([
       Promise.all([completion, mutations]).then(([finished, changes]): WorldEffectResult =>
         finished.kind === "failed"
-          ? { kind: "effect_failed", observation: finished.observation }
+          ? { kind: "effect_failed", observation: finished.observation, ...(finished.cause && { cause: finished.cause }) }
           : changes.find((change) => change.kind !== "confirmed") ?? changes[0]!,
       ),
       completion.then((finished): WorldEffectResult | Promise<never> =>
         finished.kind === "failed"
-          ? { kind: "effect_failed", observation: finished.observation }
+          ? { kind: "effect_failed", observation: finished.observation, ...(finished.cause && { cause: finished.cause }) }
           : new Promise<never>(() => {}),
       ),
       ...expectations.map((expectation) => expectation.result.then((change) =>
