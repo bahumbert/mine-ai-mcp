@@ -34,6 +34,7 @@ import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
 import { furnaceOutputTake } from "./checks/furnace-output-take.ts";
+import { furnaceTakeCorrected } from "./checks/furnace-take-corrected.ts";
 import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
 import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
 import { variantTransferClicks } from "./checks/variant-transfer-clicks.ts";
@@ -146,6 +147,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   clickWindowHotbarSwap,
   clickWindowShiftMove,
   furnaceOutputTake,
+  furnaceTakeCorrected,
   clickWindowOntoVariant,
   clickWindowVariantSplit,
   variantTransferClicks,
