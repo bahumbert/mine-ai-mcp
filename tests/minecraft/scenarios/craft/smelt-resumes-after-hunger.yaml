@@ -31,6 +31,8 @@ geometry:
 players:
   - name: Smelter
     pos: [0.5, -60, 0.5]
+    # needsFood (environment.ts:73-74): 15 > 14 at full health; the floor does not wound the bot (wounded branch <18).
+    food: 15
     inventory:
       - { item: raw_iron, count: 8 }
       - { item: coal, count: 2 }
@@ -47,11 +49,10 @@ params:
     y: -60
     z: 0
 
-# Hunger starts once, when the bot reaches the furnace and starts to cook. Mine Labs gives the bot Saturation at setup, so a short
-# dose (10 s at level 99, run 1 and 2 here) never brought food under 14: 40 s at level 30 does, about 35 s into an 80 s smelt.
+# Start one dose near the furnace: with zero saturation, level 30 for 40 ticks crosses 15 -> 14 during the smelt.
 tick:
   - "gamemode spectator @a[name=!Smelter,gamemode=!spectator]"
-  - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run effect give @s minecraft:hunger 40 29 true"
+  - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run effect give @s minecraft:hunger 2 29 true"
   - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run tag @s add hungry"
 
 goal:

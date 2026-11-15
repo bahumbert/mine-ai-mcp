@@ -5,8 +5,56 @@ import { join } from "node:path";
 import test from "node:test";
 import * as mineLabs from "mine-labs";
 import * as goalRunner from "../../../node_modules/mine-labs/src/trial/run.ts";
+import * as goals from "../../../node_modules/mine-labs/src/trial/goals.ts";
+import { preparePlayerForTrial } from "../../../node_modules/mine-labs/src/player/prepare.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/index.js";
 
 const NO_OP_REFUSAL = "Could not set the block";
+
+/** Entity-data wording: Mine Labs prepare.test.ts; foodLevel measured in tsan-k5's Task 5 lane trace, 2026-11-15. */
+async function prepareFood(options: { food?: number; foods?: readonly number[]; saturation?: readonly number[]; reused?: boolean; stopped?: boolean; cancel?: boolean }) {
+  const clock = createFakeClock({ mode: "manual" });
+  const abort = new AbortController();
+  const commands = new RecordingRcon([], {
+    "data get entity Actor foodLevel": (options.foods ?? [20, 18, 15]).map(food => `Actor has the following entity data: ${food}`),
+    "data get entity Actor foodSaturationLevel": (options.saturation ?? [0]).map(saturation => `Actor has the following entity data: ${saturation}.0f`),
+    "data get entity Actor Fire": ["Actor has the following entity data: -20s"],
+  });
+  const command = commands.command.bind(commands);
+  const result = preparePlayerForTrial({
+    commands: { command: name => name === "time query gametime" ? Promise.resolve(`The time is ${options.stopped ? 0 : Math.floor(clock.now() / 1_000) * 20}`) : command(name) },
+    resetReusablePlayer: options.reused ?? false,
+    player: { name: "Actor", inventory: [], op: false, food: options.food },
+    goalStallMs: 1_000, signal: abort.signal, now: clock.now,
+    sleep: async ms => { await clock.advance(ms); if (options.cancel) abort.abort("food cancelled"); },
+  });
+  return { sent: commands.sent, result, foodReads: () => commands.sent.filter(command => command.endsWith(" foodLevel")).length, elapsed: clock.now };
+}
+
+test("food preparation reaches the declared food with zero saturation, bounds failures and always releases hunger", async () => {
+  const cases: { options: Parameters<typeof prepareFood>[0]; reads?: number; elapsed?: number; error?: RegExp }[] = [
+    { options: { food: 15 }, reads: 3 },
+    { options: { food: 15, reused: true }, reads: 3 },
+    { options: { food: 0, foods: [0] }, reads: 1 },
+    { options: { food: 20, foods: [20], saturation: [5, 0] }, reads: 2 },
+    { options: {}, reads: 0 },
+    { options: { food: 15, foods: [20] }, elapsed: 10_000, error: /food did not fall to 15 \(at 20\)/u },
+    { options: { food: 15, foods: [20], stopped: true }, elapsed: 1_000, error: /food did not fall to 15 \(at 20\)/u },
+    { options: { food: 15, foods: [20], cancel: true }, error: /food cancelled/u },
+  ];
+  for (const { options, reads, elapsed, error } of cases) {
+    const fixture = await prepareFood(options);
+    if (error) await assert.rejects(fixture.result, error);
+    else await fixture.result;
+    if (reads !== undefined) assert.equal(fixture.foodReads(), reads);
+    if (elapsed !== undefined) assert.equal(fixture.elapsed(), elapsed, "200 ticks at 20 tps, or the independent wall stall bound");
+    if (options.food === undefined) { assert.deepEqual(fixture.sent, []); continue; }
+    assert.equal(fixture.sent.at(-1), "effect clear Actor minecraft:hunger");
+    const dose = fixture.sent.indexOf("effect give Actor minecraft:hunger infinite 255 true");
+    assert.ok(dose >= 0);
+    if (options.reused) assert.ok(dose > fixture.sent.indexOf("effect give Actor minecraft:saturation 1 9 true"));
+  }
+});
 
 /**
  * The commands a trial sends over RCON, in order. `setblock` answers as vanilla does: a block placed over air is
@@ -16,10 +64,14 @@ const NO_OP_REFUSAL = "Could not set the block";
 class RecordingRcon {
   readonly sent: string[] = [];
   private readonly standing = new Map<string, string>();
-  constructor(private readonly refused: readonly string[] = []) {}
+  constructor(private readonly refused: readonly string[] = [], private readonly scriptedAnswers: Readonly<Record<string, readonly string[]>> = {}) {}
+  private readonly reads = new Map<string, number>();
   async command(command: string): Promise<string> {
     this.sent.push(command);
-    return "";
+    const read = this.reads.get(command) ?? 0;
+    this.reads.set(command, read + 1);
+    const answers = this.scriptedAnswers[command];
+    return answers?.[Math.min(read, answers.length - 1)] ?? "";
   }
   async executeChecked(command: string, options: { acceptedNoOp?: RegExp } = {}): Promise<string> {
     this.sent.push(command);
@@ -286,6 +338,7 @@ async function settleGameTime(options: {
   cancelDuringRead?: number;
   completionOnCancel?: "succeeded" | "failed";
   initiallyCancelled?: boolean;
+  cancelDuringObservation?: "goal" | "position";
 }) {
   const abort = new AbortController();
   if (options.initiallyCancelled) abort.abort("before clock");
@@ -296,18 +349,25 @@ async function settleGameTime(options: {
   const observations: string[] = [];
   const completions: Parameters<typeof goalRunner.awaitScenarioGoal>[0]["clients"]["completions"] = new Map();
   let reads = 0;
+  const logs: string[] = [];
+  const rcon = new GameTimeRcon(options.answers, (read) => {
+    reads = read;
+    if (read !== options.cancelDuringRead) return;
+    abort.abort("during clock");
+    if (options.completionOnCancel) completions.set("Walker", { status: options.completionOnCancel, detail: "test completion" });
+  });
+  if (options.cancelDuringObservation) {
+    rcon.playerDeaths = async () => { if (options.cancelDuringObservation === "goal") abort.abort("during goal"); return 0; };
+    const command = rcon.command.bind(rcon);
+    rcon.command = async name => { if (options.cancelDuringObservation === "position" && name.endsWith(" Pos")) abort.abort("during position"); return command(name); };
+  }
   try {
     const result = await goalRunner.awaitScenarioGoal({
       scenario: mineLabs.scenarioSchema.parse({
-        name: "game-time", players: [{ name: "Walker" }], client: { command: "true" },
+        name: "game-time", players: options.cancelDuringObservation ? [{ name: "Walker" }, { name: "Actor" }] : [{ name: "Walker" }], client: { command: "true" },
         goal: options.survive ? { kind: "survive", seconds: 1, timeout: 1 } : { kind: "completion", timeout: 1 },
       }),
-      server: neverStartedServer("unused", new GameTimeRcon(options.answers, (read) => {
-        reads = read;
-        if (read !== options.cancelDuringRead) return;
-        abort.abort("during clock");
-        if (options.completionOnCancel) completions.set("Walker", { status: options.completionOnCancel, detail: "test completion" });
-      })),
+      server: neverStartedServer("unused", rcon),
       clients: { processes: new Map(), chat: new Map(), completions },
       signal: abort.signal,
       goalStallMs: options.stallMs ?? 30_000,
@@ -317,8 +377,9 @@ async function settleGameTime(options: {
         if (++polls === options.cancelAfter) abort.abort("observed pending");
       },
       onGoalProgress: (goal) => { observations.push(goal.state); },
+      log: line => logs.push(line),
     });
-    return { ...result, observations, wall, reads };
+    return { ...result, observations, wall, reads, logs, positions: rcon.sent.filter(command => command.endsWith(" Pos")) };
   } finally {
     clearTimeout(guard);
   }
@@ -357,6 +418,12 @@ test("cancellation before or during a clock read wins over completion and the ti
   }
   assert.deepEqual(results.map((result) => result.outcome), ["cancelled", "cancelled", "cancelled", "cancelled"]);
   assert.equal(before.reads, 0, "an already cancelled goal must not start an RCON request");
+  for (const cancelDuringObservation of ["goal", "position"] as const) {
+    const result = await settleGameTime({ answers: [100], survive: true, cancelDuringObservation });
+    assert.equal(result.outcome, "cancelled");
+    assert.deepEqual(result.positions, cancelDuringObservation === "goal" ? [] : ["data get entity Walker Pos"]);
+    assert.match(result.logs.at(-1) ?? "", /^goal still spans:/u);
+  }
 });
 
 test("survive counts game seconds: 19 ticks is pending, 20 passes", async () => {
@@ -377,6 +444,7 @@ async function settleCompletion(options: { passingAt?: number; cancel?: boolean;
   let wall = 0;
   let tick = 0;
   let reads = 0;
+  const logs: string[] = [];
   const completions: Parameters<typeof goalRunner.awaitScenarioGoal>[0]["clients"]["completions"] = new Map();
   if (!options.failedDuringRead) completions.set("Walker", { status: "succeeded" });
   const answers = options.stopped ? [100] : [100, 100, ...(options.unreadableBaseline ? ["unreadable"] : []), 200, 220, 239, 240];
@@ -398,8 +466,10 @@ async function settleCompletion(options: { passingAt?: number; cancel?: boolean;
     server: neverStartedServer("unused", rcon),
     clients: { processes: new Map(), chat: new Map(), completions },
     signal: abort.signal, goalStallMs: 1_000, now: () => wall,
+    log: line => logs.push(line),
     sleep: async () => { wall += 250; if (options.cancel) abort.abort("during settle"); },
   });
+  assert.match(logs.at(-1) ?? "", /^goal still spans: longest \d+ ticks at tick \d+$/u);
   return { ...result, tick, reads, wall };
 }
 
@@ -433,4 +503,37 @@ test("abort during the completion settle cancels; a stopped clock times out", as
   assert.equal(stopped.outcome, "timeout");
   assert.match(stopped.log, /stood still for 1000 ms/u);
   assert.equal(stopped.wall, 1_000);
+});
+
+test("goal progress ignores survive elapsed time but retains death and every counted child", () => {
+  const goal = mineLabs.scenarioSchema.parse({ client: { command: "true" }, goal: { kind: "all", goals: [{ kind: "survive", seconds: 5 }, { kind: "hasItem", item: "iron_ingot", count: 8 }] } }).goal;
+  const result = (elapsed: number, count: number, alive = true): goals.GoalResult => ({ state: "pending", detail: `all pending: alive ${elapsed}/5s`, children: [
+    { state: "pending", detail: `${alive ? "alive" : "dead"} ${elapsed}/5s` },
+    { state: "pending", detail: `iron_ingot: ${count}/8` },
+  ] });
+  assert.equal(goals.progressKey(goal, result(3, 2)), goals.progressKey(goal, result(4, 2)));
+  assert.notEqual(goals.progressKey(goal, result(4, 2)), goals.progressKey(goal, result(4, 3)));
+  assert.notEqual(goals.progressKey(goal, result(4, 2)), goals.progressKey(goal, result(4, 2, false)));
+});
+
+test("goal progress logs block moves at most once per 20 game ticks and includes the terminal still span", async () => {
+  const ticks = [100, 100, 110, 120, 130, 140, 150, 160, 180];
+  // Measured .tmp/endpoint-before RCON Pos: <body> has the following entity data: [0.5d, -59.0d, 512.5d].
+  const rcon = new RecordingRcon([], { "time query gametime": ticks.map(tick => `The time is ${tick}`), "data get entity Actor Pos": [
+    "Actor has the following entity data: [1.5d, -60.0d, 2.5d]",
+    "Actor has the following entity data: [1.9d, -60.0d, 2.9d]",
+    "Actor has the following entity data: [1.5d, -60.0d, 3.5d]",
+    "Actor has the following entity data: [1.5d, -60.0d, 3.5d]",
+  ] });
+  const logs: string[] = [];
+  const result = await goalRunner.awaitScenarioGoal({
+    scenario: mineLabs.scenarioSchema.parse({ client: { command: "true" }, players: [{ name: "Actor" }], goal: { kind: "survive", seconds: 4 } }),
+    server: neverStartedServer("unused", rcon),
+    clients: { processes: new Map(), chat: new Map(), completions: new Map() },
+    now: () => 0, sleep: async () => {}, log: line => logs.push(line),
+  });
+  assert.equal(result.outcome, "pass");
+  assert.deepEqual(logs.filter(line => line.startsWith("goal progress")), ["goal progress at tick 100", "goal progress at tick 140"]);
+  assert.equal(logs.at(-1), "goal still spans: longest 40 ticks at tick 180");
+  assert.equal(rcon.sent.filter(command => command.endsWith(" Pos")).length, 5);
 });
