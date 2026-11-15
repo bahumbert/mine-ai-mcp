@@ -119,7 +119,7 @@ async function ensureLauncher(deps: ConsoleDeps): Promise<{ launcher: LauncherLo
 }
 
 /** The text of each `data:` line of an event stream, until the stream ends (the launcher stopped or died). */
-async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<{ line?: string; failed?: boolean }> {
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of body) {
@@ -127,7 +127,8 @@ async function* streamLines(body: ReadableStream<Uint8Array>): AsyncGenerator<st
     for (let end = buffer.indexOf("\n\n"); end >= 0; end = buffer.indexOf("\n\n")) {
       const block = buffer.slice(0, end);
       buffer = buffer.slice(end + 2);
-      if (block.startsWith("data: ")) yield block.slice(6);
+      if (block.startsWith("data: ")) yield { line: block.slice(6) };
+      else if (block === "event: outcome\ndata: failed") yield { failed: true };
     }
   }
 }
@@ -141,20 +142,24 @@ const NO_IDLE_TIMEOUT: BunFetchRequestInit = { timeout: false };
 
 /** Shows the launcher's lines until its stream ends. An error closes this window's socket; the launcher stops the stack when no other window is attached. */
 async function showAttachedStream(deps: ConsoleDeps, launcher: LauncherLock): Promise<"ended" | "error"> {
+  let startFailed = false;
   try {
     const attached = await deps.fetch(`http://127.0.0.1:${launcher.controlPort}/attach`, { headers: { [CONTROL_HEADER]: "1" }, ...NO_IDLE_TIMEOUT });
     if (!attached.ok || attached.body === null) {
       deps.write(`Could not attach to Mine AI (HTTP ${attached.status}).`);
       return "error";
     }
-    for await (const line of streamLines(attached.body)) deps.write(line);
+    for await (const event of streamLines(attached.body)) {
+      if (event.line !== undefined) deps.write(event.line);
+      if (event.failed) startFailed = true;
+    }
   } catch (error) {
     // Not "is stopping": with another window attached, or a launcher that is already gone, the stack does not stop now.
     deps.write(`This window lost its connection to Mine AI (${fetchErrorText(error)}). Mine AI stops when no window is left open. Open it again from the Start menu.`);
     return "error";
   }
   deps.write("Mine AI has stopped.");
-  return "ended";
+  return startFailed ? "error" : "ended";
 }
 
 /** Runs the console: banner, then the launcher's lines until it ends. Returns the exit code. */

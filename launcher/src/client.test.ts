@@ -82,8 +82,12 @@ async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Resp
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-for (const [label, data] of [["empty", ""], ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n"]] as const) {
-test(`a ${label} stream ends without Enter and attaches without an idle timeout`, async () => {
+for (const [label, data, lines, waits] of [
+  ["empty", "", [], 0],
+  ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n", ["first", "second"], 0],
+  ["failed start", "data: Check the server log.\n\ndata: Stopping Mine AI (mine-ai stop)...\n\nevent: outcome\ndata: failed\n\n", ["Check the server log.", "Stopping Mine AI (mine-ai stop)..."], 1],
+] as const) {
+test(`a ${label} stream shows its lines and waits for Enter only after failure`, async () => {
   const body = new ReadableStream<Uint8Array>({
     start: (stream) => {
       if (data) stream.enqueue(bytes(data));
@@ -91,14 +95,39 @@ test(`a ${label} stream ends without Enter and attaches without an idle timeout`
     },
   });
   const { control, h, inits } = await consoleWithAttach(body);
-  assert.equal(await runConsole(h.deps), 0);
-  await control.close();
-  assert.deepEqual(h.out.slice(data ? -3 : -1), data ? ["first", "second", "Mine AI has stopped."] : ["Mine AI has stopped."]);
-  assert.ok(!h.out.some((line) => line.includes("ping")));
-  assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
-  assert.equal(h.enterWaits, 0);
+  try {
+    assert.equal(await runConsole(h.deps), 0);
+    assert.deepEqual(h.out.slice(-lines.length - 1), [...lines, "Mine AI has stopped."]);
+    assert.ok(!h.out.includes(": ping"));
+    assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
+    assert.equal(h.enterWaits, waits);
+  } finally {
+    await control.close();
+  }
 });
 }
+
+test("a failure after attachment waits for Enter even when another stop wins", async () => {
+  const recording = handlers(STATUS);
+  const control = await startControlServer({ startPort: 26_380, handlers: recording });
+  let sawLine!: () => void;
+  const seen = new Promise<void>((resolve) => { sawLine = resolve; });
+  const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
+    write: (line) => { h.out.push(line); if (line === "Check the server log.") sawLine(); },
+  });
+  const finished = runConsole(h.deps);
+  try {
+    control.publish("Check the server log.");
+    await seen;
+    recording.status$ = { ...STATUS, phase: "stopping", problem: "Check the server log." };
+    control.publish("Stopping Mine AI (mine-ai stop)...");
+    await control.close();
+    assert.equal(await finished, 0);
+    assert.equal(h.enterWaits, 1);
+  } finally {
+    await control.close();
+  }
+});
 
 for (const [label, response, status] of [
   ["attach 503", new Response("stopping", { status: 503 }), 503],
