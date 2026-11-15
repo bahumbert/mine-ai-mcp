@@ -4,22 +4,29 @@ import type { ClientCompletion } from "mine-labs/client";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { forbidDigStraightDown } from "./styled-navigate.ts";
 
 const routeSchemaIn = (arena: ArenaFrame) => z.strictObject({
   dig: z.boolean().default(false),
+  noDigStraightDown: z.boolean().default(false),
   legs: z.array(z.strictObject({
     target: arenaPoint(arena),
     range: z.number().nonnegative(),
     label: z.string(),
+    dig: z.boolean().optional(),
   })).min(1),
 });
 
 /** Verify each named arrival before continuing; only excavation courses permit digging. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { legs, dig } = routeSchemaIn(context.arena).parse(context.scenario.params);
+  const { legs, dig, noDigStraightDown } = routeSchemaIn(context.arena).parse(context.scenario.params);
+  if (noDigStraightDown) {
+    const failure = await forbidDigStraightDown(context);
+    if (failure) return failure;
+  }
   const completed: string[] = [];
-  for (const { target: [x, y, z], range, label } of legs) {
-    const output = await context.call("navigate", { x, y, z, range, dig, scaffold: false });
+  for (const { target: [x, y, z], range, label, dig: legDig } of legs) {
+    const output = await context.call("navigate", { x, y, z, range, dig: legDig ?? dig, scaffold: false });
     completed.push(`${label}: ${output.summary}`);
     if (output.result.status !== "succeeded") {
       return { status: "failed", detail: completed.join("; ") };

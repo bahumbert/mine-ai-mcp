@@ -1,0 +1,42 @@
+template: ../../templates/flat-single-action.yaml
+
+name: staircase-descent-way-back
+tags: [regression]
+description: >-
+  P4-20, runs r38e-r38s: staircase descents cut away their own way back up.
+  The down leg may stop one block short (range 1); the return needs no digging or blocks.
+
+reset:
+  - "fill -8 -63 -8 8 -40 8 air"
+
+geometry:
+  - fill: { block: stone, from: [-6, -63, -6], to: [6, -46, 6] }
+
+players:
+  - name: Climber
+    pos: [0.5, -45, 0.5]
+    inventory:
+      - { item: stone_pickaxe, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/navigate-route.ts]
+
+tick:
+  - "gamemode spectator @a[name=!Climber,gamemode=!spectator]"
+
+params:
+  noDigStraightDown: true
+  dig: true
+  legs:
+    - { label: down, target: [0, -57, 0], range: 1 }
+    - { label: back up, target: [0, -45, 0], range: 0, dig: false }
+
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - { kind: reach, who: Climber, pos: [0.5, -45, 0.5], radius: 1.0 }
+    - { kind: health, who: Climber, health: 20 }
+    - { kind: completion, who: Climber }
