@@ -1,4 +1,4 @@
-// Runs one trial on a server under the wall-clock bounds: the arrangement mutex, the abort at goal timeout + slack, the lane's restore.
+// Runs one trial under a wall bound scaled by its server's tick rate, with an arrangement mutex and a bounded lane restore.
 import type { ArenaTrialOptions, ClientProvider, RunResult, Scenario } from "mine-labs";
 import { controlChunkOf, type Lane } from "../arena/lanes.ts";
 import type { ArrangementMutex } from "./arrangement-mutex.ts";
@@ -7,8 +7,15 @@ import type { MutexQueueMarks } from "./pool.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
 const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
+/** Spec 2026-11-15-scenario-ticks open choice 1: twice the nominal game duration, plus the existing wall slack. */
+export const TRIAL_TICK_SLACK_FACTOR = 2;
 const WORLD_FLOOR_Y = -64;
 const WORLD_CEILING_Y = 319;
+
+/** Scale the goal's game seconds to wall time; null means the server's default 20 ticks/s. */
+export function trialWallBoundMs(timeoutSeconds: number, tickRate: number | null, slackMs: number, k: number): number {
+  return timeoutSeconds * 1000 * (20 / (tickRate ?? 20)) * k + slackMs;
+}
 
 export interface TrialRunInput {
   readonly server: ScenarioServer;
@@ -34,6 +41,8 @@ export interface TrialJob {
   readonly name: string;
   /** Already shifted for a lane. */
   readonly scenario: Scenario;
+  /** Carried from placement: a lane's scenario no longer has its server-wide tick-rate command. */
+  readonly tickRate: number | null;
   /** Null: the scenario runs alone on its own server at offset 0, with no arena. */
   readonly lane: Lane | null;
   readonly server: ScenarioServer;
@@ -54,7 +63,7 @@ export interface TrialEnd {
   /** `free`: the arena is certified clean; `quarantined`: not certified, never reuse; `held`: something may still be running there. */
   readonly lane: "free" | "quarantined" | "held";
   readonly serverSick: boolean;
-  /** The trial was aborted at goal timeout + slack. */
+  /** The trial was aborted at the rate-scaled goal wall bound plus slack. */
   readonly hitWallBound: boolean;
   /** A restore ran and finished. */
   readonly restored: boolean;
@@ -216,7 +225,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
   const queue = job.lane ? job.queue : undefined;
   const startedAt = Date.now();
   const wall = new AbortController();
-  const timeoutMs = (job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS) * 1000 + deps.config.trialSlackMs;
+  const timeoutMs = trialWallBoundMs(job.scenario.goal.timeout ?? DEFAULT_GOAL_TIMEOUT_SECONDS, job.tickRate, deps.config.trialSlackMs, TRIAL_TICK_SLACK_FACTOR);
   const wallTimer = setTimeout(() => wall.abort("wall-clock bound"), timeoutMs);
   const signal = AbortSignal.any([job.signal, wall.signal]);
   const late = lateAfterAbort(signal, deps.config.restoreBoundMs);

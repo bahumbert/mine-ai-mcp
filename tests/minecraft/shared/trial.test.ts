@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { RunResult } from "mine-labs";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { laneOf } from "../arena/lanes.ts";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
 import { executeTrial, type TrialRunInput, type TrialRunner } from "./trial.ts";
@@ -22,6 +23,8 @@ test("a passing lane trial hands its lane back after the restore ran, and the ar
 });
 
 test("two lanes' arrangements never overlap: the second runs after the first is prepared", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const mutex = new ArrangementMutex();
   const events: string[] = [];
   const slowPrepare: TrialRunner = async input => {
@@ -32,10 +35,11 @@ test("two lanes' arrangements never overlap: the second runs after the first is 
     input.deferReset(async () => {});
     return result("pass");
   };
-  await Promise.all([
+  const running = Promise.all([
     executeTrial({ runTrial: slowPrepare, config }, job({ mutex, lane: laneOf(1) })),
     executeTrial({ runTrial: slowPrepare, config }, job({ mutex, lane: laneOf(2) })),
   ]);
+  await clock.settle(running, 30, 10);
   assert.deepEqual(events, ["arrange lane-1", "prepared lane-1", "arrange lane-2", "prepared lane-2"]);
 });
 
@@ -46,10 +50,12 @@ test("a trial that returns before it was prepared frees the mutex for the next l
   (await mutex.acquire())();
 });
 
-test("a never-settling trial is aborted at goal timeout plus slack on the wall clock, then marks its server sick", async () => {
+test("a never-settling trial at the default 20 ticks/s is aborted at its goal wall bound plus slack, then marks its server sick", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const neverSettles: TrialRunner = async input => { await input.onPrepared(); return new Promise<RunResult>(() => {}); };
   const started = performance.now();
-  const end = await executeTrial({ runTrial: neverSettles, config }, job());
+  const end = await clock.settle(executeTrial({ runTrial: neverSettles, config }, job()), 500, 10);
   const elapsed = performance.now() - started;
   assert.ok(elapsed >= 30 + 20 + 60, `waited the goal timeout, the slack and the restore bound: ${elapsed} ms`);
   assert.ok(elapsed < 500, `and no longer: ${elapsed} ms`);
@@ -61,6 +67,8 @@ test("a never-settling trial is aborted at goal timeout plus slack on the wall c
 });
 
 test("the lane stays held while an aborted trial's restore runs, then frees", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const events: string[] = [];
   const honoursAbort: TrialRunner = async input => {
     await input.onPrepared();
@@ -68,7 +76,7 @@ test("the lane stays held while an aborted trial's restore runs, then frees", as
     await new Promise<void>(resolve => input.signal.addEventListener("abort", () => resolve(), { once: true }));
     return result("cancelled");
   };
-  const end = await executeTrial({ runTrial: honoursAbort, config }, job());
+  const end = await clock.settle(executeTrial({ runTrial: honoursAbort, config }, job()), 200, 5);
   events.push("lane released");
   assert.deepEqual(events, ["restore done", "lane released"]);
   assert.equal(end.lane, "free");
@@ -77,8 +85,10 @@ test("the lane stays held while an aborted trial's restore runs, then frees", as
 });
 
 test("a restore that outlasts the restore bound marks the server sick and keeps the lane", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const slowRestore = runnerOf({ restore: () => new Promise(() => {}) });
-  const end = await executeTrial({ runTrial: slowRestore, config }, job());
+  const end = await clock.settle(executeTrial({ runTrial: slowRestore, config }, job()), 100, 5);
   assert.equal(end.lane, "held");
   assert.equal(end.serverSick, true);
   assert.match(end.result.error ?? "", /restore did not finish/u);
@@ -101,34 +111,24 @@ test("a runner that throws is an error result and the lane is quarantined (no re
 test("the submitter cancelling ends the trial as cancelled, restore still runs", async () => {
   const events: string[] = [];
   const cancel = new AbortController();
+  let prepared!: () => void;
+  const ready = new Promise<void>(resolve => { prepared = resolve; });
   const waitsForAbort: TrialRunner = async input => {
     await input.onPrepared();
     input.deferReset(async () => { events.push("restore"); });
-    await new Promise<void>(resolve => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+    const aborted = new Promise<void>(resolve => input.signal.addEventListener("abort", () => resolve(), { once: true }));
+    prepared();
+    await aborted;
     return result("cancelled");
   };
   const running = executeTrial({ runTrial: waitsForAbort, config }, job({ signal: cancel.signal, scenario: scenario(60) }));
-  await new Promise(resolve => setTimeout(resolve, 10));
+  await ready;
   cancel.abort("submitter left");
   const end = await running;
   assert.equal(end.result.outcome, "cancelled");
   assert.equal(end.hitWallBound, false);
   assert.deepEqual(events, ["restore"]);
   assert.equal(end.lane, "free");
-});
-
-test("a trial cancelled while it waits for the arrangement mutex never reaches the runner", async () => {
-  const mutex = new ArrangementMutex();
-  const holder = await mutex.acquire();
-  const cancel = new AbortController();
-  let ran = false;
-  const running = executeTrial({ runTrial: async () => { ran = true; return result("pass"); }, config }, job({ mutex, signal: cancel.signal, scenario: scenario(60) }));
-  cancel.abort("submitter left");
-  const end = await running;
-  holder();
-  assert.equal(ran, false);
-  assert.equal(end.result.outcome, "cancelled");
-  assert.equal(end.lane, "free", "nothing was touched");
 });
 
 test("a scenario on its own server (no lane) restores at once without the mutex and passes no arena", async () => {
@@ -184,10 +184,13 @@ test("a trial says it was arranged once its runner arranged or prepared, and not
   const mutex = new ArrangementMutex();
   const held = await mutex.acquire();
   const gone = new AbortController();
-  const waiting = executeTrial({ runTrial: arranges, config }, job({ mutex, signal: gone.signal }));
+  let ran = false;
+  const waiting = executeTrial({ runTrial: async input => { ran = true; return arranges(input); }, config }, job({ mutex, signal: gone.signal }));
   gone.abort("server died");
   const end = await waiting;
+  assert.equal(ran, false);
   assert.equal(end.result.outcome, "cancelled");
+  assert.equal(end.lane, "free", "nothing was touched");
   assert.equal(end.arranged, false, "cancelled while waiting for the arrangement turn");
   held();
 });

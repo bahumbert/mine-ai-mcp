@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Scenario } from "mine-labs";
 import type { Lane } from "../arena/lanes.ts";
 import { renameBodyOnOwnServer } from "../arena/own-body.ts";
+import { settingsOf } from "../arena/settings.ts";
 import { shiftScenario } from "../arena/shift-scenario.ts";
 import { trialLine } from "./daemon-lines.ts";
 import type { ManagedServer } from "./pool.ts";
@@ -126,6 +127,7 @@ async function executeOnServer(deps: SchedulerDeps, trial: PlacedTrial, runDir: 
   try {
     const end = await executeTrial({ runTrial: deps.runTrial, config: deps.config }, {
       name: entry.name, scenario, lane, server, mutex: managed.mutex, runDir, log: run.log, queue: admitted.queue ?? undefined,
+      tickRate: entry.placement.kind === "lane" ? entry.placement.settings.tickRate : settingsOf(entry.scenario, {}).settings.tickRate,
       signal: AbortSignal.any([submission.abort.signal, managed.died]), reuseServer: lane !== null || (entry.placement.kind === "own" && entry.placement.reusable),
       clientProvider: deps.clientsAhead?.providerFor(submission.id, queued.sequence, run.log),
     });
