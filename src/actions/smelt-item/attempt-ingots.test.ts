@@ -20,7 +20,7 @@ for (const { stopped, elapsed, count, produced } of [
     // (mineflayer inventory.js, lastClosedWindow; facts/gathering.md "An aborted attempt counts its ingots").
     const cook: CookAttempt = {
       verdict: "execution_failed", executionError: "interrupted", recovery: { input: 2, fuel: 0, output: null, errors: [] },
-      harvest: { taken: () => 0, item: () => null, takeReady: async () => {}, credit: () => {} },
+      harvest: { taken: () => 0, item: () => null, takeReady: async () => false, credit: () => {} },
       loaded: { carriedBefore: 8, count: 8 }, inputLeft: 0, recoveredAtAge: bot.time.age,
     };
     if (stopped) server.stop();

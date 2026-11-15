@@ -3,12 +3,15 @@
  * (`pause`) and the furnace to `smeltItem` through its dependencies.
  */
 import { EventEmitter } from "node:events";
+import { createRequire } from "node:module";
+import type { Bot } from "mineflayer";
+import type { Item } from "prismarine-item";
 import minecraftData from "minecraft-data";
 import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
 import { fuelCapacity as capacityIn } from "../world/smelting.js";
 import { CarriedCounts } from "./carried-counts.js";
-import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
+import { type FakeClock, createFakeBot, itemOf } from "./fake-bot/index.js";
 
 const FURNACE_VERSION = "1.21.4";
 const registry = minecraftData(FURNACE_VERSION);
@@ -17,10 +20,47 @@ const FURNACE_CELL = "2,64,0";
 /**
  * Harness clock one smelt attempt may take. The cook runs on the fixture's `pause`, not on that clock, so the clock
  * carries only the attempt's waits for the server's answers: 40 ticks of world age (2 s at 20 ticks a second).
- * Keep the original 3.5 s test ceiling: it distinguishes those answers from both the former 5 s wall cap and the
- * 20 s stopped-clock limit (scenario-ticks T11b, 2026-11-15).
+ * Each take now waits for its own answer (a4 B1 Branch R, 2026-11-15); the original 1.5 s margin stays.
  */
-export const ANSWERED_ATTEMPT_MS = 3_500;
+export const answeredAttemptMs = (answerWaits: number) => 2_000 * answerWaits + 1_500;
+/** Compatibility for the out-of-task runner test: its two attempts now take 8 s of harness clock (B3b). */
+export const ANSWERED_ATTEMPT_MS = answeredAttemptMs(2);
+
+const windowLibrary = createRequire(import.meta.url)("prismarine-windows")(FURNACE_VERSION);
+type Stack = { readonly name: string; readonly count: number };
+type FurnaceContents = { inputItem(): Stack | null; fuelItem(): Stack | null; outputItem(): Stack | null; close(): void };
+type CookWindow<T> = Omit<T, keyof FurnaceContents> & EventEmitter & {
+  readonly id: number; readonly inventoryStart: number; readonly inventoryEnd: number; readonly slots: (Item | null)[];
+  inputItem(): Item | null; fuelItem(): Item | null; outputItem(): Item | null; close(): void;
+};
+
+/** Give cook doubles the measured furnace menu and source items used by shift-clicks (16a, a4 B1). */
+export function furnaceWindow<T extends FurnaceContents>(bot: Bot, contents: T): CookWindow<T> {
+  const menu = windowLibrary.createWindow(7, "minecraft:furnace", "Furnace");
+  const read = (source: "inputItem" | "fuelItem" | "outputItem", slot: number) => {
+    const stack = contents[source]();
+    return stack ? Object.assign(itemOf(bot.registry, stack.name, stack.count), { slot }) : null;
+  };
+  const window = Object.assign(new EventEmitter(), contents, new EventEmitter(), {
+    id: menu.id, inventoryStart: menu.inventoryStart, inventoryEnd: menu.inventoryEnd,
+    slots: [] as (Item | null)[],
+    inputItem: () => read("inputItem", 0), fuelItem: () => read("fuelItem", 1), outputItem: () => read("outputItem", 2),
+    close() {
+      contents.close();
+      if (bot.currentWindow === window as never) bot.currentWindow = null;
+      window.emit("close");
+    },
+  });
+  Object.defineProperty(window, "slots", { get: () => {
+    const slots = Array(menu.slots.length).fill(null);
+    slots[0] = window.inputItem(); slots[1] = window.fuelItem(); slots[2] = window.outputItem();
+    // Stopgap: cook doubles change carried counts while open, unlike Mineflayer's stale inventory until close (16a).
+    for (let slot = menu.inventoryStart; slot < menu.inventoryEnd; slot++) slots[slot] = bot.inventory.slots[slot - menu.inventoryStart + bot.inventory.inventoryStart];
+    return slots;
+  } });
+  bot.currentWindow = window as never;
+  return window;
+}
 
 /** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
 const fuelCapacity = (fuel: string) => capacityIn(fuel, registry.version.minecraftVersion!);
@@ -91,10 +131,12 @@ class FakeFurnaceSlots {
   }
 }
 
-/** Shift-clicks on the output slot (2) into the inventory; the `failsAt`th one throws. */
-function outputSlotClicks(slots: FakeFurnaceSlots, adjust: (name: string, delta: number) => void, failsAt?: number) {
+/** Shift-click all three sources, without a window packet for an accepted prediction (16a). */
+function furnaceSlotClicks(slots: FakeFurnaceSlots, adjust: (name: string, delta: number) => void, takes: { input(): Promise<unknown>; fuel(): Promise<unknown> }, failsAt?: number) {
   let clicks = 0;
   return async (slot: number) => {
+    if (slot === 0) { await takes.input(); return; }
+    if (slot === 1) { await takes.fuel(); return; }
     if (slot !== 2 || slots.output === 0) return;
     clicks += 1;
     if (clicks === failsAt) throw new Error("window closed under the take");
@@ -126,7 +168,7 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
   let activeFuel = 0;
   const slots = new FakeFurnaceSlots(options.windowLagsCompletion === true);
   const burn = new FakeBurn(options.fuel ?? "coal", options.cookMs);
-  const furnace = Object.assign(new EventEmitter(), {
+  let furnace = furnaceWindow(bot, {
     id: 7, progress: 0,
     fuel: 0,
     properties: options.reportsBurnTime ? () => burn.properties(elapsedInItem) : undefined,
@@ -164,7 +206,7 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
     close: () => undefined,
   });
   if (options.full) bot.inventory.emptySlotCount = () => 0;
-  bot.clickWindow = outputSlotClicks(slots, adjust, options.outputClickFailsAt);
+  bot.clickWindow = furnaceSlotClicks(slots, adjust, { input: furnace.takeInput, fuel: furnace.takeFuel }, options.outputClickFailsAt);
   let elapsedInItem = 0;
   const dependencies: SmeltItemDependencies = {
     createMovements: () => ({}) as never,
@@ -172,6 +214,8 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
     // A window just opened shows the server's slots (`window_items`).
     openFurnace: async () => {
       slots.redraw();
+      if (bot.currentWindow !== furnace as never) furnace = furnaceWindow(bot, { ...furnace, close: () => undefined });
+      bot.currentWindow = furnace as never;
       return furnace as never;
     },
     now: () => now,
@@ -192,5 +236,5 @@ export function observedFurnace(options: ObservedFurnaceOptions) {
       if (slots.input === 0) activeFuel = 0;
     },
   };
-  return { bot, dependencies, furnace, harness, get now() { return now; } };
+  return { bot, dependencies, get furnace() { return furnace; }, harness, get now() { return now; } };
 }

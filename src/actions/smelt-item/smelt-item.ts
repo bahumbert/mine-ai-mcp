@@ -308,6 +308,7 @@ async function clearFurnaceForAttempt(
   furnace: FurnaceWindow,
   request: ExistingFurnaceRequest,
   progress: SmeltProgress,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const occupied = [
     furnace.inputItem() && "input",
@@ -316,7 +317,7 @@ async function clearFurnaceForAttempt(
   ].filter((slot): slot is string => Boolean(slot));
   if (occupied.length === 0) return null;
   if (!holdsOnlyOurLeftovers(furnace, request, progress)) return smeltItemOutcomes.occupied(occupied);
-  const recovery = await recover(bot, furnace);
+  const recovery = await recover(bot, furnace, signal);
   if (recovery.output) {
     if (!progress.outputLeftCounted) progress.produced += recovery.output.count;
     progress.outputItem = recovery.output.name;
@@ -334,7 +335,7 @@ async function loadAndCook(
   context: ActionContext,
   dependencies: SmeltItemDependencies,
 ): Promise<CookAttempt> {
-  const harvest = midCookHarvest(bot, furnace, dependencies.now);
+  const harvest = midCookHarvest(bot, furnace, dependencies.now, context.signal);
   let verdict: CookAttempt["verdict"] = "execution_failed";
   let executionError = "";
   let recovery: Recovery = { input: 0, fuel: 0, output: null, errors: [] };
@@ -364,10 +365,10 @@ async function loadAndCook(
   } finally {
     if (progress.ownsSlots) {
       recoveredAtAge = bot.time?.age;
-      recovery = await recover(bot, furnace);
+      recovery = await recover(bot, furnace, context.signal);
       inputLeft = furnace.inputItem()?.count ?? 0;
     }
-    furnace.close();
+    if (bot.currentWindow === furnace) furnace.close();
   }
   return { verdict, executionError, recovery, harvest, loaded, inputLeft, recoveredAtAge };
 }
@@ -458,16 +459,20 @@ async function smeltAttempt(
   if (opened.kind === "stopped") return opened.result;
   const { furnace } = opened;
   progress.ownsSlots = false;
-  const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress);
+  const blocked = await clearFurnaceForAttempt(bot, furnace, request, progress, context.signal);
+  if (context.signal?.aborted) {
+    if (bot.currentWindow === furnace) furnace.close();
+    context.signal.throwIfAborted();
+  }
   // A resumed attempt: the fuel it put in earlier may still be burning, and a window just opened has not said so yet.
   if (blocked === null && progress.fuelInserted > 0) await settleBurnReport(furnace, dependencies, context.signal);
   const supplies = blocked === null ? checkSupplies(bot, request, progress, burningItems(furnace, cookTicksFor(bot, request.itemName))) : null;
   if (blocked !== null || supplies?.kind !== "ready") {
-    furnace.close();
+    if (bot.currentWindow === furnace) furnace.close();
     return supplies?.kind === "refused" ? supplies.result : stoppedAttempt(bot, request, progress, blocked!);
   }
   if (progress.produced >= request.count) {
-    furnace.close();
+    if (bot.currentWindow === furnace) furnace.close();
     return { status: "succeeded", smelt: progressEvidence(bot, request, progress) };
   }
   progress.current = furnaceObservation(furnace);
