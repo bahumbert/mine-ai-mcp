@@ -33,6 +33,7 @@ import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
+import { furnaceOutputTake } from "./checks/furnace-output-take.ts";
 import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
 import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
 import { variantTransferClicks } from "./checks/variant-transfer-clicks.ts";
@@ -142,6 +143,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   rainAndThunderState,
   clickWindowHotbarSwap,
   clickWindowShiftMove,
+  furnaceOutputTake,
   clickWindowOntoVariant,
   clickWindowVariantSplit,
   variantTransferClicks,
