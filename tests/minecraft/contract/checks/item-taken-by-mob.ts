@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import type { Entity } from "prismarine-entity";
 import { droppedItemName } from "../../../../src/world/item-pickup.ts";
 import type { ContractCheck } from "../checks.ts";
-import { afterServerTicks } from "../server-answer.ts";
 import { recordWindowPackets } from "../window-packets.ts";
 import { markNow, tickOf, type Mark } from "./server-tick-marks.ts";
 
@@ -12,7 +11,6 @@ type Reading = { kind: string; id?: number; collector?: number; pickupCount?: nu
 export const itemTakenByMob: ContractCheck = {
   name: "item-taken-by-mob",
   withoutRuntime: true,
-  waitsForFake: "T1b: the fake has no mob pickup yet",
   fixture: {
     cells: Object.fromEntries([
       ...[3, 5].flatMap((x) => [-1, 0, 1].flatMap((z) => [-60, -59].map((y) => [`${x},${y},${z}`, "stone"]))),
@@ -47,7 +45,8 @@ export const itemTakenByMob: ContractCheck = {
     try {
       const piglin = await subject.summonMob("piglin", subject.world([4.5, -60, 0.5]), "{IsImmuneToZombification:1b,PersistenceRequired:1b,CanPickUpLoot:1b}");
       const item = await subject.summonItem({ name: "gold_ingot", count: 2 }, subject.world([4.5, -60, 0.5]), 0);
-      await afterServerTicks(subject, 200, "piglin pickup");
+      await subject.mobTakesItem(piglin, item, 1);
+      await subject.mobTakesItem(piglin, item, 1);
       const measured = await Promise.all(readings.map(async ({ mark, ...reading }) => ({ ...reading, tick: await tickOf(subject, mark) })));
       const itemReadings = measured.filter((reading) => reading.id === item.id);
       const detail = JSON.stringify({ piglin: piglin.id, item: item.id, readings: measured, packets: packets.packets });
@@ -59,20 +58,16 @@ export const itemTakenByMob: ContractCheck = {
       ], detail);
       assert.equal(measured.some(({ kind }) => kind === "updateSlot"), false, detail);
       const gone = itemReadings.find(({ kind }) => kind === "entityGone");
-      if (gone) {
-        const second = itemReadings.filter(({ kind }) => kind === "collectPacket")[1];
-        assert.equal(second?.collector, piglin.id, detail);
-        assert.equal(second?.pickupCount, 1, detail);
-        assert.equal(second?.name, null, detail);
-        assert.equal(second?.count, null, detail);
-        assert.equal(gone.name, null, detail);
-        assert.equal(gone.count, null, detail);
-        assert.equal(gone.listed, true, detail);
-        assert.equal(gone.valid, true, detail);
-      } else {
-        assert.equal(bot.entities[item.id], item, detail);
-        assert.equal(item.getDroppedItem()?.count, 1, detail);
-      }
+      const second = itemReadings.filter(({ kind }) => kind === "collectPacket")[1];
+      assert.equal(second?.collector, piglin.id, detail);
+      assert.equal(second?.pickupCount, 1, detail);
+      assert.equal(second?.name, null, detail);
+      assert.equal(second?.count, null, detail);
+      assert.equal(gone?.name, null, detail);
+      assert.equal(gone?.count, null, detail);
+      assert.equal(gone?.listed, true, detail);
+      assert.equal(gone?.valid, true, detail);
+      assert.equal(bot.entities[item.id], undefined, detail);
     } finally {
       packets.stop();
       bot.off("playerCollect", onCollect);

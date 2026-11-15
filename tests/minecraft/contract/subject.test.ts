@@ -106,6 +106,22 @@ test("summonItem, summonMob and launchFireball on the fake resolve with the enti
   }
 });
 
+test("mobTakesItem on the fake waits for the server answer and reports the mob's pickup", async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), lagMs: 450 });
+  using _installed = harness.clock.install();
+  const subject = fakeContractSubject(harness, arenaFrame(ZERO_ARENA));
+  const at = subject.world([4.5, -60, 0.5]);
+  const mob = await subject.summonMob("piglin", at);
+  const item = await subject.summonItem({ name: "gold_ingot", count: 2 }, at, 0);
+  let collector = -1;
+  harness.bot.on("playerCollect", (entity) => { collector = entity.id; });
+  const start = subject.now();
+  await subject.mobTakesItem(mob, item, 1);
+  assert.ok(subject.now() - start >= 450);
+  assert.equal(collector, mob.id);
+  assert.equal(item.getDroppedItem()?.count, 1);
+});
+
 test("setBlock and hurtBot on the fake resolve once the client has the change, at a 450 ms answer lag", async () => {
   const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), lagMs: 450 });
   using _installed = harness.clock.install();

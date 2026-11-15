@@ -45,6 +45,8 @@ export interface ContractSubject {
   explode(position: Vec3): Promise<void>;
   /** The server summons the mob `name` at `position` (a world position) with the raw SNBT `nbt` (the fake reads none: its mobs have no AI); resolves with it once the client has it. */
   summonMob(name: string, position: Vec3, nbt?: string): Promise<Entity>;
+  /** Wait for a mob to collect the item; the fake delivers the measured answer. */
+  mobTakesItem(mob: Entity, item: Entity, count: number): Promise<void>;
   /** The server removes a mob it summoned (`/kill`); resolves once the client no longer has it. */
   removeMob(mob: Entity): Promise<void>;
   /** A fireball (a ghast's) is summoned at `position` flying with `motion` (blocks a tick) and a small acceleration, with no block broken by its blast (the `mobGriefing` game rule is off until `clearFireballs`: a server-wide rule); resolves with it once the client has it. */
@@ -313,6 +315,9 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       await afterAnswer(() => combat.explode(position), "explode");
     },
     summonMob: (name, position) => afterAnswer(() => entities.spawn({ name, position }), "summonMob"),
+    async mobTakesItem(mob, item, count) {
+      await afterAnswer(() => entities.takenBy(mob, item, count), "mobTakesItem");
+    },
     async removeMob(mob) {
       await afterAnswer(() => entities.remove(mob.id), "removeMob");
     },
@@ -348,6 +353,24 @@ async function commandUntil(bot: Bot, command: string, cell: Vec3, name: string)
       throw new Error(`/${command}: ${cell} still ${bot.blockAt(cell)?.name ?? "unloaded"} after ${SERVER_EDIT_WALL_MS} ms (is the bot op?)`);
     }
     await delay(SETTLE_STEP_MS);
+  }
+}
+
+/** Wait up to 200 server ticks for the named mob's collect. */
+async function waitForMobPickup(bot: Bot, clock: Pick<ContractSubject, "now" | "wait">, mob: Entity, item: Entity): Promise<void> {
+  let collected = false;
+  let startAge: number | null = bot.time.age;
+  const onCollect = (collector: Entity, entity: Entity) => { if (collector.id === mob.id && entity.id === item.id) collected = true; };
+  bot.on("playerCollect", onCollect);
+  try {
+    const finished = await holdsWhileMoving(clock, () => {
+      const age: number | null = bot.time.age;
+      if (age !== null) startAge ??= age;
+      return collected || (age !== null && startAge !== null && age - startAge >= 219);
+    }, () => bot.time.age, 10_000);
+    if (!finished || !collected) throw new Error("mobTakesItem: no matching collect within 200 server ticks");
+  } finally {
+    bot.off("playerCollect", onCollect);
   }
 }
 
@@ -396,6 +419,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
     },
+    mobTakesItem: (mob, item) => waitForMobPickup(bot, { now, wait }, mob, item),
     async hurtBot(amount, sourceId) {
       const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, "/damage");
       const source = sourceId === null ? "minecraft:generic" : `minecraft:mob_attack by ${selectorOf(bot.entities[sourceId]!)}`;
