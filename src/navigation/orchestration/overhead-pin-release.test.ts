@@ -15,10 +15,40 @@ import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
 import type { MemoryWorld } from "../world/memory-world.js";
 import type { NavigationEvent } from "../telemetry/index.js";
 import { createNavigator } from "./navigator.js";
+import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 
 /** A big dripleaf's flat leaf over the start cell: a slab from 0.6875 to 0.9375, above a crouch and below a stand. */
 const LEAF = { x: 0, y: 64, z: 0 };
 const LEAF_SHAPE = [{ minX: 0, minY: 0.6875, minZ: 0, maxX: 1, maxY: 0.9375, maxZ: 1 }];
+
+test("a ten-tick ceiling break gets 300 server ticks for pin release", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const fake = createFakeBot({ clock, server: { ticksPerSecond: 5 } });
+  const world = heldWorld();
+  const bot = Object.assign(new HeldBot(world), { worldAge: () => fake.bot.time.age });
+  let finish!: () => void;
+  bot.startEffect = () => ({ issued: true,
+    completion: new Promise(resolve => { finish = () => resolve({ kind: "failed", observation: "cancelled" }); }),
+    cancel: () => finish(),
+  });
+  const navigator = createNavigator({ bot, world });
+  const run = navigator.startRun({ goal: exactBlockGoal({ x: 2, y: 63, z: 0 }),
+    policy: createMovementPolicy({ evaluateBreak: () => ({ decision: { kind: "allowed" }, tool: { itemType: 42, expectedTicks: 10 } }) }),
+  });
+  if (run.kind !== "started") assert.fail("busy");
+  let settled = false;
+  void run.handle.outcome.then(() => { settled = true; });
+  try {
+    await flush();
+    await clock.advance(59_975, 25);
+    assert.equal(settled, false, "age +280 is within the pin-release budget");
+    await clock.advance(50, 25);
+    const outcome = await run.handle.outcome;
+    assert.equal(outcome.kind, "failed");
+    assert.match(JSON.stringify(outcome), /expired/iu);
+  } finally { run.handle.cancel(); await run.handle.outcome; }
+});
 
 class HeldBot extends FakeNavigationBot {
   readonly breaks: PlannedOperation[] = [];

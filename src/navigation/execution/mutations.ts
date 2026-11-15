@@ -13,10 +13,11 @@
  *
  * Receipts keep an issued expectation alive after the executor has moved on,
  * so a late acknowledgement of the bot's own dig is still recognised as
- * expected rather than mistaken for an invalidating change. The physics tick
- * drives `expire`, so a lost acknowledgement cannot be waited on forever.
+ * expected rather than mistaken for an invalidating change. Deadlines read world age;
+ * the effect's real-time poll, physics ticks and `classify` drive `expire`.
  */
 import type { BlockMatcher } from "../movements/movement.js";
+import type { ServerTickDeadline } from "../../world/world-age.js";
 import { type BlockPosition, type WorldChange, blockKey, blockLabel, samePosition } from "../world/world.js";
 
 export interface AttemptToken {
@@ -31,8 +32,7 @@ interface Expectation {
   readonly before: BlockMatcher;
   readonly after: BlockMatcher;
   readonly operation: "break" | "place" | "activate";
-  /** A `monotonicNow()` reading: the ledger's `now` is the same clock, so a wall-clock step never moves a deadline. */
-  readonly deadlineMs: number;
+  readonly deadline: ServerTickDeadline;
   /**
    * Cells whose every change belongs to this operation while it is remembered:
    * a break that brings a falling column down watches the blocks above turn
@@ -129,7 +129,7 @@ export class ExpectedMutationLedger {
   expire(now: number) {
     for (const collection of [this.#active, this.#receipts])
       for (const [key, item] of collection)
-        if (now >= item.deadlineMs) {
+        if (item.deadline.passed(now)) {
           collection.delete(key);
           item.settle({ kind: "expired" });
         }

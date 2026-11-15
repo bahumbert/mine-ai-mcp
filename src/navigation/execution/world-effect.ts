@@ -1,4 +1,5 @@
 import { monotonicNow } from "../../utils/monotonic-clock.js";
+import { DEFAULT_POLL_MS, serverTickDeadline, type ServerTickDeadline } from "../../world/world-age.js";
 import type { NavigationBot } from "../bot.js";
 import type { BlockMatcher, PlannedOperation } from "../movements/movement.js";
 import type { BlockPosition } from "../world/world.js";
@@ -28,6 +29,19 @@ async function drained(completion: Promise<unknown>): Promise<void> {
   }
 }
 
+/** Check the server deadline even when neither physics nor world changes run. */
+function confirmationExpiry(deadline: ServerTickDeadline, ledger: ExpectedMutationLedger, resources: DisposableStack): Promise<{ kind: "expired" }> {
+  return new Promise(resolve => {
+    const timer = setInterval(() => {
+      const now = monotonicNow();
+      if (!deadline.passed(now)) return;
+      ledger.expire(now);
+      resolve({ kind: "expired" });
+    }, DEFAULT_POLL_MS);
+    resources.defer(() => clearInterval(timer));
+  });
+}
+
 /** Own an interaction until both its physical work and world confirmation settle. */
 export async function executeWorldEffect(options: {
   readonly bot: NavigationBot;
@@ -41,14 +55,14 @@ export async function executeWorldEffect(options: {
     readonly after: BlockMatcher;
     readonly owned?: readonly BlockPosition[];
   }[];
-  /** A `monotonicNow()` reading, as the ledger's deadlines are. */
-  readonly deadlineMs: number;
+  readonly deadlineTicks: number;
   readonly invalidated?: Promise<{ readonly kind: "invalidated" }>;
 }): Promise<{ readonly result: WorldEffectResult; readonly issued: boolean }> {
-  const { bot, ledger, signal, operation, token, deadlineMs } = options;
+  const { bot, ledger, signal, operation, token, deadlineTicks } = options;
   if (signal.aborted) return { result: { kind: "cancelled" }, issued: false };
   using resources = new DisposableStack();
-  const expectations = options.targets.map((target) => ledger.expect({ ...target, token, operation: operation.kind, deadlineMs }));
+  const deadline = serverTickDeadline(() => bot.worldAge?.() ?? null, deadlineTicks, monotonicNow());
+  const expectations = options.targets.map((target) => ledger.expect({ ...target, token, operation: operation.kind, deadline }));
   for (const expectation of expectations) resources.defer(() => expectation.detach());
   const stopped = new AbortController();
   const cancelled = new Promise<{ kind: "cancelled" }>((resolve) => {
@@ -56,13 +70,7 @@ export async function executeWorldEffect(options: {
     signal.addEventListener("abort", abort, { once: true });
     resources.defer(() => signal.removeEventListener("abort", abort));
   });
-  const expired = new Promise<{ kind: "expired" }>((resolve) => {
-    const timer = setTimeout(() => {
-      ledger.expire(deadlineMs);
-      resolve({ kind: "expired" });
-    }, Math.max(0, deadlineMs - monotonicNow()));
-    resources.defer(() => clearTimeout(timer));
-  });
+  const expired = confirmationExpiry(deadline, ledger, resources);
   const effect = bot.startEffect(operation, token, AbortSignal.any([signal, stopped.signal]));
   const completion = effect.completion.catch((cause: unknown) => ({
     kind: "failed" as const,
