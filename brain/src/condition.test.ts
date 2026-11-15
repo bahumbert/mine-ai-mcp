@@ -22,7 +22,7 @@ test("the full line in the spec's order", () => {
     light: { sky: 0, block: 0, openSkyAbove: 85 },
     gear: { tools: ["iron_sword", "stone_pickaxe", "wooden_axe", "bow", "shield"].map((item) => ({ class: item, item })), armour: [] },
     respawn: { kind: "world_spawn", position: { x: 912, y: 64, z: 0 }, distance: 912 }, lastDeath: death,
-  }), [house(140)]), "- Condition: health 6.5/20, food 8/20 (saturation 0.5), carried food 18 points; armour 7 points worn: head iron_helmet, torso none, legs iron_leggings, feet none; carried, not worn: iron_chestplate; your fight reflex uses by itself: iron_sword, bow with 12 arrows, shield; day, night in 4.2 min; light here: sky 0, block 0; open sky 85 blocks above; tools: iron_sword, stone_pickaxe, wooden_axe, bow, shield; home 140 blocks away; respawn: world spawn 912 blocks away; last death 12 min ago at -645 53 -27: Anselm was slain by Zombie.");
+  }), [house(140)]), "- Condition: health 6.5/20, food 8/20 (saturation 0.5), carried food 18 points; armour 7 points worn: head iron_helmet, torso none, legs iron_leggings, feet none; carried, not worn: iron_chestplate; your fight reflex uses by itself: iron_sword, bow with 12 arrows, shield; it is day now, night comes in 4.2 min; light here: sky 0, block 0; open sky 85 blocks above; tools: iron_sword, stone_pickaxe, wooden_axe, bow, shield; home 140 blocks away; respawn: world spawn 912 blocks away; last death 12 min ago at -645 53 -27: Anselm was slain by Zombie.");
 });
 
 test("Ayla's unworn iron set", () => {
@@ -97,8 +97,16 @@ test("burning shows when the runtime says so; toughness shows only when over 0",
   }
 });
 
-test("a bed in another dimension says so and night gives the time until day", () => {
-  assert.ok(conditionLine(snapshot({ clock: { phase: "night", minutesUntilChange: 2 }, respawn: { kind: "bed", position: { x: 1, y: 2, z: 3 }, distance: null } }), []).includes("night, day in 2.0 min; no home; respawn: bed in another dimension."));
+test("a bed in another dimension says so and night says it is night now and when day comes", () => {
+  assert.ok(conditionLine(snapshot({ clock: { phase: "night", minutesUntilChange: 2 }, respawn: { kind: "bed", position: { x: 1, y: 2, z: 3 }, distance: null } }), []).includes("it is night now, day comes in 2.0 min; no home; respawn: bed in another dimension."));
+});
+
+test("the clock is left out when its phase or its minutes are unknown", () => {
+  for (const clock of [{ phase: null, minutesUntilChange: 3 }, { phase: "night", minutesUntilChange: null }] as const) {
+    const line = conditionLine(snapshot({ clock }), []);
+    assert.doesNotMatch(line, /it is (day|night) now/u);
+    assert.doesNotMatch(line, / comes in /u);
+  }
 });
 
 test("an older view_status gives the short line", () => {

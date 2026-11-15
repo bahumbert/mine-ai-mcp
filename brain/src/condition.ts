@@ -75,7 +75,7 @@ export function conditionLine(snapshot: BotSnapshot, places: readonly KnownPlace
   if (snapshot.burn != null) segments.push(`burning: about ${Math.round(snapshot.burn.ticks / 20)} s left (~${snapshot.burn.hp} hp)`);
   segments.push(...armourSegments(snapshot));
   if (snapshot.combat !== undefined) segments.push(combatSegment(snapshot.combat));
-  if (snapshot.clock?.phase != null && snapshot.clock.minutesUntilChange !== null) segments.push(`${snapshot.clock.phase}, ${snapshot.clock.phase === "day" ? "night" : "day"} in ${snapshot.clock.minutesUntilChange.toFixed(1)} min`);
+  if (snapshot.clock?.phase != null && snapshot.clock.minutesUntilChange !== null) segments.push(`it is ${snapshot.clock.phase} now, ${snapshot.clock.phase === "day" ? "night" : "day"} comes in ${snapshot.clock.minutesUntilChange.toFixed(1)} min`);
   segments.push(...lightSegments(snapshot), homeOf(places, snapshot));
   if (snapshot.respawn != null) {
     const kind = snapshot.respawn.kind === "bed" ? "bed" : "world spawn";
