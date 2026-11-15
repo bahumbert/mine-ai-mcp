@@ -47,8 +47,9 @@ The installer asks which server the bots join:
   [Minecraft EULA](https://aka.ms/MinecraftEULA). It listens on this PC only (`127.0.0.1`), with `online-mode=false`
   so the bots can join without Minecraft accounts. Join it from Minecraft at `localhost`; the console shows the port
 (25565, or the next free one). Below this choice the installer asks for the server program:
-  **Paper (recommended)**, the same game run by a faster server program (animals and monsters far from every player
-  move less), or **Vanilla**, Mojang's own server. A new local server starts on Paper; an update keeps the program
+  **Vanilla**, Mojang's own server, or **Paper (recommended)**, the same game run by a faster server program, the
+  better choice for many companions (more than 5, for example; animals and monsters far from every player move less).
+  A new local server starts on Paper; an update keeps the program
   already saved, and a server saved before Paper existed stays vanilla. The choice can be changed later with
   `mine-ai configure --server-local --server-program paper|vanilla` — it picks the server program of the local server;
   Paper is the default for a new local server; going back to vanilla on a world that ran on Paper is refused.
