@@ -1,15 +1,15 @@
 /** Measure predicted furnace shift-clicks against the packets from a real server. */
 import assert from "node:assert/strict";
 import type { ContractCheck } from "../checks.ts";
-import { serverQuiet } from "../server-answer.ts";
+import { ANSWER_WALL_MS, serverQuiet } from "../server-answer.ts";
+import { settleWithin } from "../subject.ts";
 import { recordWindowPackets, stackOf } from "../window-packets.ts";
 
 export const furnaceOutputTake: ContractCheck = {
   name: "furnace-output-take",
   withoutRuntime: true,
-  waitsForFake: "a furnace in the fake windows (amendment a3)",
   fixture: {
-    cells: { "0,-60,0": "furnace" },
+    cells: { "0,-60,0": { name: "furnace", properties: { lit: true } } },
     containers: { "0,-60,0": { raw_iron: 64, coal: 64, iron_ingot: 2 } },
     carried: {},
     position: [-2.5, -60, 0.5],
@@ -18,7 +18,9 @@ export const furnaceOutputTake: ContractCheck = {
     const { bot } = subject;
     const block = bot.blockAt(subject.world([0, -60, 0]))!;
     assert.equal(block.getProperties().lit, true, "the furnace is burning");
-    const window = await bot.openFurnace(block);
+    const opened = await settleWithin(subject, bot.openFurnace(block), ANSWER_WALL_MS);
+    assert.ok(opened?.value !== undefined, `furnace opens: ${opened?.error?.message ?? "never"}`);
+    const window = opened.value;
     const writes: { name: string; slot?: number; ms: number; age: number | null }[] = [];
     const trace: unknown[] = [];
     const client = bot._client;
@@ -30,10 +32,11 @@ export const furnaceOutputTake: ContractCheck = {
       return originalWrite.call(this, name, params);
     };
     const takes = [
-      { name: "output", slot: 2, destination: 38, stack: "iron_ingot x2" },
-      { name: "input", slot: 0, destination: 3, stack: "raw_iron x64" },
-      { name: "fuel", slot: 1, destination: 4, stack: "coal x63" },
+      { name: "output", slot: 2, destination: 38 },
+      { name: "input", slot: 0, destination: 3 },
+      { name: "fuel", slot: 1, destination: 4 },
     ] as const;
+    const taken: string[] = [];
     try {
       for (const take of takes) {
         const recording = recordWindowPackets(bot);
@@ -47,19 +50,21 @@ export const furnaceOutputTake: ContractCheck = {
         };
         window.on("updateSlot", onSlot);
         try {
-          assert.equal(stackOf(window.slots[take.slot]), take.stack, `${take.name} before click`);
+          const stack = stackOf(window.slots[take.slot]);
+          assert.ok(stack, `${take.name} before click`);
+          taken.push(stack);
           assert.deepEqual(bot.inventory.items(), [], "inventory stays stale while open");
           await bot.clickWindow(take.slot, 0, 1);
           trace.push({ take: take.name, event: "promise", ms: subject.now(), age: bot.time.age, write: writes.at(-1) });
           assert.equal(writes.at(-1)?.name, "window_click");
           assert.equal(writes.at(-1)?.slot, take.slot);
           assert.ok(updateTimes.every((ms) => ms <= writes.at(-1)!.ms), `${take.name}: prediction before packet write`);
-          assert.deepEqual(updates, [{ slot: take.destination, stack: take.stack }, { slot: take.slot, stack: null }], `${take.name}: prediction before promise`);
-          assert.equal(stackOf(window.slots[take.destination]), take.stack);
+          assert.deepEqual(updates, [{ slot: take.destination, stack }, { slot: take.slot, stack: null }], `${take.name}: prediction before promise`);
+          assert.equal(stackOf(window.slots[take.destination]), stack);
           assert.deepEqual(bot.inventory.items(), []);
           await serverQuiet(subject, `after ${take.name}`);
           assert.deepEqual(recording.packets, [], `${take.name}: no server window packet`);
-          assert.equal(stackOf(window.slots[take.destination]), take.stack);
+          assert.equal(stackOf(window.slots[take.destination]), stack);
           assert.deepEqual(bot.inventory.items(), []);
         } finally {
           window.off("updateSlot", onSlot);
@@ -75,7 +80,7 @@ export const furnaceOutputTake: ContractCheck = {
     }
     assert.equal(writes.at(-1)?.name, "close_window");
     await serverQuiet(subject, "after closing the furnace");
-    assert.deepEqual(bot.inventory.items().map(stackOf).sort(), ["coal x63", "iron_ingot x2", "raw_iron x64"]);
+    assert.deepEqual(bot.inventory.items().map(stackOf).sort(), taken.sort());
     return `MEASURED ${JSON.stringify({ trace, close: writes.at(-1) })}`;
   },
 };

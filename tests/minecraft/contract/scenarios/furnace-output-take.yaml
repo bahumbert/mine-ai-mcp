@@ -16,7 +16,7 @@ reset: []
 setup:
   - fill -6 -61 -6 6 -61 6 stone
   - fill -6 -60 -6 6 -55 6 air
-  - setblock 0 -60 0 furnace
+  - setblock 0 -60 0 furnace[lit=true]
   - item replace block 0 -60 0 container.0 with raw_iron 64
   - item replace block 0 -60 0 container.1 with coal 64
   - item replace block 0 -60 0 container.2 with iron_ingot 2
