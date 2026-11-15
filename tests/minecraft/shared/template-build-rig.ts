@@ -98,6 +98,14 @@ export class TemplateBuildRig {
         this.calls.push(call);
       }),
     });
+    // A real build ends when the daemon stops (its server stops, or its start is refused). A fake build has no server, so the
+    // stop would wait for a finish only the test gives: the stop ends every open call first, then awaits the stop.
+    const stopBuilds = this.builds.stop.bind(this.builds);
+    this.builds.stop = async () => {
+      const stopping = stopBuilds();
+      for (const call of this.calls) call.finish({ ok: false, reason: "daemon stopping", bound: false });
+      await stopping;
+    };
   }
 
   /** `startIfDue` with a machine that has room, and idle as the test says. */
