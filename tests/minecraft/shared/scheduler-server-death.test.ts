@@ -1,4 +1,4 @@
-// A server whose java process died or never started: its trials end red or go back to the queue once, and the next trial runs on another server.
+// A server whose java process died or never started: one retry on another server, then a final result.
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Scenario } from "mine-labs";
@@ -6,28 +6,11 @@ import { renameBodyOnOwnServer } from "../arena/own-body.ts";
 import { fixtureScenario } from "./scenario-fixture.ts";
 import { ScriptedClients } from "./scripted-clients.ts";
 import { lanePlacement, ownPlacement, SchedulerRig } from "./scheduler-rig.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 
 const resultOf = (rig: SchedulerRig, name: string) => rig.events.find(event => event.type === "result" && event.name === name);
 
-test("a trial running on a server whose java died is told, and ends red naming the death; the next trial of the key runs on another server in its submission's pass", async () => {
-  const rig = new SchedulerRig();
-  rig.submit([{ name: "a", placement: lanePlacement("k") }]);
-  rig.sample();
-  await rig.settle();
-  const running = rig.running[0]!;
-  await rig.killJavaOf(0);
-  assert.equal(running.input.signal.aborted, true, "the trial running on it is aborted, not left to the RCON timeouts");
-  running.finish("cancelled");
-  await rig.settle();
-  const event = resultOf(rig, "a");
-  assert.equal(event?.type === "result" ? event.outcome : null, "error");
-  assert.match(event?.type === "result" ? event.error ?? "" : "", /server s1 died/u);
-  rig.submit([{ name: "b", placement: lanePlacement("k") }]);
-  await rig.settle();
-  assert.equal(rig.serverOf("b"), "s2", "b is not admitted to the dead server");
-});
-
-test("a trial still waiting for the arrangement turn of a server whose java died goes back to the queue once and runs on another server; the one arranging ends red", async () => {
+test("a waiting trial and an arranged trial on a dead server each run again on another server", async () => {
   const rig = new SchedulerRig();
   const open = rig.holdArrangements();
   rig.submit([{ name: "a", placement: lanePlacement("k") }, { name: "b", placement: lanePlacement("k") }]);
@@ -41,8 +24,11 @@ test("a trial still waiting for the arrangement turn of a server whose java died
   rig.finishNamed("a", "cancelled");
   rig.finishNamed("b");
   await rig.settle();
+  assert.equal(rig.serverOf("a"), "s2");
+  rig.finishNamed("a");
+  await rig.settle();
   const arranging = resultOf(rig, "a");
-  assert.match(arranging?.type === "result" ? arranging.error ?? "" : "", /server s1 died/u);
+  assert.match(arranging?.type === "result" ? arranging.retried ?? "" : "", /^server died:/u);
   const waiting = resultOf(rig, "b");
   assert.equal(waiting?.type === "result" ? waiting.outcome : null, "pass");
 });
@@ -133,7 +119,7 @@ for (const [label, reusable] of [["reusable", true], ["non-reusable", false]] as
   });
 }
 
-test("an own trial whose java dies after it was prepared ends red naming the death and is not sent back", OPTIONS, async () => {
+test("an own trial whose java dies after it was prepared retries on a new server", OPTIONS, async () => {
   const rig = new SchedulerRig();
   rig.submit([{ name: "a", placement: ownPlacement("own:a") }]);
   rig.sample();
@@ -142,9 +128,14 @@ test("an own trial whose java dies after it was prepared ends red naming the dea
   await rig.killJavaOf(0);
   running.finish("cancelled");
   await rig.settle();
-  assert.match(resultError(rig, "a") ?? "", /server s1 died/u);
+  assert.equal(resultOf(rig, "a"), undefined);
+  assert.equal(rig.serverOf("a"), "s2");
   assert.equal(backCount(rig), 0);
-  assert.equal(rig.factory.created.length, 1);
+  assert.equal(rig.factory.created.length, 2);
+  rig.finishNamed("a");
+  await rig.settle();
+  const event = resultOf(rig, "a");
+  assert.equal(event?.type === "result" && event.class, "pass");
 });
 
 test("an own trial whose servers die twice before its arrangement ends red with the second death", OPTIONS, async () => {
@@ -254,6 +245,8 @@ test("a cancel of the submission ends the wait for the death at once: the trial 
 });
 
 test("a trial that fails with an RCON error on a server whose java stays alive settles red with its own error once the confirmation bound passed", OPTIONS, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const rig = new SchedulerRig({ MINE_AI_SCENARIO_SAMPLE_EVERY_MS: "50" });
   const failArrangement = failingArrangement(rig);
   rig.submit([{ name: "a", placement: ownPlacement("own:a") }]);
@@ -262,7 +255,7 @@ test("a trial that fails with an RCON error on a server whose java stays alive s
   failArrangement();
   await rig.settle();
   assert.equal(resultOf(rig, "a"), undefined, "it waits for the death");
-  await rig.until(() => resultOf(rig, "a") !== undefined, "the bound to pass");
+  await clock.advance(2_100);
   assert.match(resultError(rig, "a") ?? "", /rcon closed/u);
   assert.doesNotMatch(resultError(rig, "a") ?? "", /died/u, "the server did not die");
   assert.equal(backCount(rig), 0);

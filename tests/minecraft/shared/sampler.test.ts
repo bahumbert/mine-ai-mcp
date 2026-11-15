@@ -266,7 +266,8 @@ test("a server whose java pid is unknown has no liveness reading: only STALL_STO
   now = 1_500;
   await sampleOnce(deps);
   assert.equal(fake.stopped, true, "1000 ms after its first query (500)");
-  assert.equal(managed.died.aborted, false, "a stall is no death: the java process is not read");
+  assert.equal(managed.died.aborted, true, "stopping a stalled server aborts its unfinished trials");
+  assert.equal(managed.died.reason, `it answered nothing for ${rig.config.stallStopMs} ms`);
 });
 
 test("a server the pool stops itself (idle) is not counted as a death", async () => {

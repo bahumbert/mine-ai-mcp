@@ -58,7 +58,11 @@ export class Scheduler {
   #sequence = 0;
 
   readonly #host: TrialHost = {
-    sendBack: (queued, admitted, why) => this.#sendBack(queued, admitted, why),
+    sendBack: (queued, admitted, why, avoid, cause) => this.#sendBack(queued, admitted, why, avoid, cause),
+    requeue: (queued, avoid) => {
+      queued.avoidServerId = avoid;
+      this.#requeue(queued);
+    },
     unadmit: (queued, admitted) => this.#unadmit(queued, admitted),
     hitWallBound: serverId => { this.#admission = noteWallBoundHit(this.#admission, serverId); },
     settled: submission => { this.#finishIfDone(submission); this.#pump(false); },
@@ -112,6 +116,7 @@ export class Scheduler {
         this.#queue.push({
           sequence: ++this.#sequence, aheadClient: aheadClients.get(entry) ?? null, players: entry.scenario.players.length, queuedAt: this.deps.now(),
           heldBy: null, submission, entry, refusal: null, roomSamples: 0, waitingForCalm: false, sentBack: false,
+          avoidServerId: null, infraCause: null,
         });
         submission.queued += 1;
       }
@@ -252,7 +257,7 @@ export class Scheduler {
     if (cap !== null && submission.running >= cap) return this.#refusedNotForRoom(queued, `--lanes ${cap} reached for this submission`, "lanes");
     const decision = decideAdmission({
       sample: this.#liveSample()!, state: this.#admission, tally: this.#tally, config: this.deps.config,
-      request: this.#requestFor(entry.placement, this.#isTiming(submission, entry), clientReserveMb(this.deps.config, this.deps.clientsAhead, queued)),
+      request: this.#requestFor(queued, this.#isTiming(submission, entry), clientReserveMb(this.deps.config, this.deps.clientsAhead, queued)),
     });
     const timing = this.#isTiming(submission, entry);
     this.#setWaitingForCalm(queued, timing && !decision.admit && decision.bound === "cpu");
@@ -284,12 +289,13 @@ export class Scheduler {
     return !submission.spec.hold && isTimingTrial(entry.placement, submission.spec.lock);
   }
 
-  #requestFor(placement: Placement, timing: boolean, reserveMb: number): AdmissionRequest {
+  #requestFor(queued: QueuedTrial, timing: boolean, reserveMb: number): AdmissionRequest {
     const { pool, config } = this.deps;
+    const { entry: { placement }, avoidServerId } = queued;
     // A timing trial waiting for a calm machine counts as one running: the others start only under CPU_CALM until it has started.
     const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm, clientReserveMb: reserveMb };
-    if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
-    const candidates = pool.sharedCandidates(placement.key);
+    if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key).filter(id => id !== avoidServerId), newServerHeapMb: config.singleHeapMb };
+    const candidates = pool.sharedCandidates(placement.key).filter(id => id !== avoidServerId);
     return {
       ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb, newServerWorldMb: this.#worldMbOf(placement),
       spreadToNewServer: this.#mayStartKeyServers && this.#keyWantsMoreServers(placement.key),
@@ -365,24 +371,32 @@ export class Scheduler {
   }
 
   /** A server that failed to start or died before this trial's arrangement never ran it: it goes back to the queue once, to be placed on another server; a second failure stays its error. Returns false when it stays one. */
-  #sendBack(queued: QueuedTrial, admitted: Admitted, why: string): boolean {
+  #sendBack(queued: QueuedTrial, admitted: Admitted, why: string, avoid: string, cause: NonNullable<QueuedTrial["infraCause"]>): boolean {
     const { submission, entry } = queued;
     if (queued.sentBack || submission.abort.signal.aborted) return false;
     queued.sentBack = true;
+    queued.avoidServerId = avoid;
+    queued.infraCause = cause;
     this.#unadmit(queued, admitted, true);
     // The client of the admission never started a trial: it is not growing into the ledger.
     const young = this.#young.findIndex(client => client.at === admitted.at && client.mb === admitted.clientMb);
     if (young >= 0) this.#young.splice(young, 1);
     this.#tally = { ...this.#tally, reservedMb: this.#tally.reservedMb - admitted.clientMb };
     this.deps.log(`${entry.name}: ${why}, back in the queue`);
+    this.#requeue(queued);
+    return true;
+  }
+
+  /** Re-inserts a released trial in sequence order without changing its clients or memory reserves. */
+  #requeue(queued: QueuedTrial): void {
     const next = this.#queue.findIndex(other => other.sequence > queued.sequence);
     this.#queue.splice(next < 0 ? this.#queue.length : next, 0, queued);
     queued.refusal = null;
     queued.heldBy = null;
     queued.roomSamples = 0;
-    submission.queued += 1;
+    this.#setWaitingForCalm(queued, false);
+    queued.submission.queued += 1;
     this.#pump(false);
-    return true;
   }
 
   /** The trial leaves what admission gave it: its place in the mutex queue, its booked client, its count among the running. */

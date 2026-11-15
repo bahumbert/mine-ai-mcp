@@ -172,6 +172,9 @@ test("a ready server that answered nothing for STALL_STOP of questions is stoppe
   pool.answered(talking.id, config.stallStopMs - 1);
   const stopped = await pool.stopStalled(config.stallStopMs);
   assert.deepEqual(stopped, [silent.id]);
+  assert.equal(silent.died.aborted, true, "the stalled server aborts its trials before stopping");
+  assert.equal(silent.died.reason, `it answered nothing for ${config.stallStopMs} ms`);
+  assert.equal(talking.died.aborted, false);
   assert.deepEqual(factory.created.map(server => server.stopped), [true, false]);
   assert.deepEqual(pool.readings().map(reading => reading.id), [talking.id]);
 });

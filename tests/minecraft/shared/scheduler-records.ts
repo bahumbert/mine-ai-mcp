@@ -30,8 +30,10 @@ export interface QueuedTrial {
   roomSamples: number;
   /** A timing trial whose last refusal was the cpu bound: it holds the other trials to CPU_CALM so the load drains. */
   waitingForCalm: boolean;
-  /** Its server failed to start once and it went back to the queue: a second failure is its error. */
+  /** One budget shared by a never-ran send-back and an infra retry. */
   sentBack: boolean;
+  avoidServerId: string | null;
+  infraCause: { readonly cause: string; readonly selfMade: boolean } | null;
 }
 
 export interface Submission {

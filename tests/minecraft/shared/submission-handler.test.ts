@@ -22,15 +22,20 @@ const ONE_FILE = join(CONTRACT_DIR, "air-supply-under-water.yaml");
 test("featured and legacy submissions get compatible infra results and private variables stay out of clients", async () => {
   for (const featured of [false, true]) {
     const { rig, sent, base } = setup();
+    rig.factory.failNextStart = true;
     rig.sample();
     const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false,
       env: { MINE_AI_SUBMIT_FEATURES: featured ? "classes" : "", MINE_AI_SUBMIT_CANARY: "/secret" } });
+    await rig.until(() => rig.factory.requests.length === 1 && rig.scheduler.queuedCount === 1, "failed lane start consumed the retry budget");
+    rig.sample();
     await rig.until(() => rig.running.length === 1, "trial start");
     assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_FEATURES, undefined);
     assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_CANARY, undefined);
     await rig.killJavaOf(0);
     rig.running[0]!.finish("fail");
     await running.finished;
+    assert.equal(sent.filter(message => message.type === "result").length, 1);
+    assert.equal(sent.filter(message => message.type === "done").length, 1);
     const result = sent.find(m => m.type === "result");
     assert.equal(result?.type, "result");
     if (result?.type !== "result") throw new Error("missing result");

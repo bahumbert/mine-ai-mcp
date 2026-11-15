@@ -68,7 +68,7 @@ export interface ManagedServer {
   readonly mutex: ArrangementMutex;
   /** Resolves with the server once its setup commands ran; rejects when it could not start. */
   readonly ready: Promise<ScenarioServer>;
-  /** Aborts, with the reason, when the pool stops the server because its java process is gone: the trials on it cannot finish. */
+  /** Aborts with the reason when java is gone or the server is stopped as stalled: unfinished trials cannot use it. */
   readonly died: AbortSignal;
 }
 
@@ -307,9 +307,10 @@ export class ServerPool {
     return this.#stopRemoved(dead, "has no java process any more", "java process gone");
   }
 
-  /** Stop, now and by force of the server, the servers silent for STALL_STOP; their trials fail on the dead RCON. Returns their ids. */
+  /** Stops servers silent for STALL_STOP, aborting their trials as a bench death before the stop. Returns their ids. */
   stopStalled(now: number): string[] {
     const stalled = [...this.#entries.values()].filter(entry => entry.status === "ready" && entry.stall.isStalled(now));
+    for (const entry of stalled) entry.death.abort(`it answered nothing for ${this.config.stallStopMs} ms`);
     return this.#stopRemoved(stalled, `answered nothing for ${this.config.stallStopMs} ms`, "stalled");
   }
 
