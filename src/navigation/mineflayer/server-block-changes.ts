@@ -7,7 +7,7 @@
  * listens here, never to `blockUpdate`.
  */
 import type { Bot } from "mineflayer";
-import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, waitForWorldAge, type WorldAgeOptions } from "../../world/world-age.js";
+import { SERVER_ANSWER_TICKS, waitForServerTicks, type WorldAgeOptions } from "../../world/world-age.js";
 import type { Position3 } from "../world/world.js";
 
 /** A cell the server named, or a whole column it sent again (every cell of the column is then the server's answer). */
@@ -94,8 +94,8 @@ export function watchServerChange(bot: Pick<Bot, "_client" | "supportFeature" | 
   });
   return {
     answer: async (signal, clock = {}) => {
-      await waitForWorldAge(bot, SERVER_ANSWER_TICKS, {
-        wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, signal, until: () => answered, ...clock,
+      await waitForServerTicks(bot, SERVER_ANSWER_TICKS, {
+        signal, until: () => answered, ...clock,
       });
       return answered;
     },

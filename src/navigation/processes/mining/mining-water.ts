@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { SERVER_CLOCK_STOPPED_MS, waitForWorldAge } from "../../../world/world-age.js";
+import { waitForServerTicks } from "../../../world/world-age.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { HORIZONTAL, sourceFeeding, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
@@ -65,7 +65,7 @@ export async function clearMiningWater(
       if (plugged.kind !== "failed") removedSource = true;
     }
     // Scheduled water updates follow world age; only a still server clock ends the wait early (scenario-ticks C8, 2026-11-15).
-    if (removedSource) await waitForWorldAge(bot, DRAIN_TICKS, { wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, signal: lifetime,
+    if (removedSource) await waitForServerTicks(bot, DRAIN_TICKS, { signal: lifetime,
       until: () => wetFaces().length === 0 && !holdsWaterAt(bot.entity.position.floored()) });
     for (const cell of wetFaces()) {
       const placed = await place(bot, cell, { ...(signal && { signal }) });

@@ -79,6 +79,18 @@ export const SERVER_ANSWER_TICKS = 40;
  */
 export const SERVER_CLOCK_STOPPED_MS = 20_000;
 
+/** Wait for ticks or an answer, allowing a moving server clock to run without a wall cap. */
+export function waitForServerTicks(
+  bot: Pick<Bot, "time">,
+  ticks: number,
+  options: Pick<WorldAgeOptions, "signal" | "until" | "now" | "sleep"> = {},
+): Promise<WorldAgeWait> {
+  return waitForWorldAge(bot, ticks, {
+    ...options, wallMs: Number.POSITIVE_INFINITY,
+    stallMs: SERVER_CLOCK_STOPPED_MS,
+  });
+}
+
 /**
  * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, it stood still for `stallMs`, or `wallMs` passed.
  * `sentAtAge` is the age when the request went out (undefined: the age now), so a caller that looked away for a while

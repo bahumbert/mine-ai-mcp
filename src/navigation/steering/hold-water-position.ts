@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { Position3 } from "../../utils/index.js";
 import { physicsTicksUntil } from "../../utils/physics-ticks.js";
-import { SERVER_CLOCK_STOPPED_MS, waitForWorldAge } from "../../world/world-age.js";
+import { waitForServerTicks } from "../../world/world-age.js";
 import { holdSwimDepth, solidFloorUnder } from "../world/swimming.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
 import { horizontalControlsToward, type HorizontalSteeringControl } from "./local-steering.js";
@@ -50,8 +50,8 @@ export async function landOnStanceFloor(
   const landed = () => bot.entity.onGround === true;
   if (landed()) return true;
   if (!bot.entity.isInWater || !solidFloorUnder(floor.read, floor.stance)) return false;
-  await waitForWorldAge(bot, bounds.ticks, {
-    wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, signal,
+  await waitForServerTicks(bot, bounds.ticks, {
+    signal,
     until: landed,
   });
   return landed();

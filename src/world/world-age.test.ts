@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
-import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer, waitForWorldAge } from "./world-age.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer, waitForServerTicks, waitForWorldAge } from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
 function worldBot(age = 1_000, options: FakeBotOptions = {}) {
@@ -10,6 +10,34 @@ function worldBot(age = 1_000, options: FakeBotOptions = {}) {
   const harness = createFakeBot({ clock, server: { startAge: age }, ...options });
   return { ...harness, timing: { now: clock.now, sleep: clock.sleep } };
 }
+
+test("server ticks wait for moving age without a wall cap, and stop on a still clock", async () => {
+  const { bot, clock, server, timing } = worldBot();
+  assert.equal(await clock.settle(waitForServerTicks(bot, 40, timing), 2_000), "moved");
+  assert.equal(clock.now(), 2_000);
+  assert.equal(bot.time.age, 1_040);
+  const pending = waitForServerTicks(bot, Infinity, timing);
+  const long = watch(pending);
+  await clock.advance(600_000);
+  assert.equal(long.over, false, "moving age remains pending after ten minutes");
+  server.stop();
+  await clock.advance(SERVER_CLOCK_STOPPED_MS);
+  assert.equal(long.over, true);
+  assert.equal(await pending, "stalled");
+});
+
+test("server ticks forward the condition and cancellation", async () => {
+  const { bot, clock, timing } = worldBot();
+  let done = false;
+  clock.after(100, () => { done = true; });
+  assert.equal(await clock.settle(waitForServerTicks(bot, 40, { ...timing, until: () => done }), 100), "until");
+  const controller = new AbortController();
+  const pending = waitForServerTicks(bot, 40, { ...timing, signal: controller.signal });
+  const rejected = assert.rejects(pending, /cancelled/);
+  controller.abort(new Error("cancelled"));
+  await clock.advance(25);
+  await rejected;
+});
 
 test("resolves moved when the server age advanced the asked ticks, seen in jumps of 20", async () => {
   const { bot, clock, timing } = worldBot();
