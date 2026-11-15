@@ -89,6 +89,7 @@ test("ordinary placement requests immediate native face aiming", async () => {
   const support = bot.blockAt(target.offset(0, -1, 0))!;
   const result = await clock.settle(placeBlock(bot, { ...placementAt(bot, item, target), support, face }), SERVER_ANSWER_MS);
   assert.equal(result.kind, "placed");
+  assert.equal(bot.inventory.count(item.type, null), 1, "creative placement does not wait for consumption");
   // The click names the support and the face; `forceLook: "ignore"` keeps Mineflayer from aiming again (the one look is placement's).
   const click = server.packets.find((packet) => packet.name === "block_place")!.data as { location: Vec3; direction: number };
   assert.deepEqual([click.location, click.direction], [support.position, 1]);
@@ -307,19 +308,6 @@ test("a block that appears after mineflayer's timeout but before the world age m
   assert.equal(result.kind, "placed");
 });
 
-test("a server that answered without the block fails after 40 ticks with the observed cells", async () => {
-  const target = new Vec3(0, 64, 0);
-  const { bot, clock, item } = placer("cobblestone", { overrides: { _placeBlockWithOptions: async () => {} } });
-  using _timers = clock.install();
-
-  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), TWO_TIME_PACKETS_MS);
-
-  assert.deepEqual(result, {
-    kind: "failed",
-    error: "The expected block did not appear after placement: the server moved 40 ticks past it and (0, 64, 0)=air.",
-  });
-});
-
 test("placement answered at 7 s at 5 tps is placed", async () => {
   const target = new Vec3(0, 64, 0);
   const { bot, clock, world, item } = placer("cobblestone", {
@@ -334,39 +322,27 @@ test("placement answered at 7 s at 5 tps is placed", async () => {
   assert.equal(result.kind, "placed");
 });
 
-for (const { wallMs, pendingMs, finishMs, error } of [
-  { wallMs: undefined, pendingMs: 19_950, finishMs: 50, error: /clock stood still for 20000 ms/u },
-  { wallMs: 120, pendingMs: 100, finishMs: 20, error: /within 120 ms/u },
-]) {
-  test(`placement with stopped physics and clock respects ${wallMs === undefined ? "20 s of still age" : "an explicit 120 ms cap"}`, async () => {
+for (const stopped of [false, true]) {
+  test(`placement with stopped physics waits for ${stopped ? "20 s of still age" : "40 ticks of world age"}`, async () => {
     const target = new Vec3(0, 64, 0);
     const { bot, clock, server, item } = placer("cobblestone", { overrides: { _placeBlockWithOptions: async () => {} } });
     using _timers = clock.install();
     bot.physicsEnabled = false;
-    server.stop();
-    const placing = placeBlock(bot, placementAt(bot, item, target, wallMs === undefined ? {} : { answerWallMs: wallMs }));
+    if (stopped) server.stop();
+    const placing = placeBlock(bot, placementAt(bot, item, target));
     const pending = watch(placing);
 
-    await clock.advance(pendingMs);
+    await clock.advance((stopped ? 20_000 : TWO_TIME_PACKETS_MS) - 50);
     assert.equal(pending.over, false, "the answer bound has not elapsed");
-    const outcome = await clock.settle(placing, finishMs, finishMs);
+    const outcome = await clock.settle(placing, 50);
 
     assert.equal(outcome.kind, "failed");
-    if (outcome.kind === "failed") assert.match(outcome.error, error);
+    if (outcome.kind === "failed") {
+      if (stopped) assert.match(outcome.error, /clock stood still for 20000 ms/u);
+      else assert.equal(outcome.error, "The expected block did not appear after placement: the server moved 40 ticks past it and (0, 64, 0)=air.");
+    }
   });
 }
-
-test("creative placement does not wait for a count", async () => {
-  const target = new Vec3(0, 64, 0);
-  const { bot, clock, world, item } = placer("cobblestone", {
-    overrides: { _placeBlockWithOptions: async () => world.setCell(target, "cobblestone") },
-  });
-  using _timers = clock.install();
-
-  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 0);
-
-  assert.equal(result.kind, "placed");
-});
 
 test("a block that appeared but whose consumption never shows fails once the server answered", async () => {
   const target = new Vec3(0, 64, 0);

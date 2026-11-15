@@ -62,18 +62,16 @@ function lookAtSentCells(
 /**
  * This request's sent placement as the server answered it: waits up to `SERVER_ANSWER_TICKS` of world age past the
  * send for a sent cell to hold a block that `matches`, or until the clock stands still for `SERVER_CLOCK_STOPPED_MS`.
- * An explicit `wallMs` also limits the total wait. A cell that is not
- * loaded cannot be judged and is reported at once: the bot has to go back near it.
+ * A cell that is not loaded cannot be judged and is reported at once: the bot has to go back near it.
  */
 export async function awaitOwnPlacement(
   bot: Bot,
   own: OwnPlacement,
   matches: (block: WorldBlock) => boolean,
   signal?: AbortSignal,
-  wallMs = Number.POSITIVE_INFINITY,
 ): Promise<OwnPlacementSeen> {
   if (own.cells.length === 0) return { kind: "none" };
   const settled = () => lookAtSentCells(bot, own, matches) !== null;
-  await waitForServerAnswer(bot, own.sentAtAge, { until: settled, wallMs, stallMs: SERVER_CLOCK_STOPPED_MS, ...(signal && { signal }) });
+  await waitForServerAnswer(bot, own.sentAtAge, { until: settled, wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, ...(signal && { signal }) });
   return lookAtSentCells(bot, own, matches) ?? { kind: "not_landed" };
 }

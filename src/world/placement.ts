@@ -49,8 +49,6 @@ export interface BlockPlacement {
   readonly signal?: AbortSignal;
   /** Called right before the placement packet is sent: an abort after it may still leave the block placed. */
   readonly onSent?: () => void;
-  /** Optional total wall-clock ceiling; by default only a stopped server clock ends the answer wait. */
-  readonly answerWallMs?: number;
 }
 
 /**
@@ -201,10 +199,9 @@ type PlacedBlocksSeen =
 async function awaitPlacedBlocks(bot: Bot, placement: BlockPlacement, sentAtAge: number | undefined): Promise<PlacedBlocksSeen> {
   const look = () => placement.expectedCells.map((position) => bot.blockAt(asVec3(position)));
   const allPlaced = () => look().every((block) => Boolean(block && placement.matches(block)));
-  const wallMs = placement.answerWallMs ?? Number.POSITIVE_INFINITY;
   const outcome = await waitForServerAnswer(bot, sentAtAge, {
     until: allPlaced,
-    wallMs,
+    wallMs: Number.POSITIVE_INFINITY,
     stallMs: SERVER_CLOCK_STOPPED_MS,
     ...(placement.signal && { signal: placement.signal }),
   });
@@ -215,9 +212,7 @@ async function awaitPlacedBlocks(bot: Bot, placement: BlockPlacement, sentAtAge:
     because:
       outcome === "moved"
         ? `the server moved ${SERVER_ANSWER_TICKS} ticks past it and ${observed}.`
-        : outcome === "stalled"
-          ? `the server's clock stood still for ${SERVER_CLOCK_STOPPED_MS} ms and ${observed}; wait for the server to resume before placing again.`
-          : `the server did not answer within ${wallMs} ms and ${observed}.`,
+        : `the server's clock stood still for ${SERVER_CLOCK_STOPPED_MS} ms and ${observed}; wait for the server to resume before placing again.`,
   };
 }
 

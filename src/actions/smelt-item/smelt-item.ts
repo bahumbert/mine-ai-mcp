@@ -25,7 +25,6 @@ import {
   midCookHarvest,
   recover,
   settleBurnReport,
-  SLOT_RECOVERY_MS,
   waitForCook,
   type FurnaceObservation,
   type FurnaceWindow,
@@ -407,7 +406,7 @@ async function settleAttempt(
       bot,
       progress.outputItem!,
       output.inventoryBefore + output.taken,
-      { timeoutMs: SLOT_RECOVERY_MS, signal: context.signal },
+      { signal: context.signal },
     );
     if (!outputAfter.confirmed) {
       recovery = {

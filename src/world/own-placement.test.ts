@@ -76,26 +76,21 @@ for (const { delayMs, ticksPerSecond } of [{ delayMs: 150, ticksPerSecond: 20 },
   });
 }
 
-for (const { wallMs, pendingMs, finishMs } of [
-  { wallMs: undefined, pendingMs: 19_950, finishMs: 50 },
-  { wallMs: 120, pendingMs: 100, finishMs: 20 },
-]) {
-  test(`own placement on a stopped clock respects ${wallMs === undefined ? "20 s of still age" : "an explicit 120 ms cap"}`, async () => {
-    const { bot, clock, server } = worldBot();
-    using _timers = clock.install();
-    server.stop();
-    const own = startOwnPlacement();
-    recordPlacementSent(own, [cell], bot.time.age);
-    const waiting = awaitOwnPlacement(bot, own, isCobble, undefined, wallMs);
-    const over = watch(waiting);
+test("own placement on a stopped clock waits for 20 s of still age", async () => {
+  const { bot, clock, server } = worldBot();
+  using _timers = clock.install();
+  server.stop();
+  const own = startOwnPlacement();
+  recordPlacementSent(own, [cell], bot.time.age);
+  const waiting = awaitOwnPlacement(bot, own, isCobble);
+  const over = watch(waiting);
 
-    await clock.advance(pendingMs);
-    assert.equal(over.over, false, "still waiting before the bound");
-    const seen = await clock.settle(waiting, finishMs, finishMs);
+  await clock.advance(19_950);
+  assert.equal(over.over, false, "still waiting before the bound");
+  const seen = await clock.settle(waiting, 50);
 
-    assert.deepEqual(seen, { kind: "not_landed" });
-  });
-}
+  assert.deepEqual(seen, { kind: "not_landed" });
+});
 
 test("the abort signal ends the wait", async () => {
   const { bot, clock } = worldBot();

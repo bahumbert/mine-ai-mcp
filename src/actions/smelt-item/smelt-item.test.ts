@@ -8,6 +8,8 @@ import minecraftData from "minecraft-data";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
 import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { ANSWERED_ATTEMPT_MS, observedFurnace } from "../../test-support/furnace.js";
+import { watch } from "../../test-support/pending.js";
+import { SERVER_CLOCK_STOPPED_MS } from "../../world/world-age.js";
 import { createSmeltItemAction, parseSmeltItemRequest, smeltItem, type SmeltItemDependencies } from "./index.js";
 
 test("a named furnace and a temporary one are exclusive, and a temporary one must be carried", async () => {
@@ -43,8 +45,8 @@ const registry = minecraftData("1.21.4");
 const mockedClock = () => createFakeClock({ mode: "mocked" });
 
 /** `clock`: a mocked one the test installs, for a test whose waits run on it. */
-function smeltingBot({ clock }: { readonly clock?: FakeClock } = {}) {
-  const harness = createFakeBot({ clock, version: "1.21.4", carried: { raw_iron: 3, coal: 1 }, cells: { "2,64,0": "furnace" } });
+function smeltingBot({ clock, ticksPerSecond = 20 }: { readonly clock?: FakeClock; readonly ticksPerSecond?: number } = {}) {
+  const harness = createFakeBot({ clock, server: { ticksPerSecond }, version: "1.21.4", carried: { raw_iron: 3, coal: 1 }, cells: { "2,64,0": "furnace" } });
   const counts = new CarriedCounts(harness.inventory, harness.bot.registry);
   /** A furnace transfer's change to what the bot carries, as the server's slot updates make it. */
   const adjust = (name: string, delta: number) => {
@@ -90,25 +92,45 @@ function smeltingBot({ clock }: { readonly clock?: FakeClock } = {}) {
     now: Date.now,
     pause: async () => undefined,
   };
-  return { bot, dependencies, adjust };
+  return { bot, dependencies, adjust, server: harness.server };
 }
 
-test("smelts the requested input and reports output actually taken into inventory", async () => {
-  const { bot, dependencies } = smeltingBot();
-  const result = await smeltItem(
-    bot,
-    navigation,
-    { itemName: "raw_iron", count: 3, fuelItemName: "coal", x: 2, y: 64, z: 0 },
-    {},
-    dependencies,
-  );
+for (const stopped of [false, true]) {
+  test(`an injected smelt output inventory deficit ${stopped ? "stays unconfirmed after 20 s of still world age" : "is confirmed at age +40 at 5 tps"}`, async () => {
+    const clock = mockedClock();
+    using _installed = clock.install();
+    const { bot, dependencies, adjust, server } = smeltingBot({ clock, ticksPerSecond: 5 });
+    const click = bot.clickWindow;
+    bot.clickWindow = async (...args) => {
+      await click(...args);
+      // Stopgap: injects a post-close correction; accepted takes keep prediction (contract
+      // `furnace-output-take`); this correction is unmeasured. The shared furnace fake
+      // belongs to a4 Task 16b (master answer, 2026-11-15).
+      adjust("iron_ingot", -3);
+      const sentAt = bot.time.age;
+      if (stopped) server.stop();
+      else {
+        const stop = server.onTimePacket(() => {
+          if (bot.time.age - sentAt < 40) return;
+          adjust("iron_ingot", 3);
+          stop();
+        });
+      }
+    };
+    const pending = smeltItem(bot, navigation,
+      { itemName: "raw_iron", count: 3, fuelItemName: "coal", x: 2, y: 64, z: 0 }, {}, dependencies);
+    const seen = watch(pending);
+    const answerMs = stopped ? SERVER_CLOCK_STOPPED_MS : 8_000;
+    await clock.advance(answerMs - 50);
+    assert.equal(seen.over, false, "the output receipt must wait for the server answer or stopped-clock bound");
+    const result = await clock.settle(pending, 50);
 
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.smelt.outputItem, "iron_ingot");
-  assert.equal(result.smelt.produced, 3);
-  assert.equal(result.smelt.inputInventoryAfter, 0);
-  assert.equal(result.smelt.fuelInventoryAfter, 0);
-});
+    assert.equal(result.smelt.produced, 3);
+    assert.equal(result.status, stopped ? "partial" : "succeeded");
+    assert.equal(carriedIngots(bot), stopped ? 0 : 3);
+    if (result.status !== "succeeded") assert.match(result.error, /Player inventory did not confirm furnace output iron_ingot x3 after close/u);
+  });
+}
 
 test("snapshots the output stack before a shift-click merges it into carried ingots", async () => {
   // The combined workshop cooked both batches, but reported 0/9 on the second:
@@ -131,7 +153,10 @@ test("snapshots the output stack before a shift-click merges it into carried ing
       },
     });
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.equal(result.smelt.outputItem, "iron_ingot");
   assert.equal(result.smelt.produced, 3);
+  assert.equal(result.smelt.inputInventoryAfter, 0);
+  assert.equal(result.smelt.fuelInventoryAfter, 0);
   assert.equal(bot.inventory.items().find((item) => item.name === "iron_ingot")?.count, 5);
 });
 
