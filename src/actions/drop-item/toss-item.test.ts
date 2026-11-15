@@ -19,8 +19,8 @@ function tossRig(ticksPerSecond = 5) {
     await nativeToss(type, metadata, count);
     sends.push(count!);
   };
-  // Stopgap: a post-prediction server correction is unmeasured; needs contract `toss-corrected-inventory-answer`
-  // before this exceptional sequence can be claimed as game behavior (task-review T9b, 2026-11-15).
+  // Stopgap: stages a refused toss; accepted tosses keep the prediction (contract
+  // `toss-corrected-inventory-answer`); a refusal is unmeasured (2026-11-15).
   harness.bot.toss = async (type, metadata, count) => {
     await send(type, metadata, count);
     carried.count += count!;
@@ -29,6 +29,28 @@ function tossRig(ticksPerSecond = 5) {
   const attempt = (signal?: AbortSignal) => tossItem(harness.bot, "gravel", 10, { signal }, toss);
   return { ...harness, clock, carried, toss, sends, send, attempt };
 }
+
+test("an accepted toss is confirmed as soon as it resolves", async () => {
+  const rig = tossRig();
+  using _installed = rig.clock.install();
+  rig.bot.toss = rig.send;
+  const result = await rig.clock.settle(rig.attempt(), 50);
+  assert.deepEqual([result.dropped, result.carriedAfter, rig.toss.pending], [10, 10, null]);
+  assert.equal(rig.clock.now(), 0);
+  assert.equal(rig.bot.time.age, 0);
+});
+
+test("toss contract advances the fake clock for a delayed game-time answer", async () => {
+  // Contract tests are outside the src TypeScript project; load them only for this regression.
+  const contractRoot = new URL("../../../tests/minecraft/contract/", import.meta.url);
+  const { arenaFrame, ZERO_ARENA } = await import(new URL("../arena/frame.ts", contractRoot).href);
+  const { tossCorrectedInventoryAnswer: check } = await import(new URL("checks/toss-corrected-inventory-answer.ts", contractRoot).href);
+  const { fakeHarnessFor } = await import(new URL("fake-harness.ts", contractRoot).href);
+  const { fakeContractSubject } = await import(new URL("subject.ts", contractRoot).href);
+  const harness = fakeHarnessFor(check.fixture, arenaFrame(ZERO_ARENA), {}, 450);
+  using _installed = harness.clock.install();
+  await check.run(fakeContractSubject(harness, arenaFrame(ZERO_ARENA)));
+});
 
 for (const { rate, answerMs } of [{ rate: 20, answerMs: 2_000 }, { rate: 5, answerMs: 8_000 }]) {
   test(`confirms the requested toss at age +40, ${answerMs} ms at ${rate} tps`, async () => {

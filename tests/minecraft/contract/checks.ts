@@ -58,6 +58,7 @@ import { stateIdAgrees } from "./checks/state-id-agrees.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
+import { tossCorrectedInventoryAnswer } from "./checks/toss-corrected-inventory-answer.ts";
 import { waitForTicksAndAge } from "./checks/wait-for-ticks-and-age.ts";
 import { worldAgeAtSlowTick } from "./checks/world-age-at-slow-tick.ts";
 import { worldAgePerSecond } from "./checks/world-age-per-second.ts";
@@ -125,6 +126,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   itemsMatchSlots,
   equipHandAndOffHand,
   tossCountAndEntity,
+  tossCorrectedInventoryAnswer,
   placementBlockUpdate,
   digTimeAndUpdate,
   stopDiggingBothWindows,
