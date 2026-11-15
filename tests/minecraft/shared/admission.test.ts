@@ -90,6 +90,15 @@ test("target alone breached: running trials reach the concurrency target", () =>
   assert.equal(refusedBound(ask(sample({ ownTrials: target - 1 }), initialAdmissionState(config), { trials: 1, newServers: 0, reservedMb: 0 })), "target");
 });
 
+test("a server read late gets no new trial in that sample; its next answer restores it", () => {
+  // Its old P95 (5 ms) is well under MSPT_ADMIT, so only the late flag can refuse it (spec 2026-11-15 F2: a lagging server must not look healthy on its previous answer).
+  const late = sample({ servers: [server({ late: true })], memAvailableMb: 3_000 + MARGIN_MB });
+  const refused = ask(late);
+  assert.equal(refusedBound(refused), "server");
+  assert.match(refused.admit ? "" : refused.detail, /s1 answered late/u);
+  assert.deepEqual(ask(sample({ servers: [server()] })), { admit: true, server: "s1", reserveMb: config.clientMemMb }, "the next sample's answer carries no late flag");
+});
+
 test("candidate server over MSPT_ADMIT: refused naming the server tick time, a new server is the way out when memory allows", () => {
   const lagging = sample({ servers: [server({ msptP95: 26 })], memAvailableMb: 7_000 });
   const withoutRoom = ask({ ...lagging, memAvailableMb: 3_000 + MARGIN_MB });

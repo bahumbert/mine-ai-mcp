@@ -15,6 +15,8 @@ export interface ServerReading {
   readonly msptP95: number | null;
   readonly heapMb: number;
   readonly residentMb: number;
+  /** Its tick query was still unanswered when the sample stopped waiting (`msptP95` is then null, not a reading): no new trial on it in this sample. Absent: answered in time. */
+  readonly late?: boolean;
 }
 
 export interface AdmissionSample {
@@ -133,6 +135,7 @@ function serverRefusal(reading: ServerReading | undefined, id: string, state: Ad
   if (!reading) return `${id} is not in the sample`;
   if (reading.status === "sick") return `${id} is sick (a trial did not settle in time)`;
   if (state.servers[id]?.backedOff) return `${id} is backing off after lagging`;
+  if (reading.late) return `${id} answered late (its tick query was still unanswered when this sample stopped waiting)`;
   if (!reading.shared) return null;
   if (reading.msptP95 !== null && reading.msptP95 >= config.msptAdmitMs) {
     return `${id} tick time P95 ${reading.msptP95} ms is not under ${config.msptAdmitMs} ms`;
