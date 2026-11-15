@@ -8,6 +8,7 @@ import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 /** Hold the arranged body until the fire packet arrives, so a delayed command cannot light the route behind it. */
 async function injectFire(context: ScenarioContext): Promise<boolean> {
@@ -63,8 +64,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   bot.on("messagestr", answer);
   try {
     bot.chat(`/execute if block ${cell.join(" ")} minecraft:air run tellraw @s {"text":"cleanup-server-air"}`);
-    const answerDeadline = monotonicNow() + 2_000;
-    while (!serverAir && monotonicNow() < answerDeadline) await delay(20);
+    await waitServerTicks(bot, 40);
   } finally {
     bot.off("messagestr", answer);
   }
