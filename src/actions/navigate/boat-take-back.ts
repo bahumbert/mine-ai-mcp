@@ -141,6 +141,7 @@ export interface BoatLeft {
   readonly reason: string;
   readonly hits: number;
   readonly elapsedMs: number;
+  readonly elapsedTicks: number;
   /** The hit after which the boat left her client; null when it never did. */
   readonly goneAfterHit: number | null;
 }
@@ -165,8 +166,8 @@ export interface TakeBackSituation {
  * movement takes only such a boat back).
  */
 export function boatLeftAfter(bot: Bot, report: TakeBackReport, { boat, underFeet, cancelled }: TakeBackSituation): BoatLeft {
-  const { hits, elapsedMs, goneAfterHit } = report;
-  const measured = { hits, elapsedMs, goneAfterHit };
+  const { hits, elapsedMs, elapsedTicks, goneAfterHit } = report;
+  const measured = { hits, elapsedMs, elapsedTicks, goneAfterHit };
   if (goneAfterHit !== null) {
     const item = nearestDroppedBoat(bot);
     const where = item === undefined ? "no item in view: it drifted off or someone else took it" : `an item ${Math.round(item.position.distanceTo(bot.entity.position))} blocks off`;
