@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createNavigationRuntime } from "../navigation/index.js";
+import { bodyDependsOnBlock, createNavigationRuntime, liveBlockReader } from "../navigation/index.js";
 import type { Goal } from "../navigation/goals/goal.js";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
 import { observation } from "../test-support/navigation.js";
@@ -281,6 +281,39 @@ function stepScene(
 }
 
 const nodeAt = (x: number, y: number, z: number) => ({ feet: { x, y, z }, remainingScaffolds: 0, overlayId: "" });
+
+test("cleanup retains sole slab-height support and ignores a block below the supporting floor", async () => {
+  for (const { y, cellY, block, approaches } of [
+    { y: 64.0, cellY: 63, block: "cobblestone", approaches: true },
+    { y: 64.5, cellY: 64, block: "oak_slab", approaches: true },
+    { y: 65.0, cellY: 64, block: "cobblestone", approaches: true },
+    { y: 65.5, cellY: 64, block: "cobblestone", approaches: false },
+  ]) {
+    using data = temporaryBotData();
+    const cell = new Vec3(1, cellY, 0);
+    const fixture = createFakeBot({
+      position: { x: 0.85, y, z: 0.5 }, groundY: null, gameMode: "creative",
+      cells: { [`1,${cellY},0`]: block, "2,64,0": "stone", ...(y === 65.5 ? { "0,65,0": "oak_slab" } : {}) },
+      clock: createFakeClock({ mode: "mocked" }),
+    });
+    const { bot, clock, world } = fixture;
+    using _timers = clock.install();
+    setProtectedRegionsProvider(bot, () => [REGION]);
+    confirmFakeDigs(fixture);
+    assert.equal(bodyDependsOnBlock(bot.entity.position, false, cell, liveBlockReader(bot)), approaches, `shared support at y=${y}`);
+    let walked = false;
+    placements.setLifeSavingRemovalContext(bot, { data, navigate: async () => {
+      assert.equal(world.blockAt(cell)?.name, block, "support stays intact until the bank arrival");
+      walked = true;
+      bot.entity.position.set(2.5, 65, 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    } });
+    placements.recordLifeSavingPlacement(bot, cell, "block");
+    assert.deepEqual(await clock.settle(remove(bot), 10_000), { removed: [cell], left: [] });
+    assert.equal(walked, approaches, `feet y=${y}, block y=${cellY}`);
+    assert.equal(world.blockAt(cell)?.name, "air");
+  }
+});
 
 for (const [name, feet, arrival, approaches] of [
   // The geometry of every footprint position is in `player-physics.test.ts`; here the cleanup's walk-then-dig order.

@@ -42,7 +42,7 @@ import {
   type HorizontalSteeringRequest,
 } from "../steering/local-steering.js";
 import { navigationFeet } from "../world/block-geometry.js";
-import { bodyDependsOnBlock } from "../world/body-support.js";
+import { breakRemovesEdgeSupport } from "../world/body-support.js";
 import {
   blockLabel,
   blockPosition,
@@ -705,9 +705,8 @@ export class MineflayerBot implements NavigationBot {
   #breakSupportFailure(operation: Extract<PlannedOperation, { kind: "break" }>): EffectFailure | null {
     const { position, isInWater, onGround } = this.bot.entity;
     const target = operation.position;
-    if (!operation.retainSupport && target.x === Math.floor(position.x) && target.z === Math.floor(position.z)) return null;
     const read = liveBlockReader({ blockAt: (cell) => this.bot.blockAt(cell) as MineflayerBlock | null });
-    if (!bodyDependsOnBlock(position, isInWater && !onGround, target, read)) return null;
+    if (!breakRemovesEdgeSupport(position, isInWater && !onGround, target, read, operation.retainSupport)) return null;
     return {
       kind: "failed", cause: "support",
       observation: `The block at ${blockLabel(target)} is the body's only support. Move to supported footing before digging it.`,

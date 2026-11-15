@@ -30,7 +30,7 @@ import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
 import { lavaWatchCells, routeLavaDependencies } from "../world/lava-watch.js";
 import { blockKey, packKey, type NavigationObservation, type WorldView } from "../world/world.js";
-import { bodyDependsOnBlock } from "../world/body-support.js";
+import { breakRemovesEdgeSupport } from "../world/body-support.js";
 import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
 import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
@@ -213,9 +213,8 @@ function rootMovementRetainsSupport(step: PlannedStep, actualStart: NavigationOb
   for (const operation of step.operations) {
     if (operation.kind === "move") break;
     if (operation.kind !== "break") continue;
-    const target = operation.position;
-    if (target.x === Math.floor(position.x) && target.z === Math.floor(position.z)) continue;
-    if (bodyDependsOnBlock(position, stance === "swimming", target, (x, y, z) => world.blockAt(x, y, z))) return false;
+    if (breakRemovesEdgeSupport(position, stance === "swimming", operation.position,
+      (x, y, z) => world.blockAt(x, y, z))) return false;
   }
   return true;
 }

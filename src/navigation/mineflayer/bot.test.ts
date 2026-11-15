@@ -80,16 +80,23 @@ function edgeDig() {
 
 for (const floor of ["air", "void", "stone"] as const) {
   test(`physical edge admission reads ${floor} alternative support before swinging`, async () => {
-    const run = edgeDig();
-    using _clock = run.clock.install();
-    run.world.setCell(new Vec3(0, 62, 0), floor);
-    const effect = run.start();
-    const result = await run.clock.settle(effect.completion, 10_000);
-    assert.equal(result.kind, floor === "stone" ? "accepted" : "failed");
-    if (result.kind === "failed") assert.equal(result.cause, "support");
-    assert.equal(effect.issued, floor === "stone");
-    assert.deepEqual(run.counts(), floor === "stone" ? { digs: 1, reports: 1 } : { digs: 0, reports: 0 });
-    run.clean();
+    for (const { y, cellY, block } of [
+      { y: 64.0, cellY: 63, block: "stone" },
+      ...(floor === "stone" ? [] : [{ y: 64.5, cellY: 64, block: "oak_slab" }]),
+    ]) {
+      const run = edgeDig();
+      using _clock = run.clock.install();
+      run.bot.entity.position.y = y;
+      run.world.setCell(new Vec3(1, cellY, 0), block);
+      run.world.setCell(new Vec3(0, cellY, 0), floor);
+      const effect = run.start({ position: { x: 1, y: cellY, z: 0 }, expectedStateId: run.bot.registry.blocksByName[block]!.defaultState! });
+      const result = await run.clock.settle(effect.completion, 10_000);
+      assert.equal(result.kind, floor === "stone" ? "accepted" : "failed", JSON.stringify({ y, result }));
+      if (result.kind === "failed") assert.equal(result.cause, "support");
+      assert.equal(effect.issued, floor === "stone");
+      assert.deepEqual(run.counts(), floor === "stone" ? { digs: 1, reports: 1 } : { digs: 0, reports: 0 });
+      run.clean();
+    }
   });
 }
 
