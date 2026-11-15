@@ -1,10 +1,15 @@
 // Tests of the follow_player skill: a follow ends after ten minutes of silence, in monotonic time.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { stepSchema } from "../actions.ts";
+import { skillUsage, stepSchema } from "../actions.ts";
+import { styleOrDefault } from "../building/plan.ts";
 import { runStep } from "../skills.ts";
 import { FakeRuntime, steppedClocks } from "../testing.ts";
 import { contextFor } from "./skill-fixtures.test.ts";
+
+test("the follow line shows no minutes literal and names the field", () => {
+  assert.equal(skillUsage("follow_player", styleOrDefault(undefined)), '{"skill":"follow_player","player":"<username>","distance":3}  follow that player: asked by them, it lasts until they stop talking to you for 10 minutes (or say stop); on your own, add "minutes":<1-15> for how long');
+});
 
 test("a follow asked for by a player ends after ten minutes without a word from them", async () => {
   // Spec 2026-10-04-activity-time-travel-terraforming: following never ended by itself (live: Vex followed Tester until
