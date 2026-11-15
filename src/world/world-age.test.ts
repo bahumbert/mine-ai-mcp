@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
-import { waitForServerAnswer, waitForWorldAge } from "./world-age.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer, waitForWorldAge } from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
 function worldBot(age = 1_000, options: FakeBotOptions = {}) {
@@ -104,18 +104,17 @@ test("the server answer without a send age counts from the call", async () => {
   assert.ok(clock.now() > 0 && clock.now() < 10_000);
 });
 
-test("a stopped server clock ends the answer wait on the wall clock", async () => {
+test("the shared stopped-clock bound waits exactly 20 s without a moving age", async () => {
   const { bot, clock, server, timing } = worldBot();
   server.stop();
-  const pending = waitForServerAnswer(bot, 1_000, { wallMs: 5_000, until: () => false, ...timing });
+  const pending = waitForServerAnswer(bot, 1_000, {
+    wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, ...timing,
+  });
   const wait = watch(pending);
-
-  await clock.advance(4_900);
-  assert.equal(wait.over, false, "still inside the 5 s wall bound");
-  await clock.advance(150);
-
-  assert.equal(await pending, "timeout");
-  assert.ok(wait.over);
+  await clock.advance(19_975);
+  assert.equal(wait.over, false);
+  assert.equal(await clock.settle(pending, 25), "stalled");
+  assert.equal(clock.now(), 20_000);
 });
 
 test("the awaited change wins over the world age in the server answer wait", async () => {

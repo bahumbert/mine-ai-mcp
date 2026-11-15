@@ -16,6 +16,7 @@ import { snapshotInventory } from "../bot-data/bot-status.js";
 import type { SourceIdentity } from "../diagnostics/incident-recorder.js";
 import { createMinecraftRuntime, type MinecraftRuntime } from "../runtime/minecraft-runtime.js";
 import { watchHeightHints } from "../world/height-hints.js";
+import { timeoutSignal } from "../utils/wall-timers.js";
 import type { HostOptions } from "./config.js";
 import { sendMessage } from "../actions/send-message/send-message.js";
 import { handleChatCommandRoute } from "./chat-commands-route.js";
@@ -94,7 +95,7 @@ function mountChatCommandRoutes(app: Express, runtime: MinecraftRuntime, bot: Bo
     const answered = handleChatCommandRoute(request, response, {
       ring: runtime.chatCommands,
       whisper: async (to, message) => {
-        const result = await sendMessage(bot, { to, message }, { signal: AbortSignal.timeout(CHAT_COMMAND_WHISPER_TIMEOUT_MS) });
+        const result = await sendMessage(bot, { to, message }, { signal: timeoutSignal(CHAT_COMMAND_WHISPER_TIMEOUT_MS) });
         return result.status === "succeeded" ? { ok: true } : { ok: false, error: result.error };
       },
     });

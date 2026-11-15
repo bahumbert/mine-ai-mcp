@@ -55,7 +55,7 @@ test("the cancel waits for the bot to pass cancelPastX in the lane's frame", asy
 
 test("a clone-length server pause during stop measurement still reaches the next ride in the lane's frame", async () => {
   const harness = seatedBot();
-  const { bot } = harness;
+  const { bot, clock } = harness;
   using _clock = harness.clock.install();
   bot.entity.position.set(95, -60, 512.5);
   let cancelled: (() => void) | undefined;
@@ -79,7 +79,7 @@ test("a clone-length server pause during stop measurement still reaches the next
       }
       // The second ride: the bot leaves the boat at world x 100, short of the lane's far bank (154), past the arena's (90).
       Object.assign(bot.entity, { vehicle: null }); // prismarine-entity types the vehicle non-null; a dismount clears it
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await clock.sleep(300);
       return { action, durationMs: 300, result: { status: "succeeded" }, summary };
     },
   });

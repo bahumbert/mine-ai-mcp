@@ -74,6 +74,12 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
 export const SERVER_ANSWER_TICKS = 40;
 
 /**
+ * Two time-packet intervals at 2 tps, leaving room for a slow server behind schedule (scenario-ticks C8, 2026-11-15).
+ * The rate: `scenarios/build/place-block-slow-server.yaml`; cadence: contract check `world-age-at-slow-tick`.
+ */
+export const SERVER_CLOCK_STOPPED_MS = 20_000;
+
+/**
  * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, it stood still for `stallMs`, or `wallMs` passed.
  * `sentAtAge` is the age when the request went out (undefined: the age now), so a caller that looked away for a while
  * does not wait the 40 ticks again.

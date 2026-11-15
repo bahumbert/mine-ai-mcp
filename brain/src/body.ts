@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "./wall-timers.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { errorCode, type ActionStatus, type BotRuntime, type ForegroundState, type ForegroundTool } from "./runtime-client.ts";
 
@@ -105,7 +105,7 @@ export class Body {
       let from = since;
       for (const message of messages) {
         const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (monotonicNow() - from);
-        if (wait > 0) await (this.typing.sleep ?? sleep)(wait);
+        if (wait > 0) await (this.typing.sleep ?? sleepMs)(wait);
         const outcome = await this.runtime.say(message, to);
         if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
         from = monotonicNow();
@@ -204,7 +204,7 @@ export class Body {
         continue;
       }
       if (state.code !== "ACTION_BUSY" || blocking !== null || monotonicNow() >= deadline || signal?.aborted) return state;
-      await sleep(WAIT_SLICE_MS, undefined, { signal }).catch(() => undefined);
+      await sleepMs(WAIT_SLICE_MS, signal).catch(() => undefined);
     }
   }
 

@@ -7,7 +7,7 @@
  * listens here, never to `blockUpdate`.
  */
 import type { Bot } from "mineflayer";
-import { SERVER_ANSWER_TICKS, waitForWorldAge, type WorldAgeOptions } from "../../world/world-age.js";
+import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, waitForWorldAge, type WorldAgeOptions } from "../../world/world-age.js";
 import type { Position3 } from "../world/world.js";
 
 /** A cell the server named, or a whole column it sent again (every cell of the column is then the server's answer). */
@@ -77,11 +77,8 @@ export function subscribeServerBlockChanges(
   };
 }
 
-/** The same bound on the monotonic wall clock, for a server whose clock has stopped. */
-export const SERVER_ANSWER_WALL_MS = 2_000;
-
 export interface ServerChangeWatch {
-  /** True once the server has changed the watched cell (even before this was asked); false after the bound, or a wall-clock one. An abort rejects with its reason. */
+  /** True once the server has changed the watched cell (even before this was asked); false after 40 ticks or a stopped clock. An abort rejects with its reason. */
   answer(signal: AbortSignal, clock?: Partial<Pick<WorldAgeOptions, "now" | "sleep">>): Promise<boolean>;
   dispose(): void;
 }
@@ -97,7 +94,9 @@ export function watchServerChange(bot: Pick<Bot, "_client" | "supportFeature" | 
   });
   return {
     answer: async (signal, clock = {}) => {
-      await waitForWorldAge(bot, SERVER_ANSWER_TICKS, { wallMs: SERVER_ANSWER_WALL_MS, signal, until: () => answered, ...clock });
+      await waitForWorldAge(bot, SERVER_ANSWER_TICKS, {
+        wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, signal, until: () => answered, ...clock,
+      });
       return answered;
     },
     dispose: unsubscribe,

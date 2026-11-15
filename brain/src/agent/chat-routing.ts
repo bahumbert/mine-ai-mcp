@@ -1,5 +1,5 @@
 // Who the agent hears, and the chat tier's decision about each line it hears (waiting for a model server that is away).
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "../wall-timers.ts";
 import type { AgentOptions } from "../agent.ts";
 import { ModelUnavailable } from "../chat-model.ts";
 import type { Heard, Inbox } from "../inbox.ts";
@@ -49,7 +49,7 @@ export async function decideChat(host: ChatRoutingHost, message: PlayerMessage, 
         log(`chat tier unavailable, "${message.message}" dropped (${superseded ? "its speaker said something since" : "no answer in time"}): ${error.message}`);
         return null;
       }
-      await sleep(delay, undefined, { signal: host.runSignal() }).catch(() => undefined);
+      await sleepMs(delay, host.runSignal()).catch(() => undefined);
     }
   }
 }
