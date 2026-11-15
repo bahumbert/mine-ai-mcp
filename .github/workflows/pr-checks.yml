@@ -1,5 +1,5 @@
-# Pull request checks: the full test suite with coverage (blocking), the quality gate (check 6 blocking), and a report
-# comment (token cost of the change, new or grown long functions, duplicated code, coverage). The model review runs
+# Pull request checks: the full test suite with coverage (blocking), the quality gate (checks 6-10 and 12 blocking),
+# and a report comment (token cost of the change, new or grown long functions, duplicated code, coverage). The model review runs
 # locally before pushing (pre-push gate), not here.
 name: PR checks
 
@@ -39,7 +39,8 @@ jobs:
           path: coverage/
           retention-days: 14
 
-  # The quality gate (spec D5, B9): check 6 (wall clock) blocks; the whole gate goes to the job summary. The gate lives in
+  # The quality gate (spec D5, B9; plan 2026-11-15-test-writing-rules 6c): checks 6-10 and 12 block; the whole gate
+  # goes to the job summary. The gate lives in
   # the private `.agent` submodule, so the checkout needs the read-only token AGENT_REPO_TOKEN (owner chore O2).
   quality-gate:
     runs-on: ubuntu-latest
