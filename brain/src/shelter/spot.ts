@@ -5,7 +5,7 @@ import { areaKey, type BlockArea, type BlockKind, type BotRuntime, type CarriedS
 /** Cells dug under her feet: she ends with her head two blocks under the ground and the roof a block above it. */
 export const DEPTH = 3;
 /** How far around her (blocks) a column fit for the hole is looked for: 13 x 13 = 169 columns. */
-const SEARCH_RADIUS = 6;
+export const SEARCH_RADIUS = 6;
 /** The best spots returned, cheapest first: the flow tries them in turn. */
 const MAX_CANDIDATES = 3;
 /** A column whose estimated dig is longer than this is skipped: obsidian by hand is 3 x 250 s. */
@@ -226,7 +226,7 @@ export function describeNoSpot(search: SpotSearch): string {
     .filter((reason) => search.reasons[reason] > 0)
     .sort((a, b) => search.reasons[b] - search.reasons[a])
     .map((reason) => `${search.reasons[reason]} ${REASON_WORDS[reason]}`);
-  return `no ground near here to dig a closed hole in (of ${search.columns} columns: ${counts.join(", ")})`;
+  return `no ground near here to dig a closed hole in (of ${search.columns} columns up to ${SEARCH_RADIUS} blocks along each axis: ${counts.join(", ")}): go_to another patch of dry, solid ground and dig_shelter there`;
 }
 
 /**
