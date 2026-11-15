@@ -6,24 +6,38 @@ import type { ClientCompletion } from "mine-labs/client";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements } from "../../../src/world/life-saving-placements.ts";
-import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { waitForWorldAge } from "../../../src/world/world-age.ts";
 import { isInLava } from "../../../src/survival/perception/body.ts";
 import { run as escapePool } from "./lava-pool-escape.ts";
 import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
+
+// Match waitServerTicks' margin: the entry age may already be 19 server ticks old (scenario-ticks, 2026-11-15).
+const TIME_PACKET_MARGIN_TICKS = 20;
 
 /** Require the server's answer, rather than Mineflayer's predicted air after digging. */
-async function serverRemoved(context: ScenarioContext, cells: readonly Vec3[]): Promise<boolean> {
+export async function serverRemoved(context: ScenarioContext, cells: readonly Vec3[], sleep: (ms: number) => Promise<void> = delay): Promise<boolean> {
   const confirmed = new Set<string>();
   const answer = (message: string) => { if (message.startsWith("pool-air-")) confirmed.add(message); };
   context.bot.on("messagestr", answer);
   try {
     cells.forEach((cell, index) => context.bot.chat(`/execute if block ${cell.x} ${cell.y} ${cell.z} minecraft:air run tellraw @s {"text":"pool-air-${index}"}`));
-    const deadline = monotonicNow() + 2_000;
-    while (confirmed.size < cells.length && monotonicNow() < deadline) await delay(20);
+    await waitForWorldAge(context.bot, 40 + TIME_PACKET_MARGIN_TICKS, {
+      wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, sleep,
+      until: () => confirmed.size === cells.length,
+    });
     return confirmed.size === cells.length;
   } finally {
     context.bot.off("messagestr", answer);
   }
+}
+
+/** Allow the safe cleanup to clear its ledger before checking the server's blocks. */
+export async function waitForPoolCleanup(bot: ScenarioContext["bot"], sleep: (ms: number) => Promise<void> = delay): Promise<void> {
+  await waitForWorldAge(bot, 600 + TIME_PACKET_MARGIN_TICKS, {
+    wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, sleep,
+    until: () => pendingLifeSavingPlacements(bot).length === 0,
+  });
 }
 
 /** The existing pool driver proves the escape; this wrapper proves the placement debt and the next action. */
@@ -67,8 +81,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const escape = await escapePool({ ...context, scenario: { ...context.scenario, params: params.escape } });
     if (escape.status !== "succeeded") return escape;
     escaped = true;
-    const deadline = monotonicNow() + 30_000;
-    while (pendingLifeSavingPlacements(context.bot).length > 0 && monotonicNow() < deadline) await delay(50);
+    await waitForPoolCleanup(context.bot);
     const cells = [...seen.values()];
     const removed = cells.length > 0 && pendingLifeSavingPlacements(context.bot).length === 0 && await serverRemoved(context, cells);
     if (!removed) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, pending: pendingLifeSavingPlacements(context.bot), lavaTicksAfterEscape }) };
