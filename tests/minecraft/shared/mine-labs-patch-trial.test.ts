@@ -142,6 +142,7 @@ async function runLaneTrial(
     return await mineLabs.runScenarioTrial({
       server: neverStartedServer(join(root, "world"), rcon), scenario: options.scenario, runDir: root, log: () => {}, reuseServer: true, arena: options.arena,
       onArranged: options.onArranged, clientProvider: options.clientProvider, signal: options.signal,
+      arrangeSettleMs: 0,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -183,7 +184,7 @@ test("a trial without arena options reloads its datapack, kills everywhere and r
 
 test("a lane trial the lane cannot honour is refused before the world is touched", async () => {
   const rcon = new RecordingRcon();
-  const base = { server: neverStartedServer("unused", rcon), scenario: scenario(), runDir: "unused", log: () => {}, arena: ARENA };
+  const base = { server: neverStartedServer("unused", rcon), scenario: scenario(), runDir: "unused", log: () => {}, arena: ARENA, arrangeSettleMs: 0 };
   const nether = mineLabs.scenarioSchema.parse({ ...scenario(), world: { dimension: "the_nether" }, players: [{ name: "Walker", pos: [0, 70, 0] }] });
   await assert.rejects(mineLabs.runScenarioTrial(base), /lane-3.*reuseServer/u);
   await assert.rejects(mineLabs.runScenarioTrial({ ...base, reuseServer: true, holdPreparedWorld: true }), /lane-3.*spectator lanes/u);
@@ -237,6 +238,20 @@ test("an onArranged that throws ends the trial as an error, the tick blocks stop
   assert.ok(rcon.sent.some((command, index) => index > removals[1]! && command.startsWith("clone ")), "the arena is cloned back");
   assert.ok(rcon.sent.includes("forceload remove -496 1296 -495 1296"), "the control chunk pin is released");
 });
+test("the arrangement's settle wait is a parameter: arrangeSettleMs 0 waits 0 ms, nothing given waits the upstream 1500 ms", async () => {
+  const waits: number[] = [];
+  const root = await mkdtemp(join(tmpdir(), "mine-labs-patch-trial-"));
+  try {
+    // A recorder per trial: the second arrangement would find the first one's stone block standing and refuse it.
+    const trial = { runDir: root, log: () => {}, reuseServer: true, arena: ARENA, settle: async (ms: number) => { waits.push(ms); } };
+    await mineLabs.runScenarioTrial({ ...trial, server: neverStartedServer(join(root, "world"), new RecordingRcon()), scenario: scenario(), arrangeSettleMs: 0 });
+    await mineLabs.runScenarioTrial({ ...trial, server: neverStartedServer(join(root, "world"), new RecordingRcon()), scenario: scenario() });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(waits, [0, 1500]);
+});
+
 /** A scenario with one client; its player is never online, so a trial that gets past the launch would wait for it. */
 function scenarioWithClient() {
   return mineLabs.scenarioSchema.parse({ ...scenario(), players: [{ name: "Walker" }] });
