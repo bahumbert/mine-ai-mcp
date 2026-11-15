@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenario, scenarioDefinitionSchema } from "mine-labs";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../../../src/test-support/fake-bot/index.ts";
+import { createFakeBot, createFakeClock, type FakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import { arenaFrame } from "../arena/frame.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
 import { run } from "./cancel-mid-ride.ts";
@@ -16,8 +16,9 @@ const PARAMS = { target: [105, -60, 0], cancelPastX: 30, farBankX: 90, settleWit
 const BOAT_ID = 100;
 
 /** A bot seated in a boat at world x 80: past the arena's cancel line (30) but not the lane's (94). */
-function seatedBot() {
+function seatedBot(clock?: FakeClock) {
   const { bot } = createFakeBot({
+    clock,
     position: new Vec3(80, -60, 512.5),
     entities: { [BOAT_ID]: { name: "oak_boat", position: new Vec3(80, -60, 512.5) } },
   });
@@ -26,8 +27,10 @@ function seatedBot() {
 }
 
 test("the cancel waits for the bot to pass cancelPastX in the lane's frame", async () => {
-  const bot = seatedBot();
-  const crossesLine = setTimeout(() => bot.entity.position.set(95, -60, 512.5), 250);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const bot = seatedBot(clock);
+  clock.after(250, () => bot.entity.position.set(95, -60, 512.5));
   let xAtCancel: number | null = null;
   const context = scenarioTestContext({
     scenario: scenarioDefinitionSchema.parse({ params: PARAMS, goal: { kind: "completion" } }),
@@ -42,16 +45,17 @@ test("the cancel waits for the bot to pass cancelPastX in the lane's frame", asy
       return new Promise(() => {});
     },
   });
-  await run(context).then(
+  await clock.settle(run(context), 1_000).then(
     () => assert.fail("the driver ran on past the cancel"),
     (cause: Error) => assert.equal(cause.message, "cancel seen"),
   );
-  clearTimeout(crossesLine);
   assert.ok(xAtCancel !== null && xAtCancel >= 94, `cancelled at x ${xAtCancel}, before the lane's line at 94`);
 });
 
 test("leaving the boat short of the far bank is read in the lane's frame", async () => {
-  const bot = seatedBot();
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const bot = seatedBot(clock);
   bot.entity.position.set(95, -60, 512.5);
   let cancelled: (() => void) | undefined;
   let rides = 0;
@@ -72,11 +76,11 @@ test("leaving the boat short of the far bank is read in the lane's frame", async
       }
       // The second ride: the bot leaves the boat at world x 100, short of the lane's far bank (154), past the arena's (90).
       Object.assign(bot.entity, { vehicle: null }); // prismarine-entity types the vehicle non-null; a dismount clears it
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await clock.sleep(300);
       return { action, durationMs: 300, result: { status: "succeeded" }, summary };
     },
   });
-  const completion = await run(context);
+  const completion = await clock.settle(run(context), 6_000);
   assert.equal(completion.status, "failed");
   assert.match(completion.detail ?? "", /the bot left the boat before the far bank/);
 });
