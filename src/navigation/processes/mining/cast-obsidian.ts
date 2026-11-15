@@ -32,6 +32,7 @@ import {
   type useItemAt,
 } from "../../../world/index.js";
 import type { BlockPosition, BreakBlockInPlace, MovementPolicy } from "../../index.js";
+import { standsOnBlock } from "./target-safety.js";
 
 /**
  * How close the route brings the bot to a lava source, feet cell to cell.
@@ -121,6 +122,7 @@ function firstSolidTowards(bot: Bot, source: Vec3): BlockPosition | null {
   const cell = (position ?? (hit as unknown as Vec3)).floored();
   const feet = bot.entity.position.floored();
   if (cell.x === feet.x && cell.y === feet.y - 1 && cell.z === feet.z) return null;
+  if (standsOnBlock(bot, cell)) return null;
   return { x: cell.x, y: cell.y, z: cell.z };
 }
 
@@ -166,6 +168,7 @@ export async function castOntoPool(
   sources: readonly BlockPosition[],
   options: { readonly openSightLine?: boolean } = {},
 ): Promise<CastOutcome> {
+  physics.signal?.throwIfAborted();
   const item = carried(bot, "water_bucket");
   if (!item) return { kind: "failed", reason: "the bucket holds no water" };
   const keys = new Set(sources.map(cellKey));
@@ -180,8 +183,10 @@ export async function castOntoPool(
     const swing = await physics.breakInPlace({
       movements: physics.movements,
       position: blocking,
+      retainSupport: true,
       ...(physics.signal && { signal: physics.signal }),
     });
+    physics.signal?.throwIfAborted();
     if (swing.status === "failed") {
       return {
         kind: "reposition",

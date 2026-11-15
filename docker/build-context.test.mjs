@@ -22,6 +22,17 @@ test('the build context allows the files the Paper image reads', () => {
   }
 });
 
+// `bun install --frozen-lockfile` in the image applies every patch package.json names, so each patch file must reach the build context.
+test('the build context allows every patch file of package.json', () => {
+  const allowed = read('.dockerignore').split('\n').filter(line => line.startsWith('!')).map(line => line.slice(1));
+  const patches = Object.values(JSON.parse(read('package.json')).patchedDependencies ?? {});
+  assert.ok(patches.length > 0, 'package.json names no patch file');
+  for (const path of patches) {
+    assert.ok(existsSync(join(root, path)), `${path} does not exist`);
+    assert.ok(allowed.some(entry => path === entry || (entry.endsWith('/') && path.startsWith(entry))), `.dockerignore does not allow ${path}`);
+  }
+});
+
 test('both Dockerfiles pass MINECRAFT_SERVER (default paper) to the download', () => {
   for (const file of ['Dockerfile', 'Dockerfile.beatthegame']) {
     const text = read(file);

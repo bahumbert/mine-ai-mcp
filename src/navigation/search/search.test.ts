@@ -16,7 +16,7 @@ import type { StepField } from "../step-field.js";
 import { ExpectedMutationLedger } from "../execution/mutations.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { MemoryWorld } from "../world/memory-world.js";
-import { blockKey } from "../world/world.js";
+import { blockKey, type NavigationObservation } from "../world/world.js";
 import type { SearchLimits } from "./search-result.js";
 import { IncrementalSearch, type SearchUpdate } from "./search.js";
 
@@ -101,12 +101,14 @@ function searchOver(
     now?: () => number;
     stepField?: StepField;
     world?: MemoryWorld;
+    observedStart?: NavigationObservation;
   } = {},
 ): IncrementalSearch {
   return new IncrementalSearch({
     id: options.id ?? goal.revision,
     start: planningStart(ORIGIN, options.scaffolds ?? 0),
     goal,
+    observedStart: options.observedStart,
     ...(options.limits ? { limits: options.limits } : {}),
     now: options.now ?? (() => 0),
     context: {
@@ -118,6 +120,77 @@ function searchOver(
     },
   });
 }
+
+test("finish receives an observed pose only for its actual root ancestry, including an edited root", () => {
+  for (const observed of [true, false]) for (const edited of [true, false]) {
+    const pose = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
+    const start = planningStart(ORIGIN);
+    const overlay = edited ? start.overlay.apply({ kind: "break", position: { x: 3, y: 64, z: 0 }, stateId: 0 }) : start.overlay;
+    const seen: { x: number; overlay: string; actual?: NavigationObservation }[] = [];
+    const goal = { ...goalOf("provenance", () => 0), finish: (state, _context, _dig, actual) => {
+      seen.push({ x: state.node.feet.x, overlay: state.overlay.identity, actual });
+      return null;
+    } } satisfies ActiveGoal;
+    const catalogue = stubCatalogue((state) => {
+      if (state.node.feet.x === 0 && state.node.remainingScaffolds === 0) return [graphMovement(state, 1, 0, 1)];
+      if (state.node.feet.x !== 1) return [];
+      const returned = graphMovement(state, 0, 0, 1);
+      const future = planningStart(ORIGIN, 1);
+      return [{ ...returned, remainingScaffolds: 1, state: future }];
+    });
+    const search = new IncrementalSearch({ id: "ancestry", start: { node: { ...start.node, overlayId: overlay.identity }, overlay },
+      goal, observedStart: observed ? pose : undefined, now: () => 0,
+      context: { world: flatWorld(), policy: createMovementPolicy(), player: WELL_FED, catalogue } });
+    search.advance();
+    assert.equal(seen[0]?.actual, observed ? pose : undefined);
+    assert.deepEqual(seen.map((call) => call.x), [0, 1, 0]);
+    assert.equal(seen[2]?.overlay, start.overlay.identity, "an empty-overlay return is still a future node");
+    assert.ok(seen.slice(1).every((call) => call.actual === undefined), "future nodes never inherit the root pose");
+  }
+});
+
+test("the real catalogue routes around sole edge support while retaining centred descent", () => {
+  const world = flatWorld();
+  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) {
+    world.load({ x, y: 61, z }, { stateId: 1 });
+    world.load({ x, y: 60, z }, { stateId: 1 });
+  }
+  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
+  const target = { x: 1, y: 62, z: 0 };
+  const goal = destination(target);
+  for (const [x, observed] of [[0.85, true], [0.85, false], [1.5, true]] as const) {
+    const position = { x, y: 63, z: 0.5 };
+    const start = planningStart({ x: Math.floor(position.x), y: 63, z: 0 });
+    const search = new IncrementalSearch({ id: "real-edge", start, goal,
+      observedStart: observed ? { ...observation(), position } : undefined, now: () => 0,
+      context: { world, catalogue: createMovementCatalogue(),
+        policy: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }), player: WELL_FED } });
+    const { plan } = expect(search.advance(), "complete");
+    const breaks = plan.steps[0]!.operations.filter((op) => op.kind === "break");
+    assert.equal(breaks.some((op) => op.position.x === 1 && op.position.y === 62 && op.position.z === 0),
+      !observed || x === 1.5, JSON.stringify(plan.steps));
+  }
+});
+
+test("root support filtering keeps a safe sibling during expansion and reconstruction", () => {
+  const world = flatWorld();
+  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
+  const pose = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
+  const catalogue = stubCatalogue((state) => {
+    if (state.node.feet.x !== 0) return [];
+    const safe = graphMovement(state, 1, 0, 2);
+    const unsafe = { ...safe, cost: 1, step: { ...safe.step, id: "unsafe", operations: [
+      { kind: "break" as const, position: { x: 1, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [], stance: ORIGIN },
+      ...safe.step.operations,
+    ] } };
+    return [unsafe, safe];
+  });
+  for (const actual of [pose, undefined]) {
+    const search = searchOver(goalOf("bank", () => 0, (node) => node.feet.x === 1), catalogue, { world, observedStart: actual });
+    const plan = expect(search.advance(), "complete").plan;
+    assert.equal(plan.steps[0]?.id, actual ? "0,0>1,0" : "unsafe");
+  }
+});
 
 /** The update carrying a route, asserting the search reached the named kind of answer. */
 function expect(update: SearchUpdate, kind: "complete" | "segment_ready") {

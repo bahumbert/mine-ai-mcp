@@ -18,6 +18,68 @@ import {
 
 const goalTestWorld = new GoalTestWorld();
 
+test("stationary excavation judges actual support and preserves the admitted body pose", () => {
+  const cases = [
+    { name: "sole x edge", x: 0.85, z: 0.5, y: 63, floor: false, allowed: false },
+    { name: "safe bank", x: 0.85, z: 0.5, y: 63, floor: true, allowed: true },
+    { name: "exact touch", x: 0.7, z: 0.5, y: 63, floor: false, allowed: true },
+    { name: "z edge", x: 0.5, z: 0.85, y: 63, floor: false, allowed: false, targetZ: true },
+    { name: "corner", x: 0.85, z: 0.85, y: 63, floor: false, allowed: false },
+    { name: "lowered floor", x: 0.85, z: 0.5, y: 62.875, floor: false, allowed: false },
+    { name: "floating source", x: 0.85, z: 0.5, y: 63.2, floor: false, allowed: true, water: true },
+    { name: "grounded wader", x: 0.85, z: 0.5, y: 63, floor: false, allowed: false, water: true },
+    { name: "non-floor dig", x: 0.85, z: 0.5, y: 63, floor: false, allowed: true, high: true },
+  ];
+  for (const c of cases) {
+    const world = flatWorld();
+    world.load({ x: 0, y: 62, z: 0 }, { stateId: c.floor ? 1 : 0 });
+    if (c.name === "corner") for (const x of [0, 1]) world.load({ x, y: 62, z: 1 }, { stateId: 0 });
+    const target = { x: c.targetZ ? 0 : 1, y: c.high ? 64 : 62, z: c.targetZ ? 1 : 0 };
+    if (c.water) world.load({ x: 0, y: 63, z: 0 }, {
+      stateId: 2, collisionShapes: [], traits: { empty: true, liquid: "water", liquidSource: true },
+    });
+    world.load(target, { stateId: 1 });
+    const actual = { ...observation(), position: { x: c.x, y: c.y, z: c.z },
+      stance: c.y > 63 ? "swimming" as const : "supported" as const };
+    const goal = active(excavateGoal(target).resolve(actual));
+    const movement = goal.finish?.(planningStart({ x: 0, y: 63, z: 0 }),
+      { world, policy: createMovementPolicy(), player: WELL_FED },
+      { submergedAtEyes: false, onGround: c.floor, aquaAffinity: false, effects: {} }, actual);
+    assert.equal(Boolean(movement), c.allowed, c.name);
+    if (!movement) continue;
+    assert.deepEqual(movement.step.operations.at(-1), { kind: "move", movement: "walk", target: actual.position }, c.name);
+    assert.ok(movement.step.operations.filter((op) => op.kind === "break").every((op) => op.retainSupport), c.name);
+    assert.deepEqual(movement.to, { x: 0, y: 63, z: 0 });
+  }
+});
+
+test("a composite excavation goal forwards physical root provenance", () => {
+  const world = flatWorld();
+  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
+  const target = { x: 1, y: 62, z: 0 };
+  const actual = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
+  const goal = active(anyGoal([excavateGoal(target)]).resolve(actual));
+  assert.equal(goal.finish?.(planningStart({ x: 0, y: 63, z: 0 }),
+    { world, policy: createMovementPolicy(), player: WELL_FED },
+    { submergedAtEyes: false, onGround: false, aquaAffinity: false, effects: {} }, actual), null);
+});
+
+test("future excavation uses the node centre even when the resolved body was in the same cell", () => {
+  const world = flatWorld();
+  const actual = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
+  const target = { x: 5, y: 63, z: 0 };
+  world.load(target, { stateId: 1 });
+  const context = { world, policy: createMovementPolicy(), player: WELL_FED };
+  const dig = { submergedAtEyes: false, onGround: true, aquaAffinity: false, effects: {} };
+  const state = planningStart({ x: 0, y: 63, z: 0 });
+  const goal = active(excavateGoal(target).resolve(actual));
+  assert.ok(goal.finish?.(state, context, dig, actual), "the observed edge is in reach");
+  assert.equal(goal.finish?.(state, context, dig), null, "a future return must not borrow old reach");
+  world.load({ x: 1, y: 64, z: 0 }, { stateId: 1 });
+  const near = active(excavateGoal({ x: 1, y: 64, z: 0 }).resolve(actual)).finish?.(state, context, dig);
+  assert.deepEqual(near?.step.operations.at(-1), { kind: "move", movement: "walk", target: { x: 0.5, y: 63, z: 0.5 } });
+});
+
 test("stationary excavation chooses a stable stance instead of digging a dry target from a current", () => {
   const world = flatWorld();
   const target = { x: 1, y: 64, z: 0 };

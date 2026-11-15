@@ -42,6 +42,7 @@ import {
   type HorizontalSteeringRequest,
 } from "../steering/local-steering.js";
 import { navigationFeet } from "../world/block-geometry.js";
+import { bodyDependsOnBlock } from "../world/body-support.js";
 import {
   blockLabel,
   blockPosition,
@@ -53,7 +54,7 @@ import {
 } from "../world/world.js";
 import { longestBreakDurationMs } from "./break-duration.js";
 import { reportNavigationDig, type NavigationDig } from "./dig-observer.js";
-import { putAwayHeldTool, visibleDigAim } from "./dig-preparation.js";
+import { equipDigTool, putAwayHeldTool, visibleDigAim, type BreakAim } from "./dig-preparation.js";
 import { requestCellResync } from "./cell-resync.js";
 import { type ServerChangeWatch, watchServerChange } from "./server-block-changes.js";
 import { CLIMBABLES, isSwimWater, liveBlockReader, observeMineflayerBlock, type MineflayerBlock } from "./world.js";
@@ -76,7 +77,7 @@ function traceDig(record: Record<string, unknown>): void {
 }
 
 /** What an effect that did not happen says. */
-type EffectFailure = { readonly kind: "failed"; readonly observation: string };
+type EffectFailure = { readonly kind: "failed"; readonly observation: string; readonly cause?: "support" };
 
 export interface MineflayerBotSurface {
   readonly entity: {
@@ -700,6 +701,45 @@ export class MineflayerBot implements NavigationBot {
   longestBreakDurationMs(operation: Extract<PlannedOperation, { kind: "break" }>): number | null {
     return this.bot.longestBreakDurationMs?.(operation.position, operation.toolType) ?? null;
   }
+  /** Refuse a swing that would remove the live body's only retained footing. */
+  #breakSupportFailure(operation: Extract<PlannedOperation, { kind: "break" }>): EffectFailure | null {
+    const { position, isInWater, onGround } = this.bot.entity;
+    const target = operation.position;
+    if (!operation.retainSupport && target.x === Math.floor(position.x) && target.z === Math.floor(position.z)) return null;
+    const read = liveBlockReader({ blockAt: (cell) => this.bot.blockAt(cell) as MineflayerBlock | null });
+    if (!bodyDependsOnBlock(position, isInWater && !onGround, target, read)) return null;
+    return {
+      kind: "failed", cause: "support",
+      observation: `The block at ${blockLabel(target)} is the body's only support. Move to supported footing before digging it.`,
+    };
+  }
+  /** Aim from the prepared stance, centring only when no target face is visible. */
+  async #aimBreak(position: BlockPosition, aim: BreakAim, signal: AbortSignal): Promise<EffectFailure | null> {
+    if ((aim.belowFeet || aim.aboveHead) && await this.#aimVertical(aim.belowFeet ? -Math.PI / 2 : Math.PI / 2, aim.yaw)) return null;
+    let visible = this.bot.visibleDigAim(position);
+    // Reach and sight were planned from the stance centre; a corner can hide the face (2026-11-15).
+    if (visible === null && !aim.aboveHead && await this.centerOnCell(aim.feet, signal)) visible = this.bot.visibleDigAim(position);
+    if (visible === null) {
+      const { x, y, z } = this.bot.entity.position;
+      return {
+        kind: "failed",
+        observation: `No face of the block at ${blockLabel(position)} is in view from ${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}.`,
+      };
+    }
+    await this.bot.lookAt(new Vec3(visible.x, visible.y, visible.z), true);
+    return null;
+  }
+  /** Admit each physical swing only after aiming, using the body and world as they are now. */
+  async #swingBreak(operation: Extract<PlannedOperation, { kind: "break" }>, target: unknown, aim: BreakAim, signal: AbortSignal, markIssued: () => void): Promise<EffectFailure | null> {
+    const failed = await this.#aimBreak(operation.position, aim, signal);
+    signal.throwIfAborted();
+    if (failed) return failed;
+    const refused = this.#breakSupportFailure(operation);
+    if (refused) return refused;
+    markIssued();
+    await this.bot.dig(target, "ignore");
+    return null;
+  }
   /** The break half of `startEffect`: aim, dig, and wait for the server to say the block is gone. Null on success. */
   async #breakEffect(operation: Extract<PlannedOperation, { kind: "break" }>, signal: AbortSignal, markIssued: () => void): Promise<EffectFailure | null> {
     const feet = navigationFeet(this.bot.entity.position, this.bot.entity.onGround);
@@ -714,25 +754,10 @@ export class MineflayerBot implements NavigationBot {
     if (directlyBelowFeet) await this.centerOnCell(feet, signal);
     const block = this.bot.blockAt(new Vec3(operation.position.x, operation.position.y, operation.position.z));
     if (!block) return { kind: "failed", observation: "Break target was not loaded." } as const;
-    if (operation.toolType !== null) {
-      const item = this.bot.inventory.items().find((candidate) => candidate.type === operation.toolType);
-      // The route was priced at tool speed. Hand-digging it instead is
-      // several times slower, so the confirmation window elapses and the
-      // failure is reported as a timeout — blaming the clock for an
-      // inventory fact. Say what is actually missing.
-      if (!item)
-        return {
-          kind: "failed",
-          observation: `The route planned to break with ${this.bot.itemName?.(operation.toolType) ?? `item type ${operation.toolType}`}, which is not in the inventory.`,
-        } as const;
-      await this.bot.equip(item, "hand");
-    } else {
-      // No tool helps: dig by hand rather than wear out whatever tool the last dig left in it.
-      await this.bot.putAwayHeldTool?.().catch(() => {});
-    }
+    const unavailable = await equipDigTool(this.bot, operation.toolType);
+    if (unavailable) return { kind: "failed", observation: unavailable };
     signal.throwIfAborted();
     this.selectedTool()?.(operation.toolType);
-    markIssued();
     // Read before the hold so the dig aims where the route left the head.
     const yaw = this.bot.entity.yaw;
     const digStartedAt = monotonicNow();
@@ -745,42 +770,14 @@ export class MineflayerBot implements NavigationBot {
     const serverWatch = this.bot.watchServerChange?.(operation.position);
     let airborne = !this.bot.entity.onGround;
     let digEntered = false; // a dig that never started (no face in view, an abort before the swing) is not reported
+    const aim = { feet, belowFeet: directlyBelowFeet, aboveHead: directlyAboveHead, yaw };
+    const swingIssued = () => { digEntered = true; markIssued(); };
     try {
       // The planner priced a dig from a stance over a solid floor as standing (`digContextAt`), and Minecraft digs
       // x5 slower off the ground: the hold lets the body sink onto that floor, and the swing waits for it, bounded.
       if (operation.stance) await this.bot.landOnStanceFloor?.(operation.stance, signal);
       airborne = !this.bot.entity.onGround;
-      const swing = async (target: unknown) => {
-        if (
-          (directlyBelowFeet || directlyAboveHead) &&
-          (await this.#aimVertical(directlyBelowFeet ? -Math.PI / 2 : Math.PI / 2, yaw))
-        ) {
-          digEntered = true;
-          await this.bot.dig(target, "ignore");
-          return null;
-        }
-        let aim = this.bot.visibleDigAim(operation.position);
-        // Search judges reach and sight from the centre of the stance
-        // cell, and the body can stop at its corner: a dig planned at the
-        // edge of reach is then out of view from where the bot stands.
-        // Stand where the plan assumed before reporting the face hidden.
-        if (aim === null && !directlyAboveHead && (await this.centerOnCell(feet, signal)))
-          aim = this.bot.visibleDigAim(operation.position);
-        if (aim === null) {
-          const { x, y, z } = this.bot.entity.position;
-          return {
-            kind: "failed",
-            observation:
-              `No face of the block at ${blockLabel(operation.position)} is in view from ` +
-              `${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}.`,
-          } as const;
-        }
-        await this.bot.lookAt(new Vec3(aim.x, aim.y, aim.z), true);
-        digEntered = true;
-        await this.bot.dig(target, "ignore");
-        return null;
-      };
-      const first = await swing(block);
+      const first = await this.#swingBreak(operation, block, aim, signal, swingIssued);
       if (first) return first;
       const dropped = await this.#awaitServerBreak(serverWatch, operation.position, signal);
       if (dropped) return dropped;
@@ -792,7 +789,7 @@ export class MineflayerBot implements NavigationBot {
       for (let landed = 0; landed < operation.brings.length; landed += 1) {
         const refilled = await this.#awaitRefill(operation.position, signal);
         if (refilled === null) break;
-        const again = await swing(refilled.block);
+        const again = await this.#swingBreak(operation, refilled.block, aim, signal, swingIssued);
         if (again) return again;
       }
     } finally {
@@ -915,17 +912,19 @@ export class MineflayerBot implements NavigationBot {
   ): EffectHandle {
     let issued = false;
     let cancelled = false;
+    const stopped = new AbortController();
+    const effectSignal = AbortSignal.any([signal, stopped.signal]);
     const markIssued = () => {
       issued = true;
     };
     const completion = (async () => {
       try {
-        signal.throwIfAborted();
+        effectSignal.throwIfAborted();
         const failed =
           operation.kind === "break"
-            ? await this.#breakEffect(operation, signal, markIssued)
+            ? await this.#breakEffect(operation, effectSignal, markIssued)
             : operation.kind === "place"
-              ? await this.#placeEffect(operation, signal, markIssued)
+              ? await this.#placeEffect(operation, effectSignal, markIssued)
               : await this.#activateEffect(operation, markIssued);
         if (failed) return failed;
         if (!cancelled && operation.kind === "place") this.bot.combatResourceReceipt?.();
@@ -943,6 +942,7 @@ export class MineflayerBot implements NavigationBot {
       },
       cancel: () => {
         cancelled = true;
+        stopped.abort();
         if (operation.kind === "break" && issued) this.bot.stopDigging();
       },
     };

@@ -1,12 +1,13 @@
 import type { GeneratedMovement, PlanningState } from "./catalogue.js";
 import type { Excavation } from "./excavation.js";
 import { stateMatcher, type PlannedStep } from "./movement.js";
-import { blockLabel } from "../world/world.js";
+import { blockLabel, type Position3 } from "../world/world.js";
 
 /** Execute priced excavation from one supported stance without travelling away. */
 export function stationaryExcavation(
   state: PlanningState,
   excavation: Extract<Excavation, { kind: "prepared" }>,
+  stand?: Position3,
 ): GeneratedMovement {
   const feet = state.node.feet;
   const cleared = excavation.digs.flatMap((dig) => [dig.position, ...dig.brings]);
@@ -39,8 +40,9 @@ export function stationaryExcavation(
             toolType: dig.toolType,
             brings: dig.brings,
             stance: feet,
+            retainSupport: true,
           })),
-          { kind: "move", movement: "walk", target: { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 } },
+          { kind: "move", movement: "walk", target: stand ?? { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 } },
         ],
         effects: cleared.map((position) => ({ kind: "break", position, stateId: 0 })),
         cost: {

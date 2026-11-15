@@ -28,6 +28,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
+import { bodyDependsOnBlock } from "../../world/body-support.js";
 import { waterMiningStance } from "../../world/water.js";
 import { dropColumn, isDryAir, isLava } from "../../world/block-geometry.js";
 import type { BlockObservation } from "../../world/world.js";
@@ -153,14 +154,8 @@ export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, p
  * work uses (`sealAndBreakInReach` lets a floating body dig).
  */
 export function standsOnBlock(bot: Bot, position: BlockPosition): boolean {
-  const feet = bot.entity.position;
   const floating = Reflect.get(bot.entity, "isInWater") === true && !bot.entity.onGround;
-  return (
-    !floating &&
-    position.x === Math.floor(feet.x) &&
-    position.z === Math.floor(feet.z) &&
-    position.y === Math.ceil(feet.y) - 1
-  );
+  return bodyDependsOnBlock(bot.entity.position, floating, position, liveBlockReader(bot));
 }
 
 /**

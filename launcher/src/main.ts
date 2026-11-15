@@ -24,6 +24,8 @@ export const USAGE = `Usage: mine-ai <command>
   bot start|stop <persona id or name>   start or stop one bot while Mine AI runs
   install <gpu|disk|ollama|ollama-remove|model|model-remove|java|server|endpoint-test|endpoint-models> [--accept-eula] [--dir <ollama folder>] [--no-model] [--json <file>]
             (--dir: ollama and disk only; --no-model: disk only; disk lists the free space and what a local model and server need)
+  install disk [--server-program paper|vanilla]
+            (--server-program: disk only; previews that program or uses the saved program when absent, without saving, downloading or accepting the EULA)
   install endpoint-models --list <file> [--url <url>] [--key <key> | --saved-key] [--json <file>]
             (writes the models the remote endpoint lists, one per line; without --url it reads the saved settings)
   configure --llm-local | --llm-remote <url> <key> <model> | --llm-remote-saved-key <url> <model>   and/or   --server-none | --server-local | --server-remote <host> <port>   and/or   --server-program paper|vanilla

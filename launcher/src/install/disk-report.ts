@@ -6,6 +6,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { ServerProgram } from "../settings.ts";
 import { checkSpace, DiskError, driveOf, freeBytes, gb, headSize, modelBytesToPull, realDiskDeps, realModelStoreDeps, type DiskDeps, type ModelStoreDeps, type SpaceNeed } from "./disk.ts";
 import { isPinnedJreInstalled } from "./java.ts";
 import { manifestFileParts, modelOnDisk, modelStore } from "./model.ts";
@@ -76,7 +77,7 @@ export function orFallback<T>(read: () => T, fallback: T): T {
  * The needs of the local AI model and of a local server, with a size or null (unknown). An item that is already there
  * is a need of 0 bytes, so the drive still shows and the line can say "nothing to download". The requests go out together.
  */
-async function collectNeeds(ctx: InstallContext, options: { dir: string | undefined; noModel: boolean }, deps: DiskReportDeps): Promise<GroupedNeed[]> {
+async function collectNeeds(ctx: InstallContext, options: { dir: string | undefined; noModel: boolean; serverProgram?: ServerProgram }, deps: DiskReportDeps): Promise<GroupedNeed[]> {
   const { manifest, root } = ctx;
   const ollamaFound = orFallback(() => deps.ollamaExe(), null) !== null;
   const installOllama = !options.noModel && !ollamaFound;
@@ -103,16 +104,17 @@ async function collectNeeds(ctx: InstallContext, options: { dir: string | undefi
   const java: GroupedNeed[] = isJavaInstalled
     ? [{ group: "server", what: "Java", folder: runtime, bytes: 0 }]
     : [{ group: "server", what: "Java", folder: runtime, bytes: javaZip }, { group: "server", what: "Java", folder: runtime, bytes: manifest.java.installedBytes }];
-  return [...model, ...java, { group: "server", what: "server jar", folder: serverDir, bytes: jarBytes }, ...paperNeeds(ctx, deps.disk)];
+  return [...model, ...java, { group: "server", what: "server jar", folder: serverDir, bytes: jarBytes }, ...paperNeeds(ctx, deps.disk, options.serverProgram)];
 }
 
 /**
- * Paper's needs when the settings choose Paper, counted as `installPaper` (server.ts) spends them: its jar unless it is
+ * Paper's needs for an explicit preview or the saved program, counted as `installPaper` (server.ts) spends them: its jar unless it is
  * there, its first-start files unless the patched jar is in `versions/` (a jar there without it still needs them).
  */
-function paperNeeds(ctx: InstallContext, disk: DiskDeps): GroupedNeed[] {
+function paperNeeds(ctx: InstallContext, disk: DiskDeps, serverProgram?: ServerProgram): GroupedNeed[] {
   const { settings, manifest, root } = ctx;
-  if (settings.server.kind !== "local" || settings.server.program !== "paper") return [];
+  const program = serverProgram ?? (settings.server.kind === "local" ? settings.server.program : undefined);
+  if (program !== "paper") return [];
   const dir = join(root, "server");
   const jarThere = disk.exists(join(dir, serverJarName(manifest, "paper")));
   const prepared = jarThere && disk.exists(paperPreparedFile(dir, manifest));
@@ -201,9 +203,10 @@ function driveLine({ drive, needs, free, short }: DriveRead, reserveBytes: numbe
  * unless the pinned one is installed, the jar unless it is there, Paper's jar and first-start files when the program is
  * Paper). `ok:true` with `short:true` when a drive is short
  * (the setup shows the text either way); `ok:false` only when no drive could be read. `noModel`: the GPU verdict is
- * remote, so no model and no Ollama line, and no registry or Ollama request.
+ * remote, so no model and no Ollama line, and no registry or Ollama request. `serverProgram` previews that program
+ * instead of the saved setting; neither choice writes settings or downloads files.
  */
-export async function diskReport(ctx: InstallContext, options: { dir: string | undefined; noModel: boolean }, deps: DiskReportDeps = realDiskReportDeps(ctx)): Promise<DiskReport | StepFailure> {
+export async function diskReport(ctx: InstallContext, options: { dir: string | undefined; noModel: boolean; serverProgram?: ServerProgram }, deps: DiskReportDeps = realDiskReportDeps(ctx)): Promise<DiskReport | StepFailure> {
   const needs = await collectNeeds(ctx, options, deps);
   const reserve = ctx.manifest.disk.reserveBytes;
   const reads: DriveRead[] = [];

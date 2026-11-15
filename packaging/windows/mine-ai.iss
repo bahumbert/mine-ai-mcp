@@ -156,7 +156,8 @@ var
   DataPage: TInputDirWizardPage;
   // The endpoint page's variables are in endpoint-page.iss.
   ModelPage, ServerPage, EulaPage, StepsPage: TWizardPage;
-  ModelStatus, DiskStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  ModelStatus, ModelStepStatus, OllamaDirLabel, ServerDownloadText: TNewStaticText;
+  DiskStatus: TNewMemo;
   ModelLocalRadio, ModelRemoteRadio: TNewRadioButton;
   OllamaDirEdit: TEdit;
   OllamaBrowseButton: TButton;
@@ -180,6 +181,8 @@ var
   // The data folder (DataDir('')) the tasks-page box was last set for from its settings.json; '' until the page first shows.
   TasksBoxFolder: String;
   LastLogTail, GpuProblem, GpuReason, SetupFailure, SilentFailure, StepsDoneFor, DataFolderFailure, OllamaFolderChecked: String;
+  CaptureConfigureOutput: Boolean;
+  ConfigureStdout: String;
   DeleteDataOnUninstall, RemoveModelOnUninstall, RemoveOllamaOnUninstall: Boolean;
   // Read once in InitializeUninstall: by usPostUninstall Inno has removed the uninstall key it comes from.
   UninstallDataDir: String;
@@ -453,6 +456,8 @@ var
   Text, Rest: String;
   Space: Integer;
 begin
+  if CaptureConfigureOutput and (not Error) then
+    ConfigureStdout := ConfigureStdout + Line + #13#10;
   Text := Trim(Line);
   if Text = '' then
     Exit;
@@ -481,6 +486,7 @@ begin
   JsonFile := ExpandConstant('{tmp}\mine-ai-step.json');
   DeleteFile(JsonFile);
   JsonText := '';
+  ConfigureStdout := '';
   LastLogTail := '';
   ActiveGauge := Gauge;
   ActiveStatus := Status;
@@ -840,9 +846,16 @@ procedure CreateModelPage();
 begin
   ModelPage := CreateCustomPage(wpInfoAfter, 'AI model', 'Where should the bots'' AI model run?');
   ModelStatus := AddText(ModelPage, '', 0, 46);
-  // The free space of the drives the local model needs (ShowDiskSpace, wizard only).
-  // Room for about four lines: a short drive adds a warning sentence to the drive lines (disk-report.ts).
-  DiskStatus := AddText(ModelPage, '', 48, 60);
+  // Multiple drives and warnings can exceed this footprint: keep every line reachable (T14 walk, 2026-11-15).
+  DiskStatus := TNewMemo.Create(WizardForm);
+  DiskStatus.Parent := ModelPage.Surface;
+  DiskStatus.Top := ScaleY(48);
+  DiskStatus.Height := ScaleY(60);
+  DiskStatus.Width := ModelPage.SurfaceWidth;
+  DiskStatus.ReadOnly := True;
+  DiskStatus.WordWrap := True;
+  DiskStatus.ScrollBars := ssVertical;
+  DiskStatus.TabStop := True;
   // What the local choice does is set by CheckGpuOnce once it knows whether Ollama is already installed.
   ModelLocalRadio := AddRadio(ModelPage, 'On this PC', 112);
   // One row: the label, the folder and Browse; shown only when this setup will install Ollama (ModelChoiceChanged).
@@ -1092,7 +1105,7 @@ var
 begin
   Result := MemoDirInfo + NewLine + NewLine + 'Data folder:' + NewLine + Space + DataDir('');
   if IsUpdate() and SettingsSummary(Model, Server) then
-    Result := Result + NewLine + NewLine + 'AI model:' + NewLine + Space + Model + NewLine + NewLine + 'Minecraft server:' + NewLine + Space + Server
+    Result := Result + NewLine + NewLine + 'Saved AI model:' + NewLine + Space + Model + NewLine + NewLine + 'Saved Minecraft server:' + NewLine + Space + Server + NewLine + NewLine + 'These are your saved settings. You can change the AI model and Minecraft server on the next pages, after the files are copied.'
   else
     // A first install, or an update that finds no settings.json: the pages after the copy still ask both.
     Result := Result + NewLine + NewLine + 'AI model and Minecraft server: chosen on the next pages, after the files are copied (the setup checks this PC''s graphics card there).';
@@ -1152,6 +1165,8 @@ end;
 
 procedure InitializeWizard();
 begin
+  CaptureConfigureOutput := False;
+  ConfigureStdout := '';
   // The Ready list's long lines (the disk room warning) wrapped to the right under a horizontal scroll bar (F3).
   WizardForm.ReadyMemo.WordWrap := True;
   WizardForm.ReadyMemo.ScrollBars := ssVertical;
@@ -1197,15 +1212,15 @@ var
   Json, Args: String;
   Succeeded: Boolean;
 begin
-  DiskStatus.Caption := 'Checking disk space...';
-  Args := 'install disk';
+  DiskStatus.Text := 'Checking disk space...';
+  Args := 'install disk --server-program paper';
   if not ModelLocalRadio.Enabled then
     Args := Args + ' --no-model';
   Succeeded := RunStepSucceeded(Args, ModelGauge, ModelStepStatus, Json);
   if Succeeded and (JsonString(Json, 'detail') <> '') then
-    DiskStatus.Caption := JsonString(Json, 'detail')
+    DiskStatus.Text := JsonString(Json, 'detail') + #13#10 + 'Server disk estimate includes Paper, the recommended local server. You choose the server on a later page. A fresh vanilla server downloads less; existing server files are kept.'
   else
-    DiskStatus.Caption := '';
+    DiskStatus.Text := '';
 end;
 
 // Moves the focus to the radio of the group that is already checked, when Page is the page on screen. It never writes a .Checked: a
@@ -1379,7 +1394,7 @@ begin
   ModelChoiceChanged(nil);
   ModelStatus.Caption := StepFailureText(Json);
   // The disk text listed the local model's needs, which this PC no longer has.
-  DiskStatus.Caption := '';
+  DiskStatus.Text := '';
   if InstallStateHas('"ollama":"installed"') then
   begin
     if SuppressibleMsgBox('This PC cannot run the model, so the Ollama that was just installed is not needed. Remove it now?', mbConfirmation, MB_YESNO, IDNO) = IDYES then
@@ -1490,6 +1505,32 @@ begin
   Log(Line);
 end;
 
+// Configure's full stdout belongs in both logs, even when saving settings later fails (T14 walk, 2026-11-15).
+procedure NoteConfigureOutput(const Output: String);
+var
+  Rest, Line: String;
+  P: Integer;
+begin
+  Rest := Output;
+  while Length(Rest) > 0 do
+  begin
+    P := Pos(#10, Rest);
+    if P = 0 then
+    begin
+      Line := Rest;
+      Rest := '';
+    end
+    else
+    begin
+      Line := Copy(Rest, 1, P - 1);
+      Delete(Rest, 1, P);
+    end;
+    StringChangeEx(Line, #13, '', True);
+    if Trim(Line) <> '' then
+      NoteSetup(Line);
+  end;
+end;
+
 function RunSetupStep(const Step: String): Boolean;
 var
   Json: String;
@@ -1511,7 +1552,13 @@ var
   Code: Integer;
 begin
   StepsStatus.Caption := 'Saving your choices...';
-  Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  CaptureConfigureOutput := True;
+  try
+    Code := RunLauncher(ConfigureArguments(), False, StepsGauge, StepsStatus, Ignored);
+  finally
+    CaptureConfigureOutput := False;
+  end;
+  NoteConfigureOutput(ConfigureStdout);
   Result := Code = 0;
   if Result then
     NoteSetup('OK   settings saved in ' + DataDir('') + '\settings.json')

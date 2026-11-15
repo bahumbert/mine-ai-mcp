@@ -142,6 +142,29 @@ class TickDrivenBot extends FakeNavigationBot {
 
 // ── Effects and their confirmation ───────────────────────────────────────────
 
+test("support-refused route invalidates without movement-failure evidence and a safe next route completes", async () => {
+  const world = flatWorld();
+  const bot = new FakeNavigationBot();
+  const ledger = new ExpectedMutationLedger();
+  const position = { x: 1, y: 62, z: 0 };
+  world.load(position, { stateId: 2 });
+  bot.startEffect = () => ({
+    issued: false, cancel() {},
+    completion: Promise.resolve({ kind: "failed", observation: "Move onto the bank.", cause: "support" }),
+  });
+  const step: PlannedStep = {
+    ...walkStep("unsafe-edge", 0, 1),
+    operations: [{ kind: "break", position, expectedStateId: 2, toolType: null, brings: [] }],
+  };
+  assert.deepEqual(await executeSingleStep({ step, world, bot, ledger }), { kind: "invalidated" });
+  assert.equal(ledger.activeCount, 0);
+  assert.equal(ledger.receiptCount, 0);
+  assert.equal(bot.ownedControlCount, 0);
+  assert.equal(bot.ticks.size, 0);
+  bot.prepareMovement = async (next) => ({ kind: "completed", arrival: next.to });
+  assert.equal((await executeSingleStep({ step: walkStep("safe-bank", 0, -1), world, bot, ledger })).kind, "exhausted");
+});
+
 /**
  * A break followed by a move. Each row is one stance the bot may be in when
  * the world confirms the break, and whether the executor must settle the body

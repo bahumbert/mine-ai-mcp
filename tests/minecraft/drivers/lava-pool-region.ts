@@ -50,8 +50,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       context.bot.chat(`/fill ${params.gateMin.join(" ")} ${params.gateMax.join(" ")} minecraft:air replace minecraft:stone`);
     }
   };
-  // The burn lasts from the last contact with lava: the wait before `navigate` counts its bound from here. In 11 of 30 green runs the bot went back into the pool
-  // about 12 s after its escape (the step removed under it, or beside it), a second contact that restarts the burn: `lavaTicksAfterEscape` shows it in the detail, never hides it.
+  // The burn lasts from the last contact with lava: the wait before `navigate` counts its bound from here. Lava after the escape is a bug, not a thing to show: the cleanup
+  // dug the step while the body's footprint was on it (11 of 30 runs fell back into the pool before plan 2026-11-15-p4-34-cleanup-footprint T1), so the run fails on it.
   let lastInLava = burnStartNow(context.bot);
   let escaped = false;
   let lavaTicksAfterEscape = 0;
@@ -71,10 +71,11 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     while (pendingLifeSavingPlacements(context.bot).length > 0 && monotonicNow() < deadline) await delay(50);
     const cells = [...seen.values()];
     const removed = cells.length > 0 && pendingLifeSavingPlacements(context.bot).length === 0 && await serverRemoved(context, cells);
-    if (!removed) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, pending: pendingLifeSavingPlacements(context.bot) }) };
+    if (!removed) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, pending: pendingLifeSavingPlacements(context.bot), lavaTicksAfterEscape }) };
     // The bot still burns after the pool and the fire reflex claims the body again while it does: a `navigate` on a claim is refused `ACTION_BUSY` (two reds of 5, the claim 18 and 27 ms old).
     const bodyFree = await waitUntilBodyFree(context, lastInLava);
     if (!bodyFree.freed) return { status: "failed", detail: JSON.stringify({ escape, lavaTicksAfterEscape, bodyFree }) };
+    if (lavaTicksAfterEscape > 0) return { status: "failed", detail: JSON.stringify({ escape, placed: cells, lavaTicksAfterEscape, why: "the bot touched lava again after its escape" }) };
     const [x, y, z] = params.next;
     const next = await context.call("navigate", { x, y, z, range: 0, dig: false, scaffold: false });
     return { status: next.result.status === "succeeded" ? "succeeded" : "failed", detail: JSON.stringify({ escape, placed: cells, serverRemoved: removed, lavaTicksAfterEscape, bodyFree, next: next.result.status }) };

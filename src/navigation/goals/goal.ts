@@ -34,8 +34,13 @@ export type ResolvedGoal =
       heuristic(node: PlanningNode): number;
       /** Search supplies predicted edits; arrival supplies the observed world. */
       isSatisfied(node: PlanningNode, world: WorldView): boolean;
-      /** Work that completes this goal from a candidate stance, priced alongside travel. */
-      finish?(state: PlanningState, context: GenerationContext, digContext: DigContext): GeneratedMovement | null;
+      /** Work priced alongside travel; only the physical search root receives an actual pose. */
+      finish?(
+        state: PlanningState,
+        context: GenerationContext,
+        digContext: DigContext,
+        actualStart?: NavigationObservation,
+      ): GeneratedMovement | null;
     }
   | { readonly kind: "invalid"; readonly observation: string };
 

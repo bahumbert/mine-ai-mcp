@@ -20,7 +20,7 @@ import type { NavigationObservation, Position3, WorldView } from "./world/world.
 export type { MovementExecution } from "./execution/movement-controller.js";
 
 export interface EffectHandle {
-  readonly completion: Promise<{ kind: "accepted" } | { kind: "failed"; observation: string }>;
+  readonly completion: Promise<{ kind: "accepted" } | { kind: "failed"; observation: string; readonly cause?: "support" }>;
   readonly issued: boolean;
   cancel(): void;
 }

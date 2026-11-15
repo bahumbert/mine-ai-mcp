@@ -17,6 +17,8 @@ import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
  * a second contact and the burn restarts there (`lava-pool-region.ts` records it). The plan's 340 ticks (lava's 300-tick burn, facts `fire-lava-escape.md`, plus 40)
  * left 2 ticks over the worst run; 400 is the worst run plus the 19 ticks the world age can be behind (`ContractSubject.serverTicks`) plus a margin of 43.
  * A fire block's burn is unmeasured and takes the same bound.
+ * The 400 ticks stay after plan 2026-11-15-p4-34-cleanup-footprint T1: they cover the 300-tick burn plus a margin; the second contact with lava that stretched the
+ * worst run to 338 ticks was the cleanup digging the step under the body, now a bug the driver fails on. No change without new numbers.
  */
 export const BODY_FREE_BOUND_TICKS = 400;
 /**

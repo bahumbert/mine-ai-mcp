@@ -84,27 +84,29 @@ begin
   ServerPage := CreateCustomPage(EndpointPage.ID, 'Minecraft server', 'Which Minecraft server should the bots join?');
   ServerNoneRadio := AddRadio(ServerPage, 'No server for now (I will set one in settings.json)', 0);
   ServerLocalRadio := AddRadio(ServerPage, 'Install a Minecraft server on this PC (only this PC can join, by default)', 24);
-  // The program of the local server, indented under its radio: Paper first and checked, the text of each under its radio.
-  // 42 to 170: the Paper text takes up to four lines (64), the vanilla text two (26); every row below is that height further down.
+  // The program of the local server, indented under its radio: vanilla first, Paper second and checked (owner 2026-11-15), the
+  // text of each under its radio. 42 to 138: room for two lines of each text, 26 for vanilla's, 32 for Paper's (26 cut its
+  // second line on the T14 walk); every row below is that height further down.
+  // Inno does not scroll a custom page: the modern wizard's surface ends near row 305 (T14 walk, 2026-11-15).
   ServerProgramPanel := TPanel.Create(ServerPage);
   ServerProgramPanel.Parent := ServerPage.Surface;
   ServerProgramPanel.BevelOuter := bvNone;
   ServerProgramPanel.Left := ScaleX(16);
   ServerProgramPanel.Top := ScaleY(42);
   ServerProgramPanel.Width := ServerPage.SurfaceWidth - ScaleX(16);
-  ServerProgramPanel.Height := ScaleY(128);
-  ServerPaperRadio := AddProgramRadio(ServerProgramPanel, ServerPage, 'Paper (recommended)',
-    'The same game, run by a faster server program. With many companions spread over the world it keeps the game close to full speed (about 20 ticks a second in our test with 20 companions at work, where the standard server fell behind three to four times as often). What changes: animals and monsters far from every player move less.', 0, 64);
+  ServerProgramPanel.Height := ScaleY(96);
   ServerVanillaRadio := AddProgramRadio(ServerProgramPanel, ServerPage, 'Vanilla (Mojang''s own server)',
-    'The standard server program. It may slow down with many companions.', 84, 26);
+    'The standard server program. It may slow down with many companions.', 0, 26);
+  ServerPaperRadio := AddProgramRadio(ServerProgramPanel, ServerPage, 'Paper (recommended)',
+    'The same game, run by a faster server program. The better choice if you plan to run many companions (more than 5, for example). Animals and monsters far from every player move less.', 46, 32);
   ServerPaperRadio.Checked := True;
-  ServerRemoteRadio := AddRadio(ServerPage, 'Use an existing server', 172);
+  ServerRemoteRadio := AddRadio(ServerPage, 'Use an existing server', 140);
   PortLeft := (ServerPage.SurfaceWidth * 3) div 4;
-  AddText(ServerPage, 'Address', 196, 14);
-  ServerHostEdit := AddEdit(ServerPage, 210, 0, PortLeft - ScaleX(8));
-  ServerPortEdit := AddEdit(ServerPage, 210, PortLeft, ServerPage.SurfaceWidth - PortLeft);
+  AddText(ServerPage, 'Address', 164, 14);
+  ServerHostEdit := AddEdit(ServerPage, 178, 0, PortLeft - ScaleX(8));
+  ServerPortEdit := AddEdit(ServerPage, 178, PortLeft, ServerPage.SurfaceWidth - PortLeft);
   ServerPortEdit.Text := IntToStr(DEFAULT_SERVER_PORT);
-  AddText(ServerPage, 'An existing server must be vanilla or Paper Minecraft 1.21.4 with online-mode=false (the bots join without a Minecraft account). Mine AI checks it before starting any bot.', 238, 44);
+  AddText(ServerPage, 'An existing server must be vanilla or Paper Minecraft 1.21.4 with online-mode=false (the bots join without a Minecraft account). Mine AI checks it before starting any bot.', 206, 44);
   ServerNoneRadio.Checked := True;
   ServerNoneRadio.OnClick := @ServerChoiceChanged;
   ServerLocalRadio.OnClick := @ServerChoiceChanged;
@@ -112,6 +114,6 @@ begin
   ServerPaperRadio.OnClick := @ServerChoiceChanged;
   ServerVanillaRadio.OnClick := @ServerChoiceChanged;
   // What a local server downloads and where, filled by ShowServerDownloadText once the data folder is known.
-  ServerDownloadText := AddText(ServerPage, '', 284, 44);
+  ServerDownloadText := AddText(ServerPage, '', 252, 44);
   ServerChoiceChanged(nil);
 end;

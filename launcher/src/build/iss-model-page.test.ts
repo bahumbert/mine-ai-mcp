@@ -31,11 +31,23 @@ test("`install disk` is run by the model page's disk text only, after `install g
   assert.ok(gpu.indexOf("'install gpu'") >= 0 && gpu.indexOf("ShowDiskSpace()") > gpu.indexOf("'install gpu'"), "the disk text comes after the GPU text");
   assert.match(gpu, /if not WizardSilent then\s+ShowDiskSpace\(\);/u);
   const disk = functionBody("ShowDiskSpace");
-  assert.match(disk, /DiskStatus\.Caption := 'Checking disk space\.\.\.'/u);
+  assert.match(disk, /DiskStatus\.Text := 'Checking disk space\.\.\.'/u);
+  assert.match(disk, /Args := 'install disk --server-program paper';/u);
   assert.match(disk, /if not ModelLocalRadio\.Enabled then\s+Args := Args \+ ' --no-model'/u);
-  assert.match(disk, /JsonString\(Json, 'detail'\)/u);
+  assert.match(disk, /DiskStatus\.Text := JsonString\(Json, 'detail'\) \+ #13#10 \+ 'Server disk estimate includes Paper, the recommended local server\. You choose the server on a later page\. A fresh vanilla server downloads less; existing server files are kept\.'/u);
   // A run that failed shows nothing.
-  assert.match(disk, /else\s+DiskStatus\.Caption := '';/u);
+  assert.match(disk, /else\s+DiskStatus\.Text := '';/u);
+  assert.match(functionBody("SwitchToRemoteAfterOllama"), /DiskStatus\.Text := '';/u);
+  assert.doesNotMatch(code, /DiskStatus\.Caption/u);
+  assert.match(doc, /install disk --server-program paper\|vanilla[\s\S]*saved[\s\S]*never saves[\s\S]*downloads[\s\S]*EULA/u);
+});
+
+test("the disk report is a keyboard-accessible scrolling memo in the same model-page footprint", () => {
+  assert.match(code, /DiskStatus: TNewMemo;/u);
+  const page = functionBody("CreateModelPage");
+  for (const assignment of ["TNewMemo.Create(WizardForm)", "Parent := ModelPage.Surface", "Top := ScaleY(48)", "Height := ScaleY(60)", "Width := ModelPage.SurfaceWidth", "ReadOnly := True", "WordWrap := True", "ScrollBars := ssVertical", "TabStop := True"]) {
+    assert.ok(page.includes(`DiskStatus${assignment.startsWith("TNewMemo") ? " := " : "."}${assignment};`), assignment);
+  }
 });
 
 // T11 (owner 2026-11-06): the disk figures count the downloads and installs only; the player is told what they do not count.

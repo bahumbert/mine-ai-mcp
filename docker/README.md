@@ -36,7 +36,7 @@ docker compose build
 
 This builds from your checkout, including uncommitted changes, which is what you
 want while developing. The build context is an allow-list ([.dockerignore](../.dockerignore)): only `src/`,
-`docker/`, the package manifest and lockfile, the tsconfigs, `README.md`, `LICENSE` and four files of the Paper server
+`docker/`, the package manifest and lockfile, the dependency patches of `patches/`, the tsconfigs, `README.md`, `LICENSE` and four files of the Paper server
 (`packaging/manifest.json`, `packaging/paper-settings.json`, `launcher/src/install/paper-settings.ts` and
 `launcher/src/install/paper-settings-cli.ts`) reach the image, so a new top-level path the image needs must be added
 there.

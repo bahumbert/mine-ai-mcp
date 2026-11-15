@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import { droppedItemName } from "../../../world/item-pickup.js";
 import { findLoadedBlockPositions } from "../../../world/loaded-block-scan.js";
+import { navigationFeet } from "../../world/block-geometry.js";
 import { standsOnBlock } from "./target-safety.js";
 import { scanTargets, WEIGHED_SCAN_LIMIT } from "./target-weighing.js";
 import type { MineBlockTarget, MineRequest, MineScan } from "./mine-process.js";
@@ -48,10 +49,13 @@ export function scanMineTargets(bot: Bot, request: MineRequest, blacklist: MineB
       if (decision.underWater) underWaterRejections += 1;
       continue;
     }
-    // The block under the bot's feet stays a target; only its top cell stops being a stance to work it from.
+    // Dependency is temporary: a safe-bank refresh makes these stances available again (2026-11-15).
     const excludedStances = new Set(blacklist.blockStances.get(key));
     for (const stance of decision.drained?.wetStances ?? []) excludedStances.add(cellKey(stance));
-    if (standsOnBlock(bot, block.position)) excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
+    if (standsOnBlock(bot, block.position)) {
+      excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
+      excludedStances.add(cellKey(navigationFeet(feet, bot.entity.onGround)));
+    }
     blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances,
       ...(decision.drained && { drained: true as const }) });
     if (!request.targetCost && blocks.length === MAX_MINE_TARGETS) break;

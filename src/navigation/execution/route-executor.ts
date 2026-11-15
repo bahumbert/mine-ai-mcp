@@ -23,6 +23,7 @@ import {
   type PlannedOperation,
   type PlannedStep,
   type RoutePlan,
+  type BlockMatcher,
   airMatcher,
   stateMatcher,
 } from "../movements/movement.js";
@@ -46,6 +47,23 @@ const MINIMUM_CONFIRMATION_MS = 5_000;
 /** The longest the body can take to dig a break operation from its state now (0 for any other operation, an unloaded block or a bot that cannot tell). */
 function longestDigTime(bot: NavigationBot, operation: PlannedOperation): number {
   return operation.kind === "break" ? (bot.longestBreakDurationMs?.(operation) ?? 0) : 0;
+}
+
+/** Track a whole activated passage or the single mutation and its falling column. */
+function mutationTargets(world: WorldView, step: PlannedStep, operation: Exclude<PlannedOperation, { kind: "move" }>, position: BlockPosition, before: BlockMatcher, after: BlockMatcher) {
+  const activationGroup = operation.kind === "activate"
+    ? activationGroupAt(world.blockAt(position.x, position.y, position.z), position)
+    : null;
+  if (operation.kind === "activate" && activationGroup) return step.effects.flatMap((effect) => {
+    if (effect.kind !== "activate") return [];
+    return activationGroupAt(world.blockAt(effect.position.x, effect.position.y, effect.position.z), effect.position) === activationGroup
+      ? [{ position: effect.position, before: stateMatcher(effect.stateId), after }]
+      : [];
+  });
+  return [{
+    position, before, after,
+    ...(operation.kind === "break" && operation.brings.length > 0 && { owned: [position, ...operation.brings] }),
+  }];
 }
 
 export type RouteExecutionResult =
@@ -368,32 +386,7 @@ export class RouteExecutor {
           ? stateMatcher(operation.placement.stateId)
           : operation.after;
     const world = this.request.context.world;
-    const activationGroup =
-      operation.kind === "activate"
-        ? activationGroupAt(world.blockAt(position.x, position.y, position.z), position)
-        : null;
-    const targets =
-      operation.kind === "activate" && activationGroup
-        ? step.effects.flatMap((effect) => {
-            if (effect.kind !== "activate") return [];
-            return activationGroupAt(
-              world.blockAt(effect.position.x, effect.position.y, effect.position.z),
-              effect.position,
-            ) === activationGroup
-              ? [{ position: effect.position, before: stateMatcher(effect.stateId), after }]
-              : [];
-          })
-        : [
-            {
-              position,
-              before,
-              after,
-              // A break that brings a falling column down owns the column's
-              // cells until it is done; see `Expectation.owned`.
-              ...(operation.kind === "break" &&
-                operation.brings.length > 0 && { owned: [position, ...operation.brings] }),
-            },
-          ];
+    const targets = mutationTargets(world, step, operation, position, before, after);
     // Each brought block takes a fall and a second swing beyond the dig time.
     const settling = operation.kind === "break" ? operation.brings.length * 3_000 : 0;
     const { bot } = this.request.context;
@@ -416,6 +409,7 @@ export class RouteExecutor {
     if (result.kind === "cancelled" || result.kind === "invalidated") return result;
     const failed = { kind: operation.kind, position };
     if (result.kind === "effect_failed") {
+      if (result.cause === "support") return { kind: "invalidated" };
       return {
         kind: "failed",
         failure: { kind: "operation_failed", stepId: step.id, phase, observation: result.observation, operation: failed },

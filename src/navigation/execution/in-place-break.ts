@@ -14,26 +14,22 @@ import { prepareExcavation } from "../movements/excavation.js";
 export interface BreakBlockInPlaceOptions {
   readonly movements: MovementPolicy;
   readonly position: BlockPosition;
+  readonly retainSupport?: boolean;
   readonly signal?: AbortSignal;
   /** Observe the tool of a committed dig immediately before its physical effect starts. */
   readonly onToolSelected?: (itemType: number | null) => void;
 }
 
 export type BreakBlockInPlaceResult =
-  { readonly status: "broken" } | { readonly status: "failed"; readonly reason: string; readonly cause?: "policy" };
+  { readonly status: "broken" } | { readonly status: "failed"; readonly reason: string; readonly cause?: "policy" | "support" };
 
 export type BreakBlockInPlace = (options: BreakBlockInPlaceOptions) => Promise<BreakBlockInPlaceResult>;
 
-export async function breakBlockInPlace(
+/** Admit water excavation only from a live still-water stance, preserving all other policy refusals. */
+function inPlaceExcavationPolicy(
   dependencies: { readonly world: WorldView; readonly bot: NavigationBot },
-  options: BreakBlockInPlaceOptions,
-): Promise<BreakBlockInPlaceResult> {
-  options.signal?.throwIfAborted();
-  const observed = dependencies.world.blockAt(options.position.x, options.position.y, options.position.z);
-  if (observed.kind !== "loaded") return { status: "failed", reason: "The block is not loaded." };
-  const observation = dependencies.bot.observe();
-  const feet = observation.position;
-  const head = dependencies.world.blockAt(Math.floor(feet.x), Math.floor(feet.y + 1.62), Math.floor(feet.z));
+  movements: MovementPolicy,
+): MovementPolicy {
   const waterWorkWorld: WorldView = {
     get revision() { return dependencies.world.revision; },
     subscribe: (listener) => dependencies.world.subscribe(listener),
@@ -48,10 +44,10 @@ export async function breakBlockInPlace(
         : block;
     },
   };
-  const policy: MovementPolicy = {
-    ...options.movements,
+  return {
+    ...movements,
     evaluateBreak(block, position, world) {
-      const evaluation = options.movements.evaluateBreak(block, position, world);
+      const evaluation = movements.evaluateBreak(block, position, world);
       if (evaluation.decision.kind !== "prohibited" || evaluation.decision.cause !== "opens_into_liquid") return evaluation;
       const current = dependencies.bot.observe();
       const standing = {
@@ -60,9 +56,23 @@ export async function breakBlockInPlace(
         z: Math.floor(current.position.z),
       };
       if (!waterMiningStance((x, y, z) => world.blockAt(x, y, z), standing, current.stance === "supported")) return evaluation;
-      return options.movements.evaluateBreak(block, position, waterWorkWorld);
+      return movements.evaluateBreak(block, position, waterWorkWorld);
     },
   };
+}
+
+/** Execute every prepared column dig from the current stance under the same support requirement. */
+export async function breakBlockInPlace(
+  dependencies: { readonly world: WorldView; readonly bot: NavigationBot },
+  options: BreakBlockInPlaceOptions,
+): Promise<BreakBlockInPlaceResult> {
+  options.signal?.throwIfAborted();
+  const observed = dependencies.world.blockAt(options.position.x, options.position.y, options.position.z);
+  if (observed.kind !== "loaded") return { status: "failed", reason: "The block is not loaded." };
+  const observation = dependencies.bot.observe();
+  const feet = observation.position;
+  const head = dependencies.world.blockAt(Math.floor(feet.x), Math.floor(feet.y + 1.62), Math.floor(feet.z));
+  const policy = inPlaceExcavationPolicy(dependencies, options.movements);
   const excavation = prepareExcavation({
     world: dependencies.world,
     position: options.position,
@@ -96,6 +106,7 @@ export async function breakBlockInPlace(
           expectedStateId: dig.stateId,
           toolType: dig.toolType,
           brings: dig.brings,
+          ...(options.retainSupport !== undefined && { retainSupport: options.retainSupport }),
         },
         { runId: "in-place", planId: "in-place", stepId: `break:${blockLabel(dig.position)}`, attempt: 0 },
         controller.signal,
@@ -112,7 +123,9 @@ export async function breakBlockInPlace(
         controller.signal.removeEventListener("abort", cancel);
       }
       options.signal?.throwIfAborted();
-      if (completion.kind === "failed") return { status: "failed", reason: completion.observation };
+      if (completion.kind === "failed") return {
+        status: "failed", reason: completion.observation, ...(completion.cause && { cause: completion.cause }),
+      };
       const after = dependencies.world.blockAt(dig.position.x, dig.position.y, dig.position.z);
       if (after.kind !== "loaded" || after.stateId === dig.stateId) {
         return { status: "failed", reason: "The excavation's block removal was not observed." };

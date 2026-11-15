@@ -630,8 +630,10 @@ export class NavigationRun {
     // model blocks only, so without the fingerprint a hostile that has walked
     // two blocks would be answered as a repeat of the question it changed.
     const field = this.context.stepField?.() ?? null;
+    // Actual-root support can change within one feet cell (2026-11-15).
     const identity =
       `${goal.revision}|${blockKey(node.feet)}|${observation.worldRevision}|${observation.resourceRevision}` +
+      (ahead ? "" : `|pose:${observation.position.x},${observation.position.y},${observation.position.z}:${observation.stance}`) +
       `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|escape:${this.#relaxedRules.length}|field:${field?.fingerprint ?? "none"}`;
     if (this.#searchIdentities.has(identity))
       return {
@@ -720,6 +722,13 @@ export class NavigationRun {
   ): Promise<SearchAnswer> {
     const searchId = `${this.context.runId}:search:${++this.#counters.searches}`;
     const searchStart = this.context.bot.observe();
+    if (!ahead) {
+      if (!samePosition(node.feet, navigationFeet(searchStart.position, searchStart.stance === "supported")))
+        return { kind: "start_changed" };
+      const resolved = this.#resolveGoal(searchStart);
+      if (resolved.kind === "invalid") return { kind: "goal_invalid", failure: resolved.failure };
+      goal = resolved.goal;
+    }
     if (!ahead) this.#planningStall.begin(searchStart);
     if (reason === "segment_continuation" || reason === "arrival_continuation" || reason === "alternate_arrival")
       this.#counters.continuations += 1;
@@ -731,13 +740,14 @@ export class NavigationRun {
       id: searchId,
       start: { node: { ...node, overlayId: overlay.identity }, overlay },
       goal,
+      observedStart: ahead ? undefined : searchStart,
       context: {
         world: this.context.world,
         catalogue: this.context.catalogue,
         policy: this.#policy,
         // Read fresh: food drains over a long run, and a route planned while
         // sprinting is not executable once it stops being available.
-        player: this.context.bot.observe().player,
+        player: searchStart.player,
         protectedFeet: this.#visitedFeet,
         stepField: field,
       },

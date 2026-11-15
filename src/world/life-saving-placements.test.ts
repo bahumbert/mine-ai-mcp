@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createNavigationRuntime } from "../navigation/index.js";
+import type { Goal } from "../navigation/goals/goal.js";
+import { MemoryWorld } from "../navigation/world/memory-world.js";
+import { observation } from "../test-support/navigation.js";
+import { footprintStandsOnCell } from "./player-physics.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
 import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { confirmFakeDigs } from "../test-support/life-saving-placements.js";
@@ -247,3 +251,121 @@ for (const danger of ["lava", "fire", "lethal_burn"] as const) {
     assert.deepEqual(await clock.settle(remove(bot), 1_000), { removed: [CELL], left: [] });
   });
 }
+
+// The step a bot escaped onto: cell (1,64,0), the feet at y 65 on its top, an open drop beside it. The body is carried
+// by the cell's column unless a neighbouring column the footprint overlaps holds a block at the cell's height.
+// Arrival x 2.19 is the probe's nearest end of the approach (cell x + 1.19, run `uadb` of rc-lava/probe-15runs.log).
+const STEP = new Vec3(1, 64, 0);
+const BANKS = { "2,64,0": "stone", "1,64,1": "stone", "2,64,1": "stone", "3,64,0": "stone" } as const;
+
+function stepScene(
+  data: ReturnType<typeof temporaryBotData>,
+  feet: { x: number; z: number },
+  cells: Record<string, "stone" | "lava"> = BANKS,
+  arrival?: { x: number; z: number },
+) {
+  const fixture = createFakeBot({
+    username: "Ayla", position: { x: feet.x, y: STEP.y + 1, z: feet.z }, groundY: 50, gameMode: "creative",
+    cells: { "1,64,0": "cobblestone", ...cells }, clock: createFakeClock({ mode: "mocked" }), simulatePhysics: false,
+  });
+  setProtectedRegionsProvider(fixture.bot, () => [REGION]);
+  confirmFakeDigs(fixture);
+  const goals: Goal[] = [];
+  placements.setLifeSavingRemovalContext(fixture.bot, { data, navigate: async ({ goal }) => {
+    goals.push(goal);
+    if (arrival) fixture.bot.entity.position.set(arrival.x, STEP.y + 1, arrival.z);
+    return { status: "completed", elapsedMs: 0 };
+  } });
+  placements.recordLifeSavingPlacement(fixture.bot, STEP, "block");
+  return { ...fixture, goals };
+}
+
+const nodeAt = (x: number, y: number, z: number) => ({ feet: { x, y, z }, remainingScaffolds: 0, overlayId: "" });
+
+for (const [name, feet, arrival, approaches] of [
+  // The geometry of every footprint position is in `player-physics.test.ts`; here the cleanup's walk-then-dig order.
+  ["its centre over the open column beside the step", { x: STEP.x - 0.15, z: 0.5 }, { x: 2.19, z: 0.5 }, true],
+  ["its centre over the bank", { x: STEP.x + 1.5, z: 0.5 }, { x: 2.19, z: 0.5 }, false],
+] as const) {
+  test(`the step is dug only once the body is off it: ${name} ${approaches ? "walks first" : "digs in place"}`, async () => {
+    using data = temporaryBotData();
+    const { bot, world, clock, goals } = stepScene(data, feet, BANKS, arrival);
+    using _timers = clock.install();
+    const result = await clock.settle(remove(bot), 10_000);
+    assert.deepEqual(result, { removed: [STEP], left: [] });
+    assert.equal(goals.length, approaches ? 1 : 0);
+    assert.equal(world.blockAt(STEP)?.name, "air");
+    if (approaches) assert.deepEqual([bot.entity.position.x, bot.entity.position.z], [arrival.x, arrival.z], "the dig came after the walk");
+  });
+}
+
+test("the goal of the walk refuses the step's own node and accepts a node on the bank within reach", async () => {
+  using data = temporaryBotData();
+  const { bot, clock, goals } = stepScene(data, { x: STEP.x - 0.15, z: 0.5 }, BANKS, { x: 2.19, z: 0.5 });
+  using _timers = clock.install();
+  await clock.settle(remove(bot), 10_000);
+  const goal = goals[0]!.resolve(observation(0, STEP.y + 1, 0));
+  assert.equal(goal.kind, "active");
+  if (goal.kind !== "active") return;
+  const world = new MemoryWorld();
+  assert.equal(goal.isSatisfied(nodeAt(1, 65, 0), world), false, "the step's own node");
+  assert.equal(goal.isSatisfied(nodeAt(2, 65, 0), world), true, "a node on the bank");
+  // The node the body is in is judged where the body is: the centre of node (0,65,0) is off the step, the footprint is on it.
+  const atEdge = goals[0]!.resolve({ ...observation(0, STEP.y + 1, 0), position: { x: STEP.x - 0.15, y: STEP.y + 1, z: 0.5 } });
+  if (atEdge.kind !== "active") throw new Error("expected an active goal");
+  assert.equal(atEdge.isSatisfied(nodeAt(0, 65, 0), world), false, "the start node of a body on the step's edge");
+});
+
+test("a failed walk leaves the body on the step, the step standing in the ledger, and the next safe moment finishes it", async () => {
+  using data = temporaryBotData();
+  const { bot, world, clock } = stepScene(data, { x: STEP.x - 0.15, z: 0.5 });
+  using _timers = clock.install();
+  placements.setLifeSavingRemovalContext(bot, { data, navigate: async () => ({ status: "stopped", reason: "No route", elapsedMs: 0 }) });
+  const result = await clock.settle(remove(bot), 10_000);
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.left.length, 1);
+  assert.match(result.left[0]!.why, /no route to the placement/iu);
+  assert.equal(world.blockAt(STEP)?.name, "cobblestone", "nothing was dug under the body");
+  assert.equal(placements.pendingLifeSavingPlacements(bot).length, 1);
+  placements.setLifeSavingRemovalContext(bot, { data, navigate: async () => {
+    bot.entity.position.set(2.19, STEP.y + 1, 0.5);
+    return { status: "completed", elapsedMs: 0 };
+  } });
+  assert.deepEqual(await clock.settle(remove(bot), 10_000), { removed: [STEP], left: [] });
+});
+
+test("a footprint over the step's edge and a solid neighbour digs with no walk; an air neighbour walks first", async () => {
+  using data = temporaryBotData();
+  const solid = stepScene(data, { x: STEP.x + 1.19, z: 0.5 });
+  {
+    using _timers = solid.clock.install();
+    assert.deepEqual(await solid.clock.settle(remove(solid.bot), 10_000), { removed: [STEP], left: [] });
+    assert.equal(solid.goals.length, 0);
+  }
+  // Nothing beside the step at its height: the step is the only floor under the footprint.
+  const open = stepScene(data, { x: STEP.x + 1.19, z: 0.5 }, { "3,64,0": "stone" }, { x: 3.5, z: 0.5 });
+  using _timers = open.clock.install();
+  assert.deepEqual(await open.clock.settle(remove(open.bot), 10_000), { removed: [STEP], left: [] });
+  assert.equal(open.goals.length, 1);
+});
+
+test("a short real navigation off the step's edge ends where the predicate accepts and removes the step", async () => {
+  const fixture = createFakeBot({
+    username: "Ayla", position: { x: STEP.x - 0.15, y: STEP.y + 1, z: 0.5 }, groundY: 50, gameMode: "creative",
+    cells: { "1,64,0": "cobblestone", "0,64,0": "lava", ...BANKS }, clock: createFakeClock({ mode: "mocked" }), simulatePhysics: true,
+  });
+  const { bot, world, clock } = fixture;
+  setProtectedRegionsProvider(bot, () => [REGION]);
+  confirmFakeDigs(fixture);
+  using data = temporaryBotData();
+  using _timers = clock.install();
+  await using navigation = createNavigationRuntime(bot);
+  placements.setLifeSavingRemovalContext(bot, { data, navigate: navigation.navigate });
+  placements.recordLifeSavingPlacement(bot, STEP, "block");
+  const result = await clock.settle(remove(bot), 10_000);
+  assert.deepEqual(result, { removed: [STEP], left: [] });
+  assert.equal(world.blockAt(STEP)?.name, "air");
+  const { position } = bot.entity;
+  assert.equal(position.y, STEP.y + 1, `the body stayed on the bank, at ${position}`);
+  assert.equal(footprintStandsOnCell(position, STEP, () => false), false, `the body left the step's column, at ${position}`);
+});

@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { code, doc, functionBody, iss, issIncludes, issPath } from "./iss-test-support.ts";
 
-const PAPER_TEXT = "The same game, run by a faster server program. With many companions spread over the world it keeps the game close to full speed (about 20 ticks a second in our test with 20 companions at work, where the standard server fell behind three to four times as often). What changes: animals and monsters far from every player move less.";
+const PAPER_TEXT = "The same game, run by a faster server program. The better choice if you plan to run many companions (more than 5, for example). Animals and monsters far from every player move less.";
 const VANILLA_TEXT = "The standard server program. It may slow down with many companions.";
 const REMOTE_WORDS = "vanilla or Paper Minecraft 1.21.4 with online-mode=false";
 
@@ -46,6 +46,20 @@ test("the program radios and their texts carry the owner's words verbatim", () =
   assert.ok(code.includes("'Vanilla (Mojang''s own server)'"));
   assert.ok(code.includes(`'${pascal(PAPER_TEXT)}'`), "the Paper text is not the one of the plan");
   assert.ok(code.includes(`'${pascal(VANILLA_TEXT)}'`), "the vanilla text is not the one of the plan");
+});
+
+test("vanilla is the first program radio and Paper the second, still the one checked (owner 2026-11-15)", () => {
+  const page = functionBody("CreateServerPage");
+  const vanilla = /ServerVanillaRadio := AddProgramRadio\(ServerProgramPanel, ServerPage, '[^\n]*',\s+'[^\n]*', (\d+), (\d+)\);/u.exec(page);
+  const paper = /ServerPaperRadio := AddProgramRadio\(ServerProgramPanel, ServerPage, '[^\n]*',\s+'[^\n]*', (\d+), (\d+)\);/u.exec(page);
+  assert.ok(vanilla !== null && paper !== null, "a program radio is not placed with numbers");
+  assert.equal(Number(vanilla![1]), 0, "vanilla is not the first row of the panel");
+  assert.ok(Number(vanilla![1]) + 18 + Number(vanilla![2]) <= Number(paper![1]), "the Paper radio overlaps the vanilla text");
+  // Two lines of the Paper text need 32 rows: 26 cut its second line in half on the T14 walk (2026-11-15).
+  assert.ok(Number(paper![2]) >= 32, "the Paper text has no room for its two lines");
+  const panelHeight = Number(/ServerProgramPanel\.Height := ScaleY\((\d+)\);/u.exec(page)![1]);
+  assert.ok(Number(paper![1]) + 18 + Number(paper![2]) <= panelHeight, "the Paper text runs past the panel");
+  assert.match(page, /ServerPaperRadio\.Checked := True;/u);
 });
 
 test("a first install checks Paper, and a prefill without a settings file or a local server goes back to it", () => {
@@ -139,4 +153,7 @@ test("the server page's rows do not overlap: the panel under the local radio, th
   assert.ok(address + 14 <= edits, "the address edits overlap their label");
   assert.ok(edits + 23 <= Number(note![1]), "the remote note overlaps the address edits");
   assert.ok(Number(note![1]) + Number(note![2]) <= Number(download![1]), "the download line overlaps the remote note");
+  // Inno does not scroll a custom page: on the modern wizard the surface ended near row 305 (T14 walk, 2026-11-15, where a
+  // download line ending at row 328 lost its last one and a half lines).
+  assert.ok(Number(download![1]) + Number(download![2]) <= 300, "the download line runs past the page's surface (about 305 rows)");
 });

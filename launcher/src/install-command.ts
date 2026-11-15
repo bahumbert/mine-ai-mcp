@@ -1,6 +1,7 @@
 // `mine-ai install <step> [--accept-eula] [--dir <folder>] [--no-model] [--json <file>]`: the installer's way into the
 // install steps (spec D2, D3). `--dir` is for `install ollama` and `install disk`: the folder Ollama's setup installs
 // into when Ollama is missing. `--no-model` is for `install disk` only: the GPU verdict is remote, so no model line.
+// `install disk --server-program paper|vanilla` previews that program without changing settings.
 // `install endpoint-models [--url <url>] [--key <key> | --saved-key] --list <file>` writes the endpoint's model list.
 import { writeFileSync } from "node:fs";
 import { posix } from "node:path";
@@ -17,7 +18,7 @@ import { server } from "./install/server.ts";
 import { stepFailure, type InstallContext, type StepResult } from "./install/step.ts";
 import type { Manifest } from "./manifest.ts";
 import { ensureParentDir } from "./paths.ts";
-import { loadSettings } from "./settings.ts";
+import { loadSettings, SERVER_PROGRAMS, type ServerProgram } from "./settings.ts";
 
 export const INSTALL_STEP_NAMES = ["gpu", "disk", "ollama", "ollama-remove", "model", "model-remove", "java", "server", "endpoint-test", "endpoint-models"] as const;
 export type InstallStepName = (typeof INSTALL_STEP_NAMES)[number];
@@ -26,15 +27,15 @@ export type InstallStepName = (typeof INSTALL_STEP_NAMES)[number];
 type StepOutput = StepResult | DiskReport | { readonly ok: true; readonly detail: string; readonly report: GpuReport };
 /**
  * `dir`: the `--dir` folder, given to `ollama` and `disk` only; `noModel`: `--no-model`, `disk` only; `models`: the
- * `--url`, `--key`, `--saved-key` and `--list` options, `endpoint-models` only (any other step is refused them before it runs).
+ * `--url`, `--key`, `--saved-key` and `--list` options, `endpoint-models` only; `serverProgram`: the disk-only preview.
  */
-export type InstallSteps = Record<InstallStepName, (ctx: InstallContext, acceptEula: boolean, dir?: string, noModel?: boolean, models?: EndpointModelsOptions) => Promise<StepOutput>>;
+export type InstallSteps = Record<InstallStepName, (ctx: InstallContext, acceptEula: boolean, dir?: string, noModel?: boolean, models?: EndpointModelsOptions, serverProgram?: ServerProgram) => Promise<StepOutput>>;
 
 /** `install disk` with the dependencies `depsFor` gives (the real ones unless a test gives its own). */
 export const diskStep =
   (depsFor: (ctx: InstallContext) => DiskReportDeps = realDiskReportDeps): InstallSteps["disk"] =>
-  (ctx, _acceptEula, dir, noModel) =>
-    diskReport(ctx, { dir, noModel: noModel === true }, depsFor(ctx));
+  (ctx, _acceptEula, dir, noModel, _models, serverProgram) =>
+    diskReport(ctx, { dir, noModel: noModel === true, serverProgram }, depsFor(ctx));
 
 export const realInstallSteps: InstallSteps = {
   gpu: (ctx) => gpu(ctx),
@@ -81,6 +82,7 @@ interface InstallArguments {
   dir: string | undefined;
   noModel: boolean;
   models: EndpointModelsOptions | undefined;
+  serverProgram?: ServerProgram;
   json: string | undefined;
 }
 
@@ -109,16 +111,19 @@ function parseInstallArguments(args: readonly string[]): InstallArguments {
   const { values, positionals } = parseArgs({
     args: withKeyValueJoined(args),
     allowPositionals: true,
-    options: { "accept-eula": { type: "boolean" }, dir: { type: "string" }, "no-model": { type: "boolean" }, url: { type: "string" }, key: { type: "string" }, "saved-key": { type: "boolean" }, list: { type: "string" }, json: { type: "string" } },
+    options: { "accept-eula": { type: "boolean" }, dir: { type: "string" }, "no-model": { type: "boolean" }, "server-program": { type: "string" }, url: { type: "string" }, key: { type: "string" }, "saved-key": { type: "boolean" }, list: { type: "string" }, json: { type: "string" } },
   });
   const step = positionals[0];
   if (!INSTALL_STEP_NAMES.includes(step as InstallStepName)) throw new UsageError(`install needs one step: ${INSTALL_STEP_NAMES.join(", ")}.`);
   if (values.dir !== undefined && step !== "ollama" && step !== "disk") throw new UsageError(`--dir is for \`install ollama --dir <folder>\` and \`install disk --dir <folder>\` only; \`install ${step}\` does not take it.`);
   if (values["no-model"] === true && step !== "disk") throw new UsageError(`--no-model is for \`install disk --no-model\` only; \`install ${step}\` does not take it.`);
+  const serverProgram = values["server-program"];
+  if (serverProgram !== undefined && step !== "disk") throw new UsageError(`--server-program is for \`install disk\` only; \`install ${step}\` does not take it.`);
+  if (serverProgram !== undefined && !(SERVER_PROGRAMS as readonly string[]).includes(serverProgram)) throw new UsageError(`--server-program takes ${SERVER_PROGRAMS.join(" or ")}, not "${serverProgram}".`);
   const refused = ENDPOINT_MODELS_FLAGS.find((flag) => values[flag] !== undefined);
   if (refused !== undefined && step !== "endpoint-models") throw new UsageError(`--${refused} is for \`install endpoint-models\` only; \`install ${step}\` does not take it.`);
   const models = step === "endpoint-models" ? endpointModelsOptions(values) : undefined;
-  return { step: step as InstallStepName, acceptEula: values["accept-eula"] === true, dir: values.dir === undefined ? undefined : checkedFolder(values.dir), noModel: values["no-model"] === true, models, json: values.json };
+  return { step: step as InstallStepName, acceptEula: values["accept-eula"] === true, dir: values.dir === undefined ? undefined : checkedFolder(values.dir), noModel: values["no-model"] === true, models, serverProgram: serverProgram as ServerProgram | undefined, json: values.json };
 }
 
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\)/u;
@@ -134,11 +139,11 @@ function checkedFolder(dir: string): string {
   return ROOT_FOLDER.test(dir) ? dir : dir.replace(/[\\/]+$/u, "");
 }
 
-async function runStep({ step, acceptEula, dir, noModel, models }: InstallArguments, context: CliContext, steps: InstallSteps): Promise<StepOutput> {
+async function runStep({ step, acceptEula, dir, noModel, models, serverProgram }: InstallArguments, context: CliContext, steps: InstallSteps): Promise<StepOutput> {
   try {
     const manifest = context.loadManifest();
     const settings = loadSettings(context.root, manifest);
-    return await steps[step]({ manifest, settings, root: context.root, onProgress: progressPrinter(context.out) }, acceptEula, dir, noModel, models);
+    return await steps[step]({ manifest, settings, root: context.root, onProgress: progressPrinter(context.out) }, acceptEula, dir, noModel, models, serverProgram);
   } catch (error) {
     return stepFailure(error, "Run the installer again to resume: the steps that are done are not repeated. If it repeats, `mine-ai doctor` lists the last errors.");
   }
