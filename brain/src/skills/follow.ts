@@ -1,5 +1,5 @@
 // Following a player and walking up to one (follow_player, go_to_player).
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "../wall-timers.ts";
 import { elapsedSince, monotonicNow } from "../monotonic-clock.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
@@ -58,12 +58,12 @@ export async function follow(context: SkillContext, player: string, distance: nu
     if (step.kind === "lost") {
       unseen += 1;
       if (unseen >= FOLLOW_LOST_CHECKS) return { status: "failed", detail: `lost sight of ${player}` };
-      await sleep(FOLLOW_POLL_MS, undefined, { signal });
+      await sleepMs(FOLLOW_POLL_MS, signal);
       continue;
     }
     unseen = 0;
     if (step.kind === "hold") {
-      await sleep(FOLLOW_POLL_MS, undefined, { signal });
+      await sleepMs(FOLLOW_POLL_MS, signal);
       continue;
     }
     const target = step.target;
@@ -79,7 +79,7 @@ export async function follow(context: SkillContext, player: string, distance: nu
     if (outcome.status === "failed" && !outcome.preempted) {
       failures += 1;
       if (failures >= FOLLOW_MAX_FAILURES) return { status: "failed", detail: outcome.error ?? `cannot reach ${player}` };
-      await sleep(FOLLOW_POLL_MS, undefined, { signal });
+      await sleepMs(FOLLOW_POLL_MS, signal);
     } else {
       failures = 0;
     }

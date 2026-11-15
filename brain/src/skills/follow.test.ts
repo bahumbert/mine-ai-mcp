@@ -1,6 +1,6 @@
 // Tests of the follow_player skill: a follow ends after ten minutes of silence, in monotonic time.
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { stepSchema } from "../actions.ts";
 import { runStep } from "../skills.ts";
 import { FakeRuntime, steppedClocks } from "../testing.ts";
@@ -31,4 +31,28 @@ test("a follow of its own minutes ends after them in monotonic time, whatever th
   const result = await Promise.race([following, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 3_000))]);
   assert.notEqual(result, "hung");
   assert.match((result as { detail: string }).detail, /followed Tom for 2 minutes/u);
+});
+
+// Plan 2026-11-15-unit-suite-parallel S2: the hold between two polls is a wall timer a mocked clock reaches (`sleepMs`),
+// so the second status read comes when the test advances the clock, not after real seconds.
+test("a follow that holds beside its player polls again when the mocked clock passes its poll", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 1, y: 64, z: 0 } }] };
+  const status = t.mock.method(runtime, "status");
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const following = runStep({ skill: "follow_player", player: "Tom", distance: 3, minutes: 2 }, contextFor(runtime, { signal: controller.signal }));
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  await settle();
+  assert.equal(status.mock.callCount(), 1);
+  mock.timers.tick(749);
+  await settle();
+  assert.equal(status.mock.callCount(), 1, "the poll waits for its full 750 ms of mocked time");
+  mock.timers.tick(1);
+  await settle();
+  assert.equal(status.mock.callCount(), 2);
+  controller.abort();
+  assert.deepEqual(await following, { status: "stopped" });
 });

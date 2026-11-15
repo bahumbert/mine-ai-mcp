@@ -1,5 +1,5 @@
 // Shelter progress, roofing and the bounded return and climb after an interruption.
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "../wall-timers.ts";
 import type { ActOutcome, Body } from "../body.ts";
 import type { BotRuntime, Position, ProtectedArea } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
@@ -124,7 +124,7 @@ export function retryBusy(context: ShelterContext, act: ShelterAct): ShelterAct 
       if (!isBusy(result)) return result;
       if (await context.dayCame()) return result;
       context.alive?.();
-      await sleep(timingsOf(context).waitSliceMs, undefined, { signal: context.signal }).catch(() => undefined);
+      await sleepMs(timingsOf(context).waitSliceMs, context.signal).catch(() => undefined);
       if (await context.dayCame()) return result;
     }
   };
@@ -189,7 +189,7 @@ export async function finishShelter(context: ShelterContext, act: ShelterAct, st
   state.causes.push(climbError.slice(0, 80));
   if (!isInHole(position, state.spot)) return { status: "done", detail: `the shelter time ended; now at ${cellOf(position)}` };
   context.alive?.();
-  await sleep(timingsOf(context).waitSliceMs, undefined, { signal: context.signal }).catch(() => undefined);
+  await sleepMs(timingsOf(context).waitSliceMs, context.signal).catch(() => undefined);
   if (context.signal.aborted) return stopped;
   const second = await climbOut(context, act, state, { ...roof, placed: first.roofStill }, waitedMs);
   if (context.signal.aborted) return stopped;

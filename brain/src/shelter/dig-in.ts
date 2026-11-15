@@ -1,5 +1,5 @@
 // The shelter flow: walk to a spot, dig the hole, step into it, roof it, wait inside for the day, climb out.
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "../wall-timers.ts";
 import type { ActOutcome } from "../body.ts";
 import type { BotRuntime, BotSnapshot, Position } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
@@ -43,7 +43,7 @@ async function awaitLanding(context: ShelterContext, spot: ShelterSpot, depth: n
   for (;;) {
     if (Math.floor((await context.runtime.status()).position.y) <= spot.y - depth) return true;
     if (context.signal.aborted || performance.now() >= deadline) return false;
-    await sleep(landingPollMs, undefined, { signal: context.signal }).catch(() => undefined);
+    await sleepMs(landingPollMs, context.signal).catch(() => undefined);
   }
 }
 
@@ -116,7 +116,7 @@ async function waitForDay(context: ShelterContext, spot: ShelterSpot): Promise<{
     if (!isInHole(position, spot)) return { outcome: "left", now: position, waitedMs: now() - started };
     if (await context.dayCame()) return { outcome: "day", waitedMs: now() - started };
     context.alive?.();
-    await sleep(timingsOf(context).waitSliceMs, undefined, { signal: context.signal }).catch(() => undefined);
+    await sleepMs(timingsOf(context).waitSliceMs, context.signal).catch(() => undefined);
   }
 }
 
