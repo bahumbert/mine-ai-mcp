@@ -94,7 +94,7 @@ export async function runAdmittedTrial(env: TrialEnvironment, trial: PlacedTrial
     outcome: end.result.outcome, placement: entry.placement.kind, submissionCancelled: submission.abort.signal.aborted,
     startFailed: caught instanceof ServerStartFailed ? detail : null,
     diedBeforeSettle: diedAt !== undefined && (end.settledAt === undefined || diedAt <= end.settledAt) ? String(managed.died.reason) : null,
-    transportFailure: null, hitWallBound: end.hitWallBound, late: end.late === true,
+    transportFailure: end.result.transportFailure ?? null, hitWallBound: end.hitWallBound, late: end.late === true,
     harnessError: end.threw ?? (caught instanceof ServerStartFailed || caught instanceof FreshBodyRefused || caught instanceof ShiftRefused ? null : detail),
     phases: end.phases ? phasesLine(end.phases) : null, detail: end.result.error ?? end.result.goal.detail,
   });

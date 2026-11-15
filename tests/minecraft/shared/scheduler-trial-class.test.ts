@@ -40,6 +40,19 @@ test("a refused lane shift is product", async () => {
   assert.equal(summary.failed, 1);
 });
 
+test("a runner failure with an RCON transport failure is infrastructure", async () => {
+  const { handle, events } = customRun(new SchedulerRig(), { runTrial: async input => {
+    await input.onArranged();
+    return { scenario: "a", outcome: "fail", elapsedMs: 1, goal: { state: "failed", detail: "goal failed" },
+      goalText: "", transportFailure: "connection lost" };
+  } });
+  const summary = await handle.finished;
+  const event = events.find(event => event.type === "result");
+  assert.equal(event?.type === "result" && event.class, "infra");
+  assert.match(event?.type === "result" ? event.cause ?? "" : "", /^rcon: connection lost/u);
+  assert.deepEqual([summary.failed, summary.infra], [1, 1]);
+});
+
 test("a wall bound without a bench event is product, not cancelled", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();

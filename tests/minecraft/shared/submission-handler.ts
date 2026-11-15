@@ -1,15 +1,17 @@
 // One `submit` message: load its files, place each scenario, queue them, and stream the results back until the batch is done.
 import type { Scenario } from "mine-labs";
 import type { ScenarioServerConfig } from "./config.ts";
-import type { GameruleDefaultsCache } from "./gamerule-defaults.ts";
+import { ProbeFailed, type GameruleDefaultsCache } from "./gamerule-defaults.ts";
 import type { InPlace, ScenarioMirror, Snapshot } from "./mirror.ts";
 import { snapshotCwd } from "./mirror.ts";
 import { gameruleNamesOf, placeScenario } from "./placement.ts";
 import type { DaemonMessage, SubmitMessage } from "./protocol.ts";
 import { loadScenarioFiles } from "./scenario-files.ts";
 import type { Scheduler, SubmissionHandle } from "./scheduler.ts";
-import type { SubmissionEntry } from "./scheduler-types.ts";
+import type { SubmissionEntry, SubmissionEvent } from "./scheduler-types.ts";
+import { SUBMIT_FEATURES } from "./submit-args.ts";
 import { sourceRootOf } from "./source-root.ts";
+import { withTickRate } from "./tick-rate-variant.ts";
 
 export interface SubmissionHandlerDeps {
   readonly scheduler: Scheduler;
@@ -29,7 +31,19 @@ export interface RunningSubmission {
 
 /** The scenario's client also sees the submitter's MINE_AI_* variables; the YAML's own env wins, as it does over the process env in `mine-labs run`. */
 function withSubmitterEnv(scenario: Scenario, env: Readonly<Record<string, string>>): Scenario {
-  return { ...scenario, client: { ...scenario.client, env: { ...env, ...scenario.client.env } } };
+  const clientEnv = Object.fromEntries(Object.entries({ ...env, ...scenario.client.env }).filter(([name]) => !name.startsWith("MINE_AI_SUBMIT_")));
+  return { ...scenario, client: { ...scenario.client, env: clientEnv } };
+}
+
+function supportsClasses(message: SubmitMessage): boolean {
+  return (message.env[SUBMIT_FEATURES] ?? "").split(",").includes("classes");
+}
+
+/** Keep old clients' strict wire schema while conveying infrastructure failures as errors. */
+function resultForClient(event: SubmissionEvent, featured: boolean): DaemonMessage {
+  if (event.type !== "result" || featured) return event;
+  const { class: resultClass, cause, retried: _retried, ...legacy } = event;
+  return resultClass === "infra" ? { ...legacy, outcome: "error", error: `infra: ${cause ?? "unknown cause"}${legacy.error ? `; ${legacy.error}` : ""}` } : legacy;
 }
 
 function versionsOf(scenarios: readonly { readonly scenario: Scenario }[]): Map<string, Scenario[]> {
@@ -110,8 +124,21 @@ async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessa
     deps.send({ type: "done", runs: errors.length, passed: 0, failed: errors.length, cancelled: 0 });
     return;
   }
-  await readDefaults(deps, scenarios);
-  const placed = scenarios.map(({ id, scenario: loaded }) => {
+  const variants = message.tickRate === undefined ? scenarios : scenarios.map(entry => ({ ...entry, ...withTickRate(entry.scenario, message.tickRate!) }));
+  if (message.tickRate !== undefined) {
+    const kept = variants.filter(entry => "changed" in entry && !entry.changed);
+    deps.send({ type: "info", text: `tick rate ${message.tickRate}: ${variants.length - kept.length} scenarios at ${message.tickRate} ticks/s, ${kept.length} kept their own` + kept.map(entry => `\n  ${entry.id}: ${"reason" in entry ? entry.reason : ""}`).join("") });
+  }
+  try {
+    await readDefaults(deps, variants);
+  } catch (error) {
+    if (!(error instanceof ProbeFailed) || !supportsClasses(message)) throw error;
+    const count = variants.length * message.repeat;
+    deps.send({ type: "error", text: `bench: probe server for ${error.version} did not start: ${error.message}; ${count} trials not run` });
+    deps.send({ type: "done", runs: count + errors.length, passed: 0, failed: count + errors.length, infra: count, cancelled: 0 });
+    return;
+  }
+  const placed = variants.map(({ id, scenario: loaded }) => {
     const scenario = withSubmitterEnv(loaded, message.env);
     return { name: id, scenario, placement: placeScenario(scenario, deps.defaults.forVersion(scenario.minecraft.version)) };
   });
@@ -132,11 +159,12 @@ async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessa
     }
     const handle = deps.scheduler.submit({
       entries, repeat: message.repeat, maxLanes: message.lanes, lock: message.lock, hold: message.hold ?? false, outDir: message.out,
-      emit: event => deps.send({ ...event }),
+      emit: event => deps.send(resultForClient(event, supportsClasses(message))),
     });
     onHandle(handle);
     const summary = await handle.finished;
-    deps.send({ type: "done", runs: summary.runs + errors.length, passed: summary.passed, failed: summary.failed + errors.length, cancelled: summary.cancelled });
+    deps.send({ type: "done", runs: summary.runs + errors.length, passed: summary.passed, failed: summary.failed + errors.length, cancelled: summary.cancelled,
+      ...(supportsClasses(message) ? { infra: summary.infra ?? 0, ...(summary.retried === undefined ? {} : { retried: summary.retried }) } : {}) });
   } finally {
     for (const hold of holds) hold.release();
   }

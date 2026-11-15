@@ -3,16 +3,29 @@ import assert from "node:assert/strict";
 import { decodeClientMessage, decodeDaemonMessage, encodeMessage, LineReader, type ClientMessage, type DaemonMessage } from "./protocol.ts";
 
 test("a submit message survives a round trip through one line", () => {
-  const message: ClientMessage = { type: "submit", paths: ["/a/b.yaml"], out: "/tmp/out", repeat: 2, lanes: null, lock: false, env: {} };
-  const line = encodeMessage(message);
-  assert.equal(line.endsWith("\n"), true);
-  assert.equal(line.trimEnd().includes("\n"), false);
-  assert.deepEqual(decodeClientMessage(line.trimEnd()), message);
+  const base: ClientMessage = { type: "submit", paths: ["/a/b.yaml"], out: "/tmp/out", repeat: 2, lanes: null, lock: false, env: {} };
+  for (const message of [base, { ...base, tickRate: 5 }]) {
+    const line = encodeMessage(message);
+    assert.equal(line.endsWith("\n"), true);
+    assert.equal(line.trimEnd().includes("\n"), false);
+    assert.deepEqual(decodeClientMessage(line.trimEnd()), message);
+  }
+  assert.throws(() => decodeClientMessage(JSON.stringify({ ...base, tickRate: 0.5 })));
 });
 
 test("a result message keeps its error and run directory", () => {
   const message: DaemonMessage = { type: "result", name: "x", outcome: "fail", elapsedMs: 1200, detail: "goal failed", error: "boom", runDir: "/tmp/r" };
   assert.deepEqual(decodeDaemonMessage(encodeMessage(message).trimEnd()), message);
+});
+
+test("class fields and infrastructure counts round trip while invalid classes are refused", () => {
+  const result = { type: "result", name: "x", outcome: "error", elapsedMs: 1, detail: "x", runDir: "/r", class: "infra", cause: "x" };
+  assert.deepEqual(decodeDaemonMessage(JSON.stringify(result)), result);
+  assert.throws(() => decodeDaemonMessage(JSON.stringify({ ...result, class: "other" })));
+  for (const extra of [{}, { infra: 2, retried: 1 }]) {
+    const done = { type: "done", runs: 2, passed: 0, failed: 2, cancelled: 0, ...extra };
+    assert.deepEqual(decodeDaemonMessage(JSON.stringify(done)), done);
+  }
 });
 
 test("a message of an unknown type is refused with the type named", () => {

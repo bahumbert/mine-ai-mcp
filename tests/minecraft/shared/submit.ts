@@ -6,7 +6,7 @@ import { loadScenarioServerConfig } from "./config.ts";
 import { exchange } from "./daemon-client.ts";
 import { ensureDaemon } from "./daemon-launch.ts";
 import type { DaemonMessage } from "./protocol.ts";
-import { formatMessage, forwardedEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
+import { exitCodeOf, formatMessage, submitEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../..");
@@ -27,10 +27,10 @@ async function runOnDaemon(args: SubmitArgs): Promise<number> {
   await ensureDaemon({ socketPath, port: args.port, daemonFile: resolve(HERE, "daemon.ts"), repoRoot: REPO_ROOT });
   let exitCode = 1;
   const session = await exchange(socketPath, {
-    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: forwardedEnv(process.env, process.cwd()),
+    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: submitEnv(process.env, process.cwd()), ...(args.tickRate === null ? {} : { tickRate: args.tickRate }),
   }, message => {
     print(message);
-    if (message.type === "done") exitCode = message.failed > 0 || message.cancelled > 0 ? 1 : 0;
+    if (message.type === "done") exitCode = exitCodeOf(message);
   });
   let interrupted = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { interrupted = true; session.close(); });

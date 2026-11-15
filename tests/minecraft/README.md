@@ -213,6 +213,11 @@ bunx --bun mine-labs run tests/minecraft/contract/scenarios --repeat 3 -p <port>
 
 ## Shared server: many scenarios at once
 
+Results include `INFRA` for an infrastructure failure and a cause line. The session line counts infrastructure
+failures within the failed total: `session: N/M passed, F failed, I infra, C cancelled`. A successful retry is marked
+`after an infra retry`. The shared submitter exits 0 for success, 1 for product failures or cancellation, 3 when all
+failures are infrastructure, 2 for a submitter error, and 130 on interruption. Older daemons omit the infra count.
+
 `bun run scenarios:once` (and `bun tests/minecraft/shared/submit.ts <yaml|dir>...`) send the scenarios to one
 long-lived daemon instead of starting a Mine Labs server per run. The daemon keeps one or more servers per **settings
 key** (world type, seed, time, difficulty, tick rate and the effective value of every gamerule) warm, and runs each
@@ -275,7 +280,8 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
 - **Commands** (all through `submit.ts`; scripts `scenario-run.sh` and `scenario-repeat.sh` call it):
   `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (servers of
   the batch's own on a calm machine: timing batches; no file lock), `--hold` (master only: runs alone once the queue
-  ahead is empty), `--out DIR`
+  ahead is empty), `--tick-rate N` (1–20 ticks/s, including decimals; keeps explicit rates and exclusive scenarios,
+  requires the daemon), `--out DIR`
   (evidence, default `.mine-labs`), `--isolated` (today's `mine-labs run`, one server per worker), `--stop` (daemon
   stops once its trials end; `bun run scenarios:stop`). The clients run from the YAML's own checkout, so a worker tests
   its own code; the submitter's `MINE_AI_*` variables reach the clients through `client.env`.

@@ -19,6 +19,60 @@ import { handleSubmit } from "./submission-handler.ts";
 const CONTRACT_DIR = fileURLToPath(new URL("../contract/scenarios", import.meta.url));
 const ONE_FILE = join(CONTRACT_DIR, "air-supply-under-water.yaml");
 
+test("featured and legacy submissions get compatible infra results and private variables stay out of clients", async () => {
+  for (const featured of [false, true]) {
+    const { rig, sent, base } = setup();
+    rig.sample();
+    const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false,
+      env: { MINE_AI_SUBMIT_FEATURES: featured ? "classes" : "", MINE_AI_SUBMIT_CANARY: "/secret" } });
+    await rig.until(() => rig.running.length === 1, "trial start");
+    assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_FEATURES, undefined);
+    assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_CANARY, undefined);
+    await rig.killJavaOf(0);
+    rig.running[0]!.finish("fail");
+    await running.finished;
+    const result = sent.find(m => m.type === "result");
+    assert.equal(result?.type, "result");
+    if (result?.type !== "result") throw new Error("missing result");
+    if (featured) assert.equal(result.class, "infra");
+    else { assert.equal(result.class, undefined); assert.match(result.error ?? "", /^infra: /u); }
+    const done = sent.find(m => m.type === "done");
+    assert.equal(done?.type === "done" && done.infra, featured ? 1 : undefined);
+  }
+});
+
+test("tick rate is applied before placement and kept scenarios are named", async () => {
+  const { rig, sent, base } = setup();
+  const dir = mkdtempSync(join(tmpdir(), "submission-rate-"));
+  try {
+    const submit = rig.scheduler.submit.bind(rig.scheduler);
+    let placements: { rate: number | null; key: string }[] = [];
+    rig.scheduler.submit = spec => {
+      placements = spec.entries.map(entry => {
+        assert.equal(entry.placement.kind, "lane");
+        if (entry.placement.kind !== "lane") throw new Error("expected lane placement");
+        return { rate: entry.placement.settings.tickRate, key: entry.placement.key };
+      });
+      return submit(spec);
+    };
+    const text = readFileSync(ONE_FILE, "utf8").replace("../../templates/flat-single-action.yaml", fileURLToPath(new URL("../templates/flat-single-action.yaml", import.meta.url))).replace("cwd: ../..", `cwd: ${dirname(dirname(CONTRACT_DIR))}`);
+    const kept = join(dir, "kept.yaml");
+    writeFileSync(kept, text.replace("setup:\n", "setup:\n  - tick rate 2\n"));
+    rig.sample();
+    const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE, kept], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: {}, tickRate: 10 });
+    await rig.until(() => sent.some(m => m.type === "info" && m.text.startsWith("tick rate 10: ")), "rate summary");
+    const info = sent.find(m => m.type === "info" && m.text.startsWith("tick rate 10: "));
+    assert.match(info?.type === "info" ? info.text : "", /kept.*sets its own tick rate/u);
+    assert.match(info?.type === "info" ? info.text : "", /1 scenarios at 10 ticks\/s, 1 kept their own/u);
+    assert.equal(sent.filter(m => m.type === "info" && m.text.startsWith("tick rate 10: ")).length, 1);
+    await sampleUntilRunning(rig, 2);
+    assert.deepEqual(placements.map(p => p.rate).sort((a, b) => (a ?? 0) - (b ?? 0)), [2, 10]);
+    assert.notEqual(placements[0]!.key, placements[1]!.key);
+    await rig.drain();
+    await running.finished;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 function setup() {
   const rig = new SchedulerRig();
   const sent: DaemonMessage[] = [];
@@ -118,15 +172,18 @@ test("a scenario whose client entry cannot be resolved gets a server of its own 
   }
 });
 
-test("a gamerule probe server that fails to start ends the submission with an error and a done instead of rejecting (a rejection would kill the daemon)", async () => {
-  const { rig, sent } = setup();
-  const failing = new GameruleDefaultsCache(async () => { throw new Error("probe port busy"); });
-  const running = handleSubmit({ scheduler: rig.scheduler, defaults: failing, config: rig.config, send: message => sent.push(message) },
-    { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: {} });
-  await running.finished;
-  assert.ok(sent.some(message => message.type === "error" && message.text.includes("probe port busy")));
-  const done = sent.at(-1);
-  assert.deepEqual(done?.type === "done" ? [done.runs, done.failed] : [], [1, 1]);
+test("a failed gamerule probe ends both legacy and featured submissions with their respective totals", async () => {
+  for (const featured of [false, true]) {
+    const { rig, sent } = setup();
+    const failing = new GameruleDefaultsCache(async () => { throw new Error("probe port busy"); });
+    const running = handleSubmit({ scheduler: rig.scheduler, defaults: failing, config: rig.config, send: message => sent.push(message) },
+      { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 2, lanes: null, lock: false, env: featured ? { MINE_AI_SUBMIT_FEATURES: "classes" } : {} });
+    await running.finished;
+    const errors = sent.filter(message => message.type === "error");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!.text, featured ? /bench: probe server for 1\.21\.4 did not start.*probe port busy/u : /submission failed: probe port busy/u);
+    assert.deepEqual(sent.at(-1), featured ? { type: "done", runs: 2, passed: 0, failed: 2, infra: 2, cancelled: 0 } : { type: "done", runs: 1, passed: 0, failed: 1, cancelled: 0 });
+  }
 });
 
 // The scenario mirror (plan 2026-10-30-scenario-clients-ext4 T4): the clients of a submission start from a snapshot of their source root, or from where they are.
