@@ -148,7 +148,8 @@ export class MineTargeting {
   }
 
   excludeBlockStance(target: MineBlockTarget, feet: BlockPosition): void {
-    this.#blockStances.set(cellKey(target.position), new Set([...target.excludedStances, cellKey(feet)]));
+    const key = cellKey(target.position);
+    this.#blockStances.set(key, new Set([...this.#blockStances.get(key) ?? [], cellKey(feet)]));
     this.lastReason = `the target at ${cellKey(target.position)} is occluded from ${cellKey(feet)}`;
     this.#refreshedAtMs = Number.NEGATIVE_INFINITY;
   }

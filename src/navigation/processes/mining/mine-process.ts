@@ -26,7 +26,7 @@ import type { DropLossObserver } from "./mine-drops.js";
 import { clearMiningWater } from "./mining-water.js";
 import { hasWetFace, IN_WATER_PREFIX } from "./drowned-target.js";
 import { waterMiningStance } from "../../world/water.js";
-import { lavaClosuresOf, lavaFacesOf, type MineTargetDecision } from "./target-safety.js";
+import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
 import type { PassedOverNearest } from "./target-weighing.js";
 import { MineTargeting } from "./mine-targeting.js";
 import { castStance, isDropTarget, targetIdentity, waterStance, workingCells } from "./mine-target-goal.js";
@@ -229,7 +229,9 @@ async function sealLavaFaces(
   signal?: AbortSignal,
 ): Promise<string | null> {
   for (const cell of lavaClosuresOf(bot, position)) {
+    signal?.throwIfAborted();
     const placed = await request.placeInto(bot, cell, { ...(signal && { signal }) });
+    signal?.throwIfAborted();
     if (placed.kind === "failed") {
       const what = bot.blockAt(asVec3(cell))?.name === "lava" ? "the lava" : "the floor over lava";
       return `${what} at ${cellKey(cell)} could not be closed: ${placed.error}`;
@@ -280,10 +282,15 @@ async function breakTargetInPlace(
   target: MineTarget,
   signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
+  if (refreshDependentStance(bot, targeting, target.position)) return;
   const workingFeet = bot.entity.position.floored();
   targeting.attemptedWork = true;
   if (await castTouchingSources(bot, request, targeting, target.position, signal)) return;
+  signal?.throwIfAborted();
   const water = await clearMiningWater(bot, target.position, request.placeInto, request.cast, signal);
+  signal?.throwIfAborted();
+  if (refreshDependentStance(bot, targeting, target.position)) return;
   if (water !== null) {
     const world = { blockAt: liveBlockReader(bot), revision: 0, subscribe: () => () => {} };
     if (target.kind === "block" && target.drained && hasWetFace(world, target.position)) {
@@ -297,16 +304,29 @@ async function breakTargetInPlace(
     return;
   }
   const seal = await sealLavaFaces(bot, request, target.position, signal);
+  signal?.throwIfAborted();
+  if (refreshDependentStance(bot, targeting, target.position)) return;
   if (seal !== null) {
     targeting.blacklist(target, seal);
     return;
   }
-  const swing = await request.breakInPlace({ movements: request.movements, position: target.position, signal });
+  const swing = await request.breakInPlace({ movements: request.movements, position: target.position, retainSupport: true, signal });
   if (swing.status === "failed") {
-    targeting.blacklist(target, swing.reason);
+    if (swing.cause === "support") {
+      targeting.lastReason = swing.reason;
+      targeting.refresh();
+    } else targeting.blacklist(target, swing.reason);
     return;
   }
   targeting.refresh();
+}
+
+/** Re-select a working stance when preparation moved the body onto the target's support. */
+function refreshDependentStance(bot: Bot, targeting: MineTargeting, position: BlockPosition): boolean {
+  if (!standsOnBlock(bot, position)) return false;
+  targeting.lastReason = `the target at ${cellKey(position)} supports the body; approach from a supported bank`;
+  targeting.refresh();
+  return true;
 }
 
 /**

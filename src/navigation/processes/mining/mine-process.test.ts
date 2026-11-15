@@ -9,6 +9,8 @@ import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
 import { DROP_PICKUP_TIMEOUT_MS } from "./mine-drops.js";
 import { mine, type MineRequest, type MineScan } from "./mine-process.js";
+import { MineTargeting } from "./mine-targeting.js";
+import { standsOnBlock } from "./target-safety.js";
 
 const goalTestWorld = new GoalTestWorld();
 
@@ -362,7 +364,7 @@ test("a drained target excludes wet stances with and without weighing, preservin
   }
 });
 
-test("a target under the body's footprint edge, its centre over a drop, loses its own top cell as a stance (P4-34)", async () => {
+test("support exclusions cover the occupied edge stance and refresh away while explicit failures persist (P4-34)", async () => {
   const target = new Vec3(1, 64, 0);
   using scene = mineScene({ blocks: [target], feet: new Vec3(0.85, 65, 0.5) });
   let excluded: string[] | null = null;
@@ -375,7 +377,192 @@ test("a target under the body's footprint edge, its centre over a drop, loses it
     },
     route: async () => ({ status: "completed", elapsedMs: 0 }),
   });
-  assert.deepEqual(excluded, ["1,65,0"]);
+  assert.deepEqual(excluded, ["1,65,0", "0,65,0"]);
+  const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: target }));
+  const first = targeting.targets()[0];
+  assert.ok(first?.kind === "block");
+  targeting.excludeBlockStance(first, new Vec3(3, 65, 0));
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+  const second = targeting.refresh()[0];
+  assert.ok(second?.kind === "block");
+  assert.deepEqual([...second.excludedStances], ["3,65,0"]);
+  targeting.excludeBlockStance(second, new Vec3(4, 65, 0));
+  const third = targeting.refresh()[0];
+  assert.ok(third?.kind === "block");
+  assert.deepEqual([...third.excludedStances], ["3,65,0", "4,65,0"]);
+});
+
+test("sealed edge work reapproaches a stone bank without dispatching a support dig", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], lava: [new Vec3(1, 64, 1)], feet: new Vec3(0.85, 65, 0.5) });
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  let broken = false;
+  let routed = false;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => broken,
+    placeInto: async (_bot, cell) => {
+      assert.deepEqual(cellAt(cell), new Vec3(1, 64, 1));
+      scene.world.setCell(cellAt(cell), "cobblestone");
+      return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+    },
+    route: async () => {
+      assert.equal(broken, false);
+      scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+      assert.equal(scene.bot.blockAt(new Vec3(2, 64, 0))?.name, "stone");
+      assert.equal(standsOnBlock(scene.bot, target), false);
+      routed = true;
+      return { status: "completed", elapsedMs: 0 };
+    },
+    breakInPlace: async (options) => {
+      assert.equal(routed, true, "the original edge stance cannot dispatch a break");
+      assert.equal(options.retainSupport, true);
+      scene.world.setCell(target, "air");
+      broken = true;
+      return { status: "broken" };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(result.broken, [target]);
+});
+
+test("alternative centre support permits sealed in-place work without routing", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], solids: [new Vec3(0, 64, 0)], feet: new Vec3(0.85, 65, 0.5) });
+  const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: target }));
+  const kept = targeting.targets()[0];
+  assert.ok(kept?.kind === "block");
+  assert.deepEqual([...kept.excludedStances], []);
+  let broken = false;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => broken,
+    route: noRouteNeeded,
+    breakInPlace: async ({ retainSupport }) => {
+      assert.equal(retainSupport, true);
+      scene.world.setCell(target, "air");
+      broken = true;
+      return { status: "broken" };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+});
+
+test("motion to sole edge support during settle, water clearing or sealing returns to a safe bank", async () => {
+  for (const preparation of ["settle", "water", "seal"] as const) {
+    const target = new Vec3(1, 64, 0);
+    const face = new Vec3(1, 64, 1);
+    using scene = mineScene({
+      blocks: [target], feet: new Vec3(2.5, preparation === "settle" ? 65.2 : 65, 0.5),
+      onGround: preparation !== "settle", isInWater: preparation === "settle",
+      water: preparation === "water" ? [face] : [], lava: preparation === "seal" ? [face] : [],
+    });
+    scene.world.setCell(new Vec3(2, 64, 0), "stone");
+    const displace = () => {
+      scene.bot.entity.position = new Vec3(0.85, 65, 0.5);
+      Object.assign(scene.bot.entity, { onGround: true, isInWater: false });
+      assert.equal(standsOnBlock(scene.bot, target), true);
+    };
+    if (preparation === "settle") scene.bot.once("physicsTick", displace);
+    let broken = false;
+    let routed = false;
+    const result = await runMine(scene, {
+      exactTarget: target,
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      isSatisfied: () => broken,
+      placeInto: async (_bot, cell) => {
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        displace();
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      route: async () => {
+        assert.equal(broken, false, preparation);
+        routed = true;
+        scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: async () => {
+        assert.equal(routed, true, `${preparation} must not dispatch from the displaced edge`);
+        scene.world.setCell(target, "air");
+        broken = true;
+        return { status: "broken" };
+      },
+    });
+    assert.equal(result.status, "satisfied", preparation);
+    assert.deepEqual(result.broken, [target]);
+    assert.equal(scene.bot.listenerCount("physicsTick"), 0);
+  }
+});
+
+test("a late support refusal refreshes the stance without blacklisting the unbroken target", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], feet: new Vec3(2.5, 65, 0.5) });
+  scene.world.setCell(new Vec3(2, 64, 0), "stone");
+  let attempts = 0;
+  const result = await runMine(scene, {
+    exactTarget: target,
+    canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+    isSatisfied: () => attempts === 2,
+    breakInPlace: async () => {
+      if (++attempts === 1) {
+        scene.bot.entity.position = new Vec3(0.85, 65, 0.5);
+        return { status: "failed", cause: "support", reason: "support changed; approach from a safe bank" };
+      }
+      scene.world.setCell(target, "air");
+      return { status: "broken" };
+    },
+    route: async () => {
+      assert.equal(scene.bot.blockAt(target)?.name, "stone");
+      scene.bot.entity.position = new Vec3(2.5, 65, 0.5);
+      return { status: "completed", elapsedMs: 0 };
+    },
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(result.broken, [target]);
+});
+
+test("cancel or death during preparation prevents later placement and swing, then a fresh action succeeds", async () => {
+  for (const interruption of ["cancel", "death"] as const) {
+    const target = new Vec3(1, 64, 0);
+    using scene = mineScene({ blocks: [target], lava: [new Vec3(1, 64, 1), new Vec3(2, 64, 0)], feet: new Vec3(0.5, 64, 0.5) });
+    const lifetime = new AbortController();
+    // Runtime action ownership aborts the request on death; this is the process's signal port.
+    scene.bot.once("death", () => lifetime.abort(new Error("death")));
+    let placements = 0;
+    await assert.rejects(runMine(scene, {
+      signal: lifetime.signal,
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      placeInto: async (_bot, cell) => {
+        assert.equal(++placements, 1, "no second preparation after interruption");
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        if (interruption === "death") scene.bot.emit("death");
+        else lifetime.abort(new Error("cancel"));
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      breakInPlace: async () => { throw new Error("unexpected swing after interruption"); },
+      route: noRouteNeeded,
+    }), new RegExp(interruption));
+    let broken = false;
+    const next = await runMine(scene, {
+      canMine: () => ({ kind: "mineable", routeMayBreak: false }),
+      isSatisfied: () => broken,
+      placeInto: async (_bot, cell) => {
+        scene.world.setCell(cellAt(cell), "cobblestone");
+        return { kind: "placed", block: scene.bot.blockAt(cellAt(cell))! };
+      },
+      breakInPlace: async () => {
+        scene.world.setCell(target, "air");
+        broken = true;
+        return { status: "broken" };
+      },
+      route: noRouteNeeded,
+    });
+    assert.equal(next.status, "satisfied");
+    assert.equal(scene.bot.listenerCount("physicsTick"), 0);
+  }
 });
 
 test("nearby drops are recovered before another source is offered for mining", async () => {
