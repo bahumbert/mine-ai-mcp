@@ -19,7 +19,7 @@ export interface SubmissionEntry {
 
 export type SubmissionEvent =
   | { readonly type: "info"; readonly text: string }
-  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string; readonly class?: ResultClass; readonly cause?: string; readonly retried?: string };
+  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string; readonly class?: ResultClass; readonly cause?: string; readonly selfMade?: boolean; readonly retried?: string };
 
 export interface SubmissionSpec {
   readonly entries: readonly SubmissionEntry[];

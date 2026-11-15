@@ -2,6 +2,7 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Scenario } from "mine-labs";
+import { BenchState } from "./bench-canary.ts";
 import { ClientsAhead } from "./client-ahead.ts";
 import { loadScenarioServerConfig, portBlockOf, type PortBlock, type ScenarioServerConfig } from "./config.ts";
 import { sampleLine } from "./daemon-lines.ts";
@@ -152,6 +153,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // Not awaited by the listen: a first prune over a large mirror must not delay the first submit.
   if (mirror) void mirror.prune().catch((error: unknown) => log(`mirror prune failed: ${error instanceof Error ? error.message : String(error)}`));
   const defaults = new GameruleDefaultsCache(probeServers(pool, config, now));
+  const bench = new BenchState(config.waitReportMs);
   const submissions = new Set<RunningSubmission>();
   const stopped = Promise.withResolvers<void>();
   let lastActivityAt = now();
@@ -186,7 +188,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const socket = await serveSocket(socketPath, {
     submit: (message, send) => {
-      const running = handleSubmit({ scheduler, defaults, config, send, mirror }, message);
+      const running = handleSubmit({ scheduler, defaults, config, send, mirror, bench, stateDir: options.stateDir }, message);
       submissions.add(running);
       void running.finished.finally(() => submissions.delete(running));
       return running;

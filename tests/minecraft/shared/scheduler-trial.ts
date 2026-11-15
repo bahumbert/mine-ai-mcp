@@ -188,7 +188,8 @@ function countAndEmit(env: TrialEnvironment, trial: PlacedTrial, end: TrialEnd, 
   if (classified.class === "infra") submission.summary.infra = (submission.summary.infra ?? 0) + 1;
   if (retried !== undefined) submission.summary.retried = (submission.summary.retried ?? 0) + 1;
   submission.spec.emit({
-    type: "result", name: entry.name, outcome: infraTwice ? "fail" : result.outcome, elapsedMs: result.elapsedMs, detail: result.goal.detail, error: result.error, runDir, class: classified.class, cause: classified.cause, retried,
+    type: "result", name: entry.name, outcome: infraTwice ? "fail" : result.outcome, elapsedMs: result.elapsedMs, detail: result.goal.detail, error: result.error, runDir, class: classified.class, cause: classified.cause,
+    selfMade: classified.class === "infra" && infraCause?.selfMade === false ? false : classified.selfMade, retried,
   });
   env.host.settled(submission);
 }

@@ -122,6 +122,8 @@ for (const [second, wantClass, wantCause] of [
     const event = events.find(event => event.type === "result");
     assert.equal(event?.type === "result" && event.class, wantClass);
     assert.equal(event?.type === "result" && event.cause, wantCause);
+    if (second === "throw") assert.equal(event?.type === "result" && event.selfMade, false,
+      "the final classifier's harness metadata reaches internal consumers");
     if (second === "transport" || second === "death") assert.equal(event?.type === "result" && event.outcome, "fail");
     assert.equal(event?.type === "result" && event.retried, undefined);
     assert.equal(attempts.length, 2);
@@ -141,6 +143,8 @@ for (const second of ["death", "throw"] as const) {
     const summary = await handle.finished;
     assert.deepEqual([summary.runs, summary.failed, summary.infra], [1, 1, 1]);
     assert.equal(events.filter(event => event.type === "result").length, 1);
+    const result = events.find(event => event.type === "result");
+    assert.equal(result?.type === "result" && result.selfMade, false, "a non-self-made first cause survives a self-made retry failure");
     assert.equal(scheduler.queuedCount, 0);
     assert.equal(rig.factory.requests.length, 2);
   });

@@ -1,5 +1,7 @@
 // `submit`'s command line and how the daemon's messages print (the PASS/FAIL lines Mine Labs prints, which the scripts grep).
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { readdir, readFile } from "node:fs/promises";
+import { loadScenario } from "mine-labs";
 import { SCENARIO_SERVER_ENV_NAMES } from "./config.ts";
 import type { DaemonMessage } from "./protocol.ts";
 
@@ -63,6 +65,29 @@ const OUTCOME_LABEL = { pass: "PASS", fail: "FAIL", timeout: "TIMEOUT", error: "
 export const SUBMIT_FEATURES = "MINE_AI_SUBMIT_FEATURES";
 export const SUBMIT_CANARY = "MINE_AI_SUBMIT_CANARY";
 
+/** Read cheap tag lines first; load only candidates so discovery costs no full-tree scenario expansion. */
+async function canariesIn(root: string): Promise<string[]> {
+  const files = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const found = await Promise.all(files.map(async file => {
+    const path = join(root, file.name);
+    if (file.isDirectory()) return canariesIn(path);
+    if (!file.isFile() || !/\.ya?ml$/iu.test(file.name)) return [];
+    try {
+      const text = await readFile(path, "utf8");
+      if (!/^tags:\s*\[[^\]\n]*\bcanary\b[^\]\n]*\]/mu.test(text)) return [];
+      return (await loadScenario(path)).tags.includes("canary") ? [path] : [];
+    }
+    catch { return []; }
+  }));
+  return found.flat();
+}
+
+/** Choose the first valid tagged scenario by path; a missing or ambiguous canary is visible to the submitter. */
+export async function findCanary(scenariosRoot: string): Promise<{ path: string | null; note: string | null }> {
+  const paths = (await canariesIn(resolve(scenariosRoot))).sort();
+  return { path: paths[0] ?? null, note: paths.length === 0 ? "no bench canary found; batch runs without a canary" : paths.length > 1 ? `multiple bench canaries found; using ${paths[0]}` : null };
+}
+
 /** Exit 3 means every failure was infrastructure and nothing was cancelled. */
 export function exitCodeOf(done: Extract<DaemonMessage, { type: "done" }>): 0 | 1 | 3 {
   if (done.cancelled > 0) return 1;
@@ -71,8 +96,9 @@ export function exitCodeOf(done: Extract<DaemonMessage, { type: "done" }>): 0 | 
 }
 
 /** Forward client variables and announce the protocol features this submitter understands. */
-export function submitEnv(env: Readonly<Record<string, string | undefined>>, cwd?: string): Record<string, string> {
-  return { ...forwardedEnv(env, cwd), [SUBMIT_FEATURES]: "classes" };
+export function submitEnv(env: Readonly<Record<string, string | undefined>>, cwd?: string, canary?: string | null): Record<string, string> {
+  const forwarded = Object.fromEntries(Object.entries(forwardedEnv(env, cwd)).filter(([name]) => !name.startsWith("MINE_AI_SUBMIT_")));
+  return { ...forwarded, [SUBMIT_FEATURES]: "classes,canary", ...(canary ? { [SUBMIT_CANARY]: canary } : {}) };
 }
 
 /** The lines to print for one daemon message. */

@@ -1,5 +1,7 @@
 // One `submit` message: load its files, place each scenario, queue them, and stream the results back until the batch is done.
 import type { Scenario } from "mine-labs";
+import { join } from "node:path";
+import type { BenchState, CanaryRun } from "./bench-canary.ts";
 import type { ScenarioServerConfig } from "./config.ts";
 import { ProbeFailed, type GameruleDefaultsCache } from "./gamerule-defaults.ts";
 import type { InPlace, ScenarioMirror, Snapshot } from "./mirror.ts";
@@ -9,11 +11,13 @@ import type { DaemonMessage, SubmitMessage } from "./protocol.ts";
 import { loadScenarioFiles } from "./scenario-files.ts";
 import type { Scheduler, SubmissionHandle } from "./scheduler.ts";
 import type { SubmissionEntry, SubmissionEvent } from "./scheduler-types.ts";
-import { SUBMIT_FEATURES } from "./submit-args.ts";
+import { SUBMIT_CANARY, SUBMIT_FEATURES } from "./submit-args.ts";
 import { sourceRootOf } from "./source-root.ts";
 import { withTickRate } from "./tick-rate-variant.ts";
 
 export interface SubmissionHandlerDeps {
+  readonly bench?: BenchState;
+  readonly stateDir?: string;
   readonly scheduler: Scheduler;
   /** Where the clients start from: a snapshot of each source root on ext4 or the root itself. Without one (a test's daemon) they start where the scenario says. */
   readonly mirror?: Pick<ScenarioMirror, "acquire">;
@@ -41,8 +45,10 @@ function supportsClasses(message: SubmitMessage): boolean {
 
 /** Keep old clients' strict wire schema while conveying infrastructure failures as errors. */
 function resultForClient(event: SubmissionEvent, featured: boolean): DaemonMessage {
-  if (event.type !== "result" || featured) return event;
-  const { class: resultClass, cause, retried: _retried, ...legacy } = event;
+  if (event.type !== "result") return event;
+  const { selfMade: _selfMade, ...result } = event;
+  if (featured) return result;
+  const { class: resultClass, cause, retried: _retried, ...legacy } = result;
   return resultClass === "infra" ? { ...legacy, outcome: "error", error: `infra: ${cause ?? "unknown cause"}${legacy.error ? `; ${legacy.error}` : ""}` } : legacy;
 }
 
@@ -117,6 +123,70 @@ async function startFromSnapshots(
   });
 }
 
+/** Load, place and snapshot the canary with the first waiter's client environment. */
+export async function canaryEntry(deps: SubmissionHandlerDeps, path: string, env: Readonly<Record<string, string>>, signal: AbortSignal, holds: { release(): void }[]): Promise<SubmissionEntry | { error: string }> {
+  const { scenarios, errors } = await loadScenarioFiles([path]);
+  if (scenarios.length !== 1 || errors.length) return { error: errors.join("; ") || "expected one canary scenario" };
+  await readDefaults(deps, scenarios);
+  const scenario = withSubmitterEnv(scenarios[0]!.scenario, env);
+  const entry = { name: scenarios[0]!.id, scenario, placement: placeScenario(scenario, deps.defaults.forVersion(scenario.minecraft.version)) };
+  return deps.mirror ? (await startFromSnapshots({ ...deps, mirror: deps.mirror }, [entry], signal, holds))[0]! : entry;
+}
+
+let canarySequence = 0;
+
+/** Queue a bench-owned run; its snapshots survive a waiter's departure and are released when the run ends. */
+async function startCanary(deps: SubmissionHandlerDeps, path: string, env: Readonly<Record<string, string>>, signal: AbortSignal): Promise<CanaryRun> {
+  const holds: { release(): void }[] = [];
+  try {
+    const entry = await canaryEntry(deps, path, env, signal, holds);
+    signal.throwIfAborted();
+    if ("error" in entry) throw new Error(`could not load bench canary ${path}: ${entry.error}`);
+    let result: Awaited<CanaryRun["done"]> | undefined;
+    const handle = deps.scheduler.submit({ entries: [entry], repeat: 1, maxLanes: null, lock: false, hold: false,
+      outDir: join(deps.stateDir ?? ".tmp/scenario-server", "canary", String(++canarySequence)),
+      emit: event => {
+        if (event.type !== "result") return;
+        if (event.class === "infra") deps.bench?.sawInfra();
+        result = { class: event.class ?? (event.outcome === "pass" ? "pass" : "product"), cause: event.cause, selfMade: event.selfMade, elapsedMs: event.elapsedMs };
+      },
+    });
+    const cancel = () => handle.cancel("no canary waiters left");
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    const done = handle.finished.then(summary => result ?? { class: summary.cancelled ? "cancelled" as const : "product" as const, elapsedMs: 0 })
+      .finally(() => { signal.removeEventListener("abort", cancel); for (const hold of holds) hold.release(); });
+    return { done, waitReport: () => deps.scheduler.waitReport(handle.id) };
+  } catch (error) {
+    for (const hold of holds) hold.release();
+    if (error instanceof ProbeFailed) {
+      deps.bench?.sawInfra();
+      return { done: Promise.resolve({ class: "infra", cause: `probe server for ${error.version} did not start: ${error.message}`, selfMade: false, elapsedMs: 0 }), waitReport: () => null };
+    }
+    throw error;
+  }
+}
+
+/** A cancelled waiter ends only its own requested trials, including those not yet queued. */
+function sendCancelled(deps: SubmissionHandlerDeps, trials: number, errors: number): void {
+  deps.send({ type: "done", runs: trials + errors, passed: 0, failed: errors, cancelled: trials });
+}
+
+/** Gate multi-trial submissions while the shared bench has not been verified. */
+async function waitForCanary(deps: SubmissionHandlerDeps, message: SubmitMessage, abort: AbortSignal, trials: number, errors: number): Promise<boolean> {
+  const path = message.env[SUBMIT_CANARY];
+  if (!deps.bench || !path || trials < 2 || message.lock || deps.bench.isVerified()) return true;
+  const verdict = await deps.bench.ensure(path, signal => startCanary(deps, path, message.env, signal), abort, text => deps.send({ type: "wait", text }));
+  if (verdict === "left" || abort.aborted) { sendCancelled(deps, trials, errors); return false; }
+  if (verdict.kind === "infra") {
+    deps.send({ type: "error", text: `bench canary ${verdict.name} infra: ${verdict.cause}; ${trials} trials not run` });
+    deps.send({ type: "done", runs: trials + errors, passed: 0, failed: trials + errors, cancelled: 0, ...(supportsClasses(message) ? { infra: trials } : {}) });
+    return false;
+  }
+  deps.send({ type: "info", text: verdict.kind === "verified" ? `bench canary passed in ${verdict.seconds.toFixed(1)} s` : `bench canary unproven (${verdict.class}${verdict.cause ? `: ${verdict.cause}` : ""}); batch runs` });
+  return true;
+}
+
 async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessage, abort: AbortSignal, onHandle: (handle: SubmissionHandle) => void): Promise<void> {
   const { scenarios, errors } = await loadScenarioFiles(message.paths);
   for (const text of errors) deps.send({ type: "error", text });
@@ -132,12 +202,14 @@ async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessa
   try {
     await readDefaults(deps, variants);
   } catch (error) {
+    if (error instanceof ProbeFailed) deps.bench?.sawInfra();
     if (!(error instanceof ProbeFailed) || !supportsClasses(message)) throw error;
     const count = variants.length * message.repeat;
     deps.send({ type: "error", text: `bench: probe server for ${error.version} did not start: ${error.message}; ${count} trials not run` });
     deps.send({ type: "done", runs: count + errors.length, passed: 0, failed: count + errors.length, infra: count, cancelled: 0 });
     return;
   }
+  if (!await waitForCanary(deps, message, abort, variants.length * message.repeat, errors.length)) return;
   const placed = variants.map(({ id, scenario: loaded }) => {
     const scenario = withSubmitterEnv(loaded, message.env);
     return { name: id, scenario, placement: placeScenario(scenario, deps.defaults.forVersion(scenario.minecraft.version)) };
@@ -159,10 +231,14 @@ async function queueSubmission(deps: SubmissionHandlerDeps, message: SubmitMessa
     }
     const handle = deps.scheduler.submit({
       entries, repeat: message.repeat, maxLanes: message.lanes, lock: message.lock, hold: message.hold ?? false, outDir: message.out,
-      emit: event => deps.send(resultForClient(event, supportsClasses(message))),
+      emit: event => {
+        if (event.type === "result" && event.class === "infra") deps.bench?.sawInfra();
+        deps.send(resultForClient(event, supportsClasses(message)));
+      },
     });
     onHandle(handle);
     const summary = await handle.finished;
+    if (errors.length === 0 && summary.runs === 1 && summary.passed === 1) deps.bench?.sawPass();
     deps.send({ type: "done", runs: summary.runs + errors.length, passed: summary.passed, failed: summary.failed + errors.length, cancelled: summary.cancelled,
       ...(supportsClasses(message) ? { infra: summary.infra ?? 0, ...(summary.retried === undefined ? {} : { retried: summary.retried }) } : {}) });
   } finally {

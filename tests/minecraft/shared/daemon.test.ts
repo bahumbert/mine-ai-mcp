@@ -74,6 +74,20 @@ test("a submit over the socket streams a result and a done, and the daemon keeps
   });
 });
 
+test("a featured socket submission runs a canary before its batch and sends no internal canary result", async () => {
+  let calls = 0;
+  await withDaemon(async ({ socketPath, dir }) => {
+    const messages: DaemonMessage[] = [];
+    const session = await exchange(socketPath, { type: "submit", paths: [ONE_FILE], out: dir, repeat: 2, lanes: null, lock: false,
+      env: { MINE_AI_SUBMIT_FEATURES: "classes,canary", MINE_AI_SUBMIT_CANARY: ONE_FILE } }, message => messages.push(message));
+    await session.closed;
+    assert.equal(calls, 3);
+    assert.equal(messages.filter(message => message.type === "result").length, 2);
+    assert.ok(messages.some(message => message.type === "info" && message.text.startsWith("bench canary passed in")));
+    assert.deepEqual(messages.at(-1), { type: "done", runs: 2, passed: 2, failed: 0, cancelled: 0, infra: 0 });
+  }, { runTrial: async input => { calls++; return passing(input); } });
+});
+
 test("a second daemon on a live socket refuses to start", async () => {
   await withDaemon(async ({ socketPath }) => {
     const second = startDaemon({

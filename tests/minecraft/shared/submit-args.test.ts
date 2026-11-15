@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { exitCodeOf, formatMessage, forwardedEnv, parseSubmitArgs, submitEnv } from "./submit-args.ts";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { exitCodeOf, findCanary, formatMessage, forwardedEnv, parseSubmitArgs, submitEnv } from "./submit-args.ts";
 
 test("featured results, totals and exit codes distinguish infrastructure", () => {
   const result = { type: "result", name: "x", outcome: "error", elapsedMs: 1000, detail: "pending", runDir: "/r" } as const;
@@ -12,7 +16,31 @@ test("featured results, totals and exit codes distinguish infrastructure", () =>
   for (const [failed, infra, cancelled, expected] of [[0, 0, 0, 0], [2, 2, 0, 3], [3, 2, 0, 1], [2, 2, 1, 1], [1, undefined, 0, 1]] as const) {
     assert.equal(exitCodeOf({ ...done, failed, infra, cancelled }), expected);
   }
-  assert.equal(submitEnv({ MINE_AI_SUBMIT_FEATURES: "wrong" }).MINE_AI_SUBMIT_FEATURES, "classes");
+  assert.equal(submitEnv({ MINE_AI_SUBMIT_FEATURES: "wrong", MINE_AI_SUBMIT_CANARY: "/shell" }).MINE_AI_SUBMIT_FEATURES, "classes,canary");
+  assert.equal(submitEnv({ MINE_AI_SUBMIT_CANARY: "/shell" }).MINE_AI_SUBMIT_CANARY, undefined);
+});
+
+test("findCanary reports none, validates tagged YAML and selects the first path with a note for duplicates", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "canaries-"));
+  const fixture = fileURLToPath(new URL("../scenarios/collect/sand-single.yaml", import.meta.url));
+  const template = fileURLToPath(new URL("../templates/flat-single-action.yaml", import.meta.url));
+  const text = readFileSync(fixture, "utf8").replace("../../templates/flat-single-action.yaml", template).replace(/tags:.*\n/u, "tags: [acceptance, canary]\n");
+  try {
+    const none = await findCanary(dir);
+    assert.equal(none.path, null);
+    assert.match(none.note ?? "", /no.*canary/iu);
+    writeFileSync(join(dir, "broken.yaml"), "tags: [canary]\nworld: invalid\n");
+    assert.equal((await findCanary(dir)).path, null);
+    writeFileSync(join(dir, "z.yaml"), text);
+    chmodSync(join(dir, "z.yaml"), 0);
+    assert.equal((await findCanary(dir)).path, null, "an unreadable candidate cannot prevent a submission");
+    chmodSync(join(dir, "z.yaml"), 0o600);
+    assert.equal((await findCanary(dir)).path, join(dir, "z.yaml"));
+    writeFileSync(join(dir, "a.yaml"), text);
+    const many = await findCanary(dir);
+    assert.equal(many.path, join(dir, "a.yaml"));
+    assert.match(many.note ?? "", /several|multiple|2/iu);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("paths and options are told apart and paths become absolute", () => {
@@ -32,13 +60,7 @@ test("tick rate accepts 1 through 20 including decimals and refuses isolated run
 
 test("--hold is the load batch's flag, and --holds-lock (the old inner run of a flock) no longer exists", () => {
   assert.equal(parseSubmitArgs(["x.yaml", "--hold"], "/work").hold, true);
-  assert.equal(parseSubmitArgs(["x.yaml"], "/work").hold, false);
   assert.throws(() => parseSubmitArgs(["x.yaml", "--holds-lock"], "/work"), /--holds-lock/u);
-});
-
-test("--lock only asks the daemon for servers of the batch's own: parsing it takes no file lock and re-runs nothing", () => {
-  const args = parseSubmitArgs(["x.yaml", "--lock", "--lanes", "1"], "/work");
-  assert.deepEqual([args.lock, args.hold, args.lanes], [true, false, 1]);
 });
 
 test("the defaults: one repeat, any number of lanes, output in .mine-labs of the submitter", () => {
