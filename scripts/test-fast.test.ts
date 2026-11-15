@@ -1,24 +1,49 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   defaultShardCount,
   fileTimes,
   isFiltered,
   junitFileKey,
+  main,
   nextTimes,
+  needsSlot,
   parseArgs,
   planShards,
   readJunit,
+  releaseHolder,
+  runInSlot,
   shardArguments,
+  slotLockPath,
   summaryLines,
   testFiles,
+  writeHolder,
 } from "./test-fast.js";
 
 const roots: string[] = [];
+const holders: { flock: { kill(signal: NodeJS.Signals): void }; pid: number }[] = [];
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const holder of holders) {
+    holder.flock.kill("SIGKILL");
+    try {
+      process.kill(holder.pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
 });
 
 function tree(files: readonly string[]): string {
@@ -271,11 +296,12 @@ test("defaultShardCount is half the parallelism, at most 12, at least 1", () => 
 });
 
 test("parseArgs: default shard count, --shards N, and the arguments after -- for bun test", () => {
-  expect(parseArgs([], 24)).toEqual({ shards: 12, passThrough: [] });
-  expect(parseArgs(["--shards", "3"], 24)).toEqual({ shards: 3, passThrough: [] });
+  expect(parseArgs([], 24)).toEqual({ shards: 12, passThrough: [], slot: true });
+  expect(parseArgs(["--shards", "3"], 24)).toEqual({ shards: 3, passThrough: [], slot: true });
   expect(parseArgs(["--shards", "2", "--", "--timeout", "5000"], 8)).toEqual({
     shards: 2,
     passThrough: ["--timeout", "5000"],
+    slot: true,
   });
 });
 
@@ -285,4 +311,239 @@ test("parseArgs refuses a shard count that is not a whole number of 1 or more, a
   expect(() => parseArgs(["--bogus"], 8)).toThrow("unknown argument --bogus");
   expect(() => parseArgs(["--shards"], 8)).toThrow("--shards takes a whole number of 1 or more");
   expect(() => parseArgs(["--shards", "3", "extra"], 8)).toThrow("--shards takes a whole number of 1 or more");
+});
+
+function slotLock(): string {
+  const dir = mkdtempSync(join(tmpdir(), "test-fast-slot-"));
+  roots.push(dir);
+  return join(dir, "unit.lock");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(condition: () => boolean, what: string, timeoutMs = 5000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!condition()) {
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await delay(20);
+  }
+}
+
+/** A holder of `lock` as a real `flock` whose command is `sleep` (the pid in the pid file, `exec` replaces `sh`). */
+async function holdLock(lock: string): Promise<{ flock: { kill(signal: NodeJS.Signals): void }; pid: number }> {
+  const pidFile = join(dirname(lock), `holder-${holders.length}.pid`);
+  const flock = Bun.spawn(["flock", lock, "sh", "-c", `echo $$ > ${pidFile}; exec sleep 30`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await waitUntil(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "", "the holder's pid");
+  const holder = { flock, pid: Number(readFileSync(pidFile, "utf8").trim()) };
+  holders.push(holder);
+  return holder;
+}
+
+test("slotLockPath takes the env override, else the cache folder under the home given", () => {
+  expect(slotLockPath({ MINE_AI_TEST_SLOT_LOCK: "/x/y.lock" }, "/home/u")).toBe("/x/y.lock");
+  expect(slotLockPath({}, "/home/u")).toBe("/home/u/.cache/mine-ai/test-fast.lock");
+});
+
+test("parseArgs(--no-slot) turns the slot off, in any order with --shards, and after -- it goes to bun test", () => {
+  expect(parseArgs(["--no-slot"], 8)).toEqual({ shards: 4, passThrough: [], slot: false });
+  expect(parseArgs(["--shards", "3", "--no-slot"], 8)).toEqual({ shards: 3, passThrough: [], slot: false });
+  expect(parseArgs(["--no-slot", "--shards", "3"], 8)).toEqual({ shards: 3, passThrough: [], slot: false });
+  expect(parseArgs(["--", "--no-slot"], 8)).toEqual({ shards: 4, passThrough: ["--no-slot"], slot: true });
+});
+
+test("needsSlot: a run asks for the slot unless it is off or the run already holds it", () => {
+  expect(needsSlot(true, {})).toBe(true);
+  expect(needsSlot(true, { MINE_AI_TEST_SLOT_HELD: "1" })).toBe(false);
+  expect(needsSlot(false, {})).toBe(false);
+});
+
+test("runInSlot on a free lock returns the command's exit with no waiting line", async () => {
+  const lines: string[] = [];
+  const code = await runInSlot(["sh", "-c", "exit 3"], slotLock(), { PATH: process.env.PATH }, (line) => lines.push(line));
+  expect(code).toBe(3);
+  expect(lines).toEqual([]);
+});
+
+test("runInSlot on a held lock says who holds it, then runs once the holder is gone", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  writeFileSync(`${lock}.holder`, JSON.stringify({ pid: holder.pid, root: "/work/tsan", since: "2026-11-15T09:00:00.000Z" }));
+  const lines: string[] = [];
+  const run = runInSlot(["true"], lock, { PATH: process.env.PATH }, (line) => lines.push(line));
+  await delay(300);
+  process.kill(holder.pid, "SIGTERM");
+  const outcome = await Promise.race([run, delay(5000).then(() => "timed out" as const)]);
+  expect(outcome).toBe(0);
+  expect(lines).toEqual([
+    `test:fast: waiting for the unit slot, held by pid ${holder.pid}, /work/tsan, since 2026-11-15T09:00:00.000Z`,
+  ]);
+});
+
+test("runInSlot on a held lock with no holder file says the holder is unknown", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  const lines: string[] = [];
+  const run = runInSlot(["true"], lock, { PATH: process.env.PATH }, (line) => lines.push(line));
+  await delay(300);
+  process.kill(holder.pid, "SIGTERM");
+  expect(await run).toBe(0);
+  expect(lines).toEqual(["test:fast: waiting for the unit slot, held by unknown"]);
+});
+
+test("a queued run starts when its holder's command is SIGKILLed", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  const run = runInSlot(["true"], lock, { PATH: process.env.PATH }, () => {});
+  await delay(300);
+  process.kill(holder.pid, "SIGKILL");
+  expect(await Promise.race([run, delay(5000).then(() => "timed out" as const)])).toBe(0);
+});
+
+test("a queued run waits while the holder's flock is killed but its command lives, and starts once the command dies", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  holder.flock.kill("SIGKILL");
+  const run = runInSlot(["true"], lock, { PATH: process.env.PATH }, () => {});
+  const early = await Promise.race([run.then(() => "finished" as const), delay(1000).then(() => "still waiting" as const)]);
+  expect(early).toBe("still waiting");
+  process.kill(holder.pid, "SIGKILL");
+  expect(await Promise.race([run, delay(5000).then(() => "timed out" as const)])).toBe(0);
+});
+
+test("without flock the command runs with no slot, and says so", async () => {
+  const lines: string[] = [];
+  const env = { ...process.env, PATH: "/nonexistent" };
+  expect(await runInSlot(["/bin/sh", "-c", "exit 0"], slotLock(), env, (line) => lines.push(line))).toBe(0);
+  expect(lines).toEqual(["test:fast: no flock here, running without the unit slot"]);
+});
+
+test("a command that exits 75 is its own exit, read once: it is not taken for a busy lock", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "test-fast-count-"));
+  roots.push(dir);
+  const counter = join(dir, "runs");
+  const code = await runInSlot(["sh", "-c", `echo run >> ${counter}; exit 75`], slotLock(), { PATH: process.env.PATH }, () => {});
+  expect(code).toBe(75);
+  expect(readFileSync(counter, "utf8")).toBe("run\n");
+});
+
+test("a lock folder that cannot be made is a failed run (1), never 0", async () => {
+  const code = await runInSlot(["true"], "/proc/x/lock", { PATH: process.env.PATH }, () => {});
+  expect(code).toBe(1);
+});
+
+test("main with the slot held by a parent that is gone runs nothing and returns 0", async () => {
+  const gone = Bun.spawn([process.execPath, "-e", "0"], { stdout: "ignore", stderr: "ignore" });
+  await gone.exited;
+  const runsDir = join(import.meta.dir, "..", ".tmp", "test-fast");
+  const runsBefore = existsSync(runsDir) ? readdirSync(runsDir).filter((name) => name.startsWith("run-")) : [];
+  const saved = { HELD: process.env.MINE_AI_TEST_SLOT_HELD, PARENT: process.env.MINE_AI_TEST_SLOT_PARENT };
+  const lines: string[] = [];
+  const log = console.log;
+  process.env.MINE_AI_TEST_SLOT_HELD = "1";
+  process.env.MINE_AI_TEST_SLOT_PARENT = String(gone.pid);
+  console.log = (...parts: unknown[]) => lines.push(parts.join(" "));
+  try {
+    expect(await main(["--shards", "1"])).toBe(0);
+  } finally {
+    console.log = log;
+    for (const [key, value] of Object.entries({ MINE_AI_TEST_SLOT_HELD: saved.HELD, MINE_AI_TEST_SLOT_PARENT: saved.PARENT })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  expect(lines).toEqual(["test:fast: the run that asked for the slot is gone, nothing run"]);
+  const runsAfter = existsSync(runsDir) ? readdirSync(runsDir).filter((name) => name.startsWith("run-")) : [];
+  expect(runsAfter).toEqual(runsBefore);
+});
+
+test("summaryLines adds the slot wait to its first line when given", () => {
+  const green = readJunit(
+    '<testsuites name="bun test" tests="1" assertions="1" failures="0" skipped="0" time="0.1">' +
+      '<testsuite name="a.test.ts" file="a.test.ts"><testcase name="one" classname="" time="0.1" file="a.test.ts" /></testsuite>' +
+      "</testsuites>",
+  );
+  const result = summaryLines([shard(0, 1, green)], 1000, 1, false, 12.34);
+  expect(result.lines[0]).toMatch(/, slot wait 12\.3 s\)$/u);
+});
+
+async function exitedPid(): Promise<number> {
+  const gone = Bun.spawn([process.execPath, "-e", "0"], { stdout: "ignore", stderr: "ignore" });
+  await gone.exited;
+  return gone.pid;
+}
+
+test("writeHolder names this run in a folder that does not exist yet, and a holder that cannot be written does not throw", () => {
+  const lock = join(mkdtempSync(join(tmpdir(), "test-fast-holder-")), "nested", "unit.lock");
+  roots.push(dirname(dirname(lock)));
+  writeHolder(lock, "/work/tsan");
+  const holder = JSON.parse(readFileSync(`${lock}.holder`, "utf8")) as { pid: number; root: string; since: string };
+  expect(holder.pid).toBe(process.pid);
+  expect(holder.root).toBe("/work/tsan");
+  expect(() => writeHolder("/proc/x/unit.lock", "/work/tsan")).not.toThrow();
+});
+
+test("releaseHolder removes the holder file only when this run wrote it", () => {
+  const lock = slotLock();
+  writeHolder(lock, "/work/tsan");
+  releaseHolder(lock);
+  expect(existsSync(`${lock}.holder`)).toBe(false);
+  writeFileSync(`${lock}.holder`, JSON.stringify({ pid: 1, root: "/other", since: "2026-11-15T09:00:00.000Z" }));
+  releaseHolder(lock);
+  expect(existsSync(`${lock}.holder`)).toBe(true);
+});
+
+test("runInSlot: a holder file naming an exited pid says the holder is unknown", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  writeFileSync(`${lock}.holder`, JSON.stringify({ pid: await exitedPid(), root: "/work/tsan", since: "2026-11-15T09:00:00.000Z" }));
+  const lines: string[] = [];
+  const run = runInSlot(["true"], lock, { PATH: process.env.PATH }, (line) => lines.push(line));
+  await delay(300);
+  process.kill(holder.pid, "SIGTERM");
+  expect(await run).toBe(0);
+  expect(lines).toEqual(["test:fast: waiting for the unit slot, held by unknown"]);
+});
+
+test("a SIGTERM to the run ends its command's group, and the run returns 1", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "test-fast-signal-"));
+  roots.push(dir);
+  const pidFile = join(dir, "command.pid");
+  const run = runInSlot(["sh", "-c", `echo $$ > ${pidFile}; exec sleep 30`], slotLock(), { PATH: process.env.PATH }, () => {});
+  await waitUntil(() => existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "", "the command's pid");
+  const commandPid = Number(readFileSync(pidFile, "utf8").trim());
+  process.kill(process.pid, "SIGTERM");
+  expect(await Promise.race([run, delay(5000).then(() => "timed out" as const)])).toBe(1);
+  expect(() => process.kill(commandPid, 0)).toThrow();
+});
+
+test("a queued run whose parent is SIGKILLed: its waiter takes the slot when the holder ends, and that run does nothing and frees the lock", async () => {
+  const lock = slotLock();
+  const holder = await holdLock(lock);
+  const log = join(dirname(lock), "helper.log");
+  const modulePath = join(import.meta.dir, "test-fast.ts");
+  const script = [
+    `import { runInSlot } from ${JSON.stringify(modulePath)};`,
+    `await runInSlot([process.execPath, ${JSON.stringify(modulePath)}, "--shards", "1"], ${JSON.stringify(lock)}, process.env, console.log);`,
+  ].join("\n");
+  const fd = openSync(log, "w");
+  const helper = Bun.spawn([process.execPath, "-e", script], { stdout: fd, stderr: fd, env: process.env });
+  await waitUntil(() => existsSync(log) && readFileSync(log, "utf8").includes("waiting for the unit slot"), "the helper to queue");
+  helper.kill("SIGKILL");
+  await helper.exited;
+  process.kill(holder.pid, "SIGKILL");
+  await waitUntil(
+    () => readFileSync(log, "utf8").includes("the run that asked for the slot is gone, nothing run"),
+    "the queued run to take the slot",
+    10_000,
+  );
+  await waitUntil(
+    () => Bun.spawnSync(["flock", "--nonblock", lock, "true"]).exitCode === 0,
+    "the slot to be free again",
+    10_000,
+  );
 });
