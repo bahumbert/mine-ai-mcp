@@ -159,6 +159,7 @@ for (const cause of ["no collect", "own collect", "partial take then silent remo
         navigate: async () => {
           if (cause === "own collect" || cause === "own collect after a partial take") {
             if (cause === "own collect after a partial take") entities.takenBy(mob, drop, 1);
+            // Stopgap: own collect without its slot update awaits a delayed-pickup contract check (review 2026-11-16).
             entities.takenBy(bot.entity, drop, cause === "own collect" ? 2 : 1);
           }
           else {

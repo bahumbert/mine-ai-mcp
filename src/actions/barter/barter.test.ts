@@ -123,7 +123,8 @@ test("a desired drop taken by another entity is reported, then offers go on", as
   const drop = f.harness.entities.spawn({ name: "item", position: new Vec3(2, 64, 0), item: { name: "ender_pearl", count: 2 } });
   const navigate = f.navigation.navigate;
   const navigation = { ...f.navigation, navigate: (async () => {
-    f.harness.entities.takenBy(f.target, drop, 2);
+    f.harness.entities.takenBy(f.target, drop, 1);
+    f.harness.entities.takenBy(f.target, drop, 1);
     navigation.navigate = navigate;
     return { status: "completed", elapsedMs: 0 };
   }) as NavigationRuntime["navigate"] };
@@ -152,11 +153,17 @@ for (const takeAt of ["before abort", "between attempts"] as const) {
     const cancel = new AbortController();
     const pending = run({ signal: cancel.signal });
     await turn();
-    if (takeAt === "before abort") f.harness.entities.takenBy(f.target, drop, 2);
+    if (takeAt === "before abort") {
+      f.harness.entities.takenBy(f.target, drop, 1);
+      f.harness.entities.takenBy(f.target, drop, 1);
+    }
     cancel.abort("attempt interrupted");
     const interrupted = await pending;
     assert.equal(interrupted.barter.goldOffers, 0);
-    if (takeAt === "between attempts") f.harness.entities.takenBy(f.target, drop, 2);
+    if (takeAt === "between attempts") {
+      f.harness.entities.takenBy(f.target, drop, 1);
+      f.harness.entities.takenBy(f.target, drop, 1);
+    }
     navigation.navigate = navigate;
     const resumed = run({});
     await turn();
@@ -181,7 +188,8 @@ test("a take during a reflex takeover is recorded at the resume", async (t) => {
   const pending = runner.run(runnerAction({ ...f, navigation }), request());
   await turn();
   const claim = runner.claim("hostile_reflex", "move away", async () => {
-    f.harness.entities.takenBy(f.target, drop, 2);
+    f.harness.entities.takenBy(f.target, drop, 1);
+    f.harness.entities.takenBy(f.target, drop, 1);
     navigation.navigate = navigate;
     return { value: null, continuation: { kind: "resume" as const } };
   });
