@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, typecheckPlan } from "./check.js";
+import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport } from "./data-readers.js";
 import { aliasesFromPackageJson, buildReverseGraph, IMPORTER_DEPTH, IMPORTER_TEST_CAP, testsReachedBy } from "./import-graph.js";
 
@@ -13,27 +13,15 @@ function checkout(layout: "directory" | "file" | "none", content = ""): string {
   return root;
 }
 
-test("main checkout (.git directory) uses plain git", () => {
-  expect(gitProgram(checkout("directory"))).toBe("git");
-});
-
-test("worktree whose .git file holds a Windows gitdir uses git.exe", () => {
-  const root = checkout("file", "gitdir: D:/minecraft/mcp/mine-ai-mcp/.git/worktrees/x\n");
-  expect(gitProgram(root)).toBe("git.exe");
-});
-
-test("Windows gitdir with backslashes and CRLF uses git.exe", () => {
-  const root = checkout("file", "gitdir: D:\\repo\\.git\\worktrees\\x\r\n");
-  expect(gitProgram(root)).toBe("git.exe");
-});
-
-test("worktree with a POSIX gitdir keeps plain git", () => {
-  const root = checkout("file", "gitdir: /mnt/d/repo/.git/worktrees/x\n");
-  expect(gitProgram(root)).toBe("git");
-});
-
-test("no .git at all keeps plain git", () => {
-  expect(gitProgram(checkout("none"))).toBe("git");
+test("git program follows the checkout's gitdir layout", () => {
+  const cases = [
+    ["directory", "", "git"],
+    ["file", "gitdir: D:/minecraft/mcp/mine-ai-mcp/.git/worktrees/x\n", "git.exe"],
+    ["file", "gitdir: D:\\repo\\.git\\worktrees\\x\r\n", "git.exe"],
+    ["file", "gitdir: /mnt/d/repo/.git/worktrees/x\n", "git"],
+    ["none", "", "git"],
+  ] as const;
+  for (const [layout, content, expected] of cases) expect(gitProgram(checkout(layout, content))).toBe(expected);
 });
 
 test("missing git.exe gives a clear message, not an empty change list", () => {
@@ -85,6 +73,12 @@ test("bun run test passes the arguments after --all to bun test only", () => {
   expect(suiteTestCommand(["./src"], ["--coverage", "--coverage-dir=coverage"])).toEqual(["bun", "test", "./src", "--coverage", "--coverage-dir=coverage"]);
 });
 
+test("suite roots include both scenario test directories", () => {
+  const command = suiteTestCommand(suiteTestPaths(), []);
+  expect(command).toContain("./scenarios/src");
+  expect(command).toContain("./scenarios/default");
+});
+
 test("typechecks the projects with changed files and those importing them, each once, in project order", () => {
   const plan = typecheckPlan(["src/a.ts", "src/b.ts"], new Map([["tests/", "tests/x.ts"], ["src/", "src/c.ts"], ["scenarios/", "scenarios/src/s.ts"]]));
   expect(plan).toEqual([
@@ -99,10 +93,11 @@ test("a scripts/ change typechecks scripts/ (Bun types)", () => {
 });
 
 test("the test beside a changed file runs only inside the suite's test paths", () => {
-  expect(siblingTests(["src/a.ts", "src/b.test.ts", "scenarios/flat/combat/reflex.ts", "scenarios/flat/x.test.ts"], ["src/", "scenarios/src/"])).toEqual([
-    "src/a.test.ts",
-    "src/b.test.ts",
-  ]);
+  const cases = [
+    { files: ["src/a.ts", "src/b.test.ts", "scenarios/flat/combat/reflex.ts", "scenarios/flat/x.test.ts"], roots: ["src/", "scenarios/src/"], expected: ["src/a.test.ts", "src/b.test.ts"] },
+    { files: ["scenarios/default/nether/fortress-withdrawal.ts", "scenarios/flat/x.test.ts"], roots: suiteTestRoots(), expected: ["scenarios/default/nether/fortress-withdrawal.test.ts"] },
+  ];
+  for (const { files, roots, expected } of cases) expect(siblingTests(files, roots)).toEqual(expected);
 });
 
 test("config changes and source changes together typecheck the union, each once, a source change keeping its own reason", () => {

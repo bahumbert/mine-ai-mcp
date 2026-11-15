@@ -22,14 +22,14 @@ import {
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport, type DataReadPlan } from "./data-readers.js";
 import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
 
-const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
-  { dir: "src/", typecheck: "typecheck", tests: "./src" },
-  { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: "./scenarios/src" },
-  { dir: "tests/", typecheck: "typecheck:tests", tests: "./tests" },
-  { dir: "brain/", typecheck: "typecheck:brain", tests: "./brain" },
-  { dir: "launcher/", typecheck: "typecheck:launcher", tests: "./launcher" },
-  { dir: "monitor/", typecheck: "typecheck:monitor", tests: "./monitor" },
-  { dir: "scripts/", typecheck: "typecheck:scripts", tests: "./scripts" },
+const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: readonly string[] }[] = [
+  { dir: "src/", typecheck: "typecheck", tests: ["./src"] },
+  { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: ["./scenarios/src", "./scenarios/default"] },
+  { dir: "tests/", typecheck: "typecheck:tests", tests: ["./tests"] },
+  { dir: "brain/", typecheck: "typecheck:brain", tests: ["./brain"] },
+  { dir: "launcher/", typecheck: "typecheck:launcher", tests: ["./launcher"] },
+  { dir: "monitor/", typecheck: "typecheck:monitor", tests: ["./monitor"] },
+  { dir: "scripts/", typecheck: "typecheck:scripts", tests: ["./scripts"] },
 ];
 
 /**
@@ -156,9 +156,14 @@ function dataReadsOrExit(changedRaw: readonly string[], files: readonly string[]
   return plan;
 }
 
-/** Path prefixes of the suite's test paths (`src/`, `scenarios/src/`...), for the projects present in this checkout. */
-function suiteTestRoots(): string[] {
-  return PROJECTS.filter((project) => existsSync(project.dir)).map((project) => `${project.tests.slice(2)}/`);
+/** Test paths of projects present in this checkout. */
+export function suiteTestPaths(): string[] {
+  return PROJECTS.filter((project) => existsSync(project.dir)).flatMap((project) => project.tests);
+}
+
+/** Path prefixes of suite test paths, including `scenarios/src/` and `scenarios/default/`. */
+export function suiteTestRoots(): string[] {
+  return suiteTestPaths().map((path) => `${path.slice(2)}/`);
 }
 
 /** `x.test.ts` beside each changed `x.ts` (a changed test is itself), inside the suite's test paths only: `check` runs no test CI does not. */
@@ -214,7 +219,7 @@ function runAll(extraArgs: readonly string[]): never {
   for (const project of present) {
     if (!run(["bun", "run", "--silent", project.typecheck])) process.exit(1);
   }
-  process.exit(run(suiteTestCommand(present.map((project) => project.tests), extraArgs)) ? 0 : 1);
+  process.exit(run(suiteTestCommand(suiteTestPaths(), extraArgs)) ? 0 : 1);
 }
 
 function parsedArgsOrExit(): ReturnType<typeof parseCheckArgs> {
