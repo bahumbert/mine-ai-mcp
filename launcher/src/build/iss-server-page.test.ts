@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { code, doc, functionBody, iss, issIncludes, issPath } from "./iss-test-support.ts";
 
-const PAPER_TEXT = "The same game, run by a faster server program. With many companions spread over the world it keeps the game at full speed (20 ticks a second, where the standard server slowed to 19 in our test with 20 idle companions). What changes: animals and monsters far from every player move less.";
+const PAPER_TEXT = "The same game, run by a faster server program. With many companions spread over the world it keeps the game close to full speed (about 20 ticks a second in our test with 20 companions at work, where the standard server fell behind three to four times as often). What changes: animals and monsters far from every player move less.";
 const VANILLA_TEXT = "The standard server program. It may slow down with many companions.";
 const REMOTE_WORDS = "vanilla or Paper Minecraft 1.21.4 with online-mode=false";
 

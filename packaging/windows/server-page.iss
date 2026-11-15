@@ -94,7 +94,7 @@ begin
   ServerProgramPanel.Width := ServerPage.SurfaceWidth - ScaleX(16);
   ServerProgramPanel.Height := ScaleY(128);
   ServerPaperRadio := AddProgramRadio(ServerProgramPanel, ServerPage, 'Paper (recommended)',
-    'The same game, run by a faster server program. With many companions spread over the world it keeps the game at full speed (20 ticks a second, where the standard server slowed to 19 in our test with 20 idle companions). What changes: animals and monsters far from every player move less.', 0, 64);
+    'The same game, run by a faster server program. With many companions spread over the world it keeps the game close to full speed (about 20 ticks a second in our test with 20 companions at work, where the standard server fell behind three to four times as often). What changes: animals and monsters far from every player move less.', 0, 64);
   ServerVanillaRadio := AddProgramRadio(ServerProgramPanel, ServerPage, 'Vanilla (Mojang''s own server)',
     'The standard server program. It may slow down with many companions.', 84, 26);
   ServerPaperRadio.Checked := True;
