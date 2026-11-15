@@ -10,18 +10,20 @@ const DROP_REACH = 10;
 /** Pause after each hit: 6 ticks on a server on time, a full hit's weight (contract boat-broken-by-attack: 9-10 hits at 300 ms). */
 const HIT_EVERY_MS = 300;
 /**
- * The longest the hits go on, counted from the first on the wall clock. A boat breaks above 40 damage, loses 1 a server
- * tick, and a full hand hit adds 10; one sooner than 5 ticks after the last adds `0.2 + 0.8 strength^2` of that (contract
- * check boat-broken-by-attack: 8 hits 250 ms apart, 9-10 at 300 ms, 17-19 at 400 ms, server on time; the strength rule
- * read in Player.attack). The hits a stalled server queues land in one tick at a fifth of a hit each, so a count of
- * hits is no measure of damage: the bound is time (run 20; Dirk's take-back failed, its cause unproven).
+ * How long the hits go on, counted from the first: 10 s of a server on time, which is 200 ticks of world age
+ * (`TAKE_BACK_WALL_MS / 50`: a server at 5 ticks a second is hit for 40 s of wall), and 10 s of wall when the world age
+ * stands still. A boat breaks above 40 damage, loses 1 a server tick, and a full hand hit adds 10; one sooner than 5
+ * ticks after the last adds `0.2 + 0.8 strength^2` of that (contract check boat-broken-by-attack: 8 hits 250 ms apart,
+ * 9-10 at 300 ms, 17-19 at 400 ms, server on time; the strength rule read in Player.attack). The hits a stalled server
+ * queues land in one tick at a fifth of a hit each, so a count of hits is no measure of damage: the bound is time
+ * (run 20; Dirk's take-back failed, its cause unproven), in server ticks since spec 2026-11-15-scenario-disk-stalls section 5.
  */
 export const TAKE_BACK_WALL_MS = 10_000;
 
 export interface TakeBackOptions {
   /** Pause after the last hit for the item to be picked up (default 1500 ms). */
   readonly settleMs?: number;
-  /** Stop after this many hits, if the wall bound has not (the hostile reflex: a mob attacks meanwhile). */
+  /** Stop after this many hits, if the tick bound has not (the hostile reflex: a mob attacks meanwhile). */
   readonly maxHits?: number;
 }
 
@@ -32,6 +34,8 @@ export interface TakeBackReport {
   readonly hits: number;
   /** From the first hit to the end of the hits. */
   readonly elapsedMs: number;
+  /** The server ticks (world age) from the first hit to the end of the hits; 0 when none was sent or the bot had heard no world age. */
+  readonly elapsedTicks: number;
   /** The hit after which the boat entity left her client; null when it was present at every hit (or never hit). */
   readonly goneAfterHit: number | null;
 }
@@ -50,25 +54,66 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Hits `boat` every {@link HIT_EVERY_MS} while it is in her client, until the wall bound, `maxHits` or an abort. */
+/**
+ * The server ticks since the first hit and the wall time the server's clock has stood still, from the world age (`bot.time.age`,
+ * one time packet per 20 ticks): `over()` is true when the hits have lasted {@link TAKE_BACK_WALL_MS} / 50 ticks or the age
+ * has not moved for {@link TAKE_BACK_WALL_MS}. A bot that has heard no age counts no ticks, so only the stand-still ends it.
+ */
+function takeBackClock(bot: Bot) {
+  let firstAge: number | null | undefined;
+  let lastAge: number | null | undefined;
+  let startedAt = 0;
+  let lastMoveAt = 0;
+  const look = () => {
+    const age = bot.time?.age ?? null;
+    if (age !== lastAge) [lastAge, lastMoveAt] = [age, performance.now()];
+    return age;
+  };
+  return {
+    /** The first hit is about to go out. */
+    start() {
+      startedAt = performance.now();
+      lastMoveAt = startedAt;
+      firstAge = lastAge = bot.time?.age ?? null;
+    },
+    elapsedMs: () => (firstAge === undefined ? 0 : Math.round(performance.now() - startedAt)),
+    ticks() {
+      const age = look();
+      // No age was heard at the first hit: the first one heard is the baseline (up to 20 ticks late), so the bound still comes.
+      if (firstAge === null) firstAge = age;
+      return firstAge === undefined || firstAge === null || age === null ? 0 : age - firstAge;
+    },
+    over() {
+      if (firstAge === undefined) return false;
+      const ticks = this.ticks();
+      return ticks >= TAKE_BACK_WALL_MS / 50 || performance.now() - lastMoveAt >= TAKE_BACK_WALL_MS;
+    },
+  };
+}
+
+/**
+ * Hits `boat` every {@link HIT_EVERY_MS} while it is in her client, until the bound (200 ticks of world age, or the age standing
+ * still for {@link TAKE_BACK_WALL_MS}), `maxHits` or an abort. The bound is in server ticks since a server at 5 ticks a second
+ * lets the boat lose its damage 4 times slower than the wall clock says (spec 2026-11-15-scenario-disk-stalls section 5,
+ * lag-triage E2); a stopped one still ends it on the wall clock.
+ */
 async function hitUntilGone(bot: Bot, boat: Entity | null, signal: AbortSignal | undefined, maxHits: number | undefined): Promise<Omit<TakeBackReport, "carried">> {
   const present = () => boat !== null && bot.entities[boat.id] !== undefined;
   let hits = 0;
-  let startedAt: number | null = null;
-  const elapsed = () => (startedAt === null ? 0 : Math.round(performance.now() - startedAt));
-  while (boat !== null && present() && !signal?.aborted && hits < (maxHits ?? Number.POSITIVE_INFINITY) && elapsed() < TAKE_BACK_WALL_MS) {
-    startedAt ??= performance.now();
+  const clock = takeBackClock(bot);
+  while (boat !== null && present() && !signal?.aborted && hits < (maxHits ?? Number.POSITIVE_INFINITY) && !clock.over()) {
+    if (hits === 0) clock.start();
     await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
     bot.attack(boat);
     hits += 1;
     await pause(HIT_EVERY_MS, signal);
   }
-  return { hits, elapsedMs: elapsed(), goneAfterHit: hits > 0 && !present() ? hits : null };
+  return { hits, elapsedMs: clock.elapsedMs(), elapsedTicks: clock.ticks(), goneAfterHit: hits > 0 && !present() ? hits : null };
 }
 
 /**
  * The boat back: broken by hand, it drops and is picked up, swum after when it floats off. The hits go on until the
- * boat is gone or {@link TAKE_BACK_WALL_MS} passes (`maxHits` caps them for a caller that cannot wait). A cancel stops
+ * boat is gone or {@link TAKE_BACK_WALL_MS} / 50 server ticks pass (`maxHits` caps them for a caller that cannot wait). A cancel stops
  * the hits, the pauses and the swim at once.
  */
 export async function takeBoatBackReport(bot: Bot, boat: Entity | null, signal?: AbortSignal, options: TakeBackOptions = {}): Promise<TakeBackReport> {
