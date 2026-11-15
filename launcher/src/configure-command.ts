@@ -206,7 +206,11 @@ export async function runConfigureCommand(args: readonly string[], context: CliC
     context.err(error.message);
     return 1;
   }
+  if (moved.length > 0) context.out("To use vanilla, Mine AI puts Paper's Nether and End folders back inside the world folder.");
   moved.forEach((line) => context.out(line)); // before the save: a save that fails must not hide that the folders moved
+  if (loaded.server.kind === "local" && loaded.server.program === "paper" && next.server.kind === "local" && next.server.program === "vanilla") {
+    context.out("Paper's downloaded server files are kept for a switch back. They still use disk space; nothing is deleted.");
+  }
   try {
     saveSettings(context.root, next, options);
   } catch (error) {

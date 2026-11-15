@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { diskReport, driveLines, type DiskReport, type DiskReportDeps } from "./disk-report.ts";
 import { gb, type DiskDeps, type ModelStoreDeps } from "./disk.ts";
-import type { ServerProgram } from "../settings.ts";
+import type { ServerProgram, Settings } from "../settings.ts";
 import { testContext, testManifest } from "./fixtures/install-test-support.ts";
 import type { InstallContext, StepFailure } from "./step.ts";
 
@@ -302,6 +302,23 @@ test("paper adds the jar and its installed bytes to the server's line, beside th
   );
 });
 
+test("Paper preview overrides saved none, remote and vanilla without changing settings or removing its no-model budget", async () => {
+  const t = setup();
+  const servers: Settings["server"][] = [{ kind: "none" }, { kind: "remote", host: "play.example", port: 25_565 }, withServerProgram(t.ctx, "vanilla").settings.server];
+  for (const server of servers) {
+    for (const noModel of [false, true]) {
+      const ctx = { ...t.ctx, settings: { ...t.ctx.settings, server } };
+      const before = structuredClone(ctx.settings);
+      const report = asReport(await diskReport(ctx, { dir: undefined, noModel, serverProgram: "paper" }, t.deps));
+      assert.deepEqual(paperNeedsOf(report).map((need) => need.bytes), [PAPER_BYTES, PAPER_INSTALLED]);
+      assert.equal(report.drives[0]!.needs.some((need) => need.what === "model"), !noModel);
+      assert.deepEqual(ctx.settings, before);
+    }
+  }
+  const vanilla = asReport(await diskReport(withServerProgram(t.ctx, "paper"), { dir: undefined, noModel: true, serverProgram: "vanilla" }, t.deps));
+  assert.deepEqual(paperNeedsOf(vanilla), []);
+});
+
 test("the Paper needs follow what is on disk: the first-start files count until versions holds the patched jar beside the jar", async () => {
   const rows: [string, string[], [number, number]][] = [
     ["the jar only: an installed jar still counts its installed bytes", [PAPER_JAR], [0, PAPER_INSTALLED]],
@@ -310,11 +327,13 @@ test("the Paper needs follow what is on disk: the first-start files count until 
   ];
   for (const [what, existing, [download, installed]] of rows) {
     const t = setup({ existing });
-    const report = asReport(await diskReport(withServerProgram(t.ctx, "paper"), { dir: undefined, noModel: true }, t.deps));
-    assert.deepEqual(paperNeedsOf(report), [
-      { what: "Paper", bytes: download },
-      { what: "Paper", bytes: installed },
-    ], what);
+    for (const [ctx, serverProgram] of [[withServerProgram(t.ctx, "paper"), undefined], [withServerProgram(t.ctx, "vanilla"), "paper"]] as const) {
+      const report = asReport(await diskReport(ctx, { dir: undefined, noModel: true, serverProgram }, t.deps));
+      assert.deepEqual(paperNeedsOf(report), [
+        { what: "Paper", bytes: download },
+        { what: "Paper", bytes: installed },
+      ], what);
+    }
   }
 });
 

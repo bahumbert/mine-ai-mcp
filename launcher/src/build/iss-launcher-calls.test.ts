@@ -11,12 +11,41 @@ import { runInstallCommand } from "../install-command.ts";
 import { runCli } from "../main.ts";
 import { loadManifest } from "../manifest.ts";
 import { loadSettings, settingsPath } from "../settings.ts";
-import { code, doc, iss, setup, VALUES } from "./iss-test-support.ts";
+import { code, doc, functionBody, iss, setup, VALUES } from "./iss-test-support.ts";
 
 interface CallsLine {
   readonly parameters: readonly string[];
   readonly calls: readonly string[];
 }
+
+test("configure stdout reaches both setup logs in full on success and failure, without arguments or stderr", () => {
+  assert.match(code, /CaptureConfigureOutput: Boolean;/u);
+  assert.match(code, /ConfigureStdout: String;/u);
+  assert.match(functionBody("InitializeWizard"), /CaptureConfigureOutput := False;[\s\S]*ConfigureStdout := '';/u);
+  const run = functionBody("RunLauncher");
+  assert.match(run, /ConfigureStdout := '';[\s\S]*ExecAndLogOutput/u);
+  assert.doesNotMatch(run, /ConfigureStdout := ConfigureStdout/u);
+  assert.match(run, /JsonText := '';[\s\S]*if WithJson then[\s\S]*LoadStringFromFile\(JsonFile, Raw\)[\s\S]*JsonText := UTF8Decode\(Raw\)/u);
+  assert.match(functionBody("OnLauncherLine"), /if CaptureConfigureOutput and \(not Error\) then\s+ConfigureStdout := ConfigureStdout \+ Line \+ #13#10;\s+Text := Trim\(Line\)/u);
+  const configure = functionBody("RunConfigure");
+  assert.match(configure, /CaptureConfigureOutput := True;\s+try\s+Code := RunLauncher\(ConfigureArguments\(\), False, StepsGauge, StepsStatus, Ignored\);\s+finally\s+CaptureConfigureOutput := False;\s+end;\s+NoteConfigureOutput\(ConfigureStdout\);\s+Result := Code = 0;/u);
+  const output = functionBody("NoteConfigureOutput");
+  assert.match(output, /while Length\(Rest\) > 0 do[\s\S]*Pos\(#10, Rest\)[\s\S]*if P = 0 then[\s\S]*Line := Rest;[\s\S]*Rest := '';[\s\S]*else[\s\S]*Copy\(Rest, 1, P - 1\)[\s\S]*Delete\(Rest, 1, P\)/u);
+  assert.match(output, /Trim\(Line\) <> '' then\s+NoteSetup\(Line\)/u);
+  assert.match(output, /StringChangeEx\(Line, #13, '', True\)/u);
+  assert.doesNotMatch(output + configure, /LastLogTail|Moved|600|NoteSetup\(ConfigureArguments|NoteConfigureOutput\(Ignored/u);
+  assert.match(functionBody("NoteSetup"), /StepsLog\.Lines\.Add\(Line\);\s+Log\(Line\)/u);
+  assert.match(functionBody("KeepLauncherLine"), /Length\(LastLogTail\) > 600/u);
+  assert.match(functionBody("SaveAndTestEndpoint"), /RunLauncher\([^\n]*False,/u);
+});
+
+test("the Windows guide describes stopped world migration and retained downloads", () => {
+  assert.match(doc, /stop[\s\S]*folders[\s\S]*backups/u);
+  assert.match(doc, /212,557,822 bytes[\s\S]*shared|212,557,822 bytes[\s\S]*serve vanilla/u);
+  assert.match(doc, /world backups[\s\S]*additional/iu);
+  assert.doesNotMatch(doc, /going back to vanilla on a world that ran on Paper is refused/u);
+  assert.match(doc, /Saved AI model[\s\S]*Saved Minecraft server[\s\S]*after the files are copied/u);
+});
 
 function callsLines(): CallsLine[] {
   const lines = [...iss.matchAll(/^\/\/\s+CALLS (.+?): (.+)$/gmu)].map((match) => ({
@@ -80,14 +109,15 @@ test("every launcher call of every silent parameter set runs on the CLI and leav
  */
 const WIZARD_ONLY_STEPS: Readonly<Record<string, { readonly reason: string; readonly flags: readonly string[] }>> = {
   "endpoint-models": { reason: "fills the endpoint page's model list on the player's button; a silent install gives /LLMMODEL= and never lists", flags: ["--url", "--key", "--saved-key", "--list"] },
-  disk: { reason: "the model page's free-space text (spec D2); nobody reads it in a silent install, whose steps keep their own guards", flags: ["--no-model"] },
+  disk: { reason: "the model page's free-space text (spec D2); nobody reads it in a silent install, whose steps keep their own guards", flags: ["--no-model", "--server-program"] },
 };
 
 test("the CALLS lines name every flag and install step the .iss code uses, and nothing it does not, except the steps only the wizard runs", () => {
   const documented = callsLines().flatMap((line) => line.calls);
   const wizardOnlyFlags = Object.values(WIZARD_ONLY_STEPS).flatMap((step) => step.flags);
   const flagsIn = (text: string): string[] => [...new Set([...text.matchAll(/--[a-z]+(?:-[a-z]+)*/gu)].map((match) => match[0]))].filter((flag) => flag !== "--json").sort();
-  assert.deepEqual(flagsIn(documented.join(" ")), flagsIn(code).filter((flag) => !wizardOnlyFlags.includes(flag)));
+  const documentedFlags = flagsIn(documented.join(" "));
+  assert.deepEqual(documentedFlags, flagsIn(code).filter((flag) => !wizardOnlyFlags.includes(flag) || documentedFlags.includes(flag)));
   const stepsInCode = [...code.matchAll(/(?:'install |RunSetupStep\('|RunInstallStepWithRetry\(')([a-z]+(?:-[a-z]+)*)/gu)].map((match) => match[1]!);
   const stepsDocumented = documented.filter((call) => call.startsWith("install ")).map((call) => call.split(" ")[1]!);
   assert.deepEqual([...new Set(stepsInCode)].filter((step) => !(step in WIZARD_ONLY_STEPS)).sort(), [...new Set(stepsDocumented)].sort());

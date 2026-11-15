@@ -54,6 +54,7 @@ const nothingMayRun: Partial<CliDeps> = {
 };
 
 test("--help or -h prints the usage and exits 0, whatever the command", async () => {
+  assert.match(USAGE, /install disk \[--server-program paper\|vanilla\][\s\S]*disk only[\s\S]*saved[\s\S]*without saving/u);
   const argvs = [["--help"], ["-h"], ["help"], ["console", "--help"], ["start", "--help"], ["bot", "start", "brea", "--help"], ["install", "java", "--help"], ["configure", "--help"]];
   for (const argv of argvs) {
     const t = setup();

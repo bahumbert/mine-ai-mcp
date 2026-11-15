@@ -154,8 +154,12 @@ test("the Ready summary lists the folders, and the model and server of an update
   // An update with no settings.json falls to the sentence too: the pages after the copy still ask both.
   assert.match(memo, /IsUpdate\(\) and SettingsSummary\(Model, Server\) then[\s\S]*\n\s+else\n[\s\S]*chosen on the next pages/u);
   assert.match(memo, /Data folder:/u);
-  assert.match(memo, /AI model:/u);
-  assert.match(memo, /Minecraft server:/u);
+  assert.match(memo, /Saved AI model:/u);
+  assert.match(memo, /Saved Minecraft server:/u);
+  assert.match(memo, /These are your saved settings\. You can change the AI model and Minecraft server on the next pages, after the files are copied\./u);
+  const summary = functionBody("SettingsSummary");
+  assert.match(summary, /Kind = 'local' then[\s\S]*ProgramWords\(JsonString\(ServerSection, 'program'\)\)[\s\S]*Kind = 'remote' then[\s\S]*host[\s\S]*else[\s\S]*none/u);
+  assert.match(functionBody("ProgramWords"), /'paper'[\s\S]*'Paper'[\s\S]*else[\s\S]*'vanilla'/u);
   assert.match(memo, /AI model and Minecraft server: chosen on the next pages, after the files are copied/u);
   assert.match(memo, /SettingsSummary\(/u);
   // One reader of the file's `llm` and `server` objects: the summary and the pages' prefill both call it, none repeats it.

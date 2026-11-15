@@ -38,6 +38,14 @@ downloads and installs only. Ollama's own installer also needs temporary room on
 and the bots' memories and worlds grow as they play, so keep several GB free beyond the figures shown. The setup says
 the same on the AI model page and on the Ready page, and writes it in its log in a silent install.
 
+The model page previews Paper, the recommended local server, before you choose the server on a later page.
+A fresh vanilla server downloads less; existing server files are kept. The report scrolls so every drive and
+warning remains accessible with the mouse or keyboard.
+
+`mine-ai install disk --server-program paper|vanilla` previews either program for this report only. Without
+`--server-program`, it uses the saved program. It never saves settings, moves worlds, downloads files or accepts
+the EULA. The actual install uses your server choice and still checks disk space before downloading.
+
 ## The Minecraft server
 
 The installer asks which server the bots join:
@@ -52,7 +60,10 @@ The installer asks which server the bots join:
   A new local server starts on Paper; an update keeps the program
   already saved, and a server saved before Paper existed stays vanilla. The choice can be changed later with
   `mine-ai configure --server-local --server-program paper|vanilla` — it picks the server program of the local server;
-  Paper is the default for a new local server; going back to vanilla on a world that ran on Paper is refused.
+  To go back to vanilla after Paper, stop Mine AI first with `mine-ai stop`, then run configure. Mine AI moves Paper's
+  Nether and End folders back inside the world folder, keeping existing targets as backups, and explains each move.
+  A running launcher or a failed move refuses the switch and leaves settings unchanged. Paper's downloaded server
+  files stay for a switch back; nothing is deleted.
 - **An existing server.** Give its address and port. It must be a **vanilla or Paper Minecraft 1.21.4** server with
   **`online-mode=false`**. At every start Mine AI checks the server and, when it is down, is another version or has
   online mode on, prints one clear line and starts no bot.
@@ -184,11 +195,17 @@ own Ollama (port 11434) and your models are never started, stopped, reinstalled 
 own Ollama's store, so nothing is downloaded twice. When Mine AI installs Ollama itself, Ollama's tray app also starts
 with Windows, and **the AI model lives in your data folder** (`models\`, about 8 GB), so it goes with that folder.
 
+Paper's jar, `cache/`, `libraries/` and `versions/` remain after a switch to vanilla. On one measured installation
+they totalled 212,557,822 bytes (about 0.21 GB); some files also serve vanilla, so this is not all reclaimable
+Paper-only space. The world backups are additional and depend on your world. The disk estimate uses current free
+space and pending downloads, rather than this example.
+
 ## Updating
 
 Run a newer installer: it installs over the old version, in the same folders, and keeps your data. Its first page,
 "Ready to update or repair", lists the program folder, the data folder, and the AI model and Minecraft server you chose
-before; the button is **Update**. Running the same version again repairs: any missing file comes back, and your data
+before, labelled **Saved AI model:** and **Saved Minecraft server:**. These are your saved settings; you can change
+both on the next pages, after the files are copied. The button is **Update**. Running the same version again repairs: any missing file comes back, and your data
 folder, worlds and bots stay as they are (the AI model and server settings are set again on the pages after the copy). At a first install the Ready page lists the two folders and says that the AI model
 and the server are chosen on the next pages, after the files are copied (the graphics card check happens there). Mine AI checks once at start whether a
 newer release exists and tells you; it never downloads one by itself. The check is one request for the latest release on
