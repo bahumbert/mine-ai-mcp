@@ -320,9 +320,15 @@ export function nearEntityGoal(entity: EntityReference, range: number): Goal {
   };
 }
 
+/** A threat's last position and optional geometry for finding cover. */
+export interface SafeFromEntity extends Pick<EntityObservation, "id" | "position"> {
+  readonly cover?: { readonly minRange: number; readonly eyeHeight: number; readonly width: number };
+}
+
 /**
  * Reach a stance at least `range` from every supplied threat, using its current
- * position when observed and the caller's last observation otherwise.
+ * position when observed and the caller's last observation otherwise, unless
+ * snapshot mode freezes the supplied positions.
  *
  * Unlike composing inverted near-entity goals, this gives A* a gradient: the
  * largest remaining distance shortfall. Entity positions are re-read whenever
@@ -331,16 +337,22 @@ export function nearEntityGoal(entity: EntityReference, range: number): Goal {
  * The caller removes confirmed-dead threats; absence alone does not establish safety.
  */
 export function safeFromEntitiesGoal(
-  entities: readonly Pick<EntityObservation, "id" | "position">[],
+  entities: readonly SafeFromEntity[],
   range: number,
+  options?: { readonly follow?: "live" | "snapshot" },
 ): Goal {
   if (range < 0 || !Number.isFinite(range))
     throw new RangeError("Safe entity range must be a finite non-negative number.");
-  const known = [...new Map(entities.map((entity) => [entity.id, entity])).values()].sort((a, b) => a.id - b.id);
+  const snapshot = options?.follow === "snapshot";
+  const known = [...new Map(entities.map((entity) => [entity.id, snapshot
+    ? { ...entity, position: { ...entity.position } }
+    : entity])).values()].sort((a, b) => a.id - b.id);
   return {
     resolve(observation) {
-      const threats = known.map((lastSeen) => observation.entities.get(lastSeen.id) ?? lastSeen);
-      const revision = `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
+      const threats = snapshot ? known : known.map((lastSeen) => ({ ...lastSeen, ...observation.entities.get(lastSeen.id) }));
+      const revision = snapshot
+        ? `safe-from:${range}:snapshot:${threats.map(({ id, position }) => `${id}@${position.x},${position.y},${position.z}`).join("|")}`
+        : `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
       const shortfall = (position: BlockPosition): number => {
         let largest = 0;
         for (const threat of threats) {

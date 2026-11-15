@@ -32,6 +32,7 @@ test("safe-from-entities grades the distance still owed and follows the threat i
   assert.equal(moved.kind, "active");
   if (first.kind !== "active") return;
 
+  assert.equal(first.revision, "safe-from:16:entity:7:0,0,0");
   assert.equal(first.heuristic(node(5)), 44);
   assert.equal(first.isSatisfied(node(16), goalTestWorld), true);
   assert.equal(first.isSatisfied(node(15), goalTestWorld), false);
@@ -44,4 +45,19 @@ test("safe-from-entities grades the distance still owed and follows the threat i
   if (gone.kind !== "active") return;
   assert.equal(gone.isSatisfied(node(0), goalTestWorld), false);
   assert.equal(gone.isSatisfied(node(16), goalTestWorld), true);
+});
+
+test("a snapshot retains its creation position across observations and caller mutation", () => {
+  const position = { x: 0, y: 0, z: 0 };
+  const goal = safeFromEntitiesGoal([{ id: 7, position }], 36, { follow: "snapshot" });
+  const first = goal.resolve(watching(0));
+  const moved = goal.resolve(watching(20));
+  position.x = 20;
+  const mutated = goal.resolve(watching());
+  for (const resolved of [first, moved, mutated]) {
+    assert.equal(resolved.kind, "active");
+    if (resolved.kind !== "active") return;
+    assert.equal(resolved.revision, "safe-from:36:snapshot:7@0,0,0");
+    assert.equal(resolved.isSatisfied(node(44), goalTestWorld), true);
+  }
 });
