@@ -38,6 +38,24 @@ test("a sample reads each server's tick time and resident size into the pool, an
   assert.deepEqual(rig.scheduler.sampleReport()?.serverTicks, [{ id: managed.id, msptP95: 9.5 }]);
 });
 
+test("a tick query that fails at once marks the server late and drops its old percentile until the next answer", async () => {
+  const rig = new SchedulerRig();
+  const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  fake.replies.set("tick query", TICK_QUERY);
+  await sampleOnce(depsOf(rig.pool, rig));
+  assert.equal(rig.pool.readings().find(each => each.id === managed.id)?.msptP95, 9.5);
+  fake.replies.set("tick query", new Error("RCON timed out"));
+  await sampleOnce(depsOf(rig.pool, rig));
+  let reading = rig.pool.readings().find(each => each.id === managed.id);
+  assert.equal(reading?.late, true);
+  assert.equal(reading?.msptP95, null);
+  fake.replies.set("tick query", TICK_QUERY);
+  await sampleOnce(depsOf(rig.pool, rig));
+  reading = rig.pool.readings().find(each => each.id === managed.id);
+  assert.equal(reading?.late, undefined);
+  assert.equal(reading?.msptP95, 9.5);
+});
+
 test("a server whose tick query fails is not stalled until STALL_STOP has passed since its first failed query, then it is stopped", async () => {
   const rig = new SchedulerRig({ MINE_AI_SCENARIO_STALL_STOP_MS: "1000" });
   const { managed, fake } = await readyServer(rig.pool, rig.factory);
@@ -106,18 +124,34 @@ test("an idle server is reaped by the sample when its key is no longer queued", 
   assert.equal(rig.pool.get(managed.id), undefined);
 });
 
-test("a slow tick query is neither abandoned nor repeated: it is still outstanding at the next sample, and its late answer counts", async () => {
+test("a hanging tick query stays late across samples without a duplicate query, until its answer clears the mark", async () => {
   const rig = new SchedulerRig();
   const { managed, fake } = await readyServer(rig.pool, rig.factory);
+  rig.pool.leaseLane(managed.id);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   let answerLate!: (text: string) => void;
   let asked = 0;
   fake.command = () => { asked += 1; return new Promise<string>(resolve => { answerLate = resolve; }); };
-  const first = sampleOnce(depsOf(rig.pool, rig, { now: () => 500 }));
-  await sampleOnce(depsOf(rig.pool, rig, { now: () => 600 }));
+  const deps = depsOf(rig.pool, rig, { now: clock.now });
+  const first = sampleOnce(deps);
+  await sampleOnce(deps);
+  assert.equal(asked, 1, "no duplicate while the first sample still waits for its bound");
+  await clock.advance(config.sampleEveryMs / 2);
+  await first;
+  let reading = rig.pool.readings().find(each => each.id === managed.id);
+  assert.equal(reading?.late, true);
+  assert.equal(reading?.msptP95, null);
+  await sampleOnce(deps);
+  reading = rig.pool.readings().find(each => each.id === managed.id);
+  assert.equal(reading?.late, true);
+  assert.equal(reading?.msptP95, null);
   assert.equal(asked, 1, "no second tick query on top of the unanswered one");
   answerLate(TICK_QUERY);
-  await first;
-  assert.equal(rig.pool.readings().find(reading => reading.id === managed.id)?.msptP95, 9.5);
+  await clock.advance(0);
+  reading = rig.pool.readings().find(each => each.id === managed.id);
+  assert.equal(reading?.late, undefined);
+  assert.equal(reading?.msptP95, 9.5);
 });
 
 // A stop or a slow answer never holds the sample (spec 2026-11-15 sections 1 and F2).

@@ -31,7 +31,10 @@ async function readServerHealth(deps: SamplerDeps, id: string, server: ScenarioS
   deps.pool.asked(id, deps.now());
   // No bound of our own: RCON times each command out at 10 s, and an answer that comes late still shows the server alive.
   const answer = await server.command("tick query").catch(() => null).finally(() => queryOutstanding.delete(server));
-  if (answer === null) return;
+  if (answer === null) {
+    deps.pool.markLate(id);
+    return;
+  }
   deps.pool.answered(id, deps.now());
   const reading = parseTickQuery(answer);
   if (!reading && !unparsedLogged.has(server)) {
