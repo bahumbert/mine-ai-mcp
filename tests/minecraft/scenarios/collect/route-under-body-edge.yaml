@@ -1,0 +1,39 @@
+template: ../../templates/collect/single-action.yaml
+name: route-under-body-edge
+tags: [regression]
+description: Avoid repeatedly planning a refused edge-support dig by descending into the adjacent dry pocket first.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: peaceful
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, randomTickSpeed: 0 }
+reset: ["fill -8 -59 -8 10 -40 8 air"]
+geometry:
+  # Walls rule out upper banks; the pocket floor supplies a safe lower stance (R3, 2026-11-15).
+  - fill: { block: stone, from: [-6, -63, -6], to: [8, -60, 6] }
+  - setblock: { block: air, at: [0, -60, 0] }
+  - setblock: { block: dirt, at: [1, -60, 0] }
+  - fill: { block: bedrock, from: [-1, -59, 0], to: [-1, -57, 0] }
+  - fill: { block: bedrock, from: [0, -59, -1], to: [1, -57, -1] }
+  - fill: { block: bedrock, from: [0, -59, 1], to: [1, -57, 1] }
+  - fill: { block: bedrock, from: [2, -59, 0], to: [2, -57, 0] }
+players:
+  - name: Collector
+    pos: [0.85, -59, 0.5]
+    inventory: [{ item: diamond_shovel, count: 1 }]
+client: { command: bun, cwd: ../.., args: [client-host.ts, drivers/mining-body-edge.ts] }
+params:
+  # Straight-down digging otherwise gives the baseline a cheaper safe route (R3, 2026-11-15).
+  noDigStraightDown: true
+  action: navigate
+  input: { x: 1, y: -60, z: 0, range: 0, dig: true, scaffold: false }
+  target: { x: 1, y: -60, z: 0 }
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: reach, pos: [1.5, -60, 0.5], radius: 0.8 }
+    - { kind: blocksAt, block: air, positions: [[1, -60, 0]] }
+    - { kind: health, who: Collector, health: 20 }
+    - { kind: completion, who: Collector }
