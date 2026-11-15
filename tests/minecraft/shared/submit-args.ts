@@ -1,9 +1,7 @@
 // `submit`'s command line and how the daemon's messages print (the PASS/FAIL lines Mine Labs prints, which the scripts grep).
-import { existsSync, realpathSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { SCENARIO_SERVER_ENV_NAMES } from "./config.ts";
 import type { DaemonMessage } from "./protocol.ts";
-import { ninePMountOf } from "./source-root.ts";
 
 export interface SubmitArgs {
   readonly paths: string[];
@@ -51,25 +49,6 @@ export function parseSubmitArgs(argv: readonly string[], cwd: string): SubmitArg
   }
   if (paths.length === 0 && !flags.stop) throw new Error(USAGE);
   return { paths, socket, port, ...flags };
-}
-
-/** Where `target` really is: the real path of its nearest existing ancestor (the output folder is made later) plus the rest. */
-function realPathOfNearestAncestor(target: string): string {
-  let ancestor = target;
-  while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
-  return join(realpathSync(ancestor), relative(ancestor, target));
-}
-
-/**
- * A warning when the artifacts folder (`--out`) is on a 9P mount (`/mnt/d`), else null; `mounts` is `/proc/mounts` text.
- * 2026-11-06 (plan p4-01a T7): through the daemon, `fight-no-progress` failed 30 of 30 with "disk I/O error" from the
- * clients' bot-data SQLite store with artifacts on /mnt/d and passed with them on ext4; the failing SQLite step was not
- * kept and a fresh WSL did not reproduce it (7 of 7 runs, 36 of 36 parallel store opens under load), so the cause is unproven.
- */
-export function outputOnNinePWarning(out: string, mounts: string, realPath: (path: string) => string = realPathOfNearestAncestor): string | null {
-  const real = realPath(out);
-  if (!ninePMountOf(real, mounts)) return null;
-  return `warning: --out ${out} is on a 9P mount (${real}): the clients' bot-data SQLite store failed there with "disk I/O error" in a batch of runs on 2026-11-06 (cause unproven; other runs passed). If a run fails so, pass an --out on ext4 (under /tmp or ~/.cache), as .agent/scripts/scenario/scenario-repeat.sh does.`;
 }
 
 const OUTCOME_LABEL = { pass: "PASS", fail: "FAIL", timeout: "TIMEOUT", error: "ERROR", cancelled: "CANCELLED" } as const;
