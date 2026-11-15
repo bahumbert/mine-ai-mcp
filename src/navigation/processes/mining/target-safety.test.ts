@@ -201,6 +201,19 @@ test("standsOnBlock: on the block, not beside it or lower in its column; a swimm
   assert.equal(standsOnBlock(bot, block), false, "a swimmer afloat works from the top stance");
 });
 
+test("standsOnBlock: a target under the footprint's edge with the centre over a drop is the body's floor; a solid neighbour is the floor instead", () => {
+  const target = { x: 1, y: 64, z: 0 };
+  const edge = new Vec3(0.85, 65, 0.5);
+  const over = createFakeBot({ position: edge, groundY: 50, cells: { "1,64,0": "stone" } });
+  assert.equal(standsOnBlock(over.bot, target), true, "the 0.6-wide body is on the step's edge, the other column is air");
+  const held = createFakeBot({ position: edge, groundY: 50, cells: { "1,64,0": "stone", "0,64,0": "stone" } });
+  assert.equal(standsOnBlock(held.bot, target), false, "the neighbouring column carries the body, the target may be mined from here");
+  const centred = createFakeBot({ position: new Vec3(1.1, 65, 0.5), groundY: 50, cells: { "1,64,0": "stone", "0,64,0": "stone" } });
+  assert.equal(standsOnBlock(centred.bot, target), false, "a centre over the target with a solid neighbour under the footprint: the neighbour carries it too");
+  const beside = createFakeBot({ position: new Vec3(0.7, 65, 0.5), groundY: 50, cells: { "1,64,0": "stone" } });
+  assert.equal(standsOnBlock(beside.bot, target), false, "a footprint that only touches the boundary is not on it");
+});
+
 test("standing mid-bridge over a 20-deep gap, no bridge block is a target; cobblestone on the ground still is", () => {
   // Bridge at y 64, x 0..9 along z 0, over a gap down to y 44; ground at y 63 for x <= -1 and x >= 10, and cobblestone 15 away.
   const cell = (x: number, y: number, z: number) =>

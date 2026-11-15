@@ -15,6 +15,34 @@ export const COAST_TICKS = 2;
 export const PLAYER_HALF_WIDTH = 0.3;
 
 /**
+ * Whether the block at `cell` carries the body standing on it: the footprint (feet.x and feet.z plus or minus
+ * {@link PLAYER_HALF_WIDTH}) overlaps the cell's column, and no other column it overlaps holds a body-carrying block at
+ * the cell's height, so removing the cell would drop the body. The caller has already checked that the feet stand at
+ * the cell's top. Overlap is strict: a footprint that only touches the boundary is not on the column. The centre of the
+ * feet is not the question: a centre over a drop with the body on the step's edge still stands on the step (plan
+ * 2026-11-15-p4-34-cleanup-footprint, 16 probe runs of rc-lava/probe-15runs.log: 4 of 4 fell when the cleanup dug it).
+ * `columnCarriesBodyAt` reads the block's own geometry for the caller (the navigation observation's `safeSupport`).
+ */
+export function footprintStandsOnCell(
+  feet: Position3,
+  cell: Position3,
+  columnCarriesBodyAt: (x: number, y: number, z: number) => boolean,
+): boolean {
+  const lowX = feet.x - PLAYER_HALF_WIDTH;
+  const highX = feet.x + PLAYER_HALF_WIDTH;
+  const lowZ = feet.z - PLAYER_HALF_WIDTH;
+  const highZ = feet.z + PLAYER_HALF_WIDTH;
+  if (!(highX > cell.x && lowX < cell.x + 1 && highZ > cell.z && lowZ < cell.z + 1)) return false;
+  // Cells the footprint overlaps: from the cell holding its low edge to the one holding its high edge, edges exclusive.
+  for (let x = Math.floor(lowX); x < highX; x++)
+    for (let z = Math.floor(lowZ); z < highZ; z++) {
+      if (x === cell.x && z === cell.z) continue;
+      if (columnCarriesBodyAt(x, cell.y, z)) return false;
+    }
+  return true;
+}
+
+/**
  * Ticks of horizontal travel left in an airborne body, per block per tick of
  * speed. Off the ground there is no block friction, only the 0.91 inertia
  * prismarine-physics applies each tick, so the remaining travel is

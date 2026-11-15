@@ -8,10 +8,11 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { saveBotNote } from "../actions/note-save/note-save.js";
 import type { SqlBotData } from "../bot-data/sql-bot-data.js";
-import { createMovements, customGoal, DIG_REACH, watchServerChange, type Navigate } from "../navigation/index.js";
+import { createMovements, customGoal, DIG_REACH, isSafeSupport, liveBlockReader, watchServerChange, type Navigate } from "../navigation/index.js";
 import { monotonicNow } from "../utils/monotonic-clock.js";
 import { raceSignal } from "../utils/race-signal.js";
 import { observedEyeHeight, visibleBlockAim } from "./block-visibility.js";
+import { footprintStandsOnCell } from "./player-physics.js";
 import { describeProtectedRegion, foreignRegionAt, regionChangeRefusal, type BlockCorner, type ProtectedRegion } from "./protected-regions.js";
 
 export type LifeSavingKind = "block" | "water";
@@ -97,9 +98,14 @@ function forgetPlacement(bot: Bot, entry: LifeSavingPlacement): void {
   if (index >= 0) ledger!.splice(index, 1);
 }
 
-/** A catching floor cannot be removed from under the body; approach from another safe stance first. */
+/**
+ * A block that carries the body cannot be removed from under it; approach from another safe stance first. The body
+ * stands on the cell when any of its 0.6-wide footprint is over it and no other column under the footprint carries it
+ * (`footprintStandsOnCell`): the centre of the feet over the neighbouring drop is no reason to dig (P4-34).
+ */
 function removalAim(bot: Bot, cell: Vec3, feet = bot.entity.position): Vec3 | null {
-  if (Math.floor(feet.x) === cell.x && Math.floor(feet.z) === cell.z && Math.floor(feet.y) - 1 === cell.y) return null;
+  const read = liveBlockReader(bot);
+  if (Math.floor(feet.y) - 1 === cell.y && footprintStandsOnCell(feet, cell, (x, y, z) => isSafeSupport(read(x, y, z)))) return null;
   const block = bot.blockAt(cell);
   if (!block) return null;
   const eye = feet.offset(0, observedEyeHeight(bot.entity), 0);
@@ -130,7 +136,11 @@ async function approachPlacement(bot: Bot, cell: Vec3, signal: AbortSignal): Pro
   try {
     const result = await navigate({
       movements: bounded,
-      goal: customGoal(`remove emergency placement ${cell}`, (node) => removalAim(bot, cell, new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5)) !== null),
+      goal: customGoal(`remove emergency placement ${cell}`, (node, { position }) => {
+        // The node the body is in is judged where the body is: its centre may be over a drop while the footprint is on the step.
+        const inThisNode = Math.floor(position.x) === node.feet.x && Math.floor(position.z) === node.feet.z && Math.abs(position.y - node.feet.y) < 0.5;
+        return removalAim(bot, cell, inThisNode ? new Vec3(position.x, position.y, position.z) : new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5)) !== null;
+      }),
       signal: AbortSignal.any([signal, route.signal]),
     });
     if (result.status === "stopped") return `no route to the placement: ${result.reason}`;

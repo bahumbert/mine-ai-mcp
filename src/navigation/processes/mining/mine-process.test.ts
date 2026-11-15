@@ -362,6 +362,22 @@ test("a drained target excludes wet stances with and without weighing, preservin
   }
 });
 
+test("a target under the body's footprint edge, its centre over a drop, loses its own top cell as a stance (P4-34)", async () => {
+  const target = new Vec3(1, 64, 0);
+  using scene = mineScene({ blocks: [target], feet: new Vec3(0.85, 65, 0.5) });
+  let excluded: string[] | null = null;
+  await runMine(scene, {
+    isSatisfied: () => excluded !== null,
+    targetCost: { beginScan() {}, cost: () => 0 },
+    onScan: (scan) => {
+      const kept = scan.targets[0];
+      if (kept?.kind === "block") excluded = [...kept.excludedStances];
+    },
+    route: async () => ({ status: "completed", elapsedMs: 0 }),
+  });
+  assert.deepEqual(excluded, ["1,65,0"]);
+});
+
 test("nearby drops are recovered before another source is offered for mining", async () => {
   const cell = new Vec3(1, 64, 0);
   using scene = mineScene({ blocks: [cell], drops: [cell] });

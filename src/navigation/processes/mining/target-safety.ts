@@ -28,6 +28,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { plausibleToBreak } from "../../../world/block-classification.js";
+import { footprintStandsOnCell } from "../../../world/player-physics.js";
 import { waterMiningStance } from "../../world/water.js";
 import { dropColumn, isDryAir, isLava } from "../../world/block-geometry.js";
 import type { BlockObservation } from "../../world/world.js";
@@ -37,6 +38,7 @@ import { breakRefusalCause } from "../../movements/policy.js";
 import { drownedVerdict } from "./drowned-target.js";
 import { MAXIMUM_BUCKET_DROP } from "../../mineflayer/movement-policy.js";
 import {
+  isSafeSupport,
   observeMineflayerBlock,
   type BlockPosition,
   type MineflayerBlock,
@@ -155,12 +157,10 @@ export function isWalkwayOverDrop(movements: MovementPolicy, world: WorldView, p
 export function standsOnBlock(bot: Bot, position: BlockPosition): boolean {
   const feet = bot.entity.position;
   const floating = Reflect.get(bot.entity, "isInWater") === true && !bot.entity.onGround;
-  return (
-    !floating &&
-    position.x === Math.floor(feet.x) &&
-    position.z === Math.floor(feet.z) &&
-    position.y === Math.ceil(feet.y) - 1
-  );
+  if (floating || position.y !== Math.ceil(feet.y) - 1) return false;
+  // The body's footprint, not the feet's centre: a target under its edge with the centre over a drop is its floor (P4-34).
+  const read = liveBlockReader(bot);
+  return footprintStandsOnCell(feet, position, (x, y, z) => isSafeSupport(read(x, y, z)));
 }
 
 /**
