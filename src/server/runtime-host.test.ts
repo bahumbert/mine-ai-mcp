@@ -4,13 +4,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { plugin as toolPlugin } from "mineflayer-tool";
 import { createFakeBot, type FakeBotOptions } from "../test-support/fake-bot/index.js";
+import { sleepMs } from "../utils/wall-timers.js";
 import { parseHostOptions } from "./config.js";
 import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
@@ -20,7 +20,7 @@ const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
 const TOOL_PLUGIN_PHYSICS_LISTENERS = await (async () => {
   const { bot } = createFakeBot();
   bot.loadPlugin(toolPlugin);
-  await delay(0);
+  await sleepMs(0);
   return bot.listenerCount("physicsTick");
 })();
 
@@ -64,7 +64,7 @@ async function answeredWhileClockMoves<T>(clock: { advance(ms: number): Promise<
   const deadline = performance.now() + ROUTE_ANSWER_REAL_MS;
   while (!settled && performance.now() < deadline) {
     await clock.advance(100);
-    await delay(5);
+    await sleepMs(5);
   }
   assert.ok(settled, `the route did not answer within ${ROUTE_ANSWER_REAL_MS} ms of real time`);
   return pending;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getEventListeners } from "node:events";
-import { setTimeout as pause } from "node:timers/promises";
+import { setTimeout as realDelay } from "node:timers/promises";
 import { z } from "zod";
 import { defineAction, actionResultSchema } from "../actions/action.js";
 import { temporaryBotData } from "../test-support/bot-data.js";
@@ -45,7 +45,7 @@ test("submission deduplicates, timed waits preserve execution, and final retriev
   abort.abort(new Error("Stop only this wait"));
   await assert.rejects(waiting, /Stop only this wait/);
   assert.equal(f.runner.status().busy, true);
-  await pause(5);
+  await realDelay(5);
   f.finish();
   await f.service.settled();
   const refused = f.service.submit(f.action, {}, { submission_id: "second" }, 5);
@@ -74,7 +74,7 @@ test("targeted cancellation leaves a reflex alive, waits for release, and never 
   const f = fixture();
   const accepted = f.service.submit(f.action, {}, { submission_id: "first" }, 1);
   assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
-  await pause(0);
+  await realDelay(0);
   let release!: () => void;
   let reflexSignal: AbortSignal | null = null;
   const claim = f.runner.claim("hostile", "defend", async (signal) => {
@@ -82,7 +82,7 @@ test("targeted cancellation leaves a reflex alive, waits for release, and never 
     await new Promise<void>((resolve) => { release = resolve; });
     return { value: null, continuation: { kind: "resume" } };
   });
-  await pause(0);
+  await realDelay(0);
   f.service.cancel(accepted.actionId, "Choose a different objective");
   assert.equal((reflexSignal as AbortSignal | null)?.aborted, false);
   assert.equal((await f.service.wait(accepted.actionId, 0)).state, "pending");
@@ -141,7 +141,7 @@ test("storage failure retains the result gate without repeating physical work", 
     await new Promise<void>((resolve) => { release = resolve; });
     return { value: null, continuation: { kind: "resume" as const } };
   });
-  await pause(0);
+  await realDelay(0);
   assert.equal(service.submit(f.action, {}, { submission_id: "next" }, 2).state, "refused");
   assert.equal(store.load()[0]?.resultRetrieved, true);
   release();
@@ -404,7 +404,7 @@ test("a waiter listener that throws does not keep the others waiting", async () 
   const first = f.service.wait(accepted.actionId, 5000, broken);
   const second = f.service.wait(accepted.actionId, 5000);
   f.finish();
-  const bounded = <T>(promise: Promise<T>) => Promise.race([promise, pause(2000).then(() => "still waiting" as const)]);
+  const bounded = <T>(promise: Promise<T>) => Promise.race([promise, realDelay(2000).then(() => "still waiting" as const)]);
   const secondOutcome = await bounded(second);
   assert.equal(typeof secondOutcome === "string" ? secondOutcome : secondOutcome.state, "settled");
   assert.notEqual(await bounded(first), "still waiting");

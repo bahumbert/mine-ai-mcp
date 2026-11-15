@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import { ExecutionScope, observeExecution, type ExecutionEvent } from "./execution-scope.js";
+import { sleepMs } from "../utils/wall-timers.js";
 
 /** Every execution event, until the scope that declared it ends. */
 function recordExecution() {
@@ -33,7 +33,7 @@ test("time awaiting observations is not charged as uninterrupted computation", a
   using execution = new ExecutionScope({ bot: "WaitingTest", operation: "guard", targetId: null });
   for (let tick = 0; tick < 4; tick++) {
     await execution.checkpoint();
-    await delay(20);
+    await sleepMs(20);
   }
   assert.equal(record.events.filter((event) => event.kind === "yielded").length, 0);
 });

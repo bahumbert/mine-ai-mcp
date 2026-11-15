@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentOptions } from "./agent.ts";
 import { INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
@@ -10,6 +9,7 @@ import { OtherAgents } from "./other-agents.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
 import { FakeRuntime, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
 import { planFollowStep } from "./skills.ts";
+import { sleepMs } from "./wall-timers.ts";
 
 function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
@@ -364,7 +364,7 @@ test("stop ends everything, its own goal included, and it rests before going bac
   await agent.handle(say("Steve", "stop, take a break"));
   await until(() => runtime.cancelled.length === 1);
   assert.equal(agent.activity, "idle");
-  await sleep(300);
+  await sleepMs(300);
   assert.equal(planner.requests.length, 1, "no new own objective while resting");
 });
 
@@ -477,7 +477,7 @@ test("under an order, what it starts doing and why is given to the chat tier, wh
   planner.reply({ objective: "get 2 dirt" });
   action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 4 dirt" });
   await until(() => action.requests.length === 4);
-  await sleep(50);
+  await sleepMs(50);
   assert.equal(chat.requests.length, 3, "no narration for its own goal");
 });
 
@@ -574,7 +574,7 @@ test("after a granted goal call the next one is held for 60000 / goalCallsPerMin
   // The first call was granted (6 a minute: the next is due 10 s later); the objective's first step is the next goal call.
   const clocks = steppedClocks(t);
   clocks.monotonic(6_000);
-  await sleep(60);
+  await sleepMs(60);
   assert.equal(action.requests.length, 0, "6 s after a grant at 6 calls a minute the next call is still held");
   clocks.monotonic(4_000);
   await until(() => action.requests.length === 1);
@@ -755,7 +755,7 @@ test("a reply whose speaker said something since is dropped unspoken; the newest
   runtime.inbox.push(say("Steve", "Ayla build a house"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Steve", "Ayla no wait, stop"));
-  await sleep(40);
+  await sleepMs(40);
   release();
   await until(() => runtime.said.length === 1);
   // One answer, to the latest state: the stale "On it!" was never spoken and nothing was taken on.
@@ -782,13 +782,13 @@ test("a superseded stop still stops; only its line is dropped", async (t) => {
   runtime.inbox.push(say("Steve", "Ayla, stop"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Steve", "Ayla, please"));
-  await sleep(40);
+  await sleepMs(40);
   release();
   await until(() => runtime.said.length === 1);
   await until(() => runtime.cancelled.length === 1);
   assert.deepEqual(runtime.said, ["Right."]);
   assert.equal(agent.activity, "idle");
-  await sleep(300);
+  await sleepMs(300);
   assert.equal(planner.requests.length, 1, "no new own objective while resting");
 });
 
@@ -800,7 +800,7 @@ test("another player's line does not supersede a reply", async (t) => {
   runtime.inbox.push(say("Steve", "hi Ayla"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Bob", "hi Ayla"));
-  await sleep(40);
+  await sleepMs(40);
   release();
   await until(() => runtime.said.length === 2);
   assert.deepEqual(runtime.said, ["Hi Steve!", "Hi Bob!"]);
@@ -1401,7 +1401,7 @@ test("an order taken while the agent waits for the model starts at once", async 
   action.unavailable(1).reply({ done: "sand is here" });
   await agent.handle(say("Steve", "get me 2 dirt"));
   await until(() => action.requests.length === 1);
-  await sleep(100);
+  await sleepMs(100);
   assert.equal(action.requests.length, 1, "it waits instead of asking again at once");
   assert.match(agent.activity, /collect 2 dirt/u);
   await agent.handle(say("Bob", "get me 3 sand"));
@@ -1435,7 +1435,7 @@ test("a chat line superseded during the wait is dropped unasked, and the newer l
   runtime.inbox.push(say("Steve", "Ayla, do a dance"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Steve", "Ayla, stop"));
-  await sleep(40);
+  await sleepMs(40);
   release();
   await until(() => runtime.cancelled.length === 1);
   assert.deepEqual(runtime.said, ["Stopping."]);
@@ -1456,7 +1456,7 @@ test("a stop during a slow work call: the stopped order is not narrated and no \
   await until(() => action.requests.length === 4);
   await agent.handle(say("Steve", "Ayla, stop"));
   holds[3]!();
-  await sleep(150);
+  await sleepMs(150);
   assert.equal(action.requests.length, 6, "the held call was answered");
   assert.deepEqual(events.filter((event) => event.kind === "objective" && event.event === "finished"), []);
   assert.equal(chat.requests.length, 2, "no narration was asked for");
@@ -1477,7 +1477,7 @@ test("progress of an order stopped mid-step is not narrated", async (t) => {
   await agent.handle(say("Steve", "Ayla, stop"));
   chat.reply({ say: "Digging a bit of dirt for you." });
   narration();
-  await sleep(100);
+  await sleepMs(100);
   assert.deepEqual(runtime.said, ["Sure.", "Stopping."], "the progress line of the stopped order was dropped");
 });
 
@@ -1518,7 +1518,7 @@ test("a chat line is asked again for CHAT_RETRY_MS of monotonic time, whatever t
   // 119 s have passed while the wall clock jumped 5 minutes ahead: the line is still waited for.
   clocks.monotonic(CHAT_RETRY_MS - 1_000);
   clocks.wall(300_000);
-  await sleep(100);
+  await sleepMs(100);
   assert.deepEqual(logs.filter((line) => line.includes("dropped")), [], "a wall clock step ahead does not end the wait early");
   // 120.5 s have passed while the wall clock went back 5 minutes and 0.8 s: the wait is over.
   clocks.monotonic(1_500);
@@ -1553,6 +1553,6 @@ test("a follow ordered by a player counts their silence in monotonic time: a wal
   await agent.handle(say("Steve", "Ayla, follow me"));
   await until(() => events.some((event) => event.kind === "state" && event.step !== null));
   clocks.wall(11 * 60_000);
-  await sleep(1_000);
+  await sleepMs(1_000);
   assert.deepEqual(events.filter((event) => event.kind === "step"), [], "still following after a poll (750 ms): the silence is 1 s of real time");
 });
