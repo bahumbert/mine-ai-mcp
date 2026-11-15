@@ -3,6 +3,7 @@
 *
 !src/
 !docker/
+!patches/
 !packaging/manifest.json
 !packaging/paper-settings.json
 !launcher/src/install/paper-settings.ts
