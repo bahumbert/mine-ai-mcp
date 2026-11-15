@@ -11,7 +11,7 @@ world:
   gamerules:
     doDaylightCycle: false
     doMobSpawning: false
-    # Isolate withdrawal while wounded; food remains carried for ordinary use.
+    # Disable healing and recovery hide to measure wounded withdrawal (T5, 2026-11-16).
     naturalRegeneration: false
 players:
   - name: FortressBot
