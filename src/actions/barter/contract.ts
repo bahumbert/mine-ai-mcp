@@ -34,6 +34,11 @@ export const barterResultSchema = actionResultSchema({
     goldBudget: z.number().int(),
     goldOffers: z.number().int(),
     goldSpent: z.number().int(),
+    dropsTakenByOthers: z.array(z.strictObject({
+      drop: z.number().int(),
+      collector: z.number().int(),
+      collectorName: z.string().nullable(),
+    })),
   }),
 });
 export type BarterResult = z.output<typeof barterResultSchema>;

@@ -5,7 +5,7 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { armSignal, waitForSignal } from "../../utils/signals.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
 import { carriedCount } from "../../world/inventory-count.js";
-import { DROPPED_ITEM_OBSERVATION_EVENTS, droppedItemName, pickupObservedItem } from "../../world/item-pickup.js";
+import { DROPPED_ITEM_OBSERVATION_EVENTS, droppedItemName, pickupObservedItem, watchItemCollectors, type ItemCollectorWatch } from "../../world/item-pickup.js";
 import { watchEntityRemoval } from "../../world/entity-removal.js";
 import { observeMobAge } from "../../world/mob-age.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
@@ -88,6 +88,46 @@ async function waitForExchangeEnd(bot: Bot, piglinId: number, context: ActionCon
   }
 }
 
+interface BarterPickupState {
+  readonly desiredDrop: () => Bot["entity"] | undefined;
+  readonly satisfied: () => boolean;
+  readonly collectors: ItemCollectorWatch;
+  readonly pursued: Set<number>;
+  readonly recordTaken: () => void;
+}
+
+/** Exhaust the desired ground drops before barter can spend another reserved offer. */
+async function collectDesiredDrops(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  request: BarterRequest,
+  context: ActionContext,
+  state: BarterPickupState,
+): Promise<void> {
+  state.recordTaken();
+  while (!state.satisfied()) {
+    context.signal?.throwIfAborted();
+    const item = state.desiredDrop();
+    if (!item) return;
+    const before = carriedCount(bot, request.item_name);
+    state.pursued.add(item.id);
+    const pickup = await pickupObservedItem(bot, {
+      entityId: item.id,
+      navigate: navigation.navigate,
+      movements: createMovements(bot),
+      hasArrived: () => carriedCount(bot, request.item_name) > before,
+      signal: context.signal,
+      collectors: state.collectors,
+    });
+    state.recordTaken();
+    if (pickup.kind === "inventory_full") throw new Error(pickup.reason);
+    if (pickup.kind === "not_collected")
+      throw new Error(
+        `Could not collect observed ${request.item_name} #${item.id}: ${pickup.route.status === "stopped" ? pickup.route.reason : "inventory gain was not observed"}.`,
+      );
+  }
+}
+
 /** One admitted request retains its inventory target and every reserved gold offer. */
 export function beginBarter(
   bot: Bot,
@@ -97,6 +137,16 @@ export function beginBarter(
 ): RequestExecution<BarterResult> {
   lifetime.throwIfAborted();
   const inventoryBefore = carriedCount(bot, request.item_name);
+  const collectors = watchItemCollectors(bot, lifetime);
+  const pursued = new Set<number>();
+  const dropsTakenByOthers: BarterResult["barter"]["dropsTakenByOthers"] = [];
+  const recordTaken = () => {
+    for (const drop of pursued) {
+      const collector = collectors.takenBy(drop);
+      if (!collector || dropsTakenByOthers.some((taken) => taken.drop === drop)) continue;
+      dropsTakenByOthers.push({ drop, collector: collector.entityId, collectorName: collector.name });
+    }
+  };
   const desiredItems = new Set([request.item_name]);
   const capacityStop = (offeredGoldCount: number) =>
     hasInventorySpaceFor(bot.inventory, desiredItems) || offeredGoldCount === 1
@@ -128,6 +178,7 @@ export function beginBarter(
   };
   const result = (error?: string): BarterResult => {
     observeGold();
+    recordTaken();
     const inventoryAfter = carriedCount(bot, request.item_name);
     const gained = Math.max(0, inventoryAfter - inventoryBefore);
     const barter = {
@@ -140,6 +191,7 @@ export function beginBarter(
       goldBudget: request.gold_budget,
       goldOffers,
       goldSpent,
+      dropsTakenByOthers: [...dropsTakenByOthers],
     };
     return gained >= request.count
       ? { status: "succeeded", barter }
@@ -177,26 +229,9 @@ export function beginBarter(
         Object.values(bot.entities)
           .filter((entity) => entity.isValid && droppedItemName(entity) === request.item_name)
           .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
-      const collect = async () => {
-        while (!satisfied()) {
-          context.signal?.throwIfAborted();
-          const item = desiredDrop();
-          if (!item) return;
-          const before = carriedCount(bot, request.item_name);
-          const pickup = await pickupObservedItem(bot, {
-            entityId: item.id,
-            navigate: navigation.navigate,
-            movements: createMovements(bot),
-            hasArrived: () => carriedCount(bot, request.item_name) > before,
-            signal: context.signal,
-          });
-          if (pickup.kind === "inventory_full") throw new Error(pickup.reason);
-          if (pickup.kind === "not_collected")
-            throw new Error(
-              `Could not collect observed ${request.item_name} #${item.id}: ${pickup.route.status === "stopped" ? pickup.route.reason : "inventory gain was not observed"}.`,
-            );
-        }
-      };
+      const collect = () => collectDesiredDrops(bot, navigation, request, context, {
+        desiredDrop, satisfied, collectors, pursued, recordTaken,
+      });
       while (!satisfied()) {
         await collect();
         if (satisfied()) return result();
@@ -289,6 +324,14 @@ export function beginBarter(
   };
 }
 
+/** Include confirmed takers in the action log while retaining the request's pickup and spending receipt. */
+function formatTakenDrops(result: BarterResult): string {
+  const { item, dropsTakenByOthers } = result.barter;
+  return dropsTakenByOthers.length === 0 ? "" : `\nTaken by others before pickup: ${dropsTakenByOthers
+    .map(({ drop, collector, collectorName }) => `${item} #${drop} by ${collectorName ?? "entity"} #${collector}`)
+    .join("; ")}.`;
+}
+
 export function createBarterAction(bot: Bot, navigation: NavigationRuntime) {
   return defineAction({
     checkpointSchema: barterCheckpointSchema,
@@ -301,6 +344,6 @@ export function createBarterAction(bot: Bot, navigation: NavigationRuntime) {
     annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
     begin: (request, lifetime) => beginBarter(bot, navigation, request, lifetime),
     formatResult: (result) =>
-      `Carried ${result.barter.item} +${result.barter.gained}/${result.barter.requested} (inventory ${result.barter.inventoryBefore} → ${result.barter.inventoryAfter}). Gold spent ${result.barter.goldSpent}; offers ${result.barter.goldOffers}/${result.barter.goldBudget}; piglin #${result.barter.piglinId}.${result.status === "succeeded" ? "" : `\nObserved stop: ${result.error}`}`,
+      `Carried ${result.barter.item} +${result.barter.gained}/${result.barter.requested} (inventory ${result.barter.inventoryBefore} → ${result.barter.inventoryAfter}). Gold spent ${result.barter.goldSpent}; offers ${result.barter.goldOffers}/${result.barter.goldBudget}; piglin #${result.barter.piglinId}.${formatTakenDrops(result)}${result.status === "succeeded" ? "" : `\nObserved stop: ${result.error}`}`,
   });
 }

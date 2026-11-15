@@ -114,7 +114,87 @@ test("existing desired drops satisfy a zero-gold request without activating a re
   assert.equal(f.offers(), 0);
   assert.equal(result.barter.goldSpent, 0);
   assert.equal(result.barter.gained, 2);
+  assert.deepEqual(result.barter.dropsTakenByOthers, []);
   barterResultSchema.parse(result);
+});
+
+test("a desired drop taken by another entity is reported, then offers go on", async (t) => {
+  const f = fixture(t);
+  const drop = f.harness.entities.spawn({ name: "item", position: new Vec3(2, 64, 0), item: { name: "ender_pearl", count: 2 } });
+  const navigate = f.navigation.navigate;
+  const navigation = { ...f.navigation, navigate: (async () => {
+    f.harness.entities.takenBy(f.target, drop, 2);
+    navigation.navigate = navigate;
+    return { status: "completed", elapsedMs: 0 };
+  }) as NavigationRuntime["navigate"] };
+  const pending = beginBarter(f.bot, navigation, request(), f.lifetime.signal)({});
+  await turn();
+  f.complete();
+  const result = await pending;
+  assert.equal(result.status, "succeeded");
+  assert.deepEqual(result.barter.dropsTakenByOthers, [{ drop: drop.id, collector: 7, collectorName: "piglin" }]);
+  assert.equal(result.barter.goldOffers, 1);
+  assert.equal(result.barter.goldSpent, 1);
+  assert.match(createBarterAction(f.bot, f.navigation).formatResult(result), /Taken by others before pickup: ender_pearl #\d+ by piglin #7/);
+  barterResultSchema.parse(result);
+});
+
+for (const takeAt of ["before abort", "between attempts"] as const) {
+  test(`a take ${takeAt} is recorded once across abort and resume`, async (t) => {
+    const f = fixture(t);
+    const drop = f.harness.entities.spawn({ name: "item", position: new Vec3(2, 64, 0), item: { name: "ender_pearl", count: 2 } });
+    const navigate = f.navigation.navigate;
+    const navigation = { ...f.navigation, navigate: (async ({ signal }) => {
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped" as const, reason: "aborted", elapsedMs: 0 };
+    }) as NavigationRuntime["navigate"] };
+    const run = beginBarter(f.bot, navigation, request(), f.lifetime.signal);
+    const cancel = new AbortController();
+    const pending = run({ signal: cancel.signal });
+    await turn();
+    if (takeAt === "before abort") f.harness.entities.takenBy(f.target, drop, 2);
+    cancel.abort("attempt interrupted");
+    const interrupted = await pending;
+    assert.equal(interrupted.barter.goldOffers, 0);
+    if (takeAt === "between attempts") f.harness.entities.takenBy(f.target, drop, 2);
+    navigation.navigate = navigate;
+    const resumed = run({});
+    await turn();
+    f.complete();
+    const result = await resumed;
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(result.barter.dropsTakenByOthers, [{ drop: drop.id, collector: 7, collectorName: "piglin" }]);
+    assert.equal(result.barter.goldOffers, 1);
+    assert.equal(result.barter.goldSpent, 1);
+  });
+}
+
+test("a take during a reflex takeover is recorded at the resume", async (t) => {
+  const f = fixture(t);
+  const drop = f.harness.entities.spawn({ name: "item", position: new Vec3(2, 64, 0), item: { name: "ender_pearl", count: 2 } });
+  const navigate = f.navigation.navigate;
+  const navigation = { ...f.navigation, navigate: (async ({ signal }) => {
+    await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+    return { status: "stopped" as const, reason: "aborted", elapsedMs: 0 };
+  }) as NavigationRuntime["navigate"] };
+  const runner = new ActionRunner();
+  const pending = runner.run(runnerAction({ ...f, navigation }), request());
+  await turn();
+  const claim = runner.claim("hostile_reflex", "move away", async () => {
+    f.harness.entities.takenBy(f.target, drop, 2);
+    navigation.navigate = navigate;
+    return { value: null, continuation: { kind: "resume" as const } };
+  });
+  assert.equal(claim.kind, "claimed");
+  await turn();
+  f.complete();
+  const output = await pending;
+  if (!("barter" in output.result)) throw new Error("expected barter evidence");
+  assert.equal(output.result.status, "succeeded");
+  assert.deepEqual(output.result.barter.dropsTakenByOthers, [{ drop: drop.id, collector: 7, collectorName: "piglin" }]);
+  assert.equal(output.result.barter.goldOffers, 1);
+  assert.equal(output.result.barter.goldSpent, 1);
+  assert.equal(f.bot.listenerCount("playerCollect"), 0);
 });
 
 test("a consumed offer survives cancellation and resumption without spending twice", async (t) => {
@@ -134,6 +214,7 @@ test("a consumed offer survives cancellation and resumption without spending twi
   const result = await resumed;
   assert.equal(result.status, "succeeded");
   assert.equal(f.offers(), 1);
+  f.lifetime.abort();
   assert.equal(f.bot.listenerCount("entityEquip"), 0);
   assert.equal(f.bot.listenerCount("entityGone"), 0);
 });
@@ -150,6 +231,7 @@ test("a gone recipient settles an accepted exchange without inventing completion
   assert.equal(result.barter.goldSpent, 1);
   assert.equal(f.offers(), 1);
   assert.equal(result.error, "The selected piglin disappeared before exchange completion was observed.");
+  f.lifetime.abort();
   assert.equal(f.bot.listenerCount("entityGone"), 0);
   assert.equal(f.bot.listenerCount("entityEquip"), 0);
 });
@@ -187,6 +269,7 @@ test("a recipient removed before it accepts settles the offer wait at the remova
   assert.equal(result.barter.goldOffers, 1);
   assert.equal(result.barter.goldSpent, 0);
   assert.match(result.error!, /acceptance was not observed/);
+  f.lifetime.abort();
   assert.equal(f.bot.listenerCount("entityGone"), 0);
 });
 
@@ -242,6 +325,7 @@ for (const stop of ["cancel", "disconnect"] as const) {
     assert.equal(f.offers(), 1);
     assert.equal(f.bot.listenerCount("entityEquip"), 0);
     assert.equal(f.bot.listenerCount("entityGone"), 0);
+    assert.equal(f.bot.listenerCount("playerCollect"), 0);
     assert.equal(f.bot.inventory.listenerCount("updateSlot"), f.idleSlotListeners);
   });
 }
