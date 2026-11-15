@@ -11,19 +11,10 @@
  * "the server had not answered yet".
  */
 import type { Bot } from "mineflayer";
-import { waitForServerAnswer } from "./world-age.js";
-
-/**
- * The longest a receipt waits for the count it expects, on the wall clock.
- *
- * The wait ends on the server's answer, not on a guess of its delay: the count it expects, or the world age moving
- * on past the send (`SERVER_ANSWER_TICKS`) without it. This bound only covers a server whose clock has stopped, so
- * it is longer than a server seconds behind needs.
- */
-export const INVENTORY_SETTLE_WALL_MS = 5_000;
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "./world-age.js";
 
 export interface InventorySettleOptions {
-  /** Wall-clock bound; default `INVENTORY_SETTLE_WALL_MS`. */
+  /** Optional total wall-clock ceiling; by default only a stopped server clock ends the answer wait. */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   /** World age when the act went out, so the answer wait counts from the send and not from this call. */
@@ -33,7 +24,7 @@ export interface InventorySettleOptions {
 export interface SettledInventoryCount {
   /** The carried count observed when the wait ended. */
   readonly count: number;
-  /** Whether that count is the one the action expected, seen before the deadline. */
+  /** Whether that count is the one the action expected when the wait ended. */
   readonly confirmed: boolean;
 }
 
@@ -55,8 +46,8 @@ export function settledNow(bot: Bot, itemName: string): SettledInventoryCount {
 }
 
 /**
- * Wait until the carried count of `itemName` is `expected`, or the deadline
- * passes; report the count observed either way.
+ * Wait until the carried count of `itemName` is `expected`, the server answers without it, or its clock stops;
+ * report the count observed either way. An explicit `timeoutMs` also limits the total wait.
  *
  * Returns at once when the count is already right, so an action that the
  * server answered promptly pays nothing for the wait.
@@ -90,7 +81,8 @@ async function settleCount(
   // A look every 25 ms rather than a slot listener: the wait also ends on the world age, which has no event.
   await waitForServerAnswer(bot, options.sentAtAge ?? bot.time?.age, {
     until: accepted,
-    wallMs: options.timeoutMs ?? INVENTORY_SETTLE_WALL_MS,
+    wallMs: options.timeoutMs ?? Number.POSITIVE_INFINITY,
+    stallMs: SERVER_CLOCK_STOPPED_MS,
     ...(options.signal && { signal: options.signal }),
   }).catch((cause: unknown) => {
     // A cancelled caller still gets the count seen so far; any other failure is a bug that must not hide.

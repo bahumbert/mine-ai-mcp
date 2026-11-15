@@ -13,7 +13,7 @@
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import type { WorldBlock } from "./placement.js";
-import { waitForServerAnswer } from "./world-age.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "./world-age.js";
 
 export interface OwnPlacement {
   /** The cells the last placement packet went to (a bed: foot and head); empty when nothing was sent. */
@@ -21,9 +21,6 @@ export interface OwnPlacement {
   /** World age when that packet was sent. */
   sentAtAge: number | undefined;
 }
-
-/** Wall-clock bound of the answer wait, for a server whose clock has stopped. */
-export const OWN_PLACEMENT_WALL_MS = 5_000;
 
 export function startOwnPlacement(): OwnPlacement {
   return { cells: [], sentAtAge: undefined };
@@ -64,7 +61,8 @@ function lookAtSentCells(
 
 /**
  * This request's sent placement as the server answered it: waits up to `SERVER_ANSWER_TICKS` of world age past the
- * send (and at most `wallMs` on the wall clock) for a sent cell to hold a block that `matches`. A cell that is not
+ * send for a sent cell to hold a block that `matches`, or until the clock stands still for `SERVER_CLOCK_STOPPED_MS`.
+ * An explicit `wallMs` also limits the total wait. A cell that is not
  * loaded cannot be judged and is reported at once: the bot has to go back near it.
  */
 export async function awaitOwnPlacement(
@@ -72,10 +70,10 @@ export async function awaitOwnPlacement(
   own: OwnPlacement,
   matches: (block: WorldBlock) => boolean,
   signal?: AbortSignal,
-  wallMs = OWN_PLACEMENT_WALL_MS,
+  wallMs = Number.POSITIVE_INFINITY,
 ): Promise<OwnPlacementSeen> {
   if (own.cells.length === 0) return { kind: "none" };
   const settled = () => lookAtSentCells(bot, own, matches) !== null;
-  await waitForServerAnswer(bot, own.sentAtAge, { until: settled, wallMs, ...(signal && { signal }) });
+  await waitForServerAnswer(bot, own.sentAtAge, { until: settled, wallMs, stallMs: SERVER_CLOCK_STOPPED_MS, ...(signal && { signal }) });
   return lookAtSentCells(bot, own, matches) ?? { kind: "not_landed" };
 }

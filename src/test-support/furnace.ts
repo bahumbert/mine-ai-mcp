@@ -6,9 +6,7 @@ import { EventEmitter } from "node:events";
 import minecraftData from "minecraft-data";
 import type { FurnaceProperties } from "../actions/smelt-item/furnace-properties.js";
 import type { SmeltItemDependencies } from "../actions/smelt-item/smelt-item.js";
-import { INVENTORY_SETTLE_WALL_MS } from "../world/inventory-count.js";
 import { fuelCapacity as capacityIn } from "../world/smelting.js";
-import { SERVER_ANSWER_TICKS } from "../world/world-age.js";
 import { CarriedCounts } from "./carried-counts.js";
 import { type FakeClock, createFakeBot } from "./fake-bot/index.js";
 
@@ -18,11 +16,11 @@ const FURNACE_CELL = "2,64,0";
 
 /**
  * Harness clock one smelt attempt may take. The cook runs on the fixture's `pause`, not on that clock, so the clock
- * carries only the attempt's waits for the server's answers: `SERVER_ANSWER_TICKS` of world age (2 s at 20 ticks a
- * second) on a running server, the `INVENTORY_SETTLE_WALL_MS` wall bound (5 s) on a stopped one. An attempt settled
- * within the midpoint ended its waits on the server's answers, not on the wall bound.
+ * carries only the attempt's waits for the server's answers: 40 ticks of world age (2 s at 20 ticks a second).
+ * Keep the original 3.5 s test ceiling: it distinguishes those answers from both the former 5 s wall cap and the
+ * 20 s stopped-clock limit (scenario-ticks T11b, 2026-11-15).
  */
-export const ANSWERED_ATTEMPT_MS = (SERVER_ANSWER_TICKS * 50 + INVENTORY_SETTLE_WALL_MS) / 2;
+export const ANSWERED_ATTEMPT_MS = 3_500;
 
 /** The fuel burning in the fake furnace, and what the server's window property packets would say about it. */
 const fuelCapacity = (fuel: string) => capacityIn(fuel, registry.version.minecraftVersion!);

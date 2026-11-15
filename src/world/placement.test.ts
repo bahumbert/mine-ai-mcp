@@ -10,6 +10,7 @@ import {
   createFakeClock,
 } from "../test-support/fake-bot/index.js";
 import { placeBlock, type InventoryItem, type WorldBlock } from "./placement.js";
+import { watch } from "../test-support/pending.js";
 
 /** Off every target cell: Mineflayer lists the bot's own entity in `bot.entities` (`entities.js:105`), which a placement checks. */
 const STANDING = new Vec3(3.5, 64, 3.5);
@@ -52,23 +53,6 @@ function placementAt(bot: Bot, item: InventoryItem, target: Vec3, extra: Record<
     ...extra,
   };
 }
-
-test("placement settles the last item before another caller can select the emptied stack", async () => {
-  const target = new Vec3(0, 64, 0);
-  const { bot, clock, world, inventory, item } = placer("cobblestone", {
-    gameMode: "survival",
-    overrides: {
-      _placeBlockWithOptions: async () => {
-        world.setCell(target, "cobblestone");
-        clock.after(30, () => inventory.updateSlot(36, null as never));
-      },
-    },
-  });
-  using _timers = clock.install();
-  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 100);
-  assert.equal(result.kind, "placed");
-  assert.equal(bot.inventory.count(item.type, null), 0);
-});
 
 test("places an oriented block while sneaking and always releases sneak", async () => {
   const target = new Vec3(1, 64, 0);
@@ -289,18 +273,21 @@ function survivalPlacer(target: Vec3, answer: (scene: PlacementAnswer) => Promis
   return { ...harness, placement: placementAt(harness.bot, harness.item, target) };
 }
 
-test("a block whose slot update comes 600 ms after it is placed, not failed", async () => {
-  const target = new Vec3(0, 64, 0);
-  const { bot, clock, placement } = survivalPlacer(target, async (scene) => {
-    scene.appear();
-    scene.clock.after(600, scene.consume);
+for (const { delayMs, maxMs } of [{ delayMs: 30, maxMs: 100 }, { delayMs: 600, maxMs: 700 }]) {
+  test(`placement settles its last item after a ${delayMs} ms slot delay before returning`, async () => {
+    const target = new Vec3(0, 64, 0);
+    const { bot, clock, placement, item } = survivalPlacer(target, async (scene) => {
+      scene.appear();
+      scene.clock.after(delayMs, scene.consume);
+    });
+    using _timers = clock.install();
+
+    const result = await clock.settle(placeBlock(bot, placement), maxMs);
+
+    assert.equal(result.kind, "placed");
+    assert.equal(bot.inventory.count(item.type, null), 0);
   });
-  using _timers = clock.install();
-
-  const result = await clock.settle(placeBlock(bot, placement), 700);
-
-  assert.equal(result.kind, "placed");
-});
+}
 
 test("a block that appears after mineflayer's timeout but before the world age moved 40 ticks is placed", async () => {
   const target = new Vec3(0, 64, 0);
@@ -333,18 +320,41 @@ test("a server that answered without the block fails after 40 ticks with the obs
   });
 });
 
-test("physics stopped (waitForTicks never resolves): the block wait still ends on the wall clock", async () => {
+test("placement answered at 7 s at 5 tps is placed", async () => {
   const target = new Vec3(0, 64, 0);
-  const { bot, clock, server, item } = placer("cobblestone", { overrides: { _placeBlockWithOptions: async () => {} } });
+  const { bot, clock, world, item } = placer("cobblestone", {
+    server: { ticksPerSecond: 5 },
+    overrides: { _placeBlockWithOptions: async () => {} },
+  });
   using _timers = clock.install();
-  // No physics tick and no time packet: only the wall bound can end the wait.
-  bot.physicsEnabled = false;
-  server.stop();
+  clock.after(7_000, () => world.setCell(target, "cobblestone"));
 
-  const outcome = await clock.settle(placeBlock(bot, placementAt(bot, item, target, { answerWallMs: 120 })), 150);
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 7_000);
 
-  assert.equal(outcome.kind, "failed");
+  assert.equal(result.kind, "placed");
 });
+
+for (const { wallMs, pendingMs, finishMs, error } of [
+  { wallMs: undefined, pendingMs: 19_950, finishMs: 50, error: /clock stood still for 20000 ms/u },
+  { wallMs: 120, pendingMs: 100, finishMs: 20, error: /within 120 ms/u },
+]) {
+  test(`placement with stopped physics and clock respects ${wallMs === undefined ? "20 s of still age" : "an explicit 120 ms cap"}`, async () => {
+    const target = new Vec3(0, 64, 0);
+    const { bot, clock, server, item } = placer("cobblestone", { overrides: { _placeBlockWithOptions: async () => {} } });
+    using _timers = clock.install();
+    bot.physicsEnabled = false;
+    server.stop();
+    const placing = placeBlock(bot, placementAt(bot, item, target, wallMs === undefined ? {} : { answerWallMs: wallMs }));
+    const pending = watch(placing);
+
+    await clock.advance(pendingMs);
+    assert.equal(pending.over, false, "the answer bound has not elapsed");
+    const outcome = await clock.settle(placing, finishMs, finishMs);
+
+    assert.equal(outcome.kind, "failed");
+    if (outcome.kind === "failed") assert.match(outcome.error, error);
+  });
+}
 
 test("creative placement does not wait for a count", async () => {
   const target = new Vec3(0, 64, 0);
