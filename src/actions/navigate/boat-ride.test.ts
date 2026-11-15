@@ -64,12 +64,25 @@ test("a stop without a server answer fails explicitly and a later ride can resum
   using _clock = world.clock.install();
   world.server.stop();
   const ride = new BoatRide(world.bot, theBoat(world), AHEAD, world.bot.entity.position, undefined);
+  const startedAt = world.clock.now();
   await assert.rejects(settled(world, ride.end()), /\[BOAT_STOP_UNCONFIRMED\]/u);
+  assert.ok(world.clock.now() - startedAt >= 20_200, "the stopped age gets twenty seconds after the stop writes");
   assert.equal(world.bot._client.listenerCount("vehicle_move"), 0);
   world.server.resume();
   const next = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 5));
   assert.equal(next.atSea, true, next.detail);
   assert.equal(next.blocks, 5);
+});
+
+test("a boat stop survives eleven seconds without server time then confirms the stop", async () => {
+  const world = await mountedSea();
+  using _clock = world.clock.install();
+  world.server.stop();
+  world.clock.after(11_000, () => world.server.resume());
+  const ride = new BoatRide(world.bot, theBoat(world), AHEAD, world.bot.entity.position, undefined);
+  const stopped = await settled(world, ride.end());
+  assert.equal(stopped.z, 3.5);
+  assert.equal(world.bot._client.listenerCount("vehicle_move"), 0);
 });
 
 test("cancel or death during stop settlement cannot start a get-off or take-back", async () => {
