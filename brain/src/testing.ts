@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "./wall-timers.ts";
 import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
@@ -349,7 +349,7 @@ export class FakeRuntime implements BotRuntime {
 
   async wait(actionId: string): Promise<ForegroundState> {
     // Yield to timers like a real network round trip, so pending loops never starve the test.
-    await sleep(1);
+    await sleepMs(1);
     return this.step(actionId);
   }
 
@@ -568,7 +568,7 @@ export async function until(condition: () => boolean, timeoutMs = 2_000): Promis
   const deadline = realMonotonicNow() + timeoutMs;
   while (!condition()) {
     if (realMonotonicNow() > deadline) throw new Error("condition not reached in time");
-    await sleep(5);
+    await sleepMs(5);
   }
 }
 

@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "./wall-timers.ts";
 import { describeStep, stepKey, targetItems, type Step } from "./actions.ts";
 import { activityOf, activityTimes, gatheringActivity, parseActivity, type Activity, type ActionTime, type ActivityPhase, type ActivitySpan } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
@@ -259,7 +259,7 @@ export class Agent {
       } catch (error) {
         if (signal.aborted) return;
         this.options.log(`status unreadable, retrying: ${String(error)}`);
-        await sleep(STARTUP_RETRY_MS, undefined, { signal }).catch(() => undefined);
+        await sleepMs(STARTUP_RETRY_MS, signal).catch(() => undefined);
       }
     }
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
@@ -284,7 +284,7 @@ export class Agent {
           unreadable = true;
         }
         await this.stopOwnStepAtNightfall().catch(() => undefined);
-        await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
+        await sleepMs(this.options.pollMs ?? DEFAULT_POLL_MS, signal).catch(() => undefined);
       }
     } finally {
       this.stopAll();
@@ -413,7 +413,7 @@ export class Agent {
           log(`chat tier unavailable, "${message.message}" dropped (${superseded ? "its speaker said something since" : "no answer in time"}): ${error.message}`);
           return null;
         }
-        await sleep(delay, undefined, { signal: this.runSignal }).catch(() => undefined);
+        await sleepMs(delay, this.runSignal).catch(() => undefined);
       }
     }
   }
