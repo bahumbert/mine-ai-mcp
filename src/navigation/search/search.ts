@@ -31,7 +31,7 @@ import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./sea
 import { lavaWatchCells, routeLavaDependencies } from "../world/lava-watch.js";
 import { blockKey, packKey, type NavigationObservation, type WorldView } from "../world/world.js";
 import { breakRemovesEdgeSupport } from "../world/body-support.js";
-import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
+import type { GenerationContext, MovementCatalogue, PlanningState, RouteFeet } from "../movements/catalogue.js";
 import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
 import { endsStrandedUnderWater } from "./stranded-segment.js";
@@ -231,6 +231,18 @@ function routeNodes(store: NodeStore, node: number): readonly number[] {
   return nodes;
 }
 
+/** Build the route's feet lazily, only when a dig needs them. */
+function routeFeetOf(store: NodeStore, node: number): RouteFeet {
+  let feet: Set<number> | undefined;
+  return { has(key) {
+    if (!feet) {
+      feet = new Set();
+      for (let cursor = node; cursor !== NO_NODE; cursor = store.parent[cursor]!) feet.add(store.key[cursor]!);
+    }
+    return feet.has(key);
+  } };
+}
+
 function reconstructStep(options: SearchOptions, store: NodeStore, node: number): PlannedStep | null {
   const finish = store.finish[node];
   if (finish) return finish.step;
@@ -239,7 +251,7 @@ function reconstructStep(options: SearchOptions, store: NodeStore, node: number)
   const state = store.state[parent]!;
   const key = store.key[node]!;
   const remaining = store.remaining[node]!;
-  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state));
+  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state), routeFeetOf(store, parent));
   for (let index = 0; index < movements.length; index += 1) {
     if (movements.remainingScaffolds[index] !== remaining) continue;
     if (packKey(movements.toX[index]!, movements.toY[index]!, movements.toZ[index]!) !== key) continue;
@@ -614,7 +626,7 @@ export class IncrementalSearch {
     }
     // The catalogue's rows are read by index, and a movement is only made for
     // a row that improves on a known arrival; about half of them do not.
-    const movements = context.catalogue.generate(state, context, digContext);
+    const movements = context.catalogue.generate(state, context, digContext, routeFeetOf(store, current));
     for (let index = 0; index < movements.length; index += 1) {
       const x = movements.toX[index]!;
       const y = movements.toY[index]!;
