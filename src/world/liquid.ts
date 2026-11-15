@@ -12,6 +12,7 @@ import { Vec3 } from "vec3";
 import { isLiquid, isReplaceableForPlacement } from "./block-classification.js";
 import { STANDING_EYE_HEIGHT } from "./block-visibility.js";
 import type { WorldBlock } from "./placement.js";
+import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, waitForWorldAge, type WorldAgeOptions } from "./world-age.js";
 
 /** The game's two fluids: the one list the bucket action's input, its items and its source checks all read. */
 export const LIQUIDS = ["water", "lava"] as const;
@@ -21,7 +22,6 @@ export type LiquidName = (typeof LIQUIDS)[number];
 const FORMATION_RADIUS = 10;
 /** How long a pour is given to finish spreading before its formations are counted. */
 const SPREAD_TIMEOUT_TICKS = 100;
-const SPREAD_SETTLED_TICKS = 10;
 /**
  * How far a fill will trace a flow back to the source feeding it. A model that
  * names a cell it saw water in is usually a few blocks downstream of the
@@ -236,20 +236,37 @@ function sameFormed(left: Formed, right: Formed): boolean {
   return names.length === Object.keys(right).length && names.every((name) => left[name] === right[name]);
 }
 
-/** Wait for a pour to stop changing the world, then count what it made. */
-export async function settledFormations(
+/** Count until 40 quiet server ticks, 100 total ticks, or a stopped server clock (T11b, 2026-11-15). */
+export async function settleFormations(
   bot: Bot,
   watch: FormationWatch,
   signal: AbortSignal | undefined,
-): Promise<Formed> {
+  clock: Pick<WorldAgeOptions, "now" | "sleep"> = {},
+): Promise<{ readonly formed: Formed; readonly ended: "quiet" | "timeout" | "stalled" }> {
+  signal?.throwIfAborted();
+  let startAge = bot.time?.age;
   let last = observeFormations(bot, watch);
-  let stableTicks = 0;
-  for (let tick = 0; tick < SPREAD_TIMEOUT_TICKS && stableTicks < SPREAD_SETTLED_TICKS; tick += 1) {
-    await bot.waitForTicks(1);
-    signal?.throwIfAborted();
-    const next = observeFormations(bot, watch);
-    stableTicks = sameFormed(next, last) ? stableTicks + 1 : 0;
-    last = next;
+  const elapsedTicks = () => startAge == null ? 0 : (bot.time?.age ?? startAge) - startAge;
+  for (;;) {
+    const remaining = SPREAD_TIMEOUT_TICKS - elapsedTicks();
+    if (remaining <= 0) return { formed: last, ended: "timeout" };
+    const ended = await waitForWorldAge(bot, Math.min(SERVER_ANSWER_TICKS, remaining), {
+      ...clock, signal, wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, pollMs: 50,
+      until: () => {
+        startAge ??= bot.time?.age;
+        const next = observeFormations(bot, watch);
+        const changed = !sameFormed(next, last);
+        last = next;
+        return changed;
+      },
+    });
+    if (ended === "stalled") return { formed: last, ended: "stalled" };
+    if (elapsedTicks() >= SPREAD_TIMEOUT_TICKS) return { formed: last, ended: "timeout" };
+    if (ended === "moved") return { formed: last, ended: "quiet" };
   }
-  return last;
+}
+
+/** The bucket action needs only the formations; mining also needs whether the server answered. */
+export async function settledFormations(bot: Bot, watch: FormationWatch, signal: AbortSignal | undefined): Promise<Formed> {
+  return (await settleFormations(bot, watch, signal)).formed;
 }

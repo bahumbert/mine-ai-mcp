@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
-import { observeFormations, pourAim, settledFormations, watchFormations } from "./liquid.js";
+import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { observeFormations, pourAim, settleFormations, settledFormations, watchFormations } from "./liquid.js";
 
 /**
  * The vanilla rule these tests encode, measured in the `pour-through-lava`
@@ -138,23 +138,68 @@ test("a cell beyond the formation radius is not watched", () => {
   assert.deepEqual(observeFormations(bot, watch), {});
 });
 
-test("a pour is settled when the blocks it made stop changing, and the last count is returned", async () => {
-  const { bot, world, clock } = changingWorld({ "0,0,0": "lava", "1,0,0": "lava" });
+// Packet cadence: contract world-age-at-slow-tick; formation timing: T11b trace-5 (2026-11-15).
+for (const [index, scenario] of [
+  { rate: 5, changes: [3, 5], stop: null, ms: 8_000, age: 24_040, ended: "quiet" },
+  { rate: 5, changes: [30], stop: null, ms: 12_000, age: 24_060, ended: "quiet" },
+  { rate: 20, changes: [3, 5], stop: null, ms: 2_000, age: 24_040, ended: "quiet" },
+  { rate: 5, changes: [3, 5], stop: 2_000, ms: 21_000, age: 24_000, ended: "stalled" },
+  { rate: 5, changes: [3, 5], stop: 5_000, ms: 24_000, age: 24_020, ended: "stalled" },
+].entries()) {
+  test(`formations at ticks ${scenario.changes} at ${scenario.rate} tps, stop ${scenario.stop}: ${scenario.ended}`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = index === 0 ? clock.install() : null;
+    const { bot, world, server } = createFakeBot({
+      cells: { "0,0,0": "lava", "1,0,0": "lava" }, groundY: null,
+      server: { ticksPerSecond: scenario.rate }, clock,
+    });
+    const watch = watchFormations(bot, cell(0, 0, 0));
+    let ticks = 0;
+    server.onTick(() => {
+      ticks += 1;
+      scenario.changes.forEach((at, index) => {
+        if (ticks === at) world.setCell(cell(index, 0, 0), "obsidian");
+      });
+    });
+    if (scenario.stop !== null) clock.after(scenario.stop, () => server.stop());
+    const countOnly = index === 0
+      ? settledFormations(bot, watchFormations(bot, cell(0, 0, 0)), undefined)
+        .then((formed) => ({ formed, ms: clock.now(), age: bot.time.age }))
+      : null;
+    const result = await clock.settle(settleFormations(bot, watch, undefined, clock), 25_000);
+    assert.deepEqual(result, { formed: { obsidian: scenario.changes.length }, ended: scenario.ended });
+    assert.ok(clock.now() >= scenario.ms && clock.now() <= scenario.ms + 100, `ended at ${clock.now()} ms`);
+    assert.equal(bot.time.age, scenario.age);
+    if (countOnly) assert.deepEqual(await countOnly, { formed: result.formed, ms: 8_000, age: 24_040 });
+  });
+}
+
+test("formations changing every server tick time out at age +100 (20 s at five tps)", async () => {
+  const cells: Record<string, string> = {};
+  for (let x = -5; x < 5; x += 1) for (let z = -5; z < 5; z += 1) cells[`${x},0,${z}`] = "lava";
+  const { bot, world, clock, server } = createFakeBot({ cells, groundY: null, server: { ticksPerSecond: 5 } });
   const watch = watchFormations(bot, cell(0, 0, 0));
-  let ticks = 0;
-  bot.on("physicsTick", () => {
-    ticks += 1;
-    if (ticks === 3) world.setCell(cell(0, 0, 0), "obsidian");
-    if (ticks === 5) world.setCell(cell(1, 0, 0), "obsidian");
+  const wet = watch.cells.filter((position) => bot.blockAt(position)?.name === "lava");
+  let tick = 0;
+  server.onTick(() => {
+    const position = wet[tick++];
+    if (position) world.setCell(position, "obsidian");
   });
+  const result = await clock.settle(settleFormations(bot, watch, undefined, clock), 21_000);
+  assert.deepEqual(result, { formed: { obsidian: 100 }, ended: "timeout" });
+  assert.equal(clock.now(), 20_000);
+  assert.equal(bot.time.age, 24_100);
+});
 
-  let ticksAtSettle = 0;
-  const settled = settledFormations(bot, watch, undefined).then((counts) => {
-    ticksAtSettle = ticks;
-    return counts;
+test("aborting formation settling rejects with the reason and cancels its timer", async () => {
+  const { bot, clock } = createFakeBot();
+  const controller = new AbortController();
+  const reason = new Error("cancel the pour");
+  const settling = settleFormations(bot, watchFormations(bot, cell(0, 64, 0)), controller.signal, {
+    now: clock.now, sleep: (ms) => clock.sleep(ms, controller.signal),
   });
-  await clock.advance(5_000);
-
-  assert.deepEqual(await settled, { obsidian: 2 });
-  assert.ok(ticksAtSettle >= 15, "waited for ten quiet ticks after the last change");
+  const rejected = assert.rejects(settling, (error) => error === reason);
+  controller.abort(reason);
+  await rejected;
+  assert.equal(clock.pendingTimers(), 0);
 });

@@ -484,9 +484,10 @@ async function castTouchingSources(
     targeting.endCast();
   }
   if (outcome.kind !== "cast") return false;
+  if (!outcome.formationsAnswered) targeting.forgetCastTouching(sources);
   if (!outcome.waterRecovered) targeting.recoverWater(outcome.landing);
   targeting.refresh();
-  return outcome.obsidianFormed > 0 || !outcome.waterRecovered;
+  return !outcome.formationsAnswered || outcome.obsidianFormed > 0 || !outcome.waterRecovered;
 }
 
 async function breakTargetInPlace(
@@ -608,7 +609,7 @@ async function castInReach(
     targeting.blacklist(target, `the lava at ${cellKey(target.position)} could not be cast: ${outcome.reason}`);
     return true;
   }
-  if (outcome.obsidianFormed === 0) {
+  if (outcome.obsidianFormed === 0 && outcome.formationsAnswered) {
     targeting.blacklist(target, `the pour into ${cellKey(outcome.landing)} formed no obsidian`);
   }
   if (!outcome.waterRecovered) targeting.recoverWater(outcome.landing);
@@ -715,6 +716,9 @@ class MineTargeting {
   }
   castTouching(sources: readonly BlockPosition[]): void {
     for (const source of sources) this.#touchingCasts.add(cellKey(source));
+  }
+  forgetCastTouching(sources: readonly BlockPosition[]): void {
+    for (const source of sources) this.#touchingCasts.delete(cellKey(source));
   }
 
   beginCast(): void {
