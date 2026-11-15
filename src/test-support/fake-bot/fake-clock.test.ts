@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as realDelay } from "node:timers/promises";
 import { createFakeClock, failIfFakeClockLeftInstalled, type FakeClock } from "./fake-clock.js";
 import { installClockForTest } from "./fake-clock-installer-fixture.js";
+
+// The real timer functions, captured before any test installs a clock: the identity checks and the cleanups of the red tests.
+const realSetTimeout = globalThis.setTimeout;
+const realSetInterval = globalThis.setInterval;
+const realClearTimeout = globalThis.clearTimeout;
+const realClearInterval = globalThis.clearInterval;
 
 test("a mocked clock runs a 1000 ms setTimeout once and moves Date.now and performance.now by 1000", async () => {
   const clock = createFakeClock({ mode: "mocked", startMs: 5_000 });
@@ -18,15 +25,20 @@ test("a mocked clock runs a 1000 ms setTimeout once and moves Date.now and perfo
   assert.equal(performance.now() - monotonic, 2_000);
 });
 
-test("disposing a mocked clock restores the real performance.now and Date", () => {
+test("disposing a mocked clock restores the real performance.now, Date and the four timer functions", () => {
   const realPerformanceNow = performance.now;
   const clock = createFakeClock({ mode: "mocked" });
   {
     using _installed = clock.install();
     assert.notEqual(performance.now, realPerformanceNow);
+    assert.notEqual(globalThis.setTimeout, realSetTimeout);
     assert.equal(Date.now(), 0);
   }
   assert.equal(performance.now, realPerformanceNow);
+  assert.equal(globalThis.setTimeout, realSetTimeout);
+  assert.equal(globalThis.setInterval, realSetInterval);
+  assert.equal(globalThis.clearTimeout, realClearTimeout);
+  assert.equal(globalThis.clearInterval, realClearInterval);
   assert.ok(Date.now() > 1_000_000_000_000);
 });
 
@@ -225,4 +237,40 @@ test("dispose undoes the step: the mock's own Date.now is back and no offset is 
   const second = createFakeClock({ mode: "mocked", startMs: 5_000 });
   using _installed = second.install();
   assert.equal(Date.now(), 5_000);
+});
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+// A real timer or interval made before install and cleared while installed: `clear` is the call under test, `cleanup` the real one.
+const realTimerKinds: { readonly name: string; readonly start: (fire: () => void) => TimerHandle; readonly clear: (handle: TimerHandle) => void; readonly cleanup: (handle: TimerHandle) => void }[] = [
+  { name: "timeout", start: (fire) => setTimeout(fire, 20), clear: (handle) => clearTimeout(handle), cleanup: (handle) => realClearTimeout(handle) },
+  { name: "interval", start: (fire) => setInterval(fire, 20), clear: (handle) => clearInterval(handle), cleanup: (handle) => realClearInterval(handle) },
+];
+
+for (const kind of realTimerKinds) {
+  test(`a real ${kind.name} created before install and cleared while installed never fires`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    let fired = 0;
+    const realTimer = kind.start(() => (fired += 1));
+    try {
+      {
+        using _installed = clock.install();
+        kind.clear(realTimer);
+      }
+      await realDelay(60);
+      assert.equal(fired, 0);
+    } finally {
+      kind.cleanup(realTimer);
+    }
+  });
+}
+
+test("a mocked timer cleared while installed never fires on tick", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  let fired = 0;
+  const mockedTimer = setTimeout(() => (fired += 1), 100);
+  clearTimeout(mockedTimer);
+  await clock.advance(200);
+  assert.equal(fired, 0);
 });

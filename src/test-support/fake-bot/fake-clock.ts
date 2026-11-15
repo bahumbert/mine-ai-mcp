@@ -102,14 +102,46 @@ function fireDueTimers(timers: Set<ClockTimer>, now: number): void {
   }
 }
 
-/** Take over node's mock timers and `performance.now` for `clock`; the returned function gives them back. */
+/** A mocked create function that also remembers each handle it returns: the handles a clear must send to the mock. */
+function recordMockHandles<Create extends (...args: never[]) => unknown>(createMocked: Create, mockHandles: Set<unknown>): Create {
+  return ((...args: unknown[]) => {
+    const handle = Reflect.apply(createMocked, globalThis, args);
+    mockHandles.add(handle);
+    return handle;
+  }) as unknown as Create;
+}
+
+/** A clear that sends a handle the mock created to the mock's clear, and any other handle (a real timer made before the install) to the real one. */
+function clearByHandleOrigin<Clear extends (handle: never) => void>(clearMocked: Clear, clearReal: Clear, mockHandles: Set<unknown>): Clear {
+  return ((handle: unknown) => {
+    if (mockHandles.has(handle)) Reflect.apply(clearMocked, globalThis, [handle]);
+    else Reflect.apply(clearReal, globalThis, [handle]);
+  }) as unknown as Clear;
+}
+
+/**
+ * Take over node's mock timers and `performance.now` for `clock`; the returned function gives them back. While installed,
+ * `clearTimeout`/`clearInterval` are the mock's, so a real timer created before the install would never be cleared: the
+ * clears are routed by the handle's origin instead. The returned function puts the four real functions back.
+ */
 function installGlobals(now: () => number): () => void {
   const realPerformanceNow = performance.now;
+  const realTimers = { setTimeout: globalThis.setTimeout, setInterval: globalThis.setInterval, clearTimeout: globalThis.clearTimeout, clearInterval: globalThis.clearInterval };
   mock.timers.enable({ apis: [...MOCKED_APIS], now: now() });
   performance.now = now;
+  const mockHandles = new Set<unknown>();
+  globalThis.setTimeout = recordMockHandles(globalThis.setTimeout, mockHandles);
+  globalThis.setInterval = recordMockHandles(globalThis.setInterval, mockHandles);
+  globalThis.clearTimeout = clearByHandleOrigin(globalThis.clearTimeout, realTimers.clearTimeout, mockHandles);
+  globalThis.clearInterval = clearByHandleOrigin(globalThis.clearInterval, realTimers.clearInterval, mockHandles);
   return () => {
     mock.timers.reset();
     performance.now = realPerformanceNow;
+    // Guard: `reset()` already gives back the four functions on Bun 1.4.2, but the wrapper must not outlive the install.
+    globalThis.setTimeout = realTimers.setTimeout;
+    globalThis.setInterval = realTimers.setInterval;
+    globalThis.clearTimeout = realTimers.clearTimeout;
+    globalThis.clearInterval = realTimers.clearInterval;
   };
 }
 
