@@ -103,6 +103,8 @@ export interface MineflayerBotSurface {
   >;
   /** Undefined until the bot has spawned. */
   readonly food?: number;
+  /** The world age the client last heard, null before the first time packet. Optional so fakes need no change. */
+  worldAge?(): number | null;
   setControlState(control: "forward" | "back" | "left" | "right" | "jump" | "sprint" | "sneak", state: boolean): void;
   /** Holds a water stance counted on the connected bot itself, the bot `runtime.steering` asks (review 2026-10-19 #2). */
   holdWaterStance(
@@ -186,6 +188,7 @@ export function mineflayerBotSurface(bot: Bot): MineflayerBotSurface {
     get food() {
       return bot.food;
     },
+    worldAge: () => bot.time?.age ?? null,
     setControlState: (control, state) => bot.setControlState(control, state),
     holdWaterStance: (signal, setControl, stance) =>
       holdWaterPosition(bot, signal, setControl, stance && { stance, read: liveBlockReader(bot) }),
@@ -270,6 +273,9 @@ export class MineflayerBot implements NavigationBot {
     readonly ownsDive: () => boolean = () => false,
     readonly selectedTool: () => ((itemType: number | null) => void) | undefined = () => undefined,
   ) {}
+  worldAge(): number | null {
+    return this.bot.worldAge?.() ?? null;
+  }
   /** One reading of the bot: where it is and how it stands, the player, every stack, and every entity. */
   observe(): NavigationObservation {
     const { entity } = this.bot;

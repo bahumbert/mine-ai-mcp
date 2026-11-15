@@ -62,6 +62,8 @@ export interface NavigationBot {
    * Optional so fakes keep the planned deadline.
    */
   longestBreakDurationMs?(operation: Extract<PlannedOperation, { kind: "break" }>): number | null;
+  /** The world age the client last heard, null before the first time packet. Optional so fakes need no change. */
+  worldAge?(): number | null;
   stabilize(signal: AbortSignal): Promise<{ kind: "stable" } | { kind: "failed"; observation: string }>;
   /**
    * Ask the server to send `cell` again (see `mineflayer/cell-resync.ts`) and wait for its packet: the way out of a client
