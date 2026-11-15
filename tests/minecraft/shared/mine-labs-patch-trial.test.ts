@@ -265,7 +265,8 @@ test("a trial on a server of its own kills everywhere when it ends, before its r
 /** RCON's gametime wording was measured by the audit's section 6.3 prototype (scenario-ticks spec section 2). */
 class GameTimeRcon extends RecordingRcon {
   private read = 0;
-  constructor(private readonly answers: readonly (number | string | Error)[], private readonly onRead?: (read: number) => void) { super(); }
+  constructor(private readonly answers: readonly (number | string | Error)[], private readonly onRead?: (read: number) => void, private readonly matches?: () => boolean) { super(); }
+  async blockMatches(): Promise<boolean> { return this.matches?.() ?? false; }
   override async command(command: string): Promise<string> {
     if (command !== "time query gametime") return super.command(command);
     const answer = this.answers[Math.min(this.read++, this.answers.length - 1)]!;
@@ -368,4 +369,68 @@ test("parseGameTime accepts a vanilla answer and refuses unreadable answers", ()
   for (const [answer, expected] of [["The time is 2400", 2400], ["", null], ["Unknown command", null]] as const) {
     assert.equal(goalRunner.parseGameTime(answer), expected);
   }
+});
+
+/** The live cave reproduction reads a block over RCON after the client's success (T4, 2026-11-15). */
+async function settleCompletion(options: { passingAt?: number; cancel?: boolean; stopped?: boolean; unreadableBaseline?: boolean; failedDuringRead?: boolean }) {
+  const abort = new AbortController();
+  let wall = 0;
+  let tick = 0;
+  let reads = 0;
+  const completions: Parameters<typeof goalRunner.awaitScenarioGoal>[0]["clients"]["completions"] = new Map();
+  if (!options.failedDuringRead) completions.set("Walker", { status: "succeeded" });
+  const answers = options.stopped ? [100] : [100, 100, ...(options.unreadableBaseline ? ["unreadable"] : []), 200, 220, 239, 240];
+  const rcon = new GameTimeRcon(answers, read => {
+    reads = read;
+    const answer = answers[Math.min(read - 1, answers.length - 1)]!;
+    if (typeof answer === "number") tick = answer;
+  }, () => {
+    if (options.failedDuringRead) completions.set("Walker", { status: "failed", detail: "action failed during the goal read" });
+    return tick >= (options.passingAt ?? Infinity);
+  });
+  const result = await goalRunner.awaitScenarioGoal({
+    scenario: mineLabs.scenarioSchema.parse({
+      name: "completion-settle", players: [{ name: "Walker" }], client: { command: "true" },
+      goal: options.failedDuringRead
+        ? { kind: "all", goals: [{ kind: "completion" }, { kind: "blockAt", pos: [0, 0, 0], block: "air" }] }
+        : { kind: "blockAt", pos: [0, 0, 0], block: "air" },
+    }),
+    server: neverStartedServer("unused", rcon),
+    clients: { processes: new Map(), chat: new Map(), completions },
+    signal: abort.signal, goalStallMs: 1_000, now: () => wall,
+    sleep: async () => { wall += 250; if (options.cancel) abort.abort("during settle"); },
+  });
+  return { ...result, tick, reads, wall };
+}
+
+test("completion re-reads after 40 fresh ticks, then passes or fails on the server's answer", async () => {
+  for (const [passingAt, unreadableBaseline, outcome, wall] of [
+    [240, false, "pass", 750], [240, true, "pass", 1_000], [undefined, false, "fail", 750],
+  ] as const) {
+    const result = await settleCompletion({ passingAt, unreadableBaseline });
+    assert.equal(result.outcome, outcome);
+    assert.equal(result.tick, 240);
+    assert.equal(result.wall, wall);
+    if (outcome === "fail") assert.match(result.log, /goal not satisfied on client completion/u);
+  }
+});
+
+test("passing and terminally failed completions do not wait or read game time again", async () => {
+  for (const [options, outcome] of [[{ passingAt: 100 }, "pass"], [{ failedDuringRead: true }, "fail"]] as const) {
+    const result = await settleCompletion(options);
+    assert.equal(result.outcome, outcome);
+    assert.equal(result.reads, 2);
+    assert.equal(result.wall, 0);
+    if (outcome === "fail") assert.match(result.goal.detail, /Walker failed/u);
+  }
+});
+
+test("abort during the completion settle cancels; a stopped clock times out", async () => {
+  const cancelled = await settleCompletion({ cancel: true });
+  assert.equal(cancelled.outcome, "cancelled");
+  assert.match(cancelled.log, /during settle/u);
+  const stopped = await settleCompletion({ stopped: true });
+  assert.equal(stopped.outcome, "timeout");
+  assert.match(stopped.log, /stood still for 1000 ms/u);
+  assert.equal(stopped.wall, 1_000);
 });

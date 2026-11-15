@@ -24,6 +24,8 @@ export interface TrialRunInput {
   readonly log: (message: string) => void;
   readonly signal: AbortSignal;
   readonly reuseServer: boolean;
+  /** The daemon's bound for a goal whose server clock stopped advancing. */
+  readonly goalStallMs: number;
   readonly arena?: ArenaTrialOptions;
   /** Hands over the arena restore to run after the trial (Mine Labs' `deferReset`). */
   readonly deferReset: (restore: (log: (message: string) => void) => Promise<void>) => void;
@@ -156,7 +158,7 @@ export function phasesLine(phases: TrialPhases): string {
   return `phases: ${phaseFields(phases)}`;
 }
 
-type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs"> };
+type TrialDeps = { readonly runTrial: TrialRunner; readonly config: Pick<ScenarioServerConfig, "trialSlackMs" | "restoreBoundMs" | "stallStopMs"> };
 
 function arenaOf(lane: Lane): ArenaTrialOptions {
   const { cell } = lane;
@@ -233,6 +235,7 @@ async function runTrialJob(deps: TrialDeps, job: TrialJob, marks: TrialMarks): P
   try {
     const trial = deps.runTrial({
       server: job.server, scenario: job.scenario, runDir: job.runDir, log: job.log, signal, reuseServer: job.reuseServer,
+      goalStallMs: deps.config.stallStopMs,
       arena: job.lane ? arenaOf(job.lane) : undefined,
       deferReset: handed => { restore = handed; },
       onArranged: async () => { marks.arranged(); queue?.arranged(); release(); },

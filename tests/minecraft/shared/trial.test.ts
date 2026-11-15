@@ -9,17 +9,20 @@ import { executeTrial, type TrialRunInput, type TrialRunner } from "./trial.ts";
 import { config, scenario, result, job, runnerOf } from "./trial-fixtures.ts";
 
 test("a passing lane trial hands its lane back after the restore ran, and the arena options name the lane", async () => {
-  const events: string[] = [];
-  let seen: TrialRunInput | undefined;
-  const runner: TrialRunner = async input => { seen = input; return runnerOf({ events })(input); };
-  const end = await executeTrial({ runTrial: runner, config }, job());
-  assert.equal(end.result.outcome, "pass");
-  assert.equal(end.lane, "free");
-  assert.deepEqual(events, ["arrange", "prepared", "restore"]);
-  assert.equal(seen?.arena?.id, "lane-3");
-  assert.deepEqual(seen?.arena?.controlChunk, { x: -496, z: 3 * 512 - 240 });
-  assert.equal(seen?.arena?.entityBox.minZ, 3 * 512 - 256);
-  assert.equal(seen?.reuseServer, true);
+  for (const [trialConfig, expectedStallMs] of [[config, 30_000], [{ ...config, stallStopMs: 12_345 }, 12_345]] as const) {
+    const events: string[] = [];
+    let seen: TrialRunInput | undefined;
+    const runner: TrialRunner = async input => { seen = input; return runnerOf({ events })(input); };
+    const end = await executeTrial({ runTrial: runner, config: trialConfig }, job());
+    assert.equal(end.result.outcome, "pass");
+    assert.equal(end.lane, "free");
+    assert.deepEqual(events, ["arrange", "prepared", "restore"]);
+    assert.equal(seen?.arena?.id, "lane-3");
+    assert.deepEqual(seen?.arena?.controlChunk, { x: -496, z: 3 * 512 - 240 });
+    assert.equal(seen?.arena?.entityBox.minZ, 3 * 512 - 256);
+    assert.equal(seen?.reuseServer, true);
+    assert.equal(seen?.goalStallMs, expectedStallMs);
+  }
 });
 
 test("two lanes' arrangements never overlap: the second runs after the first is prepared", async () => {
