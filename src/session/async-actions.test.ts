@@ -412,6 +412,95 @@ test("a waiter listener that throws does not keep the others waiting", async () 
   assert.equal(f.runner.status().busy, false);
 });
 
+/** A caller signal whose cleanup throws, with dispatch retained for the abort path. */
+function brokenWaitSignal() {
+  let removeCalls = 0;
+  let listener: (() => void) | undefined;
+  const reason = new Error("Stop only this wait");
+  const signal = {
+    aborted: false, reason, throwIfAborted() {},
+    addEventListener(_event: string, callback: () => void) { listener = callback; },
+    removeEventListener() { removeCalls++; throw new Error("listener broke"); },
+  } as unknown as AbortSignal;
+  return { signal, reason, removeCalls: () => removeCalls, abort: () => listener?.() };
+}
+
+test("a wait whose timeout fires while the signal's cleanup throws returns pending and lets no error out", async () => {
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "timeout-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const outcome = await f.service.wait(accepted.actionId, 20, broken.signal);
+    assert.equal(outcome.state, "pending");
+    if (outcome.state === "pending") assert.equal(outcome.wakeReason, "timeout");
+    await realDelay(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+    f.finish();
+    assert.equal((await f.service.wait(accepted.actionId, 1000)).state, "settled");
+    assert.equal(f.service.status().awaitingResult, null);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
+});
+
+test("a completion after a clock change runs the cleanup once and nothing fires later", async () => {
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "clock-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const waiting = f.service.wait(accepted.actionId, 50, broken.signal);
+    {
+      const clock = createFakeClock({ mode: "mocked" });
+      using _timers = clock.install();
+      f.finish();
+      assert.equal((await waiting).state, "settled");
+    }
+    await realDelay(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
+});
+
+test("an abort while the signal's cleanup throws rejects with the reason and lets no error out", async () => {
+  const f = fixture();
+  const broken = brokenWaitSignal();
+  const errors: Error[] = [];
+  const onError = (error: Error) => { errors.push(error); };
+  process.on("uncaughtException", onError);
+  try {
+    const accepted = f.service.submit(f.action, {}, { submission_id: "abort-cleanup" }, 1);
+    assert.equal(accepted.state, "accepted"); if (accepted.state !== "accepted") return;
+    const waiting = f.service.wait(accepted.actionId, 50, broken.signal);
+    const rejected = assert.rejects(waiting, (error: unknown) => error === broken.reason);
+    assert.doesNotThrow(() => broken.abort());
+    await rejected;
+    f.finish();
+    assert.equal((await f.service.wait(accepted.actionId, 1000)).state, "settled");
+    await realDelay(100);
+    assert.deepEqual(errors, []);
+    assert.equal(broken.removeCalls(), 1);
+  } finally {
+    f.finish();
+    await f.service.settled();
+    process.off("uncaughtException", onError);
+  }
+});
+
 test("a lookup whose store read throws answers EXECUTION_LOOKUP_FAILED and leaves the execution unchanged", async (t) => {
   const real = new ExecutionStore(temporaryBotData({ closeAfter: t }), "Bot");
   real.write([storedRecord(1, "retrieved")]);
