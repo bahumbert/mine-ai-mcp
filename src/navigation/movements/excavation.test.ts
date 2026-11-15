@@ -26,8 +26,8 @@ test("opening a water pocket from beside its lid preserves the miner's own dry s
   const target = { x: 0, y: 62, z: 0 };
   world.load(target, { stateId: 1 });
   world.load({ x: 0, y: 61, z: 0 }, { stateId: 2, collisionShapes: [], traits: { empty: true, liquid: "water", liquidSource: true } });
-  assert.match(refusal(prepare(world, target)), /dry footing above water/);
-  assert.equal(prepare(world, target, { standing: { x: 1.5, y: 63, z: 0.5 } }).kind, "prepared");
+  for (const [x, expected] of [[0.5, "unavailable"], [1.15, "unavailable"], [1.3, "prepared"], [1.5, "prepared"]] as const)
+    assert.equal(prepare(world, target, { standing: { x, y: 63, z: 0.5 } }).kind, expected, `x=${x}`);
 });
 
 test("stationary mining does not wake a suspended gravel floor beneath its stance", () => {
@@ -39,6 +39,10 @@ test("stationary mining does not wake a suspended gravel floor beneath its stanc
   assert.match(refusal(prepare(world, target)), /no observed stable support/);
   world.load({ x: 0, y: 61, z: 0 }, { stateId: 1 });
   assert.equal(prepare(world, target).kind, "prepared");
+  world.load({ x: 1, y: 62, z: 0 }, { stateId: 124, traits: { falling: true } });
+  world.load({ x: 1, y: 61, z: 0 }, { stateId: 0 });
+  assert.match(refusal(prepare(world, target, { standing: { x: 0.85, y: 63, z: 0.5 } })), /no observed stable support/);
+  assert.equal(prepare(world, target, { standing: { x: 0.7, y: 63, z: 0.5 } }).kind, "prepared");
 });
 
 /** Prepare the excavation of one cell, at the shipped prices unless the fixture names others. */
@@ -149,6 +153,20 @@ test("a column beside the bot comes down from the top; from underneath, its supp
   // From directly below, the sand is hidden behind the coal, and taking the
   // coal first would drop the sand onto the bot.
   assert.match(refusal(prepare(world, target)), /would drop the falling block above it onto the bot/);
+});
+
+test("falling-block excavation protects every overlapped body column, even with its centre in air", () => {
+  const target = { x: 1, y: 65, z: 1 };
+  for (const [x, z, expected] of [
+    [0.85, 1.5, "unavailable"], [1.5, 0.85, "unavailable"],
+    [0.85, 0.85, "unavailable"], [0.7, 1.5, "prepared"],
+  ] as const) {
+    const world = excavationWorld();
+    world.load(target, { stateId: 1 });
+    for (let y = 66; y <= 72; y++) world.load({ ...target, y }, { stateId: 2, traits: { falling: true } });
+    world.load({ ...target, y: 73 }, { stateId: 0 });
+    assert.equal(prepare(world, target, { standing: { x, y: 63, z } }).kind, expected, `${x},${z}`);
+  }
 });
 
 test("a falling column is taken from its highest reachable block, which brings the hidden remainder down", () => {

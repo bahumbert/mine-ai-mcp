@@ -1,0 +1,34 @@
+template: ../../templates/collect/single-action.yaml
+name: dig-under-body-edge
+tags: [regression]
+description: Collect the sole support beneath the body's edge without swinging from above the pit.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: peaceful
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, randomTickSpeed: 0 }
+reset: ["fill -8 -59 -8 10 -40 8 air"]
+geometry:
+  - fill: { block: stone, from: [-6, -63, -6], to: [8, -60, 6] }
+  - fill: { block: air, from: [0, -62, 0], to: [0, -60, 0] }
+  - setblock: { block: lava, at: [0, -63, 0] }
+  - setblock: { block: dirt, at: [1, -60, 0] }
+players:
+  - name: Collector
+    pos: [0.85, -59, 0.5]
+client: { command: bun, cwd: ../.., args: [client-host.ts, drivers/mining-body-edge.ts] }
+params:
+  # Collection can choose a bank even on the baseline; first exercise real in-place swing admission.
+  probeInPlace: true
+  action: collect_block
+  input: { block_name: dirt, count: 1, scaffold: false }
+  target: { x: 1, y: -60, z: 0 }
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: hasItem, who: Collector, item: dirt, count: 1 }
+    - { kind: blocksAt, block: air, positions: [[1, -60, 0]] }
+    - { kind: health, who: Collector, health: 20 }
+    - { kind: completion, who: Collector }

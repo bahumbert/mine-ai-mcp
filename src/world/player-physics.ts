@@ -14,6 +14,12 @@ export const COAST_TICKS = 2;
 /** Half the player's 0.6-block collision width: a cell centre closer than this is under the body, not ahead of it. */
 export const PLAYER_HALF_WIDTH = 0.3;
 
+/** Every block column strictly overlapped by the player's collision footprint. */
+export function* footprintColumns(feet: Position3): Generator<{ x: number; z: number }> {
+  for (let x = Math.floor(feet.x - PLAYER_HALF_WIDTH); x < feet.x + PLAYER_HALF_WIDTH; x++)
+    for (let z = Math.floor(feet.z - PLAYER_HALF_WIDTH); z < feet.z + PLAYER_HALF_WIDTH; z++) yield { x, z };
+}
+
 /**
  * Whether the block at `cell` carries the body standing on it: the footprint (feet.x and feet.z plus or minus
  * {@link PLAYER_HALF_WIDTH}) overlaps the cell's column, and no other column it overlaps holds a body-carrying block at
@@ -33,12 +39,10 @@ export function footprintStandsOnCell(
   const lowZ = feet.z - PLAYER_HALF_WIDTH;
   const highZ = feet.z + PLAYER_HALF_WIDTH;
   if (!(highX > cell.x && lowX < cell.x + 1 && highZ > cell.z && lowZ < cell.z + 1)) return false;
-  // Cells the footprint overlaps: from the cell holding its low edge to the one holding its high edge, edges exclusive.
-  for (let x = Math.floor(lowX); x < highX; x++)
-    for (let z = Math.floor(lowZ); z < highZ; z++) {
-      if (x === cell.x && z === cell.z) continue;
-      if (columnCarriesBodyAt(x, cell.y, z)) return false;
-    }
+  for (const { x, z } of footprintColumns(feet)) {
+    if (x === cell.x && z === cell.z) continue;
+    if (columnCarriesBodyAt(x, cell.y, z)) return false;
+  }
   return true;
 }
 

@@ -1,0 +1,40 @@
+template: ../../templates/collect/single-action.yaml
+name: cast-lid-body-edge
+tags: [regression]
+description: Keep the sole edge support while exposing a lava pool for casting, then cast from a safe bank.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: peaceful
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, randomTickSpeed: 0 }
+reset: ["fill -8 -59 -8 10 -40 8 air"]
+geometry:
+  - fill: { block: stone, from: [-6, -63, -6], to: [8, -60, 6] }
+  - fill: { block: air, from: [0, -62, 0], to: [0, -60, 0] }
+  - setblock: { block: stone, at: [0, -61, 0] }
+  - setblock: { block: air, at: [2, -60, 0] }
+  - setblock: { block: lava, at: [0, -63, 0] }
+  - setblock: { block: air, at: [1, -61, 0] }
+  - setblock: { block: lava, at: [1, -62, 0] }
+players:
+  - name: Collector
+    pos: [0.85, -59, 0.5]
+    inventory:
+      - { item: diamond_pickaxe, count: 1 }
+      - { item: iron_pickaxe, count: 1 }
+      - { item: water_bucket, count: 1 }
+      - { item: cobblestone, count: 32 }
+client: { command: bun, cwd: ../.., args: [client-host.ts, drivers/mining-body-edge.ts] }
+params:
+  action: collect_block
+  input: { block_name: obsidian, count: 1, scaffold: false }
+  target: { x: 1, y: -60, z: 0 }
+  source: { x: 1, y: -62, z: 0 }
+goal:
+  kind: all
+  timeout: 180
+  goals:
+    - { kind: completion, who: Collector }
+    - { kind: health, who: Collector, health: 20 }
+    - { kind: hasItem, who: Collector, item: obsidian, count: 1 }
