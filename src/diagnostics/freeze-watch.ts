@@ -34,7 +34,7 @@ export interface FreezeWatch extends Disposable {
   lastRecord(): string | null;
 }
 
-let active: { head: Int32Array; slots: Int32Array; times: Float64Array; text: Uint8Array } | null = null;
+let active: ReturnType<typeof freezeViews> | null = null;
 let lastText: string | null = null;
 const encoder = new TextEncoder();
 
@@ -47,6 +47,11 @@ export function freezeViews(shared: SharedArrayBuffer) {
     times: new Float64Array(shared, HEADER_BYTES, (MARKER_SLOTS * SLOT_BYTES) / 8),
     text: new Uint8Array(shared, HEADER_BYTES, MARKER_SLOTS * SLOT_BYTES),
   };
+}
+
+/** The running watch's shared views, or null when no watch is active. */
+export function activeFreezeViews(): ReturnType<typeof freezeViews> | null {
+  return active;
 }
 
 /**
