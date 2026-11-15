@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { acquireLauncherLock, findRunningLauncher, launcherLockFile, releaseLauncherLock, setLockControlPort, startControlServer, STREAM_HEARTBEAT_MS, type StartTimer } from "./control.ts";
 import type { BotOutcome } from "./stack.ts";
-import { attach, cliContext, POST, RecordingHandlers, STATUS, until } from "./cli-test-support.ts";
+import { attach, cliContext, freeTestPort, POST, RecordingHandlers, STATUS, until } from "./cli-test-support.ts";
 
 const answerBotCall = (call: string): BotOutcome =>
   call === "start nobody"
@@ -15,9 +15,9 @@ const answerBotCall = (call: string): BotOutcome =>
       ? { ok: true, message: `${call.slice(6)} is running` }
       : { ok: false, reason: "not-running", message: `${call.slice(5)} is not running.` };
 
-async function withServer(run: (base: string, handlers: RecordingHandlers, control: Awaited<ReturnType<typeof startControlServer>>) => Promise<void>, startPort = 26_100, startTimer?: StartTimer): Promise<void> {
+async function withServer(run: (base: string, handlers: RecordingHandlers, control: Awaited<ReturnType<typeof startControlServer>>) => Promise<void>, startPort?: number, startTimer?: StartTimer): Promise<void> {
   const handlers = new RecordingHandlers(answerBotCall);
-  const control = await startControlServer({ startPort, handlers, ...(startTimer ? { startTimer } : {}) });
+  const control = await startControlServer({ startPort: startPort ?? (await freeTestPort()), handlers, ...(startTimer ? { startTimer } : {}) });
   try {
     await run(`http://127.0.0.1:${control.port}`, handlers, control);
   } finally {
@@ -137,12 +137,13 @@ test("attaching to a stack that is stopping is refused with a line saying to wai
 
 test("a taken control port is skipped and the free one is reported", async () => {
   const holder = createServer();
-  await new Promise<void>((resolve) => holder.listen(26_200, "0.0.0.0", resolve));
+  await new Promise<void>((resolve) => holder.listen(0, "0.0.0.0", resolve));
+  const heldPort = (holder.address() as { port: number }).port;
   try {
     await withServer(async (base, _handlers, control) => {
-      assert.ok(control.port > 26_200);
+      assert.ok(control.port > heldPort);
       assert.equal((await fetch(`${base}/status`)).status, 200);
-    }, 26_200);
+    }, heldPort);
   } finally {
     holder.close();
   }
@@ -243,7 +244,7 @@ async function readRawUntil(base: string, text: string, limitMs = 3000): Promise
 }
 
 test("an attached stream gets a `: ping` comment line every heartbeat, so no client sees 360 s of silence", async () => {
-  const control = await startControlServer({ startPort: 26_110, handlers: new RecordingHandlers(), heartbeatMs: 20 });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: new RecordingHandlers(), heartbeatMs: 20 });
   try {
     const received = await readRawUntil(`http://127.0.0.1:${control.port}`, ": ping\n\n: ping\n\n");
     assert.match(received, /: attached\n\n(: ping\n\n){2}/u);
@@ -286,7 +287,7 @@ test("one timer of STREAM_HEARTBEAT_MS serves all streams: it starts at the firs
     assert.equal(timer.started.length, 2);
     third.hangUp();
     await until(() => timer.stopped === 2);
-  }, 26_120, timer.startTimer);
+  }, undefined, timer.startTimer);
 });
 
 test("closing the server stops the heartbeat of streams still attached", () => {
@@ -296,5 +297,5 @@ test("closing the server stops the heartbeat of streams still attached", () => {
     await control.close();
     assert.equal(timer.stopped, 1);
     stream.hangUp();
-  }, 26_130, timer.startTimer);
+  }, undefined, timer.startTimer);
 });

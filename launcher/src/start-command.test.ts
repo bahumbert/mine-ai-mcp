@@ -2,17 +2,18 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { attach, cliContext, POST, until } from "./cli-test-support.ts";
+import { attach, cliContext, freeTestPort, POST, until } from "./cli-test-support.ts";
 import { launcherLockFile } from "./control.ts";
 import { fakeKeyCipher } from "./key-cipher-test-support.ts";
 import { saveSettings, type Settings } from "./settings.ts";
 import { hostHealth, stackFixture, type StackFixture } from "./stack-test-support.ts";
 import { runStartCommand, type StartDeps } from "./start-command.ts";
 
-const CONTROL_PORT = 26_400;
 const NO_CIPHER = { platform: "linux", cipher: null } as const;
 
 interface Launch {
+  /** The control port this run's settings name: a free one, taken per run. */
+  controlPort: number;
   fixture: StackFixture;
   out: string[];
   context: ReturnType<typeof cliContext>["context"];
@@ -23,12 +24,14 @@ interface Launch {
   update: { latest: string; url?: string } | null;
 }
 
-function launch(change: Parameters<typeof stackFixture>[0] = (settings) => settings, share?: Launch): Launch {
-  const fixture = share?.fixture ?? stackFixture((settings) => change({ ...settings, controlPort: CONTROL_PORT }));
+async function launch(change: Parameters<typeof stackFixture>[0] = (settings) => settings, share?: Launch): Promise<Launch> {
+  const controlPort = share?.controlPort ?? (await freeTestPort());
+  const fixture = share?.fixture ?? stackFixture((settings) => change({ ...settings, controlPort }));
   if (!share) saveSettings(fixture.root, fixture.settings, NO_CIPHER); // the key as a player's hand-edited file holds it, on any system the tests run on
   const { out, context } = cliContext("start", fixture.root, fixture.root);
   let signalHandler: (signal: string) => void = () => {};
   const result: Launch = {
+    controlPort,
     fixture,
     context,
     out,
@@ -67,7 +70,7 @@ function publishedControlPort(root: string): number | null {
 
 /** A launcher running on its real control socket (only its services are fake). */
 async function boot(change?: Parameters<typeof stackFixture>[0], customize: (run: Launch) => void = () => {}) {
-  const run = launch(change);
+  const run = await launch(change);
   hostHealth(run.fixture, 25_575);
   customize(run);
   const finished = runStartCommand(run.context, run.deps);
@@ -90,7 +93,7 @@ async function withBoot(run: (launched: Awaited<ReturnType<typeof boot>>) => Pro
 test("a second start while one runs says so, exits 0, and cleans up and starts nothing", () =>
   withBoot(async (first) => {
     first.run.order.length = 0;
-    const second = launch((settings) => settings, first.run);
+    const second = await launch((settings) => settings, first.run);
     assert.equal(await runStartCommand(second.context, second.deps), 0);
     assert.match(second.out.join("\n"), /already running/u);
     assert.deepEqual(first.run.order, [], "cleanupStale would kill the running launcher's children");
@@ -106,12 +109,12 @@ test("a lock left by a launcher that is gone is replaced and the start goes on",
     undefined,
     (run) => {
       mkdirSync(join(run.fixture.root, "run"), { recursive: true });
-      writeFileSync(launcherLockFile(run.fixture.root), JSON.stringify({ pid: 99_999, controlPort: CONTROL_PORT, startedAt: 1 }));
+      writeFileSync(launcherLockFile(run.fixture.root), JSON.stringify({ pid: 99_999, controlPort: run.controlPort, startedAt: 1 }));
     },
   ));
 
 test("a stack that cannot start: the problem is printed, the launcher lingers for a console, then exits 1", async () => {
-  const run = launch();
+  const run = await launch();
   run.deps = { ...run.deps, stackDeps: (say) => ({ ...run.fixture.deps, ollamaExe: () => null, say }) };
   assert.equal(await runStartCommand(run.context, run.deps), 1);
   assert.match(run.out.join("\n"), /install ollama/u);
@@ -121,7 +124,7 @@ test("a stack that cannot start: the problem is printed, the launcher lingers fo
 });
 
 test("the stack's dependencies are made for the data root the launcher runs in, so ollama.exe is found where the install recorded it", async () => {
-  const run = launch();
+  const run = await launch();
   hostHealth(run.fixture, 25_575);
   const roots: string[] = [];
   run.deps = { ...run.deps, stackDeps: (say, root) => (roots.push(root), { ...run.fixture.deps, say }) };
@@ -130,7 +133,7 @@ test("the stack's dependencies are made for the data root the launcher runs in, 
 });
 
 test("a launcher the console started stops itself when no console ever attaches", async () => {
-  const run = launch();
+  const run = await launch();
   hostHealth(run.fixture, 25_575);
   assert.equal(await runStartCommand(run.context, run.deps, { expectConsole: true }), 0);
   assert.match(run.out.join("\n"), /No console attached/u);
@@ -234,7 +237,7 @@ test("a bot started through the control endpoint runs, and one stopped there end
   ));
 
 test("a settings file that is invalid stops the start with its path, before any lock or process", async () => {
-  const run = launch();
+  const run = await launch();
   writeFileSync(join(run.fixture.root, "settings.json"), "{ nope");
   assert.equal(await runStartCommand(run.context, run.deps), 1);
   assert.match(run.out.join("\n"), /settings\.json is invalid/u);
@@ -253,7 +256,7 @@ async function startOnce(run: Launch): Promise<number> {
 }
 
 test("a start on Windows encrypts a key found in clear, says so once, and the second start says nothing", async () => {
-  const first = launch(withClearKey);
+  const first = await launch(withClearKey);
   const cipher = fakeKeyCipher();
   first.deps = { ...first.deps, settings: { platform: "win32", cipher } };
   assert.equal(await startOnce(first), 0);
@@ -261,14 +264,14 @@ test("a start on Windows encrypts a key found in clear, says so once, and the se
   assert.equal(readFileSync(file, "utf8").includes("sk-old"), false);
   assert.equal(first.out.filter((line) => MIGRATION_LINE.test(line)).length, 1);
   assert.equal(launcherLogLines(first.fixture.root).filter((line) => MIGRATION_LINE.test(line)).length, 1, "the log keeps it too");
-  const second = launch((settings) => settings, first);
+  const second = await launch((settings) => settings, first);
   second.deps = { ...second.deps, settings: { platform: "win32", cipher } };
   assert.equal(await startOnce(second), 0);
   assert.equal(second.out.some((line) => MIGRATION_LINE.test(line)), false);
 });
 
 test("a save that fails is said with the file, and the start goes on with the key it read", async () => {
-  const run = launch(withClearKey);
+  const run = await launch(withClearKey);
   const cipher = { ...fakeKeyCipher(), protect: () => { throw new Error("CryptProtectData failed (error 5)"); } };
   run.deps = { ...run.deps, settings: { platform: "win32", cipher } };
   assert.equal(await startOnce(run), 0);
