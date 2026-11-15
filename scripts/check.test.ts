@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, typecheckPlan } from "./check.js";
@@ -225,6 +225,25 @@ test("a near-miss of the marker is reported, not ignored", () => {
   for (const line of ["//check-reads: data/*.yaml", "// check-reads : data/*.yaml", "//  check-reads: data/*.yaml", "/* check-reads: data/*.yaml */"]) {
     const plan = planDataReads(["data/a.yaml"], new Map([["tests/r.ts", `${line}\n`]]), ["data/a.yaml"]);
     expect({ line, reads: plan.reads.length, malformed: plan.malformed.length }).toEqual({ line, reads: 0, malformed: 1 });
+  }
+});
+
+test("a change to a module the daemon test reads alone selects the daemon test, read from its real declaration", () => {
+  const DAEMON_TEST = "tests/minecraft/shared/daemon.test.ts";
+  const daemonSource = readFileSync(new URL(`../${DAEMON_TEST}`, import.meta.url), "utf8");
+  const daemonModules = [
+    "tests/minecraft/shared/protocol.ts",
+    "tests/minecraft/shared/submission-handler.ts",
+    "tests/minecraft/shared/scheduler-types.ts",
+    "tests/minecraft/shared/scheduler-trial.ts",
+    "tests/minecraft/shared/scheduler.ts",
+    "tests/minecraft/shared/result-class.ts",
+    "tests/minecraft/shared/trial.ts",
+  ];
+  for (const changed of daemonModules) {
+    const { plan, reached } = dataReadTree({ [DAEMON_TEST]: daemonSource }, [], [changed]);
+    expect({ changed, reads: plan.reads }).toEqual({ changed, reads: [{ data: changed, reader: DAEMON_TEST }] });
+    expect({ changed, tests: reached.tests.map((entry) => entry.file) }).toEqual({ changed, tests: [DAEMON_TEST] });
   }
 });
 

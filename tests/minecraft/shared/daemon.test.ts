@@ -19,6 +19,8 @@ import { ScriptedClients } from "./scripted-clients.ts";
 import { BUILD_KEY, TemplateBuildRig } from "./template-build-rig.ts";
 import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
+// scheduler-trial.ts reaches this test at depth 3, past IMPORTER_DEPTH 2; the others are listed so each selects it by name (2026-11-15).
+// check-reads: tests/minecraft/shared/protocol.ts, tests/minecraft/shared/submission-handler.ts, tests/minecraft/shared/scheduler-types.ts, tests/minecraft/shared/scheduler-trial.ts, tests/minecraft/shared/scheduler.ts, tests/minecraft/shared/result-class.ts, tests/minecraft/shared/trial.ts
 
 const ONE_FILE = fileURLToPath(new URL("../contract/scenarios/air-supply-under-water.yaml", import.meta.url));
 
