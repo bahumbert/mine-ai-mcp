@@ -259,7 +259,9 @@ test("cancelling the request during a reflex handoff stops the action for good",
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const claim = runner.claim("hostile_reflex", "hostile contact", async () => {
+  let reflexSignal: AbortSignal | undefined;
+  const claim = runner.claim("hostile_reflex", "hostile contact", async (signal) => {
+    reflexSignal = signal;
     await gate;
     return { value: "killed", continuation: { kind: "resume" as const } };
   });
@@ -274,7 +276,10 @@ test("cancelling the request during a reflex handoff stops the action for good",
   release();
   const output = await outcome;
   if (claim.kind !== "claimed") throw new Error("Expected claim");
-  await claim.outcome;
+  // The request's cancel stops the objective, not the reflex that holds the body: it finishes its work. (The interrupted
+  // action's own controller is already aborted by the claim, so cancelRequest aborting it again changes nothing.)
+  assert.equal(await claim.outcome, "killed", "the reflex finished its work");
+  assert.equal(reflexSignal?.aborted, false, "the cancellation never aborted the reflex");
   assert.equal(runs.count, 1);
   assert.equal(output.result.status, "cancelled");
   assert.deepEqual(output.interruptions, ["hostile contact"]);
