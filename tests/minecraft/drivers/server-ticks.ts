@@ -9,7 +9,7 @@ export const DRIVER_CLOCK_STOPPED_MS = 30_000;
 export function waitServerTicks(
   bot: Pick<Bot, "time">,
   ticks: number,
-  options: { signal?: AbortSignal; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+  options: { signal?: AbortSignal; until?: () => boolean; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<WorldAgeWait> {
   return waitForWorldAge(bot, Math.ceil(ticks / 20) * 20 + 20, {
     wallMs: Number.POSITIVE_INFINITY,

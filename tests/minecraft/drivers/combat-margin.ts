@@ -11,6 +11,7 @@ import { arenaPoint } from "../arena/params.ts";
 import { serverContractSubject } from "../contract/subject.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { observeDeaths } from "./deaths.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 const paramsSchema = z.strictObject({
   mob: z.enum(["zombie", "creeper"]),
@@ -29,7 +30,7 @@ const POLL_MS = 100;
 const EMPTY_MOB = "{PersistenceRequired:1b,IsBaby:0b,HandItems:[{},{}],ArmorItems:[{},{},{},{}]}";
 
 /** Spawn only after listeners and the runtime are ready, so preparation cannot spend the fuse or lose a death. */
-export async function run(context: ScenarioContext): Promise<ClientCompletion> {
+export async function run(context: ScenarioContext, sleep: (ms: number) => Promise<void> = delay): Promise<ClientCompletion> {
   const params = paramsSchema.parse(context.scenario.params);
   const { bot } = context;
   const deaths = observeDeaths(bot);
@@ -43,11 +44,15 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const started = monotonicNow();
     while (targetId === null && monotonicNow() - started < 5_000) {
       targetId = Object.values(bot.entities).find(entity => entity.name === params.mob)?.id ?? null;
-      if (targetId === null) await delay(POLL_MS);
+      if (targetId === null) await sleep(POLL_MS);
     }
     assert.notEqual(targetId, null, "the summoned contact was never seen");
-    while (monotonicNow() - started < params.observeSeconds * 1_000 && deaths.deaths.length === 0) await delay(POLL_MS);
+    // Encounters need the same game time at every rate, plus a packet of margin for a stale age (scenario-ticks P5, 2026-11-15).
+    const observed = await waitServerTicks(bot, params.observeSeconds * 20, {
+      until: () => deaths.deaths.length > 0, sleep,
+    });
     assert.equal(deaths.deaths.length, 0, "the actor died during the encounter");
+    assert.notEqual(observed, "stalled", "the server's clock stood still during the encounter");
     assert.ok(bot.health > 0, "the actor is not alive");
     const receipts = await encounterReceipts(context);
     const matching = receipts.filter(outcome => outcome.response === params.response &&
