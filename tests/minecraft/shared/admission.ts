@@ -17,6 +17,11 @@ export interface ServerReading {
   readonly residentMb: number;
   /** Its tick query was still unanswered when the sample stopped waiting (`msptP95` is then null, not a reading): no new trial on it in this sample. Absent: answered in time. */
   readonly late?: boolean;
+  /**
+   * The world a lane server is copying into RAM (tmpfs), in MB, until the copy ends: it is in no resident size and not yet in MemAvailable, so the ledger holds it here.
+   * Absent or 0: no RAM world, or its copy ended (from there MemAvailable shows it).
+   */
+  readonly worldPendingMb?: number;
 }
 
 export interface AdmissionSample {
@@ -82,6 +87,8 @@ export interface AdmissionRequest {
   readonly clientReserveMb?: number;
   /** Heap of the server a new start would create. */
   readonly newServerHeapMb: number;
+  /** The world a new lane server copies into RAM, in MB (the template's size); absent or 0 when its root is on disk. */
+  readonly newServerWorldMb?: number;
   /** The key has enough trials queued to fill `serversPerKey` servers and fewer servers than that: a new one starts now, whatever the candidates could take. */
   readonly spreadToNewServer?: boolean;
   /** This trial measures time (a locked batch, a scenario tagged exclusive): it starts only on a calm machine. */
@@ -106,7 +113,7 @@ function growthMb(server: Pick<ServerReading, "heapMb" | "residentMb">, config: 
 }
 
 /**
- * MemAvailable minus what busy servers and young clients are still going to take, minus what this sample admitted. An idle warm
+ * MemAvailable minus what busy servers and young clients are still going to take, minus the RAM worlds still being copied, minus what this sample admitted. An idle warm
  * server is not counted (it will not grow, and its resident size is already out of MemAvailable). The trial admitted onto it
  * must find that growth plus its client free (`reserveMb`); the scheduler then leases the lane, which makes the server busy in the
  * next reading, so the ledger holds the growth from there and the tally keeps only the client.
@@ -114,7 +121,8 @@ function growthMb(server: Pick<ServerReading, "heapMb" | "residentMb">, config: 
 export function ledgerMb(sample: AdmissionSample, tally: AdmissionTally, config: ScenarioServerConfig): number {
   const poolGrowing = sample.servers.reduce((sum, server) => sum + (server.busy ? growthMb(server, config) : 0), 0);
   const serversStillGrowing = poolGrowing + (sample.templateBuild ? growthMb(sample.templateBuild, config) : 0);
-  return sample.memAvailableMb - serversStillGrowing - (sample.youngClientsMb ?? sample.youngClients * config.clientMemMb) - tally.reservedMb;
+  const worldsStillCopying = sample.servers.reduce((sum, server) => sum + (server.worldPendingMb ?? 0), 0);
+  return sample.memAvailableMb - serversStillGrowing - worldsStillCopying - (sample.youngClientsMb ?? sample.youngClients * config.clientMemMb) - tally.reservedMb;
 }
 
 /**
@@ -210,9 +218,10 @@ export function decideAdmission(input: {
   if (cpuRefusal) return refusal("cpu", cpuRefusal);
   if (running >= state.target) return refusal("target", `${running} trials running, the concurrency target is ${state.target}`);
   // A new server's reserve holds the margin (the tally of the pass keeps it from the next admission); the other reserves leave it free outside.
-  const needed = clientMb + request.newServerHeapMb + config.serverMemMarginMb;
+  const newServerMb = clientMb + request.newServerHeapMb + (request.newServerWorldMb ?? 0);
+  const needed = newServerMb + config.serverMemMarginMb;
   // A spread start is the key's servers starting together, not the next server of a sample: only the ledger holds it.
-  const newServerFits = roomAfterAdmissionMb(available, clientMb + request.newServerHeapMb, config) >= 0;
+  const newServerFits = roomAfterAdmissionMb(available, newServerMb, config) >= 0;
   if (request.spreadToNewServer && newServerFits) return { admit: true, server: "new", reserveMb: needed, spread: true };
   const refusals: string[] = [];
   /** Idle candidates the ledger cannot afford the growth of: a memory refusal, not a server one. */
@@ -256,7 +265,7 @@ export function decideAdmission(input: {
   }
   if (!newServerFits && queueFull.length > 0) return shortestQueue(queueFull);
   if (!newServerFits) {
-    const detail = marginRefusalDetail(available, clientMb + request.newServerHeapMb, "a client and a new server", config);
+    const detail = marginRefusalDetail(available, newServerMb, "a client and a new server", config);
     return refusal(refusals.length ? "server" : "memory", [...refusals, ...unaffordable, detail].join("; "), true);
   }
   return { admit: true, server: "new", reserveMb: needed };

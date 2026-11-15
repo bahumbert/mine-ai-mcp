@@ -17,6 +17,14 @@ export interface WorldRamDir {
   remove(): Promise<void>;
 }
 
+/**
+ * The scheduler's `worldMbFor`: the MB a new lane server's world takes in RAM (the template's size, as the daemon already read it) when the daemon has a
+ * RAM dir; 0 without one, as the roots are then on disk and nothing is reserved. A server whose copy then gets no room or no template releases it at once (`onWorldCopied`).
+ */
+export function ramWorldMbFor(ram: WorldRamDir | null, templates: { worldMbKnown(version: string): number }): (version: string) => number {
+  return version => (ram ? templates.worldMbKnown(version) : 0);
+}
+
 export function worldRamDirName(socketPath: string): string {
   return `${DIR_PREFIX}${createHash("sha1").update(socketPath).digest("hex").slice(0, HASH_HEX_CHARS)}`;
 }

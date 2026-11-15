@@ -71,7 +71,7 @@ export class LaneWorldTemplates {
   readonly #facts = new Map<string, FlatWorldFacts>();
   readonly #resolved = new Map<string, Promise<ResolvedTemplate | null>>();
   readonly #said = new Set<string>();
-  /** A template's size in MB per key (a finished template never changes). */
+  /** A version's template size in MB (a version's key is computed once and a finished template never changes, so one entry per key). */
   readonly #worldMb = new Map<string, number>();
   readonly #ports: TemplateUsePorts;
 
@@ -81,7 +81,7 @@ export class LaneWorldTemplates {
 
   /** A started server's `server.properties`; only a flat world's lines are the template's generator (a default world writes `level-type=minecraft:normal`). */
   observe(request: ServerRequest, propertiesText: string): void {
-    if (request.scenario.world.type !== "flat") return;
+    if (!hasTemplateWorld(request.scenario)) return;
     const version = request.scenario.minecraft.version;
     if (this.#facts.has(version)) return;
     const viewDistance = propertyOf(propertiesText, "view-distance");
@@ -90,6 +90,8 @@ export class LaneWorldTemplates {
       return;
     }
     this.#facts.set(version, { viewChunks: Number(viewDistance), generatorLines: generatorLinesOf(propertiesText) });
+    // The key resolves now: read the size so `worldMbKnown` answers for the servers the scheduler admits from here on (a failed read costs the size, never a server).
+    void this.worldMbFor(version).catch(() => undefined);
   }
 
   /** Copies the version's template into `worldDir` when the server is a lane server of a flat world and a template of its key exists; null leaves the world empty. `onCopied` is called once after a copy that worked. */
@@ -113,13 +115,21 @@ export class LaneWorldTemplates {
   async worldMbFor(version: string): Promise<number> {
     const resolved = await this.#resolve(version);
     if (resolved === null) return 0;
-    const known = this.#worldMb.get(resolved.key);
+    const known = this.#worldMb.get(version);
     if (known !== undefined) return known;
     const dir = templateDir(this.options.config.templateDir, resolved.key);
     if (dir === null) return 0;
     const mb = Math.ceil((await this.#ports.directoryBytes(WORLD_DIRECTORIES.map(name => join(dir, name)))) / BYTES_PER_MB);
-    this.#worldMb.set(resolved.key, mb);
+    this.#worldMb.set(version, mb);
     return mb;
+  }
+
+  /**
+   * `worldMbFor`'s answer when it was already read, else 0: for the scheduler, which cannot await while it admits. `observe` reads it when the key
+   * resolves, so it is 0 only for the servers admitted before the first flat server wrote its properties (they get no copy either) and while no template exists.
+   */
+  worldMbKnown(version: string): number {
+    return this.#worldMb.get(version) ?? 0;
   }
 
   /** The template a copy for this request comes from, with the log line of why not (said once); the one place that decides, so `wouldCopy` and `prepare` agree. */
@@ -224,5 +234,10 @@ export function templateBoxesOf(scenarios: readonly Scenario[], version: string,
 
 /** A shared (lane) server of a flat world that is not the gamerule probe: the only servers a template helps (spec D10, amendment 2026-10-31). */
 function isLaneServer(request: ServerRequest): boolean {
-  return request.kind === "shared" && !request.key.startsWith(PROBE_KEY_PREFIX) && request.scenario.world.type === "flat";
+  return request.kind === "shared" && !request.key.startsWith(PROBE_KEY_PREFIX) && hasTemplateWorld(request.scenario);
+}
+
+/** Only a flat world has a template (a default world's chunks depend on its seed and the player's path): the one rule of `observe`, of the copy and of the scheduler's world reserve. */
+export function hasTemplateWorld(scenario: Pick<Scenario, "world">): boolean {
+  return scenario.world.type === "flat";
 }

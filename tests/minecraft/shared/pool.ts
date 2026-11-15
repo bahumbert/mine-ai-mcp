@@ -19,9 +19,15 @@ export interface ServerSpec {
   readonly scenario: Scenario;
   /** The locked batch this server was made for: no other submission's trial uses it, and it stops when that batch ends. */
   readonly reservedFor?: number;
+  /** The template world, in MB, the server's root may hold in RAM (its size, from the daemon); 0 or absent: none. The ledger holds it until the copy ends. */
+  readonly worldMb?: number;
 }
 
-export type ServerRequest = ServerSpec & { readonly id: string };
+export type ServerRequest = ServerSpec & {
+  readonly id: string;
+  /** The factory calls this when the world is no longer to be copied into RAM: the copy ended, was not made (a disk root, no template) or failed. Calling it again changes nothing. */
+  readonly onWorldCopied?: () => void;
+};
 
 /** Starts one server (process, ports, world) and returns it ready for commands. */
 export interface ServerFactory {
@@ -72,6 +78,8 @@ interface PoolEntry extends ManagedServer {
   readonly lanes: LanePool | null;
   readonly stall: StallWatch;
   readonly death: AbortController;
+  /** The RAM world its factory has not finished copying, in MB (the ledger holds it); 0 from the end of the copy, and from the server's being ready. A holder object: the factory may report before the entry exists. */
+  readonly world: { pendingMb: number };
   /** Samples in a row in which its java process read as gone. */
   javaGoneReadings: number;
   server: ScenarioServer | null;
@@ -137,21 +145,23 @@ export class ServerPool {
     this.#started += 1;
     this.log(`server ${id} (${spec.kind}, key ${spec.key}) starting: ${reason}`);
     const death = new AbortController();
+    const world = { pendingMb: spec.worldMb ?? 0 };
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
-      lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null,
+      lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null, world,
       stall: new StallWatch(this.config.stallStopMs), death, javaGoneReadings: 0, server: null, status: "starting", running: 0,
       lastTrialAt: now, msptP95: null, residentMb: 0, late: false, idleReusable: false, retire: false,
       mutexQueued: 0, holds: [], nextBody: 0,
-      ready: this.#create(id, spec), died: death.signal,
+      ready: this.#create(id, spec, () => { world.pendingMb = 0; }), died: death.signal,
     };
     this.#entries.set(id, entry);
-    entry.ready.then(server => { entry.server = server; entry.status = "ready"; }, () => { this.#entries.delete(id); });
+    // A ready server's copy is over whether the factory said so or not (a disk root, no template): nothing is left pending.
+    entry.ready.then(server => { entry.server = server; entry.status = "ready"; world.pendingMb = 0; }, () => { this.#entries.delete(id); });
     return entry;
   }
 
-  async #create(id: string, spec: ServerSpec): Promise<ScenarioServer> {
-    const server = await this.factory.create({ ...spec, id });
+  async #create(id: string, spec: ServerSpec, onWorldCopied: () => void): Promise<ScenarioServer> {
+    const server = await this.factory.create({ ...spec, id, onWorldCopied });
     try {
       for (const command of spec.setup) await server.command(command);
     } catch (error) {
@@ -179,6 +189,7 @@ export class ServerPool {
     return [...this.#entries.values()].map(entry => ({
       id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry), lanes: entry.running,
       msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb, ...(entry.late ? { late: true } : {}),
+      ...(entry.world.pendingMb > 0 ? { worldPendingMb: entry.world.pendingMb } : {}),
     }));
   }
 

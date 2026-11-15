@@ -217,3 +217,33 @@ test("the ledger counts a template build as one more busy server: its heap and o
   assert.equal(withBuild(4_000), 10_000, "past its heap and overhead nothing is left to grow into");
   assert.equal(ledgerMb(sample({ memAvailableMb: 10_000, servers: [] }), EMPTY_TALLY, config), 10_000, "no build, no change");
 });
+
+// Spec 2026-11-15-scenario-disk-stalls 3.1: a lane server's world in RAM (tmpfs) is in no resident size and not yet in MemAvailable while its copy runs.
+const WORLD_MB = 440;
+
+for (const spreadToNewServer of [false, true]) {
+  test(`a new lane server whose world goes to RAM needs the client, its heap, the world and the margin (${spreadToNewServer ? "a key's spread start" : "an ordinary start"}): refused 1 MB short, admitted at the exact room`, () => {
+    const request = { candidates: [], newServerHeapMb: config.sharedHeapMb, newServerWorldMb: WORLD_MB, spreadToNewServer };
+    const need = config.clientMemMb + config.sharedHeapMb + WORLD_MB + config.serverMemMarginMb;
+    const short = ask(sample({ servers: [], memAvailableMb: need - 1 }), initialAdmissionState(config), EMPTY_TALLY, request);
+    assert.equal(refusedBound(short), "memory");
+    assert.match(refusalDetail(short), new RegExp(`\\(${config.clientMemMb + config.sharedHeapMb + WORLD_MB} MB\\)`, "u"));
+    assert.deepEqual(ask(sample({ servers: [], memAvailableMb: need }), initialAdmissionState(config), EMPTY_TALLY, request),
+      { admit: true, server: "new", reserveMb: need, ...(spreadToNewServer ? { spread: true } : {}) });
+  });
+}
+
+test("ledgerMb subtracts the world of a server whose copy has not ended, and nothing once it has", () => {
+  const ledgerWith = (reading: ServerReading) => ledgerMb(sample({ memAvailableMb: 10_000, servers: [reading] }), EMPTY_TALLY, config);
+  assert.equal(ledgerWith(warm({ busy: false, worldPendingMb: WORLD_MB })), 10_000 - WORLD_MB, "pending, even for an idle server");
+  assert.equal(ledgerWith(warm({ busy: true, worldPendingMb: WORLD_MB })), 10_000 - GROWTH_MB - WORLD_MB);
+  assert.equal(ledgerWith(warm({ busy: true, worldPendingMb: 0 })), 10_000 - GROWTH_MB, "copy ended: MemAvailable holds it");
+  assert.equal(ledgerWith(warm({ busy: true })), 10_000 - GROWTH_MB, "no field: as before");
+});
+
+test("newServerWorldMb 0: a new server needs what it needed before (the absent field is every test above)", () => {
+  const request = { candidates: [], newServerHeapMb: config.sharedHeapMb, newServerWorldMb: 0 };
+  const need = config.clientMemMb + config.sharedHeapMb + config.serverMemMarginMb;
+  assert.equal(ask(sample({ servers: [], memAvailableMb: need - 1 }), initialAdmissionState(config), EMPTY_TALLY, request).admit, false);
+  assert.deepEqual(ask(sample({ servers: [], memAvailableMb: need }), initialAdmissionState(config), EMPTY_TALLY, request), { admit: true, server: "new", reserveMb: need });
+});

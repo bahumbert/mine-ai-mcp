@@ -48,7 +48,7 @@ export class SchedulerRig {
   /** The clients booted ahead, present when the rig was given a `ScriptedClients`. */
   readonly ahead: ClientsAhead | null;
 
-  constructor(env: Record<string, string> = {}, options: { readonly clients?: ScriptedClients; readonly templateBuilds?: TemplateBuilds } = {}) {
+  constructor(env: Record<string, string> = {}, options: { readonly clients?: ScriptedClients; readonly templateBuilds?: TemplateBuilds; readonly worldMbFor?: (version: string) => number } = {}) {
     this.config = loadScenarioServerConfig({ ...TEST_CONFIG_ENV, ...env });
     this.pool = new ServerPool(this.factory, this.config, message => this.logs.push(message));
     this.ahead = options.clients ? new ClientsAhead({ config: this.config, log: message => this.logs.push(message), spawn: options.clients.spawn, now: () => this.clock }) : null;
@@ -56,7 +56,7 @@ export class SchedulerRig {
       pool: this.pool, config: this.config, now: () => this.clock, log: message => this.logs.push(message),
       runTrial: input => this.#runTrial(input),
       runIo: { open: async () => ({ log: () => {}, close: async () => {} }), writeResult: async () => {} },
-      clientsAhead: this.ahead ?? undefined, templateBuilds: options.templateBuilds,
+      clientsAhead: this.ahead ?? undefined, templateBuilds: options.templateBuilds, worldMbFor: options.worldMbFor,
     });
   }
 
@@ -98,11 +98,12 @@ export class SchedulerRig {
     this.scheduler.onSample({ cpuBusy: 0.2, memAvailableMb: 28_000, threads: 24, ...overrides }, this.clock);
   }
 
-  submit(entries: { name: string; placement: Placement; /** Fields of this scenario's client command to change (another driver, another command). */ client?: Partial<Scenario["client"]> }[], overrides: Partial<SubmissionSpec> = {}): SubmissionHandle {
+  submit(entries: { name: string; placement: Placement; /** Fields of this scenario's client command to change (another driver, another command). */ client?: Partial<Scenario["client"]>; /** Fields of this scenario's world to change (the type). */ world?: Partial<Scenario["world"]> }[], overrides: Partial<SubmissionSpec> = {}): SubmissionHandle {
     return this.scheduler.submit({
       entries: entries.map(entry => {
         const base = fixtureScenario(60, entry.name);
-        const scenario = entry.client ? { ...base, client: { ...base.client, ...entry.client } } : base;
+        const withClient = entry.client ? { ...base, client: { ...base.client, ...entry.client } } : base;
+        const scenario = entry.world ? { ...withClient, world: { ...withClient.world, ...entry.world } } as Scenario : withClient;
         return { name: entry.name, scenario, placement: entry.placement.kind === "lane" ? { ...entry.placement, scenario } : entry.placement };
       }),
       repeat: 1, maxLanes: null, lock: false, hold: false, outDir: "/tmp/out", emit: event => this.events.push(event), ...overrides,

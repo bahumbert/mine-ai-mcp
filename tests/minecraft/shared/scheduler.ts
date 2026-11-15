@@ -15,6 +15,7 @@ import type {
   MachineReading, SchedulerDeps, SubmissionEntry, SubmissionHandle, SubmissionSpec, SubmissionSummary,
 } from "./scheduler-types.ts";
 import { serverSpecFor } from "./server-spec.ts";
+import { hasTemplateWorld } from "./world-template-use.ts";
 import { countStartableTrialsPerKey, turnOrder } from "./trial-turns.ts";
 
 export type { MachineReading, SchedulerDeps, SubmissionEntry, SubmissionEvent, SubmissionHandle, SubmissionSpec, SubmissionSummary } from "./scheduler-types.ts";
@@ -289,7 +290,16 @@ export class Scheduler {
     const base = { timing, timingRunning: this.#timingRunning + this.#timingWaitingForCalm, clientReserveMb: reserveMb };
     if (placement.kind !== "lane") return { ...base, candidates: pool.reusableSingles(placement.key), newServerHeapMb: config.singleHeapMb };
     const candidates = pool.sharedCandidates(placement.key);
-    return { ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb, spreadToNewServer: this.#mayStartKeyServers && this.#keyWantsMoreServers(placement.key) };
+    return {
+      ...base, candidates, queues: pool.queues(candidates), newServerHeapMb: config.sharedHeapMb, newServerWorldMb: this.#worldMbOf(placement),
+      spreadToNewServer: this.#mayStartKeyServers && this.#keyWantsMoreServers(placement.key),
+    };
+  }
+
+  /** The template world a new lane server of this placement copies into RAM, in MB: the daemon's answer for the placement's Minecraft version when its world has a template, 0 for any other placement. */
+  #worldMbOf(placement: Placement): number {
+    if (placement.kind !== "lane" || !hasTemplateWorld(placement.scenario)) return 0;
+    return this.deps.worldMbFor?.(placement.scenario.minecraft.version) ?? 0;
   }
 
   /** The key has servers, fewer than SERVERS_PER_KEY, and trials queued to fill them all to half (the first server of a key starts as any new server does). */
@@ -323,7 +333,7 @@ export class Scheduler {
     const { entry, submission } = queued;
     const now = this.deps.now();
     const managed = decision.server === "new"
-      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config), now, ownStartReason(entry.placement), decision.spread ? config.serversPerKey : undefined)
+      ? pool.startServer(serverSpecFor(entry.placement, entry.scenario, config, this.#worldMbOf(entry.placement)), now, ownStartReason(entry.placement), decision.spread ? config.serversPerKey : undefined)
       : pool.get(decision.server);
     if (!managed) return `server ${decision.server} left the pool`;
     let lane: Lane | null = null;

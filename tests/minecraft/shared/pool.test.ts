@@ -351,6 +351,42 @@ test("a server is busy while it starts and while a trial is on it (admitted or r
   assert.equal(busyOf(pool, managed.id), false, "cancelled before its arrangement");
 });
 
+test("a server made for a RAM world reads its world as pending until its copy ends, then 0; a server of no RAM world never reads one", async () => {
+  const { factory, pool } = setup();
+  let release!: () => void;
+  factory.startGate = new Promise<void>(resolve => { release = resolve; });
+  const copying = pool.startServer(spec({ worldMb: 440 }), 0);
+  const plain = pool.startServer(spec({ key: "k2" }), 0);
+  const worldOf = (id: string) => pool.readings().find(reading => reading.id === id)?.worldPendingMb ?? 0;
+  assert.deepEqual([worldOf(copying.id), worldOf(plain.id)], [440, 0], "starting: the copy has not run");
+  factory.requests[0]!.onWorldCopied?.();
+  assert.equal(worldOf(copying.id), 0, "copy ended, the server is not ready yet");
+  assert.equal(pool.readings().find(reading => reading.id === copying.id)?.status, "starting");
+  release();
+  await Promise.all([copying.ready, plain.ready]);
+  assert.equal(worldOf(copying.id), 0);
+});
+
+test("a RAM world still pending when its server is ready (a copy that was skipped or failed) reads 0 from then on, and a second end of the copy changes nothing", async () => {
+  const { factory, pool } = setup();
+  const managed = pool.startServer(spec({ worldMb: 440 }), 0);
+  assert.equal(pool.readings()[0]?.worldPendingMb, 440);
+  await managed.ready;
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+  factory.requests[0]!.onWorldCopied?.();
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+});
+
+test("a factory that reports the copy before its first await (a root already made) is heard: the world reads 0", async () => {
+  const eager = new FakeFactory();
+  const create = eager.create.bind(eager);
+  eager.create = request => { request.onWorldCopied?.(); return create(request); };
+  const pool = new ServerPool(eager, config, () => {});
+  const managed = pool.startServer(spec({ worldMb: 440 }), 0);
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+  await managed.ready;
+});
+
 test("an idle reusable single server is idle, and busy again while its next scenario runs", async () => {
   const { pool } = setup();
   const managed = pool.startServer(spec({ kind: "single", key: "own:a", heapMb: 2_048, setup: [] }), 0);

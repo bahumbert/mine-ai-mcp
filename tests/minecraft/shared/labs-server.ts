@@ -74,6 +74,9 @@ export class LabsServerFactory implements ServerFactory {
     const labsPorts = this.options.labs ?? realLabs;
     const port = ports.lease();
     const ram = await this.#ramRoot(request, labsPorts);
+    // The ledger holds the template's size for a world headed to RAM (`ServerRequest.worldMb`) until the copy ends; a world that is not going to RAM releases it now.
+    const worldDone = () => request.onWorldCopied?.();
+    if (!ram) worldDone();
     const root = ram?.root ?? join(serverRoot, request.id);
     const world = request.scenario.world;
     let abandoned = false;
@@ -97,11 +100,14 @@ export class LabsServerFactory implements ServerFactory {
         throw new Error(`Mine Labs moved server ${request.id} to port ${labs.gamePort}, outside this daemon's block`);
       }
       await labsPorts.prepareWorldDir(labs.worldDir);
-      templated = await this.options.templates?.prepare(request, labs.worldDir) ?? null;
+      templated = await this.options.templates?.prepare(request, labs.worldDir, worldDone) ?? null;
+      // No copy was made (a failed `cp`, none asked for): nothing is left to wait for.
+      if (!templated) worldDone();
       await labs.start();
       // What the template key needs of this server; a file that cannot be read costs the template, never the server.
       await readFile(join(root, "server.properties"), "utf8").then(text => this.options.templates?.observe(request, text)).catch(() => undefined);
     } catch (error) {
+      worldDone();
       await labs?.stop().catch(() => undefined);
       await templated?.remove().catch(() => undefined);
       await ram?.remove().catch(() => undefined);

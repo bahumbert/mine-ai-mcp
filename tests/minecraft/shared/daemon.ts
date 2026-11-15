@@ -24,7 +24,7 @@ import { installShutdownSignals } from "./shutdown-signals.ts";
 import { rootSlug } from "./source-root.ts";
 import { handleSubmit, type RunningSubmission } from "./submission-handler.ts";
 import type { TrialRunner } from "./trial.ts";
-import { prepareWorldRamDir, type WorldRamDir } from "./world-ram-dir.ts";
+import { prepareWorldRamDir, ramWorldMbFor, type WorldRamDir } from "./world-ram-dir.ts";
 import { LaneWorldTemplates } from "./world-template-use.ts";
 
 export interface DaemonOptions {
@@ -118,8 +118,13 @@ async function worldsInRam(options: DaemonOptions): Promise<WorldRamDir | null> 
   return null;
 }
 
-/** The daemon's server factory and template builds (the real ones unless a test gave its own), after killing the java servers a dead daemon left; `ram` is the dir its stop removes. */
-async function serverParts(options: DaemonOptions): Promise<{ readonly factory: ServerFactory; readonly templateBuilds: TemplateBuilds | undefined; readonly ram: WorldRamDir | null }> {
+/**
+ * The daemon's server factory and template builds (the real ones unless a test gave its own), after killing the java servers a dead daemon left; `ram` is the dir its stop removes,
+ * `worldMbFor` the size the scheduler reserves in the ledger for a new lane server's RAM world (0 without a RAM dir).
+ */
+async function serverParts(options: DaemonOptions): Promise<{
+  readonly factory: ServerFactory; readonly templateBuilds: TemplateBuilds | undefined; readonly ram: WorldRamDir | null; readonly worldMbFor: (version: string) => number;
+}> {
   const { config, log, socketPath } = options;
   const serverRoot = join(options.stateDir, "servers");
   // Next to the socket, not in the checkout: a daemon started from another worktree still finds what a dead one left.
@@ -133,16 +138,16 @@ async function serverParts(options: DaemonOptions): Promise<{ readonly factory: 
   const factory = options.factory ?? new LabsServerFactory({ serverRoot, ports, pidFile, config, log, templates, ramWorlds: ram ? { dir: ram.dir } : undefined });
   const templateBuilds = options.templateBuilds ?? (options.factory || config.worldTemplate !== 1 ? undefined : createDaemonTemplateBuilds({ config, log, templates, ports, pidFile }));
   templateBuilds?.pruneLeftovers();
-  return { factory, templateBuilds, ram };
+  return { factory, templateBuilds, ram, worldMbFor: ramWorldMbFor(ram, templates) };
 }
 
 export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const { config, log, socketPath } = options;
   const now = Date.now;
-  const { factory, templateBuilds, ram } = await serverParts(options);
+  const { factory, templateBuilds, ram, worldMbFor } = await serverParts(options);
   const pool = new ServerPool(factory, config, log);
   const clientsAhead = options.clientsAhead ?? (options.runTrial ? undefined : new ClientsAhead({ config, log, now }));
-  const scheduler = new Scheduler({ pool, config, now, log, runTrial: options.runTrial ?? runLabsTrial, runIo: options.runIo, clientsAhead, templateBuilds });
+  const scheduler = new Scheduler({ pool, config, now, log, runTrial: options.runTrial ?? runLabsTrial, runIo: options.runIo, clientsAhead, templateBuilds, worldMbFor });
   const mirror = options.mirror ?? (options.runTrial ? undefined : createDaemonMirror({ config, socketPath, log }));
   // Not awaited by the listen: a first prune over a large mirror must not delay the first submit.
   if (mirror) void mirror.prune().catch((error: unknown) => log(`mirror prune failed: ${error instanceof Error ? error.message : String(error)}`));

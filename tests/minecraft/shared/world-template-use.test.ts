@@ -60,7 +60,7 @@ interface Setup {
 /** `outcome` is what the fake `cp` does: copy what it was told to (like the real one), exit with a code, or run past its bound. */
 async function withTemplates(
   body: (setup: Setup) => Promise<void>,
-  options: { outcome?: "copies" | "exit-1" | "bound" | "throws"; census?: Scenario[]; loader?: () => Promise<readonly Scenario[]>; env?: Record<string, string> } = {},
+  options: { outcome?: "copies" | "exit-1" | "bound" | "throws"; census?: Scenario[]; loader?: () => Promise<readonly Scenario[]>; env?: Record<string, string>; ports?: Partial<TemplateUsePorts> } = {},
 ): Promise<void> {
   const cacheDir = mkdtempSync(join(tmpdir(), "world-template-use-"));
   const worldDir = join(cacheDir, "servers", "s2", "world");
@@ -81,6 +81,7 @@ async function withTemplates(
       if (outcome === "bound") return { code: -1, stderrTail: "", timedOut: true };
       return { code: 0, stderrTail: "" };
     },
+    ...options.ports,
   };
   const templates = new LaneWorldTemplates({
     config: { ...loadScenarioServerConfig({ MINE_AI_SCENARIO_TEMPLATE_LANES: String(LANES), MINE_AI_SCENARIO_TEMPLATE_COPY_BOUND_MS: "40000", ...options.env }), templateDir: cacheDir },
@@ -338,6 +339,28 @@ test("worldMbFor: the files under the template's region, entities and poi in MB 
     rmSync(dir, { recursive: true, force: true });
     assert.equal(await templates.worldMbFor(VERSION), 2, "the second call reads nothing: the template is gone and the answer stands");
   });
+});
+
+test("worldMbKnown: 0 until the size was read, then the size without a read (a sync answer for the scheduler); a version with no template stays 0", async () => {
+  await withTemplates(async ({ cacheDir, census, templates }) => {
+    assert.equal(templates.worldMbKnown(VERSION), 0, "no facts yet");
+    templates.observe(request(), FLAT_PROPERTIES);
+    await templates.worldMbFor(VERSION);
+    assert.equal(templates.worldMbKnown(VERSION), 0, "template not built");
+    sizeTemplate(makeTemplate(cacheDir, keyOf(census)));
+    await templates.worldMbFor(VERSION);
+    assert.equal(templates.worldMbKnown(VERSION), 2, "filled by the read");
+    assert.equal(templates.worldMbKnown("1.20.1"), 0, "another version");
+  });
+});
+
+test("observe reads the template's size by itself: the scheduler's sync answer covers the servers that start after the first flat server wrote its properties", async () => {
+  await withTemplates(async ({ cacheDir, census, templates }) => {
+    makeTemplate(cacheDir, keyOf(census));
+    templates.observe(request(), FLAT_PROPERTIES);
+    for (let turn = 0; turn < 200 && templates.worldMbKnown(VERSION) === 0; turn += 1) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(templates.worldMbKnown(VERSION), 437, "read once the key resolved, with no call to worldMbFor");
+  }, { ports: { directoryBytes: async () => 436.5 * MB } });
 });
 
 test("prepare calls onCopied once after a copy that worked, never after one that failed or that was not asked for", async () => {

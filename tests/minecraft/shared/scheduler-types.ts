@@ -62,4 +62,9 @@ export interface SchedulerDeps {
   readonly clientsAhead?: ClientsAhead;
   /** The daemon's template build: while it runs every trial waits and the ledger counts its server; absent for a scheduler that builds nothing. */
   readonly templateBuilds?: TemplateBuilds;
+  /**
+   * The template world, in MB, a new lane server of this Minecraft version would copy into RAM, as the daemon already knows it (sync: the scheduler admits
+   * without awaiting). Absent, or 0: the root is on disk (RAM off, no template yet) and the ledger reserves nothing for it.
+   */
+  readonly worldMbFor?: (version: string) => number;
 }

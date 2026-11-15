@@ -22,7 +22,7 @@ export interface TemplateBuildDeps {
   /** A monotonic millisecond clock. */
   readonly now: () => number;
   /** Which versions have a key and whether their template is on disk. */
-  readonly templates: Pick<LaneWorldTemplates, "buildStatus">;
+  readonly templates: Pick<LaneWorldTemplates, "buildStatus" | "worldMbFor">;
   /** The daemon's port pairs: the build server takes one like any server the daemon starts. */
   readonly ports: Pick<PortPairs, "lease" | "release">;
   /** The daemon's pid file: a build server killed with its daemon is found by the next start. */
@@ -174,7 +174,7 @@ export class TemplateBuilds {
     } finally {
       ports.release(port);
     }
-    this.#end(job, result);
+    await this.#end(job, result);
   }
 
   /** The build's ports, with its server registered like any server the daemon starts (pid file, port pair) and stoppable by the daemon's stop. */
@@ -234,14 +234,17 @@ export class TemplateBuilds {
     this.#finish();
   }
 
-  #end(job: TemplateBuildStatus, built: BuildResult): void {
+  async #end(job: TemplateBuildStatus, built: BuildResult): Promise<void> {
     const { log } = this.options;
     // The daemon finds a template by the key it computed from its own first server: a build stored under another key would be built again and again.
     const result = built.ok && basename(built.dir) !== job.key
       ? { ok: false as const, reason: `built under key ${basename(built.dir)}, the daemon computed ${job.key}`, bound: false }
       : built;
-    if (result.ok) log(`world template ${job.key} ready: servers started from now on get it`);
-    else if (result.bound) this.#recordCut(job, result.reason, "bound");
+    if (result.ok) {
+      log(`world template ${job.key} ready: servers started from now on get it`);
+      // The trials the build held start in the listeners below: their new servers must find the template's size already read (`worldMbKnown`), not 0 until a server's `create`.
+      await this.options.templates.worldMbFor(job.version).catch(() => undefined);
+    } else if (result.bound) this.#recordCut(job, result.reason, "bound");
     else {
       this.#failed.add(job.key);
       log(`world template ${job.key} build failed: ${result.reason} (not tried again until the daemon restarts)`);

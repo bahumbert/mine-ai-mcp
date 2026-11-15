@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadScenarioServerConfig } from "./config.ts";
-import { prepareWorldRamDir, worldRamDirName } from "./world-ram-dir.ts";
+import { prepareWorldRamDir, ramWorldMbFor, worldRamDirName } from "./world-ram-dir.ts";
 
 const SOCKET = "/tmp/mine-tsan-test.sock";
 const DEAD_PID = 2_147_483_000;
@@ -113,6 +113,14 @@ test("remove deletes the whole dir, owner file included, and a second call fails
     assert.equal(existsSync(world!.dir), false);
     await world!.remove();
   });
+});
+
+test("the scheduler's world size is the template's size while the daemon has a RAM dir, and 0 when it has none (RAM off, a test's own factory)", () => {
+  const templates = { worldMbKnown: (version: string) => (version === "1.21.4" ? 436 : 0) };
+  const ram = { dir: "/dev/shm/mine-ai-worlds-x", remove: async () => {} };
+  assert.equal(ramWorldMbFor(ram, templates)("1.21.4"), 436);
+  assert.equal(ramWorldMbFor(ram, templates)("1.20.1"), 0, "a version with no template");
+  assert.equal(ramWorldMbFor(null, templates)("1.21.4"), 0, "no RAM dir: the root is on disk, the ledger reserves nothing");
 });
 
 test("a RAM dir that cannot be made gives no RAM worlds, never an error that stops the daemon", async () => {

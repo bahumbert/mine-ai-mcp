@@ -29,7 +29,7 @@ interface Rig {
   /** The `root` of each `create` call of the fake Mine Labs, in order. */
   readonly roots: string[];
   next: Behaviour;
-  factory(overrides?: { ram?: boolean; wouldCopy?: boolean; worldMb?: number; labs?: Partial<LabsPorts> }): LabsServerFactory;
+  factory(overrides?: { ram?: boolean; wouldCopy?: boolean; worldMb?: number; labs?: Partial<LabsPorts>; /** false: the copy fails (`prepare` answers null). */ copies?: boolean }): LabsServerFactory;
 }
 
 function request(id = "s1", overrides: Partial<ServerRequest> = {}): ServerRequest {
@@ -47,9 +47,11 @@ async function withRig(body: (rig: Rig) => Promise<void>): Promise<void> {
         worldMbFor: async () => overrides.worldMb ?? 5,
         observe: () => {},
         // What a copy does: the template's directories land in the world; the server's stop removes the world.
-        prepare: async (_request, worldDir) => {
+        prepare: async (_request, worldDir, onCopied) => {
+          if (overrides.copies === false) return null;
           mkdirSync(join(worldDir, "region"), { recursive: true });
           writeFileSync(join(worldDir, "region", "r.0.0.mca"), Buffer.alloc(TEMPLATE_FILE_BYTES));
+          onCopied?.();
           return { remove: async () => rmSync(worldDir, { recursive: true, force: true }) };
         },
       };
@@ -166,6 +168,44 @@ test("a RAM step that fails (the link is refused) leaves no RAM root, starts on 
     assert.match(rig.lines.join("\n"), /world in RAM failed for s1: EPERM/u);
   });
 });
+
+/** A request that counts how often the pool's `onWorldCopied` was called, and what the fake Mine Labs had done by then (its roots made, in `rig.roots`). */
+function countingRequest(counter: { calls: number; rootsAtFirstCall: number }, rig: Rig): ServerRequest {
+  return { ...request(), onWorldCopied: () => { if (counter.calls++ === 0) counter.rootsAtFirstCall = rig.roots.length; } };
+}
+
+test("the pool is told the world is done: at the end of the copy into the RAM root, once", async () => {
+  await withRig(async rig => {
+    const counter = { calls: 0, rootsAtFirstCall: 0 };
+    const server = await rig.factory().create(countingRequest(counter, rig));
+    assert.equal(counter.calls, 1, "one copy, one call (the factory adds none after it)");
+    assert.equal(counter.rootsAtFirstCall, 1, "after the root was made, so after the copy's start");
+    await server.stop();
+    assert.equal(counter.calls, 1, "a stop adds none");
+  });
+});
+
+// At least once: a disk root's copy reports its end too, and a second call changes nothing (the pool's contract).
+for (const [name, overrides, next] of [
+  ["no room in RAM (the world goes to disk)", { worldMb: 1_000_000_000 }, {}],
+  ["a RAM step that failed", { labs: { symlink: async () => { throw new Error("EPERM"); } } }, {}],
+  ["no copy for this server", { wouldCopy: false }, {}],
+  ["a copy that failed", { copies: false }, {}],
+  ["RAM off", { ram: false }, {}],
+  ["a start that fails", {}, { startThrows: true }],
+] as const satisfies readonly (readonly [string, Parameters<Rig["factory"]>[0], Behaviour])[]) {
+  test(`the pool is told the world is done when none reaches RAM: ${name}`, async () => {
+    await withRig(async rig => {
+      mkdirSync(rig.ramDir, { recursive: true });
+      rig.next = next;
+      const counter = { calls: 0, rootsAtFirstCall: 0 };
+      const created = rig.factory(overrides).create(countingRequest(counter, rig));
+      if ("startThrows" in next) await assert.rejects(created, /server did not start/u);
+      else await created;
+      assert.equal(counter.calls >= 1, true, "the ledger is not left holding a world that never reached RAM");
+    });
+  });
+}
 
 test("RAM off, a server that gets no copy, and a daemon with no RAM dir: a disk root as before, no RAM dir made, nothing said", async () => {
   for (const overrides of [{ ram: false }, { wouldCopy: false }] as const) {
