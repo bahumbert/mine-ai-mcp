@@ -48,6 +48,7 @@ interface ActiveBuild {
   pid: number | null;
   /** Its resident size at the last sample (0 before the first reading). */
   residentMb: number;
+  residentRead?: Promise<void>;
   /** Stops the build server (once, whoever asks first); null while none runs. */
   stopServer: (() => Promise<void>) | null;
   finished: Promise<void>;
@@ -88,11 +89,14 @@ export class TemplateBuilds {
     return this.#active ? { heapMb: BUILD_SERVER_HEAP_MB, residentMb: this.#active.residentMb } : undefined;
   }
 
-  /** Reads the build server's resident size from its java pid; call before each scheduler sample. */
+  /** Starts a resident-size read without holding the sample; an outstanding read belongs only to its build. */
   async sampleResident(residentMbOf: (pid: number) => Promise<number>): Promise<void> {
     const active = this.#active;
-    if (!active || active.pid === null) return;
-    active.residentMb = await residentMbOf(active.pid).catch(() => 0);
+    if (!active || active.pid === null || active.residentRead) return;
+    active.residentRead = residentMbOf(active.pid)
+      .then(residentMb => { active.residentMb = residentMb; })
+      .catch(() => { active.residentMb = 0; })
+      .finally(() => { active.residentRead = undefined; });
   }
 
   /** `listener` runs each time a build ends, whatever its result: the trials it held may start. */
