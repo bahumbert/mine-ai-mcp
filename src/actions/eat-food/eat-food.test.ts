@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { watch } from "../../test-support/pending.js";
+import { SERVER_CLOCK_STOPPED_MS } from "../../world/world-age.js";
 import { parseEatFoodRequest } from "./contract.js";
 import { beginEatFood, formatEatFoodResult, eatFood, type EatFoodDependencies } from "./eat-food.js";
 
 /** A hungry bot carrying one stack of the named item; `clock` when the test drives the settle's global timers. */
-function hungryBot(name = "cooked_beef", count = 2, clock?: FakeClock) {
+function hungryBot(name = "cooked_beef", count = 2, clock?: FakeClock, ticksPerSecond = 20) {
   const harness = createFakeBot({
     ...(clock && { clock }),
+    server: { ticksPerSecond },
     food: 10,
     carried: count > 0 ? { [name]: count } : {},
     overrides: { consume: async () => undefined },
@@ -83,48 +86,57 @@ test("equips and consumes one named food while reporting observed changes", asyn
   assert.match(formatEatFoodResult(result), /Consumed one \*\*cooked_beef\*\*/);
 });
 
-test("waits for consumption when Mineflayer resolves before the eating animation finishes", async () => {
+for (const { delayMs, ticksPerSecond, ageDelta } of [
+  { delayMs: 350, ticksPerSecond: 20, ageDelta: 0 },
+  { delayMs: 2_000, ticksPerSecond: 20, ageDelta: 40 },
+  { delayMs: 8_000, ticksPerSecond: 5, ageDelta: 40 },
+]) {
+  test(`confirms consumption at ${delayMs} ms, world age +${ageDelta}, at ${ticksPerSecond} tps`, async () => {
+    const clock = mockedClock();
+    using _installed = clock.install();
+    const { bot, carried } = hungryBot("cooked_beef", 2, clock, ticksPerSecond);
+    const sentAtAge = bot.time.age;
+    const dependencies: EatFoodDependencies = {
+      equip: async () => {},
+      consume: async () => {
+        // A held-item update resolved consume, but the server is still eating (the slot update announces the bite).
+        clock.after(delayMs, () => {
+          carried.count -= 1;
+          bot.food = 18;
+        });
+      },
+    };
+
+    const result = await clock.settle(eatFood(bot, { foodName: "cooked_beef" }, {}, dependencies), delayMs);
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.eating.inventoryBefore, 2);
+    assert.equal(result.eating.inventoryAfter, 1);
+    assert.equal(result.eating.confirmed, true);
+    assert.equal(result.eating.hungerAfter, 18);
+    assert.equal(bot.time.age, sentAtAge + ageDelta);
+  });
+}
+
+test("cancellation rejects after consume resolves while inventory confirmation is pending", async () => {
   const clock = mockedClock();
   using _installed = clock.install();
-  const { bot, carried } = hungryBot("cooked_beef", 2, clock);
-  const dependencies: EatFoodDependencies = {
-    equip: async () => {},
-    consume: async () => {
-      // A held-item update resolved consume, but the server is still eating (the slot update announces the bite).
-      clock.after(350, () => {
-        carried.count -= 1;
-        bot.food = 18;
-      });
-    },
-  };
-
-  const result = await clock.settle(eatFood(bot, { foodName: "cooked_beef" }, {}, dependencies), 400);
-
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.eating.inventoryBefore, 2);
-  assert.equal(result.eating.inventoryAfter, 1);
-  assert.equal(result.eating.confirmed, true);
-  assert.equal(result.eating.hungerAfter, 18);
-});
-
-test("cancellation still stops the bite after consume resolves but before inventory confirmation", async () => {
-  const clock = mockedClock();
-  using _installed = clock.install();
-  const { bot, carried } = hungryBot("cooked_beef", 2, clock);
+  const { bot, carried } = hungryBot("cooked_beef", 2, clock, 5);
   const slotListeners = bot.inventory.listenerCount("updateSlot");
   const controller = new AbortController();
-  let deactivations = 0;
-  bot.deactivateItem = () => { deactivations++; bot.usingHeldItem = false; };
   const pending = eatFood(bot, { foodName: "cooked_beef" }, { signal: controller.signal }, {
     equip: async () => {},
-    consume: async () => { bot.usingHeldItem = true; },
+    consume: async () => {},
   });
-  const cancelled = assert.rejects(pending, /stop the bite/);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(bot.usingHeldItem, true);
-  controller.abort(new Error("stop the bite"));
-  await cancelled;
-  assert.equal(deactivations, 1);
+  const clearTimer = mock.method(globalThis, "clearTimeout");
+  // Abort between polls, while the 25 ms sleep still owns a timer.
+  clock.after(4_010, () => controller.abort(new Error("stop the bite")));
+  try {
+    await assert.rejects(clock.settle(pending, 4_010, 10), /stop the bite/);
+    assert.equal(clearTimer.mock.callCount(), 1, "abort clears the inventory poll's pending timer");
+  } finally {
+    clearTimer.mock.restore();
+  }
   assert.equal(carried.count, 2);
   assert.equal(bot.usingHeldItem, false);
   // The harness's window keeps its own slot listeners: the bite leaves none of its own behind.
@@ -135,11 +147,15 @@ test("says so rather than presenting a count the server never confirmed", async 
   const clock = mockedClock();
   using _installed = clock.install();
   const { bot, harness } = hungryBot("cooked_beef", 2, clock);
-  const dependencies: EatFoodDependencies = { equip: async () => {}, consume: async () => {}, settleMs: 50 };
+  const dependencies: EatFoodDependencies = { equip: async () => {}, consume: async () => {} };
 
-  // The server is stopped: its count never comes, and the 50 ms wall bound ends the wait.
+  // The server is stopped: neither a count nor a time packet can end the wait.
   harness.server.stop();
-  const result = await clock.settle(eatFood(bot, { foodName: "cooked_beef" }, {}, dependencies), 100);
+  const pending = eatFood(bot, { foodName: "cooked_beef" }, {}, dependencies);
+  const state = watch(pending);
+  await clock.advance(SERVER_CLOCK_STOPPED_MS - 50);
+  assert.equal(state.over, false, "still awaiting the answer before the stopped-clock bound");
+  const result = await clock.settle(pending, 50);
 
   assert.equal(result.status, "failed");
   assert.equal(result.eating.consumed, false);

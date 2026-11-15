@@ -18,16 +18,9 @@ import {
   type EatFoodResult,
 } from "./contract.js";
 
-// Mineflayer can resolve consume on a held-item update before eating finishes.
-// Its own 2.5-second consume allowance covers the normal 1.6-second bite plus
-// server latency; use that allowance to observe the actual inventory decrease.
-const CONSUMPTION_SETTLE_MS = 2_500;
-
 export interface EatFoodDependencies {
   readonly equip: Bot["equip"];
   readonly consume: Bot["consume"];
-  /** How long the server gets to show the eaten item leaving the inventory. */
-  readonly settleMs?: number;
 }
 
 interface EatingBefore {
@@ -171,7 +164,6 @@ async function eatAgainstBaseline(
   }
 
   const after = await settleInventoryCount(bot, request.foodName, carriedAtStart - 1, {
-    timeoutMs: dependencies.settleMs ?? CONSUMPTION_SETTLE_MS,
     signal: context.signal,
   });
   context.signal?.throwIfAborted();
