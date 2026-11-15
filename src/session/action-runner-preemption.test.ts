@@ -4,7 +4,8 @@ import test from "node:test";
 import { z } from "zod";
 import { defineAction, actionResultSchema, type ActionExecution } from "../actions/index.js";
 import { ActionRunner } from "./action-runner.js";
-import { stubAction, stubResultSchema, stubInputSchema, StubAction, started, untilOwner } from "./action-runner-fixtures.test.js";
+import type { Continuation } from "./abort.js";
+import { stubAction, stubResultSchema, stubInputSchema, StubAction, type StubResult, started, untilOwner } from "./action-runner-fixtures.test.js";
 
 /** A task that yields to any abort by throwing its reason, and counts its runs. */
 function preemptible(runs: { count: number }, execution: ActionExecution): StubAction {
@@ -13,6 +14,65 @@ function preemptible(runs: { count: number }, execution: ActionExecution): StubA
     await new Promise<void>((resolve) => context.signal?.addEventListener("abort", () => resolve(), { once: true }));
     throw context.signal?.reason;
   }, execution);
+}
+
+const CONTACT = "[HOSTILE_CONTACT] evade response for zombie#12 at 1,2,3 (4.0 blocks).";
+const SETTLED = "[HOSTILE_SETTLED] evade ended with capability_limit at health 6: x.";
+
+for (const { name, continuation, result, expectedResult } of [
+  {
+    name: "a returned preemption appends its settle reason to the cancelled error",
+    continuation: { kind: "return", reason: SETTLED }, result: { status: "cancelled", error: CONTACT },
+    expectedResult: { status: "cancelled", error: `${CONTACT} ${SETTLED}` },
+  },
+  {
+    name: "a returned preemption does not duplicate its settle suffix",
+    continuation: { kind: "return", reason: SETTLED }, result: { status: "cancelled", error: `${CONTACT} ${SETTLED}` },
+    expectedResult: { status: "cancelled", error: `${CONTACT} ${SETTLED}` },
+  },
+  {
+    name: "a resumed preemption keeps its error untouched",
+    continuation: { kind: "resume", reason: SETTLED }, result: { status: "cancelled", error: CONTACT },
+    expectedResult: { status: "cancelled", error: CONTACT },
+  },
+  {
+    name: "a returned verdict without a reason keeps the error",
+    continuation: { kind: "return", reason: null }, result: { status: "cancelled", error: CONTACT },
+    expectedResult: { status: "cancelled", error: CONTACT },
+  },
+  {
+    name: "a returned preemption keeps a succeeded result untouched",
+    continuation: { kind: "return", reason: SETTLED }, result: { status: "succeeded" },
+    expectedResult: { status: "succeeded" },
+  },
+  ...(["failed", "partial"] as const).map((status) => ({
+    name: `a returned preemption keeps a ${status} result untouched`,
+    continuation: { kind: "return", reason: SETTLED } as const, result: { status, error: CONTACT },
+    expectedResult: { status, error: CONTACT },
+  })),
+] satisfies { name: string; continuation: Continuation; result: StubResult; expectedResult: StubResult }[]) {
+  test(name, async () => {
+    stubResultSchema.parse(result);
+    const runner = new ActionRunner();
+    const runs = { count: 0 };
+    const task = stubAction(async (_request, context) => {
+      runs.count++;
+      if (runs.count === 1) {
+        await new Promise<void>((resolve) => context.signal!.addEventListener("abort", () => resolve(), { once: true }));
+      }
+      return result;
+    }, { kind: "resumable_task" });
+    const pending = runner.run(task, { block_name: "iron_ore" });
+    await started(runs, 1);
+    const claim = runner.claim("hostile_reflex", CONTACT, async () => ({ value: null, continuation }));
+    assert.equal(claim.kind, "claimed");
+    const output = await pending;
+    assert.deepEqual(output.result, expectedResult);
+    assert.deepEqual(output.interruptions, continuation.kind === "resume"
+      ? [CONTACT, SETTLED] : continuation.reason === null ? undefined : [SETTLED]);
+    assert.equal(runs.count, continuation.kind === "resume" ? 2 : 1);
+    assert.equal(runner.status().busy, false);
+  });
 }
 
 test("a resumable task preempted by a reflex runs again once the body is handed back fit", async () => {
@@ -94,25 +154,21 @@ test("a request executor starts only after admission and is reused with fresh at
   assert.equal(signals[1]!.aborted, false);
 });
 
-test("a preempted task stays cancelled when the reflex withdrew, was hurt, or threw", async () => {
-  for (const work of [
-    async () => ({ value: "evaded", continuation: { kind: "return" as const, reason: null } }),
-    async () => {
-      throw new Error("session torn down");
-    },
-  ]) {
-    const runs = { count: 0 };
-    const runner = new ActionRunner();
-    const outcome = runner.run(preemptible(runs, { kind: "resumable_task" }), { block_name: "iron_ore" });
-    await started(runs, 1);
-    const claim = runner.claim("hostile_reflex", "hostile contact", work);
+test("a preempted task stays cancelled when the reflex throws", async () => {
+  const work = async () => {
+    throw new Error("session torn down");
+  };
+  const runs = { count: 0 };
+  const runner = new ActionRunner();
+  const outcome = runner.run(preemptible(runs, { kind: "resumable_task" }), { block_name: "iron_ore" });
+  await started(runs, 1);
+  const claim = runner.claim("hostile_reflex", "hostile contact", work);
 
-    const output = await outcome;
-    await (claim.kind === "claimed" ? claim.outcome.catch(() => undefined) : undefined);
-    assert.equal(runs.count, 1);
-    assert.equal(output.result.status, "cancelled");
-    assert.equal(output.interruptions, undefined);
-  }
+  const output = await outcome;
+  await (claim.kind === "claimed" ? claim.outcome.catch(() => undefined) : undefined);
+  assert.equal(runs.count, 1);
+  assert.equal(output.result.status, "cancelled");
+  assert.equal(output.interruptions, undefined);
 });
 
 test("a task that did not declare its request safe to repeat is never resumed", async () => {

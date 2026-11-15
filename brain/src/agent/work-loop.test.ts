@@ -101,6 +101,30 @@ test("a failed step is shown to the model, which may give up and say why in char
   assert.match(chat.requests[1]?.[1]?.content ?? "", /You stopped working on "collect 5 birch_log": there is no birch_log nearby/u);
 });
 
+test("a cancelled step's settle text reaches the next decision's earlier failures", async (t) => {
+  const runtime = new FakeRuntime();
+  const contact = "[HOSTILE_CONTACT] evade response for zombie#12 at 1,2,3 (4.0 blocks).";
+  const settled = "[HOSTILE_SETTLED] evade ended with capability_limit at health 6: x.";
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    const outcome = await submit(tool, input, ...rest);
+    return tool === "navigate" && outcome.state !== "refused"
+      ? { state: "settled", actionId: outcome.actionId, status: "cancelled", error: `${contact} ${settled}` }
+      : outcome;
+  };
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "Okay!", route: "act", request: "go there and collect dirt" }, { say: "Got the dirt." });
+  action.reply({ step: { skill: "go_to", x: 10, y: 64, z: 0 } }, DIRT, { done: "collected dirt" });
+  await agent.handle(say("Steve", "go there and collect dirt"));
+  await until(() => runtime.said.length === 2);
+  const prompt = action.requests[1]?.[1]?.content ?? "";
+  const earlierFailures = prompt.slice(prompt.indexOf("Steps that failed lately in this objective"));
+  assert.ok(earlierFailures.includes(`${contact} ${settled}`));
+  assert.deepEqual(bodyCalls(runtime), ["navigate", "collect_block"]);
+  assert.match(action.requests[2]?.[1]?.content ?? "", /collect 2 dirt -> done: collected 2 dirt/u);
+  assert.equal(agent.activity, "idle");
+});
+
 test("the same step failing the same way several times in a row ends the objective instead of looping", async (t) => {
   const runtime = new FakeRuntime();
   runtime.failures.collect_block = "[NO_LOADED_MATCHING_TARGETS] Observed 0 loaded birch_log blocks.";
