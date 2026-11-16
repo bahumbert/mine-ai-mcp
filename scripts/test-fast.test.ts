@@ -46,8 +46,8 @@ afterAll(() => {
   }
 });
 
-function tree(files: readonly string[]): string {
-  const root = mkdtempSync(join(tmpdir(), "test-fast-"));
+function tree(files: readonly string[], parent = tmpdir()): string {
+  const root = mkdtempSync(join(parent, "test-fast-"));
   roots.push(root);
   for (const file of files) {
     mkdirSync(join(root, file, ".."), { recursive: true });
@@ -74,6 +74,20 @@ const JUNIT_SAMPLE = `<?xml version="1.0" encoding="UTF-8"?>
   </testsuite>
 </testsuites>
 `;
+
+// limit: the child took at most 6.55 s in 30 loaded runs; its 15 s watchdog precedes the 20 s test limit.
+test("a later shard file keeps the suite's 30 second hang limit", async () => {
+  const root = tree(["first.test.ts", "later.test.ts"], existsSync("/dev/shm") ? "/dev/shm" : tmpdir());
+  writeFileSync(join(root, "first.test.ts"), 'import test from "node:test"; test("first", () => {});');
+  writeFileSync(join(root, "later.test.ts"), 'import test from "node:test"; test("later", async () => { await new Promise((done) => setTimeout(done, 6_000)); });');
+  const report = join(root, "report.xml");
+  const child = Bun.spawn([process.execPath, "test", join(root, "first.test.ts"), join(root, "later.test.ts"), "--reporter=junit", `--reporter-outfile=${report}`, ...shardArguments([])], { stdout: "ignore", stderr: "pipe", timeout: 15_000, killSignal: "SIGKILL" });
+  const [exit, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect(exit, stderr).toBe(0);
+  const result = readJunit(readFileSync(report, "utf8"));
+  expect(result?.tests).toBe(2);
+  expect(result?.failures).toBe(0);
+}, 20_000);
 
 function shard(exit: number, given: number, report: ReturnType<typeof readJunit> | null, logTail = "") {
   return { exit, given, report, logFile: "shard.log", logTail };
@@ -250,11 +264,11 @@ test("a run with a test-name filter in any form Bun reads adds --pass-with-no-te
   const filtered = [["-t", "name"], ["-t=name"], ["-tname"], ["--test-name-pattern", "name"], ["--test-name-pattern=name"]];
   for (const args of filtered) {
     expect(isFiltered(args)).toBe(true);
-    expect(shardArguments(args)).toEqual([...args, "--pass-with-no-tests"]);
+    expect(shardArguments(args)).toEqual(["--timeout", "30000", ...args, "--pass-with-no-tests"]);
   }
   for (const args of [["--timeout", "5000"], []]) {
     expect(isFiltered(args)).toBe(false);
-    expect(shardArguments(args)).toEqual(args);
+    expect(shardArguments(args)).toEqual(["--timeout", "30000", ...args]);
   }
 });
 

@@ -28,6 +28,7 @@ import { spawn } from "node:child_process";
 import * as os from "node:os";
 import { dirname, join } from "node:path";
 import { PROJECTS } from "./check.js";
+import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
 
 export interface JunitCase {
   readonly file: string;
@@ -430,7 +431,9 @@ export function isFiltered(passThrough: readonly string[]): boolean {
  * shard matched).
  */
 export function shardArguments(passThrough: readonly string[]): string[] {
-  return isFiltered(passThrough) ? [...passThrough, "--pass-with-no-tests"] : [...passThrough];
+  // Bun 1.4.2 resets the preload's limit after the first file; the CLI default persists across files (2026-11-16).
+  const args = ["--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...passThrough];
+  return isFiltered(passThrough) ? [...args, "--pass-with-no-tests"] : args;
 }
 
 /**
