@@ -1,10 +1,22 @@
 // Verify the flight verdict rejects missing survival and resumed-order evidence.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { flightEvidence, flightVerdict } from "./evade-flight.ts";
+import { loadScenario, scenarioDefinitionSchema } from "mine-labs";
+import minecraftData from "minecraft-data";
+import { Vec3 } from "vec3";
+import { MemoryWorld } from "../../../src/navigation/world/memory-world.ts";
+import { DEFAULT_COMBAT_POLICY } from "../../../src/survival/policy/combat/contract.ts";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../../src/test-support/fake-bot/index.ts";
+import { positionExposed } from "../../../src/survival/positioning/combat/exposure.ts";
+import { positionWorld } from "../../../src/survival/positioning/combat/geometry.ts";
+import { scenarioTestContext } from "../scenario-test-context.ts";
+import type { ScenarioCall } from "../scenario.ts";
+import { flightEvidence, flightVerdict, run } from "./evade-flight.ts";
+
+// check-reads: tests/minecraft/scenarios/combat/evade-flat-skeleton-held-cover.yaml, tests/minecraft/templates/**/*.yaml
 
 const passing = { health: 7, outcome: "safe_separation", basis: "cover", distance: 12,
-  healthAfter: 3, floor: { kind: "ok" }, receipts: [], status: "succeeded", interruptions: ["[HOSTILE_CONTACT] skeleton"] } as const;
+  healthAfter: 3, floor: { kind: "ok" }, receipts: [], skipped: [], status: "succeeded", interruptions: ["[HOSTILE_CONTACT] skeleton"] } as const;
 
 test("judges first separation, floor, survival and resumed order independently", () => {
   const pursuit = { ...passing, basis: "range", distance: 38, status: "cancelled", health: 0 };
@@ -26,6 +38,48 @@ test("judges first separation, floor, survival and resumed order independently",
   ] as const;
   for (const [name, evidence, bases, distance, options, expected] of cases)
     assert.equal(flightVerdict(evidence, bases, distance, options), expected, name);
+});
+
+test("the held wall's lee is cover inside the disengage line", async () => {
+  const scenario = await loadScenario(new URL("../scenarios/combat/evade-flat-skeleton-held-cover.yaml", import.meta.url).pathname);
+  const params = scenario.params as { spawn: [number, number, number] };
+  const [sx, sy, sz] = params.spawn;
+  // Summon centres integer coordinates: trial t00001 measured 11.531 blocks (a4 T5, 2026-11-17).
+  const spawn = new Vec3(sx + 0.5, sy, sz + 0.5);
+  const actor = scenario.players[0]!.pos!;
+  const fill = scenario.setup!.find((command) => /^fill .* stone$/u.test(command))!;
+  const [, x1, y1, z1, x2, y2, z2] = fill.split(" ").map(Number);
+  const world = new MemoryWorld();
+  for (let x = -25; x <= 25; x++) for (let y = -61; y <= -57; y++) for (let z = -25; z <= 25; z++) {
+    const wall = x! >= x1! && x! <= x2! && y! >= y1! && y! <= y2! && z! >= z1! && z! <= z2!;
+    world.load({ x, y, z }, { stateId: y === -61 || wall ? 1 : 0 });
+  }
+  const registry = minecraftData("1.21.4");
+  const skeleton = registry.entitiesByName.skeleton!;
+  const player = registry.entitiesByName.player!;
+  assert.ok(player.width !== null && player.height !== null && skeleton.width !== null && skeleton.height !== null);
+  const { width, height } = player;
+  const threat = { id: 1, position: spawn, width: skeleton.width, height: skeleton.height, attack: "projectile" as const };
+  const exposed = (position: Vec3) => positionExposed(positionWorld(world), { position, width, height }, threat);
+  assert.equal(exposed(new Vec3(Number(actor[0]), Number(actor[1]), Number(actor[2]))), true);
+  for (let z = 4.5; z <= 7.5; z++) {
+    const position = new Vec3(5.5, sy, z);
+    assert.ok(position.distanceTo(spawn) >= DEFAULT_COMBAT_POLICY.evade_cover_range &&
+      position.distanceTo(spawn) < DEFAULT_COMBAT_POLICY.evade_clear_range);
+    assert.equal(exposed(position), false, `lee at ${z}`);
+  }
+  // The wall still occludes z=9.5 from this spawn; z=11.5 is exposed (a4 T5, 2026-11-17).
+  for (const position of [new Vec3(5.5, sy, 2.5), new Vec3(5.5, sy, 11.5), new Vec3(-17.5, sy, 0.5),
+    new Vec3(-5.5, sy, 12.5), new Vec3(-5.5, sy, -11.5)]) assert.equal(exposed(position), true, position.toString());
+  // The former wall cannot provide cover before the current disengage distance (a4 T5, 2026-11-17).
+  for (let y = y1!; y <= y2!; y++) for (let z = z1!; z <= z2!; z++) {
+    world.load({ x: x1!, y, z }, { stateId: 0 });
+    world.load({ x: 10, y, z }, { stateId: 1 });
+  }
+  for (let x = -20; x <= 20; x++) for (let z = -20; z <= 20; z++) {
+    const position = new Vec3(x + 0.5, sy, z + 0.5);
+    if (position.distanceTo(spawn) < DEFAULT_COMBAT_POLICY.evade_clear_range) assert.equal(exposed(position), true, `old wall at ${position}`);
+  }
 });
 test("reads every evade receipt in page order and rejects missing positions", () => {
   // Recorded t8-fixed-after receipt fields; the second endpoint reproduces the pit at lane z=512.
@@ -50,3 +104,100 @@ test("reads every evade receipt in page order and rejects missing positions", ()
     assert.deepEqual(flightEvidence([malformed(position), event(3, -60)], options).floor, { kind: "unknown", index: 0 });
   }
 });
+
+test("judges the evade after footing cancelled its predecessor", () => {
+  // t00108, campaign pursuit: the next survival outcome landed the bot before it fled again.
+  const cancelled = { response: "evade", outcome: "cancelled", healthAfter: 3,
+    finalPosition: { x: 9.119747941128798, y: -59.724875, z: 2569.032738464071 }, elapsedMs: 2273.323548,
+    ends: [{ id: 87, name: "skeleton", distance: 14.962724256750887, basis: null }] };
+  const separated = { response: "evade", outcome: "safe_separation", healthAfter: 3,
+    finalPosition: { x: 49.25554573031275, y: -60, z: 2607.2556102127446 }, elapsedMs: 12298.369129,
+    ends: [{ id: 87, name: "skeleton", distance: 36.00321186553232, basis: "range" }] };
+  const event = (source: string, outcome: unknown) => ({ type: "survival_outcome", payload: { source, evidence: { outcome } } });
+  const options = { startY: -60, deaths: 0, health: 3, status: "succeeded", interruptions: ["[HOSTILE_CONTACT]"] };
+  const footing = event("recover_footing", { kind: "landed", water: null });
+  const result = flightEvidence([event("hostile_reflex", cancelled), footing, event("hostile_reflex", separated)], options);
+  assert.equal(result.outcome, "safe_separation");
+  assert.deepEqual(result.skipped, [{ receipt: cancelled, reason: "footing" }]);
+  assert.equal(flightEvidence([event("hostile_reflex", cancelled), event("hostile_reflex", separated)], options).outcome, "cancelled");
+  assert.equal(flightEvidence([event("hostile_reflex", separated), footing], options).outcome, "safe_separation");
+  assert.equal(flightEvidence([event("hostile_reflex", cancelled), event("other", {}), footing, event("hostile_reflex", separated)], options).outcome, "cancelled");
+  const allSkipped = flightEvidence([event("hostile_reflex", cancelled), footing], options);
+  assert.equal(allSkipped.outcome, undefined);
+  assert.equal(flightVerdict(allSkipped, ["range"], undefined, { judge: "evade" }), false);
+  // t00110, the slow-server pursuit.
+  const slowCancelled = { ...cancelled, finalPosition: { x: 9.112497941128797, y: -59.724875, z: 521.044988464071 },
+    elapsedMs: 2272.0018770000006, ends: [{ id: 40, name: "skeleton", distance: 14.220699351213945, basis: null }] };
+  const slowSeparated = { ...separated, finalPosition: { x: 12.549204950571488, y: -60, z: 522.5051743513252 },
+    elapsedMs: 3747.858738000001, ends: [{ id: 40, name: "skeleton", distance: 17.547487011396466, basis: "cover" }] };
+  const slow = flightEvidence([event("hostile_reflex", slowCancelled), footing, event("hostile_reflex", slowSeparated)], options);
+  assert.equal(slow.outcome, "safe_separation");
+  assert.deepEqual(slow.skipped, [{ receipt: slowCancelled, reason: "footing" }]);
+  for (const elapsedTicks of [42, null, undefined]) {
+    const receipt = { ...separated, ...(elapsedTicks === undefined ? {} : { elapsedTicks }) };
+    assert.equal(flightEvidence([event("hostile_reflex", receipt)], options).receipts[0]?.elapsedTicks, elapsedTicks);
+  }
+});
+
+function timelineFixture(rate: number, status: "succeeded" | "failed" = "succeeded", driverError = false) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const harness = createFakeBot({ clock, health: 7, server: { ticksPerSecond: rate } });
+  const { bot } = harness;
+  const added = listenersAddedSince(bot);
+  const order = Promise.withResolvers<ScenarioCall>();
+  let listenerAtSend = -1;
+  bot.chat = () => { if (driverError) throw new Error("summon failed"); };
+  const context = scenarioTestContext({ bot, scenario: scenarioDefinitionSchema.parse({
+    params: { mob: "skeleton", target: [55, 64, 0], spawn: [-6, 64, 0], bases: ["cover"] }, goal: { kind: "completion" } }),
+    call: async (action) => {
+      if (action === "view_status") return { survivalPolicy: { revision: "1", effective: { combat: { hide: "never" } } } } as ScenarioCall;
+      if (action === "set_survival_policy") return { result: { status: "succeeded" } } as ScenarioCall;
+      if (action === "navigate") { listenerAtSend = added("time"); bot.entity.position.x += 0.25; return order.promise; }
+      return { action, durationMs: 0, summary: "events", result: { status: "succeeded", source: { queryIds: ["events"] },
+        events: [], readThroughEventId: 0, remainingEventCount: 0 } } as ScenarioCall;
+    } });
+  const finish = () => order.resolve({ action: "navigate", durationMs: 0, summary: "order", result: status === "succeeded"
+    ? { status } : { status, error: "order failed" } });
+  return { clock, harness, added, context, finish, listenerAtSend: () => listenerAtSend };
+}
+
+for (const rate of [20, 10]) {
+  for (const stopped of [false, true]) {
+  test(`flight timeline records ${stopped ? "stopped and resumed" : "continuous"} server at ${rate} tps`, async () => {
+    const f = timelineFixture(rate, stopped ? "failed" : "succeeded");
+    using _timers = f.clock.install();
+    const pending = run(f.context);
+    if (stopped) {
+      await f.clock.advance(2_000);
+      f.harness.server.stop();
+      await f.clock.advance(4_000);
+      f.harness.server.resume();
+      await f.clock.advance(2_000);
+    } else await f.clock.advance(5_000);
+    assert.equal(f.listenerAtSend(), 1, "listener is armed before navigate");
+    f.finish();
+    const result = await f.clock.settle(pending, 1_000);
+    assert.ok(result.detail);
+    const ages = (JSON.parse(result.detail) as { ages: { age: number; ms: number; health: number; x: number; y: number; z: number }[] }).ages;
+    const times = stopped ? (rate === 20 ? [1000, 2000, 7000, 8000] : [2000, 8000])
+      : (rate === 20 ? [1000, 2000, 3000, 4000, 5000] : [2000, 4000]);
+    assert.deepEqual(ages.map((sample) => sample.ms), times);
+    assert.deepEqual(ages.map((sample) => sample.age), times.map((_, index) => 24000 + 20 * (index + 1)));
+    const { x, y, z } = f.harness.bot.entity.position;
+    assert.ok(ages.every((sample) => sample.health === 7 && sample.x === x && sample.y === y && sample.z === z));
+    assert.equal(f.added("time"), 0);
+    await f.clock.advance(3_000);
+    assert.equal(f.added("time"), 0);
+  });
+  }
+
+test(`flight timeline removes its listener on a driver error at ${rate} tps`, async () => {
+  const f = timelineFixture(rate, "succeeded", true);
+  using _timers = f.clock.install();
+  await assert.rejects(run(f.context), /summon failed/);
+  assert.equal(f.listenerAtSend(), 1);
+  assert.equal(f.added("time"), 0);
+  await f.clock.advance(5_000);
+  assert.equal(f.added("time"), 0);
+});
+}

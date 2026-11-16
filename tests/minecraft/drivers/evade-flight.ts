@@ -1,4 +1,4 @@
-// Measure an evade's first settlement and the navigation it interrupted.
+// Measure the first evade kept and the navigation it interrupted.
 import assert from "node:assert/strict";
 import type { ClientCompletion } from "mine-labs/client";
 import type { Bot } from "mineflayer";
@@ -6,6 +6,7 @@ import type { Vec3 } from "vec3";
 import { z } from "zod";
 import { readRecentEventsResultSchema } from "../../../src/actions/read-recent-events/contract.ts";
 import { waitForWorldAge } from "../../../src/world/world-age.ts";
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { observeDeaths } from "./deaths.ts";
@@ -17,6 +18,7 @@ interface FlightEvidence {
   readonly healthAfter: number | undefined;
   readonly floor: { readonly kind: "ok" } | { readonly kind: "below"; readonly index: number; readonly y: number } | { readonly kind: "unknown"; readonly index: number };
   readonly receipts: readonly z.output<typeof receiptSchema>[];
+  readonly skipped: readonly { readonly receipt: z.output<typeof receiptSchema>; readonly reason: "footing" }[];
   readonly outcome: string | undefined;
   readonly basis: string | null | undefined;
   readonly distance: number | undefined;
@@ -24,7 +26,7 @@ interface FlightEvidence {
   readonly interruptions: readonly string[];
 }
 
-/** Judge the first evade and resumed order; baseline diagnostics can omit only the unavailable basis telemetry. */
+/** Judge the first kept evade and resumed order; baseline diagnostics can omit unavailable basis telemetry. */
 export function flightVerdict(evidence: FlightEvidence, bases: readonly string[], maxDistance?: number,
   { requireBasis = true, judge = "order" }: { readonly requireBasis?: boolean; readonly judge?: "order" | "evade" } = {}): boolean {
   return evidence.floor.kind === "ok" && evidence.outcome === "safe_separation" &&
@@ -36,19 +38,24 @@ export function flightVerdict(evidence: FlightEvidence, bases: readonly string[]
 
 const receiptSchema = z.object({ response: z.string(), outcome: z.string(),
   healthAfter: z.number().optional(), finalPosition: z.unknown().optional(),
-  elapsedMs: z.number().optional(), goalRefreshes: z.number().optional(),
+  elapsedMs: z.number().optional(), elapsedTicks: z.number().nullable().optional(), goalRefreshes: z.number().optional(),
   finalDistances: z.array(z.object({ id: z.number(), distance: z.number() })).optional(),
   ends: z.array(z.object({ id: z.number(), name: z.string(), basis: z.string().nullable(), distance: z.number() })).optional() });
 
 /** Collect all evade receipts in the order the event cursor supplies them. */
 export function flightEvidence(events: readonly unknown[], options: { readonly startY: number; readonly deaths: number;
   readonly health?: number; readonly status: string; readonly interruptions: readonly string[] }): FlightEvidence {
-  const eventSchema = z.object({ type: z.literal("survival_outcome"), payload: z.object({ source: z.literal("hostile_reflex"),
-    evidence: z.object({ outcome: receiptSchema }) }) });
-  const receipts = events.flatMap((event) => {
-    const parsed = eventSchema.safeParse(event);
-    return parsed.success && parsed.data.payload.evidence.outcome.response === "evade" ? [parsed.data.payload.evidence.outcome] : [];
+  const eventSchema = z.object({ type: z.literal("survival_outcome"), payload: z.object({ source: z.string(),
+    evidence: z.object({ outcome: z.unknown() }) }) });
+  const outcomes = events.flatMap((event) => { const parsed = eventSchema.safeParse(event); return parsed.success ? [parsed.data] : []; });
+  const evades = outcomes.flatMap((event, index) => {
+    const parsed = receiptSchema.safeParse(event.payload.evidence.outcome);
+    return event.payload.source === "hostile_reflex" && parsed.success && parsed.data.response === "evade"
+      ? [{ receipt: parsed.data, skip: parsed.data.outcome === "cancelled" &&
+        outcomes[index + 1]?.payload.source === "recover_footing" }] : [];
   });
+  const receipts = evades.map(({ receipt }) => receipt);
+  const skipped = evades.filter(({ skip }) => skip).map(({ receipt }) => ({ receipt, reason: "footing" as const }));
   let floor: FlightEvidence["floor"] = { kind: "ok" };
   for (const [index, receipt] of receipts.entries()) {
     const parsed = z.object({ x: z.number().finite(), y: z.number().finite(), z: z.number().finite() }).safeParse(receipt.finalPosition);
@@ -56,10 +63,10 @@ export function flightEvidence(events: readonly unknown[], options: { readonly s
     const position = parsed.data;
     if (position.y < options.startY - 0.5) { floor = { kind: "below", index, y: position.y }; break; }
   }
-  const first = receipts[0];
-  const end = first?.ends?.[0];
-  return { health: options.deaths ? 0 : (options.health ?? 0), healthAfter: first?.healthAfter, floor, receipts,
-    outcome: first?.outcome, basis: end?.basis, distance: end?.distance ?? first?.finalDistances?.[0]?.distance,
+  const kept = evades.find(({ skip }) => !skip)?.receipt;
+  const end = kept?.ends?.[0];
+  return { health: options.deaths ? 0 : (options.health ?? 0), healthAfter: kept?.healthAfter, floor, receipts, skipped,
+    outcome: kept?.outcome, basis: end?.basis, distance: end?.distance ?? kept?.finalDistances?.[0]?.distance,
     status: options.status, interruptions: options.interruptions };
 }
 
@@ -115,6 +122,12 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   assert.equal(context.bot.health, 7, "the starting wound must be observed");
   const startY = context.bot.entity.position.y;
   const deaths = observeDeaths(context.bot);
+  const ages: { age: number; ms: number; health: number; x: number; y: number; z: number }[] = [];
+  const onTime = () => {
+    const { x, y, z } = context.bot.entity.position;
+    ages.push({ age: context.bot.time.age, ms: monotonicNow(), health: context.bot.health, x, y, z });
+  };
+  context.bot.on("time", onTime);
   try {
     const [x, y, z] = params.target;
     const start = context.bot.entity.position.clone();
@@ -128,8 +141,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const result = await order;
     const evidence = flightEvidence(await flightEvents(context), { startY, deaths: deaths.deaths.length, health: context.bot.health,
       status: result.result.status, interruptions: result.interruptions ?? [] });
-    const detail = JSON.stringify({ ...evidence, deaths: deaths.deaths.length, summary: result.summary,
+    const detail = JSON.stringify({ ...evidence, ages, deaths: deaths.deaths.length, summary: result.summary,
       physicalPass: flightVerdict(evidence, params.bases, params.maxDistance, { requireBasis: false, judge: params.judge }) });
     return { status: flightVerdict(evidence, params.bases, params.maxDistance, { judge: params.judge }) ? "succeeded" : "failed", detail };
-  } finally { deaths.dispose(); }
+  } finally { context.bot.off("time", onTime); deaths.dispose(); }
 }

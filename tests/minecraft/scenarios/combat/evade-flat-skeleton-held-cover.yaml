@@ -18,7 +18,8 @@ reset:
   - "fill -16 -60 -16 64 -50 16 air"
 setup:
   - "difficulty normal"
-  - "fill 10 -60 3 10 -58 9 stone"
+  # The lee is 11-14 blocks from the shooter, inside the 16-block disengage line (a4 T5).
+  - "fill 4 -60 3 4 -58 9 stone"
 players:
   - { name: Actor, pos: [0.5, -60, 0.5], health: 7, op: true, inventory: [] }
 params:
