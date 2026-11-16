@@ -4,19 +4,29 @@ import test from "node:test";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { waitForBoatStep } from "./boat-server-progress.js";
 
-test("a slow server's next boat step waits past ten seconds for its time packet", async () => {
-  // Contract world-age-at-slow-tick: one packet per 20 server ticks, even at 2 tps.
-  const clock = createFakeClock({ mode: "mocked" });
-  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: 2 } });
-  using _timers = clock.install();
-  server.stop();
-  clock.after(500, () => server.resume());
-  const credit = { age: bot.time.age, steps: 20 };
-  const pending = waitForBoatStep(bot, credit, () => false);
-  assert.equal(await clock.settle(pending, 11_000), true);
-  assert.ok(clock.now() >= 10_500, "the packet arrives after ten seconds plus the server's delay");
-  assert.equal(credit.steps, 1, "the new packet grants the next batch of rowing steps");
-});
+for (const { ticksPerSecond, resumeAfterMs, boundMs } of [
+  { ticksPerSecond: 20, resumeAfterMs: 0, boundMs: 2_100 },
+  { ticksPerSecond: 10, resumeAfterMs: 0, boundMs: 2_100 },
+  { ticksPerSecond: 2, resumeAfterMs: 500, boundMs: 11_000 },
+]) {
+  test(`a boat step waits for the next server packet at ${ticksPerSecond} tps`, async () => {
+    // Contract world-age-at-slow-tick: one packet per 20 server ticks, even at 2 tps.
+    const clock = createFakeClock({ mode: "mocked" });
+    const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond } });
+    using _timers = clock.install();
+    if (resumeAfterMs > 0) {
+      server.stop();
+      clock.after(resumeAfterMs, () => server.resume());
+    }
+    const startAge = bot.time.age;
+    const credit = { age: startAge, steps: 20 };
+    const pending = waitForBoatStep(bot, credit, () => false);
+    assert.equal(await clock.settle(pending, boundMs), true);
+    assert.equal(bot.time.age - startAge, 20);
+    assert.equal(credit.steps, 1);
+    if (ticksPerSecond === 2) assert.ok(clock.now() >= 10_500, "the packet arrives after ten seconds plus the server's delay");
+  });
+}
 
 for (const heardTime of [true, false]) {
   test(`a boat step with ${heardTime ? "a stopped" : "no known"} world age gives up after twenty seconds and can resume`, async () => {

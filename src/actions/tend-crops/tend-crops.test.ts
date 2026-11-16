@@ -97,8 +97,8 @@ test("a cancel ends the quiet look for dropped items at once when physics has st
 });
 
 /** Protected regions at the farm's own digs and tills (plan 2026-11-07-p4-06a-threat T5b, ADR-012). */
-function farmerIn(owner: string | null, cells: Record<string, string>, carried: Record<string, number> = {}, options: { signal?: AbortSignal; clock?: FakeClock } = {}) {
-  const harness = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells, carried, ...(options.clock && { clock: options.clock }) });
+function farmerIn(owner: string | null, cells: Record<string, string>, carried: Record<string, number> = {}, options: { signal?: AbortSignal; clock?: FakeClock; ticksPerSecond?: number } = {}) {
+  const harness = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells, carried, server: { ticksPerSecond: options.ticksPerSecond }, ...(options.clock && { clock: options.clock }) });
   const region = (name: string) => ({
     regionId: 3, dimension: "overworld", owner: name, label: "Tom's farm", min: { x: 0, y: 62, z: -1 }, max: { x: 2, y: 66, z: 1 },
   });
@@ -143,6 +143,46 @@ test("the seed's use waits on the server clock, not 10 client ticks", async () =
   assert.equal(wait.over, false, "a 10-tick client wait would have ended by 500 ms");
   assert.deepEqual(await clock.settle(pending, 10_500), { kind: "unconfirmed" });
 });
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a seed's server answer at 15 ticks is observed at ${ticksPerSecond} tps`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const { body, bot, server, world } = farmerIn("own", { "1,63,0": "farmland" }, { wheat_seeds: 2 }, { clock, ticksPerSecond });
+    let sentAt = -1;
+    let answeredAt = -1;
+    const stopPacket = server.onPacket("block_place", () => {
+      sentAt = server.gameTime;
+      const stopTick = server.onTick(() => {
+        if (server.gameTime - sentAt === 15) {
+          answeredAt = server.gameTime;
+          world.setCell(new Vec3(1, 64, 0), "wheat");
+          stopTick();
+        }
+      });
+    });
+    const age = bot.time.age;
+    const result = await clock.settle(body.plant({ x: 1, y: 63, z: 0 }, "wheat_seeds"), 3_000);
+    stopPacket();
+    assert.equal(result, null);
+    assert.equal(answeredAt - sentAt, 15);
+    assert.equal(bot.time.age - age, 0, "the first +20 age packet has not arrived");
+  });
+
+  test(`seed failure sees the 19/20 tick packet boundary at ${ticksPerSecond} tps`, async () => {
+    const { bot, clock, server } = createFakeBot({ server: { ticksPerSecond } });
+    const age = bot.time.age;
+    const failed = () => ({ error: "not confirmed", serverTicksWaited: bot.time.age - age });
+    await clock.advance(19 * 1_000 / ticksPerSecond);
+    assert.equal(server.gameTime - age, 19);
+    assert.equal(failed().serverTicksWaited, 0);
+    assert.deepEqual(plantFailure(failed(), 5, 5), { kind: "unconfirmed" });
+    await clock.advance(1_000 / ticksPerSecond);
+    assert.equal(server.gameTime - age, 20);
+    assert.equal(failed().serverTicksWaited, 20);
+    assert.deepEqual(plantFailure(failed(), 5, 5), { kind: "unchanged" });
+  });
+}
 
 test("a seed in another owner's region is an error naming the region, with no use packet", async () => {
   const { body, server } = farmerIn("Tom", { "1,63,0": "farmland" }, { wheat_seeds: 1 });
