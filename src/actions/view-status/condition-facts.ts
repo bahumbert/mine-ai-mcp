@@ -90,7 +90,7 @@ export function conditionFactsLine(situation: LiveSituation): string | null {
     carriedPieces.length > 0 ? `carried armour ${carriedPieces.join(", ")}` : null,
     lightParts.length > 0 ? `light ${lightParts.join(" ")}${light.openSkyAbove === null ? "" : `; open sky ${light.openSkyAbove} blocks above`}` : null,
     combatParts.length > 0 ? `combat ${combatParts.join(", ")}` : null,
-    respawn === null ? null : `respawn ${respawn.kind === "bed" ? "bed" : "world spawn"} ${respawn.distance === null ? "in another dimension" : `${Math.round(respawn.distance)} blocks away`}`,
+    respawn === null ? null : `respawn ${respawn.kind === "bed" ? "bed" : respawn.kind === "last_wake" ? "where it last woke" : "world spawn"} ${respawn.distance === null ? "in another dimension" : `${Math.round(respawn.distance)} blocks away`}`,
   ].filter((part) => part !== null);
   return parts.length > 0 ? `Condition facts: ${parts.join("; ")}.` : null;
 }

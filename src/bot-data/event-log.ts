@@ -74,10 +74,10 @@ const playerDeathContextSchema = z.strictObject({
   carriesWeapon: z.boolean(),
   bestMelee: z.string().nullable(),
   enclosed: z.boolean(),
-  /** Where the bot would wake: a bed it slept in, else the world spawn; `distance` is null across dimensions. */
+  /** A known bed, else the last wake, else world spawn; `distance` is null across dimensions. */
   respawn: z
     .strictObject({
-      kind: z.enum(["bed", "world_spawn"]),
+      kind: z.enum(["bed", "last_wake", "world_spawn"]),
       dimension: z.string().min(1),
       x: z.number(),
       y: z.number(),

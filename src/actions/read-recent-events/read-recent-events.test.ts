@@ -248,6 +248,14 @@ test("a death event with its context tells the model what the bot held, wore and
     summary: "MineAI died at 1, 64, 1 in overworld.",
     payload: { dimension: "overworld", position: { x: 1, y: 64, z: 1 }, cause: null },
   });
+  recordEvent(data, "MineAI", {
+    type: "player_death", observedAt: "2026-08-30T04:00:00.000Z", summary: "MineAI died.",
+    payload: { dimension: "overworld", position: { x: 1, y: 64, z: 1 }, cause: null, context: {
+      lastAlive: null, food: 20, held: null, armour: { head: null, chest: null, legs: null, feet: null },
+      carriesWeapon: false, bestMelee: null, enclosed: false,
+      respawn: { kind: "last_wake", dimension: "overworld", x: 13, y: 64, z: 1, distance: 12 },
+    } },
+  });
 
   const markdown = formatReadRecentEventsResult(readRecentBotEvents(data, "MineAI", { limit: 50 }));
 
@@ -259,7 +267,8 @@ test("a death event with its context tells the model what the bot held, wore and
     markdown,
     /- State at death: held nothing; armour none; food 20; last health not seen; enclosed; respawn world spawn in another dimension/,
   );
-  assert.equal(markdown.match(/State at death/g)?.length, 2, "an old row without context prints no state line");
+  assert.match(markdown, /respawn where it last woke, 12 blocks away/);
+  assert.equal(markdown.match(/State at death/g)?.length, 3, "an old row without context prints no state line");
 });
 
 test("a status recorded before dig_straight_down existed reads back with its default", async () => {

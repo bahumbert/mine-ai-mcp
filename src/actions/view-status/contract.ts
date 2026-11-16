@@ -191,9 +191,9 @@ export const liveSituationSchema = z.strictObject({
     })
     .describe("What the fight reflex has to work with."),
   respawn: z
-    .strictObject({ kind: z.enum(["bed", "world_spawn"]), position: positionSchema, distance: z.number().nonnegative().nullable() })
+    .strictObject({ kind: z.enum(["bed", "last_wake", "world_spawn"]), position: positionSchema, distance: z.number().nonnegative().nullable() })
     .nullable()
-    .describe("Where the bot would wake after dying: a bed slept in this session, else the world spawn; distance null in another dimension."),
+    .describe("A bed slept in this session, else where it last woke after a death, else the world spawn; distance null in another dimension."),
   mobility: z
     .strictObject({
       maximumDrop: z

@@ -74,7 +74,8 @@ The event log captures these event types:
   clears the inventory just after): the last health, food and saturation seen
   alive, the item held, the four armour pieces, whether the bot carried a
   weapon and which melee weapon was best, whether it was walled in, and the
-  bed or world spawn it would wake at with its distance. Rows written before
+  known bed, else its last wake after a death, else world spawn, with its distance. The last wake need not be the next
+  respawn. Rows written before
   `context` existed have none.
 - `player_dimension_change`: The bot crossing a portal, with the dimensions
   left and entered and where it arrived.

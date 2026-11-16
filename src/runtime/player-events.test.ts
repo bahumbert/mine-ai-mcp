@@ -264,6 +264,25 @@ test("a second life starts with its own last alive reading and the gear it has t
   assert.deepEqual(deaths.map((context) => context?.held), ["iron_sword", null], "the first death cleared the hands");
 });
 
+test("the second death's context carries the first wake", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const f = armedBot("WakeTwice", { clock });
+  t.after(() => f.close());
+  f.server.setRespawnPoint(new Vec3(40.5, 64, 40.5));
+  f.combat.setHealth(0, 20);
+  await clock.advance(2_000);
+  f.bot.entity.position.x += 12;
+  f.combat.setHealth(0, 20);
+  const deaths = readRecentEvents(f.data, "WakeTwice", 50).events.filter((event) => event.type === "player_death");
+  const second = deaths[1];
+  assert.equal(second?.type, "player_death");
+  if (second?.type === "player_death") {
+    assert.deepEqual(second.payload.context?.respawn, { kind: "last_wake", dimension: "overworld", x: 40.5, y: 64, z: 40.5, distance: 12 });
+    assert.match(second.summary, /respawn where it last woke, 12 blocks away/);
+  }
+});
+
 test("a cause packet no death followed does not describe the next death", (t) => {
   const f = armedBot("Stale");
   t.after(() => f.close());
