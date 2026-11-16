@@ -18,11 +18,14 @@ const { nextInteractionSequence } = require("mineflayer/lib/interaction_sequence
   nextInteractionSequence(bot: object): number | undefined;
 };
 
-/** Send in this turn: generic_place.js skips its awaited look with forceLook ignore (T1, 2026-11-15). */
-export function clickSignNow(bot: Bot, block: WorldBlock, face: Vec3, onSent: () => void): void {
+/**
+ * Send in this turn: generic_place.js skips its awaited look with forceLook ignore (T1, 2026-11-15).
+ * A held-item click that rejects (a throwing packet write, after `onSent`) reaches `onFailed`; the empty-hand click throws to the caller.
+ */
+export function clickSignNow(bot: Bot, block: WorldBlock, face: Vec3, onSent: () => void, onFailed: (error: unknown) => void): void {
   if (bot.heldItem) {
     const placing = bot as Bot & { _genericPlace(block: WorldBlock, face: Vec3, options: object): Promise<unknown> };
-    void placing._genericPlace(block, face, { forceLook: "ignore", swingArm: "right", onSent });
+    placing._genericPlace(block, face, { forceLook: "ignore", swingArm: "right", onSent }).catch(onFailed);
     return;
   }
   const direction = face.y < 0 ? 0 : face.y > 0 ? 1 : face.z < 0 ? 2 : face.z > 0 ? 3 : face.x < 0 ? 4 : 5;

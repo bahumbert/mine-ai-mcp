@@ -52,6 +52,7 @@ export const placeSignOutcomes = {
   unloaded: "[PLACE_SIGN_UNLOADED] The target cell is not loaded; move closer and try again.",
   unknown: "[PLACE_SIGN_TEXT_UNKNOWN] The sign's front or back text is not known; move closer and read the sign before filling it.",
   noEditor: "[PLACE_SIGN_NO_EDITOR] The server did not open the editor after the one click; read the sign before deciding whether to try again.",
+  clickNotSent: (cause: string) => `[PLACE_SIGN_NO_EDITOR] The click was not sent: ${cause}. The sign was not touched; read it, then try again.`,
   unconfirmed: (block: string, cause: string, placed = true) => `[PLACE_SIGN_TEXT_UNCONFIRMED] ${block} ${placed ? "was placed" : "was opened"}, but its front text was not confirmed: ${cause}. Read the sign before deciding what to do next.`,
   failed: (cause: string) => `[PLACE_SIGN_FAILED] ${cause}; inspect the cell before trying again.`,
 };

@@ -35,6 +35,8 @@ interface SignRun {
   mode: "place" | "fill";
   clicked: boolean;
   clickAge?: number;
+  /** Why the spent click never went out; kept with the request so a resume after a cut reports it without waiting. */
+  clickFailure?: string;
   phase: "approach" | "sent" | "placed" | "click_sent" | "edit_sent" | "written";
 }
 
@@ -111,6 +113,21 @@ function blankSignRefusal(run: SignRun): PlaceSignResult | null {
   return null;
 }
 
+/** Wait for the editor; a click whose send failed ends the wait at once as "no editor", never as the action's own abort. */
+async function editorOpened(answers: SignAnswers, signal: AbortSignal, sendFailed: AbortSignal, from: number | undefined): Promise<boolean> {
+  try {
+    return await answers.editor(AbortSignal.any([signal, sendFailed]), from);
+  } catch (error) {
+    if (sendFailed.aborted && !signal.aborted) return false;
+    throw error;
+  }
+}
+
+/** The spent click's send failed: nothing was sent, so no editor is coming. */
+function clickNotSent(run: SignRun, cause: string): PlaceSignResult {
+  return run.mode === "place" ? unconfirmed(run, `the click was not sent: ${cause}`) : refusal(run, placeSignOutcomes.clickNotSent(cause));
+}
+
 /** Open a known blank sign once, with no awaited work between the final guards and its packet. */
 async function fillBlankSign(run: SignRun, signal: AbortSignal): Promise<PlaceSignResult> {
   const { bot } = run.deps;
@@ -118,6 +135,7 @@ async function fillBlankSign(run: SignRun, signal: AbortSignal): Promise<PlaceSi
   if (refused) return refused;
   run.block = bot.blockAt(run.target)!.name;
   const answers = signAnswers(run);
+  const sendFailed = new AbortController();
   if (!run.clicked) {
     const face = facingVector(run.request.facing);
     await raceSignal(bot.lookAt(run.target.offset(0.5, 0.5, 0.5).plus(face.scaled(0.5)), true), signal);
@@ -130,10 +148,17 @@ async function fillBlankSign(run: SignRun, signal: AbortSignal): Promise<PlaceSi
       run.phase = "click_sent";
       run.clicked = true;
       run.clickAge = bot.time?.age;
+    }, (error) => {
+      // A rejection after the request ended (cancel, death, disconnect) changes nothing; one after a reflex cut is kept for the resume.
+      if (run.lifetime.aborted || run.stop.signal.aborted) return;
+      run.clickFailure ??= error instanceof Error ? error.message : String(error);
+      sendFailed.abort();
     });
   }
-  if (!await answers.editor(signal, run.clickAge)) {
+  if (run.clickFailure !== undefined) return clickNotSent(run, run.clickFailure);
+  if (!await editorOpened(answers, signal, sendFailed.signal, run.clickAge)) {
     signal.throwIfAborted();
+    if (run.clickFailure !== undefined) return clickNotSent(run, run.clickFailure);
     return run.mode === "place" ? unconfirmed(run, "the server did not reopen the editor") : refusal(run, placeSignOutcomes.noEditor);
   }
   signal.throwIfAborted();
