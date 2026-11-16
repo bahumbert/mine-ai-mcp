@@ -1,13 +1,15 @@
 // How the skills ask for a walk: the `navigate` input, the walk that keeps what the work at its end needs
 // (plan 2026-11-12-house-build-fixes Task 1), and the way back a failed fetch names (Task 3).
 import type { ActOutcome } from "./body.ts";
-import type { HousePlan } from "./building/plan.ts";
-import { scaffoldKinds, stageAt, stageCellsNow } from "./building/stage-progress.ts";
-import type { MaterialCount } from "./building/blueprint.ts";
+import { planTemplate, type HousePlan } from "./building/plan.ts";
+import { scaffoldReserve, stageAt, stageCellsNow } from "./building/stage-progress.ts";
+import { templateFor, templateOfKind, TEMPLATES } from "./building/templates.ts";
+import { billOfMaterials, type MaterialCount } from "./building/blueprint.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { describeWay } from "./gathering.ts";
-import type { Position } from "./runtime-client.ts";
+import type { ItemCount, Position } from "./runtime-client.ts";
 import type { SkillContext } from "./skills.ts";
+import { isNoPath, NO_KEEP, walkKeepInput, walkRelaxing, type WalkKeep } from "./walk-keep.ts";
 
 /** `get_items` walks back to where it started when it ends farther than this, and a failed one names the way back past it. */
 export const RETURN_RANGE = 3;
@@ -18,34 +20,58 @@ export function navigateInput(target: Position, range: number): Record<string, u
 }
 
 /**
- * Walks to `to` (range 1) without laying what the work there needs: `keep.bill` (the house's blocks) and `keep.scaffold` (the
- * kinds its cells out of reach need to stand on, `scaffoldKinds`) go to `navigate` as `keep_items`, which the route and its
- * fallback scaffold both honour. When keeping the scaffold leaves the pathfinder no way (`[NAVIGATION_STOPPED]`, the one
- * failure keeping blocks can cause: deep water, a boat or a dimension change keep their result), one more walk keeps the
- * bill only: the scaffold may then bridge, and the stage check after the walk says what is short.
+ * Walks to `to` (within `range`, default 1) without laying what the work there needs: `keep` goes to `navigate` as `keep_items` (names: never
+ * placed) and `reserve_items` (counts: placed only above them), which the route and its fallback scaffold both honour. When the
+ * keep leaves the pathfinder no way (`[NAVIGATION_STOPPED]`), one more walk follows {@link relaxedKeep} (`countsBefore`: the bill
+ * at its need), and the stage check after the walk says what is short.
  */
-export async function walkKeeping(context: Pick<SkillContext, "body" | "signal" | "runtime">, to: Position, why: string, keep: { readonly bill: readonly string[]; readonly scaffold: readonly string[] }): Promise<ActOutcome> {
-  const walk = (kept: readonly string[]) => context.body.act("navigate", { ...navigateInput(to, 1), ...(kept.length > 0 && { keep_items: kept }) }, why, { signal: context.signal });
-  const outcome = await walk([...new Set([...keep.bill, ...keep.scaffold])]);
-  if (outcome.status === "succeeded" || context.signal.aborted || keep.scaffold.length === 0 || outcome.error?.startsWith("[NAVIGATION_STOPPED]") !== true) return outcome;
-  // Only a carried scaffold block can have been the reason: with none carried the second walk would be the same walk.
-  if (!(await context.runtime.status()).inventory.some((stack) => keep.scaffold.includes(stack.name))) return outcome;
-  return walk([...new Set(keep.bill)]);
+export async function walkKeeping(context: Pick<SkillContext, "body" | "signal" | "runtime">, to: Position, why: string, keep: WalkKeep, countsBefore: readonly ItemCount[], range = 1): Promise<ActOutcome> {
+  const walk = (kept: WalkKeep) => context.body.act("navigate", { ...navigateInput(to, range), ...walkKeepInput(kept) }, why, { signal: context.signal });
+  return walkRelaxing(context, keep, countsBefore, walk, isNoPath);
 }
 
 /**
- * The kinds the cells of parts `first`..`last` still to place need carried to stand on (`scaffoldKinds`): what a walk must
- * not lay. `read`: the world is read, so a cell already right (a resumed stage) asks nothing.
+ * The blocks the cells of parts `first`..`last` still to place need carried to stand on, by count (`scaffoldReserve`): what a
+ * walk must not lay below it. `read`: the world is read, so a cell already right (a resumed stage) asks nothing.
  */
-export async function scaffoldKindsBetween(context: Pick<SkillContext, "runtime">, plan: HousePlan, range: { readonly first: number; readonly last: number }, kept: readonly string[], read: boolean): Promise<readonly string[]> {
+export async function scaffoldReserveBetween(context: Pick<SkillContext, "runtime">, plan: HousePlan, range: { readonly first: number; readonly last: number }, kept: readonly string[], read: boolean): Promise<ItemCount[]> {
   const cells = await stageCellsNow(plan, { ...plan.stages[stageAt(plan, range.first)]!, ...range }, read ? context.runtime : null);
   const status = await context.runtime.status();
-  return scaffoldKinds(cells, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, kept);
+  return scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, kept);
 }
 
-/** The kinds the cells of the stage holding `part`, from that part on, need carried to stand on: what a tool-loss refetch's walks must not lay. */
-export const stageScaffoldKinds = (context: Pick<SkillContext, "runtime">, plan: HousePlan, part: number, kept: readonly MaterialCount[]) =>
-  scaffoldKindsBetween(context, plan, { first: part, last: plan.stages[stageAt(plan, part)]!.last }, kept.map((entry) => entry.item), true);
+/** The blocks the cells of the stage holding `part`, from that part on, need carried to stand on, by count: what a tool-loss refetch's walks must not lay below it. */
+export const stageScaffoldReserve = (context: Pick<SkillContext, "runtime">, plan: HousePlan, part: number, kept: readonly MaterialCount[]) =>
+  scaffoldReserveBetween(context, plan, { first: part, last: plan.stages[stageAt(plan, part)]!.last }, kept.map((entry) => entry.item), true);
+
+/** What an unfinished house still takes: `bill` the blocks of the cells still wrong from the record's part on, `keep` what a walk carrying them must not spend. */
+export interface HouseReserve {
+  readonly keep: WalkKeep;
+  readonly bill: readonly ItemCount[];
+}
+
+const NO_HOUSE_RESERVE: HouseReserve = { keep: NO_KEEP, bill: [] };
+
+/**
+ * What the bot's unfinished house still takes (spec 2026-11-14 section 4): the blocks of the cells still wrong in the world
+ * from the record's part to the end (the box read once), and a keep that holds them by count, so a spare may still bridge,
+ * plus the blocks its cells out of reach need to stand on. Empty with no unfinished house, or none whose template is known
+ * (as `resumable` reads them). For the walks and fetches of a bot that is not building now: `get_items`, `craft_item`'s table.
+ */
+export async function houseReserve(context: Pick<SkillContext, "runtime" | "building" | "templates">): Promise<HouseReserve> {
+  const unfinished = context.building?.unfinished;
+  if (unfinished === null || unfinished === undefined) return NO_HOUSE_RESERVE;
+  const templates = context.templates ?? TEMPLATES;
+  const template = templateFor(unfinished.template ?? templateOfKind(unfinished.kind, templates)?.id ?? "", templates);
+  if (template === undefined) return NO_HOUSE_RESERVE;
+  const plan = planTemplate(template, unfinished.site, unfinished.materials ?? {});
+  const first = plan.stages[stageAt(plan, unfinished.part)]!;
+  const cells = await stageCellsNow(plan, { ...first, last: plan.stages.at(-1)!.last }, context.runtime);
+  const bill = billOfMaterials(cells).map(({ item, count }) => ({ item, count }));
+  const status = await context.runtime.status();
+  const scaffold = scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
+  return { keep: { items: [], reserve: bill, scaffold }, bill };
+}
 
 /** Whether a fetch that ended at `here` is more than {@link RETURN_RANGE} (3D) from where it started. */
 export const awayFrom = (start: Position, here: Position): boolean => Math.hypot(here.x - start.x, here.y - start.y, here.z - start.z) > RETURN_RANGE;

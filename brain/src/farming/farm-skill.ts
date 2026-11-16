@@ -6,7 +6,8 @@ import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { describeWay, firstOfOwnSeed } from "../gathering.ts";
 import { describeOverlaps, overlapsOf } from "../protected-areas.ts";
 import { nearestClearSpot, SITE_SEARCH } from "../building/house-site.ts";
-import { findPlayer, levelZone, navigateInput, noteArea, releaseArea, type SkillContext, type SkillResult } from "../skills.ts";
+import { findPlayer, levelZone, noteArea, releaseArea, type SkillContext, type SkillResult } from "../skills.ts";
+import { houseReserve, walkKeeping } from "../walks.ts";
 import { farmPlot, plotBehind, type FarmPlot, type FarmSize } from "./plot.ts";
 import { chooseSite, farmStandsOnSoil, type TillFacts } from "./site.ts";
 
@@ -122,7 +123,9 @@ async function makeFarm(context: SkillContext, snapshot: BotSnapshot, plot: Farm
 
   if (horizontal(snapshot.position, water) > WALK_RANGE) {
     context.progress?.(`walking to the site of ${what} at ${water.x} ${water.y} ${water.z}`);
-    const there = await context.body.act("navigate", navigateInput({ x: water.x, y: water.y + 1, z: water.z }, 3), `Walk to the site of ${what}.`, { signal: context.signal });
+    // An unfinished house's blocks are kept on the way: the walk may lay a spare, never what its walls and roof still take.
+    const { keep, bill } = await houseReserve(context);
+    const there = await walkKeeping(context, { x: water.x, y: water.y + 1, z: water.z }, `Walk to the site of ${what}.`, keep, bill, 3);
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what}: ${there.error ?? there.status}` };
   }

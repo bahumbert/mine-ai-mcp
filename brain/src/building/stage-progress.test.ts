@@ -4,7 +4,7 @@ import test from "node:test";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../testing.ts";
 import type { WorldCell } from "./blueprint.ts";
 import { planTemplate } from "./plan.ts";
-import { BUILD_REACH, fetchClause, missingForStage, scaffoldKinds, scaffoldNeed } from "./stage-progress.ts";
+import { BUILD_REACH, fetchClause, missingForStage, scaffoldNeed, scaffoldReserve } from "./stage-progress.ts";
 import { templateFor } from "./templates.ts";
 
 const DOOR_Y = 76;
@@ -46,14 +46,16 @@ test("a new house's refusal offers 'materials' only for items: other blocks do n
   assert.match(missingForStage(plan, 0, "a house", { missing: [], owedNote: "", scaffold: standOn }, { fresh: true }), /^missing about 4 blocks to stand on for its cells 5 above the ground .*; or choose another house/u);
 });
 
-test("scaffoldKinds names the admitted kinds a walk must not spend: only while every carried block is needed", () => {
-  const kinds = (cells: WorldCell[], carried: { name: string; count: number }[] = [], options: { kept?: string[] } = {}) => scaffoldKinds(cells, DOOR_Y, carried, DEFAULT_SCAFFOLD_BLOCKS, options.kept ?? []);
-  assert.deepEqual(kinds([cellAt(1), cellAt(BUILD_REACH - 1)]), [], "all within reach");
-  assert.deepEqual(kinds([cellAt(1), cellAt(5)]), DEFAULT_SCAFFOLD_BLOCKS, "a high cell, none carried: the kinds that would be fetched");
-  assert.deepEqual(kinds([cellAt(5)], dirt(4)), DEFAULT_SCAFFOLD_BLOCKS, "4 dirt carried for a count of 4: every block is needed");
-  assert.deepEqual(kinds([cellAt(5)], dirt(5)), [], "5 carried for a count of 4: a surplus the walk may bridge with");
-  assert.deepEqual(kinds([cellAt(5)], dirt(64)), [], "64 dirt: the walk may bridge");
-  assert.deepEqual(kinds([cellAt(5)], [], { kept: [...DEFAULT_SCAFFOLD_BLOCKS] }), [], "every admitted kind is a house block (the rest of the cases are scaffoldNeed's table)");
+test("scaffoldReserve counts the blocks a walk must keep of every admitted kind: what the cells out of reach take, whatever is carried", () => {
+  const reserve = (cells: WorldCell[], options: { kept?: string[]; unread?: true } = {}) => scaffoldReserve(cells, DOOR_Y, options.unread === true ? undefined : DEFAULT_SCAFFOLD_BLOCKS, options.kept ?? []);
+  const each = (count: number, blocks: readonly string[] = DEFAULT_SCAFFOLD_BLOCKS) => blocks.map((item) => ({ item, count }));
+  assert.deepEqual(reserve([cellAt(1), cellAt(BUILD_REACH - 1)]), [], "all below reach");
+  assert.deepEqual(reserve([cellAt(1), cellAt(5)]), each(4), "a high cell: every admitted kind at the count, carried or not (blocks gathered on the walk are kept too)");
+  assert.deepEqual(reserve([cellAt(5)]), each(4), "Bruno's 5 dirt for a count of 4 reserve 4, not all five: the count is the need, never the carried total");
+  assert.deepEqual(reserve([cellAt(8)]), each(10), "the count follows the height");
+  assert.deepEqual(reserve([cellAt(5)], { unread: true }), [], "policy unread");
+  assert.deepEqual(reserve([cellAt(5)], { kept: [...DEFAULT_SCAFFOLD_BLOCKS] }), [], "every admitted kind is a bill item");
+  assert.deepEqual(reserve([cellAt(5)], { kept: ["cobblestone"] }), each(4, without("cobblestone")), "the bill's own blocks are kept by name, not counted here");
 });
 
 test("the fetch clause says 'exactly' for the items only and names the blocks to stand on by 'N or more'", () => {

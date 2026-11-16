@@ -27,7 +27,7 @@ export interface ToolLossDeps {
   readonly owed?: () => readonly OwedItem[];
   readonly inventory: () => Promise<readonly { readonly name: string; readonly count: number }[]>;
   /** The `get_items` skill: fetches and crafts what is missing. */
-  readonly getItems: (items: readonly ItemCount[], purpose: string) => Promise<{ readonly status: "done" | "failed" | "stopped"; readonly detail?: string }>;
+  readonly getItems: (items: readonly ItemCount[], purpose: string) => Promise<{ readonly status: "done" | "failed" | "stopped"; readonly detail?: string; readonly usedOwn?: string }>;
   /** Told the class of each tool lost, whatever came of it (the objective remembers it: N7). */
   readonly onLost?: (toolClass: string) => void;
   /** Whether work that needs a tool of the class is still to do (leveling: only for the digging left); unset: always. */
@@ -39,9 +39,15 @@ export type ToolLossOutcome =
   /** Lost, but no work is left that needs it: not made again, the part goes on. */
   | { readonly status: "unneeded" }
   | { readonly status: "stopped" }
-  | { readonly status: "remade"; readonly item: string }
+  /** `note`: "used 3 oak_planks of what you carried", when making it took carried items and no more were near (the step's result says so). */
+  | { readonly status: "remade"; readonly item: string; readonly note?: string }
   /** Lost again after being made again in this step, or the making failed: `note` is added to the failure's detail. */
   | { readonly status: "refused" | "failed"; readonly note: string };
+
+/** "; remade wooden_pickaxe (used 3 oak_planks of what you carried)": what a step's result adds for the tools it made again from carried items (empty for none). */
+export function remadeClause(notes: readonly { readonly item: string; readonly note: string }[]): string {
+  return notes.map(({ item, note }) => `; remade ${item} (${note})`).join("");
+}
 
 /** How many losses one step makes good: per tool class and in all (default: one per class, as a building part does). */
 export interface ToolLossCaps {
@@ -75,13 +81,15 @@ export class ToolLosses {
     const spare = spareCounter(deps.reserved, heldCounts(deps.owed?.() ?? [], inventory))(inventory);
     const have = inventory.find((stack) => stack.name.endsWith(`_${toolClass}`));
     const item = have?.name ?? toolToMake(toolClass, spare);
+    let used: string | undefined;
     if (have === undefined) {
       const got = await deps.getItems([{ item, count: 1 }], `a new ${toolClass} to go on (one wore out)`);
       if (got.status === "stopped") return { status: "stopped" };
       if (got.status === "failed") return { status: "failed", note: `making a new ${item} failed: ${got.detail ?? "failed"}` };
+      used = got.usedOwn;
     }
     this.remade.set(toolClass, item);
-    return { status: "remade", item };
+    return { status: "remade", item, ...(used !== undefined && { note: used }) };
   }
 
   /** What was made again so far, for a failure's detail: "" when nothing. */

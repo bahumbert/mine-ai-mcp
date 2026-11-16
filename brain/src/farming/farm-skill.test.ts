@@ -368,3 +368,25 @@ test("farm carrot with none carried names where a first one comes from, not get_
   const seeds = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5 }, contextFor(runtime));
   assert.match(seeds.status === "failed" ? seeds.detail : "", /get_items/u);
 });
+
+test("the farm's walk keeps an unfinished house's blocks: its bill by count, so the walk lays none of what the walls still take (plan 2026-11-14 Task 7b)", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  const unfinished = { kind: "small medieval house", template: "medieval-small", site: { door: { x: 0, y: 64, z: 2 }, facing: "north" as const }, part: 0, prepared: true, materials: {} };
+  runtime.failNext.navigate = { error: "[NAVIGATION_STOPPED] Pathfinder stopped: no path." };
+  const result = await runStep({ skill: "farm", crop: "wheat_seeds", size: 5, x: 40, y: 64, z: 4 }, contextFor(runtime, { building: { unfinished } }));
+  const walks = runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input);
+  assert.equal(result.status, "failed", "the could-not-reach-the-site failure stays");
+  assert.ok(walks.length >= 1, "the farm is walked to");
+  const reserved = walks[0]!.reserve_items as { item: string; count: number }[];
+  assert.ok(reserved.some((entry) => entry.item === "cobblestone" && entry.count > 0), `the walk reserves the house's cobblestone: ${JSON.stringify(walks[0])}`);
+  assert.equal(walks[0]!.keep_items, undefined, "counts, not names: a spare may bridge");
+});
+
+test("a farm's walk with no unfinished house keeps nothing", async () => {
+  const runtime = farmRuntime([{ name: "wooden_hoe", count: 1 }, { name: "wheat_seeds", count: 20 }, { name: "water_bucket", count: 1 }]);
+  runtime.failNext.navigate = { error: "[NAVIGATION_STOPPED] Pathfinder stopped: no path." };
+  await runStep({ skill: "farm", crop: "wheat_seeds", size: 5, x: 40, y: 64, z: 4 }, contextFor(runtime));
+  const walk = runtime.submitted.find((call) => call.tool === "navigate")!.input;
+  assert.equal(walk.reserve_items, undefined);
+  assert.equal(walk.keep_items, undefined);
+});

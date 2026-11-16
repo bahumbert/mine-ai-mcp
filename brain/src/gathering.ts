@@ -8,6 +8,7 @@ import { consumedBy, FULL_INVENTORY } from "./inventory-room.ts";
 import { stackSizeOf } from "./newest-registry.ts";
 import { ReplacementGuard, type ReplaceFirst } from "./kept-replacement.ts";
 import { carriedOf as carried, freeStacks, heldCounts, heldKinds, type OwedItem } from "./relations/items.ts";
+import { mergedKeep, NO_KEEP, isNoPath, walkKeepInput, walkRelaxing, type WalkKeep } from "./walk-keep.ts";
 import { errorCode, type BotRuntime, type BotSnapshot, type FoundBlock, type ItemCount, type MobSource, type Position, type SeenBlock, type SmeltingRecipe } from "./runtime-client.ts";
 
 type Stacks = BotSnapshot["inventory"];
@@ -55,15 +56,36 @@ export interface GatherContext {
   readonly toolsLost?: Set<string>;
   /** See {@link SkillContext.owed}: what the gathering and its crafts and smelts never spend. */
   readonly owed?: () => readonly OwedItem[];
-  /** What the walks home and to a table between crafts must not lay (`navigate` `keep_items`: a stage's scaffold, see `getItems`' `walkKeep`). */
-  readonly walkKeep?: readonly string[];
+  /** What the walks home and to a table between crafts must not lay (`navigate` `keep_items` and `reserve_items`: a stage's scaffold, see `getItems`' `walkKeep`). */
+  readonly walkKeep?: WalkKeep;
+  /** What the bag held when the fetch began (`gatherMaterials` sets it): the counts a walk that kept the fetched items by name keeps instead when it finds no way (`relaxedKeep`). */
+  readonly walkCounts?: readonly ItemCount[];
+  /**
+   * Raw or made items a fetch must not craft or burn below these counts: the unfinished house's bill (`houseReserve(...).bill`,
+   * the cells still wrong), so 26 logs for walls of 23 are replaced before the planks take them. Unset: raw items are crafting
+   * stock (rule of 2026-10-04); a `means` fetch ignores it (plan 2026-11-14 Task 8).
+   */
+  readonly reserve?: readonly ItemCount[];
+  /**
+   * The fetch makes the means of the work in hand (a tool, a table, the fill): a craft may use kept items when no
+   * replacement is near, and says so, instead of stopping with the replacement guard's sentence (plan 2026-11-14 Task 5).
+   */
+  readonly means?: true;
 }
 
-/** The `keep_items` a gathering's walk back to its crafting place carries (none when nothing is kept). */
-const keepOf = (context: GatherContext): Record<string, unknown> => (context.walkKeep !== undefined && context.walkKeep.length > 0 ? { keep_items: context.walkKeep } : {});
+/**
+ * A gathering's walk (to a seen block, to dry ground, home, to a station) with `input`: it carries `walkKeep` (`gatherMaterials`
+ * adds the fetched items by name) as `keep_items` and `reserve_items`, and on no path is walked once more by the one retry rule
+ * ({@link walkRelaxing}, `walkCounts`: the bag when the fetch began). Null when it arrived, else the failure or stop.
+ */
+async function keptWalk(context: GatherContext, input: Record<string, unknown>, rationale: string): Promise<GatherResult | null> {
+  const walk = (keep: WalkKeep) => act(context, "navigate", { ...input, ...walkKeepInput(keep) }, rationale);
+  return walkRelaxing(context, context.walkKeep ?? NO_KEEP, context.walkCounts ?? [], walk, (result) => result?.status === "failed" && result.detail.startsWith("[NAVIGATION_STOPPED]"));
+}
 
 export type GatherResult =
-  | { readonly status: "done"; readonly detail: string }
+  /** `usedOwn`: "used 3 oak_planks of what you carried" when crafts took items the character carried and none was near to replace them. */
+  | { readonly status: "done"; readonly detail: string; readonly usedOwn?: string }
   | { readonly status: "failed"; readonly detail: string }
   | { readonly status: "stopped" };
 
@@ -176,12 +198,21 @@ export async function gatherMaterials(
 ): Promise<GatherResult> {
   const knowledge = newKnowledge(context.toolsLost);
   const owed = context.owed?.() ?? [];
-  const inventory = owed.length === 0 ? [] : (await context.runtime.status()).inventory;
+  const inventory = (await context.runtime.status()).inventory;
   const made = await madeItems(context.runtime, keep, knowledge);
-  const kept = keptWithOwed(made, heldCounts(owed, inventory));
+  // The raw items the unfinished house's bill names are kept like made ones, up to their count (a means fetch keeps none: it makes the tool the work needs).
+  const reserve = context.means === true ? [] : context.reserve ?? [];
+  const kept = keptWithOwed(made, heldWithReserve(owed, reserve, inventory));
   // Off the scaffold list only a kind with no spare: 64 carried with 2 owed still bridges.
   const items = [...bill, ...made].map((entry) => entry.item).concat([...heldKinds(owed, inventory)]);
-  return withMaterialsKept(context.runtime, items, () => gatherRounds(context, bill, purpose, home, kept, knowledge));
+  // Every walk of the fetch keeps these by name (the runtime's fallback scaffold ignores the policy list, so `withMaterialsKept` alone does not cover it).
+  const walking = { ...context, reserve, walkKeep: mergedKeep(context.walkKeep ?? NO_KEEP, { items, reserve: [], scaffold: [] }), walkCounts: bagCounts(inventory) };
+  return withMaterialsKept(context.runtime, items, () => gatherRounds(walking, bill, purpose, home, kept, knowledge));
+}
+
+/** The counts of what `inventory` holds, one entry per item. */
+function bagCounts(inventory: Stacks): ItemCount[] {
+  return [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carried(inventory, item) }));
 }
 
 /**
@@ -205,7 +236,8 @@ export async function withMaterialsKept<T>(runtime: BotRuntime, items: readonly 
   }
 }
 
-// Raw materials she carries are what crafting uses, as a player's would (except what an open trade owes: keptWithOwed): only what was made (planks, stairs, glass)
+// Raw materials she carries are what crafting uses, as a player's would (except what an open trade owes: keptWithOwed, and
+// what an unfinished house's bill names: `GatherContext.reserve`): only what was made (planks, stairs, glass)
 // is kept from the crafts (live 2026-10-04: Tom's 24 logs, gathered for his house, were "used up" by its planks and
 // gathered again 24 rounds in a row; the furnace was planned from deepslate past his 20 cobblestone). An item the
 // game data does not know (a modded one, named "unknown") cannot be made again either (live 2026-10-07: "unknown is
@@ -218,9 +250,23 @@ async function madeItems(runtime: BotRuntime, keep: readonly ItemCount[], knowle
     .filter((entry): entry is ItemCount => entry !== null);
 }
 
-/** The bag without what open trades owe, read from the live `owed()` each round (a trade may have ended): the furnace burns and smelts only this. */
+/**
+ * What open trades owe and what the house's bill reserves, as far as it is carried, one count per item (the sum, capped at
+ * what is carried: blocks given in a trade leave the bag, and the house still needs its own): what crafting never spends and
+ * the furnace never burns.
+ */
+function heldWithReserve(owed: readonly OwedItem[], reserve: readonly ItemCount[], inventory: Stacks): Map<string, number> {
+  const held = heldCounts(owed, inventory);
+  for (const { item, count } of reserve) {
+    const have = Math.min(carried(inventory, item), count + (held.get(item) ?? 0));
+    if (have > 0) held.set(item, have);
+  }
+  return held;
+}
+
+/** The bag without what open trades owe and the bill reserves, read from the live `owed()` each round (a trade may have ended): the furnace burns and smelts only this. */
 function freeBag(context: GatherContext, inventory: Stacks): Stacks {
-  return freeStacks(inventory, heldCounts(context.owed?.() ?? [], inventory));
+  return freeStacks(inventory, heldWithReserve(context.owed?.() ?? [], context.reserve ?? [], inventory));
 }
 
 /** `kept` plus what open trades owe, raw or made (a get-back holds every trade's items, its own included): crafting never spends it, a craft that did is fetched again. */
@@ -262,8 +308,9 @@ async function roundStep(
   const job = plan.smelt.find((candidate) => smeltReady(candidate, freeBag(context, inventory)));
   // A kept item is replaced before the craft that uses it: the replacement alone, then the asked items (a single batch
   // would plan the asked item from the stock carried again). Tables and tools above keep their own path: a tool is the means to fetch.
+  // A fetch that is itself the means of the work in hand (`means`) uses kept items when none can be got, and says so (`settleStep`).
   const crafts = guard.allowed(ready);
-  if (crafts.length > 0) return (await guard.replaceFirst(context.runtime, crafts, inventory)) ?? craftAtHome(context, crafts, purpose, site, spent);
+  if (crafts.length > 0) return (context.means === true ? null : await guard.replaceFirst(context.runtime, crafts, inventory)) ?? craftAtHome(context, crafts, purpose, site, spent);
   if (job !== undefined) return smeltAtHome(context, job, purpose, site);
   return `cannot work out how to get ${describeMaterials(missing)}: nothing left to gather, craft or smelt`;
 }
@@ -282,7 +329,9 @@ interface Run {
 
 function finish(run: Run, detail: string): GatherResult {
   const { usedOwn } = run;
-  return { status: "done", detail: usedOwn.length === 0 ? detail : `${detail}; used ${describeMaterials(usedOwn)} of what you carried (none near to replace it)` };
+  if (usedOwn.length === 0) return { status: "done", detail };
+  const used = `used ${describeMaterials(usedOwn)} of what you carried`;
+  return { status: "done", detail: `${detail}; ${used} (none near to replace it)`, usedOwn: used };
 }
 
 /** A failure while a kept item is still short says what the asked craft would take first, the failure's own words as the reason. */
@@ -930,7 +979,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     const why = `Go to the ${block} I saw ${describeWay(here, seen)}, for ${purpose}.`;
     // Caves under the ground, trees over it: the walk is to the ground nearest her own height (as `explore` does).
     context.heading?.({ x: seen.x, z: seen.z });
-    const there = await act(context, "navigate", { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
+    const there = await keptWalk(context, { x: seen.x, z: seen.z, near_y: Math.floor(here.y), range: 12 }, why);
     context.heading?.(null);
     if (there !== null) {
       // A place that could not be reached is not offered again by the next round.
@@ -1038,8 +1087,8 @@ export function describeWay(from: { readonly x: number; readonly z: number }, to
 async function goHome(context: GatherContext, home: Position, purpose: string, work: string): Promise<GatherResult | null> {
   const here = (await context.runtime.status()).position;
   if (Math.hypot(here.x - home.x, here.y - home.y, here.z - home.z) <= HOME_RANGE) return null;
-  const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1, ...keepOf(context) };
-  return act(context, "navigate", target, `Go back to the site to ${work} for ${purpose}.`);
+  const target = { x: Math.floor(home.x), y: Math.floor(home.y), z: Math.floor(home.z), range: 1 };
+  return keptWalk(context, target, `Go back to the site to ${work} for ${purpose}.`);
 }
 
 /** Where crafting and smelting happen: `home` at first, the dry ground she moved to when no workstation fit there. */
@@ -1072,7 +1121,7 @@ async function withRoomForStation(context: GatherContext, site: Site, run: () =>
   const land = await context.runtime.nearestLand(here).catch(() => null);
   if (land === null) return first;
   const why = "Step onto dry, open ground to set the workstation down.";
-  const moved = await act(context, "navigate", { x: land.x, z: land.z, near_y: Math.floor(here.y), range: 4 }, why);
+  const moved = await keptWalk(context, { x: land.x, z: land.z, near_y: Math.floor(here.y), range: 4 }, why);
   if (moved !== null) return first;
   site.home = (await context.runtime.status()).position;
   return run();
@@ -1121,7 +1170,9 @@ export async function walkToStation(context: GatherContext, block: "crafting_tab
   // Coordinates only: the result is spread into `navigate` and `smelt_item` inputs, which refuse unknown keys (live
   // 2026-10-03: the block's `name` made every walk to a crafting table fail validation).
   const station = { x: found.x, y: found.y, z: found.z };
-  const outcome = await context.body.act("navigate", { ...station, range: 2, ...keepOf(context) }, `Walk to the ${block.replaceAll("_", " ")} close by to use it.`, { signal: context.signal });
+  const why = `Walk to the ${block.replaceAll("_", " ")} close by to use it.`;
+  const walk = (keep: WalkKeep) => context.body.act("navigate", { ...station, range: 2, ...walkKeepInput(keep) }, why, { signal: context.signal });
+  const outcome = await walkRelaxing(context, context.walkKeep ?? NO_KEEP, context.walkCounts ?? [], walk, isNoPath);
   return outcome.status === "succeeded" ? station : null;
 }
 

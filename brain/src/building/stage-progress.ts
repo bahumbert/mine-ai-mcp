@@ -1,6 +1,6 @@
 // A house is built stage by stage: what a stage asks the bot to carry now, and what the step tells the model when it stops
 // between two stages (spec 2026-11-09-house-templates section 4). Pure over a `HousePlan`, besides the one box read.
-import { areaKey, BodyDown, type BotRuntime } from "../runtime-client.ts";
+import { areaKey, BodyDown, type BotRuntime, type ItemCount } from "../runtime-client.ts";
 import { billOfMaterials, cellsCountedOnce, describeMaterials, type MaterialCount, type WorldCell } from "./blueprint.ts";
 import type { HousePlan } from "./plan.ts";
 import { resumeStep, type Stage } from "./templates.ts";
@@ -83,17 +83,15 @@ export function scaffoldNeed(cells: readonly WorldCell[], walkingY: number, inve
 }
 
 /**
- * The kinds a walk must not spend, because the cells still to place need them to stand on (`navigate`'s `keep_items`: the
- * route may not lay them, its fallback scaffold included): the admitted kinds besides `kept` when a placed cell is
- * `BUILD_REACH` or more above `walkingY` and every carried admitted block is needed (the carried total is at most the
- * count {@link scaffoldNeed} gives for none carried); `[]` otherwise: a surplus may bridge, as `gatherMaterials` keeps
- * "only a kind with no spare", and nothing is asked when no cell is out of reach or the policy is unread.
+ * What a walk must keep of each kind the cells still to place need to stand on (`navigate`'s `reserve_items`: the route lays
+ * a reserved kind only while it carries more than the count, its fallback scaffold included): every admitted kind besides
+ * `kept` at the count {@link scaffoldNeed} gives for none carried, whatever is carried (5 dirt for a count of 4 keep 4: the
+ * spare may bridge; a kind carried later on the same walk is kept too). `[]` when no placed cell is `BUILD_REACH` or more above
+ * `walkingY`, the policy is unread, or every admitted kind is one of `kept`.
  */
-export function scaffoldKinds(cells: readonly WorldCell[], walkingY: number, inventory: readonly { readonly name: string; readonly count: number }[], scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): readonly string[] {
+export function scaffoldReserve(cells: readonly WorldCell[], walkingY: number, scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): ItemCount[] {
   const needed = scaffoldNeed(cells, walkingY, [], scaffoldBlocks, kept);
-  if (needed === null) return [];
-  const carried = inventory.filter((stack) => needed.admitted.includes(stack.name)).reduce((sum, stack) => sum + stack.count, 0);
-  return carried > needed.count ? [] : needed.admitted;
+  return needed === null ? [] : needed.admitted.map((item) => ({ item, count: needed.count }));
 }
 
 /** What a stage lacks to be built now: items not carried, and blocks to stand on. */

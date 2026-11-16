@@ -896,6 +896,27 @@ test("get_items walks back keeping what it fetched: the walk back does not lay t
   assert.deepEqual(walks[0]!.input.keep_items, ["dirt"]);
 });
 
+test("a walk back that finds no way while the fetched items are kept is walked again, keeping by count what was carried before (plan 2026-11-14 Task 6)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: "dirt", count: 5 }] };
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "collect_block") runtime.snapshot = { ...runtime.snapshot, position: { x: 40.5, y: 64, z: 0.5 } };
+    if (tool === "navigate" && input.keep_items !== undefined) runtime.failNext.navigate = { error: "[NAVIGATION_STOPPED] Pathfinder stopped: no path." };
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep({ skill: "get_items", items: [{ item: "dirt", count: 4 }] }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.match(result.status === "done" ? result.detail : "", /^got 4 dirt, now carrying 9 dirt/u, "walked back at the second try: no 'could not walk back'");
+  const walks = runtime.submitted.filter((call) => call.tool === "navigate");
+  assert.equal(walks.length, 2);
+  assert.deepEqual(walks[0]!.input.keep_items, ["dirt"]);
+  assert.equal(walks[1]!.input.keep_items, undefined, "no name kept the second time");
+  assert.deepEqual(walks[1]!.input.reserve_items, [{ item: "dirt", count: 5 }], "the 5 carried before the fetch stay kept; the 4 fetched may bridge");
+});
+
 /** A `get_items` of 3 oak_log whose collect moves the bot to `ends` and fails (or aborts `controller`), from {0.5, 64, 0.5}. */
 async function failedFetchEndingAt(ends: { x: number; y: number; z: number }, change: { dimension?: string; abort?: AbortController } = {}) {
   const runtime = new FakeRuntime();
@@ -1203,7 +1224,8 @@ test("a tool worn out while leveling is made again and the batch done again, not
   runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 4,64,3; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
   const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
   assert.deepEqual(result, { status: "done", detail: "leveled 5x4 at y 64: dug 1, filled 0" });
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft oak_planks at table", "craft wooden_shovel at table", "build_structure"]);
+  // The tool refetch is a means fetch (plan 2026-11-14 Task 5): the shovel is crafted at once, the planks it took made again after.
+  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "build_structure" || call.tool === "craft_item").map(describeCall), ["build_structure", "craft wooden_shovel at table", "craft oak_planks at table", "build_structure"]);
 });
 
 test("a shovel that breaks with no digging left in the level is not made again, the filling goes on", async () => {
@@ -1265,6 +1287,62 @@ test("a crafting table close by is walked to and used; a far one is not, her own
   none.world.set("40,64,3", "crafting_table");
   assert.equal((await runStep({ skill: "get_items", items: [{ item: "wooden_pickaxe", count: 1 }] }, contextFor(none))).status, "done");
   assert.deepEqual(none.submitted.filter((call) => call.tool === "navigate" || call.tool === "craft_item").map((call) => call.tool === "navigate" ? `walk to ${call.input.x} ${call.input.z}` : describeCall(call)), ["walk to 40 3", "craft wooden_pickaxe"]);
+});
+
+// Plan 2026-11-14-house-build-fixes-2 Task 5 (ticket 2): the fetches that make the means of the work in hand (the table of
+// `craft_item`, the levelling's tools and fill, the hole fill) go on with kept items when no log is near, and say so; the
+// model's own `get_items` still stops with the replacement sentence.
+const NO_LOG_NEAR = "[NO_TARGET_IN_RANGE] no oak_log within 64 blocks of you";
+
+test("craft_item's table fetch is a means fetch: the table is made from the planks carried when no log is near", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 10 }] };
+  runtime.failNext.craft_item = { error: "[WORKSTATION_NOT_CARRIED] crafting_table is not carried" };
+  runtime.failures.collect_block = NO_LOG_NEAR;
+  const result = await runStep({ skill: "craft_item", item: "oak_door", count: 3 }, contextFor(runtime));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.ok(runtime.submitted.map(describeCall).includes("craft crafting_table"), "the table was crafted from the kept planks");
+});
+
+test("the levelling's tools are a means fetch: the shovel is made from the planks carried when no log is near", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 8 }, { name: "crafting_table", count: 1 }] };
+  runtime.world.set("2,64,2", "gold_block");
+  runtime.world.set("6,64,5", "gold_block");
+  runtime.world.set("4,64,3", "grass_block");
+  runtime.failures.collect_block = NO_LOG_NEAR;
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), contextFor(runtime, { areas: [] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.ok(runtime.submitted.map(describeCall).some((call) => call.startsWith("craft wooden_shovel")), "the shovel was crafted from the kept planks");
+});
+
+test("the hole fill is a means fetch: a fill crafted from the planks carried goes on when no log is near", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: "oak_planks", count: 12 }, { name: "crafting_table", count: 1 }] };
+  runtime.world.set("2,64,2", "gold_block");
+  runtime.world.set("6,64,5", "gold_block");
+  runtime.world.set("5,63,4", "air");
+  runtime.failures.collect_block = NO_LOG_NEAR;
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block", fill: "oak_fence" }), contextFor(runtime, { areas: [] }));
+  assert.equal(result.status, "done", JSON.stringify(result));
+  assert.deepEqual(builds(runtime).flatMap((call) => call.blocks).map((cell) => cell.block_name), ["oak_fence"]);
+});
+
+test("the get_items step is not a means fetch: the same craft from the planks carried stops with the sentence", async () => {
+  const runtime = new FakeRuntime();
+  runtime.recipes = HOUSE_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 12 }, { name: "crafting_table", count: 1 }] };
+  runtime.failures.collect_block = NO_LOG_NEAR;
+  const result = await runStep({ skill: "get_items", items: [{ item: "oak_fence", count: 3 }] }, contextFor(runtime));
+  assert.equal(result.status, "failed");
+  assert.match(result.status === "failed" ? result.detail : "", /^oak_fence would be crafted from \d+ of the oak_planks you carry/u);
 });
 
 test("level_area says where markers out of range are, so the next step can walk there", async () => {
@@ -1865,7 +1943,9 @@ test("improve_house keeps its bill and the roof's scaffold on its walk to the ho
   assert.equal(walks.length, 1);
   const keep = walks[0]!.input.keep_items as string[];
   assert.ok(keep.includes("spruce_slab"), `the bill's kinds (${keep.join(", ")})`);
-  assert.ok(DEFAULT_POLICY.scaffoldBlocks!.every((kind) => keep.includes(kind)), "the admitted kinds: the 4 dirt are all the roof's count");
+  // Plan 2026-11-14 Task 6: the scaffold is kept by count (the roof is 5 above the door: 4), not by name.
+  assert.deepEqual(walks[0]!.input.reserve_items, DEFAULT_POLICY.scaffoldBlocks!.map((item) => ({ item, count: 4 })), "every admitted kind at the roof's count of 4");
+  assert.ok(DEFAULT_POLICY.scaffoldBlocks!.every((kind) => !keep.includes(kind)), "no admitted kind is kept by name");
 });
 
 test("improving the walls sends the style's blocks for them, remembers the roof as still temporary, then the roof finishes it", async () => {

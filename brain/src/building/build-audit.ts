@@ -25,6 +25,20 @@ export function refusedCells(result: Readonly<Record<string, unknown>> | undefin
   return parsed.data.structure.left.filter((group) => group.reason === "refused").flatMap((group) => group.named.filter((cell) => cell.cause === "policy").map(({ x, y, z }) => ({ x, y, z })));
 }
 
+const leftGroupsSchema = z.object({ structure: z.object({ left: z.array(z.object({ reason: z.string(), named: z.array(z.object({ cause: z.string().optional() })) })) }) });
+
+/**
+ * Whether a failed `build_structure` ended for want of a route: the run's last routes found no way (its cells left
+ * `not_reached`, still workable), or a cell was refused for cause `route`. The audit's own groups say it; the error text
+ * is not read. A call sent with a `reserve_items` that ends so is sent once more without it (plan 2026-11-14 Task 7b).
+ */
+export function endedForWantOfRoute(error: string | null | undefined, result: Readonly<Record<string, unknown>> | undefined): boolean {
+  if (error === undefined || error === null ||!(error.startsWith("[BUILD_STOPPED]") || error.startsWith("[BUILD_INCOMPLETE]"))) return false;
+  const parsed = leftGroupsSchema.safeParse(result);
+  if (!parsed.success) return false;
+  return parsed.data.structure.left.some((group) => group.reason === "not_reached" || group.named.some((cell) => cell.cause === "route"));
+}
+
 /** How many cells a `build_structure` audit left, when every one of them was refused (0 when some other reason is in it). */
 export function onlyRefused(result: Readonly<Record<string, unknown>> | undefined): number {
   const parsed = refusedAuditSchema.safeParse(result);

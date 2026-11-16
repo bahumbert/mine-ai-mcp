@@ -6,14 +6,15 @@ import { COMPASS_HEADINGS, describeStep, dropEntries, type Step } from "./action
 import { billOfMaterials, describeMaterials, type BlockRole, type MaterialCount } from "./building/blueprint.ts";
 import { checkMaterials, improvement } from "./building/materials.ts";
 import { abandonHouse } from "./building/abandon-house.ts";
-import { builtBefore, onlyRefused, refusedCells, sameCell, type Cell } from "./building/build-audit.ts";
+import { builtBefore, endedForWantOfRoute, onlyRefused, refusedCells, sameCell, type Cell } from "./building/build-audit.ts";
 import { houseBox } from "./building/house-site.ts";
 import { replacedHouseNote, siteRefusal } from "./building/new-site.ts";
 import { builderStand, catalogueLine, chooseSite, planTemplate, siteAt, type HousePlan, type Materials, type Site } from "./building/plan.ts";
-import { billFrom, buildAgain, describeShortfall, fetchClause, missingForStage, scaffoldKinds, scaffoldNeed, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
+import { billFrom, buildAgain, describeShortfall, fetchClause, missingForStage, scaffoldNeed, scaffoldReserve, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
 import { classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
-import type { Body } from "./body.ts";
-import { awayFrom, backStep, failedFetchNote, navigateInput, scaffoldKindsBetween, stageScaffoldKinds, walkKeeping } from "./walks.ts";
+import type { ActOutcome, Body } from "./body.ts";
+import { awayFrom, backStep, failedFetchNote, houseReserve, navigateInput, scaffoldReserveBetween, stageScaffoldReserve, walkKeeping } from "./walks.ts";
+import { isNoPath, mergedKeep, NO_KEEP, walkKeepInput, walkRelaxing, type WalkKeep } from "./walk-keep.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
 import { bestTool, consumedBy, FULL_INVENTORY, junkHint, junkStacks, KEPT_KINDS, kindOf } from "./inventory-room.ts";
@@ -25,9 +26,9 @@ import { billShortfall, carriedOf, heldCounts, heldKinds, noSpareFact, owedSente
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
-import { lostToolClass, ToolLosses, toolToMake } from "./building/tool-loss.ts";
+import { lostToolClass, remadeClause, ToolLosses, toolToMake } from "./building/tool-loss.ts";
 import { describeOverlaps, earlierProtections, LEVELING_LABEL, newSiteNote, overlapsOf, ownLevelingOver } from "./protected-areas.ts";
-import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
+import { areaKey, errorCode, type BotRuntime, type BotSnapshot, type CarriedStack, type ForegroundTool, type FoundBlock, type ItemCount, type NearbyPlayer, type Position, type ProtectedArea } from "./runtime-client.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -142,7 +143,8 @@ export type FailReason = "items_gone" | "not_taken" | "no_talk" | "did_not_come"
 
 export type SkillResult =
   /** `taken`: for a give, how many items the recipient picked up (absent when the runtime named no recipient). */
-  | { readonly status: "done"; readonly detail: string; readonly taken?: number }
+  /** `usedOwn`: for a fetch, "used 3 oak_planks of what you carried" when its crafts took carried items and none was near to replace them. */
+  | { readonly status: "done"; readonly detail: string; readonly taken?: number; readonly usedOwn?: string }
   | { readonly status: "failed"; readonly detail: string; readonly reason?: FailReason }
   /** Aborted by the agent (a new order or "stop"); nothing to report. */
   | { readonly status: "stopped" };
@@ -158,8 +160,7 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
     switch (step.skill) {
       case "follow_player": return await follow(context, step.player, step.distance, step.minutes);
       case "go_to_player": return await come(context, step.player);
-      case "go_to":
-        return await once(context, "navigate", { x: step.x, y: step.y, z: step.z, range: GO_TO_RANGE }, why, `reached ${step.x} ${step.y} ${step.z}`);
+      case "go_to": return await goTo(context, step, why);
       case "explore": return await explore(context, step, why);
       case "collect_block": {
         // Within the fetch range, like get_items: a trip is a go_to of its own (spec 2026-10-03 fetch-range).
@@ -169,7 +170,11 @@ export async function runStep(step: Step, context: SkillContext): Promise<SkillR
       case "give_item": return await give(context, step.player, step.item, step.count);
       case "drop_item": return await dropItems(context, step, why);
       case "craft_item": return await craftItem(context, step, why);
-      case "get_items": return await getItems(context, step.items);
+      case "get_items": {
+        // An unfinished house's bill is kept from the crafts as well as from the walks: the logs of its walls are not planks' stock.
+        const house = await houseReserve(context);
+        return await getItems(context, step.items, { walkKeep: house.keep, reserve: house.bill });
+      }
       // No refusal from the bar here: golden apples and chorus fruit are edible when it is full, so the game answers.
       case "eat": return await eat(context, step.food, why);
       case "equip": return await once(context, "equip", { items: [{ item_name: step.item }] }, why, `equipped ${step.item}`);
@@ -281,6 +286,18 @@ async function once(context: SkillContext, tool: ForegroundTool, input: Record<s
   return { status: "failed", detail: outcome.error ?? `${tool} ${outcome.status}` };
 }
 
+/** The model's own walk: it keeps an unfinished house's blocks (`houseReserve`), and on no path is walked once more by the one retry rule (plan 2026-11-14 Task 7b, spec open choice 4). */
+async function goTo(context: SkillContext, step: Extract<Step, { skill: "go_to" }>, why: string): Promise<SkillResult> {
+  const outcome = await walkKeeping(context, { x: step.x, y: step.y, z: step.z }, why, (await houseReserve(context)).keep, [], GO_TO_RANGE);
+  if (context.signal.aborted) return { status: "stopped" };
+  return outcome.status === "succeeded" ? { status: "done", detail: `reached ${step.x} ${step.y} ${step.z}` } : { status: "failed", detail: outcome.error ?? `navigate ${outcome.status}` };
+}
+
+/** An explore leg's walk with the house's blocks kept (`keep`), walked once more by the one retry rule when that leaves no path. */
+function exploreWalk(context: SkillContext, input: Record<string, unknown>, why: string, keep: WalkKeep): Promise<ActOutcome> {
+  return walkRelaxing(context, keep, [], (kept) => context.body.act("navigate", { ...input, ...walkKeepInput(kept) }, why, { signal: context.signal }), isNoPath);
+}
+
 /** Eats the named food, unless an agreed trade owes, or a trade that ended holds, all of what is carried of it. */
 async function eat(context: SkillContext, food: string, why: string): Promise<SkillResult> {
   const owed = context.owed?.() ?? [];
@@ -294,13 +311,14 @@ async function eat(context: SkillContext, food: string, why: string): Promise<Sk
  * carried, one is made first (run 12: "needs inventory room to store 1 stone_shovel", "No crafting_table is carried").
  */
 async function craftItem(context: SkillContext, step: Extract<Step, { skill: "craft_item" }>, why: string): Promise<SkillResult> {
-  await walkToStation(context, "crafting_table");
+  // The walk to a table keeps an unfinished house's blocks (the table may be far: it lays what it needs to cross).
+  await walkToStation({ ...context, walkKeep: (await houseReserve(context)).keep }, "crafting_table");
   const run = () => once(context, "craft_item", { items: [{ item_name: step.item, count: step.count }] }, why, `crafted ${step.count} ${step.item}`);
   const first = await run();
   if (first.status !== "failed") return first;
   if (FULL_INVENTORY.test(first.detail) && (await makeRoom(context, await consumedBy(context.runtime, "craft_item", { items: [{ item_name: step.item, count: step.count }] })))) return run();
   if (/WORKSTATION_NOT_CARRIED/u.test(first.detail)) {
-    const table = await getItems(context, [{ item: "crafting_table", count: 1 }], `crafting ${step.item}`);
+    const table = await getItems(context, [{ item: "crafting_table", count: 1 }], { purpose: `crafting ${step.item}`, means: true });
     if (table.status === "stopped") return table;
     return table.status === "done" ? run() : { status: "failed", detail: `${first.detail}; making a crafting table failed: ${table.detail}` };
   }
@@ -490,23 +508,27 @@ export async function giveTo(context: SkillContext, player: string, item: string
  * Gets `count` more of each item like a player (`gathering.ts`), then comes back to where it started: fetching is a
  * basic function; when and what to fetch is the model's choice (ADR-011).
  */
-async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], purpose = `getting ${describeMaterials(items)}`, walkKeep: readonly string[] = []): Promise<SkillResult> {
+async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], options: { readonly purpose?: string; readonly walkKeep?: WalkKeep; readonly reserve?: readonly ItemCount[]; readonly means?: true } = {}): Promise<SkillResult> {
+  const { purpose = `getting ${describeMaterials(items)}`, walkKeep = NO_KEEP, reserve, means } = options;
   const { position: start, inventory, dimension: startDimension } = await context.runtime.status();
   const targets = items.map(({ item, count }) => ({ item, count: carriedOf(inventory, item) + count }));
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
   const keep = [...new Set(inventory.map((stack) => stack.name))].map((item) => ({ item, count: carriedOf(inventory, item) }));
   // What it is all for, so a line in chat says why (live 2026-10-02: "Gather 21 dirt for getting 1 stone_shovel, 21 dirt").
-  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs), walkKeep }, targets, purpose, start, keep);
+  const gathered = await gatherMaterials({ ...context, makeRoom: (inputs) => makeRoom(context, inputs), walkKeep, ...(reserve !== undefined && { reserve }), ...(means !== undefined && { means }) }, targets, purpose, start, keep);
   const after = await context.runtime.status();
   if (gathered.status === "failed") return { status: "failed", detail: `${gathered.detail}${failedFetchNote(start, startDimension, after)}` };
   if (gathered.status !== "done") return gathered;
   if (awayFrom(start, after.position)) {
-    const back = await once(context, "navigate", { ...navigateInput(start, GO_TO_RANGE), keep_items: [...new Set([...items.map(({ item }) => item), ...walkKeep])] }, "Come back to where I started fetching.", "back");
+    // The fetched items are kept by name; one retry rule (`relaxedKeep`) when that leaves no way: what was carried before the fetch stays kept by count.
+    const kept = mergedKeep(walkKeep, { items: items.map(({ item }) => item), reserve: [], scaffold: [] });
+    const walkBack = (walkKept: WalkKeep) => once(context, "navigate", { ...navigateInput(start, GO_TO_RANGE), ...walkKeepInput(walkKept) }, "Come back to where I started fetching.", "back");
+    const back = await walkRelaxing(context, kept, keep, walkBack, (result) => result.status === "failed" && result.detail.startsWith("[NAVIGATION_STOPPED]"));
     if (back.status === "stopped") return back;
     // The items are carried: that is the fetch done; the next step walks where it needs to (live 2026-10-10 run 10: a failed fetch looped the explore).
     if (back.status === "failed") return { status: "done", detail: `got ${describeMaterials(items)}; could not walk back: ${back.detail}; ${backStep(start)} tries again` };
   }
-  return { status: "done", detail: `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})` };
+  return { status: "done", detail: `got ${describeMaterials(items)}, now carrying ${describeMaterials(targets)} (${gathered.detail})`, ...(gathered.usedOwn !== undefined && { usedOwn: gathered.usedOwn }) };
 }
 
 // The step that goes on with an unfinished house (the places, opportunities and failures that name a house say it).
@@ -582,7 +604,8 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     const stand = builderStand(plan.site);
     context.progress?.(`walking to the site of ${what} at ${at.x} ${at.y} ${at.z}`);
     const bill = remaining.map((entry) => entry.item);
-    const there = await walkKeeping(context, stand, `Walk to the site of ${what}.`, { bill, scaffold: await scaffoldKindsBetween(context, plan, { first: plan.stages[startStage]!.first, last: plan.stages.at(-1)!.last }, bill, resumed !== null) });
+    const scaffold = await scaffoldReserveBetween(context, plan, { first: plan.stages[startStage]!.first, last: plan.stages.at(-1)!.last }, bill, resumed !== null);
+    const there = await walkKeeping(context, stand, `Walk to the site of ${what}.`, { items: bill, reserve: [], scaffold }, remaining);
     if (context.signal.aborted) return { status: "stopped" };
     if (there.status !== "succeeded") return { status: "failed", detail: `could not reach the site of ${what} at ${at.x} ${at.y} ${at.z}: ${there.error ?? there.status}; ${buildAgain(plan)} tries again` };
   }
@@ -665,8 +688,9 @@ async function buildOnSite(context: SkillContext, { own, resumed, plan, remainin
     const unprepared = await prepareSite(context, { plan, what, house, remaining, regionId: protection.area.regionId });
     if (unprepared !== null) return noted(unprepared, replaced);
   }
-  const stopped = await buildStages(context, { plan, what, resumed, house, remaining });
-  if (stopped !== null) return noted(stopped, replaced);
+  const remadeNotes: PartsOptions["remadeNotes"] = [];
+  const stopped = await buildStages(context, { plan, what, resumed, house, remaining, remadeNotes });
+  if (stopped !== null) return noted(stopped, `${replaced}${remadeClause(remadeNotes)}`);
   house.forget();
   const { door, facing } = plan.site;
   const roof = plan.roofTop;
@@ -679,7 +703,7 @@ async function buildOnSite(context: SkillContext, { own, resumed, plan, remainin
       ? { template: template.id, family: template.family, door, facing, materials: plan.materials }
       : { size: template.classic.size, style: template.classic.style, door, facing, materials: plan.materials },
   });
-  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}${replaced}` };
+  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}${replaced}${remadeClause(remadeNotes)}` };
 }
 
 /**
@@ -727,11 +751,12 @@ async function prepareSite(context: SkillContext, site: { plan: HousePlan; what:
  * next. A resumed house bills its current stage by the cells not yet right. Null once every stage is built and the
  * final check of all parts has passed.
  */
-async function buildStages(context: SkillContext, run: { plan: HousePlan; what: string; resumed: UnfinishedHouse | null; house: HouseRecord; remaining: readonly MaterialCount[] }): Promise<SkillResult | null> {
-  const { plan, what, resumed, house, remaining } = run;
+async function buildStages(context: SkillContext, run: { plan: HousePlan; what: string; resumed: UnfinishedHouse | null; house: HouseRecord; remaining: readonly MaterialCount[]; remadeNotes: PartsOptions["remadeNotes"] }): Promise<SkillResult | null> {
+  const { plan, what, resumed, house, remaining, remadeNotes } = run;
   const start = resumed === null ? 0 : stageAt(plan, resumed.part);
   const options = {
     reserved: remaining,
+    remadeNotes,
     leave: (part: number, refused?: readonly Cell[]) => house.leave(part, true, refused),
     refusedBefore: resumed?.refused,
     again: context.building === undefined ? "" : `; ${buildAgain(plan)} resumes it`,
@@ -744,14 +769,19 @@ async function buildStages(context: SkillContext, run: { plan: HousePlan; what: 
     const cells = await stageCellsNow(plan, stage, index === start && resumed !== null ? context.runtime : null);
     const status = await context.runtime.status();
     const { missing, owedNote } = billShortfall(billOfMaterials(cells), status.inventory, context.owed?.() ?? []);
-    const scaffold = scaffoldNeed(cells, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, remaining.map((entry) => entry.item));
+    const kept = remaining.map((entry) => entry.item);
+    const scaffold = scaffoldNeed(cells, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, kept);
     if (missing.length > 0 || scaffold !== null) {
       const shortfall = { missing, owedNote, scaffold };
       return index === start
         ? { status: "failed", detail: missingForStage(plan, index, what, shortfall, { fresh: false }) }
         : { status: "done", detail: stagesBuilt(plan, start, index, shortfall) };
     }
-    const stopped = await buildParts(context, plan, what, { ...options, from: stage.first, to: stage.last, audit: false });
+    // A stage that stands on no scaffold of its own keeps the later stages' scaffold; one that needs its own uses what it has (its check was made alone).
+    const reserve = scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, kept).length > 0 || index === plan.stages.length - 1
+      ? []
+      : await scaffoldReserveBetween(context, plan, { first: plan.stages[index + 1]!.first, last: plan.stages.at(-1)!.last }, kept, false);
+    const stopped = await buildParts(context, plan, what, { ...options, from: stage.first, to: stage.last, audit: false, reserve });
     if (stopped !== null) return stopped;
   }
   // The final check of every part: anything a later stage disturbed, or dug out since, is put back before the house counts as built.
@@ -783,7 +813,7 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: `missing ${describeShortfall({ missing, scaffold })} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): ${fetchClause({ missing, scaffold })}, then improve again` };
   const { x, y, z } = house.door;
   context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
-  const there = await walkKeeping(context, builderStand(after.site), `Walk to ${what}.`, { bill: bill.map((entry) => entry.item), scaffold: scaffoldKinds(changed, house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item)) });
+  const there = await walkKeeping(context, builderStand(after.site), `Walk to ${what}.`, { items: bill.map((entry) => entry.item), reserve: [], scaffold: scaffoldReserve(changed, house.door.y, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item)) }, bill);
   if (context.signal.aborted) return { status: "stopped" };
   if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
   return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, template, roles, after, rest, bill, kind, what }));
@@ -812,12 +842,13 @@ async function improveOnSite(context: SkillContext, { place, house, template, ro
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect ${what}: ${protection.error}` };
   noteArea(context, protection.area);
-  const stopped = await buildParts(context, after, what, { reserved: bill, leave: () => undefined, again: "; improve your house again" });
-  if (stopped !== null) return stopped;
+  const remadeNotes: PartsOptions["remadeNotes"] = [];
+  const stopped = await buildParts(context, after, what, { reserved: bill, leave: () => undefined, again: "; improve your house again", remadeNotes });
+  if (stopped !== null) return noted(stopped, remadeClause(remadeNotes));
   context.remember?.({ ...place, house: { ...house, materials: rest } });
   const swapped = roles.map((role) => template.palette[role] ?? "nothing"); // a role the house has no block for has nothing to swap back
   const still = Object.entries(rest).map(([role, block]) => `${role} ${block}`).join(", ");
-  return { status: "done", detail: `improved ${what}: ${roles.join(", ")} now ${swapped.join(", ")}${still === "" ? "" : `; still temporary: ${still}`}` };
+  return { status: "done", detail: `improved ${what}: ${roles.join(", ")} now ${swapped.join(", ")}${still === "" ? "" : `; still temporary: ${still}`}${remadeClause(remadeNotes)}` };
 }
 
 /** What stops {@link buildParts} short, and what it tells the model. */
@@ -835,8 +866,23 @@ interface PartsOptions {
   /** The parts (batch indexes, inclusive) built in the first pass: a stage's (default: all of them; `to` below `from`: none). */
   readonly from?: number;
   readonly to?: number;
+  /** Blocks the routes of the first pass may place only while more are carried (`build_structure`'s `reserve_items`: the scaffold a later stage stands on). A call that ends for want of a route is sent once more without it. */
+  readonly reserve?: readonly { readonly item: string; readonly count: number }[];
   /** Whether the second pass over every part, the final check, follows (default: yes; a stage that is not the last one has none). */
   readonly audit?: boolean;
+  /** The tools made again from carried items (none near to replace them) in the whole step: the step's caller adds them to its result (`remadeClause`). */
+  readonly remadeNotes: { readonly item: string; readonly note: string }[];
+}
+
+/**
+ * One part's `build_structure` call with `reserve` as `reserve_items` (the scaffold a later stage stands on). A call with a
+ * reserve that ends for want of a route is sent once more without it: the stage goes on, and the next stage's check says what is short.
+ */
+async function sendPart(context: SkillContext, input: Record<string, unknown>, reserve: readonly ItemCount[], why: string): Promise<ActOutcome> {
+  const act = (call: Record<string, unknown>) => context.body.act("build_structure", call, why, { signal: context.signal });
+  if (reserve.length === 0) return act(input);
+  const outcome = await act({ ...input, reserve_items: reserve });
+  return outcome.status !== "succeeded" && !context.signal.aborted && endedForWantOfRoute(outcome.error, outcome.result) ? act(input) : outcome;
 }
 
 /**
@@ -887,13 +933,14 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
     // What earlier parts built stays: a route to this part may not dig through it (live 2026-10-01: 11 cells dug).
     const keep = auditing ? [] : builtBefore(plan.batches, index, lastPart);
     const input = { blocks, remove_wrong_blocks: true, ...(keep.length > 0 && { keep }) };
-    const outcome = await recordingThrows(index, () => context.body.act("build_structure", input, `Build ${what}, ${part}.`, { signal: context.signal }));
+    const outcome = await recordingThrows(index, () => sendPart(context, input, auditing ? [] : options.reserve ?? [], `Build ${what}, ${part}.`));
     if (context.signal.aborted) {
       options.leave(Math.min(index, plan.batches.length - 1));
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: async (items, purpose) => getItems(context, items, purpose, await stageScaffoldKinds(context, plan, partIndex, options.reserved)) }));
+      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: async (items, purpose) => getItems(context, items, { purpose, walkKeep: { ...NO_KEEP, scaffold: await stageScaffoldReserve(context, plan, partIndex, options.reserved) }, means: true }) }));
+      if (lost.status === "remade" && lost.note !== undefined) options.remadeNotes.push({ item: lost.item, note: lost.note });
       if (lost.status === "remade") {
         index -= 1;
         continue;
@@ -1006,7 +1053,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   const firstFill = plan.phases.fillFirst[0]?.[0]?.block;
   if (firstFill !== undefined && spare(firstFill) < first) needs.push({ item: firstFill, count: first - Math.max(0, spare(firstFill)) });
   if (needs.length > 0) {
-    const got = await getItems(context, needs, `the tools${firstFill === undefined ? "" : " and fill"} to level ${what}`);
+    const got = await getItems(context, needs, { purpose: `the tools${firstFill === undefined ? "" : " and fill"} to level ${what}`, means: true });
     if (got.status !== "done") return got;
   }
   // Cells it may not touch (someone's crafting table, a block under water) are left and leveled around, as a player
@@ -1014,6 +1061,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   let left = 0;
   let done = 0;
   const toolLosses = new ToolLosses(LEVEL_TOOL_LOSSES);
+  const remadeNotes: PartsOptions["remadeNotes"] = [];
   const run = async (batches: readonly (readonly TerrainCell[])[]): Promise<SkillResult | null> => {
     for (let index = 0; index < batches.length; index += 1) {
       const batch = batches[index]!;
@@ -1026,16 +1074,11 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
       // 2026-10-02: a worn stone axe, then the shovel, each ended the whole job).
       // Only for the digging still to do (this batch is done again): a tool that breaks with none left is not made again.
       const digging = toolsDug(batches.slice(index));
-      const lost = await toolLosses.handle(outcome.error, {
-        reserved, ...(context.owed !== undefined && { owed: context.owed }),
-        inventory: async () => (await context.runtime.status()).inventory,
-        getItems: (items, purpose) => getItems(context, items, `${purpose}, leveling ${what}`),
-        onLost: (toolClass) => context.toolsLost?.add(toolClass),
-        stillNeeded: (toolClass) => (digging as ReadonlySet<string>).has(toolClass),
-      });
+      const lost = await levelingToolLoss(context, toolLosses, outcome.error, { what, reserved, digging });
       if (lost.status === "stopped" || context.signal.aborted) return { status: "stopped" };
       if (lost.status === "remade" || lost.status === "unneeded") {
         if (lost.status === "remade") context.toolsLost?.delete(lostToolClass(outcome.error)!);
+        if (lost.status === "remade" && lost.note !== undefined) remadeNotes.push({ item: lost.item, note: lost.note });
         done -= 1;
         index -= 1;
         continue;
@@ -1046,7 +1089,7 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
         continue;
       }
       const why = lost.status === "refused" || lost.status === "failed" ? `; ${lost.note}` : "";
-      return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}` };
+      return { status: "failed", detail: `leveling stopped at ${done}/${plan.batches.length}: ${outcome.error ?? outcome.status}${auditSuffix(outcome.error, outcome.result)}${why}${remadeClause(remadeNotes)}` };
     }
     return null;
   };
@@ -1060,7 +1103,18 @@ async function levelInside(context: SkillContext, zone: Zone, level: number, wha
   }
   const around = left === 0 ? "" : ` (left ${left} cell${left === 1 ? "" : "s"} it may not dig, leveled around)`;
   const column = plan.support === 0 ? "" : ` (${plan.support} of them a support column up from the ground)`;
-  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${column}${around}${pitNote}` };
+  return { status: "done", detail: `leveled ${what}: dug ${plan.dug - left}, filled ${plan.filled}${column}${around}${pitNote}${remadeClause(remadeNotes)}` };
+}
+
+/** A tool lost while levelling `what`: made again from what is carried (a means fetch), unless no digging left needs its class (`digging`). */
+async function levelingToolLoss(context: SkillContext, toolLosses: ToolLosses, error: string | null | undefined, work: { readonly what: string; readonly reserved: readonly ItemCount[]; readonly digging: ReadonlySet<unknown> }) {
+  return toolLosses.handle(error, {
+    reserved: work.reserved, ...(context.owed !== undefined && { owed: context.owed }),
+    inventory: async () => (await context.runtime.status()).inventory,
+    getItems: (items, purpose) => getItems(context, items, { purpose: `${purpose}, leveling ${work.what}`, means: true }),
+    onLost: (toolClass) => context.toolsLost?.add(toolClass),
+    stillNeeded: (toolClass) => work.digging.has(toolClass),
+  });
 }
 
 /** The holes, with what the dig brought; only the rest is fetched. Null when they are filled. */
@@ -1076,7 +1130,7 @@ async function fillHoles(
   const has = spareIn((await context.runtime.status()).inventory);
   const fill = fillFor(holes, has);
   if (has(fill) < holes) {
-    const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], `filling the holes of ${what}`);
+    const got = await getItems(context, [{ item: fill, count: holes - Math.max(0, has(fill)) }], { purpose: `filling the holes of ${what}`, means: true });
     if (got.status !== "done") return got;
   }
   context.progress?.(`filling the ${holes} holes of ${what} with ${fill}`);
@@ -1279,7 +1333,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     return { status: "failed", detail: `${block} is crafted, not found: get_items ${block} makes it` };
   }
   const setOut = await context.runtime.status();
-  const start = setOut.position;
+  const [start, houseKeep] = [setOut.position, (await houseReserve(context)).keep]; // every leg keeps an unfinished house's blocks
   // A creature already loaded needs no walk: it is hunted where it stands.
   const loaded = creature === undefined ? undefined : setOut.mobs.find((mob) => mob.name === creature);
   if (creature !== undefined && loaded !== undefined) {
@@ -1362,7 +1416,7 @@ async function explore(context: SkillContext, step: Extract<Step, { skill: "expl
     }
     // Caves under the ground and trees over it make the column ambiguous: the walk is to the ground nearest her own
     // height (live 2026-10-04: "observed standable feet heights: 70, -19, -47"; live 2026-10-07: the highest was a canopy).
-    const outcome = await context.body.act("navigate", { x: target.x, z: target.z, near_y: Math.floor(here.y), range: 4 }, why, { signal: context.signal });
+    const outcome = await exploreWalk(context, { x: target.x, z: target.z, near_y: Math.floor(here.y), range: 4 }, why, houseKeep);
     if (context.signal.aborted) return { status: "stopped" };
     const before = here;
     const after = await context.runtime.status();
