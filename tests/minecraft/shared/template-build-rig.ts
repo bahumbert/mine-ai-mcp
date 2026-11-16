@@ -53,6 +53,10 @@ export class TemplateBuildRig {
   clock = 1_000;
   /** A hook before `buildStatus` answers (a test delays it to let the world change). */
   statusGate: Promise<void> | null = null;
+  /** The versions whose template size the build asked for, in order (the daemon's size cache the scheduler reads). */
+  readonly sizeReads: string[] = [];
+  /** While set, the size read does not answer: the build's end waits for it. */
+  sizeGate: Promise<void> | null = null;
   /** While set, the fake `buildTemplate` rejects with it (the real one catches everything; this is a defect in it). */
   buildError: Error | null = null;
   /** While set, adding to the pid file rejects with it. */
@@ -67,7 +71,10 @@ export class TemplateBuildRig {
     const ports = new PortPairs({ first: 25_600, last: 25_619 });
     this.builds = new TemplateBuilds({
       config: this.config, log: line => this.lines.push(line), now: () => this.clock,
-      templates: { buildStatus: async () => { await this.statusGate; return this.status.map(entry => ({ ...entry })); } },
+      templates: {
+        buildStatus: async () => { await this.statusGate; return this.status.map(entry => ({ ...entry })); },
+        worldMbFor: async version => { this.sizeReads.push(version); await this.sizeGate; return 0; },
+      },
       ports: { lease: () => { if (this.leaseError) throw this.leaseError; const port = ports.lease(); this.leased.push(port); return port; }, release: port => { ports.release(port); this.released.push(port); } },
       pidFile: {
         add: async server => {
@@ -98,6 +105,14 @@ export class TemplateBuildRig {
         this.calls.push(call);
       }),
     });
+    // A real build ends when the daemon stops (its server stops, or its start is refused). A fake build has no server, so the
+    // stop would wait for a finish only the test gives: the stop ends every open call first, then awaits the stop.
+    const stopBuilds = this.builds.stop.bind(this.builds);
+    this.builds.stop = async () => {
+      const stopping = stopBuilds();
+      for (const call of this.calls) call.finish({ ok: false, reason: "daemon stopping", bound: false });
+      await stopping;
+    };
   }
 
   /** `startIfDue` with a machine that has room, and idle as the test says. */

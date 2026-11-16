@@ -141,6 +141,7 @@ export const navigationEvidenceSchema = z.strictObject({
       reason: z.string(),
       hits: z.number().int().nonnegative(),
       elapsedMs: z.number().int().nonnegative(),
+      elapsedTicks: z.number().int().nonnegative().describe("server ticks the take-back ran"),
       goneAfterHit: z.number().int().positive().nullable(),
     })
     .optional()

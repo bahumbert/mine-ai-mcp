@@ -20,12 +20,11 @@ import { Vec3 } from "vec3";
 import { liveBlockReader } from "../../mineflayer/world.js";
 import { asVec3, cellKey } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
-import { isLiquidSource } from "../../../world/liquid.js";
+import { isLiquidSource, settleFormations } from "../../../world/liquid.js";
 import {
   HORIZONTAL,
   isReplaceableForPlacement,
   pourAim,
-  settledFormations,
   watchFormations,
   USE_RAY_REACH,
   type PourAim,
@@ -65,6 +64,7 @@ export type CastOutcome =
       readonly kind: "cast";
       readonly landing: Vec3;
       readonly obsidianFormed: number;
+      readonly formationsAnswered: boolean;
       readonly waterRecovered: boolean;
     }
   | { readonly kind: "reposition"; readonly reason: string }
@@ -214,11 +214,12 @@ export async function castOntoPool(
     if (use.kind === "failed") return { kind: "failed", reason: use.error };
     // Water spreads for a while and turns every source it reaches; counting the
     // obsidian is this step's evidence that the pour was worth anything.
-    const formed = await settledFormations(bot, watch, physics.signal);
+    const { formed, ended } = await settleFormations(bot, watch, physics.signal);
     return {
       kind: "cast",
       landing: aim.landing,
       obsidianFormed: formed[CAST_BLOCK] ?? 0,
+      formationsAnswered: ended !== "stalled",
       waterRecovered: await scoopBack(bot, physics, aim),
     };
   } finally {

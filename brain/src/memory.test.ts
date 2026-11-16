@@ -51,11 +51,17 @@ test("each step's activity time is remembered and read back oldest first, at mos
   assert.match(recallQuery("Ayla", LIMITS), /brain memory: activity_time /u);
 });
 
+const activityRow = (id: number, minutes: number) => [id, memoryNote({ kind: "activity_time", time: { activity: "farming", ended: "2026-10-03T12:00:00.000Z", minutes } }).context] as const;
+
 test("activity notes older than the last hour of play are found to forget; the one crossing the hour is kept", () => {
-  const row = (id: number, minutes: number) => [id, memoryNote({ kind: "activity_time", time: { activity: "farming", ended: "2026-10-03T12:00:00.000Z", minutes } }).context] as const;
-  const rows = [row(9, 30), row(8, 20), row(7, 15), row(6, 5), [5, "not a memory"], row(4, 1)];
+  const rows = [activityRow(9, 30), activityRow(8, 20), activityRow(7, 15), activityRow(6, 5), [5, "not a memory"], activityRow(4, 1)];
   assert.deepEqual(staleActivityNotes(rows, 60), [6, 4]);
   assert.match(activityNotesQuery("Ayla"), /bot_id = 'Ayla' AND substr\(context, 1, \d+\) = 'brain memory: activity_time ' ORDER BY note_id DESC/u);
+});
+
+test("the note that ends exactly on the last hour of play is kept; the next one is stale", () => {
+  // 30 + 30 is exactly 60: the note ending on the hour stays, the one after it is forgotten.
+  assert.deepEqual(staleActivityNotes([activityRow(9, 30), activityRow(8, 30), activityRow(7, 30)], 60), [7]);
 });
 
 test("a step's purpose is remembered with its time; a note from before has none", () => {

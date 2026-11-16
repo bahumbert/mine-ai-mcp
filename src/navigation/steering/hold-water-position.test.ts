@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { liveBlockReader } from "../mineflayer/world.js";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
-import { holdWaterPosition, landOnStanceFloor, waterStancesHeld } from "./hold-water-position.js";
+import { holdWaterPosition, landOnStanceFloor, settleInWaterForDig, waterStancesHeld } from "./hold-water-position.js";
 
 function stanceBot() {
-  return Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 64, 0.5), isInWater: true, onGround: false, yaw: 0 },
-    setControlState: () => {},
-  });
+  const { bot } = createFakeBot();
+  Object.assign(bot.entity, { isInWater: true, onGround: false, yaw: 0 });
+  return bot;
 }
 
 test("a held water stance is counted for its bot until it is released", () => {
@@ -23,38 +21,9 @@ test("a held water stance is counted for its bot until it is released", () => {
   assert.equal(waterStancesHeld(other), 0, "the count is per bot");
   first();
   assert.equal(waterStancesHeld(bot), 1);
-  second();
-  assert.equal(waterStancesHeld(bot), 0);
-});
-
-test("releasing a stance twice does not count it twice", () => {
-  const bot = stanceBot();
-  const first = holdWaterPosition(bot, undefined);
-  const second = holdWaterPosition(bot, undefined);
-  first();
   first();
   assert.equal(waterStancesHeld(bot), 1, "the other stance is still held");
   second();
-  assert.equal(waterStancesHeld(bot), 0);
-});
-
-test("an aborted stance stops counting even when its owner never releases it", () => {
-  const bot = stanceBot();
-  const abort = new AbortController();
-  const release = holdWaterPosition(bot, abort.signal);
-  assert.equal(waterStancesHeld(bot), 1);
-  abort.abort();
-  assert.equal(waterStancesHeld(bot), 0);
-  release();
-  assert.equal(waterStancesHeld(bot), 0, "the late release does not go below zero");
-  assert.equal(bot.listenerCount("physicsTick"), 0);
-});
-
-test("a stance taken on an already aborted signal is not counted", () => {
-  const bot = stanceBot();
-  const release = holdWaterPosition(bot, AbortSignal.abort());
-  assert.equal(waterStancesHeld(bot), 0);
-  release();
   assert.equal(waterStancesHeld(bot), 0);
 });
 
@@ -62,14 +31,18 @@ test("a stance taken on an already aborted signal is not counted", () => {
 function driftingStance(signal: AbortSignal) {
   const bot = stanceBot();
   const writes: string[] = [];
-  const release = holdWaterPosition(bot, signal, (control, active) => writes.push(`${control}:${active}`));
+  const release = holdWaterPosition(bot, signal, (control, active) => {
+    writes.push(`${control}:${active}`);
+    bot.setControlState(control, active);
+  });
   bot.entity.position.x += 1;
   return { bot, writes, release };
 }
 
 test("after an abort a physics tick neither steers nor writes a control, and the stance no longer counts", () => {
   const abort = new AbortController();
-  const { bot, writes } = driftingStance(abort.signal);
+  const { bot, writes, release } = driftingStance(abort.signal);
+  assert.equal(waterStancesHeld(bot), 1);
   bot.emit("physicsTick");
   assert.ok(writes.some((write) => write.endsWith(":true")), "a live stance steers back");
 
@@ -81,29 +54,23 @@ test("after an abort a physics tick neither steers nor writes a control, and the
   assert.deepEqual(writes, [], "a body taken by a reflex is not written to by the dead stance");
   assert.equal(waterStancesHeld(bot), 0);
   assert.equal(bot.listenerCount("physicsTick"), 0);
-});
-
-test("a release after the abort clears the controls once and does not count the stance twice", () => {
-  const abort = new AbortController();
-  const { bot, writes, release } = driftingStance(abort.signal);
-  bot.emit("physicsTick");
-  abort.abort();
-  writes.length = 0;
 
   release();
 
-  assert.equal(writes.length, 5, "the four horizontal controls and jump, each once");
-  assert.ok(writes.every((write) => write.endsWith(":false")));
+  for (const control of ["forward", "back", "left", "right", "jump"] as const)
+    assert.equal(bot.controlState[control], false);
   assert.equal(waterStancesHeld(bot), 0);
   assert.equal(bot.listenerCount("physicsTick"), 0);
 });
 
 test("a stance taken on an already aborted signal never listens to physics ticks", () => {
   const { bot, writes, release } = driftingStance(AbortSignal.abort());
+  assert.equal(waterStancesHeld(bot), 0);
   bot.emit("physicsTick");
   assert.deepEqual(writes, []);
   assert.equal(bot.listenerCount("physicsTick"), 0);
   release();
+  assert.equal(waterStancesHeld(bot), 0);
 });
 
 /**
@@ -114,6 +81,7 @@ test("a stance taken on an already aborted signal never listens to physics ticks
  */
 function physicalStance(feetY: number, cells: Record<string, string> = {}) {
   const harness = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }),
     position: { x: 0.5, y: feetY, z: 0.5 },
     groundY: -60,
     cells: { "0,-60,0": "water", ...cells },
@@ -136,7 +104,8 @@ function physicalStance(feetY: number, cells: Record<string, string> = {}) {
 
 test("a hold over a solid floor never jumps while the body is above the floor, and the body lands on it", async () => {
   // Under load the escape walk left the body at -59.62, 0.38 above its floor; the hold kept it there (obsidian x5).
-  const { bot, jumps, ticks, read } = physicalStance(-59.62);
+  const { bot, clock, jumps, ticks, read } = physicalStance(-59.62);
+  using _timers = clock.install();
   const floor = { stance: { x: 0, y: -60, z: 0 }, read };
   const release = holdWaterPosition(bot, undefined, undefined, floor);
   let landed: boolean | null = null;
@@ -180,20 +149,57 @@ test("landing is not waited for on dry ground or when the stance has no floor", 
   assert.equal(await landOnStanceFloor(bot, { stance: { x: 0, y: -60, z: 0 }, read }, signal), false, "dry: no wait");
 });
 
-test("landing gives up after 3 s of wall clock when ticks come slower than the game's", async () => {
-  // A lagging server: one tick each 900 ms, so the 40-tick bound alone would wait 36 s inside the break's deadline.
+for (const { rate, stopped, lands, endMs } of [
+  { rate: 5, stopped: false, lands: true, endMs: 7_950 },
+  { rate: 5, stopped: false, lands: false, endMs: 8_000 },
+  { rate: 10, stopped: false, lands: false, endMs: 4_000 },
+  { rate: 5, stopped: true, lands: false, endMs: 20_000 },
+]) test(`landing waits for 40 server ticks at ${rate} tps or 20 s of a stopped clock (${stopped}, landed ${lands})`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const { bot, read } = physicalStance(-59.62);
+  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: rate }, cells: { "0,64,0": "water" } });
+  const read = liveBlockReader(bot);
+  Object.assign(bot.entity, { isInWater: true, onGround: false });
   bot.physicsEnabled = false;
-  const slowTicks = clock.every(() => bot.emit("physicsTick"), 900);
+  if (stopped) server.stop();
+  const age = bot.time.age;
+  if (lands) clock.after(endMs, () => Object.assign(bot.entity, { onGround: true }));
   let settled: boolean | null = null;
-  void landOnStanceFloor(bot, { stance: { x: 0, y: -60, z: 0 }, read }, new AbortController().signal).then((landed) => (settled = landed));
-  await clock.advance(2_900, 100);
-  assert.equal(settled, null, "still waiting before 3 s");
-  await clock.advance(200, 100);
-  slowTicks();
-  assert.equal(settled, false, "ended on the wall clock, not landed");
+  void landOnStanceFloor(bot, { stance: { x: 0, y: 64, z: 0 }, read }, new AbortController().signal).then((landed) => (settled = landed));
+  await clock.advance(endMs - 50);
+  assert.equal(settled, null, "still waiting while the world age has budget");
+  assert.equal(bot.time.age - age, stopped ? 0 : 20);
+  await clock.advance(50);
+  assert.equal(settled, lands);
+  assert.equal(bot.time.age - age, stopped || lands ? (stopped ? 0 : 20) : 40);
+});
+
+for (const { rate, stopped, floor, lands, endMs } of [
+  { rate: 5, stopped: false, floor: true, lands: true, endMs: 11_950 },
+  { rate: 5, stopped: false, floor: true, lands: false, endMs: 12_000 },
+  { rate: 10, stopped: false, floor: true, lands: false, endMs: 6_000 },
+  { rate: 5, stopped: true, floor: true, lands: false, endMs: 20_000 },
+  { rate: 5, stopped: true, floor: false, lands: false, endMs: 3_000 },
+]) test(`submerged eyes keep 60 ${floor ? "server" : "client"} ticks at ${rate} tps (stopped ${stopped}, floor ${floor}, landed ${lands})`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: rate }, groundY: floor ? 63 : null, cells: { "0,64,0": "water" } });
+  Object.assign(bot.entity, { isInWater: true, onGround: false });
+  bot.physicsEnabled = !floor;
+  if (stopped) server.stop();
+  const age = bot.time.age;
+  if (lands) clock.after(endMs, () => Object.assign(bot.entity, { onGround: true }));
+  let settled: boolean | null = null;
+  const waiting = settleInWaterForDig(bot, liveBlockReader(bot), { x: 0, y: 64, z: 0 }, true).then((value) => (settled = value));
+  await clock.advance(endMs - 50);
+  assert.equal(settled, null);
+  assert.equal(bot.time.age - age, stopped ? 0 : 40);
+  await clock.advance(50);
+  assert.equal(settled, lands);
+  assert.equal(bot.time.age - age, stopped || lands ? (stopped ? 0 : 40) : 60);
+  await waiting;
+  assert.equal(waterStancesHeld(bot), 0);
+  assert.equal(bot.controlState.jump, false);
 });
 
 test("an aborted landing rejects with the abort's reason and leaves no listener", async () => {

@@ -29,7 +29,52 @@ export interface WorldAgeOptions {
   readonly sleep?: (ms: number) => Promise<void>;
 }
 
-const DEFAULT_POLL_MS = 25;
+export const DEFAULT_POLL_MS = 25;
+
+/** Milliseconds per server tick when the server runs on time; used only before any age was heard. */
+export const MS_PER_ON_TIME_TICK = 50;
+
+export interface ServerTickDeadline {
+  readonly ticks: number;
+  /** Observe the age and latch expiry once the tick budget or stopped-clock bound passes. */
+  passed(nowMs: number): boolean;
+  /** Observe the age and report time since creation; ticks are unknown until the first age is heard. */
+  elapsed(nowMs: number): { readonly ms: number; readonly ticks: number | null };
+}
+
+/** A polled, timer-free deadline on the server clock, with a wall fallback before the first time packet. */
+export function serverTickDeadline(
+  readAge: () => number | null | undefined,
+  ticks: number,
+  startedMs: number,
+): ServerTickDeadline {
+  let firstAge = readAge() ?? undefined;
+  let lastAge = firstAge;
+  let lastMoveMs = startedMs;
+  let lastLookMs = startedMs;
+  let passed = false;
+  const observe = (nowMs: number) => {
+    const age = readAge() ?? undefined;
+    firstAge ??= age;
+    const elapsedTicks = firstAge === undefined || age === undefined ? null : age - firstAge;
+    if (age !== undefined && age !== lastAge) [lastAge, lastMoveMs] = [age, nowMs];
+    // An unobserved gap cannot distinguish a stopped clock from a later move (a2 review gap 11, 2026-11-15).
+    passed ||= (elapsedTicks !== null && elapsedTicks >= ticks)
+      || nowMs - lastMoveMs >= SERVER_CLOCK_STOPPED_MS
+      || (firstAge === undefined && nowMs - startedMs >= ticks * MS_PER_ON_TIME_TICK)
+      || nowMs - lastLookMs >= SERVER_CLOCK_STOPPED_MS;
+    lastLookMs = nowMs;
+    return { ms: nowMs - startedMs, ticks: elapsedTicks };
+  };
+  return {
+    ticks,
+    passed(nowMs) {
+      observe(nowMs);
+      return passed;
+    },
+    elapsed: observe,
+  };
+}
 
 function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -72,6 +117,24 @@ export async function waitForWorldAge(bot: Pick<Bot, "time">, ticks: number, opt
 
 /** World age a request waits past its send before "no answer" is the answer (one time packet per 20 ticks: two packets). */
 export const SERVER_ANSWER_TICKS = 40;
+
+/**
+ * Two time-packet intervals at 2 tps, leaving room for a slow server behind schedule (scenario-ticks C8, 2026-11-15).
+ * The rate: `scenarios/build/place-block-slow-server.yaml`; cadence: contract check `world-age-at-slow-tick`.
+ */
+export const SERVER_CLOCK_STOPPED_MS = 20_000;
+
+/** Wait for ticks or an answer, allowing a moving server clock to run without a wall cap. */
+export function waitForServerTicks(
+  bot: Pick<Bot, "time">,
+  ticks: number,
+  options: Pick<WorldAgeOptions, "signal" | "until" | "now" | "sleep"> = {},
+): Promise<WorldAgeWait> {
+  return waitForWorldAge(bot, ticks, {
+    ...options, wallMs: Number.POSITIVE_INFINITY,
+    stallMs: SERVER_CLOCK_STOPPED_MS,
+  });
+}
 
 /**
  * Resolve when `until` is true, the world age reached `sentAtAge + SERVER_ANSWER_TICKS`, it stood still for `stallMs`, or `wallMs` passed.

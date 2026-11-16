@@ -4,6 +4,10 @@ import { FakeNavigationBot, flatWorld } from "../../test-support/navigation.js";
 import type { PlannedOperation } from "../movements/movement.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import { breakBlockInPlace } from "./in-place-break.js";
+import { Vec3 } from "vec3";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { MineflayerBot, mineflayerBotSurface } from "../mineflayer/bot.js";
+import { MineflayerWorldView } from "../mineflayer/world.js";
 
 test("in-place support refusal keeps its cause and support flag on every column dig; the next bank break succeeds", async () => {
   const world = flatWorld();
@@ -142,4 +146,40 @@ test("cancelling an in-place dig stops the physical effect before releasing the 
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(cancelled, true, "aborting must stop the active dig, not only its positioning controls");
   await rejected;
+});
+
+for (const rate of [5, 10]) test(`in-place column landing with a stopped clock fails; after resume at ${rate} tps the next in-place break clears it`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const fake = createFakeBot({ clock, server: { ticksPerSecond: rate }, cells: {
+    "0,66,0": "bedrock", "1,66,0": "bedrock",
+    "2,65,0": "sand", "2,66,0": "sand", "2,67,0": "sand",
+  } });
+  using _clock = clock.install();
+  const cell = new Vec3(2, 65, 0);
+  const world = new MineflayerWorldView(fake.bot);
+  const bot = new MineflayerBot(mineflayerBotSurface(fake.bot), world);
+  const options = { position: cell, movements: createMovementPolicy() };
+  const packet = (state: string) => {
+    fake.world.setCell(cell, state);
+    fake.bot._client.emit("block_change", { location: cell, type: fake.world.blockAt(cell)!.stateId });
+  };
+  let stoppedAge = 0;
+  clock.after(1_000, () => { packet("air"); stoppedAge = fake.bot.time.age; fake.server.stop(); });
+  try {
+    const first = await clock.settle(breakBlockInPlace({ bot, world }, options), 21_100, 25);
+    assert.equal(fake.bot.time.age, stoppedAge);
+    assert.equal(first.status, "failed");
+    assert.match(first.status === "failed" ? first.reason : "", /server clock stood still.*column/);
+    fake.server.resume();
+    fake.world.setCell(new Vec3(2, 66, 0), "air");
+    fake.world.setCell(new Vec3(2, 67, 0), "air");
+    packet("sand");
+    const stop = fake.server.onPacket("block_dig", data => {
+      if ((data as { status: number }).status === 2) fake.server.answer(() => packet("air"));
+    });
+    try {
+      assert.deepEqual(await clock.settle(breakBlockInPlace({ bot, world }, options), 10_000), { status: "broken" });
+      assert.equal(fake.world.blockAt(cell)!.stateId, 0);
+    } finally { stop(); }
+  } finally { world.close(); }
 });

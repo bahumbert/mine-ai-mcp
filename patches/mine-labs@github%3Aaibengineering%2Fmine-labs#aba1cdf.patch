@@ -302,6 +302,84 @@ index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1
  } from "./scenario/schema.js";
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
+diff --git a/src/player/prepare.ts b/src/player/prepare.ts
+index 05d608a7f027d3622f07ef54fff29b119dfa01b5..29203e25fce81298528ecb57c8b550cfedb9deb1 100644
+--- a/src/player/prepare.ts
++++ b/src/player/prepare.ts
+@@ -33,6 +33,10 @@ export interface PreparePlayerForTrialOptions {
+   /** The arena dimension a declared `pos` is in. A player joins in the overworld. */
+   dimension?: Dimension;
+   resetReusablePlayer: boolean;
++  goalStallMs?: number;
++  signal?: AbortSignal;
++  now?: () => number;
++  sleep?: (ms: number) => Promise<void>;
+ }
+ 
+ /**
+@@ -61,14 +65,62 @@ export async function preparePlayerForTrial(options: PreparePlayerForTrialOption
+     // After the vitals restore, so a reused body is wounded from full health
+     // rather than from whatever the last trial left it with.
+     await woundToDeclaredHealth(commands, player);
++    await drainToDeclaredFood(options);
+     return;
+   }
+   // Before the teleport: for a moment after a change of dimension the player
+   // is in neither level, and a command aimed at it then finds nobody.
+   await woundToDeclaredHealth(commands, player);
++  await drainToDeclaredFood(options);
+   if (teleport) await commands.command(teleport);
+ }
+ 
++// First food decrease came about 53–67 ticks after action start in T5's lane trace; 200 is ~3x (2026-11-15).
++const FOOD_STILL_TICKS = 200;
++
++/** Drain the declared food after restoring vitals, always releasing the fixture's hunger effect. */
++async function drainToDeclaredFood(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { commands, player } = options;
++  if (player.food === undefined) return;
++  const now = options.now ?? (() => performance.now());
++  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
++  let movedAt = now();
++  let lastTick: number | undefined;
++  let foodTick: number | undefined;
++  let lastFood: number | undefined;
++  // The restore's one-second Saturation must not keep refilling food while it is being drained.
++  await commands.command(`effect clear ${player.name} minecraft:saturation`);
++  try {
++    await commands.command(`effect give ${player.name} minecraft:hunger infinite 255 true`);
++    for (;;) {
++      options.signal?.throwIfAborted();
++      const answer = await commands.command(`data get entity ${player.name} foodLevel`);
++      const food = Number(/: (\d+)\s*$/u.exec(answer)?.[1] ?? NaN);
++      options.signal?.throwIfAborted();
++      if (Number.isFinite(food) && food <= player.food) {
++        const reserve = await commands.command(`data get entity ${player.name} foodSaturationLevel`);
++        const saturation = Number(/: (\d+(?:\.\d+)?)f\s*$/u.exec(reserve)?.[1] ?? NaN);
++        options.signal?.throwIfAborted();
++        if (saturation === 0) return;
++      }
++      const time = await commands.command("time query gametime").catch(() => "");
++      const tick = Number(/^The time is (\d+)\s*$/u.exec(time)?.[1] ?? NaN);
++      if (Number.isSafeInteger(tick)) {
++        if (tick !== lastTick) movedAt = now();
++        if (foodTick === undefined || (Number.isFinite(food) && (lastFood === undefined || food < lastFood))) foodTick = tick;
++        lastTick = tick;
++      }
++      if (Number.isFinite(food)) lastFood = food;
++      if ((lastTick !== undefined && foodTick !== undefined && lastTick - foodTick >= FOOD_STILL_TICKS) || now() - movedAt >= (options.goalStallMs ?? 30_000)) {
++        throw new Error(`food did not fall to ${player.food} (at ${lastFood ?? "unknown"})`);
++      }
++      await sleep(250);
++    }
++  } finally {
++    await commands.command(`effect clear ${player.name} minecraft:hunger`);
++  }
++}
++
+ /** Magic damage ignores armour, so the declared inventory cannot change the result. */
+ async function woundToDeclaredHealth(commands: PlayerCommandHost, player: PlayerSpec): Promise<void> {
+   if (player.health !== undefined && player.health < 20) {
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
 index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609b609f116 100644
 --- a/src/scenario/compile.ts
@@ -528,8 +606,42 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
 +function snbtString(text: string): string {
 +  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 +}
+diff --git a/src/scenario/goal-schema.ts b/src/scenario/goal-schema.ts
+index 1d07d4d379277d1e78b0806753744dccf6c46826..88c751e7eb61dda32eb930ab97c7d123a66be715 100644
+--- a/src/scenario/goal-schema.ts
++++ b/src/scenario/goal-schema.ts
+@@ -8,7 +8,7 @@
+  * types keep coming straight from their own schemas instead of being manually
+  * restated.
+  *
+- * One asymmetry is deliberate: `timeout` exists only on the root goal. A nested
++ * One asymmetry is deliberate: `timeout` and `stillTicks` exist only on the root goal. A nested
+  * condition with its own deadline would make the trial's overall time
+  * ambiguous, so nesting decides *what* is measured and only the root decides
+  * how long it is allowed to take.
+@@ -140,6 +140,7 @@ const goalConditionSchema: z.ZodType<GoalCondition> = z.discriminatedUnion("kind
+ 
+ const rootGoalFields = {
+   timeout: z.number().positive().optional(),
++  stillTicks: z.number().int().positive().optional(),
+ };
+ 
+ /** A recursive goal condition plus the runner timeout for settling the whole trial. */
+diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
+index d7a0ad6fef9ea04eb8c4d3b7b74e33a33e653b5f..5cc33fe331c32b3a99d1c2b808db9561f0bdfa76 100644
+--- a/src/scenario/schema.ts
++++ b/src/scenario/schema.ts
+@@ -118,6 +118,8 @@ const playerSpecSchema = z.strictObject({
+    * arrangement is visible in the scenario and finished before `start`.
+    */
+   health: z.number().min(1).max(20).optional(),
++  /** Food points at start, with saturation drained before the trial begins. */
++  food: z.number().int().min(0).max(20).optional(),
+ });
+ export type PlayerSpec = z.infer<typeof playerSpecSchema>;
+ 
 diff --git a/src/server/rcon.ts b/src/server/rcon.ts
-index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c8e0851bf 100644
+index 0baaaf1da393b7176ce747d589ea43722846f633..7806cedda3296cffaa0d3002e77cff4fc39fa0f2 100644
 --- a/src/server/rcon.ts
 +++ b/src/server/rcon.ts
 @@ -28,7 +28,7 @@ import RconClientModule from "rcon-srcds";
@@ -541,7 +653,58 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
  
  interface RconTransport {
    authenticate(password: string): Promise<boolean>;
-@@ -127,7 +127,7 @@ export class Rcon {
+@@ -53,6 +53,15 @@ export class Rcon {
+   private readonly client: RconTransport;
+   private queryQueue: Promise<void> = Promise.resolve();
+   private queryObjectivesReady?: Promise<void>;
++  private failureCount = 0;
++  private readonly failures: string[] = [];
++
++  get transportFailures(): number { return this.failureCount; }
++
++  failureSince(count: number): string | null {
++    if (this.failureCount <= count) return null;
++    return this.failures[Math.max(0, count - (this.failureCount - this.failures.length))]!;
++  }
+ 
+   constructor(host: string, port: number, private password: string) {
+     this.client = new RconClient({ host, port, encoding: "utf8", timeout: 5_000 });
+@@ -103,18 +112,25 @@ export class Rcon {
+ 
+   /** `protected` so a test can fake the transport while exercising the real queue/depth logic in `command()`. */
+   protected async rawCommand(cmd: string): Promise<string> {
+-    if (this.socketFailure) throw new Error(`rcon connection lost: ${this.socketFailure.message}`);
+-    const c = cmd.startsWith("/") ? cmd.slice(1) : cmd;
++    try {
++      if (this.socketFailure) throw new Error(`rcon connection lost: ${this.socketFailure.message}`);
++      const c = cmd.startsWith("/") ? cmd.slice(1) : cmd;
+     // The transport's own `timeout` option only sets a socket idle timeout
+     // during `connect()`, which nothing ever subscribes to — it does not
+     // bound `execute()`. Without this, a lost response hangs forever.
+-    const response = await withTimeout(
+-      this.client.execute(c),
+-      COMMAND_TIMEOUT_MS,
+-      `rcon command timed out after ${COMMAND_TIMEOUT_MS}ms: ${c}`,
+-    );
+-    if (typeof response !== "string") throw new Error(`rcon returned no text response for: ${c}`);
+-    return response;
++      const response = await withTimeout(
++        this.client.execute(c),
++        COMMAND_TIMEOUT_MS,
++        `rcon command timed out after ${COMMAND_TIMEOUT_MS}ms: ${c}`,
++      );
++      if (typeof response !== "string") throw new Error(`rcon returned no text response for: ${c}`);
++      return response;
++    } catch (error) {
++      this.failureCount++;
++      this.failures.push(error instanceof Error ? error.message : String(error));
++      if (this.failures.length > 20) this.failures.shift();
++      throw error;
++    }
+   }
+ 
+   /** Execute one world-arrangement command and verify Minecraft accepted it. */
+@@ -127,7 +143,7 @@ export class Rcon {
        // `execute ... run /setworldspawn ...`, which is a parse error and
        // reported as "setup command failed" against a command that is fine.
        const inner = cmd.startsWith("/") ? cmd.slice(1) : cmd;
@@ -763,29 +926,129 @@ index 0000000000000000000000000000000000000000..02bc518048e62b92393e1c15e73b0cd5
 +  await rcon.command(clearEntitiesOf(lane));
 +  if (lane) await rcon.command(clearEntitiesOf(lane));
 +}
+diff --git a/src/trial/goals.test.ts b/src/trial/goals.test.ts
+index 8a80c59717ae5b2ef229684b633613e0f15bf58a..80d2d36f7bbeba73b19de82e9763b53aca21fa20 100644
+--- a/src/trial/goals.test.ts
++++ b/src/trial/goals.test.ts
+@@ -15,7 +15,8 @@ function context(
+     observer,
+     chat: new Map(),
+     completions,
+-    startedAt: Date.now(),
++    gameTicks: () => 0,
++    startTick: 0,
+     state,
+   };
+ }
+@@ -232,7 +233,7 @@ test("a survive goal with who observes only that declared player", async () => {
+     },
+   };
+   const goalContext = context(new Map(), observer);
+-  goalContext.startedAt = Date.now() - 2_000;
++  goalContext.gameTicks = () => 40;
+ 
+   const result = await evaluateGoal(
+     { kind: "survive", who: "Collector", seconds: 1 },
 diff --git a/src/trial/goals.ts b/src/trial/goals.ts
-index 052057a11a930836d966d21b8e3ac20db05370e9..1fcc4b29b5a785cf181429946172b66ca0838483 100644
+index 052057a11a930836d966d21b8e3ac20db05370e9..aa5496f2220d7e396a6d1fe0be28cd6b3670d20d 100644
 --- a/src/trial/goals.ts
 +++ b/src/trial/goals.ts
-@@ -41,6 +41,7 @@ export interface GoalContext {
+@@ -40,7 +40,8 @@ export interface GoalContext {
+   chat: Map<string, string[]>;
    /** client name -> first terminal completion reported by its process. */
    completions: ReadonlyMap<string, ClientCompletion>;
-   startedAt: number;
-+  startedAtMonotonic: number;
+-  startedAt: number;
++  gameTicks(): number;
++  startTick: number;
    /** mutable per-goal scratch state (keyed by goal identity). */
    state: Map<GoalCondition, Record<string, unknown>>;
  }
-@@ -164,7 +165,7 @@ export async function evaluateGoal(goal: GoalCondition, ctx: GoalContext): Promi
+@@ -51,6 +52,14 @@ export interface GoalResult {
+   children?: GoalResult[];
+ }
+ 
++/** Keep measured goal changes, excluding a survive leaf's passage of time (scenario-ticks T6, 2026-11-15). */
++export function progressKey(goal: GoalCondition, result: GoalResult): string {
++  if ((goal.kind === "all" || goal.kind === "any") && result.children) {
++    return JSON.stringify(goal.goals.map((child, index) => progressKey(child, result.children![index]!)));
++  }
++  return goal.kind === "survive" ? result.detail.split(" ", 1)[0]! : result.detail;
++}
++
+ /** Capture kill targets that actually exist immediately before clients start. */
+ export async function observeInitialGoalState(
+   goal: GoalCondition,
+@@ -164,11 +173,11 @@ export async function evaluateGoal(goal: GoalCondition, ctx: GoalContext): Promi
      }
      case "survive": {
        const secs = goal.seconds;
 -      const elapsed = (Date.now() - ctx.startedAt) / 1000;
-+      const elapsed = (performance.now() - ctx.startedAtMonotonic) / 1000;
++      const elapsed = (ctx.gameTicks() - ctx.startTick) / 20;
        const players = goal.who === undefined ? ctx.players : [goal.who];
        const deaths = await Promise.all(players.map((name) => ctx.observer.playerDeaths(name)));
        const alive = deaths.every((count) => count === 0);
+-      return observed(alive && elapsed >= secs, `alive ${elapsed.toFixed(0)}/${secs}s`);
++      return observed(alive && elapsed >= secs, `${alive ? "alive" : "dead"} ${elapsed.toFixed(0)}/${secs}s`);
+     }
+     case "all":
+     case "any": {
+diff --git a/src/trial/run.test.ts b/src/trial/run.test.ts
+index 1972e636589472673c03c9c035b25b3f8b235fc7..7bc46aeb2fc86c598df952304abd573944e68037 100644
+--- a/src/trial/run.test.ts
++++ b/src/trial/run.test.ts
+@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import { mkdtemp, readFile, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+-import { join, resolve } from "node:path";
++import { join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import type { ClientCompletion } from "../client/protocol.js";
+ import { awaitScenarioGoal, runScenarioTrial } from "./run.js";
+ import { scenarioSchema } from "../scenario/schema.js";
+@@ -30,6 +31,8 @@ test("a completion reported while the goal is being read still settles the trial
+   // that is already in flight, which is exactly the interleaving that reported
+   // a physically successful run as "has not reported completion".
+   const observer = {
++    // Vanilla RCON wording measured by the audit section 6.3 prototype (2026-11-15).
++    command: async () => "The time is 100",
+     countEntities: async () => 0,
+     playerWithin: async () => true,
+     playerFarFromEntities: async () => true,
+@@ -60,7 +63,7 @@ test("a completion reported while the goal is being read still settles the trial
+   assert.equal(settlement.goal.state, "passed");
+ });
+ 
+-test("a failed snapshot never arranges or tears down an unsaved arena", async () => {
++test("a failed snapshot skips arrangement and restore while still clearing trial entities", async () => {
+   const commands: string[] = [];
+   const fixture = scenarioSchema.parse({
+     name: "snapshot-failure", players: [{ name: "Builder", pos: [0.5, -60, 0.5] }],
+@@ -80,9 +83,10 @@ test("a failed snapshot never arranges or tears down an unsaved arena", async ()
+   const result = await runScenarioTrial({ runDir: "unused-snapshot-failure", scenario: fixture, server, reuseServer: true, log: () => {} });
+   assert.equal(result.outcome, "error");
+   assert.equal(result.error, "snapshot refused");
+-  assert.ok(commands.some((command) => command.startsWith("clone ")));
+-  assert.equal(commands.at(-1), "forceload remove all");
+-  assert.ok(!commands.some((command) => /^(fill|kill|reload)(?: |$)/u.test(command)));
++  assert.equal(commands.filter((command) => command.startsWith("clone ")).length, 1, "no restore follows the failed snapshot");
++  assert.ok(commands.includes("forceload remove all"));
++  assert.ok(commands.includes("kill @e[type=!minecraft:player]"), "end-of-trial cleanup still runs (contract-batch T9, 2026-11-01)");
++  assert.ok(!commands.some((command) => /^(fill|reload)(?: |$)/u.test(command)));
+ });
+ 
+ test("a prepared world is frozen before setup and cancellation never launches its clients", async () => {
+@@ -127,7 +131,7 @@ test("world and client gates precede observer arrival, activation, and thaw", as
+   const fixture = scenarioSchema.parse({
+     name: "frozen-start", players: [{ name: "Tester" }], tick: ["say started"],
+     entities: [{ type: "zombie", pos: [0, -60, 0] }],
+-    client: { command: "bun", args: [resolve("src/client/test-fixtures/protocol-client.mjs")] }, goal: { kind: "completion" },
++    client: { command: "bun", args: [fileURLToPath(new URL("../client/test-fixtures/protocol-client.mjs", import.meta.url))] }, goal: { kind: "completion" },
+   });
+   const server = {
+     worldDir: join(root, "world"), host: "127.0.0.1", operatorNames: [], gamePort: 12345,
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b042ca757 100644
+index 2465cf9c9b2f22c55e754543ec34d44f60b11202..66f5d9c06e6db7aa101c0174fe33de0f60d87b1f 100644
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
 @@ -31,16 +31,16 @@ import {
@@ -797,8 +1060,9 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
    type ArenaSnapshot,
    type SetupRegion,
  } from "../scenario/compile.js";
+-import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
 +import { assertLaneTrial, clearTrialEntities, compileOptionsOf, laneContextOf, type ArenaTrialOptions, type LaneContext } from "./arena.js";
- import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
++import { evaluateGoal, describeGoal, observeInitialGoalState, progressKey, type GoalResult } from "./goals.js";
  import { preparePlayerForTrial } from "../player/prepare.js";
  import { watchOperatorSpectators } from "../player/operators.js";
  import { delay } from "../util/fs.js";
@@ -807,7 +1071,15 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
  import type { ClientCompletion } from "../client/protocol.js";
  
  export interface RunResult {
-@@ -87,6 +87,13 @@ export interface ScenarioTrialOptions {
+@@ -68,6 +68,7 @@ export interface RunResult {
+   goal: GoalResult;
+   goalText: string;
+   error?: string;
++  transportFailure?: string;
+   /** Game port the server listened on during this run (for client spectators). */
+   gamePort?: number;
+ }
+@@ -87,6 +88,20 @@ export interface ScenarioTrialOptions {
    onGoalProgress?: (goal: GoalResult) => void;
    /** The arranged clients are waiting at the start line; a managed spectator may connect now. */
    onPrepared?: () => void | Promise<void>;
@@ -818,10 +1090,17 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
 +   * restore runs).
 +   */
 +  onArranged?: () => void | Promise<void>;
++  /**
++   * The wait after the arrangement, before the clients join: 1500 ms as upstream when not given. A test that runs
++   * trials on a fake clock passes 0 (or the wait it needs); production passes nothing.
++   */
++  arrangeSettleMs?: number;
++  /** Runs the arrangement's settle wait (default: the module's `delay`); a test passes a stub that records `ms`. */
++  settle?: (ms: number) => Promise<void>;
    /** World setup is complete; hold here before players join the frozen standby. */
    onWorldPrepared?: () => void | Promise<void>;
    /** Keep a speculative fixture frozen until its observer has joined. */
-@@ -101,6 +108,15 @@ export interface ScenarioTrialOptions {
+@@ -101,11 +116,24 @@ export interface ScenarioTrialOptions {
    waitForSpectator?: boolean;
    /** Clear server-side player state and non-player entities before a reused-server trial. */
    reuseServer?: boolean;
@@ -834,31 +1113,65 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
 +  arena?: ArenaTrialOptions;
 +  /** Hands a trial's client a process booted earlier (see `LaunchScenarioClientOptions.clientProvider`). */
 +  clientProvider?: ClientProvider;
++  /** Monotonic wall time without a game-time advance before the goal times out. */
++  goalStallMs?: number;
    startedAt?: number;
    signal?: AbortSignal;
  }
-@@ -151,6 +167,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
- /** Arrange and measure one trial on an already-running Mine Labs server. */
- export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
-   const { scenario, server, log } = opts;
-+  assertLaneTrial(opts);
-   const startedAt = opts.startedAt ?? Date.now();
-   const result = emptyResult(scenario, startedAt);
-   result.gamePort = server.gamePort;
-@@ -158,8 +175,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
-   let clientsPrepared = false;
-   // Armed before the world is arranged, so a human who is already connected —
-   // or who joins while the fixture is being built — is a spectator before the
+ 
+ const GOAL_POLL_MS = 250;
++/** The wait after a scenario's arrangement, before its clients join (upstream's value). */
++const ARRANGE_SETTLE_MS = 1500;
+ 
+ /** Run one isolated scenario with a fresh server and world. */
+ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+@@ -148,37 +176,48 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+   }
+ }
+ 
+-/** Arrange and measure one trial on an already-running Mine Labs server. */
+-export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
+-  const { scenario, server, log } = opts;
+-  const startedAt = opts.startedAt ?? Date.now();
+-  const result = emptyResult(scenario, startedAt);
+-  result.gamePort = server.gamePort;
+-  const clients = createTrialClientState();
+-  let clientsPrepared = false;
+-  // Armed before the world is arranged, so a human who is already connected —
+-  // or who joins while the fixture is being built — is a spectator before the
 -  // mobs exist rather than a survival body standing in the arrangement.
 -  const operatorWatch = server.rcon
-+  // mobs exist rather than a survival body standing in the arrangement. A lane
-+  // has no spectator (it is headless) and one watch per lane would poll the
-+  // shared server's RCON every two seconds for nothing.
-+  const operatorWatch = server.rcon && !opts.arena
++/** Arm the spectator before arrangement, except on headless shared lanes. */
++function watchTrialOperators(opts: ScenarioTrialOptions, viewpointReady: () => boolean) {
++  const { server, scenario, log } = opts;
++  return server.rcon && !opts.arena
      ? watchOperatorSpectators({
          commands: server.rcon,
          operatorNames: server.operatorNames,
-@@ -175,10 +194,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+         clientPlayerNames: scenario.players.map((player) => player.name),
+         viewpointPlayer: scenario.players[0]?.name,
+-        viewpointReady: () => clientsPrepared,
++        viewpointReady,
+         log,
+       })
+     : undefined;
++}
++
++/** Arrange and measure one trial on an already-running Mine Labs server. */
++export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
++  const { scenario, server, log } = opts;
++  const rcon = server.rcon;
++  const startCount = rcon?.transportFailures ?? 0;
++  assertLaneTrial(opts);
++  const startedAt = opts.startedAt ?? Date.now();
++  const result = emptyResult(scenario, startedAt);
++  result.gamePort = server.gamePort;
++  const clients = createTrialClientState();
++  let clientsPrepared = false;
++  const operatorWatch = watchTrialOperators(opts, () => clientsPrepared);
+ 
+   // Taken before anything touches the world and held for the `finally` below.
+   // If arrangement itself fails halfway the arena is already dirty, and that is
    // exactly when the next trial most needs it put back — so this cannot be the
    // return value of `arrangeScenario`, which a throw would discard.
    let arenaBackup: ArenaSnapshot | null = null;
@@ -869,11 +1182,14 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
 -    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld));
 +    lane = laneContextOf(opts.arena, scenario);
 +    if (opts.reuseServer) arenaBackup = await snapshotArena(server, scenario, log, lane);
-+    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld), lane, opts.onArranged);
++    const releaseArena = await arrangeScenario(server, scenario, log, {
++      reuseServer: Boolean(opts.reuseServer), holdPreparedWorld: Boolean(opts.holdPreparedWorld), lane, onArranged: opts.onArranged,
++      settle: { ms: opts.arrangeSettleMs ?? ARRANGE_SETTLE_MS, wait: opts.settle ?? delay },
++    });
      try {
        await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
        await connectScenarioClients({ ...opts, clients });
-@@ -210,11 +231,16 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -210,15 +249,22 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    } finally {
      result.elapsedMs = Date.now() - startedAt;
      operatorWatch?.stop();
@@ -891,7 +1207,13 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
        if (opts.deferReset) opts.deferReset(restore);
        else await restore(log);
      }
-@@ -296,6 +322,7 @@ async function connectScenarioClients(
+   }
++  const failure = rcon?.failureSince?.(startCount);
++  if (failure != null) result.transportFailure = failure;
+   return result;
+ }
+ 
+@@ -296,6 +342,7 @@ async function connectScenarioClients(
        username: player.name,
        version: scenario.minecraft.version,
        artifactsDirectory,
@@ -899,33 +1221,299 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
        log,
        onChat: (message) => clients.chat.get(player.name)?.push(message),
        onCompletion: (completion) => recordClientCompletion(player.name, completion, clients, log),
-@@ -360,7 +387,7 @@ export async function awaitScenarioGoal(options: {
+@@ -312,6 +359,8 @@ async function connectScenarioClients(
+       player,
+       dimension: scenario.world.dimension,
+       resetReusablePlayer: Boolean(opts.reuseServer),
++      goalStallMs: opts.goalStallMs,
++      signal: opts.signal,
+     });
+     await server.rcon.preparePlayerMetrics(player.name);
+     if (player.pos) await delay(300);
+@@ -349,77 +398,234 @@ interface GoalSettlement {
+   log: string;
+ }
+ 
++/** Parse vanilla's RCON gametime answer (audit 6.3, scenario-ticks spec, 2026-11-15). */
++export function parseGameTime(answer: string): number | null {
++  const match = /^The time is (\d+)\s*$/u.exec(answer);
++  if (!match) return null;
++  const tick = Number(match[1]);
++  return Number.isSafeInteger(tick) ? tick : null;
++}
++
++interface GoalClock {
++  tick?: number;
++  startTick?: number;
++  movedAt: number;
++}
++
++interface GoalProgress {
++  key?: string;
++  changedAt?: number;
++  sampledAt?: number;
++  longest: number;
++  positions: Map<string, string>;
++}
++
++/** Malformed/missing position observations leave the previous evidence intact, never inventing movement. */
++async function readPlayerBlockPositions(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress): Promise<void> {
++  for (const player of options.scenario.players) {
++    if (options.signal?.aborted) return;
++    const answer = await options.server.rcon!.command(`data get entity ${player.name} Pos`).catch(() => "");
++    if (options.signal?.aborted) return;
++    const coordinates = /: \[([^\]]+)\]\s*$/u.exec(answer)?.[1]?.split(",").map(value => Number(value.trim().replace(/d$/u, "")));
++    if (coordinates?.length === 3 && coordinates.every(Number.isFinite)) {
++      progress.positions.set(player.name, coordinates.map(Math.floor).join(","));
++    }
++  }
++}
++
++/** Observe goal and block-position changes; sample positions once per game second. */
++async function recordGoalProgress(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): Promise<void> {
++  if (clock.tick === undefined || options.signal?.aborted) return;
++  if (progress.sampledAt === undefined || clock.tick - progress.sampledAt >= 20) {
++    await readPlayerBlockPositions(options, progress);
++    if (options.signal?.aborted) return;
++    progress.sampledAt = clock.tick;
++  }
++  const key = JSON.stringify([progressKey(options.scenario.goal, goal), options.scenario.players.map(player => progress.positions.get(player.name) ?? null)]);
++  progress.longest = Math.max(progress.longest, clock.tick - (progress.changedAt ?? clock.tick));
++  if (key === progress.key) return;
++  progress.key = key;
++  progress.changedAt = clock.tick;
++  options.log?.(`goal progress at tick ${clock.tick}`);
++}
++
++// Two server time packets cover an answer after a send: src/world/world-age.ts:73-74 (scenario-ticks T4, 2026-11-15).
++const COMPLETION_SETTLE_TICKS = 40;
++
++// Twice Task 7's longest passing span without an override (258 ticks), rounded up to 20 (2026-11-16).
++const STILL_TICKS_DEFAULT = 520;
++
++/** Fail a pending goal only after a full window of observed game time without progress. */
++function stillGoal(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): GoalSettlement | null {
++  const stillTicks = options.scenario.goal.stillTicks ?? STILL_TICKS_DEFAULT;
++  if (clock.tick === undefined || progress.changedAt === undefined || clock.tick - progress.changedAt < stillTicks) return null;
++  return { outcome: "fail", goal, log: `no progress for ${stillTicks} game ticks: ${goal.detail}` };
++}
++
++/** Cancellation takes priority even when it arrives during an RCON read. */
++function cancelledGoal(signal: AbortSignal | undefined): GoalSettlement | null {
++  if (!signal?.aborted) return null;
++  const reason = typeof signal.reason === "string" ? signal.reason : "operator request";
++  const goal = { state: "pending", detail: `trial cancelled: ${reason}` } as const;
++  return { outcome: "cancelled", goal, log: goal.detail };
++}
++
++/** Both goal waits use the same last-advance deadline and diagnostic. */
++function stoppedGoalClock(clock: GoalClock, now: number, stallMs: number, goal: GoalResult): GoalSettlement | null {
++  if (now - clock.movedAt < stallMs) return null;
++  return { outcome: "timeout", goal, log: `goal not satisfied: the server's game time stood still for ${stallMs} ms: ${goal.detail}` };
++}
++
++/** Let the server handle the final client packets, bounded by the existing stopped-clock deadline. */
++async function waitForCompletionTicks(
++  options: Parameters<typeof awaitScenarioGoal>[0],
++  clock: GoalClock,
++  now: () => number,
++  sleep: (ms: number) => Promise<void>,
++  goal: GoalResult,
++  stallMs: number,
++  progress: GoalProgress,
++): Promise<GoalSettlement | null> {
++  let startTick: number | undefined;
++  for (;;) {
++    const beforeRead = cancelledGoal(options.signal);
++    if (beforeRead) return beforeRead;
++    const freshTick = await readGoalClock(options.server, clock, now);
++    const cancelled = cancelledGoal(options.signal);
++    if (cancelled) return cancelled;
++    if (freshTick !== null) startTick ??= freshTick;
++    await recordGoalProgress(options, progress, clock, goal);
++    const cancelledAfterProgress = cancelledGoal(options.signal);
++    if (cancelledAfterProgress) return cancelledAfterProgress;
++    if (startTick !== undefined && freshTick !== null && freshTick - startTick >= COMPLETION_SETTLE_TICKS) return null;
++    const stopped = stoppedGoalClock(clock, now(), stallMs, goal);
++    if (stopped) return stopped;
++    await sleep(GOAL_POLL_MS);
++  }
++}
++
++/** Unreadable or rejected RCON reads leave the last observation and its stall deadline intact. */
++async function readGoalClock(server: MinecraftServer, clock: GoalClock, now: () => number): Promise<number | null> {
++  const tick = await server.rcon!.command("time query gametime").then(parseGameTime).catch(() => null);
++  if (tick === null) return null;
++  clock.startTick ??= tick;
++  if (tick !== clock.tick) clock.movedAt = now();
++  clock.tick = tick;
++  return tick;
++}
++
++/** Re-evaluate the completion race once all clients have supplied their terminal report. */
++async function settleCompletedGoal(
++  options: Parameters<typeof awaitScenarioGoal>[0],
++  context: Parameters<typeof evaluateGoal>[1],
++  clock: GoalClock,
++  now: () => number,
++  sleep: (ms: number) => Promise<void>,
++  stallMs: number,
++  progress: GoalProgress,
++): Promise<GoalSettlement> {
++  let goal = await evaluateGoal(options.scenario.goal, context);
++  const cancelled = cancelledGoal(options.signal);
++  if (cancelled) return cancelled;
++  if (goal.state === "pending") {
++    const stopped = await waitForCompletionTicks(options, clock, now, sleep, goal, stallMs, progress);
++    if (stopped) return stopped;
++    goal = await evaluateGoal(options.scenario.goal, context);
++    const cancelledAfterRead = cancelledGoal(options.signal);
++    if (cancelledAfterRead) return cancelledAfterRead;
++  }
++  options.onGoalProgress?.(goal);
++  await recordGoalProgress(options, progress, clock, goal);
++  const cancelledAfterProgress = cancelledGoal(options.signal);
++  if (cancelledAfterProgress) return cancelledAfterProgress;
++  return goal.state === "passed"
++    ? { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` }
++    : { outcome: "fail", goal, log: `goal not satisfied on client completion: ${goal.detail}` };
++}
++
++/** Verification trials must keep every player inside the declared starting radius. */
++async function verifyScenarioRadius(options: Parameters<typeof awaitScenarioGoal>[0]): Promise<GoalSettlement | null> {
++  if (!options.scenario.verification) return null;
++  for (const player of options.scenario.players) {
++    const pos = player.pos;
++    if (!Array.isArray(pos)) throw new Error("verification requires an absolute player position");
++    if (await options.server.rcon!.playerWithinHorizontalRadius(
++      player.name, pos[0], pos[2], options.scenario.verification.radius,
++    )) continue;
++    const deaths = await options.server.rcon!.playerDeaths(player.name);
++    const detail = `${player.name} was not observed within its verification radius; recorded deaths: ${deaths}`;
++    const goal = { state: "failed", detail } as const;
++    return { outcome: "fail", goal, log: goal.detail };
++  }
++  return null;
++}
++
+ /** Exported for the settlement test; production callers go through `runScenarioTrial`. */
+ export async function awaitScenarioGoal(options: {
+   onGoalProgress?: (goal: GoalResult) => void;
++  log?: (message: string) => void;
+   scenario: Scenario;
+   server: MinecraftServer;
+   clients: TrialClientState;
+   initialGoalState?: Map<GoalCondition, Record<string, unknown>>;
+   signal?: AbortSignal;
++  goalStallMs?: number;
++  now?: () => number;
++  sleep?: (ms: number) => Promise<void>;
  }): Promise<GoalSettlement> {
    if (!options.server.rcon) throw new Error("rcon unavailable while evaluating the goal");
    const timeout = options.scenario.goal.timeout ?? 120;
 -  const deadline = Date.now() + timeout * 1000;
-+  const deadline = performance.now() + timeout * 1000;
++  const now = options.now ?? (() => performance.now());
++  const sleep = options.sleep ?? delay;
++  const stallMs = options.goalStallMs ?? 30_000;
++  const clock: GoalClock = { movedAt: now() };
++  const progress: GoalProgress = { longest: 0, positions: new Map() };
++  if (!options.signal?.aborted) await readGoalClock(options.server, clock, now);
    const context = {
      players: options.scenario.players.map((player) => player.name),
      dimension: options.scenario.world.dimension,
-@@ -368,6 +395,7 @@ export async function awaitScenarioGoal(options: {
+     observer: options.server.rcon,
      chat: options.clients.chat,
      completions: options.clients.completions,
-     startedAt: Date.now(),
-+    startedAtMonotonic: performance.now(),
+-    startedAt: Date.now(),
++    gameTicks: () => clock.tick ?? 0,
++    get startTick() { return clock.startTick ?? 0; },
      state: options.initialGoalState ?? new Map<GoalCondition, Record<string, unknown>>(),
    };
  
-@@ -416,7 +444,7 @@ export async function awaitScenarioGoal(options: {
-         log: `goal not satisfied on client completion: ${settled.detail}`,
-       };
+-  for (;;) {
+-    if (options.signal?.aborted) {
+-      const reason = typeof options.signal.reason === "string" ? options.signal.reason : "operator request";
+-      const goal = { state: "pending", detail: `trial cancelled: ${reason}` } as const;
+-      return { outcome: "cancelled", goal, log: goal.detail };
+-    }
+-    if (options.scenario.verification) {
+-      for (const player of options.scenario.players) {
+-        const pos = player.pos;
+-        if (!Array.isArray(pos)) throw new Error("verification requires an absolute player position");
+-        if (!(await options.server.rcon.playerWithinHorizontalRadius(
+-          player.name, pos[0], pos[2], options.scenario.verification.radius,
+-        ))) {
+-          const deaths = await options.server.rcon.playerDeaths(player.name);
+-          const detail = `${player.name} was not observed within its verification radius; recorded deaths: ${deaths}`;
+-          const goal = { state: "failed", detail } as const;
+-          return { outcome: "fail", goal, log: goal.detail };
+-        }
++  try {
++    for (;;) {
++      if (!options.signal?.aborted) await readGoalClock(options.server, clock, now);
++      const cancelled = cancelledGoal(options.signal);
++      if (cancelled) return cancelled;
++      const radiusFailure = await verifyScenarioRadius(options);
++      if (radiusFailure) return radiusFailure;
++      const goal = await evaluateGoal(options.scenario.goal, context);
++      await recordGoalProgress(options, progress, clock, goal);
++      const cancelledAfterProgress = cancelledGoal(options.signal);
++      if (cancelledAfterProgress) return cancelledAfterProgress;
++      options.onGoalProgress?.(goal);
++      if (goal.state === "passed") return { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` };
++      if (goal.state === "failed") return { outcome: "fail", goal, log: `goal failed: ${goal.detail}` };
++      const allClientsCompleted =
++        options.scenario.players.length > 0 &&
++        options.scenario.players.every((player) => options.clients.completions.has(player.name));
++      if (allClientsCompleted) {
++        // A completion arriving during evaluation invalidates its snapshot; the server may still be handling the last packets.
++        return await settleCompletedGoal(options, context, clock, now, sleep, stallMs, progress);
+       }
+-    }
+-    const goal = await evaluateGoal(options.scenario.goal, context);
+-    options.onGoalProgress?.(goal);
+-    if (goal.state === "passed") return { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` };
+-    if (goal.state === "failed") return { outcome: "fail", goal, log: `goal failed: ${goal.detail}` };
+-    const allClientsCompleted =
+-      options.scenario.players.length > 0 &&
+-      options.scenario.players.every((player) => options.clients.completions.has(player.name));
+-    if (allClientsCompleted) {
+-      // `goal` above was measured before the clients finished: its completion
+-      // child reads the map synchronously while its sibling checks are still
+-      // out on rcon, so a client that reports inside that window is invisible
+-      // to it and visible here. Every client is now done and nothing further
+-      // will move, so one more evaluation settles the trial on what actually
+-      // happened rather than on a snapshot the race already invalidated.
+-      const settled = await evaluateGoal(options.scenario.goal, context);
+-      options.onGoalProgress?.(settled);
+-      if (settled.state === "passed") {
+-        return { outcome: "pass", goal: settled, log: `goal satisfied: ${settled.detail}` };
++      if (context.gameTicks() - context.startTick > timeout * 20) {
++        return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s of game time (${timeout * 20} ticks): ${goal.detail}` };
+       }
+-      return {
+-        outcome: "fail",
+-        goal: settled,
+-        log: `goal not satisfied on client completion: ${settled.detail}`,
+-      };
++      const stopped = stoppedGoalClock(clock, now(), stallMs, goal);
++      if (stopped) return stopped;
++      const still = stillGoal(options, progress, clock, goal);
++      if (still) return still;
++      await sleep(GOAL_POLL_MS);
      }
 -    if (Date.now() > deadline) {
-+    if (performance.now() > deadline) {
-       return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s: ${goal.detail}` };
-     }
-     await delay(GOAL_POLL_MS);
-@@ -443,9 +471,10 @@ async function snapshotArena(
+-      return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s: ${goal.detail}` };
+-    }
+-    await delay(GOAL_POLL_MS);
++  } finally {
++    const tick = clock.tick ?? 0;
++    const longest = Math.max(progress.longest, tick - (progress.changedAt ?? tick));
++    options.log?.(`goal still spans: longest ${longest} ticks at tick ${tick}`);
+   }
+ }
+ 
+@@ -443,9 +649,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -937,7 +1525,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +484,7 @@ async function snapshotArena(
+@@ -455,7 +662,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -946,7 +1534,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
    }
  }
  
-@@ -465,15 +494,22 @@ async function clearScenario(
+@@ -465,15 +672,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -974,7 +1562,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +521,8 @@ async function clearScenario(
+@@ -485,7 +699,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -984,13 +1572,28 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -502,34 +539,87 @@ async function arrangeScenario(
+@@ -496,40 +711,100 @@ async function clearScenario(
+  * far-off arena — the Nether, say — then lands in chunks that are already
+  * loaded, rather than in ones the server is still generating around it.
+  */
++/** What a trial hands its arrangement besides the server, the scenario and the log. */
++interface ArrangeOptions {
++  reuseServer: boolean;
++  holdPreparedWorld: boolean;
++  lane: LaneContext | undefined;
++  onArranged: (() => void | Promise<void>) | undefined;
++  settle: { ms: number; wait: (ms: number) => Promise<void> };
++}
++
+ async function arrangeScenario(
+   server: MinecraftServer,
+   scenario: Scenario,
    log: (message: string) => void,
-   reuseServer: boolean,
-   holdPreparedWorld = false,
-+  lane?: LaneContext,
-+  onArranged?: () => void | Promise<void>,
+-  reuseServer: boolean,
+-  holdPreparedWorld = false,
++  options: ArrangeOptions,
  ): Promise<() => Promise<void>> {
++  const { reuseServer, holdPreparedWorld, lane, onArranged, settle } = options;
    const rcon = server.rcon;
    if (!rcon) throw new Error("rcon unavailable before arrangement");
 -  if (reuseServer) await rcon.command(CLEAR_ENTITIES);
@@ -1030,7 +1633,8 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
 +    if (lane) await stopTickBlocks(rcon, lane, log, []);
      throw error;
    }
-   await delay(1500);
+-  await delay(1500);
++  await settle.wait(settle.ms);
    return release;
  }
  
@@ -1079,7 +1683,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..be60256ce411192abff985cbe243bc6b
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +676,8 @@ async function pinRegions(
+@@ -586,8 +861,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */

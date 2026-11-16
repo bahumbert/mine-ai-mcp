@@ -26,6 +26,7 @@ export const whisperEcho: ContractCheck = {
   name: "whisper-echo",
   // Our runtime would not whisper, but it also reads chat; the bare bot hears exactly what the server sends.
   withoutRuntime: true,
+  exclusive: "its chat assertion is exact, and other lanes' join and leave lines reach every player",
   fixture: { cells: {}, carried: {}, position: [0.5, -60, 0.5] },
   async run(subject) {
     const { bot } = subject;

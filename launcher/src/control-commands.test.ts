@@ -9,17 +9,17 @@ import { startControlServer, type LauncherLock } from "./control.ts";
 import { loadManifest } from "./manifest.ts";
 import { cleanupStale } from "./processes.ts";
 import type { BotOutcome } from "./stack.ts";
-import { RecordingHandlers } from "./cli-test-support.ts";
+import { freeTestPort, RecordingHandlers } from "./cli-test-support.ts";
 
 interface Running {
   calls: string[];
   launcher: LauncherLock;
 }
 
-/** A control endpoint on a real socket for the length of `run`, closed after it even when an assertion fails. */
-async function withLauncher(startPort: number, run: (running: Running) => Promise<void>, reply?: (call: string) => BotOutcome): Promise<void> {
+/** A control endpoint on a real socket, on a port the system picked, for the length of `run`, closed after it even when an assertion fails. */
+async function withLauncher(run: (running: Running) => Promise<void>, reply?: (call: string) => BotOutcome): Promise<void> {
   const handlers = new RecordingHandlers(reply);
-  const control = await startControlServer({ startPort, handlers });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers });
   try {
     await run({ calls: handlers.calls, launcher: { pid: 1, controlPort: control.port, startedAt: 0 } });
   } finally {
@@ -80,7 +80,7 @@ test("stop ends the children of a launcher that is gone", async () => {
 });
 
 test("stop asks the launcher to stop and waits until it is gone", () =>
-  withLauncher(26_500, async ({ calls, launcher }) => {
+  withLauncher(async ({ calls, launcher }) => {
     let asked = false;
     let polls = 0;
     const t = setup(() => (asked && ++polls > 2 ? null : launcher));
@@ -92,14 +92,14 @@ test("stop asks the launcher to stop and waits until it is gone", () =>
   }));
 
 test("stop that the launcher never finishes ends with the refusal exit code and what to do", () =>
-  withLauncher(26_510, async ({ launcher }) => {
+  withLauncher(async ({ launcher }) => {
     const t = setup(() => launcher);
     assert.equal(await runStopCommand(t.context, t.deps), STOP_REFUSED_EXIT_CODE);
     assert.match(t.out.join("\n"), /Task Manager/u);
   }));
 
 test("status lists the model, the join address and each bot", () =>
-  withLauncher(26_520, async ({ launcher }) => {
+  withLauncher(async ({ launcher }) => {
     const t = setup(() => launcher);
     assert.equal(await runStatusCommand(t.context, t.deps), 0);
     const text = t.out.join("\n");
@@ -107,7 +107,7 @@ test("status lists the model, the join address and each bot", () =>
   }));
 
 test("bot start and bot stop reach the launcher and print its answer", () =>
-  withLauncher(26_530, async ({ calls, launcher }) => {
+  withLauncher(async ({ calls, launcher }) => {
     const t = setup(() => launcher);
     assert.equal(await runBotCommand(["start", "ayla"], t.context, t.deps), 0);
     assert.equal(await runBotCommand(["stop", "ayla"], t.context, t.deps), 0);
@@ -117,7 +117,6 @@ test("bot start and bot stop reach the launcher and print its answer", () =>
 
 test("a refusal prints the launcher's message and exits 1", () =>
   withLauncher(
-    26_540,
     async ({ launcher }) => {
       const t = setup(() => launcher);
       assert.equal(await runBotCommand(["start", "x"], t.context, t.deps), 1);
@@ -127,7 +126,7 @@ test("a refusal prints the launcher's message and exits 1", () =>
   ));
 
 test("a persona id is sent escaped, so a path in it cannot change the route", () =>
-  withLauncher(26_550, async ({ calls, launcher }) => {
+  withLauncher(async ({ calls, launcher }) => {
     const t = setup(() => launcher);
     await runBotCommand(["start", "a/b"], t.context, t.deps);
     assert.deepEqual(calls, ["start a/b"]);
@@ -145,7 +144,7 @@ for (const [label, run, pattern] of [
 }
 
 test("a launcher that has not published its control port yet is waited for, then reported as starting", () =>
-  withLauncher(26_560, async ({ launcher }) => {
+  withLauncher(async ({ launcher }) => {
     const waiting = setup(() => ({ pid: 1, controlPort: null, startedAt: 0 }));
     const runs: [() => Promise<number>, number][] = [
       [() => runStopCommand(waiting.context, waiting.deps), STOP_REFUSED_EXIT_CODE],

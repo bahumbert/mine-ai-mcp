@@ -750,23 +750,22 @@ test("two bad replies in a row still end the order with \"could not work out wha
 // Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock (back ~2 s every ~30 s); a duration is read on the
 // monotonic clock, a time of day (the chat history) stays on the wall clock.
 test("a chat line is asked again for CHAT_RETRY_MS of monotonic time, whatever the wall clock does", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const clocks = steppedClocks(t);
   const { agent, chat } = agentFor(t, runtime, {}, { log: (line) => logs.push(line) });
   chat.unavailable(1_000);
   const handling = agent.handle(say("Steve", "hello Ayla"));
-  await until(() => logs.some((line) => line.startsWith("model unavailable")));
+  await clock.settle(until(() => logs.some((line) => line.startsWith("model unavailable"))), 10_000);
   // 119 s have passed while the wall clock jumped 5 minutes ahead: the line is still waited for.
-  clocks.monotonic(CHAT_RETRY_MS - 1_000);
-  clocks.wall(300_000);
-  const before = chat.requests.length;
-  await until(() => chat.requests.length > before);
+  clock.stepWallClock(300_000);
+  await clock.advance(CHAT_RETRY_MS - 1_000);
   assert.deepEqual(logs.filter((line) => line.includes("dropped")), [], "a wall clock step ahead does not end the wait early");
   // 120.5 s have passed while the wall clock went back 5 minutes and 0.8 s: the wait is over.
-  clocks.monotonic(1_500);
-  clocks.wall(-300_800);
-  await until(() => logs.some((line) => line.includes("no answer in time")));
+  clock.stepWallClock(-300_800);
+  await clock.advance(1_500);
+  await clock.settle(until(() => logs.some((line) => line.includes("no answer in time"))), 60_000);
   await handling;
 });
 

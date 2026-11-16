@@ -27,6 +27,25 @@ const CHEST = "3,64,0";
 const CHEST_CELLS = { [CHEST]: "chest" } as const;
 const BESIDE_THE_CHEST = new Vec3(1.5, 64, 0.5);
 
+test("a furnace opens with its stacks, does not cook, and retains an empty container after takes", async () => {
+  const cell = "2,64,0";
+  const { bot, clock, windows } = createFakeBot({ version: "1.21.4", position: new Vec3(0.5, 64, 0.5), cells: { [cell]: "furnace" }, containers: { [cell]: { raw_iron: 64, coal: 64, iron_ingot: 2 } } });
+  const window = await clock.settle(bot.openFurnace(bot.blockAt(new Vec3(2, 64, 0))!), 5_000);
+  assert.equal(window.type, "minecraft:furnace");
+  assert.deepEqual([window.inputItem(), window.fuelItem(), window.outputItem()].map(stackText), ["raw_iron x64", "coal x64", "iron_ingot x2"]);
+  const received = receivedFromServer(bot._client, ["set_slot", "set_cursor_item", "window_items", "craft_progress_bar"]);
+  await clock.advance(20_000);
+  assert.deepEqual([window.inputItem(), window.fuelItem(), window.outputItem()].map(stackText), ["raw_iron x64", "coal x64", "iron_ingot x2"]);
+  assert.deepEqual(received, []);
+  for (const slot of [2, 0, 1]) {
+    await bot.clickWindow(slot, 0, 1);
+    await clock.advance(2_000);
+  }
+  window.close();
+  await clock.advance(500);
+  assert.deepEqual(windows.containerStacks(cell), []);
+});
+
 test("a number-key click swaps the slot with the hotbar slot: the client predicts it, the server writes the same and sends nothing back (inventory.js:603-706)", async () => {
   const { bot, clock, server } = createFakeBot({ slots: { 9: { name: "cobblestone", count: 5 }, 36: { name: "torch", count: 3 } } });
   const received = receivedFromServer(bot._client, ["set_slot", "window_items"]);
@@ -147,21 +166,16 @@ test("the open_window answer takes the server's lag", async () => {
   assert.equal(window.type, "minecraft:generic_9x3");
 });
 
-test("a chest opened while a block is held opens: the held block is not placed against it", async () => {
-  const { bot, clock, world } = createFakeBot({ position: BESIDE_THE_CHEST, cells: CHEST_CELLS, carried: { cobblestone: 5 }, containers: { [CHEST]: {} } });
-  await bot.equip(bot.registry.itemsByName.cobblestone!.id, "hand");
-  await clock.settle(bot.openContainer(bot.blockAt(new Vec3(3, 64, 0))!), 5_000);
-  assert.equal(world.blockAt(new Vec3(3, 65, 0))?.name, "air");
-  assert.equal(bot.inventory.count(bot.registry.itemsByName.cobblestone!.id, null), 5);
-});
-
-test("a chest in the cells without a containers entry opens empty, as setblock alone gives one, and the held block is not placed on it", async () => {
-  const { bot, clock, world } = createFakeBot({ position: BESIDE_THE_CHEST, cells: CHEST_CELLS, carried: { cobblestone: 5 } });
-  await bot.equip(bot.registry.itemsByName.cobblestone!.id, "hand");
-  const window = await clock.settle(bot.openContainer(bot.blockAt(new Vec3(3, 64, 0))!), 5_000);
-  assert.deepEqual([window.type, window.containerItems().length], ["minecraft:generic_9x3", 0]);
-  assert.equal(world.blockAt(new Vec3(3, 65, 0))?.name, "air");
-});
+for (const containers of [{ [CHEST]: {} }, undefined]) {
+  test(`an empty chest opens without placing the held block (containers ${containers === undefined ? "omitted" : "explicit"})`, async () => {
+    const { bot, clock, world } = createFakeBot({ position: BESIDE_THE_CHEST, cells: CHEST_CELLS, carried: { cobblestone: 5 }, containers });
+    await bot.equip(bot.registry.itemsByName.cobblestone!.id, "hand");
+    const window = await clock.settle(bot.openContainer(bot.blockAt(new Vec3(3, 64, 0))!), 5_000);
+    assert.deepEqual([window.type, window.containerItems().length], ["minecraft:generic_9x3", 0]);
+    assert.equal(world.blockAt(new Vec3(3, 65, 0))?.name, "air");
+    assert.equal(bot.inventory.count(bot.registry.itemsByName.cobblestone!.id, null), 5);
+  });
+}
 
 test("a click that would merge into a full stack moves nothing and the server sends nothing", async () => {
   const { bot, clock } = createFakeBot({ slots: { 9: { name: "cobblestone", count: 64 }, 10: { name: "cobblestone", count: 5 } } });

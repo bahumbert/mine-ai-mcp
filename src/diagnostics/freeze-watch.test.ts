@@ -6,7 +6,8 @@ import test from "node:test";
 // The wedge is counted on the monotonic clock, as the watch measures: `Atomics.wait` keeps its deadline on the wall clock.
 import { blockThread as wedge } from "../test-support/block-thread.js";
 import { createFakeClock } from "../test-support/fake-bot/index.js";
-import { freezeClockMs, markPhase, offsetToMainClockMs, stalledForMs, startFreezeWatch, wallMinusFreezeClockMs } from "./freeze-watch.js";
+import { createFreezeCheck, readMarkers } from "./freeze-watch-check.js";
+import { activeFreezeViews, freezeClockMs, markPhase, offsetToMainClockMs, stalledForMs, startFreezeWatch, wallMinusFreezeClockMs } from "./freeze-watch.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -49,31 +50,35 @@ test("no freeze file is written without a stall", async () => {
   });
 });
 
+test("a freeze is recorded once until a reading below the stall threshold", async () => {
+  const shouldRecord = createFreezeCheck(1000);
+  assert.deepEqual([500, 1000, 1500, 200, 1200].map(shouldRecord), [false, true, false, false, true]);
+});
+
 test("the marker ring wraps and keeps the newest 64 oldest first", async () => {
-  await withWatch(async (dir) => {
-    for (let index = 0; index < 100; index++) markPhase(`marker ${index} ${"x".repeat(400)}`);
-    wedge(2300);
-    await sleep(600);
-    const [file] = (await readdir(dir)).filter((name) => name.startsWith("freeze-"));
-    const record = JSON.parse(await readFile(path.join(dir, file!), "utf8"));
-    assert.equal(record.markers.length, 64);
-    assert.match(record.markers[0].text, /^marker 36 /);
-    assert.match(record.markers.at(-1).text, /^marker 99 /);
-    assert.ok(Buffer.byteLength(record.markers[0].text) <= 144);
+  assert.equal(activeFreezeViews(), null);
+  await withWatch(async () => {
+    for (let index = 0; index < 70; index++) markPhase(`marker ${index} ${"x".repeat(400)}`);
+    const markers = readMarkers(activeFreezeViews()!, (stampedAtMs) => String(stampedAtMs));
+    assert.equal(markers.length, 64);
+    for (const [index, marker] of markers.entries()) {
+      assert.equal(marker.sequence, index + 6);
+      assert.ok(marker.text.startsWith(`marker ${index + 6} `));
+      assert.ok(Buffer.byteLength(marker.text) <= 144);
+      assert.ok(Number.isFinite(Number(marker.at)));
+    }
   });
+  assert.equal(activeFreezeViews(), null);
 });
 
 test("identical consecutive markers share one slot and count their repeats", async () => {
-  await withWatch(async (dir) => {
+  await withWatch(async () => {
     markPhase("before");
     for (let index = 0; index < 100; index++) markPhase("physicsTick: swim s1");
     markPhase("after");
-    wedge(2300);
-    await sleep(600);
-    const [file] = (await readdir(dir)).filter((name) => name.startsWith("freeze-"));
-    const record = JSON.parse(await readFile(path.join(dir, file!), "utf8"));
+    const markers = readMarkers(activeFreezeViews()!, () => "unused");
     assert.deepEqual(
-      record.markers.map((marker: { text: string; repeats: number }) => [marker.text, marker.repeats]),
+      markers.map((marker) => [marker.text, marker.repeats]),
       [["before", 1], ["physicsTick: swim s1", 100], ["after", 1]],
     );
   });

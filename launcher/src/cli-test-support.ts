@@ -2,6 +2,7 @@
 // control handler, the console client's stream and a poll on real time (the control endpoint runs on real sockets).
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CliContext } from "./cli-context.ts";
@@ -16,6 +17,18 @@ export function cliContext(name: string, appRoot?: string, dataRoot?: string) {
   const out: string[] = [];
   const context: CliContext = { root, appRoot: appRoot ?? root, out: (line) => void out.push(line), err: (line) => void out.push(line), loadManifest };
   return { root, out, context };
+}
+
+/** A TCP port the system picked (port 0 of 127.0.0.1) that nothing holds once this returns: a test's control port, so parallel suites never share a fixed one. Another process can still take it before the test listens: a rare race, not measured yet (plan 2026-11-15-unit-suite-parallel Task 11 measures it). */
+export async function freeTestPort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => resolve());
+  });
+  const port = (probe.address() as { port: number }).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
 }
 
 /** Every install step succeeds with `<name> done`; `calls` lists the steps that ran. */

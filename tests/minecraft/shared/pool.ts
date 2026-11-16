@@ -19,9 +19,15 @@ export interface ServerSpec {
   readonly scenario: Scenario;
   /** The locked batch this server was made for: no other submission's trial uses it, and it stops when that batch ends. */
   readonly reservedFor?: number;
+  /** The template world, in MB, the server's root may hold in RAM (its size, from the daemon); 0 or absent: none. The ledger holds it until the copy ends. */
+  readonly worldMb?: number;
 }
 
-export type ServerRequest = ServerSpec & { readonly id: string };
+export type ServerRequest = ServerSpec & {
+  readonly id: string;
+  /** The factory calls this when the world is no longer to be copied into RAM: the copy ended, was not made (a disk root, no template) or failed. Calling it again changes nothing. */
+  readonly onWorldCopied?: () => void;
+};
 
 /** Starts one server (process, ports, world) and returns it ready for commands. */
 export interface ServerFactory {
@@ -62,7 +68,7 @@ export interface ManagedServer {
   readonly mutex: ArrangementMutex;
   /** Resolves with the server once its setup commands ran; rejects when it could not start. */
   readonly ready: Promise<ScenarioServer>;
-  /** Aborts, with the reason, when the pool stops the server because its java process is gone: the trials on it cannot finish. */
+  /** Aborts with the reason when java is gone or the server is stopped as stalled: unfinished trials cannot use it. */
   readonly died: AbortSignal;
 }
 
@@ -72,6 +78,8 @@ interface PoolEntry extends ManagedServer {
   readonly lanes: LanePool | null;
   readonly stall: StallWatch;
   readonly death: AbortController;
+  /** The RAM world its factory has not finished copying, in MB (the ledger holds it); 0 from the end of the copy, and from the server's being ready. A holder object: the factory may report before the entry exists. */
+  readonly world: { pendingMb: number };
   /** Samples in a row in which its java process read as gone. */
   javaGoneReadings: number;
   server: ScenarioServer | null;
@@ -80,6 +88,8 @@ interface PoolEntry extends ManagedServer {
   lastTrialAt: number;
   msptP95: number | null;
   residentMb: number;
+  /** Its last tick query was still unanswered when the sample stopped waiting: no trial is offered on its old `msptP95`. */
+  late: boolean;
   /** A single-scenario server waiting for its next scenario of the same key. */
   idleReusable: boolean;
   /** Stop as soon as nothing runs on it (sick, restart, or a scenario that dirtied its world). */
@@ -99,6 +109,8 @@ function isBusy(entry: PoolEntry): boolean {
 
 export class ServerPool {
   readonly #entries = new Map<string, PoolEntry>();
+  /** Stops started and not ended: their servers are out of `#entries`, but their ports and pid entries are held until each ends. */
+  readonly #stopping = new Set<Promise<void>>();
   #nextId = 1;
   #started = 0;
 
@@ -133,21 +145,23 @@ export class ServerPool {
     this.#started += 1;
     this.log(`server ${id} (${spec.kind}, key ${spec.key}) starting: ${reason}`);
     const death = new AbortController();
+    const world = { pendingMb: spec.worldMb ?? 0 };
     const entry: PoolEntry = {
       id, key: spec.key, kind: spec.kind, heapMb: spec.heapMb, reservedFor: spec.reservedFor ?? null, mutex: new ArrangementMutex(),
-      lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null,
-      stall: new StallWatch(this.config.stallStopMs, now), death, javaGoneReadings: 0, server: null, status: "starting", running: 0,
-      lastTrialAt: now, msptP95: null, residentMb: 0, idleReusable: false, retire: false,
+      lanes: spec.kind === "shared" ? new LanePool(lanesPerServer(this.config)) : null, world,
+      stall: new StallWatch(this.config.stallStopMs), death, javaGoneReadings: 0, server: null, status: "starting", running: 0,
+      lastTrialAt: now, msptP95: null, residentMb: 0, late: false, idleReusable: false, retire: false,
       mutexQueued: 0, holds: [], nextBody: 0,
-      ready: this.#create(id, spec), died: death.signal,
+      ready: this.#create(id, spec, () => { world.pendingMb = 0; }), died: death.signal,
     };
     this.#entries.set(id, entry);
-    entry.ready.then(server => { entry.server = server; entry.status = "ready"; }, () => { this.#entries.delete(id); });
+    // A ready server's copy is over whether the factory said so or not (a disk root, no template): nothing is left pending.
+    entry.ready.then(server => { entry.server = server; entry.status = "ready"; world.pendingMb = 0; }, () => { this.#entries.delete(id); });
     return entry;
   }
 
-  async #create(id: string, spec: ServerSpec): Promise<ScenarioServer> {
-    const server = await this.factory.create({ ...spec, id });
+  async #create(id: string, spec: ServerSpec, onWorldCopied: () => void): Promise<ScenarioServer> {
+    const server = await this.factory.create({ ...spec, id, onWorldCopied });
     try {
       for (const command of spec.setup) await server.command(command);
     } catch (error) {
@@ -174,7 +188,8 @@ export class ServerPool {
   readings(): ServerReading[] {
     return [...this.#entries.values()].map(entry => ({
       id: entry.id, key: entry.key, status: entry.status, shared: entry.kind === "shared", busy: isBusy(entry), lanes: entry.running,
-      msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb,
+      msptP95: entry.msptP95, heapMb: entry.heapMb, residentMb: entry.residentMb, ...(entry.late ? { late: true } : {}),
+      ...(entry.world.pendingMb > 0 ? { worldPendingMb: entry.world.pendingMb } : {}),
     }));
   }
 
@@ -249,11 +264,26 @@ export class ServerPool {
     return [...this.#entries.values()].flatMap(entry => (entry.status !== "starting" && entry.server ? [{ id: entry.id, server: entry.server }] : []));
   }
 
+  /** A reading from an answer: the server is no longer late. */
   setHealth(id: string, health: { readonly msptP95: number | null; readonly residentMb: number }): void {
     const entry = this.#entries.get(id);
     if (!entry) return;
     entry.msptP95 = health.msptP95;
     entry.residentMb = health.residentMb;
+    entry.late = false;
+  }
+
+  /** The sample stopped waiting for this server's tick query: its old P95 is dropped and no trial is offered on it until its answer comes (`setHealth`). Its resident size stays the last one read. */
+  markLate(id: string): void {
+    const entry = this.#entries.get(id);
+    if (!entry) return;
+    entry.msptP95 = null;
+    entry.late = true;
+  }
+
+  /** A `tick query` was sent to the server at `now`: its silence is counted from the first one after its last answer (`StallWatch`). */
+  asked(id: string, now: number): void {
+    this.#entries.get(id)?.stall.asked(now);
   }
 
   /** The server answered a command (whatever it said): it is not stalled. */
@@ -271,25 +301,26 @@ export class ServerPool {
    * Stop, at once, the servers whose java process read as gone in JAVA_GONE_READINGS samples in a row, and tell the trials on them (`died`):
    * waiting for STALL_STOP and the RCON timeouts of every command would keep sending trials to a server that is not there. Returns their ids.
    */
-  async stopDeadJava(): Promise<string[]> {
+  stopDeadJava(): string[] {
     const dead = [...this.#entries.values()].filter(entry => entry.status !== "starting" && entry.javaGoneReadings >= JAVA_GONE_READINGS);
     for (const entry of dead) entry.death.abort("its java process is gone");
     return this.#stopRemoved(dead, "has no java process any more", "java process gone");
   }
 
-  /** Stop, now and by force of the server, the servers silent for STALL_STOP; their trials fail on the dead RCON. Returns their ids. */
-  async stopStalled(now: number): Promise<string[]> {
+  /** Stops servers silent for STALL_STOP, aborting their trials as a bench death before the stop. Returns their ids. */
+  stopStalled(now: number): string[] {
     const stalled = [...this.#entries.values()].filter(entry => entry.status === "ready" && entry.stall.isStalled(now));
+    for (const entry of stalled) entry.death.abort(`it answered nothing for ${this.config.stallStopMs} ms`);
     return this.#stopRemoved(stalled, `answered nothing for ${this.config.stallStopMs} ms`, "stalled");
   }
 
-  /** Takes the entries out of the pool, logs why, and stops their servers. */
-  async #stopRemoved(entries: readonly PoolEntry[], why: string, reason: string): Promise<string[]> {
+  /** Takes the entries out of the pool, logs why, and starts the stops of their servers (started, not awaited: see `#stop`). */
+  #stopRemoved(entries: readonly PoolEntry[], why: string, reason: string): string[] {
     for (const entry of entries) {
       this.log(`server ${entry.id} ${why}: stopping it`);
       this.#entries.delete(entry.id);
+      this.#stop(entry, reason);
     }
-    await Promise.allSettled(entries.map(entry => this.#stop(entry, reason)));
     return entries.map(entry => entry.id);
   }
 
@@ -327,14 +358,16 @@ export class ServerPool {
   }
 
   /** Stop what has drained and must go (sick, restart, dirtied), and what has been idle past SERVER_IDLE with its key not wanted. */
-  async reap(now: number, wantedKeys: ReadonlySet<string>): Promise<void> {
+  reap(now: number, wantedKeys: ReadonlySet<string>): void {
     const stopping = [...this.#entries.values()].filter(entry => {
       if (entry.status === "starting" || entry.running > 0) return false;
       if (entry.retire) return true;
       return now - entry.lastTrialAt >= this.config.serverIdleMs && !wantedKeys.has(entry.key);
     });
-    for (const entry of stopping) this.#entries.delete(entry.id);
-    await Promise.allSettled(stopping.map(entry => this.#stop(entry, this.#stopReason(entry))));
+    for (const entry of stopping) {
+      this.#entries.delete(entry.id);
+      this.#stop(entry, this.#stopReason(entry));
+    }
   }
 
   /** Why a drained server stops: the plan's reasons for the log. */
@@ -344,15 +377,31 @@ export class ServerPool {
     return entry.retire ? "retired" : "idle";
   }
 
+  /** Stops every server and waits for each stop, the ones the sampler started and has not ended included: the daemon is not stopped before its servers are. */
   async stopAll(): Promise<void> {
     const all = [...this.#entries.values()];
     this.#entries.clear();
-    await Promise.allSettled(all.map(entry => this.#stop(entry, "daemon stopping")));
+    for (const entry of all) this.#stop(entry, "daemon stopping");
+    await Promise.allSettled([...this.#stopping]);
   }
 
-  async #stop(entry: PoolEntry, reason: string): Promise<void> {
+  /**
+   * Stops the server of an entry already out of `#entries`: started, not awaited (a slow stop must not hold the sample, spec 2026-11-15
+   * section 1). The promise is in `#stopping` from this call to its end, so `stopAll` can wait for it; it never rejects, a failed stop is logged.
+   * A server that is up has its `stop()` called before this returns.
+   */
+  #stop(entry: PoolEntry, reason: string): void {
+    const stopping = this.#stopServer(entry, reason).finally(() => this.#stopping.delete(stopping));
+    this.#stopping.add(stopping);
+  }
+
+  async #stopServer(entry: PoolEntry, reason: string): Promise<void> {
     this.log(`server ${entry.id} stopping: ${reason}`);
-    const server = entry.server ?? await entry.ready.catch(() => null);
-    await server?.stop();
+    try {
+      const server = entry.server ?? await entry.ready.catch(() => null);
+      await server?.stop();
+    } catch (error) {
+      this.log(`server ${entry.id} stop failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 }

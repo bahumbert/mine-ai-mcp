@@ -33,6 +33,8 @@ export class FakeServer implements ScenarioServer {
 
 export class FakeFactory implements ServerFactory {
   readonly created: FakeServer[] = [];
+  /** Every request `create` got, in order (a test calls `onWorldCopied` on one to end a copy by hand). */
+  readonly requests: ServerRequest[] = [];
   failNextStart = false;
   /** Called with each server right after it is made. */
   onCreate: ((server: FakeServer) => void) | null = null;
@@ -40,6 +42,7 @@ export class FakeFactory implements ServerFactory {
   startGate: Promise<void> | null = null;
 
   async create(request: ServerRequest): Promise<ScenarioServer> {
+    this.requests.push(request);
     await this.startGate;
     if (this.failNextStart) { this.failNextStart = false; throw new Error("no port"); }
     const server = new FakeServer(request.id, request, 25_400 + this.created.length * 2);

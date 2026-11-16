@@ -1,7 +1,7 @@
 // The ingots one smelt attempt made: counted from the input it loaded and got back, not from the window's take deltas.
 import type { Bot } from "mineflayer";
-import { carriedCount, INVENTORY_SETTLE_WALL_MS, type SettledInventoryCount } from "../../world/inventory-count.js";
-import { waitForServerAnswer } from "../../world/world-age.js";
+import { carriedCount, type SettledInventoryCount } from "../../world/inventory-count.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "../../world/world-age.js";
 import { ingotsFromInput, type CookVerdict, type Harvest, type Recovery } from "./furnace-cook.js";
 
 /** The input an attempt put in the furnace: the carried count just before, and how many went in. */
@@ -58,7 +58,8 @@ async function settleReturnedInput(bot: Bot, itemName: string, loaded: LoadedInp
   const lowest = cook.recovery.input > 0 ? shown - 1 : shown;
   if (lowest < shown) {
     await waitForServerAnswer(bot, cook.recoveredAtAge, {
-      wallMs: INVENTORY_SETTLE_WALL_MS,
+      wallMs: Number.POSITIVE_INFINITY,
+      stallMs: SERVER_CLOCK_STOPPED_MS,
       until: () => carriedCount(bot, itemName) === lowest,
     });
   }

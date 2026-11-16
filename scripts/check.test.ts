@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
+import { gitProgram, importerReport, importerTestCommand, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport } from "./data-readers.js";
 import { aliasesFromPackageJson, buildReverseGraph, IMPORTER_DEPTH, IMPORTER_TEST_CAP, testsReachedBy } from "./import-graph.js";
+import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
 
 function checkout(layout: "directory" | "file" | "none", content = ""): string {
   const root = mkdtempSync(join(tmpdir(), "check-git-"));
@@ -68,9 +69,14 @@ test("direct tests alone over the cap are named in the summary", () => {
   expect(lines).toContain(`check: depths 0 and 1 alone are 2 test files, over the cap of ${IMPORTER_TEST_CAP}`);
 });
 
-test("bun run test passes the arguments after --all to bun test only", () => {
-  expect(suiteTestCommand(["./src", "./brain"], [])).toEqual(["bun", "test", "./src", "./brain"]);
-  expect(suiteTestCommand(["./src"], ["--coverage", "--coverage-dir=coverage"])).toEqual(["bun", "test", "./src", "--coverage", "--coverage-dir=coverage"]);
+test("the suite call of check passes the 30 s limit before its paths; the arguments after --all stay last", () => {
+  const limit = ["--timeout", String(DEFAULT_TEST_TIMEOUT_MS)];
+  expect(suiteTestCommand(["./src", "./brain"], [])).toEqual(["bun", "test", ...limit, "./src", "./brain"]);
+  expect(suiteTestCommand(["./src"], ["--coverage", "--coverage-dir=coverage"])).toEqual(["bun", "test", ...limit, "./src", "--coverage", "--coverage-dir=coverage"]);
+});
+
+test("the importer call of check passes the 30 s limit before its test files, each as ./<file>", () => {
+  expect(importerTestCommand(["src/a.test.ts", "brain/b.test.ts"])).toEqual(["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), "./src/a.test.ts", "./brain/b.test.ts"]);
 });
 
 test("suite roots include both scenario test directories", () => {
@@ -220,6 +226,25 @@ test("a near-miss of the marker is reported, not ignored", () => {
   for (const line of ["//check-reads: data/*.yaml", "// check-reads : data/*.yaml", "//  check-reads: data/*.yaml", "/* check-reads: data/*.yaml */"]) {
     const plan = planDataReads(["data/a.yaml"], new Map([["tests/r.ts", `${line}\n`]]), ["data/a.yaml"]);
     expect({ line, reads: plan.reads.length, malformed: plan.malformed.length }).toEqual({ line, reads: 0, malformed: 1 });
+  }
+});
+
+test("a change to a module the daemon test reads alone selects the daemon test, read from its real declaration", () => {
+  const DAEMON_TEST = "tests/minecraft/shared/daemon.test.ts";
+  const daemonSource = readFileSync(new URL(`../${DAEMON_TEST}`, import.meta.url), "utf8");
+  const daemonModules = [
+    "tests/minecraft/shared/protocol.ts",
+    "tests/minecraft/shared/submission-handler.ts",
+    "tests/minecraft/shared/scheduler-types.ts",
+    "tests/minecraft/shared/scheduler-trial.ts",
+    "tests/minecraft/shared/scheduler.ts",
+    "tests/minecraft/shared/result-class.ts",
+    "tests/minecraft/shared/trial.ts",
+  ];
+  for (const changed of daemonModules) {
+    const { plan, reached } = dataReadTree({ [DAEMON_TEST]: daemonSource }, [], [changed]);
+    expect({ changed, reads: plan.reads }).toEqual({ changed, reads: [{ data: changed, reader: DAEMON_TEST }] });
+    expect({ changed, tests: reached.tests.map((entry) => entry.file) }).toEqual({ changed, tests: [DAEMON_TEST] });
   }
 });
 

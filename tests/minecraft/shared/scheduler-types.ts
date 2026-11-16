@@ -9,6 +9,7 @@ import type { ServerPool } from "./pool.ts";
 import type { RunIo } from "./run-io.ts";
 import type { TemplateBuilds } from "./scheduler-template-build.ts";
 import type { TrialRunner } from "./trial.ts";
+import type { ResultClass } from "./result-class.ts";
 
 export interface SubmissionEntry {
   readonly name: string;
@@ -18,7 +19,7 @@ export interface SubmissionEntry {
 
 export type SubmissionEvent =
   | { readonly type: "info"; readonly text: string }
-  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string };
+  | { readonly type: "result"; readonly name: string; readonly outcome: RunResult["outcome"]; readonly elapsedMs: number; readonly detail: string; readonly error?: string; readonly runDir: string; readonly class?: ResultClass; readonly cause?: string; readonly selfMade?: boolean; readonly retried?: string };
 
 export interface SubmissionSpec {
   readonly entries: readonly SubmissionEntry[];
@@ -33,7 +34,7 @@ export interface SubmissionSpec {
   readonly emit: (event: SubmissionEvent) => void;
 }
 
-export interface SubmissionSummary { readonly runs: number; readonly passed: number; readonly failed: number; readonly cancelled: number }
+export interface SubmissionSummary { readonly runs: number; readonly passed: number; readonly failed: number; readonly cancelled: number; readonly infra?: number; readonly retried?: number }
 
 export interface SubmissionHandle {
   readonly id: number;
@@ -62,4 +63,9 @@ export interface SchedulerDeps {
   readonly clientsAhead?: ClientsAhead;
   /** The daemon's template build: while it runs every trial waits and the ledger counts its server; absent for a scheduler that builds nothing. */
   readonly templateBuilds?: TemplateBuilds;
+  /**
+   * The template world, in MB, a new lane server of this Minecraft version would copy into RAM, as the daemon already knows it (sync: the scheduler admits
+   * without awaiting). Absent, or 0: the root is on disk (RAM off, no template yet) and the ledger reserves nothing for it.
+   */
+  readonly worldMbFor?: (version: string) => number;
 }

@@ -54,6 +54,7 @@ params:
   navigate: { x: 9, y: -60, z: 0, range: 1 }
 
 goal:
+  stillTicks: 1240 # Task 7: longest passing still span 614 ticks; 2x rounded up to 20.
   kind: all
   timeout: 240
   goals:

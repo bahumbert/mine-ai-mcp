@@ -82,7 +82,7 @@ dropTest("stacks the server spawns after the toss resolved are claimed once seen
   const world = pitWorld(clock, [{ name: "cobblestone", count: 70 }, { name: "oak_log", count: 16 }], { spawnAfterMs: 30 });
   const discarded = createDiscardedItems();
 
-  const result = await run(dropItem(world.bot, parseDropItemRequest(BURY_EVERYTHING), {}, { ...world.dependencies, settleMs: 300 }, discarded));
+  const result = await run(dropItem(world.bot, parseDropItemRequest(BURY_EVERYTHING), {}, { ...world.dependencies, holeLandingMs: 300 }, discarded));
 
   assert.equal(result.status, "succeeded", JSON.stringify(result));
   assert.deepEqual([...discarded.ignored()].sort(), [77, 78], "both stacks that landed in the pit are claimed");

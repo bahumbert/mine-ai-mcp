@@ -12,7 +12,7 @@ import { loadScenario, scenarioDefinitionSchema } from "mine-labs";
 import { Vec3 } from "vec3";
 import type { ActionResult } from "@aibengineering/mine-ai-mcp";
 import { observeLiveSituation } from "../../../src/actions/view-status/view-status.ts";
-import { createFakeBot } from "../../../src/test-support/fake-bot/index.ts";
+import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import { DEFAULT_SURVIVAL_POLICY } from "../../../src/survival/policy/contract.ts";
 import { temporaryBotData } from "../../../src/test-support/bot-data.ts";
 import { ZERO_ARENA, arenaActionInput, arenaFrame, type ArenaFrame } from "../arena/frame.ts";
@@ -72,7 +72,9 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
   const { client: _launch, ...scenario } = await loadScenario(file);
   const definition = scenarioDefinitionSchema.parse({ ...scenario, params: withoutWallWaits(scenario.params) });
   const [x, y, z] = frame.world(scenario.players[0]!.pos as [number, number, number]);
-  const { bot } = createFakeBot({ position: new Vec3(x, y, z) });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ position: new Vec3(x, y, z), clock });
   const data = temporaryBotData({ botId: "Actor" });
   const recorded: Recorded[] = [];
   const steps = (definition.params.actions ?? []) as ParamsStep[];
@@ -107,10 +109,11 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
     },
   });
   try {
-    const completion = await run(context);
-    recorded.push({ action: "(completion)", input: { status: completion.status } });
-  } catch {
     // A stand-in result a driver cannot read ends its run here; what it asked before that is what is compared.
+    const running = run(context).catch(() => null);
+    // Advance server packets within Mine Labs' goal budget (trial/run.ts, default 120s), T9 2026-11-15.
+    const completion = await clock.settle(running, (scenario.goal.timeout ?? 120) * 1_000);
+    if (completion !== null) recorded.push({ action: "(completion)", input: { status: completion.status } });
   } finally {
     data.close();
   }

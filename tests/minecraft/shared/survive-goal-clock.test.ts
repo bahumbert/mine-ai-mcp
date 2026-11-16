@@ -13,8 +13,8 @@ test("a survive goal across a backward wall-clock step passes while the player l
       observer: { playerDeaths: async () => 0 } as unknown as GoalObserver,
       chat: new Map(),
       completions: new Map(),
-      startedAt,
-      startedAtMonotonic: performance.now() - 20_100,
+      startTick: 0,
+      gameTicks: () => 402,
       state: new Map(),
     });
     assert.equal(result.state, "passed");

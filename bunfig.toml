@@ -1,0 +1,5 @@
+# Bun test settings. Read only when `bun test` runs from the repository root (every documented command does).
+
+[test]
+# The 30 s default limit, a hang detector: see scripts/test-limit.ts. The fake clock a timed-out test left installed, restored at the next test's start: scripts/test-clock-cleanup.ts.
+preload = ["./scripts/test-limit.ts", "./scripts/test-clock-cleanup.ts"]

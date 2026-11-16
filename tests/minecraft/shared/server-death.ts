@@ -14,7 +14,7 @@ export function deathConfirmBoundMs(config: Pick<ScenarioServerConfig, "sampleEv
   return 2 * config.sampleEveryMs + DEATH_CONFIRM_SLACK_MS;
 }
 
-/** Resolves when `signal` aborts (the server's death, or the submission's cancel) or `boundMs` of the wall clock pass; a server still alive after the bound is not a death (`stopStalled` aborts nothing). */
+/** Resolves on a confirmed death, a stalled-server stop, a submission cancel, or the wall bound; silence alone is not a death. */
 export function awaitDeathOrCancel(signal: AbortSignal, boundMs: number): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise(resolve => {

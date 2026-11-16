@@ -552,7 +552,6 @@ test("a cancel ends a pillar placement's waits at once when physics has stopped 
     assert.deepEqual(await effect.completion, { kind: "failed", observation: "bot died" }, `physics stopped after ${ticksBeforeStop} ticks`);
   }
 });
-
 // ── Drops ────────────────────────────────────────────────────────────────────
 
 /**
@@ -957,6 +956,10 @@ function serverWatchedDig(answer: () => Promise<boolean>) {
           order.push("answer");
           return answer();
         },
+        next: async () => {
+          order.push("answer");
+          return await answer() ? { index: 0, state: { age: 0, stateId: 0, solid: false } } : "none";
+        },
         dispose: () => {
           disposed += 1;
         },
@@ -988,23 +991,13 @@ test("a break is accepted only once the server has answered for its cell, and th
   assert.equal(run.disposed(), 1);
 });
 
-test("a break the server never answers fails after asking it to resend the cell", async () => {
-  const run = serverWatchedDig(async () => false);
-  const completion = await run.effect.completion;
-  assert.equal(completion.kind, "failed");
-  assert.match(completion.kind === "failed" ? completion.observation : "", /server did not confirm breaking the block at 0,\s?62,\s?0/);
-  assert.match(completion.kind === "failed" ? completion.observation : "", /asked it to resend the cell/);
-  assert.deepEqual(run.asked, [{ x: 0, y: 62, z: 0 }]);
-  assert.equal(run.disposed(), 1);
-});
-
 test("a dig that throws still removes the server watch", async () => {
   const bot = surface({
     blockAt: () => ({ name: "stone" }),
     dig: async () => {
       throw new Error("dig interrupted");
     },
-    watchServerChange: () => ({ answer: async () => true, dispose: () => void (disposed += 1) }),
+    watchServerChange: () => ({ answer: async () => true, next: async () => "none", dispose: () => void (disposed += 1) }),
   });
   let disposed = 0;
   const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
@@ -1021,7 +1014,8 @@ test("a break effect reports the block it dug and the tool, once, also when the 
   const dug = surface({
     blockAt: () => ({ name: "deepslate" }),
     reportDig: (dig) => reported.push(dig),
-    watchServerChange: () => ({ answer: async () => true, dispose: () => undefined }),
+    watchServerChange: () => ({ answer: async () => true,
+      next: async () => ({ index: 0, state: { stateId: 0, solid: false, age: 0 } }), dispose: () => undefined }),
   });
   const operation = { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] } as const;
   const provenance = { runId: "run", planId: "plan", stepId: "downward", attempt: 1 };

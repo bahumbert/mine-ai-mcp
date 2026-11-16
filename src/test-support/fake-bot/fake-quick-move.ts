@@ -27,10 +27,10 @@ const PLAYER_MAIN_END = 36;
 const PLAYER_HOTBAR_END = 45;
 
 /** The slots a shift click on `slot` fills, as `quickMoveStack` of each menu names them, and whether the fill runs from the last. */
-function targetRange(window: QuickMoveWindow, slot: number): { start: number; end: number; reverse: boolean } {
+function targetRange(window: QuickMoveWindow, slot: number, craft: number | undefined): { start: number; end: number; reverse: boolean } {
   if (window.type !== PLAYER_WINDOW_TYPE) {
     return slot < window.inventoryStart
-      ? { start: window.inventoryStart, end: window.inventoryEnd, reverse: true }
+      ? { start: window.inventoryStart, end: window.inventoryEnd, reverse: craft === undefined || craft < 0 || slot === craft }
       : { start: 0, end: window.inventoryStart, reverse: false };
   }
   if (slot >= window.inventoryStart && slot < PLAYER_MAIN_END) return { start: PLAYER_MAIN_END, end: PLAYER_HOTBAR_END, reverse: false };
@@ -45,10 +45,10 @@ function indexes(start: number, end: number, reverse: boolean): number[] {
 }
 
 /** Shift click on `slot`: the stack goes to the target range as far as it fits; the rest stays where it was. */
-export function quickMove(window: QuickMoveWindow, slot: number, items: QuickMoveItems): void {
+export function quickMove(window: QuickMoveWindow, slot: number, items: QuickMoveItems, craft?: number): void {
   const moving = window.slots[slot];
   if (moving === null || moving === undefined) return;
-  const { start, end, reverse } = targetRange(window, slot);
+  const { start, end, reverse } = targetRange(window, slot, craft);
   let remaining = moving.count;
   for (const index of indexes(start, end, reverse)) {
     const target = window.slots[index];

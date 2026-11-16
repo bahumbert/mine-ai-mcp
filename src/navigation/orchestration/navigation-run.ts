@@ -40,6 +40,7 @@
  */
 import type { MutationClassification } from "../execution/mutations.js";
 import { executeWorldEffect } from "../execution/world-effect.js";
+import { pinReleaseTicks } from "../execution/confirmation-deadline.js";
 import { OpenedPassages } from "../execution/opened-passages.js";
 import { RouteExecutor, type RouteContext, type StepDecision } from "../execution/route-executor.js";
 import type { PlanningNode, ResolvedGoal } from "../goals/goal.js";
@@ -175,8 +176,6 @@ type SearchAnswer =
   | { readonly kind: "planning_stalled"; readonly failure: NavigationFailure }
   | { readonly kind: "stopped" };
 
-/** How long a break to free a held body may take: a hand on a leaf is instant, a hand on stone is not. */
-const PIN_RELEASE_DEADLINE_MS = 15_000;
 /** Ticks to wait for the world to show the ceiling gone once the break has completed. */
 const PIN_RELEASE_TICKS = 40;
 /** Releases one run will attempt before a ceiling that keeps coming back is reported instead. */
@@ -1012,7 +1011,7 @@ export class NavigationRun {
       token,
       operation: { kind: "break", position: cell, expectedStateId: dig.stateId, toolType: dig.toolType, brings: [] },
       targets: [{ position: cell, before: stateMatcher(dig.stateId), after: airMatcher }],
-      deadlineMs: monotonicNow() + Math.max(PIN_RELEASE_DEADLINE_MS, dig.expectedTicks * 100),
+      deadlineTicks: pinReleaseTicks(dig.expectedTicks),
     });
     if (signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
     if (result.kind !== "confirmed")

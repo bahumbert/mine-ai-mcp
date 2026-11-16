@@ -45,6 +45,7 @@ params:
   minimumAirTicks: 200
 
 goal:
+  stillTicks: 1520 # Task 7: longest passing still span 751 ticks; 2x rounded up to 20.
   kind: all
   timeout: 90
   goals:

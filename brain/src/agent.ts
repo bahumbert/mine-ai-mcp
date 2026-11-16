@@ -1,4 +1,4 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "./wall-timers.ts";
 import { parseActivity } from "./activities.ts";
 import { activityChances, availableActivities, drawTwo } from "./activity-draw.ts";
 import { Body, HUMAN_TYPING, type TypingPace } from "./body.ts";
@@ -168,7 +168,7 @@ export class Agent {
       } catch (error) {
         if (signal.aborted) return;
         this.options.log(`status unreadable, retrying: ${String(error)}`);
-        await sleep(STARTUP_RETRY_MS, undefined, { signal }).catch(() => undefined);
+        await sleepMs(STARTUP_RETRY_MS, signal).catch(() => undefined);
       }
     }
     this.options.log(`listening as ${this.options.persona.username} (${this.options.persona.stance})`);
@@ -179,7 +179,7 @@ export class Agent {
     try {
       while (!signal.aborted) {
         unreadable = await this.readChat(unreadable);
-        await sleep(this.options.pollMs ?? DEFAULT_POLL_MS, undefined, { signal }).catch(() => undefined);
+        await sleepMs(this.options.pollMs ?? DEFAULT_POLL_MS, signal).catch(() => undefined);
       }
     } finally {
       this.stopAll();
