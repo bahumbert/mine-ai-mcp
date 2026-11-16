@@ -9,6 +9,7 @@ import { ActionRunner, type ActionRunnerOptions } from "../../session/action-run
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, engagingCombat } from "../../test-support/combat.js";
 import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { observation } from "../../test-support/navigation.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
@@ -54,37 +55,26 @@ test("an unreachable fight is not chosen again for 30 s when bot and target step
   }
 });
 
-test("a formerly unreachable attacker in reach is fought by a healthy defender with a sword above fight_margin", async () => {
-  const fixture = reflexFixture(async (id) => { fixture.entities.remove(id); return died(id); }, undefined,
-    { entities: { 7: hostile("blaze", 2) } });
-  try {
-    fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
-      { kind: "unreachable", why: "Earlier approach stopped." },
-      { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
-    fixture.tick();
-    await fixture.clock.advance(50);
-    assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
-  } finally {
-    await fixture.observer.close();
-    fixture.data.close();
-  }
-});
-
-test("a remembered unreachable fight against target 7 does not prevent fighting target 8", async () => {
-  const fixture = reflexFixture(async (id) => { fixture.entities.remove(id); return died(id); }, undefined,
-    { entities: { 8: hostile("blaze", 6) } });
-  try {
-    fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
-      { kind: "unreachable", why: "Earlier approach stopped." },
-      { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
-    fixture.tick();
-    await fixture.clock.advance(50);
-    assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
-  } finally {
-    await fixture.observer.close();
-    fixture.data.close();
-  }
-});
+for (const { description, targetId, distance } of [
+  { description: "a formerly unreachable attacker in reach is fought by a healthy defender with a sword above fight_margin", targetId: 7, distance: 2 },
+  { description: "a remembered unreachable fight against target 7 does not prevent fighting target 8", targetId: 8, distance: 6 },
+]) {
+  test(description, async () => {
+    const fixture = reflexFixture(async (id) => { fixture.entities.remove(id); return died(id); }, undefined,
+      { entities: { [targetId]: hostile("blaze", distance) } });
+    try {
+      fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
+        { kind: "unreachable", why: "Earlier approach stopped." },
+        { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+      fixture.tick();
+      await fixture.clock.advance(50);
+      assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
+    } finally {
+      await fixture.observer.close();
+      fixture.data.close();
+    }
+  });
+}
 
 test("a cancel or a death mid-fight remembers nothing", async () => {
   for (const stop of ["cancel", "death"] as const) {
@@ -905,8 +895,13 @@ test("one evade retains its first threat and records a new contact encountered a
   const fixture = reflexFixture(
     async (targetId) => died(targetId),
     async ({ goal }) => {
-      const snapshot = () =>
-        ({ entities: new Map(Object.values(fixture.bot.entities).map((entity) => [entity.id, entity])) }) as never;
+      // The cover goal needs the body's actual position as well as the contacts (P4-29 a3 T1c, 2026-11-16).
+      const snapshot = () => ({
+        ...observation(),
+        position: fixture.bot.entity.position,
+        stance: fixture.bot.entity.onGround ? "supported" as const : "airborne" as const,
+        entities: new Map(Object.values(fixture.bot.entities).map((entity) => [entity.id, entity])),
+      });
       const initial = goal.resolve(snapshot());
       assert.equal(initial.kind, "active");
       if (initial.kind === "active" && attempts++ === 0) assert.doesNotMatch(initial.revision, /8@/);
@@ -918,7 +913,7 @@ test("one evade retains its first threat and records a new contact encountered a
         assert.match(revised.revision, /7@/);
         assert.match(revised.revision, /8@/);
       }
-      // Away from the first threat alone is not enough to report safe separation.
+      // With no standing cover, 14 blocks from threat 8 still owes separation: capability_limit, not safe_separation.
       fixture.bot.entity.position = new Vec3(-40, 64, 0);
       return { status: "completed", elapsedMs: 0 };
     },
