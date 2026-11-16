@@ -41,8 +41,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     // Navigate ranges use integer feet cells. Allow the horizontal half-cell
     // diagonal and fractional footing when comparing the actual entity position.
     const distance = Math.hypot(position.x - (x + 0.5), position.y - y, position.z - (z + 0.5));
-    if (distance > range + 0.75 || observed.situation.vitals.health < 20) {
-      return { status: "failed", detail: `${label}: observed arrival ${distance.toFixed(2)} blocks from marker, health ${observed.situation.vitals.health}; ${completed.join("; ")}` };
+    if (!position.onGround || distance > range + 0.75 || observed.situation.vitals.health < 20) {
+      return { status: "failed", detail: `${label}: observed arrival ${distance.toFixed(2)} blocks from marker, grounded ${position.onGround}, health ${observed.situation.vitals.health}; ${completed.join("; ")}` };
     }
   }
   return { status: "succeeded", detail: completed.join("; ") };
