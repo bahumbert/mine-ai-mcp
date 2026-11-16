@@ -134,7 +134,7 @@ test("each search plans with the scaffold the policy offers when that search sta
   bot.current = { ...observation(), inventory: new Map([[2, 4]]) };
   // The production policy reads its scaffold from the live inventory; the run
   // must read it when a search starts, not when the policy was made.
-  let offered: { itemType: number; stateId: number } | null = null;
+  let offered: { itemType: number; stateId: number; reserve: number } | null = null;
   const policy = Object.freeze({
     ...createMovementPolicy({ allowSprinting: false, allowParkour: false }),
     get scaffold() {
@@ -150,12 +150,42 @@ test("each search plans with the scaffold the policy offers when that search sta
       if (event.kind === "route_committed") plans.push(event.plan.steps);
     }),
   });
-  offered = { itemType: 2, stateId: 1 };
+  offered = { itemType: 2, stateId: 1, reserve: 0 };
   await settle(navigator, { goal: exactBlockGoal({ x: 5, y: 63, z: 0 }), policy });
   const placements =
     plans[0]?.flatMap((step) => step.operations.filter((operation) => operation.kind === "place")) ?? [];
   assert.equal(placements.length, 4);
   for (const operation of placements) if (operation.kind === "place") assert.equal(operation.placement.itemType, 2);
+});
+
+/** A chasm four blocks wide across the whole world: only a bridge of four crosses it. The bot carries `carried` of item type 2. */
+function chasmRun(carried: number, reserve: number) {
+  const world = flatWorld();
+  for (const x of [1, 2, 3, 4])
+    for (let z = -5; z <= 5; z += 1) for (const y of [59, 60, 61, 62]) world.load({ x, y, z }, { stateId: 0 });
+  const bot = new FakeNavigationBot();
+  bot.current = { ...observation(), inventory: new Map([[2, carried]]) };
+  const policy = Object.freeze({
+    ...createMovementPolicy({ allowSprinting: false, allowParkour: false }),
+    scaffold: { itemType: 2, stateId: 1, reserve },
+  });
+  const events: NavigationEvent[] = [];
+  const navigator = createNavigator({ world, bot, createId: () => "reserve", telemetry: onEvent((event) => events.push(event)) });
+  return settle(navigator, { goal: exactBlockGoal({ x: 5, y: 63, z: 0 }), policy }).then((outcome) => ({ outcome, events }));
+}
+
+test("the run plans with the carried count less the reserve", async () => {
+  // 5 carried, 2 kept back: 3 may be placed, the bridge needs 4.
+  const short = await chasmRun(5, 2);
+  assert.equal(short.outcome.kind, "failed");
+  if (short.outcome.kind === "failed") assert.equal(short.outcome.failure.kind, "no_path");
+  assert.equal(short.events.some((event) => event.kind === "route_committed"), false);
+  // 5 carried, 1 kept back: 4 may be placed, exactly the bridge.
+  const enough = await chasmRun(5, 1);
+  const committed = enough.events.flatMap((event) => (event.kind === "route_committed" ? [event.plan] : []));
+  assert.equal(committed[0]?.steps.flatMap((step) => step.operations.filter((operation) => operation.kind === "place")).length, 4);
+  assert.equal(committed[0]?.complete, true);
+  assert.equal(enough.events.some((event) => event.kind === "continuation_abandoned"), false, "the continuation check compares the reduced count with itself");
 });
 
 test("a run pushed back to where it began reports no progress after three routes", async () => {

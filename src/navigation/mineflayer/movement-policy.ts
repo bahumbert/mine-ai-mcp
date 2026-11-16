@@ -19,7 +19,8 @@ import { occupiedCell } from "../../world/placement.js";
 import { enchantmentsOf } from "../../world/enchantments.js";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "../../survival/policy/contract.js";
 import type { BreakEvaluation, MovementPolicy, OwnRegionEscape, PolicyDecision, ToolSelection } from "../movements/policy.js";
-import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy, type ScaffoldSelection } from "../movements/policy.js";
+import { BREAK_OPENS_INTO_LIQUID, BREAK_UNDER_WATER, LAVA_SPREAD_REASON, createMovementPolicy } from "../movements/policy.js";
+import { NO_RESERVE, scaffoldSelection } from "./scaffold-item.js";
 import { TRAIT_DAMAGING, TRAIT_LAVA } from "../world/block-geometry.js";
 import { feetAtSea, isDeepOpenWater, waterAtOf, type WaterAt } from "../world/deep-water.js";
 import {
@@ -29,58 +30,13 @@ import {
   type LoadedBlock,
   type WorldView,
 } from "../world/world.js";
-import { blockClass, observeMineflayerBlock } from "./world.js";
-import { tagsOf } from "../../world/block-tags.js";
+import { blockClass } from "./world.js";
 
 /** The only carried blocks standard navigation may spend to create a route: the cheap, plentiful block of each terrain. */
 export const STANDARD_SCAFFOLD_ITEMS = DEFAULT_SCAFFOLD_BLOCKS;
 
-export function scaffoldBlockNames(bot: Bot): readonly string[] {
-  return readNavigationPolicy(bot).scaffold_blocks;
-}
+export { fallbackScaffoldItem, preferredScaffoldItem, scaffoldBlockNames } from "./scaffold-item.js";
 
-/** First carried block admitted by the policy's explicit preference order. */
-export function preferredScaffoldItem(bot: Bot, protectedNames: ReadonlySet<string> = new Set()) {
-  const carried = bot.inventory.items();
-  for (const name of scaffoldBlockNames(bot)) {
-    if (protectedNames.has(name)) continue;
-    const item = carried.find((candidate) => candidate.name === name);
-    if (!item) continue;
-    const block = bot.registry.blocksByName[name];
-    if (!block) continue;
-    const { geometry, traits } = observeMineflayerBlock(blockClass(bot).fromStateId(block.defaultState, 0));
-    if (geometry.fullCube && geometry.safeSupport && !traits.interactive && !traits.falling && traits.liquid === null)
-      return item;
-  }
-  return null;
-}
-/**
- * The block tags that mark the game's own common terrain and building stock: the
- * stones, dirts, planks, bricks and terracotta a player builds with freely. A
- * valuable (a metal or gem block), a log, a wool or a workstation is in none of them.
- */
-const FALLBACK_SCAFFOLD_TAGS = ["base_stone_overworld", "base_stone_nether", "dirt", "planks", "stone_bricks", "terracotta"] as const;
-
-/**
- * The carried block a route may bridge with when the bot has none of the survival
- * policy's `scaffold_blocks` and no route exists without one (a bot stranded on a
- * perch). Among the carried blocks that are a full solid cube to stand on, not
- * falling, not interactive and in a common-stock tag, the one carried most of; the
- * policy's own list is never consulted here, `preferredScaffoldItem` owns that.
- */
-export function fallbackScaffoldItem(bot: Bot, protectedNames: ReadonlySet<string> = new Set()) {
-  let best: InventoryItem | null = null;
-  for (const item of bot.inventory.items()) {
-    if (protectedNames.has(item.name) || (best !== null && best.count >= item.count)) continue;
-    const block = bot.registry.blocksByName[item.name];
-    if (!block) continue;
-    if (!tagsOf(item.name, bot.version).some((tag) => (FALLBACK_SCAFFOLD_TAGS as readonly string[]).includes(tag))) continue;
-    const { geometry, traits } = observeMineflayerBlock(blockClass(bot).fromStateId(block.defaultState, 0));
-    if (geometry.fullCube && geometry.safeSupport && !traits.interactive && !traits.falling && traits.liquid === null)
-      best = item;
-  }
-  return best;
-}
 const ROUTE_PROTECTED_CROPS = [
   "wheat",
   "carrots",
@@ -104,6 +60,8 @@ type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
 export interface MineflayerMovementPolicyOptions {
   readonly protectedBlockNames?: readonly string[];
   readonly protectedScaffoldNames?: readonly string[];
+  /** Item to the count the route keeps back of it: placed only while more are carried (a name in `protectedScaffoldNames` wins). */
+  readonly reservedScaffoldCounts?: ReadonlyMap<string, number>;
   readonly scaffolding?: boolean;
   /** Also bridge with a common block the bot carries when it has none of the policy's scaffold blocks (`fallbackScaffoldItem`). */
   readonly scaffoldFallback?: boolean;
@@ -350,22 +308,6 @@ function stateCount(registry: Bot["registry"]): number {
   return highest + 1;
 }
 
-function scaffoldSelection(bot: Bot, protectedNames: ReadonlySet<string>, enabled: boolean, fallback: boolean): ScaffoldSelection | null {
-  if (!enabled) return null;
-  const item = preferredScaffoldItem(bot, protectedNames) ?? (fallback ? fallbackScaffoldItem(bot, protectedNames) : null);
-  if (!item) return null;
-  const block = bot.registry.blocksByName[item.name]!;
-  if (!block.states?.some((state) => state.name === "axis"))
-    return { itemType: item.type, stateId: block.defaultState };
-  const Block = blockClass(bot);
-  const stateFor = (axis: string) => Block.fromProperties(block.id, { axis }, 0).stateId;
-  return {
-    itemType: item.type,
-    stateId: block.defaultState,
-    stateIdByAxis: { x: stateFor("x"), y: stateFor("y"), z: stateFor("z") },
-  };
-}
-
 /** Build the movement policy used by production and scenarios; only its scaffold choice is live. */
 /**
  * What breaking one block costs a route beyond the ticks spent digging it.
@@ -606,7 +548,7 @@ export function createMineflayerMovementPolicy(
       return readNavigationPolicy(bot).bucket_drops && bucketAvailable(bot) ? MAXIMUM_BUCKET_DROP : 0;
     },
     get scaffold() {
-      return scaffoldSelection(bot, protectedScaffolds, scaffolding, options.scaffoldFallback ?? false);
+      return scaffoldSelection(bot, protectedScaffolds, options.reservedScaffoldCounts ?? NO_RESERVE, scaffolding, options.scaffoldFallback ?? false);
     },
   });
 }

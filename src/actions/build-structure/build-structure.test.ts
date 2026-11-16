@@ -3,7 +3,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { structureWorld } from "../../test-support/structure-world.js";
 import { buildStructureOutcomes, parseBuildStructureRequest, portalFrameCells, type StructureCell } from "./contract.js";
-import { formatBuildStructureResult, buildStructure, beginBuildStructure, createBuildStructureAction } from "./build-structure.js";
+import { formatBuildStructureResult, buildStructure, beginBuildStructure, createBuildStructureAction, productionPhysics } from "./build-structure.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { packKey } from "../../navigation/index.js";
@@ -451,6 +452,25 @@ test("a roof the route could not reach, with no scaffold block carried, says so 
   const admitted = readNavigationPolicy(world.bot).scaffold_blocks.join(", ");
   assert.match(error, /BUILD_INCOMPLETE\] 1 cell still wrong: 1 were refused/);
   assert.equal(NO_SCAFFOLD_CLAUSE.exec(error)?.[1], admitted);
+});
+
+test("reserve_items: absent or empty, none reserved; a sent count reaches the request (the bounds are held by the navigate contract test, the schema is shared)", () => {
+  const blocks = [{ x: 0, y: 64, z: 0, block_name: "cobblestone" }];
+  assert.equal(parseBuildStructureRequest({ blocks }).reserveItems, undefined, "absent: as before");
+  assert.equal(parseBuildStructureRequest({ blocks, reserve_items: [] }).reserveItems, undefined);
+  assert.deepEqual([...(parseBuildStructureRequest({ blocks, reserve_items: [{ item: "dirt", count: 4 }] }).reserveItems ?? [])], [["dirt", 4]]);
+});
+
+test("reserve_items reaches the leg's movements: a reserved scaffold is placed only above its count, the structure's blocks stay protected", () => {
+  const world = structureWorld({ carried: { dirt: 5, cobblestone: 9 } });
+  const movementsFor = (input: Record<string, unknown>) =>
+    productionPhysics(world.bot, {} as NavigationRuntime, parseBuildStructureRequest({ blocks: [{ x: 3, y: 64, z: 0, block_name: "cobblestone" }], ...input })).movements(new Set());
+  assert.equal(movementsFor({}).scaffold?.reserve, 0, "no reserve_items: as before");
+  const spare = movementsFor({ reserve_items: [{ item: "dirt", count: 4 }] }).scaffold;
+  assert.equal(spare?.itemType, world.bot.registry.itemsByName.dirt!.id);
+  assert.equal(spare?.reserve, 4);
+  // At its reserve dirt is skipped; cobblestone is the structure's own block, never scaffold: nothing is left to place.
+  assert.equal(movementsFor({ reserve_items: [{ item: "dirt", count: 5 }] }).scaffold, null);
 });
 
 const NO_CLAUSE_CASES: { name: string; carried: Record<string, number>; cell: [number, number, number]; onSoulSand?: true; placeRefused?: true }[] = [

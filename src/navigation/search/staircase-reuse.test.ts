@@ -35,13 +35,13 @@ function rockWithStaircase(treads: number): MemoryWorld {
 }
 
 /** Cobblestone in the pockets: every placement edge is on offer, which is the live case. */
-const CARRIED_SCAFFOLD = { scaffold: { itemType: 35, stateId: 14 }, remainingScaffolds: 207 } as const;
+const CARRIED_SCAFFOLD = { scaffold: { itemType: 35, stateId: 14, reserve: 0 }, remainingScaffolds: 207 } as const;
 
 function planDown(
   world: MemoryWorld,
   treads: number,
   budget: { maximumExpansions: number },
-  pockets: { scaffold: { itemType: number; stateId: number } | null; remainingScaffolds: number },
+  pockets: { scaffold: { itemType: number; stateId: number; reserve: number } | null; remainingScaffolds: number },
 ): SearchUpdate {
   const search = new IncrementalSearch({
     id: "staircase-reuse",

@@ -18,7 +18,7 @@ import { WELL_FED, planningStart } from "../../test-support/navigation.js";
 
 const SOLID = { stateId: 1 } as const;
 const AIR = { stateId: 0 } as const;
-const COBBLESTONE = { itemType: 35, stateId: 14 } as const;
+const COBBLESTONE = { itemType: 35, stateId: 14, reserve: 0 } as const;
 
 /**
  * A 3x3 pillar of rock at y 60..70 with the bot's own cell open at y 64, and

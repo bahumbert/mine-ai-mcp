@@ -1,0 +1,66 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-reserve-items-spare-bridges
+tags: [regression]
+description: >-
+  The control of perch-reserve-items-no-bridge: the same perch, five-block gap and 3 dirt, but reserve_items keeps back
+  only 1, so the 2 spare dirt are placed and the bot arrives with the reserved dirt still carried (house-build fixes 2,
+  Task 4, spec 2026-11-14 section 5).
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The perch: one block wide, eight high.
+  - fill: { block: stone, from: [ 0, -60, 0 ], to: [ 0, -53, 0 ] }
+  # The ledge across a five-block gap (x 1..5), at the perch's height, three wide.
+  - fill: { block: stone, from: [ 6, -60, -1 ], to: [ 8, -53, 1 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 0.5, -52, 0.5 ]
+    inventory:
+      - item: dirt
+        count: 3
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 7
+    y: -52
+    z: 0
+    range: 1.5
+    reserve_items:
+      - { item: dirt, count: 1 }
+  expect:
+    status: succeeded
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    - kind: reach
+      who: PerchBot
+      pos: [ 7.5, -52, 0.5 ]
+      radius: 2.0
+    # The reserved dirt is still carried.
+    - kind: hasItem
+      who: PerchBot
+      item: dirt
+      count: 1
+    - kind: completion
+      who: PerchBot

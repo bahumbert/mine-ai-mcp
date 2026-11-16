@@ -1,0 +1,68 @@
+template: ../../templates/flat-single-action.yaml
+
+name: perch-reserve-items-no-bridge
+tags: [regression]
+description: >-
+  navigate with reserve_items keeping back more dirt than the bridge can spare (house-build fixes 2, Task 4, spec
+  2026-11-14 section 5): a bot on a perch carries only 3 dirt and reserves 2 of it, so one block may be placed and the
+  way to the ledge across a five-block gap, which takes two (measured 2026-11-14: gaps of 2 and 3 are jumped with no
+  block, the five-block gap crossed with 2 of 6 dirt), cannot be laid. The route stops with [NAVIGATION_STOPPED] and
+  the bot keeps at least the 2 reserved dirt (a partial route may place the one spare). The fallback scaffold honours
+  the reserve too. Control: perch-reserve-items-spare-bridges (reserve 1).
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 14 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 14, -61, 8 ] }
+  # The perch: one block wide, eight high.
+  - fill: { block: stone, from: [ 0, -60, 0 ], to: [ 0, -53, 0 ] }
+  # The ledge across a five-block gap (x 1..5), at the perch's height, three wide.
+  - fill: { block: stone, from: [ 6, -60, -1 ], to: [ 8, -53, 1 ] }
+
+players:
+  - name: PerchBot
+    pos: [ 0.5, -52, 0.5 ]
+    inventory:
+      - item: dirt
+        count: 3
+
+tick:
+  - "gamemode spectator @a[name=!PerchBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 7
+    y: -52
+    z: 0
+    range: 1.5
+    reserve_items:
+      - { item: dirt, count: 2 }
+  expect:
+    status: failed
+    errorContains: "[NAVIGATION_STOPPED]"
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    # The bridge is not laid: its far cell, next to the ledge, stays air.
+    - { kind: blocksAt, block: air, positions: [ [ 5, -53, 0 ] ] }
+    # The reserved dirt is still carried.
+    - kind: hasItem
+      who: PerchBot
+      item: dirt
+      count: 2
+    - kind: completion
+      who: PerchBot

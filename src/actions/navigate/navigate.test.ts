@@ -282,6 +282,7 @@ test("parses one absolute destination and defaults its reached range", () => {
     dig: true,
     build: false,
     keepItems: [],
+    reserveItems: new Map(),
   });
   assert.deepEqual(parseNavigateRequest({ x: 12, z: -4, scaffold: false, dig: false }), {
     x: 12,
@@ -293,6 +294,7 @@ test("parses one absolute destination and defaults its reached range", () => {
     dig: false,
     build: false,
     keepItems: [],
+    reserveItems: new Map(),
   });
   for (const input of [
     {},
@@ -682,6 +684,65 @@ test("keep_items: the contract accepts item ids, bounds the list and refuses any
   for (const keep_items of [Array.from({ length: 65 }, () => "dirt"), ["a".repeat(65)], ["Dirt"], ["minecraft:dirt"], [""], "dirt", [4]]) {
     assert.throws(() => parseNavigateRequest({ x: 1, y: 2, z: 3, keep_items }), /./u, JSON.stringify(keep_items));
   }
+});
+
+test("reserve_items: the contract takes counted items, bounds the list and the count, and the larger count of a repeat wins", () => {
+  const parse = (reserve_items: unknown) => parseNavigateRequest({ x: 1, y: 2, z: 3, reserve_items });
+  assert.deepEqual([...parseNavigateRequest({ x: 1, y: 2, z: 3 }).reserveItems], [], "absent: nothing reserved");
+  assert.deepEqual([...parse([{ item: "dirt", count: 4 }, { item: "stone", count: 2304 }]).reserveItems], [["dirt", 4], ["stone", 2304]]);
+  assert.deepEqual([...parse([{ item: "dirt", count: 4 }, { item: "dirt", count: 9 }, { item: "dirt", count: 2 }]).reserveItems], [["dirt", 9]]);
+  assert.doesNotThrow(() => parse(Array.from({ length: 64 }, (_, index) => ({ item: `block_${index}`, count: 1 }))));
+  const refused = [
+    Array.from({ length: 65 }, (_, index) => ({ item: `block_${index}`, count: 1 })),
+    [{ item: "dirt", count: 0 }],
+    [{ item: "dirt", count: 2305 }],
+    [{ item: "dirt", count: 1.5 }],
+    [{ item: "Dirt", count: 1 }],
+    [{ item: "a".repeat(65), count: 1 }],
+    [{ item: "dirt", count: 1, extra: true }],
+    [{ item: "dirt" }],
+    "dirt",
+  ];
+  for (const reserve_items of refused) assert.throws(() => parse(reserve_items), /./u, JSON.stringify(reserve_items).slice(0, 80));
+});
+
+test("reserve_items: the movements get the counts, the fallback replan too; none sent, none set", async () => {
+  const { movementOptions } = await noPathThenReplan({ dirt: 10, stone: 80 }, undefined, () => undefined);
+  for (const options of movementOptions) assert.equal("reservedScaffoldCounts" in (options as object), false, "no reserve_items: as before");
+  const scene = flatGroundBot(64, { carried: { dirt: 10, stone: 80 } });
+  const reserved: unknown[] = [];
+  let attempts = 0;
+  const action = createNavigateAction(scene.bot, fakeNavigation, dependencies(async () => {
+    attempts++;
+    return attempts === 1 ? { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true } : { status: "stopped", reason: "no path found", elapsedMs: 1 };
+  }, reserved));
+  await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1, reserve_items: [{ item: "dirt", count: 10 }] });
+  assert.equal(reserved.length, 2, "the first attempt and the fallback replan");
+  for (const options of reserved) assert.deepEqual([...((options as { reservedScaffoldCounts?: ReadonlyMap<string, number> }).reservedScaffoldCounts ?? [])], [["dirt", 10]]);
+});
+
+test("reserve_items: every carried block at its reserve leaves the fallback scaffold nothing: no replan", async () => {
+  // Which block the fallback picks past a reserve is held by the movement-policy unit test; here the action's wiring.
+  const scene = flatGroundBot(64, { carried: { oak_planks: 40 } });
+  const options: unknown[] = [];
+  const action = createNavigateAction(scene.bot, fakeNavigation, dependencies(async () => (
+    { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true }
+  ), options));
+  const output = await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1, reserve_items: [{ item: "oak_planks", count: 40 }] });
+  assert.equal(options.length, 1, "every carried block is at its reserve: no fallback replan");
+  assert.equal(output.result.status, "failed");
+});
+
+test("reserve_items: an item both kept and reserved is never placed: the name wins", async () => {
+  const { movementOptions } = await noPathThenReplan({ dirt: 10, stone: 80 }, ["dirt"], () => undefined);
+  assert.equal(movementOptions.length, 2);
+  const scene = flatGroundBot(64, { carried: { dirt: 10, oak_planks: 5 } });
+  const options: unknown[] = [];
+  const action = createNavigateAction(scene.bot, fakeNavigation, dependencies(async () => (
+    { status: "stopped", reason: "no path found", elapsedMs: 1, calculationFailed: true }
+  ), options));
+  await new ActionRunner().run(action, { x: 5, y: 64, z: 0, range: 1, keep_items: ["dirt"], reserve_items: [{ item: "dirt", count: 1 }, { item: "oak_planks", count: 99 }] });
+  assert.equal(options.length, 1, "dirt kept by name, planks reserved above their count: nothing left for the fallback");
 });
 
 /**

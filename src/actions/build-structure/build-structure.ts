@@ -70,7 +70,8 @@ function structureBlockNames(request: Pick<BuildStructureRequest, "cells">): Rea
   return new Set(request.cells.map((cell) => cell.blockName).filter((name) => name !== "air"));
 }
 
-function productionPhysics(
+/** The physics a build runs with outside tests; exported for the test that the request's reserve reaches the movements. */
+export function productionPhysics(
   bot: Bot,
   navigation: NavigationRuntime,
   request: BuildStructureRequest,
@@ -84,6 +85,8 @@ function productionPhysics(
         // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
         ignoreRegionsOwnedBy: bot.username,
         protectedScaffoldNames: [...structureBlockNames(request)],
+        // Blocks the caller keeps for a later stage, by count: a spare above it may still bridge.
+        ...(request.reserveItems && { reservedScaffoldCounts: request.reserveItems }),
       }),
     route: navigation.navigate,
     breakInPlace: navigation.breakBlockInPlace,

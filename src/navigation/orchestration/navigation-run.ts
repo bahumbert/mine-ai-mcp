@@ -387,9 +387,9 @@ export class NavigationRun {
     const scaffold = this.#policy.scaffold;
     return {
       feet,
-      // The observation counts every stack; which of them are scaffold blocks
-      // depends on the item this route's policy places.
-      remainingScaffolds: scaffold ? (observation.inventory.get(scaffold.itemType) ?? 0) : 0,
+      // The observation counts every stack of the item this route's policy places;
+      // the caller's reserve is kept back, only the count above it may be placed.
+      remainingScaffolds: scaffold ? Math.max(0, (observation.inventory.get(scaffold.itemType) ?? 0) - scaffold.reserve) : 0,
       overlayId: EMPTY_OVERLAY_IDENTITY,
     };
   }

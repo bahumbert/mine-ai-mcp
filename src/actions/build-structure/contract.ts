@@ -2,6 +2,7 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { type ActionOutput } from "../action.js";
 import { registryNameSchema } from "../registry-name.js";
+import { reserveCountsOf, reserveItemsInputSchema } from "../reserve-items.js";
 import { REFUSAL_CAUSES } from "../../world/placement.js";
 import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
 import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
@@ -73,6 +74,7 @@ export const buildStructureInputSchema = z.strictObject({
     .max(MAX_KEEP_CELLS)
     .optional()
     .describe("Cells routes must not dig while this call works: what earlier calls of the same structure already built. The structure's own correct cells are always kept."),
+  reserve_items: reserveItemsInputSchema,
 });
 
 export interface StructureCell {
@@ -98,6 +100,8 @@ export interface BuildStructureRequest {
   readonly onToolLoss?: "stop" | "continue";
   /** Cells routes must not dig: earlier parts of the structure. */
   readonly keep?: readonly { readonly x: number; readonly y: number; readonly z: number }[];
+  /** Counts the routes keep back of a scaffold item (blocks kept for later work): placed only above the count. Absent: none. */
+  readonly reserveItems?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -156,6 +160,7 @@ export function parseBuildStructureRequest(input: unknown): BuildStructureReques
     removeWrongBlocks: value.remove_wrong_blocks,
     onToolLoss: value.on_tool_loss,
     ...(value.keep !== undefined && value.keep.length > 0 && { keep: value.keep }),
+    ...(value.reserve_items.length > 0 && { reserveItems: reserveCountsOf(value.reserve_items) }),
   };
 }
 

@@ -326,7 +326,12 @@ and `build` to deliberately scaffold into mid-air. `keep_items` lists item ids
 (at most 64) the route must not place as scaffold: blocks the caller keeps for
 later work. The fallback scaffold, which bridges with a common carried block
 when none of the policy's scaffold blocks is carried, skips them too. An id that
-names no carried block changes nothing. Success proves the bot's
+names no carried block changes nothing. `reserve_items` lists up to 64
+`{item, count}` entries (count 1 to 2304) the route may place only while it
+carries more than `count` of that item: blocks kept for later work by count, so
+a spare above the need may still bridge. The fallback scaffold honours it too,
+and an item named in `keep_items` is never placed whatever its count here.
+Success proves the bot's
 feet arrived within the specified range of the destination.
 When digging is enabled, loss of the starting best pickaxe, shovel, or axe
 harvest capability stops at Pathfinder's safe cancellation point and returns
@@ -453,7 +458,9 @@ shapes, door hinges and double slabs are left to Minecraft. `keep` lists up to
 2048 more cells routes may not dig while the call works: what earlier calls of
 the same structure built (a house built part by part passes its finished parts,
 so a route to the roof never digs through a wall). The call's own correct cells
-are always kept. The action is
+are always kept. `reserve_items` lists up to 64 `{item, count}` entries (count
+1 to 2304): scaffold blocks the call's routes place only while they carry more
+than `count` of them, kept for a later stage of the structure. The action is
 a thin contract over the navigation library's build process, which is
 Baritone's builder loop: it places and digs what is in reach from where the
 bot stands, lowest first, and otherwise routes under one goal of every

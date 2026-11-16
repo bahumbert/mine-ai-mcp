@@ -279,7 +279,7 @@ const OFFERS: readonly OfferRow[] = [
         { x: 0, y: 63, z: 0 },
         { ...water(true), traits: { empty: true, liquid: "water", liquidSource: true } },
       ]),
-    options: { scaffolds: 4, policy: { allowPlacing: true, scaffold: { stateId: 1, itemType: 1 } } },
+    options: { scaffolds: 4, policy: { allowPlacing: true, scaffold: { stateId: 1, itemType: 1, reserve: 0 } } },
     lacks: ["pillar@*,*,*"],
   },
   {
@@ -601,7 +601,7 @@ test("an exposed solid tread is stepped onto instead of dug through", () => {
 test("a missing adjacent stair tread can be placed and ascended in one movement", () => {
   const repair = generateFrom(flatWorld(), ORIGIN, {
     scaffolds: 1,
-    policy: { scaffold: { itemType: 1, stateId: 1 } },
+    policy: { scaffold: { itemType: 1, stateId: 1, reserve: 0 } },
   }).find((movement) => movement.step.kind === "step_up" && movement.step.to.x === 1 && movement.step.to.y === 64);
 
   assert.ok(repair);
@@ -616,7 +616,7 @@ test("a missing adjacent stair tread can be placed and ascended in one movement"
 test("an axis block is placed in the state its support face produces", () => {
   const bridge = generateFrom(flat([{ x: 1, y: 62, z: 0 }, AIR]), ORIGIN, {
     scaffolds: 1,
-    policy: { scaffold: { itemType: 1, stateId: 12, stateIdByAxis: { x: 11, y: 12, z: 13 } } },
+    policy: { scaffold: { itemType: 1, stateId: 12, stateIdByAxis: { x: 11, y: 12, z: 13 }, reserve: 0 } },
   }).find((movement) => movement.step.kind === "walk" && movement.step.to.x === 1 && movement.step.to.y === 63);
   assert.ok(bridge);
   const placement = bridge.step.operations.find((operation) => operation.kind === "place");
@@ -630,7 +630,7 @@ test("an axis block is placed in the state its support face produces", () => {
 test("a pillar step clears the destination feet cell before placing beneath it", () => {
   const pillar = generateFrom(flat([{ x: 0, y: 64, z: 0 }, SOLID]), ORIGIN, {
     scaffolds: 1,
-    policy: { allowPlacing: true, scaffold: { itemType: 1, stateId: 1 } },
+    policy: { allowPlacing: true, scaffold: { itemType: 1, stateId: 1, reserve: 0 } },
   }).find(to(0, 64, 0));
   assert.equal(pillar?.step.kind, "pillar");
   assert.deepEqual(
@@ -709,7 +709,7 @@ test("a block that answers a right-click is not used as a placement support", ()
     }
   const options: GenerateOptions = {
     scaffolds: 8,
-    policy: { scaffold: { stateId: 1, itemType: 1 }, allowPlacing: true },
+    policy: { scaffold: { stateId: 1, itemType: 1, reserve: 0 }, allowPlacing: true },
   };
   const places = (moves: GeneratedMovement[]) =>
     moves.some((move) => move.step.operations.some((operation) => operation.kind === "place"));

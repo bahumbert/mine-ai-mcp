@@ -71,6 +71,8 @@ export interface ScaffoldSelection {
    * expected the default state failed its confirmation on every basalt.
    */
   readonly stateIdByAxis?: Readonly<Record<"x" | "y" | "z", number>>;
+  /** How many of the item the caller keeps back: the route may place only the count carried above it (0: all of them). */
+  readonly reserve: number;
 }
 
 /**

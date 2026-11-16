@@ -3,7 +3,7 @@ import { createMovements } from "../runtime.js";
 import { BREAK_OPENS_INTO_LIQUID } from "../movements/policy.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
-import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY, fallbackScaffoldItem } from "./movement-policy.js";
+import { DEEP_WATER_REASON, TERRAIN_BREAK_PENALTY, fallbackScaffoldItem, preferredScaffoldItem } from "./movement-policy.js";
 import { Vec3 } from "vec3";
 import type { Item } from "prismarine-item";
 import { blockClass, observeMineflayerBlock } from "./world.js";
@@ -88,6 +88,7 @@ test("the scaffold is whatever the inventory holds when it is read, and names th
   assert.deepEqual(createMovements(nether).scaffold, {
     itemType: netherrack.type,
     stateId: registry.blocksByName.netherrack!.defaultState,
+    reserve: 0,
   });
   assert.equal(createMovements(nether, { protectedScaffoldNames: ["netherrack"] }).scaffold, null);
   assert.equal(createMovements(nether, { scaffolding: false }).scaffold, null);
@@ -99,6 +100,7 @@ test("the scaffold is whatever the inventory holds when it is read, and names th
     itemType: registry.itemsByName.basalt!.id,
     stateId: basalt.defaultState,
     stateIdByAxis: { x: basalt.minStateId, y: basalt.defaultState, z: basalt.maxStateId },
+    reserve: 0,
   });
   const cobblestone = { type: registry.itemsByName.cobblestone!.id, name: "cobblestone", count: 16 };
   assert.equal("stateIdByAxis" in (createMovements(botCarrying({ cobblestone: 16 })).scaffold ?? {}), false);
@@ -423,4 +425,52 @@ test("an escape may open into flowing water only: a source or lava beside the br
   assert.equal(beside(lava, false, "lava"), false, "lava stays refused");
   assert.equal(beside(water, false, "water"), true, "flowing water with nothing under it is let through in an escape");
   assert.equal(policy.opensOnlyIntoFlowingWater!(at.x, at.y, at.z, new MemoryWorld()), false, "nothing opened: no exception needed");
+});
+
+test("a reserved item at its reserve is not chosen, and the next admitted kind is", () => {
+  const dirtOnly = botCarrying({ dirt: 5 });
+  assert.equal(preferredScaffoldItem(dirtOnly, new Set(), new Map([["dirt", 5]])), null);
+  assert.equal(createMovements(dirtOnly, { reservedScaffoldCounts: new Map([["dirt", 5]]) }).scaffold, null);
+  const both = botCarrying({ dirt: 5, cobblestone: 7 });
+  const chosen = createMovements(both, { reservedScaffoldCounts: new Map([["dirt", 5]]) }).scaffold;
+  assert.equal(chosen?.itemType, both.registry.itemsByName.cobblestone!.id, "the policy's next admitted kind");
+  assert.equal(chosen?.reserve, 0, "an unreserved kind has no reserve");
+  // One above its reserve the item is chosen again, and the selection carries the reserve.
+  const spare = createMovements(dirtOnly, { reservedScaffoldCounts: new Map([["dirt", 4]]) }).scaffold;
+  assert.equal(spare?.itemType, dirtOnly.registry.itemsByName.dirt!.id);
+  assert.equal(spare?.reserve, 4);
+  assert.equal(createMovements(dirtOnly).scaffold?.reserve, 0, "no reserve_items: nothing kept back");
+});
+
+test("the reserve counts every stack of the item, not the first", () => {
+  const bot = botCarrying({ dirt: 70 });
+  assert.equal(bot.inventory.items().filter((item) => item.name === "dirt").length, 2, "70 dirt fill a stack of 64 and one of 6");
+  assert.equal(preferredScaffoldItem(bot, new Set(), new Map([["dirt", 70]])), null, "70 carried, 70 reserved");
+  assert.equal(preferredScaffoldItem(bot, new Set(), new Map([["dirt", 69]]))?.name, "dirt", "one above the reserve");
+  assert.equal(preferredScaffoldItem(bot, new Set(), new Map([["dirt", 10]]))?.name, "dirt", "a reserve under the first stack's count");
+});
+
+test("the reserve is read live: the item is skipped once the stack is spent down to it", () => {
+  const { bot, inventory } = createFakeBot({ carried: { dirt: 5 } });
+  const policy = createMovements(bot, { reservedScaffoldCounts: new Map([["dirt", 4]]) });
+  assert.equal(policy.scaffold?.reserve, 4, "5 carried, 4 reserved");
+  (inventory.updateSlot as (slot: number, item: Item | null) => void).call(inventory, 36, null);
+  assert.equal(policy.scaffold, null, "nothing carried");
+});
+
+test("the fallback skips an item at its reserve and takes the other common block", () => {
+  const bot = versioned([{ name: "stone", count: 80 }, { name: "oak_planks", count: 40 }]);
+  assert.equal(fallbackScaffoldItem(bot)?.name, "stone", "the one carried most of");
+  assert.equal(fallbackScaffoldItem(bot, new Set(), new Map([["stone", 80]]))?.name, "oak_planks");
+  assert.equal(fallbackScaffoldItem(bot, new Set(), new Map([["stone", 79]]))?.name, "stone", "one spare above the reserve");
+  assert.equal(fallbackScaffoldItem(bot, new Set(), new Map([["stone", 80], ["oak_planks", 40]])), null);
+  const selection = createMovements(bot, { scaffoldFallback: true, reservedScaffoldCounts: new Map([["stone", 79]]) }).scaffold;
+  assert.equal(selection?.itemType, bot.registry.itemsByName.stone!.id);
+  assert.equal(selection?.reserve, 79);
+});
+
+test("a name both kept and reserved is never placed: the name wins", () => {
+  const bot = botCarrying({ dirt: 64 });
+  const policy = createMovements(bot, { protectedScaffoldNames: ["dirt"], reservedScaffoldCounts: new Map([["dirt", 1]]) });
+  assert.equal(policy.scaffold, null);
 });
