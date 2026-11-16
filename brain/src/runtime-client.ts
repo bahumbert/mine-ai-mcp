@@ -91,10 +91,27 @@ export interface BotSnapshot {
   readonly mobs: readonly NearbyMob[];
   readonly players: readonly NearbyPlayer[];
   /** The survival policy's revision and the setting the brain manages; null when the runtime did not report it. */
-  readonly policy: { readonly revision: string; readonly digStraightDown: boolean; readonly scaffoldBlocks?: readonly string[]; readonly reportOpenSky?: boolean } | null;
+  readonly policy: {
+    readonly revision: string;
+    readonly digStraightDown: boolean;
+    readonly scaffoldBlocks?: readonly string[];
+    readonly reportOpenSky?: boolean;
+    /** The effective health at or below which the bot is in danger (the survival policy's `combat.critical_health`). */
+    readonly criticalHealth?: number;
+  } | null;
   readonly coverExit?: { readonly at: Position; readonly plannedAt: string; readonly reached: boolean } | null;
   /** The overworld's day or night (null elsewhere) and minutes until it changes; unset when the runtime did not say. */
-  readonly clock?: { readonly phase: "day" | "night" | null; readonly minutesUntilChange: number | null };
+  readonly clock?: {
+    readonly phase: "day" | "night" | null;
+    readonly minutesUntilChange: number | null;
+    /** Game time of day in ticks (0-24000); unset when an older runtime does not send it. */
+    readonly timeOfDay?: number;
+    readonly sleeping?: boolean;
+  };
+  /** The vehicle she rides (a boat, a minecart...); null when on foot; unset when an older runtime does not send it. */
+  readonly vehicle?: { readonly name: string } | null;
+  /** Whether she stands on the ground, in water or in lava; unset when the runtime does not report both onGround and inWater. */
+  readonly footing?: { readonly onGround: boolean; readonly inWater: boolean; readonly inLava: boolean | null };
   /** Her best carried tool and armour per class, worn or not (`view_status` tools; item null: none). */
   readonly gear?: {
     readonly tools: readonly { readonly class: string; readonly item: string | null }[];

@@ -20,8 +20,11 @@ function mobSpecies(groups: readonly { name: string; hostile: boolean; count: nu
 /** The snapshot a parsed `view_status` reply stands for; an optional field an older runtime does not send stays unset. */
 export function snapshotOf(data: z.infer<typeof viewStatusSchema>): BotSnapshot {
   const { situation } = data.result;
+  const { x, y, z, onGround, inWater, inLava } = situation.position;
   return {
-    position: situation.position,
+    position: { x, y, z },
+    ...(onGround === undefined || inWater === undefined ? {} : { footing: { onGround, inWater, inLava: inLava ?? null } }),
+    ...(situation.vehicle === undefined ? {} : { vehicle: situation.vehicle === null ? null : { name: situation.vehicle.name } }),
     dimension: situation.dimension,
     health: situation.vitals.health,
     food: situation.vitals.food,
@@ -49,6 +52,7 @@ export function snapshotOf(data: z.infer<typeof viewStatusSchema>): BotSnapshot 
         digStraightDown: data.survivalPolicy.effective.navigation.dig_straight_down,
         scaffoldBlocks: data.survivalPolicy.effective.navigation.scaffold_blocks,
         ...(data.survivalPolicy.effective.navigation.report_open_sky === undefined ? {} : { reportOpenSky: data.survivalPolicy.effective.navigation.report_open_sky }),
+        ...(data.survivalPolicy.effective.combat?.critical_health === undefined ? {} : { criticalHealth: data.survivalPolicy.effective.combat.critical_health }),
       },
   };
 }

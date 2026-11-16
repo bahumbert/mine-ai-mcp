@@ -6,7 +6,11 @@ export const positionSchema = z.object({ x: z.number(), y: z.number(), z: z.numb
 export const viewStatusSchema = z.object({
   result: z.object({
     situation: z.object({
-      position: positionSchema,
+      position: positionSchema.extend({
+        onGround: z.boolean().optional(),
+        inWater: z.boolean().optional(),
+        inLava: z.boolean().nullable().optional(),
+      }),
       dimension: z.string().default("minecraft:overworld"),
       difficulty: z.string().optional(),
       observedAt: z.string().optional(),
@@ -29,7 +33,11 @@ export const viewStatusSchema = z.object({
         players: z.array(z.object({ username: z.string(), position: positionSchema.nullable() })),
         mobs: z.array(z.object({ name: z.string(), hostile: z.boolean().default(false), count: z.number(), nearest: z.object({ distance: z.number(), position: positionSchema.optional() }) })).default([]),
       }),
-      clock: z.object({ phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable() }).optional(),
+      clock: z.object({
+        phase: z.enum(["day", "night"]).nullable(), minutesUntilChange: z.number().nullable(),
+        timeOfDay: z.number().optional(), sleeping: z.boolean().optional(),
+      }).optional(),
+      vehicle: z.object({ name: z.string(), id: z.number() }).nullable().optional(),
       navigation: z.object({ coverExit: z.object({ at: positionSchema, plannedAt: z.string(), reached: z.boolean() }).nullable().optional() }).optional(),
       tools: z.object({
         tools: z.array(z.object({ class: z.string(), item: z.string().nullable() })),
@@ -39,6 +47,9 @@ export const viewStatusSchema = z.object({
   }),
   survivalPolicy: z.object({
     revision: z.string(),
-    effective: z.object({ navigation: z.object({ dig_straight_down: z.boolean().default(true), scaffold_blocks: z.array(z.string()).default([]), report_open_sky: z.boolean().optional() }) }),
+    effective: z.object({
+      navigation: z.object({ dig_straight_down: z.boolean().default(true), scaffold_blocks: z.array(z.string()).default([]), report_open_sky: z.boolean().optional() }),
+      combat: z.object({ critical_health: z.number().optional() }).optional(),
+    }),
   }).optional(),
 });

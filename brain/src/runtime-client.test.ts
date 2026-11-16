@@ -417,6 +417,30 @@ test("an older view_status parses; nullable condition facts stay unknown", async
   assert.equal("reportOpenSky" in (olderPolicy.policy ?? {}), false);
 });
 
+test("status reads time of day, sleeping, vehicle and footing; an older status without them parses and leaves them unset (plan 2026-11-15-p4-18-night-reflex-l2 T1)", async () => {
+  // 12100 is day; the night (12542) is 442 ticks, 0.4 minutes, on (`src/world/daylight.ts:11-12,37-38`).
+  const clock = { phase: "day", minutesUntilChange: 0.4, timeOfDay: 12100, sleeping: false };
+  const position = { x: 0, y: 64, z: 0, onGround: false, inWater: true, inLava: null };
+  const status = await McpBotRuntime.over(statusClient({ clock, vehicle: { name: "oak_boat", id: 7 }, position })).status();
+  assert.deepEqual(status.clock, clock);
+  assert.deepEqual(status.vehicle, { name: "oak_boat" });
+  assert.deepEqual(status.footing, { onGround: false, inWater: true, inLava: null });
+  assert.deepEqual(status.position, { x: 0, y: 64, z: 0 }, "position keeps x, y and z only");
+  const onLand = await McpBotRuntime.over(statusClient({ vehicle: null, position: { x: 0, y: 64, z: 0, onGround: true, inWater: false } })).status();
+  assert.equal(onLand.vehicle, null, "no vehicle is null, not unset");
+  assert.deepEqual(onLand.footing, { onGround: true, inWater: false, inLava: null }, "inLava defaults to null");
+  const older = await McpBotRuntime.over(statusClient({ clock: { phase: "day", minutesUntilChange: 9 } }, { revision: "r1", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] } } })).status();
+  assert.deepEqual(older.clock, { phase: "day", minutesUntilChange: 9 });
+  for (const field of ["vehicle", "footing"]) assert.equal(field in older, false, field);
+  assert.equal("criticalHealth" in (older.policy ?? {}), false);
+  for (const field of ["timeOfDay", "sleeping"]) assert.equal(field in (older.clock ?? {}), false, field);
+});
+
+test("status reads the effective critical health (plan 2026-11-15-p4-18-night-reflex-l2 T1)", async () => {
+  const policy = { revision: "r4", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] }, combat: { critical_health: 12 } } };
+  assert.equal((await McpBotRuntime.over(statusClient({}, policy)).status()).policy?.criticalHealth, 12);
+});
+
 test("families parse from the runtime's stacks; a runtime that sends none means empty", async () => {
   const stacks = [{ name: "diamond_sword", count: 1, families: ["sword"] }, { name: "cobblestone", count: 3 }];
   const status = await McpBotRuntime.over(statusClient({ inventory: { stacks } })).status();
