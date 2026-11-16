@@ -374,7 +374,7 @@ export function prepareExcavationDigs(
         reason: `The required dig at ${blockLabel(hidden)} cannot be seen within reach from this position.`,
       };
     }
-    const hazard = excavationBodyHazard(blockAt, standing, footprint, dig.position, cleared);
+    const hazard = excavationBodyHazard(blockAt, standing, dig.position, cleared);
     if (hazard) return { kind: "unavailable", reason: hazard };
     remaining.splice(index, 1);
     cleared.push(packKey(dig.position.x, dig.position.y, dig.position.z));
@@ -402,23 +402,37 @@ export function prepareExcavationDigs(
   return { kind: "prepared", digs, breakTicks, breakPenalty };
 }
 
-/** Refuse work that drops a falling column onto the body or removes its dry footing. */
-function excavationBodyHazard(
-  blockAt: WorldView["blockAt"], standing: Position3, footprint: readonly { x: number; z: number }[],
-  target: BlockPosition, cleared: readonly number[],
+/** Whether the body's footprint at `standing` overlaps the column of `target`. */
+function bodyOverColumn(standing: Position3, target: BlockPosition): boolean {
+  return [...footprintColumns(standing)].some(({ x, z }) => target.x === x && target.z === z);
+}
+
+/**
+ * Refuse a dig whose falling column would land in a cell the body occupies. `standing` is where the body is (the
+ * planner's stance, or the live position at a swing): the footprint is read from it, so an off-centre body over the
+ * target's column is refused where the stance cell's centre is not.
+ */
+export function fallingColumnBodyHazard(
+  blockAt: WorldView["blockAt"], standing: Position3, target: BlockPosition, cleared: readonly number[] = [],
 ): string | null {
-  if (!footprint.some(({ x, z }) => target.x === x && target.z === z)) return null;
-  if (target.y < standing.y) {
-    const below = blockAt(target.x, target.y - 1, target.z);
-    const body = blockAt(target.x, Math.floor(standing.y), target.z);
-    if (below.kind === "loaded" && below.traits.liquid === "water" &&
-      (body.kind !== "loaded" || body.traits.liquid !== "water"))
-      return "The dig would remove the miner's dry footing above water.";
-  } else {
-    const above = blockAt(target.x, target.y + 1, target.z);
-    if (above.kind === "loaded" && above.traits.falling && !cleared.includes(packKey(target.x, target.y + 1, target.z)))
-      return `The dig at ${blockLabel(target)} would drop the falling block above it onto the bot.`;
-  }
+  if (target.y < standing.y || !bodyOverColumn(standing, target)) return null;
+  const above = blockAt(target.x, target.y + 1, target.z);
+  if (above.kind === "loaded" && above.traits.falling && !cleared.includes(packKey(target.x, target.y + 1, target.z)))
+    return `The dig at ${blockLabel(target)} would drop the falling block above it onto the bot.`;
+  return null;
+}
+
+/** Refuse work that drops a falling column onto the body or removes its dry footing above water. */
+function excavationBodyHazard(
+  blockAt: WorldView["blockAt"], standing: Position3, target: BlockPosition, cleared: readonly number[],
+): string | null {
+  if (target.y >= standing.y) return fallingColumnBodyHazard(blockAt, standing, target, cleared);
+  if (!bodyOverColumn(standing, target)) return null;
+  const below = blockAt(target.x, target.y - 1, target.z);
+  const body = blockAt(target.x, Math.floor(standing.y), target.z);
+  if (below.kind === "loaded" && below.traits.liquid === "water" &&
+    (body.kind !== "loaded" || body.traits.liquid !== "water"))
+    return "The dig would remove the miner's dry footing above water.";
   return null;
 }
 

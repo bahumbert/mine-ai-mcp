@@ -32,6 +32,7 @@ import {
 } from "../execution/movement-controller.js";
 import type { AttemptToken } from "../execution/mutations.js";
 import { OPEN_WATER_RISE } from "../execution/water-movement-controller.js";
+import { fallingColumnBodyHazard } from "../movements/excavation.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
 import {
   centerOnCell,
@@ -696,11 +697,23 @@ export class MineflayerBot implements NavigationBot {
   longestBreakDurationMs(operation: Extract<PlannedOperation, { kind: "break" }>): number | null {
     return this.bot.longestBreakDurationMs?.(operation.position, operation.toolType) ?? null;
   }
+  #liveBlocks() {
+    return liveBlockReader({ blockAt: (cell) => this.bot.blockAt(cell) as MineflayerBlock | null });
+  }
+  /**
+   * Refuse a swing whose falling column would land in a cell the live body occupies. The planner judged this dig from
+   * its stance cell's centre; the body can stand 0.1 into the next column (coal-under-sand, 2026-11-16: sand landed
+   * on a body at z 514.10 after a stance judged at z 514.5).
+   */
+  #breakFallHazard(operation: Extract<PlannedOperation, { kind: "break" }>): EffectFailure | null {
+    const hazard = fallingColumnBodyHazard(this.#liveBlocks(), this.bot.entity.position, operation.position);
+    return hazard === null ? null : { kind: "failed", cause: "support", observation: `${hazard} Stand clear of that column before digging.` };
+  }
   /** Refuse a swing that would remove the live body's only retained footing. */
   #breakSupportFailure(operation: Extract<PlannedOperation, { kind: "break" }>): EffectFailure | null {
     const { position, isInWater, onGround } = this.bot.entity;
     const target = operation.position;
-    const read = liveBlockReader({ blockAt: (cell) => this.bot.blockAt(cell) as MineflayerBlock | null });
+    const read = this.#liveBlocks();
     if (!breakRemovesEdgeSupport(position, isInWater && !onGround, target, read, operation.retainSupport)) return null;
     return {
       kind: "failed", cause: "support",
@@ -730,10 +743,18 @@ export class MineflayerBot implements NavigationBot {
     if (unavailable) return { kind: "failed", observation: unavailable };
     signal.throwIfAborted();
     this.selectedTool()?.(operation.toolType);
+    // Centre before aiming: the aim reads the face from where the body ends up. A body that cannot leave the falling
+    // column's column is refused here, and the route replans from where it really stands.
+    if (this.#breakFallHazard(operation)) {
+      await this.centerOnCell(operation.stance ?? aim.feet, signal);
+      signal.throwIfAborted();
+      const remaining = this.#breakFallHazard(operation);
+      if (remaining) return remaining;
+    }
     const failed = await this.#aimBreak(operation.position, aim, signal);
     signal.throwIfAborted();
     if (failed) return failed;
-    const refused = this.#breakSupportFailure(operation);
+    const refused = this.#breakSupportFailure(operation) ?? this.#breakFallHazard(operation);
     if (refused) return refused;
     markIssued();
     await this.bot.dig(target, "ignore");

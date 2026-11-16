@@ -9,7 +9,8 @@ import type { Position3 } from "../world/world.js";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, flush, type FakeBotOptions } from "../../test-support/fake-bot/index.js";
+import { footprintColumns } from "../../world/player-physics.js";
 import { executeBotMovement, movementStep } from "../../test-support/navigation.js";
 import { watch } from "../../test-support/pending.js";
 import type { PlannedOperation } from "../movements/movement.js";
@@ -40,11 +41,12 @@ function surface(overrides: Partial<MineflayerBotSurface>): MineflayerBotSurface
 }
 
 /** A real shared-fake world and dig, with preparation ports controlled by each race test. */
-function edgeDig() {
+function edgeDig(options: FakeBotOptions = {}) {
   const harness = createFakeBot({
     clock: createFakeClock({ mode: "mocked" }),
     position: new Vec3(0.85, 63, 0.5), groundY: null,
     cells: { "1,62,0": "stone" }, carried: { stone_pickaxe: 1 },
+    ...options,
   });
   const live = mineflayerBotSurface(harness.bot);
   let digs = 0;
@@ -182,6 +184,148 @@ test("a falling refill rechecks live support and retains the first swing's issue
   assert.deepEqual(run.counts(), { digs: 1, reports: 1 });
   run.clean();
 });
+
+/**
+ * The 2026-11-16 coal-under-sand body: 0.10 into column z 0 (spanning z -0.20..0.40), so its footprint covers column
+ * z -1, under a coal at (0,65,-1) whose sand column (0,66..67,-1) falls onto cells the body occupies. A route break
+ * planned from the stance cell (0,63,0), on a stone floor with the shared fake's real physics.
+ */
+function trailingEdge(options: { z?: number; cells?: Record<string, "air" | "sand" | "coal_ore" | "stone"> } = {}) {
+  const run = edgeDig({
+    simulatePhysics: true, position: new Vec3(0.5, 63, options.z ?? 0.10), groundY: 62, carried: { diamond_pickaxe: 1 },
+    cells: { "0,65,-1": "coal_ore", "0,66,-1": "sand", "0,67,-1": "sand", "2,65,0": "coal_ore", "2,66,0": "sand", ...options.cells },
+  });
+  const swings: { columns: { x: number; z: number }[]; z: number; x: number }[] = [];
+  const inner = run.port.dig;
+  run.port.dig = async (block, force) => {
+    const { position } = run.bot.entity;
+    swings.push({ columns: [...footprintColumns(position)], x: position.x, z: position.z });
+    await inner(block, force);
+  };
+  // `during` runs on the first physics tick after a centring starts.
+  const centrings = { count: 0, during: () => {} };
+  const centre = run.actuator.centerOnCell.bind(run.actuator);
+  run.actuator.centerOnCell = (...args) => {
+    centrings.count++;
+    run.bot.once("physicsTick", () => centrings.during());
+    return centre(...args);
+  };
+  const coal = (x: number, z: number) => ({
+    position: { x, y: 65, z }, expectedStateId: run.bot.registry.blocksByName.coal_ore!.defaultState!, stance: { x: 0, y: 63, z: 0 },
+    toolType: run.bot.registry.itemsByName.diamond_pickaxe!.id,
+  });
+  return { ...run, swings, centrings, coal, tickListeners: () => run.bot.listenerCount("physicsTick") };
+}
+
+test("a route break from an off-centre body centres before the swing, so its footprint leaves the falling column's column", async () => {
+  const run = trailingEdge();
+  using _clock = run.clock.install();
+  const effect = run.start(run.coal(0, -1));
+  assert.deepEqual(await run.clock.settle(effect.completion, 10_000), { kind: "accepted" });
+  assert.equal(run.swings.length, 1);
+  const [swing] = run.swings;
+  assert.deepEqual(swing!.columns.filter(({ z }) => z === -1), [], `the footprint still covers column z -1 at z=${swing!.z}`);
+  // The shared fake's physics stops near z 0.60, so the stance centre is checked by `centerOnCell`'s own radius.
+  assert.ok(Math.hypot(swing!.x - 0.5, swing!.z - 0.5) <= 0.17, `centred within 0.17 of the stance: ${swing!.x},${swing!.z}`);
+  run.clean();
+});
+
+test("a body that cannot be centred is refused as support before any swing, and the next dig after it works", async () => {
+  const run = trailingEdge();
+  using _clock = run.clock.install();
+  const steer = run.port.setControlState;
+  run.port.setControlState = () => undefined; // steering blocked while physics ticks
+  const effect = run.start(run.coal(0, -1));
+  const result = await run.clock.settle(effect.completion, 10_000);
+  assert.equal(result.kind === "failed" && result.cause, "support");
+  assert.match(result.kind === "failed" ? result.observation : "", /dig at .*would drop the falling block above it onto the bot/);
+  assert.equal(effect.issued, false);
+  assert.equal(run.swings.length, 0);
+  run.clean();
+  // Next action: once steering works again the same dig centres and goes ahead.
+  run.port.setControlState = steer;
+  const next = run.start(run.coal(0, -1));
+  assert.deepEqual(await run.clock.settle(next.completion, 10_000), { kind: "accepted" });
+  assert.equal(run.swings.length, 1);
+  run.clean();
+});
+
+test("centring that never completes because physics stopped ends at centring's own deadline and leaves no waiter", async () => {
+  const run = trailingEdge();
+  using _clock = run.clock.install();
+  run.centrings.during = () => { run.bot.physicsEnabled = false; };
+  const waiters = run.tickListeners();
+  const startedAt = run.clock.now();
+  const effect = run.start(run.coal(0, -1));
+  const result = await run.clock.settle(effect.completion, 10_000);
+  const endedAfterMs = run.clock.now() - startedAt;
+  assert.equal(result.kind === "failed" && result.cause, "support");
+  assert.ok(endedAfterMs >= 2_000 && endedAfterMs < 3_000, `ended after ${endedAfterMs} ms (centring's 2 000 ms deadline, not waitForTicks' 5 050 ms)`);
+  assert.equal(run.swings.length, 0);
+  assert.deepEqual(Object.entries(run.bot.controlState).filter(([, held]) => held), []);
+  run.clean();
+  await run.clock.advance(5_200);
+  assert.equal(run.tickListeners(), waiters, "the raced tick wait left no physicsTick listener");
+});
+
+// A reflex taking the body ends the action's signal as a death does: both reach the same abort.
+for (const reason of ["cancel", "death or reflex takeover", "handle cancel"] as const) {
+  test(`${reason} while centring ends the break with no swing, no held control and no waiter, and the next dig works`, async () => {
+    const run = trailingEdge();
+    using _clock = run.clock.install();
+    const waiters = run.tickListeners();
+    const controller = new AbortController();
+    let effect: ReturnType<typeof run.start> | undefined;
+    run.centrings.during = () => (reason === "handle cancel" ? effect!.cancel() : controller.abort(new Error(reason)));
+    effect = run.start(run.coal(0, -1), controller.signal);
+    const result = await run.clock.settle(effect.completion, 10_000);
+    assert.equal(result.kind, "failed");
+    assert.equal(effect.issued, false);
+    await run.clock.advance(5_200); // past every old deadline: nothing fires a late swing or leaves a tick waiter
+    assert.equal(run.swings.length, 0);
+    assert.equal(run.tickListeners(), waiters, "the cancelled centring left no physicsTick listener");
+    assert.deepEqual(Object.entries(run.bot.controlState).filter(([, held]) => held), []);
+    run.clean();
+    // Next action: the same dig, with centring free, centres and swings once clear of the column.
+    run.centrings.during = () => {};
+    const next = run.start(run.coal(0, -1));
+    assert.deepEqual(await run.clock.settle(next.completion, 10_000), { kind: "accepted" });
+    assert.equal(run.swings.length, 1);
+    assert.deepEqual(run.swings[0]!.columns.filter(({ z }) => z === -1), []);
+    run.clean();
+  });
+}
+
+test("a body pushed back over the falling column's column after centring is refused at the final admission without a second centring", async () => {
+  const run = trailingEdge();
+  using _clock = run.clock.install();
+  // Centring runs first; aiming is the last await before the swing, and the body is knocked back onto z 0.10 there.
+  run.port.lookAt = async () => { run.bot.entity.position.z = 0.10; };
+  const effect = run.start(run.coal(0, -1));
+  const result = await run.clock.settle(effect.completion, 10_000);
+  assert.equal(result.kind === "failed" && result.cause, "support");
+  assert.equal(effect.issued, false);
+  assert.equal(run.swings.length, 0);
+  assert.equal(run.centrings.count, 1, "the final admission refuses; it never starts a second centring");
+  run.clean();
+});
+
+for (const [name, z, cells, target] of [
+  ["a centred body", 0.5, {}, [0, -1]],
+  ["a target outside the body's columns", 0.10, {}, [2, 0]],
+  ["a column whose sand this op brings is already broken", 0.10, { "0,66,-1": "air", "0,67,-1": "air" }, [0, -1]],
+] as const) {
+  test(`${name} swings with no centring`, async () => {
+    const run = trailingEdge({ z, cells });
+    using _clock = run.clock.install();
+    const brought = name.includes("brings") ? [{ x: 0, y: 66, z: -1 }, { x: 0, y: 67, z: -1 }] : [];
+    const effect = run.start({ ...run.coal(target[0], target[1]), brings: brought });
+    assert.deepEqual(await run.clock.settle(effect.completion, 10_000), { kind: "accepted" });
+    assert.equal(run.swings.length, 1);
+    assert.equal(run.centrings.count, 0, "no centring");
+    run.clean();
+  });
+}
 
 test("cancel or death during awaited aiming prevents a swing and releases watches and controls", async () => {
   for (const reason of ["cancel", "death", "handle cancel"]) {

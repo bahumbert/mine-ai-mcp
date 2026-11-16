@@ -7,6 +7,10 @@ import { Vec3 } from "vec3";
 import { occupyGoal } from "../../index.js";
 import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { createNavigationRuntime } from "../../runtime.js";
+import { createMovementPolicy } from "../../movements/policy.js";
+import { footprintColumns } from "../../../world/player-physics.js";
+import { waterStancesHeld } from "../../steering/hold-water-position.js";
 import { DROP_PICKUP_TIMEOUT_MS } from "./mine-drops.js";
 import { mine, type MineRequest, type MineScan } from "./mine-process.js";
 import { MineTargeting } from "./mine-targeting.js";
@@ -2119,4 +2123,69 @@ test("a bot standing on the only match steps off it and mines it from the side",
 
   assert.equal(result.status, "satisfied");
   assert.deepEqual(stancesAtBreak, ["1,0"]);
+});
+
+/**
+ * `collect/coal-under-sand` (2026-11-16): the stance was judged at its cell centre, the body ended 0.1 into the next
+ * column, and the coal's sand landed in cells it occupied. The last check before the swing now refuses that, and with
+ * steering blocked (a body that cannot centre) the route replans from the observed body instead of digging.
+ */
+test("a coal swing refused for the sand column over the body replans from the observed body and never digs over that column", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  // The scenario's corridor (`collect/falling-column-trailing-edge`): a bedrock box round a one-wide corridor whose
+  // coal, above head height, carries a sand column hidden behind it, so the plan digs the coal first.
+  const cells: Record<string, string> = {};
+  for (let x = -1; x <= 1; x++) for (let y = 63; y <= 70; y++) for (let z = -2; z <= 2; z++) cells[`${x},${y},${z}`] = "bedrock";
+  for (let y = 63; y <= 64; y++) for (let z = -1; z <= 1; z++) cells[`0,${y},${z}`] = "air";
+  cells["0,65,-1"] = "coal_ore";
+  for (let y = 66; y <= 69; y++) cells[`0,${y},-1`] = "sand";
+  const { bot, world } = createFakeBot({
+    clock, simulatePhysics: true, position: new Vec3(0.5, 63, 0.5), groundY: 62, carried: { diamond_pickaxe: 1 }, cells,
+  });
+  const coal = new Vec3(0, 65, -1);
+  const navigation = createNavigationRuntime(bot);
+  const swings: { columnZ: number[]; z: number }[] = [];
+  const dig = bot.dig.bind(bot);
+  bot.dig = async (block, ...rest) => {
+    if (block.position.equals(coal)) swings.push({ columnZ: [...footprintColumns(bot.entity.position)].map(({ z }) => z), z: bot.entity.position.z });
+    return dig(block, ...rest);
+  };
+  // The body is pushed 0.1 into the next column once the plan exists, and it cannot steer back.
+  let pushed = false;
+  let searches = 0;
+  navigation.onEvent((event) => {
+    if (event.kind === "search_started") searches++;
+    if (event.kind === "search_slice" && !pushed) { pushed = true; bot.entity.position.z = 0.10; bot.setControlState = () => undefined; }
+  });
+  const coalState = bot.registry.blocksByName.coal_ore!.defaultState!;
+  const mining = mine(bot, {
+    matches: (block) => block.name === "coal_ore",
+    canMine: () => ({ kind: "mineable", routeMayBreak: true }),
+    matchingStateIds: new Set([coalState]),
+    collects: () => true,
+    isSatisfied: () => world.blockAt(coal)?.name !== "coal_ore",
+    observedInventoryGain: () => 0,
+    movements: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }),
+    castSearchRadius: 64,
+    explore: false,
+    maximumBreaks: 2,
+    route: (options) => navigation.navigate({ ...options }),
+    breakInPlace: (options) => navigation.breakBlockInPlace(options),
+    placeInto: async () => ({ kind: "failed", error: "the fake bot places nothing" }),
+    cast: null,
+  });
+  try {
+    const result = await clock.settle(mining, RUN_BOUND_MS);
+    assert.equal(pushed, true, "the plan was made before the body moved");
+    assert.deepEqual(swings.filter(({ columnZ }) => columnZ.includes(-1)), [], `a swing with the footprint over column z -1: ${JSON.stringify(swings)}`);
+    assert.ok(searches >= 2, `the refused swing invalidated the route and a new search started from the observed body (${searches} searches)`);
+    assert.equal(result.status, "unreachable", "the body can neither centre nor move to a clear stance: a bounded failure");
+    assert.equal(swings.length, 0, "no swing at the coal at all");
+    assert.equal(world.blockAt(coal)?.name, "coal_ore");
+    assert.deepEqual(Object.entries(bot.controlState).filter(([, held]) => held), [], "no control is held");
+    assert.equal(waterStancesHeld(bot), 0, "no stance hold outlives the run (checked before close() could release it)");
+  } finally {
+    await clock.settle(navigation.close(), 5_000);
+  }
 });

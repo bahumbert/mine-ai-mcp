@@ -3,7 +3,8 @@ import test from "node:test";
 import { flatWorld, observation, planningStart, WELL_FED } from "../../test-support/navigation.js";
 import { excavateGoal } from "../goals/excavate.js";
 import { createMovementCatalogue } from "./catalogue.js";
-import { DIG_REACH, prepareExcavation, stanceSight } from "./excavation.js";
+import { DIG_REACH, fallingColumnBodyHazard, prepareExcavation, stanceSight } from "./excavation.js";
+import { packKey } from "../world/world.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { MemoryWorld } from "../world/memory-world.js";
@@ -166,6 +167,26 @@ test("falling-block excavation protects every overlapped body column, even with 
     for (let y = 66; y <= 72; y++) world.load({ ...target, y }, { stateId: 2, traits: { falling: true } });
     world.load({ ...target, y: 73 }, { stateId: 0 });
     assert.equal(prepare(world, target, { standing: { x, y: 63, z } }).kind, expected, `${x},${z}`);
+  }
+});
+
+test("the falling-column hazard reads a live body: an off-centre footprint over the column refuses, a centred one does not", () => {
+  // The 2026-11-16 coal-under-sand incident: the body at z 0.10 spans z -0.20..0.40, over the column z -1 of the coal.
+  const world = excavationWorld();
+  const target = { x: 0, y: 65, z: -1 };
+  world.load(target, { stateId: 1 });
+  world.load({ x: 0, y: 66, z: -1 }, { stateId: 2, traits: { falling: true } });
+  const read = world.blockAt.bind(world);
+  assert.match(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, target) ?? "", /would drop the falling block above it onto the bot/);
+  assert.equal(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.5 }, target), null);
+  assert.equal(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, target, [packKey(0, 66, -1)]), null);
+  // The height bound: a falling block over a target below the feet cannot reach the body; at feet height or above it can.
+  for (const [y, expected] of [[62, "null"], [63, "hazard"], [65, "hazard"]] as const) {
+    const column = { x: 0, y, z: -1 };
+    world.load(column, { stateId: 1 });
+    world.load({ ...column, y: y + 1 }, { stateId: 2, traits: { falling: true } });
+    const hazard = fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, column);
+    assert.equal(hazard === null ? "null" : "hazard", expected, `target y ${y} under standing y 63`);
   }
 });
 
