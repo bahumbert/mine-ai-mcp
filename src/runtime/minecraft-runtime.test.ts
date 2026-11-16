@@ -345,6 +345,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "use_container",
       "view_blocks",
       "view_crafting_requirements",
+      "view_item_family",
       "view_smelting_recipes",
       "view_block_drops",
       "view_frontier",

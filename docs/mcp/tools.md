@@ -250,6 +250,10 @@ returned event ID. It remains available during foreground execution; its event
 cursor is independent of foreground result retrieval. Defined in
 [src/actions/read-recent-events/contract.ts](../../src/actions/read-recent-events/contract.ts).
 
+### `view_item_family`
+
+Use `view_item_family` with `family` (an item family such as `sign`) to list its `members` in registry order. The result includes the requested `family` and does not change the world.
+
 ### `view_crafting_requirements`
 
 Use `view_crafting_requirements` to evaluate a recipe tree before

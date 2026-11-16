@@ -138,6 +138,9 @@ params:
         y: -59
         z: 0
         scaffold: false
+    - action: view_item_family
+      arguments:
+        family: sign
     - action: view_crafting_requirements
       arguments:
         items:

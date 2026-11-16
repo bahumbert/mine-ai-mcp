@@ -20,13 +20,15 @@
     "food": [],
     "avoided_food": [],
     "bed": ["beds"],
+    "sign": ["signs"],
     "boat": ["boats"],
     "station": [],
     "falling_block": []
   },
   "block": {
     "container": ["shulker_boxes"],
-    "chest": []
+    "chest": [],
+    "sign": ["signs"]
   },
   "entity_type": {
     "arrow_entity": ["arrows"],

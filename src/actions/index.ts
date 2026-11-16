@@ -56,6 +56,7 @@ import { createUseBucketAction } from "./use-bucket/index.js";
 import { createUseContainerAction } from "./use-container/index.js";
 import { createViewBlocksAction } from "./view-blocks/index.js";
 import { createViewCraftingRequirementsAction } from "./view-crafting-requirements/index.js";
+import { createViewItemFamilyAction } from "./view-item-family/index.js";
 import { createViewSmeltingRecipesAction } from "./view-smelting-recipes/index.js";
 import { createViewBlockDropsAction } from "./view-block-drops/index.js";
 import { createViewFrontierAction } from "./view-frontier/index.js";
@@ -142,6 +143,7 @@ export function createActions(
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
     createViewCraftingRequirementsAction(bot, seen),
+    createViewItemFamilyAction(bot),
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
@@ -193,6 +195,7 @@ export * from "./use-bucket/index.js";
 export * from "./use-container/index.js";
 export * from "./view-blocks/index.js";
 export * from "./view-crafting-requirements/index.js";
+export * from "./view-item-family/index.js";
 export * from "./view-smelting-recipes/index.js";
 export * from "./view-block-drops/index.js";
 export * from "./tend-crops/index.js";
