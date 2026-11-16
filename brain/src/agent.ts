@@ -21,6 +21,7 @@ import { GameFacts } from "./agent/game-facts.ts";
 import { opportunitiesFor } from "./agent/house-opportunities.ts";
 import { StepGuards } from "./agent/step-guards.ts";
 import { StepRunner } from "./agent/step-runner.ts";
+import { stopAll, stopWorkOf } from "./agent/stack.ts";
 import { newWork, type Work } from "./agent/work.ts";
 
 /** How often the agent checks for new chat. */
@@ -534,22 +535,14 @@ export class Agent {
 
   /** "stop": everything on the stack ends, its own goal included. */
   private stopAll(): void {
-    for (const work of this.stack) work.step?.abort();
-    this.stack.length = 0;
+    stopAll(this.stack);
     this.journalState(null);
     this.wake?.();
   }
 
-  /**
-   * "stop" from a player: the orders that player gave and the character's own goals end, the orders of
-   * other players stay on the stack (review R18).
-   */
+  /** "stop" from a player: only that player's share of the stack ends (see `stopWorkOf`). */
   private stopWorkOf(speaker: string): void {
-    const name = speaker.toLowerCase();
-    const ends = ({ objective }: Work) => objective.requester === null || objective.requester.toLowerCase() === name;
-    for (const work of this.stack.filter(ends)) work.step?.abort();
-    const kept = this.stack.filter((work) => !ends(work));
-    this.stack.splice(0, this.stack.length, ...kept);
+    stopWorkOf(this.stack, speaker);
     this.journalState(null);
     this.wake?.();
   }
