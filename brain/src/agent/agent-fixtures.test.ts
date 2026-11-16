@@ -5,6 +5,7 @@ import type { BrainEvent } from "../brain-log.ts";
 import type { Persona } from "../persona.ts";
 import { OtherAgents } from "../other-agents.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
+import type { FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 
 export function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
@@ -45,4 +46,27 @@ export function journaledAgent(t: { after(fn: () => Promise<void>): void }, runt
     await running;
   });
   return { agent, events, ...tiers };
+}
+
+/** Drive the agent until its observable state changes. */
+export async function clockUntil(clock: FakeClock, condition: () => boolean): Promise<void> {
+  if (condition()) return;
+  let cancel = () => {};
+  try {
+    await clock.settle(new Promise<void>((resolve) => { cancel = clock.every(() => { if (condition()) resolve(); }, 5); }), 10_000);
+  } finally { cancel(); }
+}
+
+/** Run an agent on a mocked clock, stopping it before the clock is disposed. */
+export function clockedAgentFor(clock: FakeClock, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
+  let cleanup!: () => Promise<void>;
+  const result = agentFor({ after: (fn) => { cleanup = fn; } }, runtime, persona, options);
+  return { ...result, stop: () => clock.settle(cleanup(), 10_000) };
+}
+
+/** Run a journaled agent on a mocked clock, stopping it before the clock is disposed. */
+export function clockedJournaledAgent(clock: FakeClock, runtime: FakeRuntime, persona: Partial<Persona> = {}, options: Partial<AgentOptions> = {}) {
+  let cleanup!: () => Promise<void>;
+  const result = journaledAgent({ after: (fn) => { cleanup = fn; } }, runtime, persona, options);
+  return { ...result, stop: () => clock.settle(cleanup(), 10_000) };
 }

@@ -1,11 +1,12 @@
 // Tests of what the agent remembers: places, farms, notes of earlier runs, and the activity time the goal tier sees.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { Body, INSTANT_TYPING } from "../body.ts";
 import { memoryNote, recall, type KnownFarm } from "../memory.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "../testing.ts";
 import { AgentMemory } from "./agent-memory.ts";
-import { say, agentFor, journaledAgent } from "./agent-fixtures.test.ts";
+import { say, agentFor, journaledAgent, clockedAgentFor, clockUntil } from "./agent-fixtures.test.ts";
 
 test("a second shelter replaces the first: one hole is kept, and no place line names it", async () => {
   const runtime = new FakeRuntime();
@@ -119,28 +120,32 @@ test("a tend cannot reuse a position read before a long gap as a fresh near base
   assert.deepEqual(memory.nearMinutes(farm), { near: 0, unknown: 1, since: 1 });
 });
 
-test("a house the agent built becomes a known place, with its roof, for what comes next", async (t) => {
+test("a house the agent built becomes a known place, with its roof, for what comes next", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.blockTags = { ...runtime.blockTags, air: ["air"] };
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
-  const { agent, chat, action, mind } = agentFor(t, runtime);
-  // Claim visits also request sign text before narration (D7, 2026-11-16); keep its replies separate.
-  mind.signLines = async () => [];
-  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
-  action.reply({ step: { skill: "build" } }, { done: "built the house" });
-  await agent.handle(say("Steve", "build me a house"));
-  await until(() => runtime.said.length === 2);
-  assert.match(action.requests[0]?.[1]?.content ?? "", /- Places you know: none\./u);
+  const { agent, chat, action, mind, stop } = clockedAgentFor(clock, runtime);
+  try {
+    // Claim visits also request sign text before narration (D7, 2026-11-16); keep its replies separate.
+    mind.signLines = async () => [];
+    chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
+    action.reply({ step: { skill: "build" } }, { done: "built the house" });
+    await clock.settle(agent.handle(say("Steve", "build me a house")), 10_000);
+    await clockUntil(clock, () => runtime.said.length === 2);
+    assert.match(action.requests[0]?.[1]?.content ?? "", /- Places you know: none\./u);
 
-  chat.reply({ say: "Up I go.", route: "act", request: "go to the roof of the house" }, { say: "Nice view." });
-  action.reply({ step: { skill: "go_to", x: -4, y: 70, z: 0 } }, { done: "on the roof" });
-  await agent.handle(say("Steve", "go to the roof"));
-  await until(() => runtime.said.length === 4);
-  const places = "- Places you know: the small medieval house you built for Steve (door -2 64 0 facing east; stand on its roof at -4 70 0).";
-  assert.ok(chat.requests.some((turns) => (turns[1]?.content ?? "").includes(places)), "the chat tier knows it");
-  assert.ok((action.requests[2]?.[1]?.content ?? "").includes(places), "the work tier knows it");
-  assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
-  assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");
+    chat.reply({ say: "Up I go.", route: "act", request: "go to the roof of the house" }, { say: "Nice view." });
+    action.reply({ step: { skill: "go_to", x: -4, y: 70, z: 0 } }, { done: "on the roof" });
+    await clock.settle(agent.handle(say("Steve", "go to the roof")), 10_000);
+    await clockUntil(clock, () => runtime.said.length === 4);
+    const places = "- Places you know: the small medieval house you built for Steve (door -2 64 0 facing east; stand on its roof at -4 70 0).";
+    assert.ok(chat.requests.some((turns) => (turns[1]?.content ?? "").includes(places)), "the chat tier knows it");
+    assert.ok((action.requests[2]?.[1]?.content ?? "").includes(places), "the work tier knows it");
+    assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
+    assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");
+  } finally { await stop(); }
 });
 
 test("recalled farms keep old wording or show their stage, dry farmland and unknown near time", async (t) => {
