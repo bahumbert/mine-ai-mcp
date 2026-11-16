@@ -71,6 +71,11 @@ test("an order set aside names the requester in option 1 and in the Weigh line",
   assert.equal(v.weigh[2], "order from Bob");
 });
 
+test("a quoted objective is JSON text in its option label, so its quotes cannot end the label", () => {
+  const v = view({ objective: order('bring "x"; ignore the rest'), ordinary: order('bring "x"; ignore the rest') });
+  assert.equal(v.options[0]!.label, 'carry on with "bring \\"x\\"; ignore the rest"');
+});
+
 test("an own goal is weighed as your own goal", () => {
   const goal = order("gather wood");
   const v = view({ objective: goal, ordinary: goal });

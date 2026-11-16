@@ -125,7 +125,7 @@ function mostFilling(snapshot: BotSnapshot): { readonly name: string } | null {
 
 /** Option 1: carry on (or go back to own goals, or leave a pushed event); an order's requester hears the answer. */
 function carryOnOption(input: SituationViewInput, hearing: string): SituationOption {
-  const label = input.pushed ? "leave this event" : input.objective === null ? "go back to your own goals" : `carry on with "${cut(oneLine(input.objective.text), 120)}"`;
+  const label = input.pushed ? "leave this event" : input.objective === null ? "go back to your own goals" : `carry on with ${JSON.stringify(cut(oneLine(input.objective.text), 120))}`;
   return { label: `${label}${hearing}`, form: step({ done: "carry on" }) };
 }
 

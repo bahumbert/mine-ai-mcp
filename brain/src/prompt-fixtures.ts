@@ -1,5 +1,8 @@
 // Test inputs of the brain's prompts at measured sizes: the median fixtures (golden texts) and the worst case per tier.
-import type { ChatLine, ChatInput, EarlierFailure, GoalInput, KnownPlace, NarrateInput, StepRecord, WorkInput } from "./mind.ts";
+import { SKILL_NAMES } from "./actions.ts";
+import { situationView } from "./agent/situation-options.ts";
+import type { SituationInfo } from "./agent/situations.ts";
+import type { ChatLine, ChatInput, EarlierFailure, GoalInput, KnownPlace, NarrateInput, Objective, StepRecord, WorkInput } from "./mind.ts";
 import { findOpportunities, type Opportunity } from "./opportunities.ts";
 import { AgentMemory } from "./agent/agent-memory.ts";
 import { Body, INSTANT_TYPING } from "./body.ts";
@@ -184,7 +187,27 @@ function crowdedSnapshotAndAreas() {
   return { snapshot, areas: Array.from({ length: 30 }, (_, index) => area(index + 1, 30 + index * 50)), places: manyPlaces() };
 }
 
-/** The work tier's worst case (spec D5): 10 steps and 8 failures (2 refused) of 700 characters, 4 paused. */
+/**
+ * A night respawn's event at its longest (spec D5): a home 40 characters long, five facts (home, deaths, the Nether, the
+ * things out of reach, beds), the gear at its longest, an order of 300 characters with commas and quotes, requested by
+ * a 16-character name, that the running step works on (the order is on top, so the carry-on option names it and the
+ * requester hears the answer).
+ */
+export function situationWorst(): NonNullable<WorkInput["situation"]> {
+  const order: Objective = { text: `bring "the iron", the coal and the bread to the farm, ${filler(280, "order")}`, requester: "Requester".padEnd(16, "x"), purpose: null };
+  const home: KnownPlace = { name: filler(40, "home"), detail: "", own: true, house: { size: "small", style: "medieval", door: { x: 3, y: 64, z: 0 }, facing: "north", materials: {} } };
+  // The longest gear of spec D5: melee, bow and shield ids of 30 characters.
+  const item30 = (index: number) => `long_gear_item_${index}`.padEnd(30, "x");
+  const snapshot: BotSnapshot = { ...crowdedSnapshotAndAreas().snapshot, combat: { melee: item30(0), bow: item30(1), arrows: 128, shield: item30(2) } };
+  const info: SituationInfo = { kind: "respawn", cause: "It is night (day comes in 7.9 min). You died 12 min ago at -645 53 -27 (Zombie) and respawned at 912 64 0", raisedAt: 0 };
+  const view = situationView({
+    info, snapshot, places: [home], objective: order, pushed: false, skills: SKILL_NAMES, boldness: "cautious", ordinary: order,
+    deaths: { total: 2, atNight: 1 }, night: true, timeOfDay: 12_100,
+  });
+  return { info, view, objective: order, running: "get_items", deciding: true };
+}
+
+/** The work tier's worst case (spec D5): 10 steps and 8 failures (2 refused) of 700 characters, 4 paused, a night event. */
 export function workWorst(): WorkInput {
   const objective = "build a small house next to the river";
   return {
@@ -195,6 +218,7 @@ export function workWorst(): WorkInput {
     paused: ["a", "b", "c", "d"].map((name) => ({ text: `set aside objective ${name}: ${filler(80, name)}`, requester: null, purpose: null })),
     earlierFailures: failures(8, 2, 700, objective),
     ownsTemporaryHouse: true,
+    situation: situationWorst(),
   };
 }
 

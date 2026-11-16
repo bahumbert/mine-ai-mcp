@@ -4,6 +4,8 @@ import type { Facing } from "./building/blueprint.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
+import type { SituationView } from "./agent/situation-options.ts";
+import type { SituationInfo } from "./agent/situations.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
@@ -156,6 +158,18 @@ export interface WorkInput {
   readonly earlierFailures?: readonly EarlierFailure[];
   /** It owns a house with temporary parts: only then is `improve_house` offered in the skill list. */
   readonly ownsTemporaryHouse?: boolean;
+  /**
+   * A situation event on the stack (spec 2026-11-15-p4-18-night-reflex-l2 D5): what it is, what the model reads of it, the
+   * work it interrupts or sets aside, and whether this call decides (`deciding`) or a pushed situation's later call.
+   */
+  readonly situation?: {
+    readonly info: SituationInfo;
+    readonly view: SituationView;
+    readonly objective: Objective | null;
+    /** The step label running now, null when none runs. */
+    readonly running: string | null;
+    readonly deciding: boolean;
+  };
   /** Step key -> refusals since that step last ran; mutable, owned by the agent's work for this objective (counted here, reset there). */
   readonly refused?: Map<string, number>;
 }

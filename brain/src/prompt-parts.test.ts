@@ -4,10 +4,14 @@ import test from "node:test";
 import type { MindTier } from "./brain-log.ts";
 import { chatParts, chatSystemPrompt, goalSystemPrompt, narrateSystemPrompt, personaPrompt, workSystemPrompt } from "./llm-mind.ts";
 import { ACTIVITIES } from "./activities.ts";
-import type { ChatInput, GoalInput, WorkInput } from "./mind.ts";
+import type { ChatInput, GoalInput, KnownPlace, Objective, WorkInput } from "./mind.ts";
 import { HINTS, PROMPT_BUDGET, fitPrompt, reservedTokens, type PromptPart } from "./prompt-budget.ts";
-import { goalParts, narrateParts, SHRINK_ORDER, workParts } from "./prompt-parts.ts";
+import { goalParts, narrateParts, SHRINK_ORDER, situationEventPart, workParts } from "./prompt-parts.ts";
 import { area, chatP50, chatWorst, goalP50, goalWorst, hints, narrateWorst, players, snapshotWith, workLarge, workP50, workWorst } from "./prompt-fixtures.ts";
+import { SKILL_NAMES } from "./actions.ts";
+import { situationView } from "./agent/situation-options.ts";
+import type { SituationInfo } from "./agent/situations.ts";
+import type { BotSnapshot } from "./runtime-client.ts";
 
 const golden = (name: string) => readFileSync(new URL(`./fixtures/prompts-before/${name}.txt`, import.meta.url), "utf8").replace(/\r?\n$/u, "");
 const part = (parts: readonly PromptPart[], key: string): PromptPart => {
@@ -195,4 +199,122 @@ test("a work prompt without steps or failures is as before", () => {
   assert.match(text, /Steps so far: none yet\./u);
   assert.doesNotMatch(text, /Steps that failed lately/u);
   assert.doesNotMatch(text, /Set aside/u);
+});
+
+// ---- the situation event part (spec 2026-11-15-p4-18-night-reflex-l2 D5) ----------------------------------------------
+
+const hillcrest: KnownPlace = { name: "Hillcrest", detail: "", own: true, house: { size: "small", style: "medieval", door: { x: 3, y: 64, z: 0 }, facing: "north", materials: {} } };
+const gather: Objective = { text: "gather the iron", requester: null, purpose: null };
+
+/** A night event of a bot with a carried bed at 14000, its house 3 blocks east; `get_items` running unless told. */
+function nightSituation(overrides: { readonly objective?: Objective | null; readonly ordinary?: Objective | null; readonly running?: string | null; readonly deciding?: boolean } = {}): NonNullable<WorkInput["situation"]> {
+  const objective = overrides.objective === undefined ? gather : overrides.objective;
+  const deciding = overrides.deciding ?? true;
+  const info: SituationInfo = { kind: "night", cause: "Night has just fallen (day comes in 2.0 min)", raisedAt: 0 };
+  const snapshot: BotSnapshot = {
+    ...snapshotWith([{ name: "white_bed", count: 1, families: ["bed"] }]),
+    armourPoints: 0,
+    combat: { melee: null, bow: null, arrows: 0, shield: null },
+    clock: { phase: "night", minutesUntilChange: 2, timeOfDay: 14_000 },
+  };
+  const view = situationView({
+    info, snapshot, places: [hillcrest], objective, pushed: !deciding, skills: SKILL_NAMES, boldness: "steady",
+    ordinary: overrides.ordinary === undefined ? gather : overrides.ordinary, deaths: { total: 0, atNight: 0 }, night: true, timeOfDay: 14_000,
+  });
+  return { info, view, objective, running: overrides.running === undefined ? "get_items" : overrides.running, deciding };
+}
+
+test("the situation part lists facts, weigh, then options in order", () => {
+  const text = situationEventPart(nightSituation()).render(0);
+  assert.equal(text, [
+    '- Event: Night has just fallen (day comes in 2.0 min). Running now: get_items for "gather the iron".',
+    '- Facts: your home "Hillcrest" is 3 blocks away (door at 3 64 0)',
+    "- Weigh: boldness steady (cautious, steady or bold); gear: armour 0 points, bare hands; your own goal",
+    '- What you can do now (your choice): carry on with "gather the iron": {"done":"carry on"}; go home: {"skill":"go_to","x":3,"y":64,"z":0}; sleep: {"skill":"sleep"}; dig an emergency shelter here: {"skill":"dig_shelter"}. Any other answer stops the running step at a safe place first.',
+  ].join("\n"));
+});
+
+test("without a running step there is no Running now clause and no stop sentence; a later call says set aside", () => {
+  const cases = [
+    {
+      name: "a pushed later call",
+      situation: nightSituation({ objective: { text: "dig the well", requester: null, purpose: null }, deciding: false, running: null }),
+      first: '- Event: Night has just fallen (day comes in 2.0 min). Set aside: "dig the well".',
+      absent: /Running now|Any other answer/u,
+    },
+    {
+      name: "a deciding call with nothing running",
+      situation: nightSituation({ running: null }),
+      first: "- Event: Night has just fallen (day comes in 2.0 min).",
+      absent: /Running now|Set aside|Any other answer/u,
+    },
+  ] as const;
+  for (const { name, situation, first, absent } of cases) {
+    const text = situationEventPart(situation).render(0);
+    const lines = text.split("\n");
+    assert.equal(lines[0], first, name);
+    assert.doesNotMatch(text, absent, name);
+    assert.ok(lines[3]!.endsWith('{"skill":"dig_shelter"}.'), name);
+  }
+  assert.ok(situationEventPart(cases[0].situation).render(0).includes('leave this event: {"done":"carry on"}'));
+});
+
+test("level 1 drops the facts and keeps the weigh line and every form", () => {
+  const situation = nightSituation();
+  const text = situationEventPart(situation).render(1);
+  assert.doesNotMatch(text, /- Facts: /u);
+  assert.ok(text.includes("\n- Weigh: boldness steady (cautious, steady or bold); gear: armour 0 points, bare hands; your own goal\n- What you can do now"));
+  for (const option of situation.view.options) assert.ok(text.includes(`${option.label}: ${option.form}`), option.label);
+});
+
+test("fitPrompt reaches the event part when the deficit needs it", () => {
+  const input = workWorst();
+  const parts = workParts(input);
+  const order = SHRINK_ORDER.work;
+  const earlier = order.filter((key) => key !== "situation-event");
+  // Every earlier entry at its floor, the event whole: one token under that is a gap only the event's shrink can close.
+  const earlierAtFloor = fitPrompt("", parts, earlier, Number.NEGATIVE_INFINITY, 3.4).estimated;
+  const fitted = fitPrompt("", parts, order, earlierAtFloor - 1, 3.4);
+  assert.equal(fitted.overBudget, false);
+  assert.equal(fitted.text.includes("- Facts: "), false);
+  assert.ok(fitted.text.includes("- Weigh: "));
+  for (const option of input.situation!.view.options) assert.ok(fitted.text.includes(option.form), option.form);
+});
+
+test("a near-budget prompt keeps the event part whole and cuts the earliest steps first", () => {
+  const input = workWorst();
+  const parts = workParts(input);
+  const whole = fitPrompt("", parts, SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4);
+  const fitted = fitPrompt("", parts, SHRINK_ORDER.work, whole.estimated - 1, 3.4);
+  assert.equal(fitted.overBudget, false);
+  assert.ok(whole.text.includes("get 1 oak_log"), "the first step is shown whole at level 0");
+  assert.equal(fitted.text.includes("get 1 oak_log"), false, "the first steps are cut once the deficit is one token");
+  assert.ok(fitted.text.includes(situationEventPart(input.situation!).render(0)));
+});
+
+test("a set-aside text with commas and quotes is shown as JSON at both levels", () => {
+  const situation = nightSituation({ objective: { text: 'bring "the iron", the coal and the bread', requester: null, purpose: null }, deciding: false, running: null });
+  for (const level of [0, 1]) {
+    assert.ok(situationEventPart(situation).render(level).includes('Set aside: "bring \\"the iron\\", the coal and the bread".'), `level ${level}`);
+  }
+});
+
+test("a set-aside text is shown whole at 119 and 120 characters and cut at 121 to 119 characters and an ellipsis, at both levels", () => {
+  for (const [length, shown] of [
+    [119, "a".repeat(119)],
+    [120, "a".repeat(120)],
+    [121, `${"a".repeat(119)}…`],
+  ] as const) {
+    const situation = nightSituation({ objective: { text: "a".repeat(length), requester: null, purpose: null }, deciding: false, running: null });
+    for (const level of [0, 1]) {
+      assert.ok(situationEventPart(situation).render(level).includes(`Set aside: "${shown}".`), `${length} characters at level ${level}`);
+    }
+  }
+});
+
+test("no situation: no event text; with one, the event sits between the situation block and the objective", () => {
+  const withoutEvent = fitPrompt("", workParts({ ...workP50(), situation: undefined }), SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4).text;
+  assert.doesNotMatch(withoutEvent, /- Event: /u);
+  const withEvent = fitPrompt("", workParts(workWorst()), SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4).text;
+  assert.match(withEvent, /- Currently doing: [^\n]*\n- Event: [\s\S]*\n\nObjective \(asked by Player4\)/u);
 });

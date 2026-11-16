@@ -2,7 +2,7 @@
 import type { MindTier } from "./brain-log.ts";
 import { conditionLine } from "./condition.ts";
 import { describeActivity } from "./activities.ts";
-import { MAX_STEP_FAILURES, type ChatLine, type EarlierFailure, type GoalInput, type KnownPlace, type NarrateInput, type StepRecord, type WorkInput } from "./mind.ts";
+import { MAX_STEP_FAILURES, type ChatLine, type EarlierFailure, type GoalInput, type KnownPlace, type NarrateInput, type Objective, type StepRecord, type WorkInput } from "./mind.ts";
 import { describeOpportunities, drawnFirst, opportunityLine, type Opportunity } from "./opportunities.ts";
 import { capLines, cut, HINTS, type PromptPart } from "./prompt-budget.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -37,7 +37,7 @@ const HISTORY_SHOWN = [Infinity, 6, 3];
 
 /** Which parts shrink first, per tier (spec D2); a part absent from its tier's list is never shrunk. */
 export const SHRINK_ORDER: Readonly<Record<MindTier, readonly string[]>> = {
-  work: ["steps", "failures", "players", "areas", "paused"],
+  work: ["steps", "failures", "players", "areas", "paused", "situation-event"],
   goal: ["lately", "players", "areas", "hints"],
   chat: ["players", "areas", "history"],
   narrate: ["history"],
@@ -249,12 +249,48 @@ function nowCarried(input: WorkInput): string {
   return `Everything ${what} was missing (${list}) is carried now: build it again.`;
 }
 
+/** The objective as a situation event shows it: JSON text of at most 120 characters (spec D5). */
+function eventObjectiveText(objective: Objective): string {
+  return JSON.stringify(cut(objective.text, 120));
+}
+
+/** The event's first line: the cause, then what runs now (deciding) or what is set aside (a later call), when there is one. */
+function eventLine(situation: NonNullable<WorkInput["situation"]>): string {
+  const { info, objective, running, deciding } = situation;
+  let clause = "";
+  if (deciding && running !== null) clause = ` Running now: ${running}${objective === null ? "" : ` for ${eventObjectiveText(objective)}`}.`;
+  if (!deciding && objective !== null) clause = ` Set aside: ${eventObjectiveText(objective)}.`;
+  return `- Event: ${info.cause}.${clause}`;
+}
+
+/** The options as the model answers them: `label: form` each; the stop sentence only while a running step can be stopped. */
+function eventOptionsLine(situation: NonNullable<WorkInput["situation"]>): string {
+  const forms = situation.view.options.map((option) => `${option.label}: ${option.form}`).join("; ");
+  const stop = situation.deciding && situation.running !== null ? " Any other answer stops the running step at a safe place first." : "";
+  return `- What you can do now (your choice): ${forms}.${stop}`;
+}
+
+/**
+ * The situation event of the work tier (spec D5): its cause and what runs or is set aside, its facts, its `Weigh` line
+ * and the options as bare forms. Level 1 drops the facts line (the shrink keeps the `Weigh` line and every form).
+ */
+export function situationEventPart(situation: NonNullable<WorkInput["situation"]>): PromptPart {
+  const render = (level: number): string => {
+    const lines = [eventLine(situation)];
+    if (level === 0 && situation.view.facts.length > 0) lines.push(`- Facts: ${situation.view.facts.join("; ")}`);
+    lines.push(`- Weigh: ${situation.view.weigh.join("; ")}`, eventOptionsLine(situation));
+    return lines.join("\n");
+  };
+  return { key: "situation-event", render, maxLevel: 1, label: () => "situation-event: facts line dropped", before: "\n" };
+}
+
 /** The work tier's user message as parts, in the order it has always had them. */
 export function workParts(input: WorkInput): PromptPart[] {
   const { objective } = input;
   const whose = objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
   return [
     ...situationParts(input.snapshot, "working on this objective", input.places, input.areas, objective.requester === null ? [] : [objective.requester]),
+    ...(input.situation === undefined ? [] : [situationEventPart(input.situation)]),
     fixedPart("objective", `Objective (${whose}): ${JSON.stringify(objective.text)}`, "\n\n"),
     pausedPart(input.paused),
     stepsPart(input.steps),
