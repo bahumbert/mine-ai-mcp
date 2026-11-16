@@ -1,6 +1,6 @@
 // Swapping the temporary parts of her own house for the style's blocks (improve_house).
 import type { Step } from "../actions.ts";
-import { describeMaterials, shortfall, type BlockRole, type MaterialCount } from "../building/blueprint.ts";
+import { describeMaterials, FACING_VECTOR, shortfall, type BlockRole, type MaterialCount } from "../building/blueprint.ts";
 import { improvement } from "../building/materials.ts";
 import { builderStand, styleOrDefault, type HousePlan, type Materials } from "../building/plan.ts";
 import { withMaterialsKept } from "../gathering/gather-materials.ts";
@@ -62,7 +62,12 @@ async function improveOnSite(context: SkillContext, { place, house, style, roles
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect ${what}: ${protection.error}` };
   noteArea(context, protection.area);
-  const stopped = await buildParts(context, after, what, { reserved: bill, leave: () => undefined, again: "; improve your house again" });
+  const claim = house.claim;
+  const [fx, fz] = FACING_VECTOR[claim?.facing ?? house.facing];
+  const keepAlways = claim === undefined ? [] : [claim.position, claim.attach === "wall"
+    ? { ...claim.position, x: claim.position.x - fx, z: claim.position.z - fz }
+    : { ...claim.position, y: claim.position.y - 1 }];
+  const stopped = await buildParts(context, after, what, { reserved: bill, keepAlways, leave: () => undefined, again: "; improve your house again" });
   if (stopped !== null) return stopped;
   context.remember?.({ ...place, house: { ...house, materials: rest } });
   const swapped = roles.map((role) => style.palette[role]);

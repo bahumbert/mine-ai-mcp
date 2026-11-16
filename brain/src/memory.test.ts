@@ -4,6 +4,18 @@ import { activityNotesQuery, memoryNote, recall, recallQuery, shelterNotesQuery,
 
 const LIMITS = { places: 8, lately: 5, farms: 4, times: 3 };
 
+test("house claim metadata accepts absent or one-character owner/dimension and skips empty strings", () => {
+  for (const field of ["owner", "dimension"]) for (const value of [undefined, "A", ""]) for (const kind of ["place", "unfinished_house"] as const) {
+    const fields = value === undefined ? {} : { [field]: value };
+    const house = { size: "small" as const, style: "medieval", door: { x: 0, y: 64, z: 2 }, facing: "north" as const, materials: {}, ...fields };
+    const place = { name: "my house", detail: "", house };
+    const unfinished = { kind: "small medieval house", site: { door: house.door, facing: house.facing }, part: 0, ...fields };
+    const note = kind === "place" ? memoryNote({ kind, place }) : memoryNote({ kind, house: unfinished });
+    const recalled = recall([note.context], LIMITS);
+    assert.deepEqual(kind === "place" ? recalled.places : recalled.unfinished, value === "" ? kind === "place" ? [] : null : kind === "place" ? [place] : unfinished, `${kind}.${field}=${JSON.stringify(value)}`);
+  }
+});
+
 const farm = (overrides: Partial<KnownFarm> = {}): KnownFarm => ({
   crop: "wheat_seeds", size: 9, centre: { x: 10, y: 63, z: -5 }, madeAt: "2026-10-02T20:00:00.000Z",
   tendedAt: "2026-10-02T20:00:00.000Z", state: { planted: 80, ripe: 0, empty: 0 }, ...overrides,

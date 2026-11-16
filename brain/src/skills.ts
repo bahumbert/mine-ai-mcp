@@ -2,7 +2,8 @@ import type { Activity } from "./activities.ts";
 import { describeStep, type Step } from "./actions.ts";
 import type { Materials, Site } from "./building/plan.ts";
 import type { Body } from "./body.ts";
-import type { KnownPlace } from "./mind.ts";
+import type { KnownPlace, SignLinesInput } from "./mind.ts";
+import type { ClaimResult } from "./skills/claim-sign.ts";
 import type { KnownFarm } from "./memory.ts";
 import { farm } from "./farming/farm-skill.ts";
 import type { TillFacts } from "./farming/site.ts";
@@ -31,6 +32,8 @@ export interface SkillContext {
   readonly requester?: string;
   /** The persona's building style (always its own: the model cannot pick another). */
   readonly style?: string;
+  /** Optional model-written lines after the claim's mandatory owner line. */
+  readonly signLines?: (input: Omit<SignLinesInput, "persona">, signal: AbortSignal) => Promise<string[]>;
   /** Told about places worth remembering (a finished house), so later requests such as "go to the roof" can use them. */
   readonly remember?: (place: KnownPlace) => void;
   /** The house left unfinished by an earlier build step, which the next build of the same kind resumes. */
@@ -78,6 +81,9 @@ export interface SkillContext {
 export interface UnfinishedHouse {
   readonly kind: string;
   readonly site: Site;
+  readonly owner?: string;
+  readonly dimension?: string;
+  readonly claim?: NonNullable<ClaimResult["claim"]>;
   /** The first part (batch) not yet built. */
   readonly part: number;
   /** False while its site is still to be leveled (an older note has none: its site counts as ready). */

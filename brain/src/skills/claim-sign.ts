@@ -7,6 +7,7 @@ import { parsePlaceSign, type BotRuntime, type BotSnapshot, type Position, type 
 import type { SkillContext } from "../skills.ts";
 import { RESUME_RANGE } from "./build-house.ts";
 import { distanceBetween } from "./positions.ts";
+import { sameCell } from "./structure-audit.ts";
 
 export interface HouseClaim {
   readonly spot: SignSpot;
@@ -31,6 +32,7 @@ interface ClaimOptions {
   readonly craft: boolean;
   readonly reserved: readonly MaterialCount[];
   readonly at?: Pick<BotSnapshot, "position" | "dimension" | "lastDeath">;
+  readonly knownClaim?: ClaimResult["claim"];
 }
 
 type SignChoice = { item: string; carried: boolean };
@@ -205,7 +207,12 @@ async function claimFromReading(run: ClaimRun, options: ClaimOptions): Promise<C
   const reading = (await run.context.runtime.readSigns(run.house.spot.position))[0];
   if (run.context.signal.aborted) return result(run, "stopped", "Claim stopped after the read.");
   const state = reading === undefined ? null : signState(reading, run.house.owner);
-  if (state === "standing" || state === "blank") rememberSign(run, "ground");
+  if (reading !== undefined && (state === "standing" || state === "blank")) {
+    const attach = run.record?.attach ?? await observedAttachment(run.context.runtime, reading);
+    if (run.context.signal.aborted) return result(run, "stopped", "Claim stopped while checking its attachment.");
+    if (attach === null) return result(run, "unknown", "The sign's attachment is unknown; inspect its support before claiming.");
+    rememberSign(run, attach);
+  }
   if (state !== null && state !== "blank") return result(run, state, state === "standing" ? "The owner's claim is standing; keep its text." : "Keep the sign as it is; read it on the next visit before claiming.");
   if (state === null) {
     const occupied = await checkClaimCell(run);
@@ -213,9 +220,15 @@ async function claimFromReading(run: ClaimRun, options: ClaimOptions): Promise<C
   }
   const lines = await claimLines(run.context, run.house);
   if (run.context.signal.aborted) return result(run, "stopped", "Claim stopped after choosing its lines.");
-  if (state === "blank") return fillSign(run, lines, "ground");
+  if (state === "blank") return fillSign(run, lines, run.record!.attach);
   const supplied = await supplySign(run, options);
   return "status" in supplied ? supplied : placeClaim(run, lines, supplied.item, supplied.at);
+}
+
+/** Shipped block tags identify attachment without guessing from a block's name. */
+async function observedAttachment(runtime: BotRuntime, reading: SignReading): Promise<Attachment | null> {
+  const tags = (await runtime.blockKinds([reading.block]))[reading.block]?.tags ?? [];
+  return tags.includes("wall_signs") ? "wall" : tags.includes("standing_signs") ? "ground" : null;
 }
 
 /** Read, then place or fill one claim sign through the foreground body. */
@@ -224,7 +237,7 @@ export async function ensureClaimSign(context: ClaimContext, house: HouseClaim, 
   try {
     if (context.signal.aborted) return { status: "stopped", detail: "Claim stopped before the read.", claim: null };
     const baseline = options.at ?? await context.runtime.status();
-    run = { context, house, baseline, record: null };
+    run = { context, house, baseline, record: options.knownClaim?.placed && sameCell(options.knownClaim.position, house.spot.position) ? options.knownClaim : null };
     if (!canAct(run, baseline)) return result(run, "stopped", "Claim stopped; return to this house in its dimension before trying again.");
     return await claimFromReading(run, options);
   } catch (error) {

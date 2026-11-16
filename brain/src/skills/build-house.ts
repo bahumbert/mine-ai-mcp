@@ -11,6 +11,7 @@ import { withMaterialsKept } from "../gathering/gather-materials.ts";
 import { areaKey, type BotRuntime, type Position, type ProtectedArea } from "../runtime-client.ts";
 import type { SkillContext, SkillResult, UnfinishedHouse } from "../skills.ts";
 import { buildParts } from "./house-parts.ts";
+import { ensureClaimSign, signToUse, type ClaimResult } from "./claim-sign.ts";
 import { levelZone } from "./level-zone.ts";
 import { distanceBetween, findPlayer, navigateInput } from "./positions.ts";
 import { releaseArea } from "./protect-area.ts";
@@ -37,7 +38,7 @@ export async function build(context: SkillContext, step: Extract<Step, { skill: 
   const unfinished = context.building?.unfinished;
   const resumed = unfinished?.kind === kind && distanceBetween(at ?? snapshot.position, unfinished.site.door) <= RESUME_RANGE ? unfinished : null;
   // Her own house has no asker to face or to name (an ordered house is the asker's unless the step says `own`).
-  const own = step.own === true || context.requester === undefined;
+  const own = resumed?.owner === undefined ? step.own === true || context.requester === undefined : resumed.owner === context.self;
   const toward = own || context.requester === undefined ? null : findPlayer(snapshot, context.requester)?.position ?? null;
   // A resumed house keeps the materials it was started with; the step's are ignored then.
   const materials = resumed === null ? step.materials ?? {} : resumed.materials ?? {};
@@ -60,7 +61,7 @@ export async function build(context: SkillContext, step: Extract<Step, { skill: 
         : `the nearest site clear of them has its door ${describeWay(snapshot.position, clear)}, at ${clear.x} ${clear.y} ${clear.z}: build there with those coordinates, or ask whoever asked you`;
       return { status: "failed", detail: `the site of ${what} (door at ${plan.site.door.x} ${plan.site.door.y} ${plan.site.door.z}) ${describeOverlaps(context, blocked)}; ${where}` };
     }
-    const missing = shortfall(plan.bill, snapshot.inventory);
+    const missing = shortfall(await billWithSign(context.runtime, plan), snapshot.inventory);
     // Only what is missing, named as the step that fetches it: get_items adds to what she carries, so asking for the
     // whole bill fetched it twice and filled her inventory (live 2026-10-02).
     if (missing.length > 0) return { status: "failed", detail: `missing ${describeMaterials(missing)} for ${what} (the rest is carried): fetch exactly the missing items with get_items, then build again` };
@@ -74,7 +75,20 @@ export async function build(context: SkillContext, step: Extract<Step, { skill: 
   }
   // The bill is not scaffolding while the house is built: the walks of the site's leveling used the very blocks it needs
   // (live 2026-10-04: 16 of 36 cobblestone).
-  return withMaterialsKept(context.runtime, plan.bill.map((entry) => entry.item), () => buildOnSite(context, { step, kind, what, style, own, resumed, plan }));
+  const identity = resumed === null
+    ? { ...(own ? context.self !== undefined && { owner: context.self } : { owner: context.requester }), dimension: snapshot.dimension }
+    : { ...(resumed.owner !== undefined && { owner: resumed.owner }), ...(resumed.dimension !== undefined && { dimension: resumed.dimension }) };
+  return withMaterialsKept(context.runtime, plan.bill.map((entry) => entry.item), () => buildOnSite(context, { step, kind, what, style, own, resumed, plan, identity }));
+}
+
+/** Add the selected sign to a fresh house's shortfall without crafting during construction. */
+async function billWithSign(runtime: BotRuntime, plan: HousePlan) {
+  try {
+    const sign = await signToUse(runtime, []);
+    return sign === null || sign.carried ? plan.bill : [...plan.bill, { item: sign.item, count: 1 }];
+  } catch {
+    return plan.bill;
+  }
 }
 
 /** What {@link build} worked out before the house is protected and built. */
@@ -86,10 +100,33 @@ interface SitePlan {
   readonly own: boolean;
   readonly resumed: UnfinishedHouse | null;
   readonly plan: HousePlan;
+  readonly identity: Pick<UnfinishedHouse, "owner" | "dimension">;
+}
+
+/** Old notes without an owner or dimension cannot safely acquire an automatic claim. */
+async function claimHouse(context: SkillContext, { plan, identity, what }: SitePlan, knownClaim?: ClaimResult["claim"]): Promise<ClaimResult | null> {
+  if (plan.sign === null || identity.owner === undefined || identity.dimension === undefined) return null;
+  try {
+    return await ensureClaimSign(context, { spot: plan.sign, door: plan.site.door, owner: identity.owner, dimension: identity.dimension, what }, { craft: false, reserved: plan.bill, knownClaim });
+  } catch (error) {
+    return { status: context.signal.aborted ? "stopped" : "failed", detail: `${String(error)}; inspect the claim cell on the next visit.`, claim: null };
+  }
+}
+
+/** Confirmed text needs no end-pass repair; every other result gets the planned final check. */
+function claimWritten(claim: ClaimResult | null): boolean {
+  return claim !== null && ["standing", "placed", "filled"].includes(claim.status);
+}
+
+/** Sign trouble describes the claim, without changing a successfully built house's result. */
+function claimClause(claim: ClaimResult | null, owner: string | undefined): string {
+  if (claim === null) return "";
+  return claimWritten(claim) ? `; claim sign placed: ${owner}; ${claim.detail}` : `; no claim sign yet: ${claim.status}; ${claim.detail}`;
 }
 
 /** {@link build} from the protection of the site to the end. */
-async function buildOnSite(context: SkillContext, { step, kind, what, style, own, resumed, plan }: SitePlan): Promise<SkillResult> {
+async function buildOnSite(context: SkillContext, sitePlan: SitePlan): Promise<SkillResult> {
+  const { step, kind, what, style, own, resumed, plan, identity } = sitePlan;
   // Protected before the first block and again on every resume (the runtime keeps one region per box): its own
   // gathering and goals must not dig into the house (ADR-012). The build itself still works inside it.
   const protection = await context.runtime.protectRegion({
@@ -99,8 +136,9 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
   });
   if (protection.status === "failed") return { status: "failed", detail: `could not protect the site of ${what}: ${protection.error}` };
   noteArea(context, protection.area);
+  let claimRecord = resumed?.claim;
   const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...(refused !== undefined && refused.length > 0 && { refused }) };
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...identity, ...(claimRecord !== undefined && { claim: claimRecord }), ...(refused !== undefined && refused.length > 0 && { refused }) };
   };
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
@@ -108,24 +146,39 @@ async function buildOnSite(context: SkillContext, { step, kind, what, style, own
     const unprepared = await prepareHouseSite(context, { plan, kind, what }, protection.area.regionId, leaveUnfinished);
     if (unprepared !== null) return unprepared;
   }
+  let claim = await claimHouse(context, sitePlan, claimRecord);
+  claimRecord = claim?.claim ?? claimRecord;
+  if (claim?.status === "stopped" || context.signal.aborted) {
+    leaveUnfinished(resumed?.part ?? 0);
+    return { status: "stopped" };
+  }
   const stopped = await buildParts(context, plan, what, {
     reserved: plan.bill,
+    keepAlways: plan.sign === null ? [] : [plan.sign.position, plan.sign.support, ...(claimRecord?.attach === "wall" || claim?.status === "unknown" || claim?.status === "taken" ? [plan.sign.wall] : [])],
     leave: (part, refused) => leaveUnfinished(part, true, refused),
     refusedBefore: resumed?.refused,
     again: context.building === undefined ? "" : "; building it again resumes it there",
     abandon: () => { if (context.building !== undefined) context.building.unfinished = null; },
   });
-  if (stopped !== null) return stopped;
+  if (stopped !== null) return stopped.status === "failed" ? { ...stopped, detail: `${stopped.detail}${claimClause(claim, identity.owner)}` } : stopped;
+  if (!claimWritten(claim)) {
+    claim = await claimHouse(context, sitePlan, claimRecord);
+    claimRecord = claim?.claim ?? claimRecord;
+    if (claim?.status === "stopped" || context.signal.aborted) {
+      leaveUnfinished(plan.batches.length - 1);
+      return { status: "stopped" };
+    }
+  }
   if (context.building !== undefined) context.building.unfinished = null;
   const { door, facing } = plan.site;
   const roof = plan.roofTop;
   context.remember?.({
-    name: `the ${kind} you built${own ? "" : ` for ${context.requester}`}`,
+    name: `the ${kind} you built${own ? "" : ` for ${identity.owner ?? context.requester}`}`,
     detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
     ...(own && { own: true }),
-    house: { size: step.size, style: style.id, door, facing, materials: plan.materials },
+    house: { size: step.size, style: style.id, door, facing, materials: plan.materials, ...identity, ...(claimRecord !== undefined && { claim: claimRecord }) },
   });
-  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}` };
+  return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}${claimClause(claim, identity.owner)}` };
 }
 
 /** Levels the site of a house about to be built; null when it is ready, else the result that ends the build. */

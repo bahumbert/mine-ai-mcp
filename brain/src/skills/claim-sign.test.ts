@@ -22,7 +22,7 @@ function reading(front: SignReading["front"] = EMPTY, back: SignReading["back"] 
 function setup() {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, lastDeath: null, inventory: [{ name: "oak_sign", count: 1 }] };
-  runtime.blockTags = { ...runtime.blockTags, air: ["air", "replaceable"] };
+  runtime.blockTags = { ...runtime.blockTags, air: ["air", "replaceable"], oak_sign: ["standing_signs"], oak_wall_sign: ["wall_signs"] };
   const controller = new AbortController();
   const body = new Body(runtime, () => {}, INSTANT_TYPING);
   const context = { runtime, body, signal: controller.signal, signLines: async () => ["Welcome"] };
@@ -236,11 +236,21 @@ test("a failed blank fill leaves the next visit able to fill without an item and
   assert.equal((await ensureClaimSign(context, CLAIM, OPTIONS)).status, "blank");
   const filled = await ensureClaimSign(context, CLAIM, OPTIONS);
   assert.equal(filled.status, "filled");
-  assert.deepEqual(filled.claim, { position: CLAIM.spot.position, facing: "north", attach: "ground", placed: true });
-  const input = { ...CLAIM.spot.position, facing: "north", attach: "ground", fill_blank: true, lines: ["Ayla", "Welcome"] };
+  assert.deepEqual(filled.claim, { position: CLAIM.spot.position, facing: "north", attach: "wall", placed: true });
+  const input = { ...CLAIM.spot.position, facing: "north", attach: "wall", fill_blank: true, lines: ["Ayla", "Welcome"] };
   assert.deepEqual(runtime.submitted, [{ tool: "place_sign", input }, { tool: "place_sign", input }]);
   assert.equal((await body.act("navigate", { x: 2, y: 64, z: 0 }, "Leave the doorway.", { signal: context.signal })).status, "succeeded");
   assert.deepEqual(runtime.submitted.map(({ tool }) => tool), ["place_sign", "place_sign", "navigate"]);
+});
+
+test("an observed sign with unknown attachment is preserved without inventing a claim record", async () => {
+  const { runtime, context } = setup();
+  runtime.signs = [reading()];
+  runtime.blockTags = { ...runtime.blockTags, oak_sign: [] };
+  const result = await ensureClaimSign(context, CLAIM, OPTIONS);
+  assert.equal(result.status, "unknown");
+  assert.equal(result.claim, null);
+  assert.equal(runtime.submitted.length, 0);
 });
 
 for (const stage of ["before read", "during status", "during recipe", "before fallback", "before recovery fill"]) test(`abort ${stage} stops the next action`, async () => {

@@ -95,7 +95,12 @@ const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_t
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
 const materials = z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1));
-const houseSchema = z.object({ size: z.enum(Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]]), style: z.string().min(1), door: position, facing, materials });
+const claimFields = {
+  owner: z.string().min(1).optional(),
+  dimension: z.string().min(1).optional(),
+  claim: z.strictObject({ position, facing, attach: z.enum(["ground", "wall"]), placed: z.boolean() }).optional(),
+};
+const houseSchema = z.object({ size: z.enum(Object.keys(HOUSE_SIZES) as [HouseSize, ...HouseSize[]]), style: z.string().min(1), door: position, facing, materials, ...claimFields });
 const memorySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional(), house: houseSchema.optional() }) }),
   z.object({ kind: z.literal("own_objective"), outcome: z.string().min(1) }),
@@ -108,6 +113,7 @@ const memorySchema = z.discriminatedUnion("kind", [
       prepared: z.boolean().optional(),
       materials: materials.optional(),
       refused: z.array(position).optional(),
+      ...claimFields,
     }).nullable(),
   }),
   z.object({

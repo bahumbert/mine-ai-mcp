@@ -6,6 +6,7 @@ import type { BotSnapshot } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
 
 export function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
+  runtime.blockTags = { air: ["air"], ...runtime.blockTags };
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, ...extra };
 }
 

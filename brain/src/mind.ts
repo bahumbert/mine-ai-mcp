@@ -8,6 +8,7 @@ import type { Opportunity } from "./opportunities.ts";
 import type { Persona } from "./persona.ts";
 import type { BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import type { ActivityTotal } from "./time-spent.ts";
+import type { ClaimResult } from "./skills/claim-sign.ts";
 
 export interface ChatLine {
   readonly speaker: string;
@@ -54,6 +55,9 @@ export interface KnownPlace {
     readonly door: Position;
     readonly facing: Facing;
     readonly materials: Materials;
+    readonly owner?: string;
+    readonly dimension?: string;
+    readonly claim?: NonNullable<ClaimResult["claim"]>;
   };
 }
 

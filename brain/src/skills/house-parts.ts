@@ -3,6 +3,7 @@ import type { MaterialCount } from "../building/blueprint.ts";
 import type { HousePlan } from "../building/plan.ts";
 import { ToolLosses } from "../building/tool-loss.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
+import type { Position } from "../runtime-client.ts";
 import { getItems } from "./get-items.ts";
 import { auditSuffix, refusedCells, sameCell, type Cell } from "./structure-audit.ts";
 
@@ -10,6 +11,8 @@ import { auditSuffix, refusedCells, sameCell, type Cell } from "./structure-audi
 interface PartsOptions {
   /** Blocks a remade tool must not use up: the house's bill. */
   readonly reserved: readonly MaterialCount[];
+  /** Claim cells stay protected during construction and the final audit alike. */
+  readonly keepAlways?: readonly Position[];
   /** Told the part (batch index) to start again from when the work stops before the end, and the cells the runtime refused (none given: the stop was not a refusal). */
   readonly leave: (part: number, refused?: readonly Cell[]) => void;
   /** The cells refused when the house was last left: refused again, the house is given up. */
@@ -26,6 +29,11 @@ interface PartsOptions {
  * blocks in some roles) and rely on `remove_wrong_blocks` to skip what is right and swap what is not.
  */
 export async function buildParts(context: SkillContext, plan: HousePlan, what: string, options: PartsOptions): Promise<SkillResult | null> {
+  const conflict = await claimSupportConflict(context, plan, options.keepAlways ?? []);
+  if (context.signal.aborted || conflict !== null) {
+    options.leave(0);
+    return context.signal.aborted ? { status: "stopped" } : { status: "failed", detail: `${what}: ${conflict}; keep the claim sign and its support; choose other parts to improve or resolve its support before resuming` };
+  }
   // A resumed house is checked again from its first part: `build_structure` skips the cells already right, and anything
   // dug out since (the doorstep under the door, by the gathering next to it: live 2026-10-01) is put back. The second
   // pass is the final check: anything a later part disturbed is put back before the house counts as built.
@@ -54,7 +62,7 @@ export async function buildParts(context: SkillContext, plan: HousePlan, what: s
     const part = auditing ? `final check ${index - plan.batches.length + 1}/${plan.batches.length}` : `part ${index + 1}/${plan.batches.length}`;
     context.progress?.(auditing ? `checking every block of ${what} is right` : `building ${what}, ${part}`);
     // What earlier parts built stays: a route to this part may not dig through it (live 2026-10-01: 11 cells dug).
-    const keep = auditing ? [] : builtBefore(plan.batches, index, lastPart);
+    const keep = [...(options.keepAlways ?? []), ...(auditing ? [] : builtBefore(plan.batches, index, lastPart))];
     const input = { blocks, remove_wrong_blocks: true, ...(keep.length > 0 && { keep }) };
     const outcome = await context.body.act("build_structure", input, `Build ${what}, ${part}.`, { signal: context.signal });
     if (context.signal.aborted) {
@@ -85,6 +93,21 @@ export async function buildParts(context: SkillContext, plan: HousePlan, what: s
     }
   }
   return null;
+}
+
+/** The runtime cannot replace a kept support: refuse before it reports an impossible build as progress. */
+async function claimSupportConflict(context: SkillContext, plan: HousePlan, keep: readonly Position[]): Promise<string | null> {
+  const targets = plan.cells.filter((cell) => keep.some((kept) => sameCell(kept, cell)));
+  if (targets.length === 0) return null;
+  const observed = await context.runtime.cellsAt(targets);
+  const conflict = targets.find((target, index) => {
+    const cell = observed[index];
+    return cell?.loaded !== true || cell.name !== target.block;
+  });
+  if (conflict === undefined) return null;
+  const cell = observed[targets.indexOf(conflict)];
+  const why = cell?.loaded === true ? `would need replacement by ${conflict.block}` : "is not loaded; move closer to inspect it";
+  return `the claim sign's support at ${conflict.x} ${conflict.y} ${conflict.z} ${why}`;
 }
 
 /** The non-air cells of the parts before `index`: what a later part's routes must keep. */

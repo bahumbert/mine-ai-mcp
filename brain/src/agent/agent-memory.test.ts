@@ -121,9 +121,10 @@ test("a tend cannot reuse a position read before a long gap as a fresh near base
 
 test("a house the agent built becomes a known place, with its roof, for what comes next", async (t) => {
   const runtime = new FakeRuntime();
+  runtime.blockTags = { ...runtime.blockTags, air: ["air"] };
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
   const { agent, chat, action } = agentFor(t, runtime);
-  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
+  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { lines: [] }, { lines: [] }, { say: "Done!" });
   action.reply({ step: { skill: "build" } }, { done: "built the house" });
   await agent.handle(say("Steve", "build me a house"));
   await until(() => runtime.said.length === 2);
@@ -134,7 +135,7 @@ test("a house the agent built becomes a known place, with its roof, for what com
   await agent.handle(say("Steve", "go to the roof"));
   await until(() => runtime.said.length === 4);
   const places = "- Places you know: the small medieval house you built for Steve (door -2 64 0 facing east; stand on its roof at -4 70 0).";
-  assert.ok((chat.requests[2]?.[1]?.content ?? "").includes(places), "the chat tier knows it");
+  assert.ok(chat.requests.some((turns) => (turns[1]?.content ?? "").includes(places)), "the chat tier knows it");
   assert.ok((action.requests[2]?.[1]?.content ?? "").includes(places), "the work tier knows it");
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").at(-1)?.input, { x: -4, y: 70, z: 0, range: 1 });
   assert.ok(runtime.notes.some((note) => note.context.startsWith("brain memory: place ")), "saved as a memory note");

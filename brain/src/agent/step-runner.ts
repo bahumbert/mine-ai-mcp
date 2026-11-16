@@ -99,6 +99,10 @@ export class StepRunner {
       requester: requester ?? undefined,
       self: persona.username,
       style: persona.style,
+      signLines: async (input, signal) => {
+        try { return await options.mind.signLines({ ...input, persona }, signal); }
+        catch { return []; }
+      },
       remember: (place) => memory.learnPlace(place),
       ownHouse: () => memory.temporaryHouse(),
       farms: memory.farms,
