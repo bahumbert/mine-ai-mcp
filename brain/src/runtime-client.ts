@@ -81,7 +81,7 @@ export interface BotSnapshot {
   };
   readonly light?: { readonly sky: number | null; readonly block: number | null; readonly openSkyAbove: number | null };
   readonly combat?: { readonly melee: string | null; readonly bow: string | null; readonly arrows: number; readonly shield: string | null };
-  readonly respawn?: { readonly kind: "bed" | "world_spawn"; readonly position: Position; readonly distance: number | null } | null;
+  readonly respawn?: { readonly kind: "bed" | "world_spawn" | "last_wake"; readonly position: Position; readonly distance: number | null } | null;
   /** The server difficulty (`peaceful`...); `unknown` or unset when the runtime did not say. */
   readonly difficulty?: string;
   readonly inventory: readonly CarriedStack[];

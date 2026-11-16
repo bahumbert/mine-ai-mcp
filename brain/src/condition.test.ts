@@ -101,6 +101,13 @@ test("a bed in another dimension says so and night says it is night now and when
   assert.ok(conditionLine(snapshot({ clock: { phase: "night", minutesUntilChange: 2 }, respawn: { kind: "bed", position: { x: 1, y: 2, z: 3 }, distance: null } }), []).includes("it is night now, day comes in 2.0 min; no home; respawn: bed in another dimension."));
 });
 
+test("the last wake is named with its distance or another dimension", () => {
+  for (const [distance, expected] of [[12.4, "12 blocks away"], [null, "in another dimension"]] as const) {
+    const line = conditionLine(snapshot({ respawn: { kind: "last_wake", position: { x: 1, y: 2, z: 3 }, distance } }), []);
+    assert.ok(line.includes(`respawn: where you last woke ${expected}`));
+  }
+});
+
 test("the clock is left out when its phase or its minutes are unknown", () => {
   for (const clock of [{ phase: null, minutesUntilChange: 3 }, { phase: "night", minutesUntilChange: null }] as const) {
     const line = conditionLine(snapshot({ clock }), []);

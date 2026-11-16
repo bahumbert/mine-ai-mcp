@@ -78,7 +78,7 @@ export function conditionLine(snapshot: BotSnapshot, places: readonly KnownPlace
   if (snapshot.clock?.phase != null && snapshot.clock.minutesUntilChange !== null) segments.push(`it is ${snapshot.clock.phase} now, ${snapshot.clock.phase === "day" ? "night" : "day"} comes in ${snapshot.clock.minutesUntilChange.toFixed(1)} min`);
   segments.push(...lightSegments(snapshot), homeOf(places, snapshot));
   if (snapshot.respawn != null) {
-    const kind = snapshot.respawn.kind === "bed" ? "bed" : "world spawn";
+    const kind = snapshot.respawn.kind === "bed" ? "bed" : snapshot.respawn.kind === "last_wake" ? "where you last woke" : "world spawn";
     segments.push(`respawn: ${kind} ${snapshot.respawn.distance === null ? "in another dimension" : `${Math.round(snapshot.respawn.distance)} blocks away`}`);
   }
   if (snapshot.lastDeath != null) segments.push(deathSegment(snapshot.lastDeath, snapshot.dimension));
