@@ -482,7 +482,7 @@ const itemFamilySchema = z.object({ result: z.object({ members: z.array(z.string
 const signLinesSchema = z.tuple([z.string(), z.string(), z.string(), z.string()]);
 const signReadingSchema = z.object({ position: positionSchema, block: z.string(), known: z.boolean(), front: signLinesSchema, back: signLinesSchema });
 export type SignReading = z.output<typeof signReadingSchema>;
-const readSignsSchema = z.object({ result: z.object({ signs: z.array(signReadingSchema) }) });
+const readSignsSchema = z.object({ result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional(), signs: z.array(signReadingSchema) }) });
 const signEvidenceSchema = z.object({ target: positionSchema, block: z.string().nullable(), facing: z.enum(["north", "south", "east", "west"]), attach: z.enum(["ground", "wall"]), lines: signLinesSchema, confirmed: z.boolean(), placed: z.boolean() });
 const placeSignSchema = z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional(), sign: signEvidenceSchema.optional(), members: z.array(z.string()).optional(), existing: z.object({ block: z.string(), front: signLinesSchema.optional(), back: signLinesSchema.optional() }).optional() });
 export type PlaceSignOutcome = Omit<z.output<typeof placeSignSchema>, "error"> & { readonly error: string | null; readonly code: string | null };
@@ -609,7 +609,9 @@ export class McpBotRuntime implements BotRuntime {
   }
 
   async readSigns(at: Position): Promise<readonly SignReading[]> {
-    return readSignsSchema.parse(await this.call("read_signs", { ...at }, "Read the sign at this cell.")).result.signs;
+    const { result } = readSignsSchema.parse(await this.call("read_signs", { ...at }, "Read the sign at this cell."));
+    if (result.status !== "succeeded") throw new Error(result.error ?? "The sign read did not finish; move closer and read again.");
+    return result.signs;
   }
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
