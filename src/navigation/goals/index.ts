@@ -16,6 +16,7 @@ import { Vec3 } from "vec3";
 import { exposedBodyFrom } from "../../world/entity-geometry.js";
 import { PLAYER_HALF_WIDTH, PLAYER_STANDING_HEIGHT } from "../../world/player-physics.js";
 import type { GeneratedMovement } from "../movements/catalogue.js";
+import { EMPTY_OVERLAY_IDENTITY } from "../search/planning-overlay.js";
 import { navigationFeet } from "../world/block-geometry.js";
 import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { withinItemPickupReach } from "../world/item-geometry.js";
@@ -331,7 +332,7 @@ export interface SafeFromEntity extends Pick<EntityObservation, "id" | "position
 }
 
 /** Whether every shooter eye is blocked by loaded geometry before it reaches the standing body. */
-function coveredFrom(threat: SafeFromEntity, node: PlanningNode, world: WorldView): boolean {
+function coveredFrom(threat: SafeFromEntity, position: Vec3, world: WorldView): boolean {
   const cover = threat.cover;
   if (!cover) return false;
   let unknown = false;
@@ -342,8 +343,7 @@ function coveredFrom(threat: SafeFromEntity, node: PlanningNode, world: WorldVie
   });
   const eye = new Vec3(threat.position.x, threat.position.y + cover.eyeHeight, threat.position.z);
   const half = cover.width / 2;
-  const body = { position: new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5),
-    width: PLAYER_HALF_WIDTH * 2, height: PLAYER_STANDING_HEIGHT };
+  const body = { position, width: PLAYER_HALF_WIDTH * 2, height: PLAYER_STANDING_HEIGHT };
   return [eye, eye.offset(half, 0, 0), eye.offset(-half, 0, 0), eye.offset(0, 0, half), eye.offset(0, 0, -half)]
     .every((point) => !exposedBodyFrom(ray, point, body) && !unknown);
 }
@@ -364,6 +364,10 @@ function coverRevision(threat: SafeFromEntity): string {
  * the goal is resolved, so an approaching threat revises the active route.
  * If an entity disappears, separation is still owed from its last observation.
  * The caller removes confirmed-dead threats; absence alone does not establish safety.
+ * Cover counts only on routes with no predicted edits; ahead searches over pending
+ * edits must reach the range instead. The current cell uses the observed body,
+ * other cells their centres. This avoids self-dug cover (40/60 skeleton trials
+ * below the floor, P4-29 a3, 2026-11-16).
  */
 export function safeFromEntitiesGoal(
   entities: readonly SafeFromEntity[],
@@ -379,6 +383,7 @@ export function safeFromEntitiesGoal(
   return {
     resolve(observation) {
       const threats = snapshot ? known : known.map((lastSeen) => ({ ...lastSeen, ...observation.entities.get(lastSeen.id) }));
+      const current = navigationFeet(observation.position, observation.stance === "supported");
       const revision = threats.some((threat) => threat.cover)
         ? `safe-from:${range}:${snapshot ? "snapshot" : "live"}:${threats.map(coverRevision).join("|")}`
         : snapshot
@@ -405,7 +410,11 @@ export function safeFromEntitiesGoal(
           if (cached !== undefined) return cached;
           const satisfied = threats.every((threat) => {
             const distance = spatialDistance(node.feet, threat.position);
-            return distance >= range || (threat.cover !== undefined && distance >= threat.cover.minRange && coveredFrom(threat, node, world));
+            return distance >= range || (node.overlayId === EMPTY_OVERLAY_IDENTITY
+              && threat.cover !== undefined && distance >= threat.cover.minRange
+              && coveredFrom(threat, samePosition(node.feet, current)
+                ? new Vec3(observation.position.x, observation.position.y, observation.position.z)
+                : new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5), world));
           });
           cache.set(key, satisfied);
           return satisfied;
