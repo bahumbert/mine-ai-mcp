@@ -98,6 +98,31 @@ test("mounting clears a pending land impulse", async () => {
   assert.equal(recovery.needed, false, "the old land impulse must not survive mounting");
 });
 
+test("a support learned before a mount does not survive the mount and dismount, so a land impulse before the next grounded tick starts no recovery", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture(false, clock, { entities: { 7: { name: "oak_boat", position: new Vec3(0.8, 47, 0.5) } } });
+  using recovery = new FootingRecovery(f.bot, f.world);
+  await clock.advance(50); // a grounded tick on the edge learns the support at (0, 47, 0)
+  f.bot.mount(f.bot.entities[7]!);
+  await clock.advance(50);
+  assert.ok(f.bot.vehicle);
+  f.entity.position.set(1.2, 47, 0.5); // carried off the edge by the boat, airborne: no grounded tick observes it
+  f.entity.onGround = false;
+  await clock.advance(50);
+  forgetVehicle(f.bot);
+  assert.equal(f.bot.vehicle, null);
+  f.impulse();
+  assert.equal(recovery.needed, false, "the pre-mount support is reset by the mount and dismount listeners: no land recovery");
+  assert.equal(recovery.snapshot(), null);
+  f.entity.position.set(0.8, 47, 0.5);
+  f.entity.onGround = true;
+  f.bot.emit("physicsTick");
+  f.impulse();
+  assert.equal(recovery.needed, true, "a grounded tick on the edge learns a fresh support, so the next impulse is recovered");
+  assert.equal(recovery.snapshot()?.phase, "pending");
+});
+
 test("after seated combat the next navigate is not interrupted by old footing", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
