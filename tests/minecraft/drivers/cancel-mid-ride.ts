@@ -39,9 +39,9 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   if (settled.result.status === "succeeded") return { status: "failed", detail: `the cancelled navigate succeeded: ${settled.summary}` };
   if (waited > settleWithinMs) return { status: "failed", detail: `the navigate settled ${waited} ms after the cancel, over ${settleWithinMs} ms: ${settled.summary}` };
   if (!boatNamed(boat?.name)) return { status: "failed", detail: `the bot left its boat at the cancel (vehicle ${boat?.name ?? "none"}): ${settled.summary}; cancel: ${cancel.summary}` };
-  if (await waitServerTicks(bot, 40) === "stalled") return { status: "failed", detail: "the server did not advance far enough to measure the stopped boat" };
+  if (await waitServerTicks(bot, 40) === "stalled") return { status: "failed", detail: "the server's clock stood still" };
   const stoppedAt = boat!.position.clone();
-  if (await waitServerTicks(bot, 40) === "stalled") return { status: "failed", detail: "the server stopped advancing during the boat drift measurement" };
+  if (await waitServerTicks(bot, 20) === "stalled") return { status: "failed", detail: "the server's clock stood still" };
   const drift = bot.entity.vehicle === boat ? boat!.position.distanceTo(stoppedAt) : Number.POSITIVE_INFINITY;
   const dropped = Object.values(bot.entities).find((entity) => entity.name === "item" && entity.position.distanceTo(bot.entity.position) < 32);
   if (drift > 1) return { status: "failed", detail: `the boat moved ${drift.toFixed(1)} blocks after the stop, or the bot left it: ${settled.summary}` };

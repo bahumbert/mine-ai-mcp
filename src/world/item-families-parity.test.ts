@@ -117,7 +117,7 @@ for (const version of SHIPPED_VERSIONS) {
       const expected: string[] = [];
       if (CHESTS.has(block.name)) expected.push("chest");
       if (isLocationOwnedContainer(block.name) || ACCEPTED_BLOCK_EXTRAS[block.name]?.includes("container")) expected.push("container");
-      const actual = sorted(index.blockFamilies(block.name));
+      const actual = sorted(index.blockFamilies(block.name).filter((family) => family === "chest" || family === "container"));
       if (sorted(expected).join() !== actual.join()) differences.push(`${block.name}: expected [${sorted(expected)}] got [${actual}]`);
     }
     // Entities: the projectile names of projectile-spawn.ts.

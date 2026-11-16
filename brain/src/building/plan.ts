@@ -1,4 +1,4 @@
-import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type WorldCell } from "./blueprint.ts";
 import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 
@@ -50,6 +50,7 @@ export interface HousePlan {
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
+  readonly sign: SignSpot | null;
   /** Where to stand on the roof, remembered with the house so "go to the roof" has real coordinates. */
   readonly roofTop: Position;
 }
@@ -76,7 +77,7 @@ export function planHouse(style: Style, size: HouseSize, site: Site, materials: 
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
   const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants)
     .map((cell) => cell.axis === undefined || other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, ...rest }) => rest)(cell));
-  return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), roofTop: roofTop(cells) };
+  return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), sign: placeSign(blueprint, site.door, site.facing), roofTop: roofTop(cells) };
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof). */

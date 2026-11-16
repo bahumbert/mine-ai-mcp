@@ -1,0 +1,31 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-toss-corrected-inventory-answer
+tags:
+  - contract
+description: Record inventory answers after partial and whole-stack tosses.
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: toss-corrected-inventory-answer
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - item: cobblestone
+        count: 20
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: completion
+      who: Actor

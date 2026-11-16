@@ -3,6 +3,7 @@ import { guardObservedWrite, recordEvent, type PlayerDeathContext, type SqlBotDa
 import { describeDeathContext } from "../bot-data/death-context-text.js";
 import { isChatCommandLine, type ChatCommandRing } from "./chat-commands.js";
 import { aliveReading, readDeathContext, type LastAliveReading } from "./death-context.js";
+import { recordWake } from "../actions/portal-entry/respawn-knowledge.js";
 
 type PlayerMessageListener = BotEvents["chat"];
 type DeathListener = BotEvents["death"];
@@ -67,7 +68,7 @@ export function observePlayerEvents(
 
   const onChat = observeMessage("chat");
   const onWhisper = observeMessage("whisper");
-  const { onHealth, onCombatDeath, onDeath } = deathListeners(bot, data, cancelForegroundAction, guarded);
+  const { onHealth, onCombatDeath, onDeath, onSpawn } = deathListeners(bot, data, cancelForegroundAction, guarded);
 
   // Respawn updates the dimension before the destination position packet.
   // Record arrival only when forcedMove observes that new position.
@@ -88,6 +89,7 @@ export function observePlayerEvents(
   bot.on("chat", onChat);
   bot.on("whisper", onWhisper);
   bot.on("death", onDeath);
+  bot.on("spawn", onSpawn);
   bot.on("health", onHealth);
   bot.on("respawn", onRespawn);
   bot.on("forcedMove", onForcedMove);
@@ -99,6 +101,7 @@ export function observePlayerEvents(
     bot.off("respawn", onRespawn);
     bot.off("forcedMove", onForcedMove);
     bot.off("death", onDeath);
+    bot.off("spawn", onSpawn);
     bot.off("whisper", onWhisper);
     bot.off("chat", onChat);
   };
@@ -112,6 +115,12 @@ function deathListeners(bot: Bot, data: SqlBotData, cancelForegroundAction: Canc
   let lastDeathMessage: string | null = null;
   let lastAlive: LastAliveReading | null = null;
   let contextAtCause: PlayerDeathContext | undefined;
+  let awaitingWake = false;
+  const onSpawn = () => {
+    if (!awaitingWake) return;
+    awaitingWake = false;
+    recordWake(bot, bot.entity.position, bot.game.dimension);
+  };
   const onHealth = () => {
     const alive = aliveReading(bot);
     if (!alive) return;
@@ -125,6 +134,7 @@ function deathListeners(bot: Bot, data: SqlBotData, cancelForegroundAction: Canc
     contextAtCause = readDeathContextSafely(bot, lastAlive);
   };
   const onDeath: DeathListener = () => {
+    awaitingWake = true;
     const cause = lastDeathMessage;
     // No cause packet came: the death handler reads what is left (the server may have cleared the gear).
     const context = contextAtCause ?? readDeathContextSafely(bot, lastAlive);
@@ -133,7 +143,7 @@ function deathListeners(bot: Bot, data: SqlBotData, cancelForegroundAction: Canc
     lastAlive = null;
     recordPlayerDeath(bot, data, cause, context, cancelForegroundAction, guarded);
   };
-  return { onHealth, onCombatDeath, onDeath };
+  return { onHealth, onCombatDeath, onDeath, onSpawn };
 }
 
 /** A failing read of the death's state must not stop the death from cancelling the action and being recorded. */

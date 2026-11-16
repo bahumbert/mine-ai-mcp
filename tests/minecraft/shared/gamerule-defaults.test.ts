@@ -1,10 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fixtureScenario } from "./scenario-fixture.ts";
-import { GameruleDefaultsCache } from "./gamerule-defaults.ts";
+import { GameruleDefaultsCache, ProbeFailed } from "./gamerule-defaults.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
 const example = fixtureScenario(10);
+
+test("probe start and command failures retain their cause", async () => {
+  for (const commandFailure of [false, true]) {
+    const cause = new Error("probe broke");
+    const cache = new GameruleDefaultsCache(async () => {
+      if (!commandFailure) throw cause;
+      return { ...probeAnswering({}, []), command: async () => { throw cause; } };
+    });
+    await assert.rejects(cache.ensure("1.21.4", ["doFireTick"], example), error => error instanceof ProbeFailed && error.cause === cause && error.message.includes("probe broke"));
+  }
+});
 
 function probeAnswering(values: Record<string, string>, asked: string[]): ScenarioServer {
   return {

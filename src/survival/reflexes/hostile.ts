@@ -18,6 +18,7 @@ import type { HostileResponse } from "../policy/combat/response.js";
 import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
 import { decideHostile, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
+import { ThreatChains } from "../state/threat-chains.js";
 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
@@ -50,6 +51,7 @@ function watchHostilePolicy(scene: HostileScene): () => void {
   });
   const resetPolicy = () => {
     encounterThreats.clear();
+    scene.chains.clear();
     transition(policy.reset("Death or dimension change; defaults restored."));
   };
   bot.on("death", resetPolicy);
@@ -74,6 +76,21 @@ function hostileFailureTemporal(outcome: HostileSettlement | ShieldPrepared) {
   return failure ? { premise: "unreachable", durationMs: COMBAT_LIMITS.noProgressMs, why: failure.why } : null;
 }
 
+/** Keep response permissions live while sharing perception and the driver's retained answers. */
+function hostileResponseContext(bot: Bot, driver: ReflexDriver, controller: CombatController,
+  perception: CombatPerception): ResponseContext {
+  const policy = controller.policy;
+  return {
+    perception,
+    resolvedIds: perception.resolvedIds,
+    attackerIds: perception.attackerIds,
+    survival: driver,
+    get policy() { return policy.combat; },
+    get food() { return policy.food; },
+    get blockedResponses() { return answeredResponses(bot, () => policy.effective, driver); },
+  };
+}
+
 /** Hostile observations and execution; admission, cancellation and failure retention belong to the driver. */
 export function attachHostileReflex(
   bot: Bot,
@@ -83,25 +100,10 @@ export function attachHostileReflex(
   perception: CombatPerception,
 ): HostileReflex {
   const policy = controller.policy;
-  const { resolvedIds, attackerIds } = perception;
   const encounterThreats = new Set<number>();
   let closing: Promise<void> | null = null;
 
-  const context: ResponseContext = {
-    perception,
-    resolvedIds,
-    attackerIds,
-    survival: driver,
-    get policy() {
-      return policy.combat;
-    },
-    get food() {
-      return policy.food;
-    },
-    get blockedResponses() {
-      return answeredResponses(bot, () => policy.effective, driver);
-    },
-  };
+  const context = hostileResponseContext(bot, driver, controller, perception);
 
   const transition = (pending: Promise<void>) => {
     void pending.catch((cause) => policy.constrain(messageOf(cause)));
@@ -116,6 +118,7 @@ export function attachHostileReflex(
     policy,
     context,
     encounterThreats,
+    chains: new ThreatChains(),
     transition,
     activeResponse: null,
   };

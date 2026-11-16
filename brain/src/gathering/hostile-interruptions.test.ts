@@ -7,6 +7,7 @@ test("parses the runtime's exact fight/evade contacts and negative cells with ne
   for (const [detail, response, name, id, cell] of [
     ["[HOSTILE_CONTACT] evade response for skeleton#24617 at 6,64,0 (6 blocks) (withdraw: no permitted attack, or defend_only engagement out of reach).", "evade", "skeleton", 24617, "6,64,0"],
     ["[HOSTILE_CONTACT] fight response for skeleton#24617 at 6,64,0 (6 blocks).", "fight", "skeleton", 24617, "6,64,0"],
+    ["[HOSTILE_CONTACT] evade response for zombie#12 at 1,2,3 (4.0 blocks). [HOSTILE_SETTLED] evade ended with capability_limit at health 6: x.", "evade", "zombie", 12, "1,2,3"],
     ["[HOSTILE_CONTACT] evade response for zombie#84159 at -553,59,-48 (3.2 blocks) (withdraw: ...).", "evade", "zombie", 84159, "-553,59,-48"],
     ["[HOSTILE_CONTACT] evade response for zombie#84159 at -553,59,-48 (3.2 blocks) (outmatched: killing 2 zombie with bare hands would cost ~99 of your 20 health (margin 0.2, fight_margin 1.5)).", "evade", "zombie", 84159, "-553,59,-48"],
     ["[HOSTILE_CONTACT] evade response for zombie#84159 at -553,59,-48 (3.2 blocks) (explosive: no safe weapon answer (blast margin 0.2)).", "evade", "zombie", 84159, "-553,59,-48"],

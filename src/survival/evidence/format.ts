@@ -1,5 +1,6 @@
 import type { Facts } from "../state/answered.js";
 import type { SurvivalReceipt, SurvivalStatus } from "./contract.js";
+import { chainSuffix } from "../state/threat-chains.js";
 
 function label(value: string): string {
   return value.replace(/_reflex$/, "").replaceAll("_", " ");
@@ -74,5 +75,11 @@ export function formatSurvivalOutcome(receipt: SurvivalReceipt): string {
   if (evidence.cancelled === true && result !== "cancelled") parts.push("cancelled");
   const error = outcome.error ?? evidence.why;
   if (typeof error === "string") parts.push(error);
+  if (typeof outcome.detail === "string") parts.push(outcome.detail);
+  const chain = object(outcome.chain);
+  if (typeof chain.responses === "number" && chain.responses >= 2 && typeof chain.threatId === "number"
+    && typeof chain.name === "string" && typeof chain.evades === "number" && typeof chain.seconds === "number"
+    && typeof chain.gained === "number") parts.push(chainSuffix({ responses: chain.responses,
+      threatId: chain.threatId, name: chain.name, evades: chain.evades, seconds: chain.seconds, gained: chain.gained }).slice(2));
   return parts.join("; ");
 }

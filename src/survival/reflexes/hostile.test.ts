@@ -16,6 +16,7 @@ import { SurvivalObserver } from "../evidence/status.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
+import { MineflayerWorldView } from "../../navigation/mineflayer/world.js";
 import { observeHostileResponse } from "../control/combat/observation.js";
 import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
@@ -278,6 +279,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   });
   const runner = new ActionRunner({ clock, ...options.runner });
   const navigation = {
+    world: new MineflayerWorldView(bot),
     onEvent: () => () => {},
     active: false,
     cancel: () => undefined,
@@ -580,6 +582,7 @@ test("an admitted low-health escape is not stopped for a stationary guard it can
     async ({ stopSignal }) => {
       assert.equal(stopSignal?.aborted, false);
       fixture.bot.entity.position.x = -40;
+      fixture.entities.remove(8);
       return { status: "completed", elapsedMs: 0 };
     },
     { entities: { 7: hostile("blaze", 3) } },
@@ -906,14 +909,14 @@ test("one evade retains its first threat and records a new contact encountered a
         ({ entities: new Map(Object.values(fixture.bot.entities).map((entity) => [entity.id, entity])) }) as never;
       const initial = goal.resolve(snapshot());
       assert.equal(initial.kind, "active");
-      if (initial.kind === "active" && attempts++ === 0) assert.doesNotMatch(initial.revision, /entity:8:/);
+      if (initial.kind === "active" && attempts++ === 0) assert.doesNotMatch(initial.revision, /8@/);
       fixture.bot.entity.position = new Vec3(-12, 64, 0);
       fixture.tick();
       const revised = goal.resolve(snapshot());
       assert.equal(revised.kind, "active");
       if (revised.kind === "active") {
-        assert.match(revised.revision, /entity:7:/);
-        assert.match(revised.revision, /entity:8:/);
+        assert.match(revised.revision, /7@/);
+        assert.match(revised.revision, /8@/);
       }
       // Away from the first threat alone is not enough to report safe separation.
       fixture.bot.entity.position = new Vec3(-40, 64, 0);
@@ -1115,6 +1118,50 @@ test("a cancelled escape preserves its attack and kill evidence when navigation 
     fixture.data.close();
   }
 });
+
+for (const reset of ["death", "dimension"] as const) {
+  test(reset === "death" ? "a death during a response records no chain into the next life"
+    : "a dimension change during a response starts a new chain", async () => {
+    let calls = 0;
+    let finish: () => void = () => assert.fail("response not started");
+    const fixture = reflexFixture((targetId): Promise<CombatOutcome> => {
+      calls++;
+      if (calls === 1) return new Promise((resolve) => {
+        finish = () => resolve({ ...died(targetId), kind: "target_lost" });
+      });
+      return Promise.resolve(died(targetId));
+    }, undefined, { clock: createFakeClock({ mode: "mocked" }), entities: { 7: hostile("zombie", 2) } });
+    using _clock = fixture.clock.install();
+    const outcomes = () => fixture.data.read(
+      "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
+    ).map((row) => JSON.parse(String(row.payload_json)));
+    try {
+      fixture.tick();
+      await fixture.clock.advance(50);
+      assert.equal(calls, 1);
+      if (reset === "death") {
+        fixture.combat.setHealth(0);
+        await fixture.clock.advance(150);
+        assert.equal(fixture.bot.health, 20, "the shared fake respawn must precede response cleanup");
+      } else {
+        fixture.bot.game.dimension = "the_nether";
+        fixture.bot.emit("game");
+      }
+      finish();
+      await fixture.clock.advance(50);
+      assert.equal(outcomes()[0]?.chain, null, "the old in-flight generation must not be recorded");
+      // Admit the next response independently of the driver's retained target-lost answer.
+      fixture.driver.answered.clear();
+      fixture.tick();
+      await fixture.clock.advance(50);
+      assert.equal(outcomes()[1]?.chain, null, "the next response is the first in the new life or dimension");
+    } finally {
+      finish();
+      await fixture.clock.settle(fixture.observer.close(), 2_000);
+      fixture.data.close();
+    }
+  });
+}
 
 for (const cleanup of ["returns", "throws"] as const) {
   test(`encounter death evidence survives respawn before cleanup ${cleanup}`, async () => {

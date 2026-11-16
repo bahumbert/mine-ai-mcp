@@ -4,9 +4,16 @@ import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { familyIndexOf } from "../../../world/item-families.js";
 import { watchServerTags } from "../../../world/server-tags.js";
 import { DEFAULT_COMBAT_POLICY } from "./contract.js";
-import { permittedCombatItems } from "./permissions.js";
+import { permittedCombatItems, responsePolicyChanged } from "./permissions.js";
 
 const names = (items: readonly { readonly name: string }[]) => items.map((item) => item.name);
+
+test("an evade's permissions include the clear and cover ranges but not bow", () => {
+  for (const field of ["evade_clear_range", "evade_cover_range"]) {
+    assert.equal(responsePolicyChanged(DEFAULT_COMBAT_POLICY, { ...DEFAULT_COMBAT_POLICY, [field]: 5 }, "evade"), true);
+  }
+  assert.equal(responsePolicyChanged(DEFAULT_COMBAT_POLICY, { ...DEFAULT_COMBAT_POLICY, bow: false }, "evade"), false);
+});
 
 test("a forbidden bow or shield is dropped from the carried items; every other item stays", () => {
   const { bot } = createFakeBot();

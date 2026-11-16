@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
-import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer, waitForWorldAge } from "./world-age.js";
+import { SERVER_CLOCK_STOPPED_MS, serverTickDeadline, waitForServerAnswer, waitForServerTicks, waitForWorldAge } from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
 function worldBot(age = 1_000, options: FakeBotOptions = {}) {
@@ -10,6 +10,124 @@ function worldBot(age = 1_000, options: FakeBotOptions = {}) {
   const harness = createFakeBot({ clock, server: { startAge: age }, ...options });
   return { ...harness, timing: { now: clock.now, sleep: clock.sleep } };
 }
+
+/** Observe each server slice, including stopped ones, without adding a timer to the deadline. */
+function deadlineOnServer(ticks: number, options: FakeBotOptions = {}) {
+  const harness = worldBot(1_000, options);
+  const { bot, clock } = harness;
+  const deadline = serverTickDeadline(() => bot.time?.age, ticks, clock.now());
+  let passedAt: { ms: number; ticks: number | null } | undefined;
+  clock.onSlice("physics", () => {
+    if (deadline.passed(clock.now())) passedAt ??= deadline.elapsed(clock.now());
+  });
+  return { ...harness, deadline, passedAt: () => passedAt };
+}
+
+test("a server-tick deadline follows the packet's world age at slow and on-time rates", async () => {
+  for (const { ticks, server, beforeMs, passedMs, elapsedTicks } of [
+    { ticks: 100, server: { ticksPerSecond: 5 }, beforeMs: 16_000, passedMs: 20_000, elapsedTicks: 100 },
+    { ticks: 100, server: { ticksPerSecond: 10 }, beforeMs: 8_000, passedMs: 10_000, elapsedTicks: 100 },
+    { ticks: 100, server: {}, beforeMs: 4_900, passedMs: 5_000, elapsedTicks: 100 },
+    { ticks: 100, server: { phaseMs: 900 }, beforeMs: 4_050, passedMs: 4_900, elapsedTicks: 100 },
+    { ticks: 110, server: {}, beforeMs: 5_999, passedMs: 6_000, elapsedTicks: 120 },
+  ]) {
+    const { bot, clock, deadline, passedAt } = deadlineOnServer(ticks, { server: { startAge: 1_000, ...server } });
+    assert.equal(deadline.ticks, ticks);
+    await clock.advance(beforeMs);
+    assert.equal(deadline.passed(clock.now()), false, `${ticks} ticks: still pending at ${beforeMs} ms`);
+    if (server.ticksPerSecond === 5) assert.equal(bot.time.age, 1_080);
+    await clock.advance(passedMs - beforeMs);
+    assert.deepEqual(passedAt(), { ms: passedMs, ticks: elapsedTicks });
+    assert.equal(deadline.passed(clock.now()), true);
+    assert.equal(clock.pendingTimers(), 0, "the deadline owns no timer");
+  }
+});
+
+test("an extra time packet neither passes nor stalls a deadline early", async () => {
+  const { clock, server, deadline, passedAt } = deadlineOnServer(100);
+  await clock.advance(450);
+  server.resendTime();
+  assert.deepEqual(deadline.elapsed(clock.now()), { ms: 450, ticks: 9 });
+  assert.equal(deadline.passed(clock.now()), false);
+  await clock.advance(4_500);
+  assert.equal(deadline.passed(clock.now()), false);
+  await clock.advance(50);
+  assert.deepEqual(passedAt(), { ms: 5_000, ticks: 100 });
+});
+
+test("a stopped server passes a deadline 20 seconds after the last moving age", async () => {
+  const { clock, server, deadline, passedAt } = deadlineOnServer(100);
+  await clock.advance(2_500);
+  server.stop();
+  await clock.advance(19_450);
+  assert.equal(deadline.passed(clock.now()), false);
+  await clock.advance(50);
+  assert.deepEqual(passedAt(), { ms: 22_000, ticks: 40 });
+});
+
+test("a no-age deadline falls back to on-time milliseconds and stays passed after a late first packet", async () => {
+  const { clock, server, deadline, passedAt } = deadlineOnServer(100, { server: { timePacketYet: false } });
+  server.stop();
+  await clock.advance(4_999);
+  assert.equal(deadline.passed(clock.now()), false);
+  assert.deepEqual(deadline.elapsed(clock.now()), { ms: 4_999, ticks: null });
+  await clock.advance(1);
+  assert.deepEqual(passedAt(), { ms: 5_000, ticks: null });
+  assert.equal(deadline.passed(clock.now()), true);
+  server.resendTime();
+  assert.deepEqual(deadline.elapsed(clock.now()), { ms: 5_000, ticks: 0 });
+  assert.equal(deadline.passed(clock.now()), true, "the late first age cannot reopen a wall-expired deadline");
+});
+
+test("a deadline starts its tick count at the first age heard, even after starting without one", async () => {
+  const { clock, deadline, passedAt } = deadlineOnServer(100, { server: { startAge: 1_000, timePacketYet: false } });
+  await clock.advance(1_000);
+  assert.deepEqual(deadline.elapsed(clock.now()), { ms: 1_000, ticks: 0 });
+  await clock.advance(4_000);
+  assert.equal(deadline.passed(clock.now()), false, "the first packet is the baseline, not a move from zero");
+  await clock.advance(1_000);
+  assert.deepEqual(passedAt(), { ms: 6_000, ticks: 100 });
+});
+
+test("a deadline nobody looked at for 20 seconds expires even if the age moved too little", async () => {
+  const { bot, clock, server } = worldBot(1_000, { server: { startAge: 1_000, ticksPerSecond: 5 } });
+  const deadline = serverTickDeadline(() => bot.time.age, 100, clock.now());
+  clock.after(10_000, () => server.stop());
+  clock.after(20_000, () => server.resume());
+  await clock.advance(1_000);
+  assert.equal(deadline.passed(clock.now()), false);
+  await clock.advance(24_000);
+  assert.equal(bot.time.age, 1_060);
+  assert.equal(deadline.passed(clock.now()), true);
+});
+
+test("server ticks wait for moving age without a wall cap, and stop on a still clock", async () => {
+  const { bot, clock, server, timing } = worldBot();
+  assert.equal(await clock.settle(waitForServerTicks(bot, 40, timing), 2_000), "moved");
+  assert.equal(clock.now(), 2_000);
+  assert.equal(bot.time.age, 1_040);
+  const pending = waitForServerTicks(bot, Infinity, timing);
+  const long = watch(pending);
+  await clock.advance(600_000);
+  assert.equal(long.over, false, "moving age remains pending after ten minutes");
+  server.stop();
+  await clock.advance(SERVER_CLOCK_STOPPED_MS);
+  assert.equal(long.over, true);
+  assert.equal(await pending, "stalled");
+});
+
+test("server ticks forward the condition and cancellation", async () => {
+  const { bot, clock, timing } = worldBot();
+  let done = false;
+  clock.after(100, () => { done = true; });
+  assert.equal(await clock.settle(waitForServerTicks(bot, 40, { ...timing, until: () => done }), 100), "until");
+  const controller = new AbortController();
+  const pending = waitForServerTicks(bot, 40, { ...timing, signal: controller.signal });
+  const rejected = assert.rejects(pending, /cancelled/);
+  controller.abort(new Error("cancelled"));
+  await clock.advance(25);
+  await rejected;
+});
 
 test("resolves moved when the server age advanced the asked ticks, seen in jumps of 20", async () => {
   const { bot, clock, timing } = worldBot();

@@ -16,7 +16,12 @@ test("dig_shelter accepts optional whole minutes from 1 to 15 and describes both
     assert.equal(describeStep(step), minutes === undefined ? "dig in and wait for the day" : `dig in for ${minutes} min`);
   }
   for (const minutes of [0, 16, 1.5]) assert.equal(stepSchema.safeParse({ skill: "dig_shelter", minutes }).success, false);
-  assert.equal(skillUsage("dig_shelter", styleOrDefault(undefined)), '{"skill":"dig_shelter","minutes":<1-15, optional>}  dig a closed hole near you, roof it with a carried block, wait inside until day (or the minutes given), then climb out');
+  assert.equal(skillUsage("dig_shelter", styleOrDefault(undefined)), '{"skill":"dig_shelter"}  dig a closed hole near you (about 20 s; not with a monster on you), roof it with a carried block and wait inside until day, then climb out; add "minutes":<1-15> only to come out sooner, or to hide by day');
+});
+
+test("the sleep line names the carried bed and the respawn point", () => {
+  assert.equal(skillUsage("sleep", styleOrDefault(undefined)), '{"skill":"sleep"}  sleep in a bed, which also makes it your respawn point: a free bed nearby, else the one you carry, placed on flat ground nearby and left there (sleeping at night or in a thunderstorm only; by day it only sets the respawn point)');
+  assert.equal(stepSchema.safeParse({ skill: "sleep" }).success, true);
 });
 
 test("runStep by day without shelter minutes is done without submitting anything", async () => {

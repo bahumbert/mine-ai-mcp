@@ -38,6 +38,8 @@ import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
+import { furnaceOutputTake } from "./checks/furnace-output-take.ts";
+import { furnaceTakeCorrected } from "./checks/furnace-take-corrected.ts";
 import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
 import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
 import { variantTransferClicks } from "./checks/variant-transfer-clicks.ts";
@@ -53,13 +55,16 @@ import { lavaBesideHead } from "./checks/lava-beside-head.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { lavaOverPassable } from "./checks/lava-over-passable.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
+import { itemTakenByMob } from "./checks/item-taken-by-mob.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { itemVariantComponents } from "./checks/item-variant-components.ts";
 import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
+import { signEdit } from "./checks/sign-edit.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { respawnAfterDeath } from "./checks/respawn-after-death.ts";
+import { respawnAtSetPoint } from "./checks/respawn-at-set-point.ts";
 import { respawnWhileAsleep } from "./checks/respawn-while-asleep.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
 import { serverTags } from "./checks/server-tags.ts";
@@ -68,6 +73,7 @@ import { COMBAT_DATA_ITEM_CHECKS } from "./checks/combat-data-items.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
+import { tossCorrectedInventoryAnswer } from "./checks/toss-corrected-inventory-answer.ts";
 import { waitForTicksAndAge } from "./checks/wait-for-ticks-and-age.ts";
 import { waterHeldCells } from "./checks/water-held-cells.ts";
 import { worldAgeAtSlowTick } from "./checks/world-age-at-slow-tick.ts";
@@ -141,6 +147,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   itemsMatchSlots,
   equipHandAndOffHand,
   tossCountAndEntity,
+  tossCorrectedInventoryAnswer,
   placementBlockUpdate,
   digTimeAndUpdate,
   stopDiggingBothWindows,
@@ -161,12 +168,15 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   rainAndThunderState,
   clickWindowHotbarSwap,
   clickWindowShiftMove,
+  furnaceOutputTake,
+  furnaceTakeCorrected,
   clickWindowOntoVariant,
   clickWindowVariantSplit,
   variantTransferClicks,
   chestOpenTakeClose,
   itemVariantComponents,
   itemPickupAfterDelay,
+  itemTakenByMob,
   tossedItemKeptBeforeDelay,
   attackCooldownDamage,
   attackHurtsAndKills,
@@ -188,11 +198,13 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackMobKnockbackSprint,
   bucketPourAndFill,
   placeBlockWithOptions,
+  signEdit,
   lavaBesideHead,
   lavaOverHole,
   lavaOverPassable,
   whisperEcho,
   respawnAfterDeath,
+  respawnAtSetPoint,
   respawnWhileAsleep,
   lightInCells,
   armourPointsWorn,

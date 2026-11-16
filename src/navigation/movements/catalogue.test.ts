@@ -3,7 +3,7 @@ import { IncrementalSearch } from "../search/search.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 import { MemoryWorld } from "../world/memory-world.js";
-import { blockKey } from "../world/world.js";
+import { blockKey, packKey } from "../world/world.js";
 import { type GeneratedMovement, type GenerationContext, createMovementCatalogue } from "./catalogue.js";
 import { createMovementPolicy } from "./policy.js";
 import type { StepField } from "../step-field.js";
@@ -20,6 +20,7 @@ interface GenerateOptions {
   readonly onGround?: boolean;
   readonly protectedFeet?: GenerationContext["protectedFeet"];
   readonly stepField?: StepField | null;
+  readonly routeFeet?: ReadonlySet<number>;
 }
 
 /** Everything the catalogue offers from `feet`, under the default policy unless the test says otherwise. */
@@ -35,6 +36,7 @@ function generateFrom(world: MemoryWorld, feet: Cell, options: GenerateOptions =
         stepField: options.stepField ?? null,
       },
       { submergedAtEyes: false, onGround: options.onGround ?? true, aquaAffinity: false, effects: {} },
+      options.routeFeet,
     )
     .toArray();
 }
@@ -65,6 +67,57 @@ test("transition hazards can refuse a jump without excluding level walking or ch
   } });
   assert.ok(movements.some(m => m.step.kind === "walk"));
   assert.equal(movements.some(m => m.step.kind === "step_up"), false);
+});
+
+const descentPrices = {
+  scaffold: { itemType: 35, stateId: 14 }, placementPenalty: 20, allowDownward: false,
+  evaluateBreak: (block: import("../world/world.js").BlockObservation) => ({
+    decision: block.kind === "loaded" && block.traits.safeToBreak
+      ? { kind: "penalized" as const, reason: "preserve terrain", cost: 25 }
+      : { kind: "prohibited" as const, reason: "unsafe" },
+    tool: { itemType: null, expectedTicks: block.kind === "loaded" && block.stateId === 2 ? 100 : 11 },
+  }),
+};
+
+function descentCost(world: MemoryWorld, feet: Cell, destination: Cell, options: GenerateOptions = {}): number {
+  const row = generateFrom(world, feet, { ...options, policy: { ...descentPrices, ...options.policy } })
+    .find(m => m.step.kind === "drop" && to(destination.x, destination.y, destination.z)(m));
+  assert.ok(row); return row.cost;
+}
+
+test("a head dig under a planned or executed tread pays the climb back", () => {
+  const world = flat([{ x: 0, y: 61, z: 0 }, SOLID], [{ x: 0, y: 63, z: 0 }, SOLID]); const feet = { x: 1, y: 63, z: 0 }; const dest = { x: 0, y: 62, z: 0 };
+  const plain = descentCost(world, feet, dest); const foot = new Set([packKey(0, 64, 0)]);
+  assert.equal(descentCost(world, feet, dest, { routeFeet: foot }), plain + 68);
+  assert.equal(descentCost(world, feet, dest, { protectedFeet: foot }), plain + 68);
+  assert.equal(descentCost(world, feet, dest, { routeFeet: new Set([packKey(5, 64, 5)]) }), plain);
+  assert.equal(descentCost(world, feet, dest, { routeFeet: foot, policy: { allowDownward: true } }), plain);
+});
+
+test("a falling head shared with the column carries one price", () => {
+  const world = flat([{ x: 1, y: 64, z: 0 }, { stateId: 3, traits: { falling: true } }]);
+  const feet = { x: 0, y: 64, z: 0 }; const dest = { x: 1, y: 63, z: 0 };
+  const plain = descentCost(world, feet, dest);
+  assert.equal(descentCost(world, feet, dest, { routeFeet: new Set([packKey(1, 65, 0)]) }), plain + 68);
+  assert.equal(descentCost(world, feet, dest, { routeFeet: new Set([packKey(5, 65, 5)]) }), plain);
+});
+
+test("the stance floor is never priced", () => {
+  const world = flat([{ x: 0, y: 61, z: 0 }, SOLID]);
+  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) world.load({ x: x!, y: 62, z: z! }, AIR);
+  const feet = { x: 0, y: 63, z: 0 }; const foot = new Set([packKey(0, 63, 0)]);
+  const cost = (options: GenerateOptions) => generateFrom(world, feet, { ...options, policy: descentPrices }).find(m => m.step.kind === "downward")?.cost;
+  assert.ok(cost({}) !== undefined);
+  assert.equal(cost({ routeFeet: foot, protectedFeet: foot }), cost({}));
+});
+
+test("dear fresh rock may still buy the undercut", () => {
+  const world = flat([{ x: 0, y: 61, z: 0 }, SOLID], [{ x: 0, y: 63, z: 0 }, SOLID],
+    [{ x: 2, y: 61, z: 0 }, SOLID], [{ x: 2, y: 62, z: 0 }, { stateId: 2 }],
+    [{ x: 2, y: 63, z: 0 }, { stateId: 2 }], [{ x: 2, y: 64, z: 0 }, { stateId: 2 }]);
+  const feet = { x: 1, y: 63, z: 0 };
+  assert.equal(descentCost(world, feet, { x: 0, y: 62, z: 0 }, { routeFeet: new Set([packKey(0, 64, 0)]) }), 146);
+  assert.equal(descentCost(world, feet, { x: 2, y: 62, z: 0 }), 381);
 });
 
 test("walking and downward excavation reject suspended gravel but retain supported gravel", () => {

@@ -47,6 +47,7 @@ export { bucketAvailable, placeWaterInto, waterLandingSupply, waterableLanding }
 export { SupportedPositionHold } from "./steering/supported-position.js";
 export { dropColumn, hasSupportedCorridor, heldByBlockAt, knockbackCorridorHazard, MAXIMUM_BUCKET_DROP, type KnockbackHazard } from "./world/block-geometry.js";
 export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
+export { bodyDependsOnBlock } from "./world/body-support.js";
 
 // The navigation transaction.
 export { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "./navigate.js";

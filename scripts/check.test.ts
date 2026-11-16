@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitProgram, importerReport, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, typecheckPlan } from "./check.js";
+import { gitProgram, importerReport, importerTestCommand, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport } from "./data-readers.js";
 import { aliasesFromPackageJson, buildReverseGraph, IMPORTER_DEPTH, IMPORTER_TEST_CAP, testsReachedBy } from "./import-graph.js";
+import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
 
 function checkout(layout: "directory" | "file" | "none", content = ""): string {
   const root = mkdtempSync(join(tmpdir(), "check-git-"));
@@ -13,27 +14,15 @@ function checkout(layout: "directory" | "file" | "none", content = ""): string {
   return root;
 }
 
-test("main checkout (.git directory) uses plain git", () => {
-  expect(gitProgram(checkout("directory"))).toBe("git");
-});
-
-test("worktree whose .git file holds a Windows gitdir uses git.exe", () => {
-  const root = checkout("file", "gitdir: D:/minecraft/mcp/mine-ai-mcp/.git/worktrees/x\n");
-  expect(gitProgram(root)).toBe("git.exe");
-});
-
-test("Windows gitdir with backslashes and CRLF uses git.exe", () => {
-  const root = checkout("file", "gitdir: D:\\repo\\.git\\worktrees\\x\r\n");
-  expect(gitProgram(root)).toBe("git.exe");
-});
-
-test("worktree with a POSIX gitdir keeps plain git", () => {
-  const root = checkout("file", "gitdir: /mnt/d/repo/.git/worktrees/x\n");
-  expect(gitProgram(root)).toBe("git");
-});
-
-test("no .git at all keeps plain git", () => {
-  expect(gitProgram(checkout("none"))).toBe("git");
+test("git program follows the checkout's gitdir layout", () => {
+  const cases = [
+    ["directory", "", "git"],
+    ["file", "gitdir: D:/minecraft/mcp/mine-ai-mcp/.git/worktrees/x\n", "git.exe"],
+    ["file", "gitdir: D:\\repo\\.git\\worktrees\\x\r\n", "git.exe"],
+    ["file", "gitdir: /mnt/d/repo/.git/worktrees/x\n", "git"],
+    ["none", "", "git"],
+  ] as const;
+  for (const [layout, content, expected] of cases) expect(gitProgram(checkout(layout, content))).toBe(expected);
 });
 
 test("missing git.exe gives a clear message, not an empty change list", () => {
@@ -80,9 +69,20 @@ test("direct tests alone over the cap are named in the summary", () => {
   expect(lines).toContain(`check: depths 0 and 1 alone are 2 test files, over the cap of ${IMPORTER_TEST_CAP}`);
 });
 
-test("bun run test passes the arguments after --all to bun test only", () => {
-  expect(suiteTestCommand(["./src", "./brain"], [])).toEqual(["bun", "test", "./src", "./brain"]);
-  expect(suiteTestCommand(["./src"], ["--coverage", "--coverage-dir=coverage"])).toEqual(["bun", "test", "./src", "--coverage", "--coverage-dir=coverage"]);
+test("the suite call of check passes the 30 s limit before its paths; the arguments after --all stay last", () => {
+  const limit = ["--timeout", String(DEFAULT_TEST_TIMEOUT_MS)];
+  expect(suiteTestCommand(["./src", "./brain"], [])).toEqual(["bun", "test", ...limit, "./src", "./brain"]);
+  expect(suiteTestCommand(["./src"], ["--coverage", "--coverage-dir=coverage"])).toEqual(["bun", "test", ...limit, "./src", "--coverage", "--coverage-dir=coverage"]);
+});
+
+test("the importer call of check passes the 30 s limit before its test files, each as ./<file>", () => {
+  expect(importerTestCommand(["src/a.test.ts", "brain/b.test.ts"])).toEqual(["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), "./src/a.test.ts", "./brain/b.test.ts"]);
+});
+
+test("suite roots include both scenario test directories", () => {
+  const command = suiteTestCommand(suiteTestPaths(), []);
+  expect(command).toContain("./scenarios/src");
+  expect(command).toContain("./scenarios/default");
 });
 
 test("typechecks the projects with changed files and those importing them, each once, in project order", () => {
@@ -99,10 +99,11 @@ test("a scripts/ change typechecks scripts/ (Bun types)", () => {
 });
 
 test("the test beside a changed file runs only inside the suite's test paths", () => {
-  expect(siblingTests(["src/a.ts", "src/b.test.ts", "scenarios/flat/combat/reflex.ts", "scenarios/flat/x.test.ts"], ["src/", "scenarios/src/"])).toEqual([
-    "src/a.test.ts",
-    "src/b.test.ts",
-  ]);
+  const cases = [
+    { files: ["src/a.ts", "src/b.test.ts", "scenarios/flat/combat/reflex.ts", "scenarios/flat/x.test.ts"], roots: ["src/", "scenarios/src/"], expected: ["src/a.test.ts", "src/b.test.ts"] },
+    { files: ["scenarios/default/nether/fortress-withdrawal.ts", "scenarios/flat/x.test.ts"], roots: suiteTestRoots(), expected: ["scenarios/default/nether/fortress-withdrawal.test.ts"] },
+  ];
+  for (const { files, roots, expected } of cases) expect(siblingTests(files, roots)).toEqual(expected);
 });
 
 test("config changes and source changes together typecheck the union, each once, a source change keeping its own reason", () => {
@@ -225,6 +226,25 @@ test("a near-miss of the marker is reported, not ignored", () => {
   for (const line of ["//check-reads: data/*.yaml", "// check-reads : data/*.yaml", "//  check-reads: data/*.yaml", "/* check-reads: data/*.yaml */"]) {
     const plan = planDataReads(["data/a.yaml"], new Map([["tests/r.ts", `${line}\n`]]), ["data/a.yaml"]);
     expect({ line, reads: plan.reads.length, malformed: plan.malformed.length }).toEqual({ line, reads: 0, malformed: 1 });
+  }
+});
+
+test("a change to a module the daemon test reads alone selects the daemon test, read from its real declaration", () => {
+  const DAEMON_TEST = "tests/minecraft/shared/daemon.test.ts";
+  const daemonSource = readFileSync(new URL(`../${DAEMON_TEST}`, import.meta.url), "utf8");
+  const daemonModules = [
+    "tests/minecraft/shared/protocol.ts",
+    "tests/minecraft/shared/submission-handler.ts",
+    "tests/minecraft/shared/scheduler-types.ts",
+    "tests/minecraft/shared/scheduler-trial.ts",
+    "tests/minecraft/shared/scheduler.ts",
+    "tests/minecraft/shared/result-class.ts",
+    "tests/minecraft/shared/trial.ts",
+  ];
+  for (const changed of daemonModules) {
+    const { plan, reached } = dataReadTree({ [DAEMON_TEST]: daemonSource }, [], [changed]);
+    expect({ changed, reads: plan.reads }).toEqual({ changed, reads: [{ data: changed, reader: DAEMON_TEST }] });
+    expect({ changed, tests: reached.tests.map((entry) => entry.file) }).toEqual({ changed, tests: [DAEMON_TEST] });
   }
 });
 

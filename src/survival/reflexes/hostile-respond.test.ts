@@ -4,7 +4,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
-import { attackedIds, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
+import { attackedIds, combatTestContext, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
+import { MemoryWorld } from "../../navigation/world/memory-world.js";
+import { recoverCombatHealth } from "../control/combat/recovery.js";
+import { secureCombatHandoff } from "../control/combat/handoff.js";
 import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { CombatPerception } from "../perception/combat/observations.js";
@@ -17,6 +20,41 @@ import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { observeCombatDecision } from "../control/combat/observation.js";
 import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
+import { ThreatChains } from "../state/threat-chains.js";
+import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
+
+for (const recovery of [true, false]) test(recovery
+  ? "recovery's evade that separates in its start cell is no new recovery cell"
+  : "the handoff still requires physical safety after an early separation", async () => {
+  const { bot, clock } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    groundY: 63, position: new Vec3(0.5, 64, 0.5),
+    entities: { 7: { name: "zombie", position: new Vec3(17.5, 64, 0.5) } } });
+  using _installed = clock.install();
+  bot.health = 6;
+  using perception = new CombatPerception(bot);
+  const context = { ...combatTestContext(bot), perception, attackerIds: new Set([7]) };
+  const policy = { ...context.policy, hide: "never" as const };
+  const world = new MemoryWorld();
+  for (let y = 63; y <= 65; y++) world.load({ x: 0, y, z: 0 }, { stateId: y === 63 ? 1 : 0 });
+  let routes = 0;
+  const navigation = { world, navigate: async () => {
+    routes++;
+    await clock.sleep(2_000);
+    return { status: "stopped" as const, reason: "navigation timeout", elapsedMs: 2_000 };
+  } } as unknown as NavigationRuntime;
+  if (!recovery) Reflect.set(bot.entity.metadata, 0, 1); // entity flags: burning, as entities.js reads them
+  const pending = (recovery ? recoverCombatHealth : secureCombatHandoff)(
+    bot, navigation, { ...context, policy }, new AbortController().signal, () => {});
+  const result = await clock.settle<Awaited<ReturnType<typeof recoverCombatHealth | typeof secureCombatHandoff>>>(pending, 4_000);
+  assert.equal(routes, 1, "the evade must actually run before its caller judges the new basis");
+  assert.equal(result.kind, recovery ? "blocked" : "unsafe");
+  if (recovery) {
+    assert.ok(context.survival.answered.snapshot().some((entry) => entry.failure.kind === "escape_failed"));
+    assert.match("observation" in result ? result.observation : "", /different recovery cell/);
+  } else if (result.kind === "unsafe") {
+    assert.ok(result.reason.includes("Withdrawal: separated"));
+  }
+});
 
 test("a hurt boat rider beside a beach keeps hide available in the sensed decision", async () => {
   for (const moving of [false, true]) {
@@ -51,9 +89,8 @@ function responseFixture(occluded = false, harness = createFakeBot({
       7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
       8: { name: "zombie", position: new Vec3(occluded ? 10.5 : 100.5, 64, 0.5) },
     },
-  })) {
+  }), navigation = { cancel: () => undefined } as unknown as NavigationRuntime) {
   const { bot, clock } = harness;
-  const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
   const controller = engagingCombat(bot, unexpectedEngage);
   const runner = new ActionRunner({ clock });
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
@@ -61,7 +98,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
   const reflex = attachHostileReflex(bot, driver, navigation, controller, perception);
   const scene: HostileScene = {
     bot, navigation, controller, driver, perception, policy: controller.policy,
-    context: reflex.threats, encounterThreats: new Set(), activeResponse: null,
+    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(),
     transition: (pending) => { void pending; },
   };
   return { ...harness, driver, perception, scene, async [Symbol.asyncDispose]() {
@@ -70,6 +107,47 @@ function responseFixture(occluded = false, harness = createFakeBot({
     perception[Symbol.dispose]();
   } };
 }
+
+test("a second evade on the same zombie carries its chain into the settled text", async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: 63,
+    position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const navigation = { world: new MemoryWorld(), cancel: () => undefined, navigate: async () => {
+    harness.bot.entity.position.x -= 6;
+    return { status: "stopped", reason: "no path", elapsedMs: 0 };
+  } } as unknown as NavigationRuntime;
+  await using fixture = responseFixture(false, harness, navigation);
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const evade = () => respondToHostile(fixture.scene, { kind: "evade", reason: "hurt", safeRange: 36,
+    threats: [{ id: 8, name: "zombie", position: harness.bot.entities[8]!.position,
+      distance: 1 }] }, new AbortController().signal);
+  const first = await fixture.clock.settle(evade(), 1_000);
+  assert.equal(first.chain, null);
+  const second = await fixture.clock.settle(evade(), 1_000);
+  assert.equal(second.chain?.responses, 2);
+  assert.equal(second.chain?.evades, 2);
+  assert.equal(second.chain?.gained, 12, "evades use the entry observation rather than the earlier decision distance");
+  const continuation = responseContinuation(second);
+  assert.equal(continuation.kind, "return");
+  assert.match(continuation.kind === "return" ? continuation.reason ?? "" : "", /2nd response to zombie#8/);
+  assert.deepEqual(JSON.parse(JSON.stringify(describeResponse(second))).chain, second.chain);
+});
+
+test("a cancelled response is recorded once", async () => {
+  await using fixture = responseFixture(false, createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } }));
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const directive: HostileResponse = { kind: "fight", targetId: 8,
+    threats: [{ id: 8, name: "zombie", position: fixture.bot.entities[8]!.position, distance: 4 }] };
+  const signal = AbortSignal.abort(new Error("caller cancelled"));
+  const first = await respondToHostile(fixture.scene, directive, signal);
+  const second = await respondToHostile(fixture.scene, directive, signal);
+  assert.equal(first.kind, "cancelled");
+  assert.equal(first.chain, null);
+  assert.equal(second.chain?.responses, 2);
+  assert.equal(second.chain?.evades, 0);
+});
 
 for (const { hit, occluded, name } of [
   { hit: false, occluded: false, name: "the hostile reflex senses a zombie while seated" },
@@ -156,6 +234,13 @@ for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
     if (kind === "evade" || kind === "hide") {
       assert.deepEqual(attackedIds(server), [], "evade and hide row only, even with a mob in reach");
       assert.ok(vehicleMoves(fixture).length > 0);
+      assert.equal(settlement.physical?.response, "evade");
+      if (settlement.physical?.response === "evade") {
+        assert.equal(settlement.physical.goalRefreshes, 0);
+        assert.ok(settlement.physical.elapsedMs > 0);
+        assert.ok(Number.isFinite(settlement.physical.startPosition.x));
+        assert.equal(settlement.physical.ends[0]?.basis, "dead");
+      }
     }
     assert.equal(scene.activeResponse, null);
   });

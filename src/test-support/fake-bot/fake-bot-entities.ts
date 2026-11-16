@@ -47,6 +47,8 @@ export interface ServerEntities {
   restack(id: number, count: number): void;
   /** What the server holds of an item entity's stack, which a partial pickup lowers without telling the client; null when it is gone. */
   countOnServer(id: number): number | null;
+  /** Deliver a measured mob collect, leaving a remainder or removing an emptied stack. */
+  takenBy(collector: Entity, entity: Entity, count: number): void;
 }
 
 /** An item entity waiting to be picked up, as the server knows it. */
@@ -112,6 +114,16 @@ function addToInventory(inventory: FakeInventory, registry: Registry, name: stri
   return count - left;
 }
 
+/** Deliver the collect packet and the removal for a mob's measured pickup. */
+function mobPickup(bot: FakeBot, lying: Map<number, LyingItem>, collect: (collector: Entity, entity: Entity, count: number) => void, remove: (id: number) => void, collector: Entity, entity: Entity, count: number): void {
+  const stack = lying.get(entity.id);
+  if (stack === undefined || count <= 0 || count > stack.count) throw new Error(`invalid mob pickup of ${entity.id}: ${count}`);
+  collect(collector, entity, count);
+  stack.count -= count;
+  bot._client.emit("collect", { collectorEntityId: collector.id, collectedEntityId: entity.id, pickupItemCount: count });
+  if (stack.count === 0) remove(entity.id);
+}
+
 /** Give the server its spawn, removal and the pickup of item entities; returns the controls of the harness. */
 export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEntities {
   const { server, inventory, entities } = parts;
@@ -166,14 +178,14 @@ export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEnti
     const room = roomFor(inventory, bot.registry, name);
     if (lying.get(entity.id) !== lyingItem || room === 0 || !canPickUp(bot)) return;
     const all = room >= lyingItem.count;
-    if (all) collect(entity, lyingItem.count);
+    if (all) collect(bot.entity, entity, lyingItem.count);
     lyingItem.count -= addToInventory(inventory, bot.registry, name, lyingItem.count);
     if (all) remove(entity.id);
   };
 
   /** Mineflayer's `collect` handler: `playerCollect`, then the dropped item's metadata lowered by the packet's count. */
-  const collect = (entity: Entity, pickupItemCount: number) => {
-    bot.emit("playerCollect", bot.entity, entity);
+  const collect = (collector: Entity, entity: Entity, pickupItemCount: number) => {
+    bot.emit("playerCollect", collector, entity);
     const dropped = entity.getDroppedItem();
     if (dropped === null) return;
     dropped.count = Math.max(0, dropped.count - pickupItemCount);
@@ -190,5 +202,5 @@ export function attachFakeEntities(bot: FakeBot, parts: EntityParts): ServerEnti
     }
   });
 
-  return { spawn, remove, restack, countOnServer: (id) => lying.get(id)?.count ?? null };
+  return { spawn, remove, restack, takenBy: (collector, entity, count) => mobPickup(bot, lying, collect, remove, collector, entity, count), countOnServer: (id) => lying.get(id)?.count ?? null };
 }

@@ -103,6 +103,9 @@ export class MineTargeting {
   castTouching(sources: readonly BlockPosition[]): void {
     for (const source of sources) this.#touchingCasts.add(cellKey(source));
   }
+  forgetCastTouching(sources: readonly BlockPosition[]): void {
+    for (const source of sources) this.#touchingCasts.delete(cellKey(source));
+  }
 
   beginCast(): void {
     this.#water = { kind: "casting" };

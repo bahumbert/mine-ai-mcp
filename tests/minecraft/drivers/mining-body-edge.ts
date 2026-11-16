@@ -11,6 +11,7 @@ import { useItemAt } from "../../../src/world/item-use.ts";
 import { arenaActionInput } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { forbidDigStraightDown } from "./styled-navigate.ts";
 
 type Point = { x: number; y: number; z: number };
 type Swing = { target: Point; body: Point; depends: boolean; path: Point[] };
@@ -72,11 +73,12 @@ async function castFromBank(context: ScenarioContext, target: Point, source: Poi
 
 /** Run an action while recording live body support immediately before every dig. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const { action, input, target, source, seal, probeInPlace } = z.strictObject({
+  const { action, input, target, source, seal, probeInPlace, noDigStraightDown } = z.strictObject({
     action: z.string(), input: z.record(z.string(), z.unknown()), target: arenaCell(context.arena),
     source: arenaCell(context.arena).optional(),
     seal: arenaCell(context.arena).optional(),
     probeInPlace: z.boolean().default(false),
+    noDigStraightDown: z.boolean().default(false),
   }).parse(context.scenario.params);
   const { bot } = context;
   const read = liveBlockReader(bot);
@@ -103,12 +105,17 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     return await originalDig(block, forceLook);
   };
   try {
+    if (noDigStraightDown) {
+      const refused = await forbidDigStraightDown(context);
+      if (refused) return refused;
+    }
     if (source) {
       const result = await castFromBank(context, target, source, swings);
       return { status: "succeeded", detail: `${result}; initial=${JSON.stringify(initial)}; swings=${JSON.stringify(swings)}; paths=${classifyTargetSwings(swings, target)}` };
     }
     const probe = probeInPlace ? await probeDryEdge(context, target, swings) : null;
     const output = await context.call(action, arenaActionInput(input, context.arena));
+    if (output.result.status !== "succeeded") throw new Error(`action: ${output.summary}; swings=${JSON.stringify(swings)}`);
     const classification = classifyTargetSwings(swings, target);
     if (seal) requireSealedTargetSwing(faceAtSwings);
     const block = bot.blockAt(new Vec3(target.x, target.y, target.z));

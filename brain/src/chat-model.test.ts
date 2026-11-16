@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { ModelUnavailable, OpenAiCompatibleModel } from "./chat-model.ts";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.js";
 
 /** An OpenAI-compatible server answering every prompt with `{}`, and `/api/ps` with `ps`; resolves to its base URL. */
 async function fakeServer(ps: unknown, status = 200): Promise<{ server: Server; baseUrl: string; bodies: Record<string, unknown>[] }> {
@@ -74,7 +75,8 @@ async function failingServer(respond: ((response: ServerResponse) => void) | nul
 const ASK = [{ role: "user" as const, content: "hi" }];
 
 test("a request that outlives the mocked timeout is ModelUnavailable", async (t) => {
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const fetchMock = t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
     const signal = init?.signal;
     assert.ok(signal);
@@ -88,11 +90,9 @@ test("a request that outlives the mocked timeout is ModelUnavailable", async (t)
     const asked = model.complete(ASK, new AbortController().signal)
       .catch((error: unknown) => error)
       .finally(() => { finished = true; });
-    mock.timers.tick(49);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await clock.advance(49);
     assert.equal(finished, false, "the request must stay pending before its deadline");
-    mock.timers.tick(1);
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await clock.advance(1);
     assert.equal(finished, true, "mocked time must end an unresponsive request");
     const failure = await asked;
     assert.ok(failure instanceof ModelUnavailable);
@@ -100,7 +100,6 @@ test("a request that outlives the mocked timeout is ModelUnavailable", async (t)
     assert.equal(failure.cause.name, "TimeoutError");
   } finally {
     fetchMock.mock.restore();
-    mock.timers.reset();
   }
 });
 

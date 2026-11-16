@@ -1,10 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { recordLastDeath } from "../../bot-data/index.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { Vec3 } from "vec3";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { createPickUpItemsAction } from "./pick-up-items.js";
+
+for (const cause of ["whole take", "silent removal", "partial take then silent removal"] as const) {
+  test(`pickup reports ${cause} with only confirmed collector evidence`, async (t) => {
+    const { bot, clock, entities } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }) });
+    using _timers = clock.install();
+    const position = new Vec3(3, 64, 0);
+    const drop = entities.spawn({ name: "item", position, item: { name: "gold_ingot", count: 2 }, pickupDelayTicks: 0 });
+    const mob = entities.spawn({ name: "piglin", position });
+    const action = createPickUpItemsAction(bot, { navigate: async () => {
+      if (cause !== "silent removal") entities.takenBy(mob, drop, 1);
+      if (cause === "whole take") entities.takenBy(mob, drop, 1);
+      if (cause !== "whole take") entities.remove(drop.id);
+      return { status: "stopped", reason: "item removed", elapsedMs: 0 };
+    } } as never, temporaryBotData({ closeAfter: t }), createDiscardedItems());
+    const lifetime = new AbortController();
+    t.after(() => lifetime.abort());
+
+    const result = await clock.settle(action.begin({ radius: 8, recoverDeathItems: false }, lifetime.signal, () => {})({}), 1_500);
+    assert.equal(result.pickup.sightings[0]?.outcome, cause === "whole take" ? "taken_by_other" : "gone_unconfirmed");
+    assert.equal(result.pickup.sightings[0]?.takenBy, cause === "whole take" ? "piglin" : null);
+    assert.doesNotThrow(() => action.resultSchema.parse(result));
+  });
+}
 
 test("death recovery returns its named no-record refusal with schema-valid current position", async (t) => {
   const { bot } = createFakeBot();

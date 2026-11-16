@@ -46,7 +46,7 @@ can always see what it has changed and why.
 | `navigation.hostile_avoidance_multiplier` | `1` | Finite, nonnegative multiplier on the capped hostile proximity route cost. `2` doubles it, `0.5` halves it, and `0` removes proximity cost. |
 | `navigation.bucket_fall_save` | `true` | Save damaging falls using carried water on loaded safe full-block floors, then verify source removal and a refilled bucket. |
 | `navigation.bucket_drops` | `true` | Allow planned water-bucket descents up to 80 blocks. Independent of scaffolding and emergency fall rescue; unavailable in the Nether. |
-| `navigation.dig_straight_down` | `true` | Allow routes to dig the block beneath the bot and descend in its own column. `false` leaves every route only staircase descents (one block over per block down). Target breaks are unaffected; read by each route search. |
+| `navigation.dig_straight_down` | `true` | Allow routes to dig the block beneath the bot and descend in its own column. `false` leaves every route only staircase descents (one block over per block down); a dig under a cell the route stands on is priced the climb back, so in uniform ground the route leaves a staircase it can walk back up. Target breaks are unaffected; read by each route search. |
 
 The scaffold list is read from the live policy whenever a consumer chooses a
 block. The first usable carried name wins over stack size; unsafe entries are
@@ -109,6 +109,8 @@ For example, use `set_survival_policy` with the current revision:
 | `combat.recovery_timeout_ms`                | `90000`                  | One protected recovery hold, including movement and eating.                                                                       |
 | `combat.evade_timeout_ms`                   | `15000`                  | One withdrawal attempt, including replacement routes and projectile guards.                                                       |
 | `combat.evade_safe_range`                   | `36`                     | Required observed separation from every threat.                                                                                   |
+| `combat.evade_clear_range`                  | `16`                     | Distance for a threat that stopped advancing; evade uses the smaller of this and `evade_safe_range`.                              |
+| `combat.evade_cover_range`                  | `8`                      | Distance for a hidden bot from a shooter that stopped advancing; evade uses the smaller of this and `evade_safe_range`.           |
 
 Health values are Minecraft health points (0–20), tick and duration limits are
 positive integers, and separation is a positive block distance. Raising pursuit
@@ -241,8 +243,10 @@ must not be inferred from an action name or reduced to automatic contact rules.
 
 By default, evade uses a single 15-second attempt across replacement routes and
 projectile guards. It aims eight blocks beyond the configured separation to allow
-for pursuing threats. Recovery defaults to a fixed 90-second hold. Repeated moves
-or healing cannot renew those attempts. Relevant edits settle the current owner
+for pursuing threats. A threat that stopped advancing can be considered unable to
+reach the bot at the clear range, or at the cover range for a shooter without sight
+of the bot; each range is capped by the safe range. Recovery defaults to a fixed
+90-second hold. Repeated moves or healing cannot renew those attempts. Relevant edits settle the current owner
 and reobserve; they never silently extend an active budget.
 
 ## Transfer and request continuation

@@ -111,6 +111,50 @@ function messageEvent(message: string, direction: "incoming" | "outgoing" = "inc
   };
 }
 
+test("old policy snapshots in durable events do not block later messages", () => {
+  const policy = new SurvivalPolicyState(createFakeBot().bot).snapshot();
+  const legacyCombat = { ...DEFAULT_COMBAT_POLICY, evade_safe_range: 27 };
+  Reflect.deleteProperty(legacyCombat, "evade_clear_range");
+  Reflect.deleteProperty(legacyCombat, "evade_cover_range");
+  const snapshot = { ...policy, defaults: { ...policy.defaults, combat: legacyCombat },
+    effective: { ...policy.effective, combat: { ...legacyCombat, evade_clear_range: 12 } } };
+  const status = { summary: "safe" as const, request: null, owner: { current: null, reserved: null, connected: true, transfer: null },
+    dangers: [], response: null, decisions: [], budgets: [], answered: [], observations: { missing: [], stale: [] },
+    policy: snapshot, vitals: { health: 20, food: 20, air: null, inWater: false },
+    runtime: { liveness: "observed_in_process" as const, observedAt: 0, physicsObservedAt: null } };
+  const oldCombat = { ...policy, defaults: legacyCombat, effective: legacyCombat, override: null };
+  Reflect.deleteProperty(oldCombat, "overrides");
+  const rows = [
+    { type: "survival_policy" as const, payload: snapshot },
+    { type: "survival_outcome" as const, payload: { kind: "outcome" as const, source: "test", evidence: null, status } },
+    { type: "combat_policy" as const, payload: oldCombat },
+  ];
+  for (const row of rows) {
+    using data = temporaryBotData();
+    historicalEvent(data, { ...row, observedAt: "2026-09-11T00:00:00Z", summary: "old" });
+    recordEvent(data, "MineAI", messageEvent("next"));
+    const result = readRecentBotEvents(data, "MineAI", { limit: 50 });
+    assert.deepEqual(result.events.map((event) => event.type), [row.type, "player_message"]);
+    assert.equal(result.readThroughEventId, 2);
+    assert.equal(readRecentBotEvents(data, "MineAI", { limit: 50 }).events.length, 0);
+    const event = result.events[0]!;
+    const defaults = event.type === "combat_policy" ? event.payload.defaults : event.type === "survival_policy"
+      ? event.payload.defaults.combat : event.type === "survival_outcome" ? event.payload.status.policy.defaults.combat : null;
+    assert.ok(defaults);
+    assert.equal(defaults.evade_clear_range, 27);
+    assert.equal(defaults.evade_cover_range, 27);
+    if (event.type === "survival_policy" || event.type === "survival_outcome") {
+      const parsed = event.type === "survival_policy" ? event.payload : event.payload.status.policy;
+      assert.equal(parsed.effective.combat.evade_clear_range, 12);
+      assert.equal(parsed.effective.combat.evade_cover_range, 27);
+    }
+  }
+  using invalid = temporaryBotData();
+  historicalEvent(invalid, { type: "survival_policy", observedAt: "2026-09-11T00:00:00Z", summary: "invalid",
+    payload: { ...snapshot, defaults: { ...snapshot.defaults, combat: { ...legacyCombat, evade_clear_range: 0 } } } });
+  assert.throws(() => readRecentBotEvents(invalid, "MineAI", { limit: 50 }));
+});
+
 test("returns incoming and outgoing events, advances the cursor, and formats their evidence", (t) => {
   assert.deepEqual(parseReadRecentEventsRequest(undefined), { limit: 50 });
   assert.deepEqual(parseReadRecentEventsRequest({ limit: 2 }), { limit: 2 });
@@ -204,6 +248,14 @@ test("a death event with its context tells the model what the bot held, wore and
     summary: "MineAI died at 1, 64, 1 in overworld.",
     payload: { dimension: "overworld", position: { x: 1, y: 64, z: 1 }, cause: null },
   });
+  recordEvent(data, "MineAI", {
+    type: "player_death", observedAt: "2026-08-30T04:00:00.000Z", summary: "MineAI died.",
+    payload: { dimension: "overworld", position: { x: 1, y: 64, z: 1 }, cause: null, context: {
+      lastAlive: null, food: 20, held: null, armour: { head: null, chest: null, legs: null, feet: null },
+      carriesWeapon: false, bestMelee: null, enclosed: false,
+      respawn: { kind: "last_wake", dimension: "overworld", x: 13, y: 64, z: 1, distance: 12 },
+    } },
+  });
 
   const markdown = formatReadRecentEventsResult(readRecentBotEvents(data, "MineAI", { limit: 50 }));
 
@@ -215,7 +267,8 @@ test("a death event with its context tells the model what the bot held, wore and
     markdown,
     /- State at death: held nothing; armour none; food 20; last health not seen; enclosed; respawn world spawn in another dimension/,
   );
-  assert.equal(markdown.match(/State at death/g)?.length, 2, "an old row without context prints no state line");
+  assert.match(markdown, /respawn where it last woke, 12 blocks away/);
+  assert.equal(markdown.match(/State at death/g)?.length, 3, "an old row without context prints no state line");
 });
 
 test("a status recorded before dig_straight_down existed reads back with its default", async () => {

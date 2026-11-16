@@ -434,7 +434,7 @@ test("no ground: failed with how many columns failed and why, nothing submitted"
   const result = await digShelterFlow(context);
   assert.equal(result.status, "failed");
   // Open air all around: the walls of the cells she would stand in are the first rule every column fails.
-  assert.match(detailOf(result), /^no ground near here to dig a closed hole in \(of 169 columns: 169 water or open walls\)/u);
+  assert.match(detailOf(result), /^no ground near here to dig a closed hole in \(of 169 columns up to 6 blocks along each axis: 169 water or open walls\)/u);
   assert.deepEqual(runtime.submitted, []);
 });
 

@@ -14,6 +14,9 @@ export const COAST_TICKS = 2;
 /** Half the player's 0.6-block collision width: a cell centre closer than this is under the body, not ahead of it. */
 export const PLAYER_HALF_WIDTH = 0.3;
 
+/** Height of a standing player in blocks. */
+export const PLAYER_STANDING_HEIGHT = 1.8;
+
 /** Every block column strictly overlapped by the player's collision footprint. */
 export function* footprintColumns(feet: Position3): Generator<{ x: number; z: number }> {
   for (let x = Math.floor(feet.x - PLAYER_HALF_WIDTH); x < feet.x + PLAYER_HALF_WIDTH; x++)

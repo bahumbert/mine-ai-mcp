@@ -74,6 +74,8 @@ const setSlot = (stateId: number, slot: number, item?: Stack, delayMs = 0): Repl
 const windowItems = (stateId: number, contents: Reply["contents"], cursor?: Stack, delayMs = 0): Reply => ({ delayMs, packet: "window_items", stateId, contents, cursor });
 const click = (slot: number, mouseButton: number, ...replies: Reply[]): ClickStep => ({ expect: { slot, mouseButton }, replies });
 
+// Stopgap until the master adds a crafting-click contract check on the shared fake and real server: the shared window
+// server does not produce the crafting result and its ordered slot-0 / tab_complete answers (probe logs above, 2026-11-15).
 /** Mineflayer's inventory and craft plugins on a scratch bot whose server is `script`; the bot starts with `carried`. */
 function craftingScene(carried: Readonly<Record<number, Stack>>, script: readonly ClickStep[], options: SceneOptions) {
   const client = Object.assign(new EventEmitter(), {

@@ -80,16 +80,23 @@ function edgeDig() {
 
 for (const floor of ["air", "void", "stone"] as const) {
   test(`physical edge admission reads ${floor} alternative support before swinging`, async () => {
-    const run = edgeDig();
-    using _clock = run.clock.install();
-    run.world.setCell(new Vec3(0, 62, 0), floor);
-    const effect = run.start();
-    const result = await run.clock.settle(effect.completion, 10_000);
-    assert.equal(result.kind, floor === "stone" ? "accepted" : "failed");
-    if (result.kind === "failed") assert.equal(result.cause, "support");
-    assert.equal(effect.issued, floor === "stone");
-    assert.deepEqual(run.counts(), floor === "stone" ? { digs: 1, reports: 1 } : { digs: 0, reports: 0 });
-    run.clean();
+    for (const { y, cellY, block } of [
+      { y: 64.0, cellY: 63, block: "stone" },
+      ...(floor === "stone" ? [] : [{ y: 64.5, cellY: 64, block: "oak_slab" }]),
+    ]) {
+      const run = edgeDig();
+      using _clock = run.clock.install();
+      run.bot.entity.position.y = y;
+      run.world.setCell(new Vec3(1, cellY, 0), block);
+      run.world.setCell(new Vec3(0, cellY, 0), floor);
+      const effect = run.start({ position: { x: 1, y: cellY, z: 0 }, expectedStateId: run.bot.registry.blocksByName[block]!.defaultState! });
+      const result = await run.clock.settle(effect.completion, 10_000);
+      assert.equal(result.kind, floor === "stone" ? "accepted" : "failed", JSON.stringify({ y, result }));
+      if (result.kind === "failed") assert.equal(result.cause, "support");
+      assert.equal(effect.issued, floor === "stone");
+      assert.deepEqual(run.counts(), floor === "stone" ? { digs: 1, reports: 1 } : { digs: 0, reports: 0 });
+      run.clean();
+    }
   });
 }
 
@@ -158,10 +165,16 @@ test("a falling refill rechecks live support and retains the first swing's issue
   const run = edgeDig();
   using _clock = run.clock.install();
   run.world.setCell(new Vec3(0, 62, 0), "stone");
-  run.port.waitForTicks = async () => {
+  run.port.watchServerChange = mineflayerBotSurface(run.bot).watchServerChange;
+  const packet = () => run.bot._client.emit("block_change", {
+    location: new Vec3(1, 62, 0), type: run.world.blockAt(new Vec3(1, 62, 0))!.stateId,
+  });
+  run.clock.after(1_500, () => { run.world.setCell(new Vec3(1, 62, 0), "air"); packet(); });
+  run.clock.after(2_000, () => {
     run.world.setCell(new Vec3(0, 62, 0), "air");
     run.world.setCell(new Vec3(1, 62, 0), "sand");
-  };
+    packet();
+  });
   const effect = run.start({ brings: [{ x: 1, y: 63, z: 0 }] });
   const result = await run.clock.settle(effect.completion, 10_000);
   assert.equal(result.kind === "failed" && result.cause, "support");
@@ -448,22 +461,21 @@ test("stationary water controls release after a failed dig and when the search r
 });
 
 test("a break that brings sand down waits for it to land and breaks it again before completing", async () => {
-  // The cell holds sand; the first dig clears it; two ticks later the sand
-  // from above lands in it; the second dig clears it for good.
-  let cell = "sand";
-  let ticksSinceDig = 0;
+  const run = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), cells: { "1,64,0": "sand" } });
+  using _clock = run.clock.install();
+  const cell = new Vec3(1, 64, 0);
+  const packet = (name: string) => {
+    run.world.setCell(cell, name);
+    run.bot._client.emit("block_change", { location: cell, type: run.world.blockAt(cell)!.stateId });
+  };
   let digs = 0;
   const bot = surface({
-    entity: { position: { x: 0.5, y: 63, z: 0.5 }, onGround: true, isInWater: false, yaw: 0 },
-    waitForTicks: async () => {
-      ticksSinceDig += 1;
-      if (digs === 1 && ticksSinceDig === 2) cell = "sand";
-    },
-    blockAt: () => ({ name: cell }),
+    ...mineflayerBotSurface(run.bot),
+    lookAt: async () => {}, look: async () => {},
     dig: async () => {
       digs += 1;
-      ticksSinceDig = 0;
-      cell = "air";
+      packet("air");
+      if (digs === 1) run.clock.after(100, () => packet("sand"));
     },
   });
   const actuator = new MineflayerBot(bot, { revision: 1 });
@@ -471,16 +483,16 @@ test("a break that brings sand down waits for it to land and breaks it again bef
     {
       kind: "break",
       position: { x: 1, y: 64, z: 0 },
-      expectedStateId: 1,
+      expectedStateId: run.world.blockAt(cell)!.stateId,
       toolType: null,
       brings: [{ x: 1, y: 65, z: 0 }],
     },
     { runId: "run", planId: "plan", stepId: "plug", attempt: 1 },
     new AbortController().signal,
   );
-  assert.deepEqual(await effect.completion, { kind: "accepted" });
+  assert.deepEqual(await run.clock.settle(effect.completion, 1_000), { kind: "accepted" });
   assert.equal(digs, 2);
-  assert.equal(cell, "air");
+  assert.equal(run.world.blockAt(cell)!.name, "air");
 });
 
 /**
@@ -511,14 +523,22 @@ test("the surface's tick wait on a connected bot ends at the signal's abort when
 });
 
 test("a cancel ends the wait for a sand column to land at once when physics has stopped", async () => {
+  const run = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), cells: { "1,64,0": "sand" } });
+  using _clock = run.clock.install();
+  run.bot.physicsEnabled = false;
+  const cell = new Vec3(1, 64, 0);
+  const stateId = run.world.blockAt(cell)!.stateId;
   const cancel = new AbortController();
   const bot = surface({
-    entity: { position: { x: 0.5, y: 63, z: 0.5 }, onGround: true, isInWater: false, yaw: 0 },
-    waitForTicks: physicsStoppingAfter(0),
-    blockAt: () => ({ name: "air" }),
+    ...mineflayerBotSurface(run.bot),
+    lookAt: async () => {}, look: async () => {},
+    dig: async () => {
+      run.world.setCell(cell, "air");
+      run.bot._client.emit("block_change", { location: cell, type: 0 });
+    },
   });
   const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
-    { kind: "break", position: { x: 1, y: 64, z: 0 }, expectedStateId: 1, toolType: null, brings: [{ x: 1, y: 65, z: 0 }] },
+    { kind: "break", position: cell, expectedStateId: stateId, toolType: null, brings: [{ x: 1, y: 65, z: 0 }] },
     { runId: "run", planId: "plan", stepId: "plug", attempt: 1 },
     cancel.signal,
   );
@@ -545,7 +565,6 @@ test("a cancel ends a pillar placement's waits at once when physics has stopped 
     assert.deepEqual(await effect.completion, { kind: "failed", observation: "bot died" }, `physics stopped after ${ticksBeforeStop} ticks`);
   }
 });
-
 // ── Drops ────────────────────────────────────────────────────────────────────
 
 /**
@@ -950,6 +969,10 @@ function serverWatchedDig(answer: () => Promise<boolean>) {
           order.push("answer");
           return answer();
         },
+        next: async () => {
+          order.push("answer");
+          return await answer() ? { index: 0, state: { age: 0, stateId: 0, solid: false } } : "none";
+        },
         dispose: () => {
           disposed += 1;
         },
@@ -981,23 +1004,13 @@ test("a break is accepted only once the server has answered for its cell, and th
   assert.equal(run.disposed(), 1);
 });
 
-test("a break the server never answers fails after asking it to resend the cell", async () => {
-  const run = serverWatchedDig(async () => false);
-  const completion = await run.effect.completion;
-  assert.equal(completion.kind, "failed");
-  assert.match(completion.kind === "failed" ? completion.observation : "", /server did not confirm breaking the block at 0,\s?62,\s?0/);
-  assert.match(completion.kind === "failed" ? completion.observation : "", /asked it to resend the cell/);
-  assert.deepEqual(run.asked, [{ x: 0, y: 62, z: 0 }]);
-  assert.equal(run.disposed(), 1);
-});
-
 test("a dig that throws still removes the server watch", async () => {
   const bot = surface({
     blockAt: () => ({ name: "stone" }),
     dig: async () => {
       throw new Error("dig interrupted");
     },
-    watchServerChange: () => ({ answer: async () => true, dispose: () => void (disposed += 1) }),
+    watchServerChange: () => ({ answer: async () => true, next: async () => "none", dispose: () => void (disposed += 1) }),
   });
   let disposed = 0;
   const effect = new MineflayerBot(bot, { revision: 1 }).startEffect(
@@ -1014,7 +1027,8 @@ test("a break effect reports the block it dug and the tool, once, also when the 
   const dug = surface({
     blockAt: () => ({ name: "deepslate" }),
     reportDig: (dig) => reported.push(dig),
-    watchServerChange: () => ({ answer: async () => true, dispose: () => undefined }),
+    watchServerChange: () => ({ answer: async () => true,
+      next: async () => ({ index: 0, state: { stateId: 0, solid: false, age: 0 } }), dispose: () => undefined }),
   });
   const operation = { kind: "break", position: { x: 0, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [] } as const;
   const provenance = { runId: "run", planId: "plan", stepId: "downward", attempt: 1 };

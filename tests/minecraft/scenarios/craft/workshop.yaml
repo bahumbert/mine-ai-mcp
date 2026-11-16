@@ -42,6 +42,7 @@ params:
   table: { x: 2, y: -59, z: 0 }
   furnace: { x: 2, y: -58, z: 0 }
 goal:
+  stillTicks: 980 # Task 7: longest passing still span 486 ticks; 2x rounded up to 20.
   kind: all
   timeout: 240
   goals:

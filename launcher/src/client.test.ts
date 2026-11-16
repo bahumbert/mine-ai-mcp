@@ -4,7 +4,7 @@ import test from "node:test";
 import { bannerLines, emphasise, runConsole, startBackgroundLauncher, type ConsoleDeps } from "./client.ts";
 import { startControlServer, type LauncherLock } from "./control.ts";
 import type { StackStatus } from "./stack.ts";
-import { RecordingHandlers, STATUS as RUNNING } from "./cli-test-support.ts";
+import { freeTestPort, RecordingHandlers, STATUS as RUNNING } from "./cli-test-support.ts";
 
 const STATUS: StackStatus = { ...RUNNING, bots: [] };
 
@@ -43,7 +43,7 @@ function harness(find: () => LauncherLock | null, extra: Partial<ConsoleDeps> = 
 }
 
 test("a running launcher: the client prints the banner, then the lines, and ends with the stream", async () => {
-  const control = await startControlServer({ startPort: 26_300, handlers: handlers(STATUS) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   control.publish("Ayla is running (host port 25575).");
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }));
   const finished = runConsole(h.deps);
@@ -66,7 +66,7 @@ test("a running launcher: the client prints the banner, then the lines, and ends
  * endpoint's. `inits` records the `/attach` request options.
  */
 async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Response | Error) {
-  const control = await startControlServer({ startPort: 26_340, handlers: handlers(STATUS) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   const inits: (RequestInit | undefined)[] = [];
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => {
@@ -82,8 +82,12 @@ async function consoleWithAttach(attachAnswer: ReadableStream<Uint8Array> | Resp
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-for (const [label, data] of [["empty", ""], ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n"]] as const) {
-test(`a ${label} stream ends without Enter and attaches without an idle timeout`, async () => {
+for (const [label, data, lines, waits] of [
+  ["empty", "", [], 0],
+  ["data and heartbeat", ": attached\n\ndata: first\n\n: ping\n\n: ping\n\ndata: second\n\n", ["first", "second"], 0],
+  ["failed start", "data: Check the server log.\n\ndata: Stopping Mine AI (mine-ai stop)...\n\nevent: outcome\ndata: failed\n\n", ["Check the server log.", "Stopping Mine AI (mine-ai stop)..."], 1],
+] as const) {
+test(`a ${label} stream shows its lines and waits for Enter only after failure`, async () => {
   const body = new ReadableStream<Uint8Array>({
     start: (stream) => {
       if (data) stream.enqueue(bytes(data));
@@ -91,14 +95,39 @@ test(`a ${label} stream ends without Enter and attaches without an idle timeout`
     },
   });
   const { control, h, inits } = await consoleWithAttach(body);
-  assert.equal(await runConsole(h.deps), 0);
-  await control.close();
-  assert.deepEqual(h.out.slice(data ? -3 : -1), data ? ["first", "second", "Mine AI has stopped."] : ["Mine AI has stopped."]);
-  assert.ok(!h.out.some((line) => line.includes("ping")));
-  assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
-  assert.equal(h.enterWaits, 0);
+  try {
+    assert.equal(await runConsole(h.deps), 0);
+    assert.deepEqual(h.out.slice(-lines.length - 1), [...lines, "Mine AI has stopped."]);
+    assert.ok(!h.out.includes(": ping"));
+    assert.equal((inits[0] as { timeout?: unknown }).timeout, false);
+    assert.equal(h.enterWaits, waits);
+  } finally {
+    await control.close();
+  }
 });
 }
+
+test("a failure after attachment waits for Enter even when another stop wins", async () => {
+  const recording = handlers(STATUS);
+  const control = await startControlServer({ startPort: 26_380, handlers: recording });
+  let sawLine!: () => void;
+  const seen = new Promise<void>((resolve) => { sawLine = resolve; });
+  const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
+    write: (line) => { h.out.push(line); if (line === "Check the server log.") sawLine(); },
+  });
+  const finished = runConsole(h.deps);
+  try {
+    control.publish("Check the server log.");
+    await seen;
+    recording.status$ = { ...STATUS, phase: "stopping", problem: "Check the server log." };
+    control.publish("Stopping Mine AI (mine-ai stop)...");
+    await control.close();
+    assert.equal(await finished, 0);
+    assert.equal(h.enterWaits, 1);
+  } finally {
+    await control.close();
+  }
+});
 
 for (const [label, response, status] of [
   ["attach 503", new Response("stopping", { status: 503 }), 503],
@@ -176,8 +205,8 @@ test("no launcher yet: the client starts one, and when it never appears says so 
 });
 
 test("a launcher that is stopping is waited for, then a new one is started", async () => {
-  const stopping = await startControlServer({ startPort: 26_320, handlers: handlers({ ...STATUS, phase: "stopping" }) });
-  const fresh = await startControlServer({ startPort: 26_330, handlers: handlers(STATUS) });
+  const stopping = await startControlServer({ startPort: await freeTestPort(), handlers: handlers({ ...STATUS, phase: "stopping" }) });
+  const fresh = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   let polls = 0;
   let started = false;
   const h = harness(
@@ -224,7 +253,7 @@ test("no settings file: a console that replays the stack's line shows that text 
       stream.close();
     },
   });
-  const control = await startControlServer({ startPort: 26_360, handlers: handlers({ ...STATUS, server: "none", join: null, settingsFound: false }) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers({ ...STATUS, server: "none", join: null, settingsFound: false }) });
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), {
     fetch: (async (input: string | URL | Request, init?: RequestInit) => (String(input).endsWith("/attach") ? new Response(body, { status: 200 }) : await fetch(input, init))) as typeof fetch,
   });
@@ -253,7 +282,7 @@ for (const [label, status, emphasised] of [
 }
 
 test("the console writes the bold lines when its deps say color", async () => {
-  const control = await startControlServer({ startPort: 26_370, handlers: handlers(STATUS) });
+  const control = await startControlServer({ startPort: await freeTestPort(), handlers: handlers(STATUS) });
   const h = harness(() => ({ pid: 1, controlPort: control.port, startedAt: 0 }), { color: true });
   const finished = runConsole(h.deps);
   await new Promise((resolve) => setTimeout(resolve, 100));

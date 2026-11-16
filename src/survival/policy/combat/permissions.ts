@@ -47,7 +47,8 @@ export function responsePermissions(policy: Readonly<CombatPolicy>, response: "f
     critical_health: policy.critical_health,
   };
   return response === "evade"
-    ? { ...defence, evade_timeout_ms: policy.evade_timeout_ms, evade_safe_range: policy.evade_safe_range }
+    ? { ...defence, evade_timeout_ms: policy.evade_timeout_ms, evade_safe_range: policy.evade_safe_range,
+        evade_clear_range: policy.evade_clear_range, evade_cover_range: policy.evade_cover_range }
     : {
         ...defence,
         engagement: policy.engagement,

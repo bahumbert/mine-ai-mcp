@@ -1,29 +1,34 @@
 // executeTrial: the lane held through the restore, the wall-clock abort, a cancel, a failed arrangement, a trial on a server of its own, and what `arranged` says.
 import test from "node:test";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
-import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.js";
 import assert from "node:assert/strict";
 import type { RunResult } from "mine-labs";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { laneOf } from "../arena/lanes.ts";
 import { ArrangementMutex } from "./arrangement-mutex.ts";
 import { executeTrial, type TrialRunInput, type TrialRunner } from "./trial.ts";
 import { config, scenario, result, job, runnerOf } from "./trial-fixtures.ts";
 
 test("a passing lane trial hands its lane back after the restore ran, and the arena options name the lane", async () => {
-  const events: string[] = [];
-  let seen: TrialRunInput | undefined;
-  const runner: TrialRunner = async input => { seen = input; return runnerOf({ events })(input); };
-  const end = await executeTrial({ runTrial: runner, config }, job());
-  assert.equal(end.result.outcome, "pass");
-  assert.equal(end.lane, "free");
-  assert.deepEqual(events, ["arrange", "prepared", "restore"]);
-  assert.equal(seen?.arena?.id, "lane-3");
-  assert.deepEqual(seen?.arena?.controlChunk, { x: -496, z: 3 * 512 - 240 });
-  assert.equal(seen?.arena?.entityBox.minZ, 3 * 512 - 256);
-  assert.equal(seen?.reuseServer, true);
+  for (const [trialConfig, expectedStallMs] of [[config, 30_000], [{ ...config, stallStopMs: 12_345 }, 12_345]] as const) {
+    const events: string[] = [];
+    let seen: TrialRunInput | undefined;
+    const runner: TrialRunner = async input => { seen = input; return runnerOf({ events })(input); };
+    const end = await executeTrial({ runTrial: runner, config: trialConfig }, job());
+    assert.equal(end.result.outcome, "pass");
+    assert.equal(end.lane, "free");
+    assert.deepEqual(events, ["arrange", "prepared", "restore"]);
+    assert.equal(seen?.arena?.id, "lane-3");
+    assert.deepEqual(seen?.arena?.controlChunk, { x: -496, z: 3 * 512 - 240 });
+    assert.equal(seen?.arena?.entityBox.minZ, 3 * 512 - 256);
+    assert.equal(seen?.reuseServer, true);
+    assert.equal(seen?.goalStallMs, expectedStallMs);
+  }
 });
 
 test("two lanes' arrangements never overlap: the second runs after the first is prepared", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const mutex = new ArrangementMutex();
   const events: string[] = [];
   const firstArranged = Promise.withResolvers<void>();
@@ -71,7 +76,7 @@ test("a never-settling trial is aborted at goal timeout plus slack on the wall c
   const running = executeTrial({ runTrial: neverSettles, config }, job());
   void running.then(() => { settled = true; });
   clock.stepWallClock(-1_700);
-  await clock.advance(49, 1);
+  await clock.advance(79, 1);
   assert.equal(aborted, false, "the goal timeout plus slack has not elapsed");
   await clock.advance(1, 1);
   assert.equal(aborted, true, "the goal timeout plus slack aborts the trial");
@@ -79,7 +84,7 @@ test("a never-settling trial is aborted at goal timeout plus slack on the wall c
   assert.equal(settled, false, "an aborted trial still gets its full restore bound to settle");
   const end = await clock.settle(running, 1, 1);
   const elapsed = monotonicNow() - started;
-  assert.ok(elapsed >= 30 + 20 + 60, `waited the goal timeout, the slack and the restore bound: ${elapsed} ms`);
+  assert.ok(elapsed >= 30 * 2 + 20 + 60, `waited the scaled goal timeout, the slack and the restore bound: ${elapsed} ms`);
   assert.ok(elapsed < 500, `and no longer: ${elapsed} ms`);
   assert.equal(end.result.outcome, "error");
   assert.match(end.result.error ?? "", /did not settle/u);
@@ -103,7 +108,7 @@ test("the lane stays held while an aborted trial's restore runs, then frees", as
   let settled = false;
   const running = executeTrial({ runTrial: honoursAbort, config }, job());
   void running.then(() => { settled = true; });
-  await clock.advance(50, 1);
+  await clock.advance(80, 1);
   await restoring.promise;
   assert.equal(settled, false, "the restore still owns its lane");
   finishRestore.resolve();
@@ -165,20 +170,6 @@ test("the submitter cancelling ends the trial as cancelled, restore still runs",
   assert.equal(end.lane, "free");
 });
 
-test("a trial cancelled while it waits for the arrangement mutex never reaches the runner", async () => {
-  const mutex = new ArrangementMutex();
-  const holder = await mutex.acquire();
-  const cancel = new AbortController();
-  let ran = false;
-  const running = executeTrial({ runTrial: async () => { ran = true; return result("pass"); }, config }, job({ mutex, signal: cancel.signal, scenario: scenario(60) }));
-  cancel.abort("submitter left");
-  const end = await running;
-  holder();
-  assert.equal(ran, false);
-  assert.equal(end.result.outcome, "cancelled");
-  assert.equal(end.lane, "free", "nothing was touched");
-});
-
 test("a scenario on its own server (no lane) restores at once without the mutex and passes no arena", async () => {
   const mutex = new ArrangementMutex();
   const holder = await mutex.acquire();
@@ -232,10 +223,13 @@ test("a trial says it was arranged once its runner arranged or prepared, and not
   const mutex = new ArrangementMutex();
   const held = await mutex.acquire();
   const gone = new AbortController();
-  const waiting = executeTrial({ runTrial: arranges, config }, job({ mutex, signal: gone.signal }));
+  let ran = false;
+  const waiting = executeTrial({ runTrial: async input => { ran = true; return arranges(input); }, config }, job({ mutex, signal: gone.signal }));
   gone.abort("server died");
   const end = await waiting;
+  assert.equal(ran, false);
   assert.equal(end.result.outcome, "cancelled");
+  assert.equal(end.lane, "free", "nothing was touched");
   assert.equal(end.arranged, false, "cancelled while waiting for the arrangement turn");
   held();
 });

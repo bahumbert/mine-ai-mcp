@@ -164,8 +164,9 @@ slot each is for (`gear`/`tools.armour` is the best carried piece, worn or not: 
 sky and block light at the feet and, when the feet are below full sky light, `openSkyAbove`, the blocks up to the first cell of
 full sky light; each is null where the client holds no light data (never 0 for unknown). `combat` is the fight
 reflex's gear: `melee` (null: bare hands), the best `bow` with or without arrows, the `arrows` carried and the
-`shield`. `respawn` is the bed slept in this session, else the world spawn, with its distance (null in another
-dimension). The text carries them as one `Condition facts:` line under the best tools.
+`shield`. `respawn` is the bed slept in this session, else where the bot last woke after a death, else the world spawn,
+with its distance (null in another dimension). The last wake is an observation, not a promise of the next respawn.
+The text carries them as one `Condition facts:` line under the best tools.
 
 The `mobility` section answers what the carried inventory unlocks, which the
 stack list alone does not say: a route falls at most three blocks unassisted,
@@ -248,6 +249,10 @@ of unread events and atomically advanced the bot's read cursor to the highest
 returned event ID. It remains available during foreground execution; its event
 cursor is independent of foreground result retrieval. Defined in
 [src/actions/read-recent-events/contract.ts](../../src/actions/read-recent-events/contract.ts).
+
+### `view_item_family`
+
+Use `view_item_family` with `family` (an item family such as `sign`) to list its `members` in registry order. The result includes the requested `family` and does not change the world.
 
 ### `view_crafting_requirements`
 
@@ -525,7 +530,7 @@ Defined in
 
 ### `pick_up_items`
 
-`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, and disappearance without a confirmed gain.
+`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, a confirmed take by another entity (`taken_by_other`, with its name in nullable `takenBy`), and disappearance without a confirmed gain.
 
 Recovery refuses after five minutes of wall time as a conservative boundary. Minecraft advances a dropped item's despawn age only while its chunk is loaded, so wall-clock age cannot establish that older drops have despawned.
 

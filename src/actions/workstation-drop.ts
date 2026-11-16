@@ -83,7 +83,7 @@ export async function recoverWorkstationDrop(
     result.kind === "inventory_full"
       ? result.reason
       : result.kind === "item_gone"
-        ? "it vanished before entering the inventory"
+        ? result.takenBy ? `it was taken by ${result.takenBy.name ?? "an entity"} #${result.takenBy.entityId}` : "it vanished before entering the inventory"
         : "the walk onto it did not reach it";
   return { status: "failed", error: `the dropped ${name} was seen but not picked up: ${reason} (drop pickup walk)` };
 }

@@ -205,6 +205,19 @@ CREATE TABLE IF NOT EXISTS frontier_chunk_biomes (
     ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE IF NOT EXISTS observed_signs (
+  sign_key TEXT PRIMARY KEY CHECK (sign_key = dimension || '|' || block_x || '|' || block_y || '|' || block_z),
+  dimension TEXT NOT NULL,
+  block_x INTEGER NOT NULL,
+  block_y INTEGER NOT NULL,
+  block_z INTEGER NOT NULL,
+  block_name TEXT NOT NULL,
+  front_json TEXT NOT NULL CHECK (json_valid(front_json) AND json_type(front_json) = 'array'),
+  back_json TEXT NOT NULL CHECK (json_valid(back_json) AND json_type(back_json) = 'array'),
+  placed_by_bot_id TEXT,
+  observed_at TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS observed_containers (
   container_key TEXT PRIMARY KEY,
   dimension TEXT NOT NULL,
@@ -468,6 +481,17 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'action_executions', 'action_id', 'Stable execution identity used for waiting and cancellation.'),
   ('main', 'action_executions', 'submission_id', 'Caller retry key; repeating it returns this execution without repeating world effects.'),
   ('main', 'action_executions', 'record_json', 'Original request identity, arguments, rationale, admission time, checkpoint, terminal output and resultRetrieved flag. Checkpoints can be stale; terminal null means settlement is not durably recorded.'),
+  ('main', 'observed_signs', NULL, 'Last observed sign text and conservative attribution at a world location.'),
+  ('main', 'observed_signs', 'sign_key', 'World-relative key formatted as dimension|block_x|block_y|block_z.'),
+  ('main', 'observed_signs', 'dimension', 'Dimension containing the sign.'),
+  ('main', 'observed_signs', 'block_x', 'Sign block X coordinate.'),
+  ('main', 'observed_signs', 'block_y', 'Sign block Y coordinate.'),
+  ('main', 'observed_signs', 'block_z', 'Sign block Z coordinate.'),
+  ('main', 'observed_signs', 'block_name', 'Observed sign block name.'),
+  ('main', 'observed_signs', 'front_json', 'Four observed front text lines as a JSON array.'),
+  ('main', 'observed_signs', 'back_json', 'Four observed back text lines as a JSON array.'),
+  ('main', 'observed_signs', 'placed_by_bot_id', 'Bot that placed the sign, null if unknown or the observation changed.'),
+  ('main', 'observed_signs', 'observed_at', 'UTC timestamp of the latest observation.'),
   ('main', 'observed_containers', NULL, 'Last complete occupied-slot layout observed when a bot opened each location-owned storage container.'),
   ('main', 'observed_containers', 'container_key', 'Stable world-relative key formatted as dimension|block_x|block_y|block_z.'),
   ('main', 'observed_containers', 'dimension', 'Mineflayer dimension containing the container.'),

@@ -63,6 +63,7 @@ export const personaSchema = z.strictObject({
   skills: z.array(z.enum(SKILL_NAMES)).min(1).optional(),
   /** Preferences as settings, not code paths (ADR-011). */
   settings: z.strictObject({
+    signLineChars: z.number().int().min(5).max(45).default(15),
     /** Model calls per minute for its own goal; orders and chat are never held back. */
     goalCallsPerMinute: z.number().int().min(1).max(120).default(6),
     /** Steps one objective may take before the character gives it up. */

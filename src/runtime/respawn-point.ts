@@ -1,12 +1,10 @@
 /** Where the bot would wake after a death, and what it wears: the two reads a player death record (`death-context.ts`) and `view_status` share. */
 import type { Bot } from "mineflayer";
-import { personalRespawnObservation } from "../actions/portal-entry/respawn-knowledge.js";
+import { lastWake, personalRespawnObservation } from "../actions/portal-entry/respawn-knowledge.js";
 import type { PlayerDeathContext } from "../bot-data/event-log.js";
 
 /**
- * The bed the bot slept in this session, else the world spawn. A bed set before a host restart reads as world spawn and a
- * bed broken since still reads as a bed (`respawn-knowledge.ts`); the analysis corrects both. The world spawn is the
- * overworld's, which is where a death without a bed wakes the bot.
+ * The bed slept in this session, else the last observed wake, else the world spawn. A wake is not a promise of the next.
  */
 export function respawnPoint(bot: Bot): PlayerDeathContext["respawn"] {
   const here = bot.entity.position;
@@ -14,6 +12,8 @@ export function respawnPoint(bot: Bot): PlayerDeathContext["respawn"] {
     bot.game.dimension === dimension ? Math.hypot(point.x - here.x, point.y - here.y, point.z - here.z) : null;
   const bed = personalRespawnObservation(bot);
   if (bed) return { kind: "bed", dimension: bed.dimension, ...bed.position, distance: distanceTo(bed.dimension, bed.position) };
+  const wake = lastWake(bot);
+  if (wake) return { kind: "last_wake", dimension: wake.dimension, ...wake.position, distance: distanceTo(wake.dimension, wake.position) };
   const spawn = bot.spawnPoint;
   if (!spawn) return null;
   return {

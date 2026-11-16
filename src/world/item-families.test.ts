@@ -7,7 +7,22 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFakeBot, type FakeHarness } from "../test-support/fake-bot/index.js";
 import { watchServerTags } from "./server-tags.js";
-import { createFamilyIndex, familyIndexOf, hasItemFamily, loadFamilyOverrides } from "./item-families.js";
+import { blockFamilyMembers, createFamilyIndex, familyIndexOf, familyMembers, hasItemFamily, loadFamilyOverrides, signBlockFor } from "./item-families.js";
+
+test("sign families and block placement variants follow registry data", () => {
+  for (const version of ["1.21.4", "1.19.4"]) {
+    const { bot } = createFakeBot({ version });
+    assert.ok(familyMembers(bot, "sign").includes("oak_sign"));
+    assert.ok(!familyMembers(bot, "sign").includes("oak_hanging_sign"));
+    assert.ok(blockFamilyMembers(bot, "sign").includes("oak_sign"));
+    assert.ok(blockFamilyMembers(bot, "sign").includes("oak_wall_sign"));
+    for (const wood of ["oak", "spruce"]) {
+      assert.equal(signBlockFor(bot, `${wood}_sign`, "ground"), `${wood}_sign`);
+      assert.equal(signBlockFor(bot, `${wood}_sign`, "wall"), `${wood}_wall_sign`);
+    }
+    assert.equal(signBlockFor(bot, "stick", "ground"), null);
+  }
+});
 
 const OVERRIDE_DIR = fileURLToPath(new URL("./data/item-families/", import.meta.url));
 

@@ -39,6 +39,33 @@ test("a trial submitted during a build waits for it, the wait line names the bui
   });
 });
 
+test("a finished build's template size is read before the trials it held start: the first servers admitted after it reserve their world (ledger of Task 5)", async () => {
+  await withRigs(async (builds, rig) => {
+    let release!: () => void;
+    builds.sizeGate = new Promise<void>(resolve => { release = resolve; });
+    rig.sample();
+    await builds.startIfDue();
+    rig.submit([{ name: "a", placement: lanePlacement("k") }]);
+    builds.calls[0]!.finish({ ok: true, dir: builtDir(builds) });
+    await rig.settle();
+    assert.deepEqual(builds.sizeReads, [BUILD_VERSION], "asked once, for the built version");
+    assert.deepEqual(rig.runningNames(), [], "the end waits for the size: nothing started yet");
+    assert.notEqual(builds.builds.active, null);
+    release();
+    await rig.settle();
+    assert.deepEqual(rig.runningNames(), ["a"], "then the held trial starts");
+  });
+});
+
+test("a build that failed or was cut reads no size", async () => {
+  await withRigs(async builds => {
+    await builds.startIfDue();
+    builds.calls[0]!.finish({ ok: false, reason: "server did not start", bound: false });
+    await builds.settle();
+    assert.deepEqual(builds.sizeReads, []);
+  });
+});
+
 test("the build's server counts in the ledger as one busy server: its heap and overhead, less what it holds, until it ends", async () => {
   await withRigs(async (builds, rig) => {
     rig.sample();

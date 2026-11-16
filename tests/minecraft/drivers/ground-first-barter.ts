@@ -18,6 +18,7 @@ export const run: ScenarioRun = async (context) => {
     .reduce((sum, item) => sum + item.count, 0);
   const actualGoldSpent = goldCount(before.situation.inventory.stacks) - goldCount(after.situation.inventory.stacks);
   assert.equal(result.status, "succeeded", output.summary);
+  assert.deepEqual(result.barter.dropsTakenByOthers, []);
   assert.equal(actualGoldSpent, 0);
   assert.equal(result.barter.goldSpent, actualGoldSpent);
   assert.equal(result.barter.goldOffers, 0);

@@ -9,6 +9,39 @@ import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
 
+const signInput = { persona: testPersona(), occasion: "claim" as const, owner: "Steve", what: "a house" };
+
+test("signLines: persona first, the owner named, tier sign logged", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.chat.reply({ lines: ["Welcome"] });
+  assert.deepEqual(await mind.signLines(signInput, signal), ["Welcome"]);
+  assert.ok(models.chat.requests[0]?.[0]?.content.startsWith(personaPrompt(signInput.persona)));
+  assert.match(models.chat.requests[0]?.[1]?.content ?? "", /Steve/u);
+  assert.equal(calls[0]?.tier, "sign");
+});
+
+test("two bad replies: no lines", async () => {
+  const content = { lines: ["1234567890123456"] };
+  const schema = { lines: null };
+  for (const [first, second] of [[content, { lines: ["a", "b", "c", "d"] }], [schema, schema], [content, schema], [schema, content], ["not json", "still not json"]]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(first, second, { lines: ["THIRD"] });
+    assert.deepEqual(await mind.signLines(signInput, signal), []);
+    assert.equal(chat.requests.length, 2);
+  }
+});
+
+test("invalid sign replies are sent back once", async () => {
+  for (const reply of [{ lines: ["a", "b", "c", "d"] }, { lines: ["1234567890123456"] }, ...["-1 64 23", "hello\nthere", "hello\rthere"].map((line) => ({ lines: [line] })), "not json"]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(reply, { lines: ["welcome"] });
+    assert.deepEqual(await mind.signLines(signInput, signal), ["welcome"]);
+    assert.equal(chat.requests.length, 2);
+  }
+});
+
 /** A chat line from Steve; addressed to her unless said otherwise (only those start a conversation: owner rule). */
 function chatInput(message: string, addressed = true): ChatInput {
   return {

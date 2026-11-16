@@ -8,6 +8,7 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { FakeCell, FakeHarness, ShotProjectile, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
+import { createMeasureReader } from "./checks/combat-data-measure.ts";
 
 /** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
 export type LocalPoint = readonly [number, number, number];
@@ -31,6 +32,10 @@ export interface ContractSubject {
   seatedOnServer(vehicle: Entity): Promise<boolean>;
   /** The world's spawn the server told the client (the `spawn_position` packet, `bot.spawnPoint`): a world position, in the world and not in the lane. The fake sends no such packet and answers its respawn point, which a night in a bed moves. */
   worldSpawn(): Vec3;
+  /** The server sets the bot's own spawn point at a world cell; resolves once the server ran it. */
+  setSpawnPoint(cell: Vec3): Promise<void>;
+  /** The player-data key form and coordinates the server holds for the command-set point. */
+  spawnPointKeys(): Promise<string>;
   /** Set the weather on the server (`/weather`); the levels then ramp, and the client hears each step. */
   setWeather(weather: Weather): Promise<void>;
   /** The server spawns `stack` as an item entity at `position` (a world position: `world` of a local one), pickable after `pickupDelayTicks`; resolves with it once the client has it. */
@@ -45,6 +50,8 @@ export interface ContractSubject {
   explode(position: Vec3): Promise<void>;
   /** The server summons the mob `name` at `position` (a world position) with the raw SNBT `nbt` (the fake reads none: its mobs have no AI); resolves with it once the client has it. */
   summonMob(name: string, position: Vec3, nbt?: string): Promise<Entity>;
+  /** Wait for a mob to collect the item; the fake delivers the measured answer. */
+  mobTakesItem(mob: Entity, item: Entity, count: number): Promise<void>;
   /** The server removes a mob it summoned (`/kill`); resolves once the client no longer has it. */
   removeMob(mob: Entity): Promise<void>;
   /** A fireball (a ghast's) is summoned at `position` flying with `motion` (blocks a tick) and a small acceleration, with no block broken by its blast (the `mobGriefing` game rule is off until `clearFireballs`: a server-wide rule); resolves with it once the client has it. */
@@ -294,6 +301,15 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
     seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
     // The fake sends no `spawn_position` (no measured answer to copy): its world spawn is the point it respawns her at (`fake-harness.ts`).
     worldSpawn: () => server.respawnPoint!.clone(),
+    async setSpawnPoint(cell) {
+      // The initial position packet is 0.1 above the cell (respawn-at-set-point, real 1.21.4, 2026-11-16).
+      await afterAnswer(() => server.setRespawnPoint(cell.offset(0.5, 0.1, 0.5)), "setSpawnPoint");
+    },
+    async spawnPointKeys() {
+      // Measured by respawn-at-set-point on real 1.21.4 (2026-11-16); the fake stores the packet position.
+      const cell = server.respawnPoint!.floored();
+      return `SpawnX:${cell.x},SpawnY:${cell.y},SpawnZ:${cell.z}`;
+    },
     async setWeather(weather) {
       server.answer(() => server.setWeather(weather));
       await clock.advance(50);
@@ -313,6 +329,9 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       await afterAnswer(() => combat.explode(position), "explode");
     },
     summonMob: (name, position) => afterAnswer(() => entities.spawn({ name, position }), "summonMob"),
+    async mobTakesItem(mob, item, count) {
+      await afterAnswer(() => entities.takenBy(mob, item, count), "mobTakesItem");
+    },
     async removeMob(mob) {
       await afterAnswer(() => entities.remove(mob.id), "removeMob");
     },
@@ -351,6 +370,24 @@ async function commandUntil(bot: Bot, command: string, cell: Vec3, name: string)
   }
 }
 
+/** Wait up to 200 server ticks for the named mob's collect. */
+async function waitForMobPickup(bot: Bot, clock: Pick<ContractSubject, "now" | "wait">, mob: Entity, item: Entity): Promise<void> {
+  let collected = false;
+  let startAge: number | null = bot.time.age;
+  const onCollect = (collector: Entity, entity: Entity) => { if (collector.id === mob.id && entity.id === item.id) collected = true; };
+  bot.on("playerCollect", onCollect);
+  try {
+    const finished = await holdsWhileMoving(clock, () => {
+      const age: number | null = bot.time.age;
+      if (age !== null) startAge ??= age;
+      return collected || (age !== null && startAge !== null && age - startAge >= 219);
+    }, () => bot.time.age, 10_000);
+    if (!finished || !collected) throw new Error("mobTakesItem: no matching collect within 200 server ticks");
+  } finally {
+    bot.off("playerCollect", onCollect);
+  }
+}
+
 /** A real server's subject: wall time, and op commands sent as chat (the fixture's player is op). */
 export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubject {
   const at = (cell: Vec3) => `${cell.x} ${cell.y} ${cell.z}`;
@@ -378,6 +415,19 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       await commandUntil(bot, `setblock ${at(cell)} ${blockArgument(block)}`, cell, name);
     },
     worldSpawn: () => bot.spawnPoint.clone(),
+    async setSpawnPoint(cell) {
+      const [answer] = await createMeasureReader(this).read([`run spawnpoint ${bot.username} ${at(cell)}`]);
+      if (!answer?.present) throw new Error(`spawnpoint ${bot.username} ${at(cell)} failed: check the cell and operator permission`);
+    },
+    async spawnPointKeys() {
+      const reader = createMeasureReader(this);
+      const keys = ["SpawnX", "SpawnY", "SpawnZ"];
+      const legacy = await reader.read(keys.map((key) => `run data get entity ${bot.username} ${key}`));
+      if (legacy.every(({ present }) => present)) return keys.map((key, index) => `${key}:${legacy[index]!.raw}`).join(",");
+      const compound = await reader.read([0, 1, 2].map((index) => `run data get entity ${bot.username} respawn.pos[${index}]`));
+      if (compound.every(({ present }) => present)) return `respawn:{pos:[I;${compound.map(({ raw }) => raw).join(",")}]}`;
+      throw new Error(`no complete SpawnX/Y/Z or respawn.pos player data for ${bot.username}: check the server version and spawnpoint command`);
+    },
     async seatedOnServer() {
       // Commands run in order: once the sentinel is set, the probe holds what the `on vehicle` branch did.
       bot.chat(`/execute as ${bot.username} on vehicle run setblock ${at(probe)} ${MARKER_BLOCK}`);
@@ -396,6 +446,7 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
       bot.chat(`/summon item ${at(position)} {Item:{id:"minecraft:${stack.name}",count:${stack.count}},PickupDelay:${pickupDelayTicks}s}`);
       return spawned;
     },
+    mobTakesItem: (mob, item) => waitForMobPickup(bot, { now, wait }, mob, item),
     async hurtBot(amount, sourceId) {
       const heard = heardWithin(bot, "entityHurt", (entity: Entity) => entity === bot.entity, "/damage");
       const source = sourceId === null ? "minecraft:generic" : `minecraft:mob_attack by ${selectorOf(bot.entities[sourceId]!)}`;

@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld, movementStep, routePlan } from "../../test-support/navigation.js";
 import type { EffectHandle } from "../bot.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
@@ -17,13 +17,12 @@ import { RouteExecutor } from "./route-executor.js";
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
 const BREAK_AT = { x: 1, y: 63, z: 0 };
 const FLOATING_ANDESITE_MS = 14_100;
-const MINIMUM_DEADLINE_MS = 5_000;
 
 /** A ledger that remembers the deadline each expectation was given. */
 class DeadlineLedger extends ExpectedMutationLedger {
   readonly deadlines: number[] = [];
   override expect(input: Parameters<ExpectedMutationLedger["expect"]>[0]) {
-    this.deadlines.push(input.deadlineMs);
+    this.deadlines.push(input.deadline.ticks);
     return super.expect(input);
   }
 }
@@ -73,7 +72,6 @@ async function startBreak(bot: FakeNavigationBot, step: PlannedStep) {
   world.load(BREAK_AT, { stateId: 2 });
   const ledger = new DeadlineLedger();
   const controller = new AbortController();
-  const startedAt = monotonicNow();
   const execution = new RouteExecutor({
     context: { runId: "run", world, bot, ledger, signal: controller.signal },
     passages: new OpenedPassages(world, bot.observe().dimension),
@@ -86,57 +84,28 @@ async function startBreak(bot: FakeNavigationBot, step: PlannedStep) {
   }).execute();
   await nextTurn();
   assert.equal(ledger.deadlines.length, 1, "the break registers one expectation");
-  return { ledger, deadlineIn: ledger.deadlines[0]! - startedAt, execution, abort: () => controller.abort() };
+  return { ledger, deadlineIn: ledger.deadlines[0]!, execution, abort: () => controller.abort() };
 }
 
-/** The deadline is `expected` ms after the start, give or take the time the test itself took. */
-function assertDeadlineIn(actual: number, expected: number, message: string) {
-  assert.ok(actual >= expected && actual < expected + 1_000, `${message}: ${actual} ms, wanted ${expected}`);
-}
-
-test("a dry grounded dig keeps the 5 s minimum deadline", async () => {
-  const run = await startBreak(new TimedDiggingBot(600), breakStep(12));
-  assertDeadlineIn(run.deadlineIn, MINIMUM_DEADLINE_MS, "dry dig");
-  run.abort();
-  await run.execution;
-});
-
-test("a floating dig of 14.1 s gets twice its dig time", async () => {
-  const bot = new TimedDiggingBot(FLOATING_ANDESITE_MS);
-  const run = await startBreak(bot, breakStep(12));
-  assertDeadlineIn(run.deadlineIn, 2 * FLOATING_ANDESITE_MS, "floating dig");
-  assert.equal((bot.asked[0] as { position: unknown }).position, BREAK_AT, "asked about the operation it runs");
-  run.abort();
-  await run.execution;
-});
-
-test("a planned cost above the real dig time still sets the deadline", async () => {
-  const run = await startBreak(new TimedDiggingBot(600), breakStep(400));
-  assertDeadlineIn(run.deadlineIn, 2 * 400 * 50, "planned 20 s");
-  run.abort();
-  await run.execution;
-});
-
-test("a falling column's settling time is added on top of the dig time", async () => {
+test("route confirmation budgets cover live digs, planned work, falling columns and unknown durations", async () => {
   const brings = [{ x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 }];
-  const run = await startBreak(new TimedDiggingBot(FLOATING_ANDESITE_MS), breakStep(12, brings));
-  assertDeadlineIn(run.deadlineIn, 2 * FLOATING_ANDESITE_MS + 2 * 3_000, "floating dig under a column");
-  run.abort();
-  await run.execution;
-});
-
-test("an unloaded block keeps the planned deadline", async () => {
-  const run = await startBreak(new TimedDiggingBot(null), breakStep(12));
-  assertDeadlineIn(run.deadlineIn, MINIMUM_DEADLINE_MS, "unloaded block");
-  run.abort();
-  await run.execution;
-});
-
-test("a bot that cannot tell its dig time keeps the planned deadline", async () => {
-  const run = await startBreak(new DiggingBot(), breakStep(12));
-  assertDeadlineIn(run.deadlineIn, MINIMUM_DEADLINE_MS, "bot without longestBreakDurationMs");
-  run.abort();
-  await run.execution;
+  for (const [label, digMs, plannedTicks, column, budget] of [
+    ["dry grounded", 600, 12, [], 100],
+    ["floating", FLOATING_ANDESITE_MS, 12, [], 564],
+    ["planned above actual", 600, 400, [], 800],
+    ["falling column", FLOATING_ANDESITE_MS, 12, brings, 1288],
+    ["unloaded", null, 12, [], 100],
+    ["no duration method", undefined, 12, [], 100],
+  ] as const) {
+    const bot = digMs === undefined ? new DiggingBot() : new TimedDiggingBot(digMs);
+    const run = await startBreak(bot, breakStep(plannedTicks, column));
+    try {
+      assert.equal(run.deadlineIn, budget, label);
+      if (bot instanceof TimedDiggingBot) {
+        assert.equal(bot.asked[0]?.kind === "break" && bot.asked[0].position, BREAK_AT, "asked about the operation it runs");
+      }
+    } finally { run.abort(); await run.execution; }
+  }
 });
 
 test("a cancel during the long dig ends the step at once and leaves no expectation behind", async () => {
@@ -167,11 +136,16 @@ test("the confirmation deadline counts monotonic time: a 1.2 s wall step forward
 });
 
 test("a block that never changes expires at the longer deadline, with the step failing on the confirmation", async () => {
-  const run = await startBreak(new TimedDiggingBot(FLOATING_ANDESITE_MS), breakStep(12));
-  run.ledger.expire(run.ledger.deadlines[0]! - 1);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const fake = createFakeBot({ clock });
+  const bot = Object.assign(new TimedDiggingBot(FLOATING_ANDESITE_MS), { worldAge: () => fake.bot.time.age });
+  const run = await startBreak(bot, breakStep(12));
+  // The first +20 packet past the 564-tick budget is at 29 s (+580 ticks).
+  await clock.advance(28_975, 25);
   await nextTurn();
   assert.equal(run.ledger.activeCount, 1, "not expired a moment before the deadline");
-  run.ledger.expire(run.ledger.deadlines[0]!);
+  await clock.advance(50, 25);
   const result = await run.execution;
   assert.equal(result.kind, "failed");
   assert.match(JSON.stringify(result), /Server confirmation deadline elapsed/);

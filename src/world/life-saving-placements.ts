@@ -8,11 +8,10 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { saveBotNote } from "../actions/note-save/note-save.js";
 import type { SqlBotData } from "../bot-data/sql-bot-data.js";
-import { createMovements, customGoal, DIG_REACH, isSafeSupport, liveBlockReader, watchServerChange, type Navigate } from "../navigation/index.js";
+import { bodyDependsOnBlock, createMovements, customGoal, DIG_REACH, liveBlockReader, watchServerChange, type Navigate } from "../navigation/index.js";
 import { monotonicNow } from "../utils/monotonic-clock.js";
 import { raceSignal } from "../utils/race-signal.js";
 import { observedEyeHeight, visibleBlockAim } from "./block-visibility.js";
-import { footprintStandsOnCell } from "./player-physics.js";
 import { describeProtectedRegion, foreignRegionAt, regionChangeRefusal, type BlockCorner, type ProtectedRegion } from "./protected-regions.js";
 
 export type LifeSavingKind = "block" | "water";
@@ -101,11 +100,10 @@ function forgetPlacement(bot: Bot, entry: LifeSavingPlacement): void {
 /**
  * A block that carries the body cannot be removed from under it; approach from another safe stance first. The body
  * stands on the cell when any of its 0.6-wide footprint is over it and no other column under the footprint carries it
- * (`footprintStandsOnCell`): the centre of the feet over the neighbouring drop is no reason to dig (P4-34).
+ * (`bodyDependsOnBlock`): the centre of the feet over the neighbouring drop is no reason to dig (P4-34).
  */
 function removalAim(bot: Bot, cell: Vec3, feet = bot.entity.position): Vec3 | null {
-  const read = liveBlockReader(bot);
-  if (Math.floor(feet.y) - 1 === cell.y && footprintStandsOnCell(feet, cell, (x, y, z) => isSafeSupport(read(x, y, z)))) return null;
+  if (bodyDependsOnBlock(feet, false, cell, liveBlockReader(bot))) return null;
   const block = bot.blockAt(cell);
   if (!block) return null;
   const eye = feet.offset(0, observedEyeHeight(bot.entity), 0);

@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import { z } from "zod";
-import { familyIndexOf, type FamilyIndex, type ItemFamily, type RankedItem } from "./item-families.js";
+import { familyIndexOf, familyMembers, type FamilyIndex, type ItemFamily, type RankedItem } from "./item-families.js";
 
 /** The families the snapshot keeps one best item of (the vocabulary is the family map's keys; `satisfies` checks it). */
 const TOOL_FAMILIES = ["pickaxe", "shovel", "axe", "sword", "hoe", "shears", "bow", "shield"] as const satisfies readonly ItemFamily[];
@@ -72,24 +72,10 @@ export function rankedItem(entry: Pick<ToolSnapshotEntry, "item" | "maximumDurab
   return { name: entry.item!, ...(entry.maximumDurability === null ? {} : { maxDurability: entry.maximumDurability }) };
 }
 
-const membersByIndex = new WeakMap<FamilyIndex, Map<ItemFamily, readonly string[]>>();
-
-/** The registry's items of a family, read once per index (a tags packet makes a new index). */
-function familyMembers(bot: Bot, index: FamilyIndex, family: ItemFamily): readonly string[] {
-  const cache = membersByIndex.get(index) ?? new Map<ItemFamily, readonly string[]>();
-  membersByIndex.set(index, cache);
-  let members = cache.get(family);
-  if (members === undefined) {
-    members = bot.registry.itemsArray.map((item) => item.name).filter((name) => index.itemFamilies(name).includes(family));
-    cache.set(family, members);
-  }
-  return members;
-}
-
 function rankOf(bot: Bot, index: FamilyIndex, kind: EquipmentClass, item: RankedItem): number {
   const family = rankFamily(kind);
   if (family === null) return 1;
-  return 1 + familyMembers(bot, index, family).filter((member) => index.compareRank(item, { name: member }, family) < 0).length;
+  return 1 + familyMembers(bot, family).filter((member) => index.compareRank(item, { name: member }, family) < 0).length;
 }
 
 /** Durability left and the maximum of a carried item; both null for an item with no durability. */

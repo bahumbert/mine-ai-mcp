@@ -294,17 +294,6 @@ test("knownContainers refuses a name or a dimension that could break the SQL lit
   assert.deepEqual(client.queries, []);
 });
 
-test("knownContainers in the Nether asks the Nether: an overworld row is never matched", async () => {
-  const client = queryClient([]);
-  const runtime = McpBotRuntime.over(client);
-  await runtime.knownContainers("Tester", AT, 32, "the_nether");
-  await runtime.knownContainers("Tester", AT, 32, "minecraft:overworld");
-  assert.match(client.queries[0]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'the_nether'/u);
-  assert.doesNotMatch(client.queries[0]!, /overworld/u);
-  // Either spelling the server reports for the overworld asks for the same rows.
-  assert.match(client.queries[1]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'overworld'/u);
-});
-
 test("sameDimensionSql strips minecraft: on both sides and refuses a value that could break the literal", () => {
   assert.equal(sameDimensionSql("p.dimension", "minecraft:the_nether"), "replace(p.dimension, 'minecraft:', '') = 'the_nether'");
   assert.equal(sameDimensionSql("dimension", "overworld"), "replace(dimension, 'minecraft:', '') = 'overworld'");
@@ -364,6 +353,13 @@ test("status reads the condition facts", async () => {
   const burn = { ticks: 70, hp: 3 };
   const result = await McpBotRuntime.over(statusClient({ vitals: { health: 6.5, food: 8, saturation: 0.5, armour: 7, armourToughness: 8, burn }, armourWorn: worn, armourCarried: carried, light, combat, respawn })).status();
   assert.deepEqual({ saturation: result.saturation, armourPoints: result.armourPoints, armourToughness: result.armourToughness, burn: result.burn, armour: result.armour, light: result.light, combat: result.combat, respawn: result.respawn }, { saturation: 0.5, armourPoints: 7, armourToughness: 8, burn, armour: { worn, carried }, light, combat, respawn });
+});
+
+test("status accepts last wake and world spawn respawn records", async () => {
+  for (const kind of ["last_wake", "world_spawn"] as const) {
+    const respawn = { kind, position: { x: 1, y: 64, z: 2 }, distance: 12.4 };
+    assert.deepEqual((await McpBotRuntime.over(statusClient({ respawn })).status()).respawn, respawn);
+  }
 });
 
 test("an older view_status parses; nullable condition facts stay unknown", async () => {

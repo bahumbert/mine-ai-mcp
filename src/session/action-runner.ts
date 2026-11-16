@@ -386,6 +386,17 @@ export class ActionRunner {
           ? { ...evidence, checkpoint: definition.checkpointSchema.parse(evidence.checkpoint) } : evidence;
       };
     };
+    return this.#runAdmitted(definition, request, invocation, observeProgress, signal);
+  }
+
+  /** Executes an admitted request, preserving its progress when a reflex hands the body back. */
+  async #runAdmitted<Name extends string, Request, Result extends ActionResult>(
+    definition: Action<Name, Request, Result>,
+    request: Request,
+    invocation: AdmittedRequest,
+    observeProgress: (read: () => RequestEvidence) => void,
+    signal?: AbortSignal,
+  ): Promise<ActionOutput<Name, Result>> {
     this.#admittedRequest = invocation;
     for (const state of this.#reflexStates.values()) invocation.progress.reflexActivity({ kind: "active", state });
     const startedAtMs = monotonicNow();
@@ -432,7 +443,11 @@ export class ActionRunner {
       }
       if (!resumable) return measured(definition.name, startedAtMs, result, interruptions);
       if (verdict.kind !== "resume") {
-        if (verdict.kind === "return" && verdict.reason) interruptions.push(verdict.reason);
+        if (verdict.kind === "return" && verdict.reason) {
+          interruptions.push(verdict.reason);
+          result = result.status === "cancelled" && !result.error?.endsWith(verdict.reason)
+            ? { ...result, error: `${result.error} ${verdict.reason}` } : result;
+        }
         return measured(definition.name, startedAtMs, result, interruptions);
       }
       if (invocation.lifetime.signal.aborted) return measured(definition.name, startedAtMs, result, interruptions);

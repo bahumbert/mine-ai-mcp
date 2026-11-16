@@ -64,14 +64,6 @@ test("the unsubscribe removes every listener it added, once or twice", () => {
 
 const CELL = { x: 3, y: 63, z: 4 };
 
-test("a watch answers when the server names its cell, even before anyone waits", async () => {
-  const { bot, client, clock } = wire();
-  const watch = watchServerChange(bot, CELL);
-  client.emit("block_change", { location: CELL, type: 0 });
-  assert.equal(await watch.answer(new AbortController().signal, clock), true);
-  watch.dispose();
-});
-
 for (const ticksPerSecond of [2, 4]) {
   test(`a server at ${ticksPerSecond} tps answers after 9 s`, async () => {
     const { bot, client, clock } = wire({ ticksPerSecond });
@@ -107,7 +99,7 @@ test("a 2 tps server behind schedule answers after two packets 10 500 ms apart",
   }
 });
 
-for (const { ticksPerSecond, boundMs } of [{ ticksPerSecond: 20, boundMs: 2_000 }, { ticksPerSecond: 2, boundMs: 20_000 }]) {
+for (const { ticksPerSecond, boundMs } of [{ ticksPerSecond: 20, boundMs: 2_000 }, { ticksPerSecond: 10, boundMs: 4_000 }, { ticksPerSecond: 2, boundMs: 20_000 }]) {
   test(`40 ticks with no answer at ${ticksPerSecond} tps gives up at the second jump, ignoring another cell`, async () => {
     const { bot, client, clock } = wire({ ticksPerSecond });
     const watch = watchServerChange(bot, CELL);
@@ -150,4 +142,36 @@ test("disposing a watch removes its listeners", () => {
   watch.dispose();
   watch.dispose();
   assert.equal(client.listenerCount("block_change"), before);
+});
+
+test("next skips unbroken states, retains packet state despite client writes, and keeps a later landing", async () => {
+  const { bot, world, client, clock } = wire();
+  const cell = new Vec3(CELL.x, CELL.y, CELL.z);
+  world.setCell(cell, "sand");
+  const sand = world.blockAt(cell)!.stateId;
+  const watch = watchServerChange(bot, CELL);
+  const packet = (state: string) => {
+    world.setCell(cell, state);
+    client.emit("block_change", { location: CELL, type: world.blockAt(cell)?.stateId ?? 0 });
+  };
+  packet("sand");
+  assert.equal(await watch.answer(new AbortController().signal, clock), true, "an unbroken resend answers resync even before a wait");
+  world.setCell(cell, "air"); // Mineflayer's prediction cannot revise the kept packet.
+  const removal = watch.next(new AbortController().signal, -1, state => state.stateId !== null && state.stateId !== sand, clock);
+  const pending = watchPending(removal);
+  await clock.advance(100);
+  assert.equal(pending.over, false);
+  packet("air");
+  packet("sand"); // both packets before the next poll
+  const removed = await clock.settle(removal, 50);
+  assert.notEqual(removed, "none");
+  assert.notEqual(removed, "stalled");
+  if (typeof removed === "string") assert.fail(removed);
+  assert.equal(removed.index, 1);
+  assert.equal(removed.state.stateId, 0);
+  const landed = await watch.next(new AbortController().signal, removed.index, state => state.solid, clock);
+  assert.equal(typeof landed === "object" && landed.index, 2);
+  assert.equal(typeof landed === "object" && landed.state.stateId, sand);
+  assert.equal(await watch.answer(new AbortController().signal, clock), true);
+  watch.dispose();
 });

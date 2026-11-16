@@ -41,6 +41,7 @@ export const SHRINK_ORDER: Readonly<Record<MindTier, readonly string[]>> = {
   goal: ["lately", "players", "areas", "hints"],
   chat: ["players", "areas", "history"],
   narrate: ["history"],
+  sign: [],
 };
 
 /** The level's cap on a list (the last level's value for a level past the table). */

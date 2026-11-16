@@ -256,7 +256,9 @@ class WindowServer implements FakeWindowServer {
   }
 
   private menuAt(location: Vec3): string | undefined {
-    return MENU_OF_BLOCK[this.parts.world.blockAt(location)?.name ?? ""];
+    const name = this.parts.world.blockAt(location)?.name ?? "";
+    const key = `minecraft:${name}`;
+    return MENU_OF_BLOCK[name] ?? (this.windowLibrary.windows[key] === undefined ? undefined : key);
   }
 
   private recordAt(key: string, menu: string): ContainerRecord {
@@ -371,7 +373,7 @@ class WindowServer implements FakeWindowServer {
     const stale = click.stateId !== (this.stateIds.get(window.id) ?? -1);
     const claimed = window.slots.map((item) => this.copy(item));
     try {
-      if (click.mode === SHIFT_CLICK) quickMove(window, click.slot, this.stackMoves);
+      if (click.mode === SHIFT_CLICK) quickMove(window, click.slot, this.stackMoves, this.windowLibrary.windows[String(window.type)]?.craft);
       else window.acceptClick({ slot: click.slot, mouseButton: click.mouseButton, mode: click.mode, windowId: window.id, item: window.slots[click.slot] ?? null });
     } catch {
       return; // a click the library rejects as invalid changes nothing

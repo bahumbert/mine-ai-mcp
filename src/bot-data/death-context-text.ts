@@ -8,7 +8,7 @@ export function describeDeathContext(context: PlayerDeathContext): string {
     ? `${context.lastAlive.health} (${(context.lastAlive.msBefore / 1000).toFixed(1)} s before)`
     : "not seen";
   const { respawn } = context;
-  const place = respawn?.kind === "bed" ? "bed" : "world spawn";
+  const place = respawn?.kind === "bed" ? "bed" : respawn?.kind === "last_wake" ? "where it last woke," : "world spawn";
   const wakes = !respawn
     ? "unknown"
     : respawn.distance === null

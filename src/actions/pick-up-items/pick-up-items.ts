@@ -18,13 +18,14 @@ const STALE_RECOVERY_MS = 5 * 60_000;
 type Point = {
   x: number; y: number; z: number
 };
-type Outcome = 'collected'|'gone_unconfirmed'|'unreachable'|'inventory_full';
+type Outcome = 'collected'|'taken_by_other'|'gone_unconfirmed'|'unreachable'|'inventory_full';
 interface Target {
   id: number;
   item: string;
   observedCount: number;
   position: Point;
   outcome: Outcome|null;
+  takenBy: string|null;
   collectedEvent: boolean
 }
 interface State {
@@ -75,6 +76,7 @@ function scan(
              observedCount: itemCount(entity),
              position: {x: entity.position.x, y: entity.position.y, z: entity.position.z},
              outcome: null,
+             takenBy: null,
              collectedEvent: false
            }));
 }
@@ -143,7 +145,10 @@ async function pursue(
     });
     if (result.kind === 'collected') return 'collected';
     if (result.kind === 'inventory_full') return 'inventory_full';
-    return result.kind === 'item_gone' ? 'gone_unconfirmed' : 'unreachable';
+    if (result.kind !== 'item_gone') return 'unreachable';
+    if (!result.takenBy) return 'gone_unconfirmed';
+    target.takenBy = result.takenBy.name;
+    return 'taken_by_other';
   } finally {
     bot.off('physicsTick', distance);
     bot.off('playerCollect', collected);

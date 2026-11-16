@@ -7,6 +7,7 @@ import { temporaryBotData } from "../../test-support/bot-data.js";
 import { viewStatusResultSchema } from "./contract.js";
 import { formatViewStatusResult, observeLiveSituation } from "./view-status.js";
 import { FEET, idleActivity, liveBot } from "./view-status-fixtures.test.js";
+import { recordWake } from "../portal-entry/respawn-knowledge.js";
 
 /** Open ground under the bot's feet: the fake answers sky 15 / block 0 for open air over a block (measured, light-in-cells). */
 const GROUND = { "-10,98,18": "stone" } as const;
@@ -50,6 +51,14 @@ test("view_status reports armour points, light, combat and respawn", (t) => {
   assert.deepEqual(situation.combat, { melee: "iron_sword", bow: "bow", arrows: 0, shield: "shield" });
   assert.deepEqual(situation.respawn, { kind: "world_spawn", position: { x: FEET.x, y: FEET.y, z: FEET.z + 12 }, distance: 12 });
   assert.deepEqual([situation.vitals.armour, situation.vitals.armourToughness], [null, null], "a piece is worn and the server told no armour attribute: unknown, not 0");
+});
+
+test("view_status describes the last wake and parses its kind", (t) => {
+  const bot = liveBot({ cells: GROUND });
+  recordWake(bot, { x: FEET.x, y: FEET.y, z: FEET.z + 12 }, "overworld");
+  const result = viewStatusResultSchema.parse({ status: "succeeded", situation: situationOf(bot, t) });
+  assert.equal(result.situation.respawn?.kind, "last_wake");
+  assert.match(formatViewStatusResult(result), /respawn where it last woke 12 blocks away/);
 });
 
 test("the open sky distance is counted up the column", (t) => {

@@ -267,3 +267,37 @@ export function familyIndexOf(bot: Bot): FamilyIndex {
 export function hasItemFamily(bot: Bot, item: string, family: ItemFamily): boolean {
   return familyIndexOf(bot).itemFamilies(item).includes(family);
 }
+
+const itemMembersByIndex = new WeakMap<FamilyIndex, Map<ItemFamily, readonly string[]>>();
+const blockMembersByIndex = new WeakMap<FamilyIndex, Map<BlockFamily, readonly string[]>>();
+
+/** Registry-ordered item members, cached until the family index changes. */
+export function familyMembers(bot: Bot, family: ItemFamily): readonly string[] {
+  const index = familyIndexOf(bot);
+  const cache = itemMembersByIndex.get(index) ?? new Map<ItemFamily, readonly string[]>();
+  itemMembersByIndex.set(index, cache);
+  if (!cache.has(family)) cache.set(family, bot.registry.itemsArray.filter((item) => index.itemFamilies(item.name).includes(family)).map((item) => item.name));
+  return cache.get(family)!;
+}
+
+/** Registry-ordered block members, cached until the family index changes. */
+export function blockFamilyMembers(bot: Bot, family: BlockFamily): readonly string[] {
+  const index = familyIndexOf(bot);
+  const cache = blockMembersByIndex.get(index) ?? new Map<BlockFamily, readonly string[]>();
+  blockMembersByIndex.set(index, cache);
+  if (!cache.has(family)) cache.set(family, bot.registry.blocksArray.filter((block) => index.blockFamilies(block.name).includes(family)).map((block) => block.name));
+  return cache.get(family)!;
+}
+
+/** The unique sign block dropped as this item with the requested attachment state. */
+export function signBlockFor(bot: Bot, item: string, attach: "ground" | "wall"): string | null {
+  const id = bot.registry.itemsByName[item]?.id;
+  if (id === undefined) return null;
+  const matches = blockFamilyMembers(bot, "sign").filter((name) => {
+    const block = bot.registry.blocksByName[name]!;
+    const rotation = block.states?.some((state) => state.name === "rotation") ?? false;
+    const facing = block.states?.find((state) => state.name === "facing");
+    return block.drops.includes(id) && (attach === "ground" ? rotation : !rotation && ["north", "south", "east", "west"].every((value) => facing?.values?.includes(value)));
+  });
+  return matches.length === 1 ? matches[0]! : null;
+}

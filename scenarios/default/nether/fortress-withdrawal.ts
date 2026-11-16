@@ -1,5 +1,6 @@
 /** Reach the surveyed exit alive from a wounded start under native threat. */
 import { NAVIGATE } from "@aibengineering/mine-ai-mcp";
+import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
 import { readEncounters, type Encounter } from "../../flat/combat/reflex.ts";
@@ -12,13 +13,23 @@ export const run: MineAiScenario = async (context) => {
   const evidence = observeFortress(context);
   const encounters: Encounter[] = [];
   try {
-    await releaseThreats(context);
     const runtime = await openRuntime(context, "fortress-withdrawal-20260906");
     try {
+      const policy = runtime.actions.find((action) => action.name === "set_survival_policy");
+      if (!policy) throw new Error("Fortress withdrawal requires the survival policy action.");
+      const configured = await runtime.run(policy, {
+        operation: "set", expected_revision: runtime.status().survivalPolicy.revision,
+        changes: { combat: { hide: "never" } }, lifetime: { kind: "session" },
+        reason: "Measure withdrawal while regeneration is disabled.",
+      }, context.signal);
+      assert.equal(configured.result.status, "succeeded", "Withdrawal policy must be installed.");
+      assert.equal(runtime.status().survivalPolicy.effective.combat.hide, "never", "Withdrawal must not enter recovery hide.");
       const navigate = runtime.actions.find((action) => action.name === NAVIGATE);
       if (!navigate) throw new Error("Fortress withdrawal requires the normal navigate action.");
       const [x, y, z] = params.exit;
-      const returned = await runtime.run(navigate, { x, y, z, range: 1 }, context.signal);
+      const release = releaseThreats(context);
+      const pending = runtime.run(navigate, { x, y, z, range: 1 }, context.signal);
+      const [, returned] = await Promise.all([release, pending]);
       context.log(`RETURN ${JSON.stringify(returned.result)}`);
       // Keep the reflex and native mobs active for delayed contact after arrival.
       for (let tick = 0; tick < 100 && evidence.snapshot().deaths === 0; tick++) {

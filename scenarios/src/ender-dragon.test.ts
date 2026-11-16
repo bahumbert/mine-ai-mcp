@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Vec3 } from "vec3";
-import type { Bot } from "mineflayer";
-import { botFixture } from "../../src/test-support/bot.ts";
+import { createFakeBot } from "../../src/test-support/fake-bot/index.ts";
 import { clearCrystals, fightPerches, type EndActionCall } from "./ender-dragon.ts";
 
 function output(outcome: string, status: "succeeded" | "failed" = "succeeded", reason: string | null = null) {
@@ -12,10 +10,12 @@ function output(outcome: string, status: "succeeded" | "failed" = "succeeded", r
 
 for (const strategy of ["mixed", "bow", "melee"] as const) {
   test(`crystal sequence ${strategy} classifies cages, preserves explicit methods and retries a missed shot`, async () => {
-    const bot = botFixture({ blocks: { "2,70,0": "iron_bars", "12,71,0": "iron_bars" } });
-    for (let i = 0; i < 10; i++) bot.entities[i + 1] = {
-      id: i + 1, isValid: true, name: "end_crystal", position: new Vec3(i * 10, 70 + i, 0),
-    } as Bot["entity"];
+    // Crystal ids 1..10 as in the assertions: id 1 replaces the fake's own entities[1] entry, as the old fixture's did (bot.entity stays the bot).
+    const { bot } = createFakeBot({
+      cells: { "2,70,0": "iron_bars", "12,71,0": "iron_bars" },
+      groundY: null,
+      entities: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i + 1, { name: "end_crystal", position: { x: i * 10, y: 70 + i, z: 0 } }])),
+    });
     const calls: Array<{ entity_id: number; weapon: string }> = [];
     let missed = false, interruptedBuild = false, prepared = 0;
     bot.waitForTicks = async () => {};
@@ -38,10 +38,10 @@ for (const strategy of ["mixed", "bow", "melee"] as const) {
 }
 
 test("confirmed crystal destruction advances the sequence even when its return walk fails", async () => {
-  const bot = botFixture();
-  for (let i = 1; i <= 10; i++) bot.entities[i] = {
-    id: i, isValid: true, name: "end_crystal", position: new Vec3(i * 10, 70, 0),
-  } as Bot["entity"];
+  const { bot } = createFakeBot({
+    groundY: null,
+    entities: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i + 1, { name: "end_crystal", position: { x: (i + 1) * 10, y: 70, z: 0 } }])),
+  });
   const visited: number[] = [];
   bot.waitForTicks = async () => assert.fail("do not wait for an already destroyed crystal");
   const call: EndActionCall = async (_name, input) => {
@@ -57,10 +57,8 @@ test("confirmed crystal destruction advances the sequence even when its return w
 });
 
 test("shared perch caller attacks an early landing, resumes unfinished preparation, then reuses readiness", async () => {
-  const bot = botFixture({ dimension: "the_end" });
   const metadata = { 9: 200, 16: 0 };
-  const dragon = { id: 42, name: "ender_dragon", isValid: true, metadata } as unknown as Bot["entity"];
-  bot.entities[42] = dragon;
+  const { bot } = createFakeBot({ dimension: "the_end", entities: { 42: { name: "ender_dragon", position: { x: 0, y: 70, z: 0 }, metadata } } });
   const calls: string[] = [];
   let preparations = 0, attacks = 0;
   const call: EndActionCall = async (name, input) => {
@@ -75,8 +73,7 @@ test("shared perch caller attacks an early landing, resumes unfinished preparati
 });
 
 test("perch failures retry preparation and attacking until the dragon dies", async () => {
-  const bot = botFixture({ dimension: "the_end" });
-  bot.entities[42] = { id: 42, name: "ender_dragon", isValid: true, metadata: { 9: 200, 16: 0 } } as unknown as Bot["entity"];
+  const { bot } = createFakeBot({ dimension: "the_end", entities: { 42: { name: "ender_dragon", position: { x: 0, y: 70, z: 0 }, metadata: { 9: 200, 16: 0 } } } });
   let preparations = 0, attacks = 0, waits = 0;
   bot.waitForTicks = async () => { waits++; };
   const call: EndActionCall = async (name, input) => {
@@ -95,9 +92,7 @@ test("perch failures retry preparation and attacking until the dragon dies", asy
 });
 
 test("clouded attack returns to preparation between requests without losing the dragon target", async () => {
-  const bot = botFixture({ dimension: "the_end" });
-  const dragon = { id: 42, name: "ender_dragon", isValid: true, metadata: { 9: 200, 16: 0 } } as unknown as Bot["entity"];
-  bot.entities[42] = dragon;
+  const { bot } = createFakeBot({ dimension: "the_end", entities: { 42: { name: "ender_dragon", position: { x: 0, y: 70, z: 0 }, metadata: { 9: 200, 16: 0 } } } });
   let waits = 0, attacks = 0;
   bot.waitForTicks = async (ticks: number) => { waits += ticks; };
   const calls: string[] = [];

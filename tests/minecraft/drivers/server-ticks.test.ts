@@ -6,13 +6,14 @@ import { watch } from "../../../src/test-support/pending.ts";
 import { waitServerTicks } from "./server-ticks.ts";
 
 // Packet cadence measured by contract/checks/world-age-at-slow-tick.ts; the shared server sends +20 per packet.
-for (const { ticks, phaseMs, firstPacketMs, finishMs } of [
-  { ticks: 20, phaseMs: 0, firstPacketMs: 1_000, finishMs: 2_000 },
-  { ticks: 20, phaseMs: 50, firstPacketMs: 50, finishMs: 1_050 },
-  { ticks: 10, phaseMs: 0, firstPacketMs: 1_000, finishMs: 2_000 },
+for (const { ticks, phaseMs, firstPacketMs, finishMs, rate } of [
+  { ticks: 20, phaseMs: 0, firstPacketMs: 1_000, finishMs: 2_000, rate: 20 },
+  { ticks: 20, phaseMs: 50, firstPacketMs: 50, finishMs: 1_050, rate: 20 },
+  { ticks: 10, phaseMs: 0, firstPacketMs: 1_000, finishMs: 2_000, rate: 20 },
+  { ticks: 20, phaseMs: 0, firstPacketMs: 2_000, finishMs: 4_000, rate: 10 },
 ]) {
   test(`${ticks} ticks with a packet after ${firstPacketMs} ms waits for the second +20 jump`, async () => {
-    const { bot, clock } = createFakeBot({ server: { phaseMs } });
+    const { bot, clock } = createFakeBot({ server: { phaseMs, ticksPerSecond: rate } });
     const startAge = bot.time.age;
     const pending = waitServerTicks(bot, ticks, { now: clock.now, sleep: clock.sleep });
     const wait = watch(pending);
@@ -20,6 +21,7 @@ for (const { ticks, phaseMs, firstPacketMs, finishMs } of [
     assert.equal(wait.over, false);
     assert.equal(bot.time.age - startAge, 20);
     await clock.advance(finishMs - firstPacketMs);
+    assert.equal(wait.over, true, "the second packet completes the wait");
     assert.equal(await pending, "moved");
     assert.equal(bot.time.age - startAge, 40);
   });

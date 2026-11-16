@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { areaKey, type BlockArea, type BlockKind, type ProtectedArea } from "../runtime-client.ts";
-import { coverOver, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotReason } from "./spot.ts";
+import { SEARCH_RADIUS, coverOver, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotReason } from "./spot.ts";
 
 const solid = (hardness: number | null, extra: Partial<BlockKind> = {}): BlockKind =>
   ({ tool: null, solid: true, fullCube: true, harvest: null, hardness, fluid: false, known: true, tags: [], ...extra });
@@ -68,16 +68,15 @@ test("on flat ground the hole is dug where she stands: three cells of hand-dug s
   assert.equal(search.columns, COLUMNS);
 });
 
-test("water beside the roof cell floods the hole once dug: the column is skipped as open_walls", () => {
-  const search = shelterSpots(ground({ [areaKey(1, 63, 0)]: "water" }), FROM, []);
-  assert.notDeepEqual(at(search.spots[0]), [0, 0]);
-  assert.ok(search.reasons.open_walls >= 1);
-});
-
-test("seagrass in a dug cell is a fluid by game data, not by name: the column is skipped", () => {
-  const search = shelterSpots(ground({ [areaKey(0, 62, 0)]: "seagrass" }), FROM, []);
-  assert.notDeepEqual(at(search.spots[0]), [0, 0]);
-  assert.ok(search.reasons.open_walls >= 1);
+test("fluid beside the roof or in a dug cell skips the column as open_walls", () => {
+  for (const row of [
+    { label: "water beside the roof cell", cell: areaKey(1, 63, 0), block: "water" },
+    { label: "seagrass in a dug cell", cell: areaKey(0, 62, 0), block: "seagrass" },
+  ]) {
+    const search = shelterSpots(ground({ [row.cell]: row.block }), FROM, []);
+    assert.notDeepEqual(at(search.spots[0]), [0, 0], row.label);
+    assert.ok(search.reasons.open_walls >= 1, row.label);
+  }
 });
 
 test("bedrock in a dug cell (hardness null) is too_hard and the next column is chosen", () => {
@@ -173,9 +172,11 @@ test("no hole anywhere near on open water, and the reasons say water", () => {
 
 test("describeNoSpot lists the counts largest first with their words", () => {
   const reasons: Record<SpotReason, number> = { open_walls: 80, open_floor: 41, too_hard: 30, unknown_cells: 12, protected: 6, occupied: 0, no_support: 0, no_room: 0 };
+  assert.equal(SEARCH_RADIUS, 6);
+  assert.equal(COLUMNS, (2 * SEARCH_RADIUS + 1) ** 2);
   assert.equal(
     describeNoSpot({ spots: [], reasons, columns: COLUMNS }),
-    "no ground near here to dig a closed hole in (of 169 columns: 80 water or open walls, 41 cave or open floor, 30 too hard or unbreakable, 12 unknown cells, 6 protected)",
+    `no ground near here to dig a closed hole in (of 169 columns up to ${SEARCH_RADIUS} blocks along each axis: 80 water or open walls, 41 cave or open floor, 30 too hard or unbreakable, 12 unknown cells, 6 protected): go_to another patch of dry, solid ground and dig_shelter there`,
   );
 });
 

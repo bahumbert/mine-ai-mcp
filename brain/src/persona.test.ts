@@ -9,6 +9,13 @@ import { loadPersona, personaSchema, personaSkills } from "./persona.ts";
 const PERSONAS = new URL("../../personas/", import.meta.url);
 const noPersonas = { skip: existsSync(PERSONAS) ? false : "no personas/ in this checkout" };
 
+test("sign line length defaults to 15", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.equal(personaSchema.parse(base).settings.signLineChars, 15);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { signLineChars: 4 } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { signLineChars: 46 } }).success, false);
+});
+
 test("the personas are valid and build in a shipped style", noPersonas, async () => {
   for (const name of ["ayla", "vex", "real-world/ayla", "real-world/vex"]) {
     const persona = await loadPersona(fileURLToPath(new URL(`${name}.json`, PERSONAS)));

@@ -198,6 +198,13 @@ export interface ChosenObjective {
   readonly purpose: Activity | null;
 }
 
+export interface SignLinesInput {
+  readonly persona: Persona;
+  readonly occasion: "claim";
+  readonly owner: string;
+  readonly what: string;
+}
+
 export interface NarrateInput {
   readonly persona: Persona;
   readonly objective: string;
@@ -209,6 +216,7 @@ export interface NarrateInput {
 
 /** The thinking part of an agent (ADR-008, ADR-011). Code around it only runs the skills it picks. */
 export interface Mind {
+  signLines(input: SignLinesInput, signal: AbortSignal): Promise<string[]>;
   /** Chat tier: fast, in character; answers and routes every message it hears. */
   chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision>;
   /** Work tier (action model): the next step towards an objective, seeing what the last steps did. */

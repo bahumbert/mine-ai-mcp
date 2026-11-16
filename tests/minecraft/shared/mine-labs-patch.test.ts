@@ -22,6 +22,16 @@ const SCENARIO_SERVER_EXPORTS = [
   "spawnClientAhead",
 ] as const;
 
+test("a declared player food is an integer from zero through twenty", () => {
+  for (const food of [0, 15, 20]) {
+    const parsed = mineLabs.scenarioSchema.parse({ client: { command: "true" }, players: [{ name: "Actor", food }], goal: { kind: "survive", seconds: 1 } });
+    assert.equal(parsed.players[0]!.food, food);
+  }
+  for (const food of [-1, 21, 1.5]) {
+    assert.equal(mineLabs.scenarioSchema.safeParse({ client: { command: "true" }, players: [{ name: "Actor", food }], goal: { kind: "survive", seconds: 1 } }).success, false);
+  }
+});
+
 test("the patched mine-labs exports what the scenario server runs a trial with", () => {
   for (const name of SCENARIO_SERVER_EXPORTS) {
     assert.equal(typeof (mineLabs as Record<string, unknown>)[name], "function", `mine-labs does not export ${name}`);

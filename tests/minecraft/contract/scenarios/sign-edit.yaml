@@ -1,0 +1,33 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-sign-edit
+tags:
+  - contract
+description: Measure sign placement, editing, reopening and chunk reload on the server.
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: sign-edit
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock 2 -60 0 stone
+  - setblock 2 -59 0 stone
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - item: oak_sign
+        count: 4
+goal:
+  kind: all
+  timeout: 240
+  goals:
+    - kind: completion
+      who: Actor

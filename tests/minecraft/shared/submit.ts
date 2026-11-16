@@ -1,12 +1,12 @@
 // `bun submit.ts <yaml|dir>... [--repeat N] [--lanes N] [--lock] [--hold] [--isolated] [--out DIR] | --stop`: run scenarios on the shared server.
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadScenarioServerConfig } from "./config.ts";
 import { exchange } from "./daemon-client.ts";
 import { ensureDaemon } from "./daemon-launch.ts";
 import type { DaemonMessage } from "./protocol.ts";
-import { formatMessage, forwardedEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
+import { exitCodeOf, findCanary, formatMessage, submitEnv, parseSubmitArgs, type SubmitArgs } from "./submit-args.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "../../..");
@@ -25,12 +25,14 @@ function runIsolated(args: SubmitArgs): Promise<number> {
 async function runOnDaemon(args: SubmitArgs): Promise<number> {
   const socketPath = args.socket ?? loadScenarioServerConfig().socketPath;
   await ensureDaemon({ socketPath, port: args.port, daemonFile: resolve(HERE, "daemon.ts"), repoRoot: REPO_ROOT });
+  const canary = await findCanary(join(REPO_ROOT, "tests/minecraft/scenarios"));
+  if (canary.note) console.log(canary.note);
   let exitCode = 1;
   const session = await exchange(socketPath, {
-    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: forwardedEnv(process.env, process.cwd()),
+    type: "submit", paths: args.paths, out: args.out, repeat: args.repeat, lanes: args.lanes, lock: args.lock, hold: args.hold, env: submitEnv(process.env, process.cwd(), canary.path), ...(args.tickRate === null ? {} : { tickRate: args.tickRate }),
   }, message => {
     print(message);
-    if (message.type === "done") exitCode = message.failed > 0 || message.cancelled > 0 ? 1 : 0;
+    if (message.type === "done") exitCode = exitCodeOf(message);
   });
   let interrupted = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { interrupted = true; session.close(); });

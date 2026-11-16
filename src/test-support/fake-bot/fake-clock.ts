@@ -54,6 +54,13 @@ const MOCKED_APIS = ["setTimeout", "setInterval", "Date"] as const;
 /** One installed clock at a time: node's mock timers are global, so two would fight over them. `by` is where it was installed (a `file:line`). */
 let installed: { restore(): void; readonly by: string } | null = null;
 
+/**
+ * Bun fails a test at its time limit and runs no hook of it, so a clock that test had installed is still installed when
+ * the next test starts. The preload `scripts/test-clock-cleanup.ts` (`bunfig.toml`) calls this at the start of every
+ * test, found under a `Symbol.for` key because `src/` is typechecked with Node types only and cannot import it.
+ */
+(globalThis as { [key: symbol]: unknown })[Symbol.for("mine-ai.restore-leftover-fake-clock")] = () => installed?.restore();
+
 /** The `file:line` of the test that called `install()`: the first stack frame in a `*.test.ts` file (a shared helper may call `install()` for it), else the first frame outside this file. */
 function installerOfThisCall(): string {
   const frames = (new Error().stack ?? "").split("\n").slice(1).filter((frame) => !frame.includes("fake-clock.ts"));
@@ -95,14 +102,46 @@ function fireDueTimers(timers: Set<ClockTimer>, now: number): void {
   }
 }
 
-/** Take over node's mock timers and `performance.now` for `clock`; the returned function gives them back. */
+/** A mocked create function that also remembers each handle it returns: the handles a clear must send to the mock. */
+function recordMockHandles<Create extends (...args: never[]) => unknown>(createMocked: Create, mockHandles: Set<unknown>): Create {
+  return ((...args: unknown[]) => {
+    const handle = Reflect.apply(createMocked, globalThis, args);
+    mockHandles.add(handle);
+    return handle;
+  }) as unknown as Create;
+}
+
+/** A clear that sends a handle the mock created to the mock's clear, and any other handle (a real timer made before the install) to the real one. */
+function clearByHandleOrigin<Clear extends (handle: never) => void>(clearMocked: Clear, clearReal: Clear, mockHandles: Set<unknown>): Clear {
+  return ((handle: unknown) => {
+    if (mockHandles.has(handle)) Reflect.apply(clearMocked, globalThis, [handle]);
+    else Reflect.apply(clearReal, globalThis, [handle]);
+  }) as unknown as Clear;
+}
+
+/**
+ * Take over node's mock timers and `performance.now` for `clock`; the returned function gives them back. While installed,
+ * `clearTimeout`/`clearInterval` are the mock's, so a real timer created before the install would never be cleared: the
+ * clears are routed by the handle's origin instead. The returned function puts the four real functions back.
+ */
 function installGlobals(now: () => number): () => void {
   const realPerformanceNow = performance.now;
+  const realTimers = { setTimeout: globalThis.setTimeout, setInterval: globalThis.setInterval, clearTimeout: globalThis.clearTimeout, clearInterval: globalThis.clearInterval };
   mock.timers.enable({ apis: [...MOCKED_APIS], now: now() });
   performance.now = now;
+  const mockHandles = new Set<unknown>();
+  globalThis.setTimeout = recordMockHandles(globalThis.setTimeout, mockHandles);
+  globalThis.setInterval = recordMockHandles(globalThis.setInterval, mockHandles);
+  globalThis.clearTimeout = clearByHandleOrigin(globalThis.clearTimeout, realTimers.clearTimeout, mockHandles);
+  globalThis.clearInterval = clearByHandleOrigin(globalThis.clearInterval, realTimers.clearInterval, mockHandles);
   return () => {
     mock.timers.reset();
     performance.now = realPerformanceNow;
+    // Guard: `reset()` already gives back the four functions on Bun 1.4.2, but the wrapper must not outlive the install.
+    globalThis.setTimeout = realTimers.setTimeout;
+    globalThis.setInterval = realTimers.setInterval;
+    globalThis.clearTimeout = realTimers.clearTimeout;
+    globalThis.clearInterval = realTimers.clearInterval;
   };
 }
 

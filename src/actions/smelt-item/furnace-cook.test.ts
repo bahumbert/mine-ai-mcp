@@ -31,7 +31,7 @@ function harvestAfterTake(taken: number): Harvest & { readonly credited: () => n
   return {
     taken: () => total,
     item: () => (taken > 0 ? { name: "iron_ingot", inventoryBefore: 0 } : null),
-    takeReady: async () => {},
+    takeReady: async () => false,
     credit: (count: number) => {
       total += count;
       credited += count;
@@ -40,19 +40,21 @@ function harvestAfterTake(taken: number): Harvest & { readonly credited: () => n
   };
 }
 
-test("every loaded item consumed and the output slot empty: ingots a take moved beyond what the window showed are credited", async () => {
-  // The window showed 2 ingots when the harvest clicked; the server's stack held 3 and moved them all (live, busy-smelt-interrupted).
-  const { window, clock, state } = cooking((now, furnace) => {
-    furnace.input = now < 300 ? 1 : 0;
-    furnace.cook = now < 300 ? 0.5 : 0;
-    furnace.output = 0;
-  });
-  state.input = 1;
-  const harvest = harvestAfterTake(2);
-  const waited = await waitForCook(window, 3, clock, undefined, undefined, harvest);
-  assert.equal(waited.verdict, "completed");
-  assert.equal(harvest.taken(), 3);
-  assert.equal(harvest.credited(), 1);
+test("consumed input credits a take's missed ingot, with or without output still in the slot", async () => {
+  for (const { taken, output, cook } of [{ taken: 2, output: 0, cook: 0.5 }, { taken: 1, output: 1, cook: 0 }]) {
+    // Live busy-smelt-interrupted and smelt-batch-normal: an output take can move one more than the window showed.
+    const { window, clock, state } = cooking((now, furnace) => {
+      furnace.input = now < 300 ? 1 : 0;
+      furnace.cook = now < 300 ? cook : 0;
+      furnace.output = now < 300 ? 0 : output;
+    });
+    state.input = 1;
+    const harvest = harvestAfterTake(taken);
+    const waited = await waitForCook(window, 3, clock, undefined, undefined, harvest);
+    assert.equal(waited.verdict, "completed");
+    assert.equal(harvest.taken(), 3 - output);
+    assert.equal(harvest.credited(), 1);
+  }
 });
 
 test("an input that was never seen in the furnace is not read as consumed", async () => {
@@ -74,17 +76,6 @@ test("with nothing taken yet there is no take to blame: an empty furnace is not 
   assert.equal(harvest.credited(), 0);
 });
 
-test("ingots still in the output slot are counted as before, and nothing is credited", async () => {
-  const { window, clock, state } = cooking((now, furnace) => {
-    furnace.input = now < 300 ? 1 : 0;
-    furnace.output = now < 300 ? 0 : 1;
-  });
-  state.input = 1;
-  const harvest = harvestAfterTake(2);
-  const waited = await waitForCook(window, 3, clock, undefined, undefined, harvest);
-  assert.equal(waited.verdict, "completed");
-  assert.equal(harvest.credited(), 0);
-});
 
 test("an input slot seen empty for one observation only, before the output slot caught up, is not credited", async () => {
   // The input and output slots update in separate packets: one observation between them must not read as drained.
@@ -100,18 +91,6 @@ test("an input slot seen empty for one observation only, before the output slot 
   assert.equal(harvest.credited(), 0);
 });
 
-test("every loaded item consumed with an ingot still in the output slot: the takes' miss is credited, the slot is counted", async () => {
-  // smelt-batch-normal, 16 items: the takes counted 14, the slot holds 1, the furnace consumed all 16 inputs.
-  const { window, clock, state } = cooking((now, furnace) => {
-    furnace.input = now < 300 ? 1 : 0;
-    furnace.output = now < 300 ? 0 : 1;
-  });
-  state.input = 1;
-  const harvest = harvestAfterTake(1);
-  const waited = await waitForCook(window, 3, clock, undefined, undefined, harvest);
-  assert.equal(waited.verdict, "completed");
-  assert.equal(harvest.credited(), 1, "3 requested, 1 taken, 1 in the slot: one went uncounted");
-});
 
 test("the safety deadline follows the recipe's cooking ticks: a slower cook is given proportionally longer", async () => {
   const endOf = async (cookTicks: number) => {
@@ -129,4 +108,25 @@ test("the safety deadline follows the recipe's cooking ticks: a slower cook is g
   assert.equal(standard.verdict, "safety_timeout");
   assert.equal(slow.verdict, "safety_timeout");
   assert.ok(slow.endedAt > standard.endedAt * 1.5, `standard ${standard.endedAt} ms, slow ${slow.endedAt} ms`);
+});
+
+test("a harvest take that waited 20 s for its answer at 2 tps does not end the cook as stalled", async () => {
+  const { window, clock, state } = cooking((now, furnace) => {
+    if (now >= 20_200) { furnace.input = 0; furnace.output = 1; }
+  });
+  state.input = 1;
+  state.output = 8;
+  let taken = 0;
+  const harvest: Harvest = {
+    ...harvestAfterTake(0),
+    taken: () => taken,
+    takeReady: async (output) => {
+      if (output < 8) return false;
+      state.output = 0;
+      taken += 8;
+      await clock.pause(20_000);
+      return true;
+    },
+  };
+  assert.equal((await waitForCook(window, 9, clock, undefined, undefined, harvest)).verdict, "completed");
 });

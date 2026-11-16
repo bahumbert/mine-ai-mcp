@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeBotOptions, createFakeBot } from "./fake-bot.js";
@@ -28,6 +29,23 @@ function cobblestone(harness: ReturnType<typeof createFakeBot>): number {
 function pickupHarness(options: FakeBotOptions = {}) {
   return createFakeBot({ carried: { cobblestone: 10 }, ...options });
 }
+
+test("a mob's pickup reports its collector, lowers metadata, then removes an emptied stack without a slot", () => {
+  const harness = pickupHarness();
+  const mob = harness.entities.spawn({ name: "piglin", position: AT_FEET });
+  const item = harness.entities.spawn({ name: "item", position: AT_FEET, item: { name: "gold_ingot", count: 2 } });
+  const events: unknown[] = [];
+  harness.bot.on("playerCollect", (collector, entity) => void events.push(["collect", collector.id, entity.getDroppedItem()?.count]));
+  (harness.bot._client as EventEmitter).on("collect", (packet: { pickupItemCount: number }) => void events.push(["packet", packet.pickupItemCount, item.getDroppedItem()?.count ?? null]));
+  harness.bot.on("entityGone", (entity) => void events.push(["gone", entity.getDroppedItem(), harness.bot.entities[entity.id] === entity, entity.isValid]));
+  harness.bot.inventory.on("updateSlot", () => events.push(["slot"]));
+  harness.entities.takenBy(mob, item, 1);
+  assert.equal(harness.entities.countOnServer(item.id), 1);
+  assert.equal(harness.bot.entities[item.id], item);
+  harness.entities.takenBy(mob, item, 1);
+  assert.deepEqual(events, [["collect", mob.id, 2], ["packet", 1, 1], ["collect", mob.id, 1], ["packet", 1, null], ["gone", null, true, true]]);
+  assert.equal(harness.bot.entities[item.id], undefined);
+});
 
 // Mineflayer's entity_metadata handler (`entities.js:471-481`): an item's metadata packet emits entityUpdate, then itemDrop.
 test("an entity the server spawns is on the bot, announced as the server's packets are, an item reads as a dropped item, an id named is kept", () => {

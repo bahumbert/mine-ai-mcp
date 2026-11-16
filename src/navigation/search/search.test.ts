@@ -173,22 +173,28 @@ test("the real catalogue routes around sole edge support while retaining centred
 });
 
 test("root support filtering keeps a safe sibling during expansion and reconstruction", () => {
-  const world = flatWorld();
-  world.load({ x: 0, y: 62, z: 0 }, { stateId: 0 });
-  const pose = { ...observation(), position: { x: 0.85, y: 63, z: 0.5 } };
-  const catalogue = stubCatalogue((state) => {
-    if (state.node.feet.x !== 0) return [];
-    const safe = graphMovement(state, 1, 0, 2);
-    const unsafe = { ...safe, cost: 1, step: { ...safe.step, id: "unsafe", operations: [
-      { kind: "break" as const, position: { x: 1, y: 62, z: 0 }, expectedStateId: 1, toolType: null, brings: [], stance: ORIGIN },
-      ...safe.step.operations,
-    ] } };
-    return [unsafe, safe];
-  });
-  for (const actual of [pose, undefined]) {
-    const search = searchOver(goalOf("bank", () => 0, (node) => node.feet.x === 1), catalogue, { world, observedStart: actual });
-    const plan = expect(search.advance(), "complete").plan;
-    assert.equal(plan.steps[0]?.id, actual ? "0,0>1,0" : "unsafe");
+  for (const { y, cellY } of [{ y: 64.0, cellY: 63 }, { y: 64.5, cellY: 64 }]) {
+    const world = flatWorld();
+    world.load({ x: 0, y: cellY, z: 0 }, { stateId: 0 });
+    world.load({ x: 1, y: cellY, z: 0 }, { stateId: 1,
+      collisionShapes: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: y - cellY, maxZ: 1 }] });
+    const pose = { ...observation(0, cellY + 1, 0), position: { x: 0.85, y, z: 0.5 } };
+    const catalogue = stubCatalogue((state) => {
+      if (state.node.feet.x !== 0) return [];
+      const safe = graphMovement(state, 1, 0, 2);
+      const unsafe = { ...safe, cost: 1, step: { ...safe.step, id: "unsafe", operations: [
+        { kind: "break" as const, position: { x: 1, y: cellY, z: 0 }, expectedStateId: 1, toolType: null, brings: [], stance: state.node.feet },
+        ...safe.step.operations,
+      ] } };
+      return [unsafe, safe];
+    });
+    for (const actual of [pose, undefined]) {
+      const search = new IncrementalSearch({ id: "bank", start: planningStart({ x: 0, y: cellY + 1, z: 0 }),
+        goal: goalOf("bank", () => 0, (node) => node.feet.x === 1), observedStart: actual, now: () => 0,
+        context: { world, catalogue, policy: createMovementPolicy(), player: WELL_FED } });
+      const plan = expect(search.advance(), "complete").plan;
+      assert.equal(plan.steps[0]?.id, actual ? "0,0>1,0" : "unsafe");
+    }
   }
 });
 
@@ -634,23 +640,17 @@ function roomOf(cells: readonly (readonly [number, number])[]): MovementCatalogu
 
 const NOWHERE = goalOf("nowhere", () => 50);
 
-test("an exhausted search in a two-cell pocket reports the farthest visited node at 1 block (Dirk, run 15 P2)", () => {
-  const update = searchOver(NOWHERE, roomOf([[0, 0], [1, 0]]), { id: "pocket" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [2, 1]);
-});
-
-test("a search that visited only its root reports the farthest visited node at 0", () => {
-  const update = searchOver(NOWHERE, roomOf([[0, 0]]), { id: "cell" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.equal(update.evidence.farthestVisited, 0);
-});
-
-test("a 3x3 room entered at its edge reports the farthest visited node at 2", () => {
-  const room = [-1, 0, 1].flatMap((z) => [0, 1, 2].map((x) => [x, z] as const));
-  const update = searchOver(NOWHERE, roomOf(room), { id: "room" }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
-  assert.equal(update.kind, "no_path");
-  assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [9, 2]);
+test("an exhausted search reports the farthest visited node for its reachable room", () => {
+  const cases = [
+    { id: "pocket", cells: [[0, 0], [1, 0]] as const, visited: 2, farthest: 1 },
+    { id: "cell", cells: [[0, 0]] as const, visited: 1, farthest: 0 },
+    { id: "room", cells: [-1, 0, 1].flatMap((z) => [0, 1, 2].map((x) => [x, z] as const)), visited: 9, farthest: 2 },
+  ];
+  for (const row of cases) {
+    const update = searchOver(NOWHERE, roomOf(row.cells), { id: row.id }).advance({ maximumExpansions: 100, maximumMilliseconds: Infinity });
+    assert.equal(update.kind, "no_path", row.id);
+    assert.deepEqual([update.evidence.visited, update.evidence.farthestVisited], [row.visited, row.farthest], row.id);
+  }
 });
 
 test("the farthest visited node counts height as well as the level, and a search that succeeds or hits a limit reports it", () => {
