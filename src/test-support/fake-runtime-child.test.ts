@@ -13,14 +13,16 @@ test("slow replies use the manual clock and each arrival waits for its own reque
   const url = `http://127.0.0.1:${child.port}/slow`;
   const first = fetch(url).then((reply) => reply.text());
   await child.arrived("/slow");
-  assert.equal(await clock.settle(first, 1_000), "finished");
+  await clock.advance(1_000);
+  assert.equal(await first, "finished");
   let arrived = false;
   const next = child.arrived("/slow").then(() => { arrived = true; });
   await clock.advance(0);
   assert.equal(arrived, false, "the preceding request cannot satisfy the next arrival");
   const second = fetch(url).then((reply) => reply.text());
   await next;
-  assert.equal(await clock.settle(second, 1_000), "finished");
+  await clock.advance(1_000);
+  assert.equal(await second, "finished");
 });
 
 test("fake runtime messages parse and preserve active execution and fault attribution", async (t) => {
