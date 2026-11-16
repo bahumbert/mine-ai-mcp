@@ -46,21 +46,21 @@ function fixture() {
   return { runtime, calls, mind, logs, body, memory, runner, work, run };
 }
 
-for (const location of ["no houses", "far", "standing"] as const) test(`one status read per step end: ${location}`, async () => {
+for (const location of ["no houses", "far", "standing"] as const) test(`start, end and post-visit status reads per step end: ${location}`, async () => {
   const f = fixture();
   const near = location === "standing";
   if (location === "no houses") f.memory.places.splice(0);
   if (location === "far") f.runtime.snapshot = { ...f.runtime.snapshot, position: { ...DOOR, x: 13 } };
   const run = await f.run();
   await f.runner.recordStep(f.work, WALK, run, f.runtime.snapshot);
-  assert.equal(f.calls.status, 2, "one start baseline plus one end read, reused by activityOf");
+  assert.equal(f.calls.status, 3, "start baseline, end read, and the read after the visit check (activityOf reuses the last)");
   assert.equal(f.calls.readSigns, near ? 1 : 0);
   assert.equal(f.calls.cellsAt + f.calls.blockKinds + f.calls.itemFamily + f.calls.craftingNeeds, 0);
   assert.equal(f.runtime.submitted.length, 1, "standing visit adds only read_signs; no house adds no call");
   if (near) {
     for (let i = 0; i < 20; i += 1) await f.run();
     assert.equal(f.calls.readSigns, 1, "staying near for 20 more step ends never checks again");
-    assert.equal(f.calls.status, 42, "no status call inside the standing-sign check");
+    assert.equal(f.calls.status, 63, "three status reads per step end; no status call inside the standing-sign check");
     assert.equal(f.runtime.submitted.length, 21, "subsequent nearby steps only navigate");
   }
 });
@@ -142,7 +142,7 @@ test("the unfinished house is claimed at a visit and keeps the observed claim", 
   assert.deepEqual(f.memory.building.unfinished?.claim, CLAIM);
 });
 
-test("a blank sign at a visit is filled: three runtime calls and one model call", async () => {
+test("a blank sign at a visit is filled: four runtime calls and one model call", async () => {
   const f = fixture();
   f.runtime.signs = [sign(["", "", "", ""])];
   let models = 0;
@@ -151,7 +151,7 @@ test("a blank sign at a visit is filled: three runtime calls and one model call"
   const placed = f.runtime.submitted.filter(({ tool }) => tool === "place_sign");
   assert.equal(placed.length, 1);
   assert.equal(placed[0]?.input.fill_blank, true);
-  assert.equal(f.calls.status, 3, "baseline, end, and pre-fill status");
+  assert.equal(f.calls.status, 4, "baseline, end, pre-fill status, and the status read again after the visit acted");
   assert.equal(f.calls.readSigns, 1);
   assert.equal(f.calls.blockKinds + f.calls.cellsAt + f.calls.itemFamily + f.calls.craftingNeeds, 0);
   assert.equal(models, 1);
@@ -175,8 +175,8 @@ for (const row of [
   assert.equal(f.runtime.submitted.filter(({ tool }) => tool === "place_sign").length, row.reserved ? 0 : 1);
   assert.equal(f.calls.readSigns, 1);
   assert.ok(f.logs.some((line) => line.includes(row.reserved ? "no_sign" : "placed")));
-  if (!row.reserved) assert.equal(Object.values(f.calls).reduce((sum, count) => sum + count, 0) - 2 + 2, 11,
-    "crafting visit runtime calls: exclude step baseline/end, include craft and placement");
+  if (!row.reserved) assert.equal(Object.values(f.calls).reduce((sum, count) => sum + count, 0), 12,
+    "all runtime calls of the crafting visit step: start and end status, craft, placement and the status read after the visit");
   assert.equal((await f.run()).result.status, "done", "the body remains usable after crafting or no_sign");
   assert.equal(f.calls.readSigns, 1);
 });
@@ -249,4 +249,21 @@ test("death during the visit's place_sign is observed by the step watch and the 
   await f.runner.recordStep(f.work, WALK, run, f.runtime.snapshot);
   assert.match(f.work.steps[0]?.detail ?? "", /you died during this step/u);
   assert.equal((await clock.settle(f.run(), 2_000)).result.status, "done");
+});
+
+test("a visit that places the carried sign: the step's after inventory no longer holds it", async () => {
+  const f = fixture();
+  f.runtime.signs = [];
+  // Stand-in: the fake's successful placement takes the carried sign at once. The game's inventory timing for a placed
+  // sign is not measured here (unverified); a failed placement keeps the sign.
+  let carried = true;
+  f.runtime.succeedEffects.place_sign = () => { carried = false; };
+  const status = f.runtime.status.bind(f.runtime);
+  f.runtime.status = async () => {
+    const current = await status();
+    return carried ? current : { ...current, inventory: current.inventory.filter(({ name }) => name !== "oak_sign") };
+  };
+  const run = await f.run();
+  assert.equal(f.runtime.submitted.filter(({ tool }) => tool === "place_sign").length, 1, "the visit placed the sign");
+  assert.equal(run.after?.inventory.some(({ name }) => name === "oak_sign"), false, "after is read after the visit's placement");
 });

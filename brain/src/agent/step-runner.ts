@@ -87,6 +87,8 @@ export class StepRunner {
       if (!context.signal.aborted && death.died() === null && result.status !== "stopped" && after !== null
         && after.lastDeath?.observedAt === baseline?.observedAt) {
         await this.checkVisit(context, after);
+        // The visit's own awaits (a sign read, a model call, a placement) can change the snapshot: read it again once.
+        after = await options.runtime.status().catch(() => after);
       }
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
