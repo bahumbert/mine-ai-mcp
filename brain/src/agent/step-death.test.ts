@@ -25,7 +25,7 @@ const DIED_AT_ORIGIN = "you died during this step at 0 64 0";
 for (const tool of ["collect_block", "navigate"] as const) test(`a death during ${tool} is recorded interrupted after a delayed status answer`, async (t) => {
   const { runtime, agent, action, collecting, outcomes } = collectingBot(t);
   runtime.durations.navigate = 100_000;
-  action.reply(tool === "collect_block" ? COLLECT : { step: { skill: "go_to", x: 100, y: 64, z: 0 } }, { give_up: "I died" });
+  action.reply(tool === "collect_block" ? COLLECT : { step: { skill: "go_to", x: 100, y: 64, z: 0 } }, { done: "carry on" }, { give_up: "I died" });
   await agent.handle(say("Steve", "collect logs"));
   await until(tool === "collect_block" ? collecting : () => runtime.submitted.some((call) => call.tool === "navigate"));
   const held = runtime.holdNextStatus();
@@ -40,7 +40,7 @@ for (const tool of ["collect_block", "navigate"] as const) test(`a death during 
     assert.deepEqual(outcomes(), []);
     await clock.advance(1);
     assert.deepEqual(outcomes(), [`interrupted: ${DIED_AT_ORIGIN} (Zombie)`]);
-    assert.match(action.requests[1]?.[1]?.content ?? "", /-> interrupted: you died during this step at 0 64 0 \(Zombie\)/u);
+    assert.match(action.requests[2]?.[1]?.content ?? "", /-> interrupted: you died during this step at 0 64 0 \(Zombie\)/u);
   } finally {
     held.release();
   }
@@ -73,7 +73,7 @@ test("a death status read that never answers releases the step record at the two
 
 test("a death between two actions ends the step at the next sample", async (t) => {
   const { runtime, agent, action, collecting, outcomes } = collectingBot(t, { noGain: { minutes: 5, sampleMs: 10 } });
-  action.reply(COLLECT, { give_up: "I died" });
+  action.reply(COLLECT, { done: "carry on" }, { give_up: "I died" });
   await agent.handle(say("Steve", "collect logs"));
   await until(collecting);
   runtime.die(null, { cancelRunning: false });
@@ -84,7 +84,7 @@ test("a death between two actions ends the step at the next sample", async (t) =
 
 test("a death is not a failure, and the same step runs again to its end from the respawn point (smallest failure limits)", async (t) => {
   const { runtime, agent, action, collecting, outcomes } = collectingBot(t, {}, { settings: { ...testPersona().settings, maxSameStepInARow: 1, maxSkillFailuresInARow: 1 } });
-  action.reply(COLLECT, COLLECT, { done: "got the logs" });
+  action.reply(COLLECT, { done: "carry on" }, COLLECT, { done: "got the logs" });
   await agent.handle(say("Steve", "collect logs"));
   await until(collecting);
   runtime.die("Zombie");
@@ -93,7 +93,7 @@ test("a death is not a failure, and the same step runs again to its end from the
   await until(() => runtime.said.length === 2, 5_000);
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2, "the second try ran: it was not refused");
   assert.deepEqual(outcomes(), [`interrupted: ${DIED_AT_ORIGIN} (Zombie)`, "done: collected 16 oak_log"]);
-  assert.doesNotMatch(action.requests[1]?.[1]?.content ?? "", /failed lately/u, "an interrupted step is not remembered as a failed one");
+  assert.doesNotMatch(action.requests[2]?.[1]?.content ?? "", /failed lately/u, "an interrupted step is not remembered as a failed one");
 });
 
 test("a death before the step starts (during the model call) does not fire, even at a sample while the step runs", async (t) => {
@@ -110,7 +110,7 @@ test("a death before the step starts (during the model call) does not fire, even
     }
     return status();
   };
-  action.reply(COLLECT, { done: "got the logs" });
+  action.reply(COLLECT, { done: "carry on" }, { done: "got the logs" });
   await agent.handle(say("Steve", "collect logs"));
   await until(() => runtime.said.length === 2, 5_000);
   assert.ok(dead, "the death came during the step's own start");
@@ -119,7 +119,7 @@ test("a death before the step starts (during the model call) does not fire, even
 
 test("the first abort wins: a no-gain stop is not relabelled by a death that comes while it unwinds", async (t) => {
   const { runtime, agent, action, outcomes } = collectingBot(t, { noGain: { minutes: 0.002, sampleMs: 10 } });
-  action.reply(COLLECT, { give_up: "stuck" });
+  action.reply(COLLECT, { done: "carry on" }, { give_up: "stuck" });
   await agent.handle(say("Steve", "collect logs"));
   await until(() => runtime.cancelled.length === 1, 5_000);
   runtime.die("Zombie");
@@ -139,7 +139,7 @@ test("the first abort wins: a death is not relabelled nothing-gained while the c
     await released;
     return cancel(actionId);
   };
-  action.reply(COLLECT, { give_up: "I died" });
+  action.reply(COLLECT, { done: "carry on" }, { give_up: "I died" });
   await agent.handle(say("Steve", "collect logs"));
   await until(collecting);
   runtime.die("Zombie", { cancelRunning: false });
@@ -157,7 +157,7 @@ test("a follow is cancelled by a death too", async (t) => {
   runtime.durations.navigate = 100_000;
   const { agent, events, chat, action } = journaledAgent(t, runtime);
   chat.reply({ say: "Coming.", route: "act", request: "follow me" }, { say: "Done." });
-  action.reply({ step: { skill: "follow_player", player: "Steve", distance: 3 } }, { give_up: "I died" });
+  action.reply({ step: { skill: "follow_player", player: "Steve", distance: 3 } }, { done: "carry on" }, { give_up: "I died" });
   await agent.handle(say("Steve", "Ayla, follow me"));
   await until(() => runtime.submitted.some((call) => call.tool === "navigate"));
   runtime.die("Zombie");

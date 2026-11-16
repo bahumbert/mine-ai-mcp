@@ -11,6 +11,7 @@ interface StepGuardHost {
   runSignal(): AbortSignal;
   top(): Work | undefined;
   idle(ms: number): Promise<void>;
+  interrupted?(): boolean;
 }
 
 export class StepGuards {
@@ -26,7 +27,7 @@ export class StepGuards {
     const interval = 60_000 / this.host.options.persona.settings.goalCallsPerMinute;
     const orderOnTop = () => (this.host.top()?.objective.requester ?? null) !== null;
     while (monotonicNow() < this.nextGoalCall) {
-      if (this.host.runSignal().aborted || orderOnTop()) return false;
+      if (this.host.runSignal().aborted || orderOnTop() || this.host.interrupted?.() === true) return false;
       await this.host.idle(Math.min(this.nextGoalCall - monotonicNow(), this.host.pollMs));
     }
     if (orderOnTop()) return false;

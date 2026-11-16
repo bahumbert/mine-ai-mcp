@@ -42,6 +42,7 @@ interface StepRunnerHost {
   journalState(step: string | null): void;
   runSignal(): AbortSignal;
   neededWork(work: Work): Work;
+  observe?(snapshot: BotSnapshot): void;
 }
 
 export class StepRunner {
@@ -70,7 +71,7 @@ export class StepRunner {
     // A death during the model call is not "during this step": the baseline is read now, not taken from the decision.
     const baseline = await options.runtime.status().then((current) => current.lastDeath, () => snapshot.lastDeath);
     const death = watchDeath({ baseline, controller, status: () => options.runtime.status(), log: options.log });
-    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }), onSnapshot: [death.sample, (s) => this.host.memory.notePosition(s.position, s.dimension, monotonicNow())] });
+    const gain = watchGain(decision.step, snapshot, controller, { runtime: options.runtime, log: options.log, ...(options.noGain ?? { minutes: NO_GAIN_MINUTES, sampleMs: GAIN_SAMPLE_MS }), onSnapshot: [death.sample, (s) => this.host.memory.notePosition(s.position, s.dimension, monotonicNow()), (s) => this.host.observe?.(s)] });
     body.onAction = (tool, input, ms, outcome) => {
       gain.alive();
       death.actionEnded(outcome);

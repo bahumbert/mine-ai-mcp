@@ -42,6 +42,8 @@ export interface Work {
   whisperTo: string | null;
   /** Step key -> refusals since that step last ran (rule 2: three end the objective); counted by the mind, reset here. */
   readonly refused: Map<string, number>;
+  /** One-time validation corrections already sent back for this objective. */
+  readonly sentBackSteps: Set<string>;
   /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
   readonly wanted: Set<string>;
   /** Where a level_area around each player (lower-case name) was first aimed in this objective: later steps reuse it (run 13). */
@@ -83,5 +85,17 @@ export function carriedOf(snapshot: BotSnapshot): string {
 export const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
 export function newWork(objective: Objective, whisperTo: string | null = null, situation: SituationState | null = null, planned: StepDecision | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, running: null, situation, planned, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, running: null, situation, planned, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), sentBackSteps: new Set(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+}
+
+/** Model validation is speculative until the work loop accepts its answer or error (P4-18 T8a review). */
+export function stageWorkValidation(work: Work) {
+  const refused = new Map(work.refused);
+  const sentBackSteps = new Set(work.sentBackSteps);
+  return { refused, sentBackSteps, commit() {
+    work.refused.clear();
+    for (const [key, count] of refused) work.refused.set(key, count);
+    work.sentBackSteps.clear();
+    for (const key of sentBackSteps) work.sentBackSteps.add(key);
+  } };
 }

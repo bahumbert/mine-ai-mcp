@@ -948,9 +948,9 @@ for (const ending of ENDINGS) test(`a step cleared after ${ending.how}, recorded
   const { agent, action, events } = journaledAgent(t, runtime);
   const work = newWork({ text: "one step", requester: null, purpose: null });
   stackOf(agent).push(work);
-  action.reply({ step: ending.step }, { give_up: "the step is over" });
+  action.reply({ step: ending.step }, ...(ending.how === "a death" ? [{ done: "carry on" }] : []), { give_up: "the step is over" });
   await ending.afterStart(runtime);
-  await until(() => action.requests.length === 2, 5_000);
+  await until(() => action.requests.length === (ending.how === "a death" ? 3 : 2), 5_000);
   assert.equal(work.running, null);
   assert.equal(work.step, null);
   assert.match(stepOutcomes(events)[0] ?? "", ending.outcome);

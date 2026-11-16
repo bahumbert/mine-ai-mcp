@@ -174,6 +174,8 @@ export interface WorkInput {
   };
   /** Step key -> refusals since that step last ran; mutable, owned by the agent's work for this objective (counted here, reset there). */
   readonly refused?: Map<string, number>;
+  /** Caller-owned one-time corrections; omitted by direct callers that use the mind's objective memory. */
+  readonly sentBackSteps?: Set<string>;
 }
 
 /** The work tier's answer: the next step, or the objective is over. */

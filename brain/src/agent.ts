@@ -18,11 +18,13 @@ import { AgentMemory } from "./agent/agent-memory.ts";
 import { decideChat, listensTo, type ChatRoutingHost } from "./agent/chat-routing.ts";
 import { FailedSteps } from "./agent/failed-steps.ts";
 import { GameFacts } from "./agent/game-facts.ts";
+import { AgentNarration } from "./agent/narration.ts";
 import { opportunitiesFor } from "./agent/house-opportunities.ts";
 import { StepGuards } from "./agent/step-guards.ts";
 import { StepRunner } from "./agent/step-runner.ts";
+import { SituationDecisions } from "./agent/situation-host.ts";
 import { neededWork, stopAll, stopWorkOf, topWork } from "./agent/stack.ts";
-import { newWork, type Work } from "./agent/work.ts";
+import { newWork, stageWorkValidation, type Work } from "./agent/work.ts";
 
 /** How often the agent checks for new chat. */
 const DEFAULT_POLL_MS = 500;
@@ -94,6 +96,8 @@ export class Agent {
   private readonly runner: StepRunner;
   /** The goal tier's pace. */
   private readonly guards: StepGuards;
+  private readonly narration: AgentNarration;
+  private readonly situations: SituationDecisions;
   private restUntil = 0;
   private wake: (() => void) | null = null;
   private runSignal: AbortSignal = new AbortController().signal;
@@ -107,12 +111,15 @@ export class Agent {
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
     this.facts = new GameFacts(options.runtime, options.log);
     this.memory = new AgentMemory(options, this.body);
+    this.narration = new AgentNarration({ options, stack: this.stack, history: this.history, runSignal: () => this.runSignal, speak: (line, whisperTo) => this.speak(line, undefined, undefined, whisperTo) });
+    this.situations = new SituationDecisions({ options, stack: this.stack, places: () => this.memory.knownPlaces(), runSignal: () => this.runSignal, wake: () => this.wake?.(), journal: (event) => options.journal?.(event), narrate: (work, line) => { void this.narration.narrate(work.objective.text, "progress", line, work.whisperTo); } });
     this.guards = new StepGuards({
       options,
       pollMs: options.pollMs ?? DEFAULT_POLL_MS,
       runSignal: () => this.runSignal,
       top: () => topWork(this.stack),
       idle: (ms) => this.idle(ms),
+      interrupted: () => this.stack.at(-1)?.situation != null,
     });
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
     this.whoWasNamed = new WhoWasNamed(options.persona.username, () => options.otherAgents.names());
@@ -136,10 +143,11 @@ export class Agent {
       failedSteps: this.failedSteps,
       soil: this.soil,
       lastHeard: this.lastHeard,
-      progress: (work, fact) => this.progress(work, fact),
+      progress: (work, fact) => this.narration.progress(work, fact),
       journalState: (step) => this.journalState(step),
       runSignal: () => this.runSignal,
       neededWork: (work) => neededWork(this.stack, work),
+      observe: (snapshot) => this.situations.observe(snapshot),
     });
   }
 
@@ -153,7 +161,7 @@ export class Agent {
 
   async run(signal: AbortSignal): Promise<void> {
     this.runSignal = signal;
-    signal.addEventListener("abort", () => this.wake?.(), { once: true });
+    signal.addEventListener("abort", () => { this.situations.stopFor(null); this.wake?.(); }, { once: true });
     const { persona } = this.options;
     this.options.journal?.({ kind: "persona", name: persona.displayName, stance: persona.stance, goal: persona.goal ?? null, preferences: persona.preferences ?? null });
     // The runtime keeps chat from before this brain started; answering it now would be confusing.
@@ -165,7 +173,9 @@ export class Agent {
     // view_status, and the brain stopped before its first step).
     for (;;) {
       try {
-        await this.keepSettings(await this.options.runtime.status());
+        const snapshot = await this.options.runtime.status();
+        this.situations.observe(snapshot);
+        await this.keepSettings(snapshot);
         break;
       } catch (error) {
         if (signal.aborted) return;
@@ -181,6 +191,7 @@ export class Agent {
     try {
       while (!signal.aborted) {
         unreadable = await this.readChat(unreadable);
+        void this.situations.poll().catch(() => undefined);
         await sleepMs(this.options.pollMs ?? DEFAULT_POLL_MS, signal).catch(() => undefined);
       }
     } finally {
@@ -369,10 +380,13 @@ export class Agent {
 
   /** Asks the goal tier for the next objective of the character's own goal; false when there is none to pick now. */
   private async pickOwnObjective(): Promise<boolean> {
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.length > 0) return true;
     const { persona, mind, runtime, log } = this.options;
     if (persona.goal === undefined || monotonicNow() < this.restUntil) return false;
     if (!(await this.guards.waitForGoalBudget())) return true;
     const snapshot = await runtime.status();
+    this.situations.observe(snapshot);
     this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     const hour = lastOfPlay(this.memory.times);
     const time = minutesByActivity(hour);
@@ -382,7 +396,17 @@ export class Agent {
     const chances = activityChances(availableActivities(personaSkills(persona), snapshot), persona.preferences, persona.settings.feelingMultipliers, (activity) => spent.get(activity) ?? 0);
     const drawn = drawTwo(chances, this.options.random ?? Math.random);
     const opportunities = await opportunitiesFor({ memory: this.memory, facts: this.facts, runtime, style: persona.style, log }, snapshot, drawn);
-    const { text, purpose } = await mind.chooseObjective({ persona, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], lately: [...this.memory.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
+    let chosen;
+    try {
+      chosen = await mind.chooseObjective({ persona, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], lately: [...this.memory.lately], lastFailed: this.lastFailed, opportunities, time, drawn, chances }, this.runSignal);
+    } catch (error) {
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.length > 0) return true;
+      throw error;
+    }
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.length > 0) return true;
+    const { text, purpose } = chosen;
     this.modelFailures = 0;
     // An order that arrived while it was thinking comes first; its own idea is dropped, it will think again.
     if (this.stack.length > 0 || monotonicNow() < this.restUntil) return true;
@@ -395,14 +419,18 @@ export class Agent {
 
   /** Takes one step towards `work`: one model call, then the chosen skill. */
   private async advance(work: Work): Promise<void> {
+    await this.situations.settled();
+    if (this.runSignal.aborted || this.stack.at(-1) !== work) return;
     const { persona, runtime } = this.options;
     if (work.situation === null && work.objective.requester === null && !(await this.guards.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     const snapshot = await runtime.status();
+    this.situations.observe(snapshot);
     this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     await this.keepSettings(snapshot);
     // A planned step (a situation's, decided when it was raised) runs without a model call, once.
     const decision = work.planned ?? (await this.decideStep(work, snapshot));
+    await this.situations.settled();
     // Set aside or stopped while it was thinking: it thinks again once the objective is back on top.
     if (decision === null || this.stack.at(-1) !== work) return;
     work.planned = null;
@@ -423,16 +451,22 @@ export class Agent {
    */
   private async decideStep(work: Work, snapshot: BotSnapshot): Promise<WorkDecision | null> {
     const { persona, mind, log } = this.options;
+    const validation = stageWorkValidation(work);
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], steps: [...work.steps], paused, earlierFailures: this.failedSteps.earlier(snapshot), ownsTemporaryHouse: this.memory.temporaryHouse() !== null, refused: work.refused }, this.runSignal);
+      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], steps: [...work.steps], paused, earlierFailures: this.failedSteps.earlier(snapshot), ownsTemporaryHouse: this.memory.temporaryHouse() !== null, refused: validation.refused, sentBackSteps: validation.sentBackSteps }, this.runSignal);
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.at(-1) !== work) return null;
+      validation.commit();
       work.badReplies = 0;
       work.sentBacks = 0;
       this.modelFailures = 0;
       return decision;
     } catch (error) {
       // Stopped while it thought (an order stopped or the agent shutting down): nothing it did is counted or told.
-      if (this.runSignal.aborted || !this.stack.includes(work)) return null;
+      await this.situations.settled();
+      if (this.runSignal.aborted || this.stack.at(-1) !== work) return null;
+      validation.commit();
       // The model server is away: no reply was given, so none is bad. The work loop waits and asks again.
       if (error instanceof ModelUnavailable) throw error;
       const sentBack = String(error).includes("[LLM_SENT_BACK]");
@@ -470,7 +504,7 @@ export class Agent {
       this.memory.memorize({ kind: "own_objective", outcome: outcomeLine });
       return;
     }
-    void this.narrate(objective.text, outcome, detail, work.whisperTo);
+    void this.narration.narrate(objective.text, outcome, detail, work.whisperTo);
   }
 
   /** Sleeps until `ms` pass, something is taken on, or the agent stops. */
@@ -498,36 +532,6 @@ export class Agent {
     this.options.log(`${wanted ? "may" : "never"} dig straight down: ${applied ? "set" : "not set yet"}`);
   }
 
-  /**
-   * A skill started something new for an order: the chat tier may say it, at most once per
-   * `settings.narrateEverySeconds` (counted from the reply that took the order on) and never twice for the same thing.
-   */
-  private progress(work: Work, fact: string): void {
-    // A step that outlives its stop may still report (BRN-08): the order was stopped, nothing is told about it.
-    if (!this.stack.includes(work) || fact === work.lastFact) return;
-    work.lastFact = fact;
-    this.options.log(`  now: ${fact}`);
-    const asked = monotonicNow() - work.spokenAt >= this.options.persona.settings.narrateEverySeconds * 1_000;
-    this.options.journal?.({ kind: "progress", objective: work.objective.text, fact, asked });
-    if (!asked) return;
-    work.spokenAt = monotonicNow();
-    void this.narrate(work.objective.text, "progress", fact, work.whisperTo, () => this.stack.includes(work));
-  }
-
-  /**
-   * Has the chat tier tell the players about an order: how it ended, or what it does now. `stillOn`: asked when the
-   * line comes back, a line about an order stopped meanwhile is dropped (flavour text, never retried: BRN-11).
-   */
-  private async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string, whisperTo: string | null, stillOn: () => boolean = () => true): Promise<void> {
-    if (this.runSignal.aborted) return;
-    try {
-      const line = await this.options.mind.narrate({ persona: this.options.persona, objective, outcome, detail, history: this.history }, this.runSignal);
-      if (stillOn()) this.speak(line, undefined, undefined, whisperTo);
-    } catch (error) {
-      this.options.log(`narration failed: ${String(error)}`);
-    }
-  }
-
   private journalObjective(event: "taken" | "queued" | "own", objective: Objective): void {
     this.options.journal?.({ kind: "objective", event, text: objective.text, requester: objective.requester, purpose: objective.purpose });
     this.journalState(null);
@@ -540,6 +544,7 @@ export class Agent {
 
   /** "stop": everything on the stack ends, its own goal included. */
   private stopAll(): void {
+    this.situations.stopFor(null);
     stopAll(this.stack);
     this.journalState(null);
     this.wake?.();
@@ -547,6 +552,7 @@ export class Agent {
 
   /** "stop" from a player: only that player's share of the stack ends (see `stopWorkOf`). */
   private stopWorkOf(speaker: string): void {
+    this.situations.stopFor(speaker);
     stopWorkOf(this.stack, speaker);
     this.journalState(null);
     this.wake?.();

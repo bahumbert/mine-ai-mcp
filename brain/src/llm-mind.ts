@@ -218,9 +218,9 @@ export class LlmMind implements Mind {
 
   /** Steps already sent back as a repeat of one that just succeeded, per objective. */
   private readonly resends = new WeakMap<object, Set<string>>();
-  private resent(objective: object): Set<string> {
-    let sent = this.resends.get(objective);
-    if (sent === undefined) this.resends.set(objective, (sent = new Set()));
+  private resent(input: WorkInput): Set<string> {
+    let sent = input.sentBackSteps ?? this.resends.get(input.objective);
+    if (sent === undefined) this.resends.set(input.objective, (sent = new Set()));
     return sent;
   }
 
@@ -252,8 +252,8 @@ export class LlmMind implements Mind {
         // step named the requester): sent back once per step with where it stands.
         const aroundRequester = step.data.skill === "protect_area" ? step.data.player : step.data.skill === "level_area" ? step.data.around : undefined;
         const aroundKey = `around you: ${describeStep(step.data)}`;
-        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has(aroundKey)) {
-          this.resent(input.objective).add(aroundKey);
+        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input).has(aroundKey)) {
+          this.resent(input).add(aroundKey);
           const { x, y, z } = input.snapshot.position;
           throw new SendBack(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
         }
@@ -278,8 +278,8 @@ export class LlmMind implements Mind {
         // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
         const label = describeStep(step.data);
         const last = input.steps.at(-1);
-        if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input.objective).has(label)) {
-          this.resent(input.objective).add(label);
+        if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input).has(label)) {
+          this.resent(input).add(label);
           throw new SendBack(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
         }
         const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);

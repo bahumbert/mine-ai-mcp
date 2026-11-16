@@ -6,6 +6,7 @@ import type { ChatTurn } from "./chat-model.ts";
 import type { Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { ActivityTotal } from "./time-spent.ts";
+import type { SituationKind } from "./agent/situations.ts";
 
 /**
  * The brain's log, read by the monitor's Mind tab (spec 2026-10-02-monitor-shows-the-mind): one JSON line per event,
@@ -57,6 +58,7 @@ export interface StackEntry {
 
 export type BrainEvent =
   | ({ readonly kind: "model" } & ModelCall)
+  | { readonly kind: "situation"; readonly event: "raised" | "decided" | "ended"; readonly situation: SituationKind; readonly text: string; readonly options?: readonly string[]; readonly weigh?: readonly string[]; readonly running?: string | null; readonly setAside?: StackEntry | null; readonly answer?: string; readonly detail?: string; readonly latencyMs?: number }
   | {
     readonly kind: "objective";
     /** taken: on top now; queued: after the current one; own: from its own goal; finished: done or failed. */
