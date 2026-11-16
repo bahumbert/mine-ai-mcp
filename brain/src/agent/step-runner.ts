@@ -17,6 +17,7 @@ import { runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import type { AgentMemory } from "./agent-memory.ts";
 import type { FailedSteps } from "./failed-steps.ts";
 import type { GameFacts } from "./game-facts.ts";
+import { ClaimVisits, visitHouses } from "./claim-visit.ts";
 import { ENDS, type StepDecision, type StepRun, type Work } from "./work.ts";
 
 /** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
@@ -44,6 +45,7 @@ interface StepRunnerHost {
 
 export class StepRunner {
   private readonly hostileInterruptions = new HostileInterruptions(monotonicNow);
+  private readonly visits = new ClaimVisits();
 
   constructor(private readonly host: StepRunnerHost) {}
 
@@ -74,8 +76,15 @@ export class StepRunner {
     };
     const phases: ActivityPhase[] = [];
     let result: SkillResult;
+    let after: BotSnapshot | null = null;
+    const context = this.stepContext(work, controller, gain, started, phases);
     try {
-      result = await runStep(decision.step, this.stepContext(work, controller, gain, started, phases));
+      result = await runStep(decision.step, context);
+      after = await options.runtime.status().catch(() => null);
+      if (!context.signal.aborted && death.died() === null && result.status !== "stopped" && after !== null
+        && after.lastDeath?.observedAt === baseline?.observedAt) {
+        await this.checkVisit(context, after);
+      }
     } catch (error) {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -84,7 +93,17 @@ export class StepRunner {
       body.onAction = null;
     }
     await death.settled();
-    return { label, result, started, actions, phases, stalled: gain.stalled(), died: death.died() };
+    return { label, result, started, actions, phases, after, stalled: gain.stalled(), died: death.died() };
+  }
+
+  /** Claim trouble belongs in the log, never in the result of the chosen step. */
+  private async checkVisit(context: SkillContext, after: BotSnapshot): Promise<void> {
+    try {
+      const clause = await this.visits.check(context, visitHouses(context, this.host.memory.places), after);
+      if (clause !== null) this.host.options.log(clause);
+    } catch (error) {
+      this.host.options.log(`could not check a claim on this visit: ${String(error)}`);
+    }
   }
 
   /** What a skill gets to run `work`'s step: the runtime, the body, what the agent knows and keeps, and the signals it reports back through. */
@@ -142,7 +161,7 @@ export class StepRunner {
     const ended = monotonicNow();
     const endedAt = new Date().toISOString();
     const ms = Math.round(ended - started);
-    const { activity, spans, carried, position, room } = await this.host.facts.activityOf(decision.step, run.actions, snapshot, started, ended, run.phases);
+    const { activity, spans, carried, position, room } = await this.host.facts.activityOf(decision.step, run.actions, snapshot, started, ended, run.phases, run.after);
     // A house or a farm is what the objective turned out to be for, whatever its label said (the end decides).
     const endPurpose = ENDS.get(decision.step.skill);
     if (endPurpose !== undefined) work.purpose = endPurpose;
@@ -151,7 +170,7 @@ export class StepRunner {
     if (memory.activityNotesDue()) await memory.rotateActivityNotes();
     // A death ended the step: interrupted, not failed (it is not the step's fault, the same step may be sent again at once).
     // Else stopped for gaining nothing (not by an order or a "stop"): it failed, and the model is told how far it got.
-    let record: StepRecord = died !== null && result.status !== "done"
+    let record: StepRecord = died !== null
       ? { step: label, outcome: "interrupted", detail: died }
       : stalled !== null && result.status !== "done"
         ? { step: label, outcome: "failed", detail: stalled }

@@ -44,6 +44,7 @@ export type StepDecision = Extract<WorkDecision, { readonly kind: "step" }>;
 
 /** What a step run left, before it is recorded: its result, when it started, the runtime actions and phases it went through. */
 export interface StepRun {
+  readonly after: BotSnapshot | null;
   readonly label: string;
   readonly result: SkillResult;
   readonly started: number;

@@ -19,9 +19,9 @@ export class GameFacts {
    * The kind of work a finished step was, from game facts the runtime gives (block tags, hostile species, foods),
    * learnt once per name. Null for errands, or when the facts cannot be read (the step still happened).
    */
-  async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[]): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null; readonly room: Pick<BotSnapshot, "inventory" | "foods"> | null }> {
+  async activityOf(step: Step, actions: readonly ActionTime[], before: BotSnapshot, started: number, ended: number, phases: readonly ActivityPhase[], after?: BotSnapshot | null): Promise<{ readonly activity: Activity | null; readonly spans: readonly ActivitySpan[]; readonly carried: string | null; readonly position: Position | null; readonly room: Pick<BotSnapshot, "inventory" | "foods"> | null }> {
     try {
-      const after = await this.runtime.status();
+      after ??= await this.runtime.status();
       for (const food of [...before.foods, ...after.foods]) this.foods.add(food.name);
       const hostile = new Set([...before.mobs, ...after.mobs].filter((mob) => mob.hostile).map((mob) => mob.name));
       const blocks = actions.flatMap((action) => action.tool === "collect_block" && typeof action.input.block_name === "string" ? [action.input.block_name] : []);
