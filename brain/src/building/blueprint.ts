@@ -36,6 +36,7 @@ const index = z.number().int().nonnegative();
 export const blueprintSchema = z.strictObject({
   name: z.string().min(1),
   size: z.strictObject({ x: index.min(1), y: index.min(1), z: index.min(1) }),
+  sign: z.strictObject({ x: index, y: index, z: index, facing: z.enum(FACINGS) }).optional(),
   cells: z.array(z.strictObject({
     x: index,
     y: index,
@@ -61,6 +62,13 @@ export const blueprintSchema = z.strictObject({
     if (cell.role === "door") doors += 1;
   }
   if (doors !== 1) context.addIssue({ code: "custom", message: `a blueprint has exactly one door cell (the lower half), not ${doors}` });
+  const sign = blueprint.sign;
+  if (sign !== undefined) {
+    const door = blueprint.cells.find((cell) => cell.role === "door");
+    if (sign.x >= blueprint.size.x || sign.y >= blueprint.size.y || sign.z >= blueprint.size.z) context.addIssue({ code: "custom", message: "sign is outside the blueprint bounds" });
+    if (blueprint.cells.some((cell) => cell.x === sign.x && cell.y === sign.y && cell.z === sign.z && cell.role !== "air")) context.addIssue({ code: "custom", message: "sign overlaps a non-air cell" });
+    if (door !== undefined && sign.x === door.x && sign.z === door.z - 1 && (sign.y === door.y || sign.y === door.y + 1)) context.addIssue({ code: "custom", message: "sign overlaps the doorway walk cell" });
+  }
 });
 
 export type Blueprint = z.infer<typeof blueprintSchema>;
@@ -109,6 +117,32 @@ export const FACING_VECTOR: Readonly<Record<Facing, readonly [number, number]>> 
 /** The facing straight back. */
 const OPPOSITE: Readonly<Record<Facing, Facing>> = { north: "south", south: "north", east: "west", west: "east" };
 
+/** Turns a local direction into the site's world direction. */
+function turnFacing(local: Facing, facing: Facing): Facing {
+  const [x, z] = ROTATE[facing](...FACING_VECTOR[local]);
+  return x > 0 ? "east" : x < 0 ? "west" : z > 0 ? "south" : "north";
+}
+
+export interface SignSpot {
+  readonly position: Position;
+  readonly facing: Facing;
+  readonly support: Position;
+  readonly wall: Position;
+}
+
+/** Places the optional sign in the same world frame as the blueprint cells. */
+export function placeSign(blueprint: Blueprint, door: Position, facing: Facing): SignSpot | null {
+  const sign = blueprint.sign;
+  if (sign === undefined) return null;
+  const anchor = blueprint.cells.find((cell) => cell.role === "door");
+  if (anchor === undefined) throw new Error(`${blueprint.name} has no door`);
+  const [dx, dz] = ROTATE[facing](sign.x - anchor.x, sign.z - anchor.z);
+  const position = { x: door.x + dx, y: door.y + sign.y - anchor.y, z: door.z + dz };
+  const signFacing = turnFacing(sign.facing, facing);
+  const [fx, fz] = FACING_VECTOR[signFacing];
+  return { position, facing: signFacing, support: { ...position, y: position.y - 1 }, wall: { ...position, x: position.x - fx, z: position.z - fz } };
+}
+
 /**
  * Turns a blueprint into world cells: the door cell lands on `door` and the front faces `facing`; each role takes
  * its block from the palette. The upper door half is never listed: the door item places it. The door itself faces
@@ -122,10 +156,6 @@ export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Pos
   if (anchor === undefined) throw new Error(`${blueprint.name} has no door`);
   const rotate = ROTATE[facing];
   // A direction in the blueprint frame, turned like the offsets; an axis across x and z swaps on a quarter turn.
-  const turn = (local: Facing): Facing => {
-    const [x, z] = rotate(...FACING_VECTOR[local]);
-    return x > 0 ? "east" : x < 0 ? "west" : z > 0 ? "south" : "north";
-  };
   const quarter = facing === "east" || facing === "west";
   return blueprint.cells.map((cell): WorldCell => {
     const [dx, dz] = rotate(cell.x - anchor.x, cell.z - anchor.z);
@@ -138,7 +168,7 @@ export function placeBlueprint(blueprint: Blueprint, palette: Palette, door: Pos
       ...position,
       block: shaped ?? palette[cell.role],
       role: cell.role,
-      ...(shaped !== undefined && cell.facing !== undefined && { facing: turn(cell.facing) }),
+      ...(shaped !== undefined && cell.facing !== undefined && { facing: turnFacing(cell.facing, facing) }),
       ...(shaped !== undefined && cell.half !== undefined && { half: cell.half }),
       ...(axis !== undefined && { axis }),
     };

@@ -35,6 +35,74 @@ export const HOUSE_SIZES = {
 } as const satisfies Record<string, Pick<HouseOptions, "width" | "depth" | "wallHeight">>;
 export type HouseSize = keyof typeof HOUSE_SIZES;
 
+/** Builds a gable roof and its triangular end walls. */
+function gableRoof(options: HouseOptions, bounds: { x0: number; x1: number; z0: number; z1: number }, set: (x: number, y: number, z: number, role: Role, states?: States) => unknown): void {
+  const { width, depth, wallHeight, overhang } = options;
+  const { x0, x1, z0, z1 } = bounds;
+  const acrossX = width <= depth;
+  const [s0, s1, l0, l1] = acrossX ? [x0, x1, z0, z1] : [z0, z1, x0, x1];
+  const at = (s: number, y: number, l: number, role: Role, states: States = {}) => (acrossX ? set(s, y, l, role, states) : set(l, y, s, role, states));
+  const [upFromLow, upFromHigh]: [Facing, Facing] = acrossX ? ["east", "west"] : ["south", "north"];
+  for (let k = 0; s0 - overhang + k <= s1 + overhang - k; k += 1) {
+    const low = s0 - overhang + k;
+    const high = s1 + overhang - k;
+    const y = wallHeight + k;
+    for (let l = l0 - overhang; l <= l1 + overhang; l += 1) {
+      if (low === high) at(low, y, l, "roof", RIDGE);
+      else {
+        at(low, y, l, "roof", stairs(upFromLow));
+        at(high, y, l, "roof", stairs(upFromHigh));
+      }
+    }
+    if (k > 0) {
+      for (let s = low + 1; s < high; s += 1) {
+        at(s, y, l0, "wall");
+        at(s, y, l1, "wall");
+      }
+    }
+  }
+}
+
+/** Adds one cell of a hip roof ring or its hidden inner support. */
+function hipRoofCell(x: number, y: number, z: number, bounds: { xl: number; xh: number; zl: number; zh: number }, set: (x: number, y: number, z: number, role: Role, states?: States) => unknown, support: (x: number, y: number, z: number) => void): void {
+  const { xl, xh, zl, zh } = bounds;
+  const ring = Math.min(x - xl, xh - x, z - zl, zh - z);
+  if (ring !== 0) {
+    if (ring === 1) support(x, y, z);
+    return;
+  }
+  if (xl === xh || zl === zh) set(x, y, z, "roof", RIDGE);
+  else set(x, y, z, "roof", stairs(x === xl ? "east" : x === xh ? "west" : z === zl ? "south" : "north"));
+}
+
+/** Builds the shrinking roof rings and their hidden supports. */
+function hipRoof(options: HouseOptions, bounds: { x0: number; x1: number; z0: number; z1: number }, set: (x: number, y: number, z: number, role: Role, states?: States) => unknown, support: (x: number, y: number, z: number) => void): void {
+  const { wallHeight, overhang } = options;
+  const { x0, x1, z0, z1 } = bounds;
+  for (let k = 0; ; k += 1) {
+    const [xl, xh, zl, zh] = [x0 - overhang + k, x1 + overhang - k, z0 - overhang + k, z1 + overhang - k];
+    if (xl > xh || zl > zh) break;
+    const y = wallHeight + k;
+    for (let x = xl; x <= xh; x += 1) {
+      for (let z = zl; z <= zh; z += 1) {
+        hipRoofCell(x, y, z, { xl, xh, zl, zh }, set, support);
+      }
+    }
+  }
+}
+
+/** Selects a wall cell while leaving the upper door half to the door item. */
+function wallCell(x: number, y: number, z: number, geometry: { edge: boolean; corner: boolean; doorX: number; z0: number; z1: number; wallHeight: number; windows: Set<string> }, set: (x: number, y: number, z: number, role: Role, states?: States) => unknown): void {
+  const { edge, corner, doorX, z0, z1, wallHeight, windows } = geometry;
+  if (!edge) set(x, y, z, "air");
+  else if (corner) set(x, y, z, "pillar", { axis: "y" });
+  else if (x === doorX && z === z0 && y <= 2) {
+    if (y === 1) set(x, y, z, "door");
+  } else if (y === wallHeight) set(x, y, z, "trim", { axis: z === z0 || z === z1 ? "x" : "z" });
+  else if (y === 2 && windows.has(`${x},${z}`)) set(x, y, z, "window");
+  else set(x, y, z, "wall");
+}
+
 /**
  * A one-room house: floor on the ground layer (foundation ring + floor), walls with corner pillars, a trim row,
  * windows at row 2, one door centred in the front wall, the room and doorstep dug clear, and a roof of stairs facing up
@@ -79,14 +147,7 @@ export function house(options: HouseOptions): Blueprint {
     for (let z = z0; z <= z1; z += 1) {
       set(x, 0, z, edge(x, z) ? "foundation" : "floor");
       for (let y = 1; y <= wallHeight; y += 1) {
-        if (!edge(x, z)) set(x, y, z, "air");
-        else if (corner(x, z)) set(x, y, z, "pillar", { axis: "y" });
-        else if (x === doorX && z === z0 && y <= 2) {
-          // The door item places its own upper half: that cell is not listed.
-          if (y === 1) set(x, y, z, "door");
-        } else if (y === wallHeight) set(x, y, z, "trim", { axis: z === z0 || z === z1 ? "x" : "z" });
-        else if (y === 2 && windows.has(`${x},${z}`)) set(x, y, z, "window");
-        else set(x, y, z, "wall");
+        wallCell(x, y, z, { edge: edge(x, z), corner: corner(x, z), doorX, z0, z1, wallHeight, windows }, set);
       }
     }
   }
@@ -94,49 +155,9 @@ export function house(options: HouseOptions): Blueprint {
   set(doorX, 2, z0 - 1, "air");
 
   if (roof === "gable") {
-    // Slopes across the shorter side; the triangular gable ends are wall, and hold up each roof row from its end.
-    const acrossX = width <= depth;
-    const [s0, s1, l0, l1] = acrossX ? [x0, x1, z0, z1] : [z0, z1, x0, x1];
-    const at = (s: number, y: number, l: number, role: Role, states: States = {}) => (acrossX ? set(s, y, l, role, states) : set(l, y, s, role, states));
-    // Up the slope, toward the ridge: +s on the low side, -s on the high side.
-    const [upFromLow, upFromHigh]: [Facing, Facing] = acrossX ? ["east", "west"] : ["south", "north"];
-    for (let k = 0; s0 - overhang + k <= s1 + overhang - k; k += 1) {
-      const low = s0 - overhang + k;
-      const high = s1 + overhang - k;
-      const y = wallHeight + k;
-      for (let l = l0 - overhang; l <= l1 + overhang; l += 1) {
-        if (low === high) at(low, y, l, "roof", RIDGE);
-        else {
-          at(low, y, l, "roof", stairs(upFromLow));
-          at(high, y, l, "roof", stairs(upFromHigh));
-        }
-      }
-      if (k > 0) {
-        for (let s = low + 1; s < high; s += 1) {
-          at(s, y, l0, "wall");
-          at(s, y, l1, "wall");
-        }
-      }
-    }
+    gableRoof(options, { x0, x1, z0, z1 }, set);
   } else {
-    // Rings shrinking to the top; a second, hidden ring inside each one carries the next ring up.
-    for (let k = 0; ; k += 1) {
-      const [xl, xh, zl, zh] = [x0 - overhang + k, x1 + overhang - k, z0 - overhang + k, z1 + overhang - k];
-      if (xl > xh || zl > zh) break;
-      const y = wallHeight + k;
-      for (let x = xl; x <= xh; x += 1) {
-        for (let z = zl; z <= zh; z += 1) {
-          const ring = Math.min(x - xl, xh - x, z - zl, zh - z);
-          if (ring !== 0) {
-            if (ring === 1) support(x, y, z);
-            continue;
-          }
-          // The top ring, a line or one cell, is the ridge; any other ring slopes inward.
-          if (xl === xh || zl === zh) set(x, y, z, "roof", RIDGE);
-          else set(x, y, z, "roof", stairs(x === xl ? "east" : x === xh ? "west" : z === zl ? "south" : "north"));
-        }
-      }
-    }
+    hipRoof(options, { x0, x1, z0, z1 }, set, support);
   }
 
   const all = [...cells.values()];
@@ -144,6 +165,7 @@ export function house(options: HouseOptions): Blueprint {
   return blueprintSchema.parse({
     name: `${roof} house ${width}x${depth}`,
     size: { x: extent("x"), y: extent("y"), z: extent("z") },
+    sign: { x: doorX + 1, y: 1, z: z0 - 1, facing: "north" },
     cells: all,
   });
 }

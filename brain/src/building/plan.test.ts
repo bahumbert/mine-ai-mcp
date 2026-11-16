@@ -2,9 +2,47 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { chooseSite, planHouse } from "./plan.ts";
 import { STYLES } from "./styles.ts";
+import { billOfMaterials, blueprintSchema, placeSign, type Facing } from "./blueprint.ts";
+import { house, HOUSE_SIZES } from "./house.ts";
+import { houseBox } from "../skills/build-house.ts";
 
 const site = chooseSite({ x: 0, y: 64, z: 0 }, null);
 const medieval = STYLES.get("medieval")!;
+
+test("sign spot rotates with the door for both house sizes and stays outside the build", () => {
+  const expected = {
+    north: { x: 1, y: -60, z: -1 }, east: { x: 1, y: -60, z: 1 },
+    south: { x: -1, y: -60, z: 1 }, west: { x: -1, y: -60, z: -1 },
+  } as const;
+  for (const size of ["small", "medium"] as const) for (const facing of Object.keys(expected) as Facing[]) {
+    const plan = planHouse(medieval, size, { door: { x: 0, y: -60, z: 0 }, facing });
+    const spot = plan.sign!;
+    assert.deepEqual(spot.position, expected[facing]);
+    assert.equal(spot.facing, facing);
+    assert.deepEqual(spot.support, { ...spot.position, y: spot.position.y - 1 });
+    assert.ok(plan.cells.some((cell) => cell.role === "wall" && cell.x === spot.wall.x && cell.y === spot.wall.y && cell.z === spot.wall.z));
+    const box = houseBox(plan.batches.flat());
+    for (const axis of ["x", "y", "z"] as const) assert.ok(spot.position[axis] >= box.min[axis] && spot.position[axis] <= box.max[axis]);
+    assert.ok(plan.batches.flat().every((cell) => cell.x !== spot.position.x || cell.y !== spot.position.y || cell.z !== spot.position.z));
+    assert.deepEqual(plan.bill, billOfMaterials(plan.cells));
+  }
+});
+
+test("blueprint sign validates bounds, occupancy and both doorway walk cells", () => {
+  const blueprint = house({ ...HOUSE_SIZES.small, ...medieval.house });
+  const door = blueprint.cells.find((cell) => cell.role === "door")!;
+  const sign = blueprint.sign!;
+  assert.equal(placeSign({ ...blueprint, sign: undefined }, { x: 0, y: 0, z: 0 }, "north"), null);
+  for (const bad of [
+    { ...sign, x: blueprint.size.x },
+    { ...sign, x: door.x, y: door.y, z: door.z },
+    { ...sign, x: door.x, y: door.y, z: door.z - 1 },
+    { ...sign, x: door.x, y: door.y + 1, z: door.z - 1 },
+  ]) assert.equal(blueprintSchema.safeParse({ ...blueprint, sign: bad }).success, false);
+  assert.equal(blueprintSchema.safeParse(blueprint).success, true);
+  assert.equal(blueprintSchema.safeParse({ ...blueprint, cells: [...blueprint.cells, { ...sign, role: "air" }] }).success, true);
+  assert.equal(placeSign({ ...blueprint, sign: { ...sign, facing: "east" } }, { x: 0, y: 0, z: 0 }, "east")?.facing, "south");
+});
 
 test("a role built with another block takes it in every cell of the role, the others stay the style's", () => {
   const plain = planHouse(medieval, "small", site);
