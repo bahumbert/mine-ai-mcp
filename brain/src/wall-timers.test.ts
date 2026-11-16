@@ -1,32 +1,29 @@
 /** The brain's waits must follow mocked time and release aborted sleeps. */
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { sleepMs, timeoutSignal } from "./wall-timers.ts";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.js";
 
 test("sleepMs wakes at its mocked deadline and removes its abort listener", async (t) => {
-  mock.timers.enable({ apis: ["setTimeout"] });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const controller = new AbortController();
   const remove = t.mock.method(controller.signal, "removeEventListener");
-  try {
-    let woke = false;
-    const sleeping = sleepMs(1_000, controller.signal).then(() => { woke = true; });
-    mock.timers.tick(999);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(woke, false);
-    mock.timers.tick(1);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(woke, true);
-    await sleeping;
-    assert.equal(remove.mock.callCount(), 1, "a completed sleep detaches its abort listener");
-    controller.abort(new Error("after the sleep"));
-  } finally {
-    mock.timers.reset();
-  }
+  let woke = false;
+  const sleeping = sleepMs(1_000, controller.signal).then(() => { woke = true; });
+  await clock.advance(999);
+  assert.equal(woke, false);
+  await clock.advance(1);
+  assert.equal(woke, true);
+  await sleeping;
+  assert.equal(remove.mock.callCount(), 1, "a completed sleep detaches its abort listener");
+  controller.abort(new Error("after the sleep"));
 });
 
 for (const when of ["before", "during"] as const) {
   test(`sleepMs aborted ${when} waiting keeps the reason and leaves no timer or listener`, async (t) => {
-    mock.timers.enable({ apis: ["setTimeout"] });
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
     const set = globalThis.setTimeout;
     const clear = globalThis.clearTimeout;
     let armed = 0;
@@ -52,22 +49,18 @@ for (const when of ["before", "during"] as const) {
     } finally {
       globalThis.setTimeout = set;
       globalThis.clearTimeout = clear;
-      mock.timers.reset();
     }
   });
 }
 
-test("timeoutSignal aborts at its mocked deadline with TimeoutError", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  try {
-    const signal = timeoutSignal(100);
-    mock.timers.tick(99);
-    assert.equal(signal.aborted, false);
-    mock.timers.tick(1);
-    assert.equal(signal.aborted, true);
-    assert.ok(signal.reason instanceof DOMException);
-    assert.equal(signal.reason.name, "TimeoutError");
-  } finally {
-    mock.timers.reset();
-  }
+test("timeoutSignal aborts at its mocked deadline with TimeoutError", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const signal = timeoutSignal(100);
+  await clock.advance(99);
+  assert.equal(signal.aborted, false);
+  await clock.advance(1);
+  assert.equal(signal.aborted, true);
+  assert.ok(signal.reason instanceof DOMException);
+  assert.equal(signal.reason.name, "TimeoutError");
 });

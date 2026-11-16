@@ -1,6 +1,7 @@
 // Tests RCON transport-failure retention and propagation into trial results.
 import assert from "node:assert/strict";
-import test, { mock } from "node:test";
+import test from "node:test";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.js";
 import { Rcon } from "../../../node_modules/mine-labs/src/server/rcon.ts";
 import * as mineLabs from "mine-labs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -18,17 +19,16 @@ function transport(execute: (command: string) => Promise<string | boolean>) {
 }
 
 test("counts a timed out command", async () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  try {
-    const { rcon } = transport(() => new Promise(() => {}));
-    const pending = rcon.command("test");
-    await Promise.resolve();
-    const rejected = assert.rejects(pending, /timed out/u);
-    mock.timers.tick(10_000);
-    await rejected;
-    assert.equal(rcon.transportFailures, 1);
-    assert.match(rcon.failureSince(0)!, /^rcon command timed out after/u);
-  } finally { mock.timers.reset(); }
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { rcon } = transport(() => new Promise(() => {}));
+  const pending = rcon.command("test");
+  await Promise.resolve();
+  const rejected = assert.rejects(pending, /timed out/u);
+  await clock.advance(10_000);
+  await rejected;
+  assert.equal(rcon.transportFailures, 1);
+  assert.match(rcon.failureSince(0)!, /^rcon command timed out after/u);
 });
 
 test("records rejected writes, lost connections, and non-string replies", async () => {
