@@ -1,4 +1,5 @@
 import { bucketAvailable, predictWaterLanding, saveWaterLanding, waterLandingActive, type WaterLandingEvidence } from "../../navigation/mineflayer/water-landing.js";
+import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { readNavigationPolicy } from "../state/navigation-policy.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
@@ -64,6 +65,8 @@ export class FootingRecovery implements Disposable {
     bot.on("physicsTick", this.#observe);
     bot.on("respawn", this.#reset);
     bot.on("death", this.#reset);
+    bot.on("mount", this.#changeVehicle);
+    bot.on("dismount", this.#changeVehicle);
     bot._client.on("entity_velocity", this.#impulse);
   }
 
@@ -73,7 +76,7 @@ export class FootingRecovery implements Disposable {
 
   get bucketNeeded(): boolean {
     if (
-      waterLandingActive(this.bot) || !readNavigationPolicy(this.bot).bucket_fall_save || !bucketAvailable(this.bot) ||
+      currentVehicle(this.bot) || waterLandingActive(this.bot) || !readNavigationPolicy(this.bot).bucket_fall_save || !bucketAvailable(this.bot) ||
       this.bot.entity.onGround || this.bot.entity.velocity.y >= -0.1 ||
       Reflect.get(this.bot.entity, "isInWater") || Reflect.get(this.bot.entity, "isInLava")
     ) return false;
@@ -89,15 +92,19 @@ export class FootingRecovery implements Disposable {
     return this.#state;
   }
 
-  readonly #reset = () => {
-    this.#body.abort("The body died or respawned during footing recovery.");
+  #resetContext(reason: string): void {
+    this.#body.abort(reason);
     this.#body = new AbortController();
     this.#support = null;
     this.#peakY = -Infinity;
     if (!this.#running) this.#state = null;
-  };
+  }
+
+  readonly #reset = () => this.#resetContext("The body died or respawned during footing recovery.");
+  readonly #changeVehicle = () => this.#resetContext("The vehicle context changed during footing recovery.");
 
   readonly #observe = () => {
+    if (currentVehicle(this.bot)) return;
     if (!this.bot.entity.onGround) {
       this.#peakY = Math.max(this.#peakY, this.bot.entity.position.y);
       return;
@@ -111,7 +118,7 @@ export class FootingRecovery implements Disposable {
 
   readonly #impulse = (packet: unknown) => {
     const parsed = impulseSchema.safeParse(packet);
-    if (!parsed.success || parsed.data.entityId !== this.bot.entity.id || !this.#support || this.bot.health <= 0)
+    if (!parsed.success || parsed.data.entityId !== this.bot.entity.id || !this.#support || this.bot.health <= 0 || currentVehicle(this.bot))
       return;
     if (
       this.#running ||
@@ -296,6 +303,8 @@ export class FootingRecovery implements Disposable {
     this.bot.off("physicsTick", this.#observe);
     this.bot.off("respawn", this.#reset);
     this.bot.off("death", this.#reset);
+    this.bot.off("mount", this.#changeVehicle);
+    this.bot.off("dismount", this.#changeVehicle);
     this.bot._client.off("entity_velocity", this.#impulse);
   }
 }
