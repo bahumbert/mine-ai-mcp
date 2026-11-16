@@ -4,6 +4,7 @@ import { Body, INSTANT_TYPING, type ActOutcome } from "../body.ts";
 import type { CarriedStack, ProtectedArea } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
 import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { navigateOutcomes } from "../../../src/actions/navigate/contract.ts";
 import { digShelterFlow, type ShelterContext, type ShelterHole, type ShelterTimings } from "./dig-in.ts";
 
 /** Quick clocks for a night in the fake: the landing and the wait slices last milliseconds. */
@@ -96,6 +97,100 @@ function intercept(r: ReturnType<typeof rig>, hook: (tool: string, input: Readon
   const original = r.context.body.act.bind(r.context.body);
   r.context.body.act = async (tool, input, reason, options) => hook(tool, input) ?? original(tool, input, reason, options);
 }
+
+// The runtime refuses unsupported range-zero targets before routing (navigate.ts / target-ground.ts; live T11 A24).
+function refuseMidAir(r: ReturnType<typeof rig>) {
+  intercept(r, (tool, input) => {
+    if (tool !== "navigate" || input.range !== 0) return null;
+    const x = Number(input.x), y = Number(input.y), z = Number(input.z);
+    if (r.runtime.world.get(`${x},${y - 1},${z}`) !== "air") return null;
+    let ground = y - 1;
+    while (r.runtime.world.get(`${x},${ground},${z}`) === "air") ground--;
+    return failed(navigateOutcomes.unsupportedTarget({ x, y, z }, 0, ground + 1));
+  });
+}
+
+function openColumn(r: ReturnType<typeof rig>, x: number, capped = false) {
+  for (const y of [61, 62, 63]) r.runtime.world.set(`${x},${y},0`, "air");
+  if (capped) for (const y of [64, 65]) r.runtime.world.set(`${x},${y},0`, "dirt");
+  refuseMidAir(r);
+}
+
+test("open columns are entered on supported ground, roofed when possible and exited", async () => {
+  const clock = createFakeClock({ mode: "mocked" }); using _installed = clock.install();
+  for (const row of [
+    { x: 1, capped: true, inventory: [{ name: "dirt", count: 4 }], digs: [60, 59, 61], roof: "dirt", words: /roofed with dirt/u },
+    { x: 2, capped: false, inventory: [{ name: "dirt", count: 4 }], digs: [63], roof: "dirt", words: /roofed with dirt/u },
+    { x: 0, capped: false, inventory: [{ name: "dirt", count: 4 }], digs: [63], roof: "dirt", words: /roofed with dirt/u },
+    { x: 0, capped: false, inventory: [{ name: "wooden_pickaxe", count: 1 }], digs: [], roof: null, words: /open hole/u },
+  ]) {
+    const r = rig({ inventory: row.inventory }); openColumn(r, row.x, row.capped);
+    if (row.x === 0) setTimeout(() => r.moveTo(0.5, 61, 0.5), 0);
+    const result = await clock.settle(digShelterFlow({ ...r.context, onHole: () => r.dayIn(0) }), 100, 20);
+    assert.deepEqual(r.walks()[0], { x: row.x, y: 61, z: 0, range: 0 });
+    assert.deepEqual(r.calls("dig").map((dig) => dig.y), row.digs);
+    assert.deepEqual(r.calls("place"), row.roof === null ? [] : [{ operation: "place", block_name: row.roof, x: row.x + 1, y: row.capped ? 61 : 63, z: 0, face: "west" }]);
+    if (!row.capped && row.roof !== null) assert.equal(r.runtime.submitted.find((call) => call.tool === "raw_action")?.input.operation, "place");
+    assert.match(detailOf(result), row.words);
+    assert.equal(result.status, "done", detailOf(result));
+  }
+});
+
+test("already on the entry cell after the search: no entry walk", async () => {
+  const clock = createFakeClock({ mode: "mocked" }); using _installed = clock.install();
+  const r = rig(); openColumn(r, 2);
+  const cellsAt = r.runtime.cellsAt.bind(r.runtime);
+  r.runtime.cellsAt = async (...args) => { const cells = await cellsAt(...args); r.moveTo(2.5, 61, 0.5); return cells; };
+  const result = await clock.settle(digShelterFlow({ ...r.context, onHole: () => r.dayIn(0) }), 100, 20);
+  assert.equal(r.walks().some((walk) => walk.range === 0), false);
+  assert.ok(r.walks().some((walk) => walk.range === 1));
+  assert.equal(r.calls("place").length, 1);
+  assert.equal(result.status, "done", detailOf(result));
+});
+
+test("dawn right after entry into an open column: she climbs out", async () => {
+  const clock = createFakeClock({ mode: "mocked" }); using _installed = clock.install();
+  for (const [x, capped, top] of [[1, true, 62], [2, false, 64]] as const) {
+    let dawn = false;
+    const r = rig({ dayCame: async () => dawn }); openColumn(r, x, capped);
+    const navigate = r.runtime.succeedEffects.navigate!;
+    r.runtime.succeedEffects.navigate = (input) => { navigate(input); if (input.range === 0) dawn = true; };
+    const result = await clock.settle(digShelterFlow(r.context), 100, 20);
+    assert.equal(r.calls("dig").length, 0);
+    assert.deepEqual(r.walks().at(-1), { x, y: top, z: 0, range: 1 });
+    assert.match(detailOf(result), /climbed out/u);
+    assert.equal(result.status, "done", detailOf(result));
+  }
+});
+
+test("dawn while passing already open cells climbs from the actual floor without roofing", async () => {
+  const clock = createFakeClock({ mode: "mocked" }); using _installed = clock.install();
+  for (const dawnCall of [3, 4]) {
+    let checks = 0;
+    const r = rig({ dayCame: async () => ++checks >= dawnCall }); openColumn(r, 2);
+    const result = await clock.settle(digShelterFlow(r.context), 100, 20);
+    assert.equal(r.calls("place").length, 0);
+    assert.equal(r.calls("dig").length, 0);
+    assert.match(detailOf(result), /at 2 61 0.*climbed out/u);
+    assert.equal(result.status, "done", detailOf(result));
+  }
+});
+
+test("a reflex displaces her during the first dig: return to the supported floor", async () => {
+  const clock = createFakeClock({ mode: "mocked" }); using _installed = clock.install();
+  const r = rig(); openColumn(r, 1, true); let interrupted = false;
+  intercept(r, (tool, input) => {
+    if (!interrupted && tool === "raw_action" && input.operation === "dig" && input.y === 60) {
+      interrupted = true; r.moveTo(0.5, 64, 0.5); return failed("[HOSTILE_CONTACT] a zombie hit me");
+    }
+    return null;
+  });
+  const result = await clock.settle(digShelterFlow({ ...r.context, onHole: () => r.dayIn(0) }), 100, 20);
+  assert.deepEqual(r.walks().filter((walk) => walk.range === 0), [{ x: 1, y: 61, z: 0, range: 0 }, { x: 1, y: 61, z: 0, range: 0 }]);
+  assert.equal(r.calls("dig")[0]?.y, 60);
+  assert.equal(result.status, "done", detailOf(result));
+  assert.match(detailOf(result), /resumes: 1/u);
+});
 
 test("by day without minutes nothing is submitted and the model is told how to shelter", async () => {
   const { runtime, context } = rig({ dayCame: async () => true });
@@ -379,22 +474,6 @@ test("each shelter wait slice reports alive", async () => {
   const r = rig(); let alive = 0; r.onPlace(() => r.dayIn(30));
   const result = await digShelterFlow({ ...r.context, alive: () => { alive++; } });
   assert.equal(result.status, "done"); assert.ok(alive >= 2);
-});
-
-test("an existing hole needs no digging and roofs only with a carried block", async () => {
-  for (const row of [
-    { inventory: [{ name: "dirt", count: 4 }], roof: ["dirt"], digs: [63], words: /roofed with dirt/u },
-    { inventory: [{ name: "wooden_pickaxe", count: 1 }], roof: [], digs: [], words: /open hole/u },
-  ]) {
-    const { runtime, context, moveTo, dayIn, calls } = rig({ inventory: row.inventory });
-    for (const y of [61, 62, 63]) runtime.world.set(`0,${y},0`, "air");
-    setTimeout(() => moveTo(0.5, 61, 0.5), 0);
-    const result = await digShelterFlow({ ...context, onHole: () => dayIn(0) });
-    assert.equal(result.status, "done", detailOf(result));
-    assert.deepEqual(calls("dig").map((dig) => dig.y), row.digs, "only a placed roof is dug on the way out");
-    assert.deepEqual(calls("place").map((place) => place.block_name), row.roof);
-    assert.match(detailOf(result), row.words);
-  }
 });
 
 test("a waterlogged stair in a wall cell of the best spot: the second spot is dug", async () => {

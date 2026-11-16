@@ -34,12 +34,17 @@ export interface ShelterSpot extends Position {
   readonly support: Position;
   readonly face: Face;
   /**
-   * Cells of the hole already open, from the top: {@link DEPTH} for a hole dug before and left open, else 0. A hole
-   * only 1 or 2 deep has a solid floor, so it is a fresh column dug from its bottom (0).
+   * Cells of the hole already open, from the top (0 to {@link DEPTH}): a hole dug before, a pit,
+   * or a cave notch under a cap; she starts the hole standing on the first solid cell under them ({@link entryOf}).
    */
   readonly dug: number;
   /** Estimated seconds: the walk plus breaking the cells still solid. */
   readonly cost: number;
+}
+
+/** The cell she stands in to start the hole: under its open cells, on the first solid one (or on the hole's floor). */
+export function entryOf(spot: ShelterSpot): Position {
+  return { x: spot.x, y: spot.y - spot.dug, z: spot.z };
 }
 
 export type SpotReason = "open_walls" | "open_floor" | "too_hard" | "unknown_cells" | "protected" | "occupied" | "no_support" | "no_room";

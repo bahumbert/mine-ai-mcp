@@ -3,7 +3,7 @@ import { sleepMs } from "../wall-timers.ts";
 import type { ActOutcome } from "../body.ts";
 import type { BotRuntime, BotSnapshot, Position } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
-import { DEPTH, describeNoSpot, isInHole, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotSearch } from "./spot.ts";
+import { DEPTH, describeNoSpot, entryOf, isInHole, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotSearch } from "./spot.ts";
 import { cellOf, finishShelter, isBusy, resumeShelter, retryBusy, roofAfterReturn, stopped, timingsOf, withResumes, type ShelterAct, type ShelterContext, type ShelterProgress } from "./resume.ts";
 
 export type { ShelterContext, ShelterHole, ShelterTimings } from "./resume.ts";
@@ -135,8 +135,9 @@ async function cellFlaw(runtime: BotRuntime, spot: ShelterSpot): Promise<"open_w
 /** Walks to the hole's spot; the error when she could not, null when she stands on it. */
 async function walkToSpot(context: ShelterContext, act: ShelterAct, spot: ShelterSpot): Promise<string | null> {
   const here = (await context.runtime.status()).position;
-  if (Math.floor(here.x) === spot.x && Math.floor(here.z) === spot.z && Math.floor(here.y) === spot.y) return null;
-  const moved = await act("navigate", { x: spot.x, y: spot.y, z: spot.z, range: 0 });
+  const entry = entryOf(spot);
+  if (Math.floor(here.x) === entry.x && Math.floor(here.z) === entry.z && Math.floor(here.y) === entry.y) return null;
+  const moved = await act("navigate", { ...entry, range: 0 });
   return moved.status === "succeeded" ? null : `${moved.error ?? moved.status}`;
 }
 
@@ -183,12 +184,18 @@ async function runShelter(context: ShelterContext, act: ShelterAct, rawAct: Shel
     state.depth = dug.depth; state.landed = dug.landed;
     let cause = dug.failure?.error ?? (dug.failure === undefined ? undefined : dug.failure.status);
     let what = `could not dig the hole at ${state.spot.x} ${state.spot.y - state.depth - 1} ${state.spot.z}`;
+    if (cause === undefined && state.depth < state.spot.dug && isInHole((await context.runtime.status()).position, state.spot)) {
+      state.depth = state.spot.dug;
+      return withResumes(await finishShelter(context, rawAct, state, waitedMs), state.causes);
+    }
     if (dug.failure !== undefined && isBusy(dug.failure) && await context.dayCame()) {
       const position = (await context.runtime.status()).position;
       const result = state.depth > 0 && isInHole(position, state.spot) ? await finishShelter(context, rawAct, state, waitedMs) : { status: "done" as const, detail: `the shelter time ended; now at ${cellOf(position)}` };
       return withResumes(result, state.causes);
     }
-    if (cause === undefined && state.depth === 0) return withResumes({ status: "done", detail: "the shelter time ended when I reached the spot: nothing dug" }, state.causes);
+    if (cause === undefined && state.depth === 0) {
+      return withResumes({ status: "done", detail: "the shelter time ended when I reached the spot: nothing dug" }, state.causes);
+    }
     if (cause === undefined) {
       state.roof = await roofAfterReturn(context, rawAct, state);
       if (context.signal.aborted) return stopped;

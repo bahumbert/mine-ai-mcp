@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { areaKey, type BlockArea, type BlockKind, type ProtectedArea } from "../runtime-client.ts";
-import { SEARCH_RADIUS, coverOver, describeNoSpot, isInHole, roofBlock, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotReason } from "./spot.ts";
+import { SEARCH_RADIUS, coverOver, describeNoSpot, entryOf, isInHole, roofBlock, shelterBox, shelterSpots, spotCells, type ShelterSpot, type SpotReason } from "./spot.ts";
 
 const solid = (hardness: number | null, extra: Partial<BlockKind> = {}): BlockKind =>
   ({ tool: null, solid: true, fullCube: true, harvest: null, hardness, fluid: false, known: true, tags: [], ...extra });
@@ -58,6 +58,21 @@ function square(reach: number, y0: number, y1: number, name: string): Record<str
 
 const at = (spot: ShelterSpot | undefined) => [spot?.x, spot?.z];
 const near = (actual: number | undefined, expected: number) => assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${actual} is not ${expected}`);
+
+test("entryOf stands on the first solid cell for zero through three open cells", () => {
+  for (const dug of [0, 1, 2, 3]) {
+    const spot: ShelterSpot = { x: 0, y: 64, z: 0, support: { x: 1, y: 63, z: 0 }, face: "west", dug, cost: 0 };
+    assert.deepEqual(entryOf(spot), { x: 0, y: 64 - dug, z: 0 });
+  }
+});
+
+test("a column open three cells under a two-block cap has its entry on solid ground", () => {
+  const area = ground({ ...column(1, 0, 61, 63, "air"), ...column(1, 0, 64, 65, "dirt"), [areaKey(1, 59, 0)]: "dirt" });
+  const spot = shelterSpots(area, FROM, []).spots.find((candidate) => candidate.x === 1 && candidate.z === 0)!;
+  assert.deepEqual([spot.y, spot.dug, spot.support, spot.face], [62, 1, { x: 2, y: 61, z: 0 }, "west"]);
+  assert.deepEqual(entryOf(spot), { x: 1, y: 61, z: 0 });
+  assert.equal(area.blocks.get(areaKey(1, 60, 0)), "dirt");
+});
 
 test("on flat ground the hole is dug where she stands: three cells of hand-dug soil, roofed against the ground beside it", () => {
   const search = shelterSpots(ground(), FROM, []);
