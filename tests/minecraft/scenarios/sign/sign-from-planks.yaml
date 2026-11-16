@@ -1,0 +1,19 @@
+template: ../../templates/flat-single-action.yaml
+name: sign-from-planks
+tags: [acceptance]
+description: Find a craftable sign family member, craft it and place it.
+setup: ["setblock 2 -60 0 crafting_table"]
+players:
+  - name: Actor
+    pos: [0.5, -60, -1.5]
+    inventory: [{ item: oak_planks, count: 8 }]
+client: { command: bun, cwd: ../.., args: [client-host.ts, drivers/signs.ts] }
+params:
+  steps:
+    - { call: view_item_family, input: { family: sign }, save: family }
+    - { firstReady: "$family.members", save: item }
+    - { call: craft_item, input: { items: [{ item_name: "$item", count: 1 }] } }
+    - { call: place_sign, input: { x: 1, y: -60, z: 1, facing: north, lines: [Actor, hello], sign_item: "$item" } }
+    - { check: confirmed }
+    - { check: signLines, at: { x: 1, y: -60, z: 1 }, front: [Actor, hello, "", ""] }
+goal: { kind: all, timeout: 120, goals: [{ kind: completion }] }
