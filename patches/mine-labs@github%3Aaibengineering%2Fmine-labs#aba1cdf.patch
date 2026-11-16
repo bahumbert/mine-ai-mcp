@@ -302,11 +302,73 @@ index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1
  } from "./scenario/schema.js";
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
+diff --git a/src/player/prepare.test.ts b/src/player/prepare.test.ts
+index 7c681e01ae60e6fa308ba47ec838a68e64df0794..3011dffea73960308ae2a3458a107033be02b216 100644
+--- a/src/player/prepare.test.ts
++++ b/src/player/prepare.test.ts
+@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import { preparePlayerForTrial, type PlayerCommandHost } from "./prepare.js";
+ 
++test("declared effects are applied before teleport and after reusable cleanup", async () => {
++  for (const resetReusablePlayer of [false, true]) {
++    const host = new FakePlayerHost();
++    await preparePlayerForTrial({ commands: host, resetReusablePlayer,
++      player: { name: "Collector", pos: [0, -59, 0], inventory: [], op: false,
++        effects: [{ effect: "absorption", seconds: 120, amplifier: 4 }] },
++    });
++    const effect = host.commands.indexOf("effect give Collector minecraft:absorption 120 4 true");
++    assert.ok(effect >= 0);
++    assert.ok(effect < host.commands.indexOf("tp Collector 0 -59 0"));
++    if (resetReusablePlayer) assert.ok(effect > host.commands.indexOf("effect clear Collector"));
++  }
++});
++
+ test("equipment follows reusable cleanup and precedes inventory grants and teleport", async () => {
+   const host = new FakePlayerHost();
+   await preparePlayerForTrial({ commands: host, resetReusablePlayer: true,
+@@ -83,9 +97,15 @@ class FakePlayerHost implements PlayerCommandHost {
+   readonly inventory: string[] = [];
+   /** Queued answers to `data get entity <name> Fire`; a settled body answers -20s. */
+   readonly fire: string[] = [];
++  private tick = 0;
++  private health = 20;
+ 
+   async command(command: string): Promise<string> {
+     this.commands.push(command);
++    if (command.endsWith(" active_effects")) return "Found no elements matching active_effects";
++    if (command === "time query gametime") return `The time is ${this.tick++}`;
++    if (command.startsWith("damage ")) this.health = 20 - Number(command.split(" ")[2]);
++    if (command.endsWith(" Health")) return `Player has the following entity data: ${this.health.toFixed(1)}f`;
+     const fire = /^data get entity (\S+) Fire$/u.exec(command);
+     if (fire) return this.fire.shift() ?? `${fire[1]} has the following entity data: -20s`;
+     if (command === "clear Collector") this.inventory.length = 0;
+@@ -122,7 +142,10 @@ test("a declared starting health wounds a fresh body before it leaves the overwo
+     resetReusablePlayer: false,
+   });
+   assert.deepEqual(host.commands, [
++    "time query gametime",
+     "damage Wounded 9 minecraft:magic",
++    "data get entity Wounded Health",
++    "time query gametime",
+     "execute in minecraft:the_nether run tp Wounded 192.5 49 -19.5",
+   ]);
+ });
 diff --git a/src/player/prepare.ts b/src/player/prepare.ts
-index 05d608a7f027d3622f07ef54fff29b119dfa01b5..29203e25fce81298528ecb57c8b550cfedb9deb1 100644
+index 05d608a7f027d3622f07ef54fff29b119dfa01b5..50bae723303a7e655ffe960524f8314180fd2bfc 100644
 --- a/src/player/prepare.ts
 +++ b/src/player/prepare.ts
-@@ -33,6 +33,10 @@ export interface PreparePlayerForTrialOptions {
+@@ -18,6 +18,9 @@ import { posToCommand } from "../scenario/schema.js";
+ import { inDimension, resourceId } from "../util/minecraft.js";
+ 
+ const MINECRAFT_TAG = /^[A-Za-z0-9_.+-]+$/u;
++const RESTORE_EFFECTS = ["minecraft:instant_health", "minecraft:saturation"] as const;
++// 2026-11-16 heal-order probe: 20/10 tps each min=max=1 tick, n=10; worst x2.
++const RESTORE_TICKS = 2;
+ const EQUIPMENT_SLOTS = {
+   head: "armor.head", chest: "armor.chest", legs: "armor.legs", feet: "armor.feet",
+   mainhand: "weapon.mainhand", offhand: "weapon.offhand",
+@@ -33,6 +36,10 @@ export interface PreparePlayerForTrialOptions {
    /** The arena dimension a declared `pos` is in. A player joins in the overworld. */
    dimension?: Dimension;
    resetReusablePlayer: boolean;
@@ -317,35 +379,115 @@ index 05d608a7f027d3622f07ef54fff29b119dfa01b5..29203e25fce81298528ecb57c8b550cf
  }
  
  /**
-@@ -61,14 +65,62 @@ export async function preparePlayerForTrial(options: PreparePlayerForTrialOption
+@@ -40,7 +47,9 @@ export interface PreparePlayerForTrialOptions {
+  * Cleanup must finish before declared inventory is provisioned or ctx.start resolves.
+  */
+ export async function preparePlayerForTrial(options: PreparePlayerForTrialOptions): Promise<void> {
+-  const { commands, player } = options;
++  options.signal?.throwIfAborted();
++  const { player } = options;
++  const commands = { command: (command: string) => preparationCommand(options, command) };
+   if (options.resetReusablePlayer) await resetReusablePlayer(commands, player.name);
+   // Equip first so a main-hand declaration cannot overwrite an inventory grant.
+   for (const [slot, item] of Object.entries(player.equipment ?? {})) {
+@@ -51,31 +60,137 @@ export async function preparePlayerForTrial(options: PreparePlayerForTrialOption
+     await commands.command(`give ${player.name} ${resourceId(stack.item)} ${stack.count}`);
+   }
+   if (player.op) await commands.command(`op ${player.name}`);
++  for (const { effect, seconds, amplifier } of player.effects ?? []) {
++    await commands.command(`effect give ${player.name} ${resourceId(effect)} ${seconds} ${amplifier} true`);
++  }
+   const teleport = player.pos
+     ? inDimension(options.dimension ?? "overworld", `tp ${player.name} ${posToCommand(player.pos)}`)
+     : null;
+   if (options.resetReusablePlayer) {
+     // Still a spectator, so the rejoin cell cannot burn or hurt it on the way out.
+     if (teleport) await commands.command(teleport);
+-    await returnReusablePlayer(commands, player.name);
++    await returnReusablePlayer(options);
      // After the vitals restore, so a reused body is wounded from full health
      // rather than from whatever the last trial left it with.
-     await woundToDeclaredHealth(commands, player);
+-    await woundToDeclaredHealth(commands, player);
++    await woundToDeclaredHealth(options);
 +    await drainToDeclaredFood(options);
      return;
    }
    // Before the teleport: for a moment after a change of dimension the player
    // is in neither level, and a command aimed at it then finds nobody.
-   await woundToDeclaredHealth(commands, player);
+-  await woundToDeclaredHealth(commands, player);
++  await woundToDeclaredHealth(options);
 +  await drainToDeclaredFood(options);
    if (teleport) await commands.command(teleport);
  }
  
+-/** Magic damage ignores armour, so the declared inventory cannot change the result. */
+-async function woundToDeclaredHealth(commands: PlayerCommandHost, player: PlayerSpec): Promise<void> {
+-  if (player.health !== undefined && player.health < 20) {
+-    await commands.command(`damage ${player.name} ${20 - player.health} minecraft:magic`);
 +// First food decrease came about 53–67 ticks after action start in T5's lane trace; 200 is ~3x (2026-11-15).
 +const FOOD_STILL_TICKS = 200;
 +
++/** One monotonic clock for preparation's independent stall deadlines and polling. */
++function preparationClock(options: PreparePlayerForTrialOptions) {
++  return {
++    now: options.now ?? (() => performance.now()),
++    sleep: options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))),
++  };
++}
++
++/** Check cancellation on both sides of a sent command; its answer still completes. */
++async function preparationCommand(options: PreparePlayerForTrialOptions, command: string): Promise<string> {
++  options.signal?.throwIfAborted();
++  const answer = await options.commands.command(command);
++  options.signal?.throwIfAborted();
++  return answer;
++}
++
++/** Unreadable game time supplies no evidence of progress. */
++async function preparationTick(options: PreparePlayerForTrialOptions): Promise<number | undefined> {
++  const answer = await options.commands.command("time query gametime").catch(() => "");
++  options.signal?.throwIfAborted();
++  const tick = Number(/^The time is (\d+)\s*$/u.exec(answer)?.[1] ?? NaN);
++  return Number.isSafeInteger(tick) ? tick : undefined;
++}
++
++/** Instant restore effects must be consumed before a wound or hunger can overwrite them. */
++async function awaitRestoreApplied(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { now, sleep } = preparationClock(options);
++  let movedAt = now();
++  let baseline: number | undefined;
++  let lastTick: number | undefined;
++  for (;;) {
++    const effects = await preparationCommand(options, `data get entity ${options.player.name} active_effects`);
++    if (!RESTORE_EFFECTS.some(effect => effects.includes(`id: "${effect}"`))) return;
++    const tick = await preparationTick(options);
++    if (tick !== undefined) {
++      baseline ??= tick;
++      if (lastTick === undefined || tick > lastTick) movedAt = now();
++      lastTick = tick;
++    }
++    if ((lastTick !== undefined && baseline !== undefined && lastTick - baseline > RESTORE_TICKS) ||
++      now() - movedAt >= (options.goalStallMs ?? 30_000)) {
++      throw new Error(`${options.player.name}'s restore was not applied (at tick ${lastTick ?? "unknown"})`);
++    }
++    await sleep(50);
++    options.signal?.throwIfAborted();
+   }
+ }
+ 
 +/** Drain the declared food after restoring vitals, always releasing the fixture's hunger effect. */
 +async function drainToDeclaredFood(options: PreparePlayerForTrialOptions): Promise<void> {
-+  const { commands, player } = options;
++  const { player } = options;
 +  if (player.food === undefined) return;
-+  const now = options.now ?? (() => performance.now());
-+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)));
++  const commands = { command: (command: string) => preparationCommand(options, command) };
++  const { now, sleep } = preparationClock(options);
 +  let movedAt = now();
 +  let lastTick: number | undefined;
 +  let foodTick: number | undefined;
 +  let lastFood: number | undefined;
 +  // The restore's one-second Saturation must not keep refilling food while it is being drained.
 +  await commands.command(`effect clear ${player.name} minecraft:saturation`);
++  options.signal?.throwIfAborted();
 +  try {
 +    await commands.command(`effect give ${player.name} minecraft:hunger infinite 255 true`);
 +    for (;;) {
@@ -359,9 +501,8 @@ index 05d608a7f027d3622f07ef54fff29b119dfa01b5..29203e25fce81298528ecb57c8b550cf
 +        options.signal?.throwIfAborted();
 +        if (saturation === 0) return;
 +      }
-+      const time = await commands.command("time query gametime").catch(() => "");
-+      const tick = Number(/^The time is (\d+)\s*$/u.exec(time)?.[1] ?? NaN);
-+      if (Number.isSafeInteger(tick)) {
++      const tick = await preparationTick(options);
++      if (tick !== undefined) {
 +        if (tick !== lastTick) movedAt = now();
 +        if (foodTick === undefined || (Number.isFinite(food) && (lastFood === undefined || food < lastFood))) foodTick = tick;
 +        lastTick = tick;
@@ -373,13 +514,49 @@ index 05d608a7f027d3622f07ef54fff29b119dfa01b5..29203e25fce81298528ecb57c8b550cf
 +      await sleep(250);
 +    }
 +  } finally {
-+    await commands.command(`effect clear ${player.name} minecraft:hunger`);
++    await options.commands.command(`effect clear ${player.name} minecraft:hunger`);
 +  }
 +}
 +
- /** Magic damage ignores armour, so the declared inventory cannot change the result. */
- async function woundToDeclaredHealth(commands: PlayerCommandHost, player: PlayerSpec): Promise<void> {
-   if (player.health !== undefined && player.health < 20) {
++/** Magic damage ignores armour, so the declared inventory cannot change the result. */
++async function woundToDeclaredHealth(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { player } = options;
++  if (player.health === undefined || player.health >= 20) return;
++  const before = await preparationTick(options);
++  await preparationCommand(options, `damage ${player.name} ${20 - player.health} minecraft:magic`);
++  const answer = await preparationCommand(options, `data get entity ${player.name} Health`);
++  const health = Number(/: (\d+(?:\.\d+)?)f\s*$/u.exec(answer)?.[1] ?? NaN);
++  const after = await preparationTick(options);
++  if (health === player.health) return;
++  if (before !== undefined && after !== undefined && after > before && health > player.health && health <= player.health + 1) return;
++  throw new Error(`${player.name}'s health did not settle at ${player.health} (at ${Number.isFinite(health) ? health : "unknown"})`);
++}
++
+ /**
+  * A reused server keeps the player's body across trials, and it rejoins where
+  * the last trial left it — a cell the restored arena may have filled with lava
+@@ -101,7 +216,9 @@ const RETURN_POLL_MS = 50;
+  * health never regenerates on no-regeneration fixtures. Reading `Fire` also
+  * waits out a change of dimension, during which the player cannot be found.
+  */
+-async function returnReusablePlayer(commands: PlayerCommandHost, name: string): Promise<void> {
++async function returnReusablePlayer(options: PreparePlayerForTrialOptions): Promise<void> {
++  const commands = { command: (command: string) => preparationCommand(options, command) };
++  const name = options.player.name;
+   for (let attempt = 1; ; attempt += 1) {
+     const answer = await commands.command(`data get entity ${name} Fire`);
+     const ticks = /(-?\d+)s\s*$/u.exec(answer.trim())?.[1];
+@@ -112,8 +229,8 @@ async function returnReusablePlayer(commands: PlayerCommandHost, name: string):
+     await new Promise((resolve) => setTimeout(resolve, RETURN_POLL_MS));
+   }
+   await commands.command(`gamemode survival ${name}`);
+-  await commands.command(`effect give ${name} minecraft:instant_health 1 9 true`);
+-  await commands.command(`effect give ${name} minecraft:saturation 1 9 true`);
++  for (const effect of RESTORE_EFFECTS) await commands.command(`effect give ${name} ${effect} 1 9 true`);
++  await awaitRestoreApplied(options);
+ }
+ 
+ /** Parse both bracketed older responses and Minecraft 1.21.4's comma-separated tag response. */
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
 index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609b609f116 100644
 --- a/src/scenario/compile.ts
@@ -627,11 +804,46 @@ index 1d07d4d379277d1e78b0806753744dccf6c46826..88c751e7eb61dda32eb930ab97c7d123
  };
  
  /** A recursive goal condition plus the runner timeout for settling the whole trial. */
+diff --git a/src/scenario/schema.test.ts b/src/scenario/schema.test.ts
+index f4c37c45f6877faa2d5dda1de5b3eb1e575f1281..4b46f5ef8075413df2e400d8fdd9b983fbca1654 100644
+--- a/src/scenario/schema.test.ts
++++ b/src/scenario/schema.test.ts
+@@ -7,6 +7,17 @@ import {
+   type ScenarioInput,
+ } from "./schema.js";
+ 
++test("player effects accept valid values and reject unsafe commands", () => {
++  const scenario = (effect: unknown) => ({
++    client: { command: "test-client" }, goal: { kind: "completion" },
++    players: [{ name: "player1", effects: [effect] }],
++  });
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "minecraft:absorption", seconds: 120, amplifier: 4 })).success, true);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption run say x", seconds: 120, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 0, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 120, amplifier: 256 })).success, false);
++});
++
+ test("scenario parsing turns optional input into a complete runner scenario", () => {
+   const input: ScenarioInput = {
+     client: { command: "test-client" },
 diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
-index d7a0ad6fef9ea04eb8c4d3b7b74e33a33e653b5f..5cc33fe331c32b3a99d1c2b808db9561f0bdfa76 100644
+index d7a0ad6fef9ea04eb8c4d3b7b74e33a33e653b5f..a8e5ebd482721ac67791811b7c0b4043c8e254a6 100644
 --- a/src/scenario/schema.ts
 +++ b/src/scenario/schema.ts
-@@ -118,6 +118,8 @@ const playerSpecSchema = z.strictObject({
+@@ -108,6 +108,12 @@ const playerSpecSchema = z.strictObject({
+   pos: posSchema.optional(),
+   /** Items Mine Labs gives after reusable-player cleanup and before ctx.start. */
+   inventory: z.array(inventoryItemSchema).default([]),
++  /** Effects to apply after cleanup and before the player is teleported. */
++  effects: z.array(z.strictObject({
++    effect: z.string().regex(minecraftResourceId),
++    seconds: z.number().int().positive(),
++    amplifier: z.number().int().min(0).max(255),
++  })).optional(),
+   /** One item per equipped slot, applied before inventory grants and client start. */
+   equipment: equipmentSchema.optional(),
+   /** Grant operator rights to the client player as part of scenario setup. */
+@@ -118,6 +124,8 @@ const playerSpecSchema = z.strictObject({
     * arrangement is visible in the scenario and finished before `start`.
     */
    health: z.number().min(1).max(20).optional(),
@@ -1705,76 +1917,3 @@ index 0dfa0ed1ec590720a1bdae1e912463958a8da8ce..e5450d022003bb75af1dcf883399704b
 +
 +/** What `Rcon.executeChecked` puts before a command, so a command near the RCON size limit counts it. */
 +export const CHECKED_COMMAND_PREFIX = "execute store success score #ml_command ml_query run ";
-diff --git a/src/player/prepare.test.ts b/src/player/prepare.test.ts
---- a/src/player/prepare.test.ts
-+++ b/src/player/prepare.test.ts
-@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
- import test from "node:test";
- import { preparePlayerForTrial, type PlayerCommandHost } from "./prepare.js";
- 
-+test("declared effects are applied before teleport and after reusable cleanup", async () => {
-+  for (const resetReusablePlayer of [false, true]) {
-+    const host = new FakePlayerHost();
-+    await preparePlayerForTrial({ commands: host, resetReusablePlayer,
-+      player: { name: "Collector", pos: [0, -59, 0], inventory: [], op: false,
-+        effects: [{ effect: "absorption", seconds: 120, amplifier: 4 }] },
-+    });
-+    const effect = host.commands.indexOf("effect give Collector minecraft:absorption 120 4 true");
-+    assert.ok(effect >= 0);
-+    assert.ok(effect < host.commands.indexOf("tp Collector 0 -59 0"));
-+    if (resetReusablePlayer) assert.ok(effect > host.commands.indexOf("effect clear Collector"));
-+  }
-+});
-+
- test("equipment follows reusable cleanup and precedes inventory grants and teleport", async () => {
-   const host = new FakePlayerHost();
-   await preparePlayerForTrial({ commands: host, resetReusablePlayer: true,
-diff --git a/src/player/prepare.ts b/src/player/prepare.ts
---- a/src/player/prepare.ts
-+++ b/src/player/prepare.ts
-@@ -42,6 +42,9 @@ export interface PreparePlayerForTrialOptions {
- export async function preparePlayerForTrial(options: PreparePlayerForTrialOptions): Promise<void> {
-   const { commands, player } = options;
-   if (options.resetReusablePlayer) await resetReusablePlayer(commands, player.name);
-+  for (const { effect, seconds, amplifier } of player.effects ?? []) {
-+    await commands.command(`effect give ${player.name} ${resourceId(effect)} ${seconds} ${amplifier} true`);
-+  }
-   // Equip first so a main-hand declaration cannot overwrite an inventory grant.
-   for (const [slot, item] of Object.entries(player.equipment ?? {})) {
-     const target = EQUIPMENT_SLOTS[slot as keyof typeof EQUIPMENT_SLOTS];
-diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
---- a/src/scenario/schema.ts
-+++ b/src/scenario/schema.ts
-@@ -108,6 +108,12 @@ const playerSpecSchema = z.strictObject({
-   pos: posSchema.optional(),
-   /** Items Mine Labs gives after reusable-player cleanup and before ctx.start. */
-   inventory: z.array(inventoryItemSchema).default([]),
-+  /** Effects to apply after cleanup and before the player is teleported. */
-+  effects: z.array(z.strictObject({
-+    effect: z.string().regex(minecraftResourceId),
-+    seconds: z.number().int().positive(),
-+    amplifier: z.number().int().min(0).max(255),
-+  })).optional(),
-   /** One item per equipped slot, applied before inventory grants and client start. */
-   equipment: equipmentSchema.optional(),
-   /** Grant operator rights to the client player as part of scenario setup. */
-diff --git a/src/scenario/schema.test.ts b/src/scenario/schema.test.ts
---- a/src/scenario/schema.test.ts
-+++ b/src/scenario/schema.test.ts
-@@ -8,5 +8,16 @@ import {
- } from "./schema.js";
- 
-+test("player effects accept valid values and reject unsafe commands", () => {
-+  const scenario = (effect: unknown) => ({
-+    client: { command: "test-client" }, goal: { kind: "completion" },
-+    players: [{ name: "player1", effects: [effect] }],
-+  });
-+  assert.equal(scenarioSchema.safeParse(scenario({ effect: "minecraft:absorption", seconds: 120, amplifier: 4 })).success, true);
-+  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption run say x", seconds: 120, amplifier: 4 })).success, false);
-+  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 0, amplifier: 4 })).success, false);
-+  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 120, amplifier: 256 })).success, false);
-+});
-+
- test("scenario parsing turns optional input into a complete runner scenario", () => {
-   const input: ScenarioInput = {
-     client: { command: "test-client" },

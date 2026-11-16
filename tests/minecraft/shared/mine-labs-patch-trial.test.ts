@@ -7,7 +7,7 @@ import * as mineLabs from "mine-labs";
 import * as goalRunner from "../../../node_modules/mine-labs/src/trial/run.ts";
 import * as goals from "../../../node_modules/mine-labs/src/trial/goals.ts";
 import { preparePlayerForTrial } from "../../../node_modules/mine-labs/src/player/prepare.ts";
-import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, createFakeServer, type FakeClock } from "../../../src/test-support/fake-bot/index.js";
 
 const NO_OP_REFUSAL = "Could not set the block";
 
@@ -19,6 +19,7 @@ async function prepareFood(options: { food?: number; foods?: readonly number[]; 
     "data get entity Actor foodLevel": (options.foods ?? [20, 18, 15]).map(food => `Actor has the following entity data: ${food}`),
     "data get entity Actor foodSaturationLevel": (options.saturation ?? [0]).map(saturation => `Actor has the following entity data: ${saturation}.0f`),
     "data get entity Actor Fire": ["Actor has the following entity data: -20s"],
+    "data get entity Actor active_effects": ["Found no elements matching active_effects"],
   });
   const command = commands.command.bind(commands);
   const result = preparePlayerForTrial({
@@ -93,6 +94,248 @@ class RecordingRcon {
   }
   async playerDeaths(): Promise<number> { return 0; }
 }
+
+/** RCON answers measured by .tmp/probe/heal-order.ts, 2026-11-16 (scenario-lane-frame.md).
+ * The restore lasts until the player's next tick, including while world time is frozen. */
+// Scripted drain stopgap: hunger-restore.jsonl (2026-11-16), one trace/rate, both finish at 78 ticks.
+// These are the measured reserve/food decrease ticks, not a model of arbitrary exhaustion histories.
+const HUNGER_DRAIN_TICKS = {
+  20: [3, 7, 10, 13, 16, 19, 22, 25, 28, 32, 35, 38, 41, 44, 47, 50, 53, 57, 60, 63, 66, 69, 72, 75, 78],
+  10: [3, 6, 9, 13, 16, 19, 22, 25, 28, 31, 34, 38, 41, 44, 47, 50, 53, 56, 59, 63, 66, 69, 72, 75, 78],
+} as const;
+
+class PlayerVitalsRcon extends RecordingRcon {
+  readonly server;
+  health = 20;
+  food = 20;
+  saturation = 0;
+  restorePending = false;
+  neverConsume = false;
+  ignoreDamage = false;
+  hungry = false;
+  private hungerTicks = 0;
+  foodBeforeDose?: number;
+  tickAnswers: (string | Error)[] = [];
+  healthAnswer?: string;
+  before?: (command: string) => void | Promise<void>;
+  private readonly removeTick;
+  constructor(readonly clock: FakeClock, rate: 20 | 10 = 20) {
+    super();
+    this.server = createFakeServer(clock, { ticksPerSecond: rate, startAge: 0 });
+    this.removeTick = this.server.onTick(() => {
+      if (this.restorePending && !this.neverConsume) {
+        this.health = this.food = this.saturation = 20;
+        this.restorePending = false;
+      }
+      if (this.hungry) this.hungerTicks += 1;
+      if (this.hungry && HUNGER_DRAIN_TICKS[rate].some(tick => tick === this.hungerTicks)) {
+        if (this.saturation > 0) this.saturation -= 1;
+        else this.food = Math.max(0, this.food - 1);
+      }
+    });
+  }
+  [Symbol.dispose]() { this.removeTick(); this.server.stop(); }
+  context() { return `fake ${this.clock.now()} ms, game tick ${this.server.gameTime}`; }
+  override async command(command: string): Promise<string> {
+    await super.command(command);
+    await this.before?.(command);
+    if (command === "time query gametime") {
+      const answer = this.tickAnswers.length > 1 ? this.tickAnswers.shift() : this.tickAnswers[0];
+      if (answer instanceof Error) throw answer;
+      return answer ?? `The time is ${this.server.gameTime}`;
+    }
+    if (command.endsWith(" active_effects")) return this.restorePending
+      ? 'Actor has the following entity data: [{duration: 1, show_icon: 0b, amplifier: 9b, id: "minecraft:saturation", show_particles: 0b}, {duration: 1, show_icon: 0b, amplifier: 9b, id: "minecraft:instant_health", show_particles: 0b}]'
+      : "Found no elements matching active_effects";
+    if (command.endsWith(" Fire")) return "Actor has the following entity data: -20s";
+    if (command.endsWith(" Health")) return this.healthAnswer ?? `Actor has the following entity data: ${this.health.toFixed(1)}f`;
+    if (command.endsWith(" foodLevel")) return `Actor has the following entity data: ${this.food}`;
+    if (command.endsWith(" foodSaturationLevel")) return `Actor has the following entity data: ${this.saturation.toFixed(1)}f`;
+    if (command.startsWith("damage ") && !this.ignoreDamage) this.health -= Number(command.split(" ")[2]);
+    if (command === "effect give Actor minecraft:saturation 1 9 true") this.restorePending = true;
+    if (command === "effect give Actor minecraft:hunger infinite 255 true") { this.foodBeforeDose = this.food; this.hungry = true; this.hungerTicks = 0; }
+    if (command === "effect clear Actor minecraft:hunger") this.hungry = false;
+    return "ok";
+  }
+}
+
+/** Run the real preparation on the shared clock; production defaults are exercised separately below. */
+function prepareVitals(rcon: PlayerVitalsRcon, options: {
+  health?: number; food?: number; fresh?: boolean; signal?: AbortSignal; defaults?: boolean;
+} = {}) {
+  return preparePlayerForTrial({ commands: rcon, resetReusablePlayer: !options.fresh, dimension: "the_nether",
+    player: { name: "Actor", inventory: [], op: false, pos: [0.5, -60, 0.5], health: options.health, food: options.food },
+    signal: options.signal,
+    ...(options.defaults ? {} : { now: rcon.clock.now, sleep: ms => rcon.clock.sleep(ms), goalStallMs: 1_000 }),
+  });
+}
+
+for (const rate of [20, 10] as const) {
+  test(`a reused declared wound survives the restore at ${rate} tps`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock, rate);
+    await clock.settle(prepareVitals(rcon, { health: 7 }), 1_000);
+    await clock.advance(2_000 / rate);
+    assert.equal(rcon.health, 7, rcon.context());
+  });
+  test(`a stopped restore fails without wounding or draining at ${rate} tps`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock, rate);
+    rcon.before = command => { if (command === "effect give Actor minecraft:saturation 1 9 true") rcon.server.stop(); };
+    await clock.settle(assert.rejects(prepareVitals(rcon, { health: 7, food: 15 }), /restore was not applied \(at tick \d+\)/u), 1_100);
+    assert.equal(rcon.sent.some(command => command.startsWith("damage ") || command.includes("hunger infinite")), false, rcon.context());
+  });
+}
+
+for (const rate of [20, 10] as const) for (const food of [15, 20]) {
+  test(`hungry reused bodies are restored before declared food ${food} is drained at ${rate} tps`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock, rate);
+    rcon.food = 10;
+    let settled = false;
+    const result = prepareVitals(rcon, { food }).then(() => { settled = true; });
+    await clock.advance(63_000 / rate);
+    assert.equal(settled, false, rcon.context());
+    // hunger-restore probe, 2026-11-16: 78 ticks at both rates (n=1 each); worst x2.
+    await clock.settle(result, 156_000 / rate);
+    assert.equal(rcon.foodBeforeDose, 20, rcon.context());
+    assert.equal(rcon.food, food, rcon.context());
+    assert.equal(rcon.saturation, 0, rcon.context());
+    assert.equal(rcon.hungry, false, rcon.context());
+  });
+}
+
+test("restore tick bound permits the measured worst times two and fails on the next tick", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  using rcon = new PlayerVitalsRcon(clock);
+  rcon.neverConsume = true;
+  let settled = false;
+  const rejection = assert.rejects(prepareVitals(rcon, { health: 7 }), /restore was not applied/u).then(() => { settled = true; });
+  await clock.advance(100);
+  assert.equal(rcon.server.gameTime, 2, rcon.context());
+  assert.equal(settled, false, rcon.context());
+  await clock.advance(50);
+  await rejection;
+  assert.equal(rcon.server.gameTime, 3, rcon.context());
+});
+
+test("restore tick reads tolerate malformed and rejected reads without resetting the stall baseline", async () => {
+  for (const answers of [["bad", "The time is 1"], [new Error("tick unavailable"), "The time is 1"],
+    ["bad"], [new Error("tick unavailable")], ["The time is 9007199254740992"], ["The time is 0", "bad"]]) {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock);
+    rcon.tickAnswers = answers;
+    const stalled = answers.length === 1 || answers[0] === "The time is 0";
+    if (stalled) rcon.server.stop();
+    const barrierTicks: number[] = [];
+    if (!stalled) {
+      // Deliberately delay consumption so malformed -> valid baseline -> valid progress are all observed.
+      rcon.neverConsume = true;
+      rcon.before = command => {
+        if (command !== "time query gametime" || !rcon.restorePending) return;
+        barrierTicks.push(rcon.server.gameTime);
+        if (barrierTicks.length > 1) rcon.tickAnswers = [];
+      };
+      clock.after(150, () => { rcon.neverConsume = false; });
+    }
+    const result = prepareVitals(rcon, { health: 7 });
+    if (stalled) {
+      await clock.settle(assert.rejects(result, answers.length === 1 ? /at tick unknown/u : /at tick 0/u), 1_100);
+      assert.equal(clock.now(), 1_000, rcon.context());
+    } else {
+      await clock.settle(result, 1_000);
+      assert.deepEqual(barrierTicks, [0, 1, 2], rcon.context());
+      await clock.advance(100);
+      assert.equal(rcon.health, 7, rcon.context());
+    }
+  }
+});
+
+test("failed restore and wound reads propagate", async () => {
+  for (const field of ["active_effects", "Health"]) {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock);
+    rcon.before = command => { if (command.endsWith(` ${field}`)) throw new Error(`${field} unavailable`); };
+    await clock.settle(assert.rejects(prepareVitals(rcon, { health: 7 }), new RegExp(`${field} unavailable`, "u")), 1_100);
+  }
+});
+
+for (const [declared, answer, advanceTick, accepted] of [
+    [7, "7.0f", false, true], [7, "8.0f", true, true], [7, "8.0f", false, false],
+    [7, "8.5f", true, false], [7, "6.5f", false, false], [7, "0.0f", false, false],
+    [7, "bad", false, false], [19, "20.0f", false, false], [1, "1.0f", false, true], [7.5, "7.5f", false, true],
+  ] as const) {
+  test(`wound ${declared} readback ${answer}, tick ${advanceTick}: accepted ${accepted}`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock);
+    rcon.healthAnswer = `Actor has the following entity data: ${answer}`;
+    rcon.ignoreDamage = declared === 19;
+    rcon.before = async command => { if (advanceTick && command.endsWith(" Health")) await clock.advance(50); };
+    const result = prepareVitals(rcon, { health: declared, fresh: true });
+    if (accepted) {
+      await clock.settle(result, 1_000);
+      assert.ok(rcon.sent.some(command => command.endsWith(" Health")), rcon.context());
+    }
+    else await clock.settle(assert.rejects(result, new RegExp(`health did not settle at ${declared} \\(at `, "u")), 1_000);
+  });
+}
+
+for (const point of ["entry", "active_effects", "sleep", "final barrier", "Health", "before hunger", "hunger dose", "fresh teleport"]) {
+  test(`preparation abort at ${point} leaves no delayed mutation or hunger`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    using rcon = new PlayerVitalsRcon(clock);
+    const abort = new AbortController();
+    const reason = new Error(`abort at ${point}`);
+    let stoppedAt = -1;
+    const cancel = () => { abort.abort(reason); stoppedAt = rcon.sent.length; };
+    if (point === "entry") cancel();
+    if (point === "sleep") clock.after(25, cancel);
+    rcon.before = command => {
+      if ((point === "active_effects" && command.endsWith(" active_effects")) ||
+        (point === "final barrier" && command.endsWith(" active_effects") && !rcon.restorePending) ||
+        (point === "Health" && command.endsWith(" Health")) ||
+        (point === "before hunger" && command === "effect clear Actor minecraft:saturation") ||
+        (point === "hunger dose" && command === "effect give Actor minecraft:hunger infinite 255 true") ||
+        (point === "fresh teleport" && command === "time query gametime" && rcon.sent.some(sent => sent.endsWith(" Health")))) cancel();
+    };
+    await clock.settle(assert.rejects(prepareVitals(rcon, { health: 7, food: point.includes("hunger") ? 15 : undefined,
+      fresh: point === "fresh teleport", signal: abort.signal }), error => error === reason), 1_100);
+    const sent = [...rcon.sent];
+    const doseSent = sent.includes("effect give Actor minecraft:hunger infinite 255 true");
+    assert.deepEqual(sent.slice(stoppedAt), doseSent ? ["effect clear Actor minecraft:hunger"] : [], `${point}: ${rcon.context()}`);
+    await clock.advance(2_000);
+    assert.deepEqual(rcon.sent, sent, rcon.context());
+    assert.equal(rcon.hungry, false, rcon.context());
+    assert.equal(clock.pendingTimers(), 0, rcon.context());
+  });
+}
+
+test("undeclared reused health still waits for the restore without wounding or reading Health", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  using rcon = new PlayerVitalsRcon(clock);
+  await clock.settle(prepareVitals(rcon), 1_000);
+  assert.equal(rcon.sent.some(command => command.startsWith("damage ")), false, rcon.context());
+  assert.equal(rcon.sent.some(command => command.endsWith(" Health")), false, rcon.context());
+  assert.equal(rcon.sent.some(command => command.endsWith(" active_effects")), true, rcon.context());
+});
+
+test("default preparation clock observes a restore and bounds a stopped server at thirty seconds", async () => {
+  for (const stopped of [false, true]) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    using rcon = new PlayerVitalsRcon(clock);
+    if (stopped) rcon.server.stop();
+    const result = prepareVitals(rcon, { health: 7, defaults: true });
+    if (stopped) {
+      await clock.settle(assert.rejects(result, /restore was not applied/u), 30_100);
+      assert.equal(clock.now(), 30_000, rcon.context());
+    } else {
+      await clock.settle(result, 1_000);
+      await clock.advance(100);
+      assert.equal(rcon.health, 7, rcon.context());
+    }
+  }
+});
 
 const ARENA = {
   id: "lane-3",
