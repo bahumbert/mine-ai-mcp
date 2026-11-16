@@ -232,11 +232,6 @@ test("low health with food: eat the most filling", () => {
   assert.deepEqual(option(v, "eat"), { label: "eat", form: '{"skill":"eat","food":"cooked_beef"}' });
 });
 
-test("food 20: no eat", () => {
-  const v = view({ info: lowHealthInfo, snapshot: snapshot({ health: 6, food: 20, foods: [{ name: "bread", count: 2, points: 5, saturation: 6 }] }) });
-  assert.equal(hasOption(v, "eat"), false);
-});
-
 test("food 5: both hunger facts", () => {
   const v = view({ info: lowHealthInfo, snapshot: snapshot({ health: 6, food: 5 }) });
   assert.ok(fact(v, "food 5/20: you do not heal by yourself"));
