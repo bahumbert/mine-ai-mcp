@@ -4,7 +4,9 @@ import type { ClientCompletion } from "mine-labs/client";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { navigateResultSchema } from "../../../src/actions/navigate/contract.ts";
 import { forbidDigStraightDown } from "./styled-navigate.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 const routeSchemaIn = (arena: ArenaFrame) => z.strictObject({
   dig: z.boolean().default(false),
@@ -14,10 +16,12 @@ const routeSchemaIn = (arena: ArenaFrame) => z.strictObject({
     range: z.number().nonnegative(),
     label: z.string(),
     dig: z.boolean().optional(),
+    scaffold: z.boolean().optional(),
+    expectFailure: z.string().optional(),
   })).min(1),
 });
 
-/** Verify each named arrival before continuing; only excavation courses permit digging. */
+/** Verify each named arrival or expected refusal before continuing the route. */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const { legs, dig, noDigStraightDown } = routeSchemaIn(context.arena).parse(context.scenario.params);
   if (noDigStraightDown) {
@@ -25,15 +29,24 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     if (failure) return failure;
   }
   const completed: string[] = [];
-  for (const { target: [x, y, z], range, label, dig: legDig } of legs) {
-    const output = await context.call("navigate", { x, y, z, range, dig: legDig ?? dig, scaffold: false });
+  for (const { target: [x, y, z], range, label, dig: legDig, scaffold: legScaffold, expectFailure } of legs) {
+    const output = await context.call("navigate", { x, y, z, range, dig: legDig ?? dig, scaffold: legScaffold ?? false });
     completed.push(`${label}: ${output.summary}`);
+    if (expectFailure !== undefined) {
+      const result = navigateResultSchema.safeParse(output.result);
+      if (!result.success || result.data.status !== "failed" || !output.summary.includes(expectFailure) || "escapeRelaxed" in result.data.navigation) {
+        return { status: "failed", detail: `${label}: expected failure containing ${JSON.stringify(expectFailure)} without relaxed escape rules; ${completed.join("; ")}` };
+      }
+      continue;
+    }
     if (output.result.status !== "succeeded") {
       return { status: "failed", detail: completed.join("; ") };
     }
     // A route can enter its accepted feet cell while the last drop is still
     // settling. Observe the arrival after that landing, including any damage.
-    await context.waitForTicks(10);
+    if (await waitServerTicks(context.bot, 10) !== "moved") {
+      return { status: "failed", detail: `${label}: server clock stopped during the arrival wait; ${completed.join("; ")}` };
+    }
     const status = await context.call("view_status", {});
     const observed = viewStatusResultSchema.parse(status.result);
     if (observed.status !== "succeeded") return { status: "failed", detail: `${label}: ${status.summary}` };

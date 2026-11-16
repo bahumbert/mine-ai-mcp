@@ -118,11 +118,17 @@ assertion:
 | [movement-course](scenarios/pathfinder/movement-course.yaml) | The original constrained stair descent, ramps, soul sand, vines, ladders and unsupported diagonal treads. |
 | [gauntlet-lava-parkour](scenarios/pathfinder/gauntlet-lava-parkour.yaml) | Maximum gap crossings plus the obstacle course's steps, drops, magma detour and door. Repeat it for movement reliability. |
 | [cave-excavation-course](scenarios/pathfinder/cave-excavation-course.yaml) | Carpet maze, dripstone stairs and the unavoidable sand curtain. |
+| [staircase-descent-way-back](scenarios/pathfinder/staircase-descent-way-back.yaml) | Staircase descent, then a return by old stairs, new stairs or a pillar. |
+| [dug-hole-return-dig-off](scenarios/pathfinder/dug-hole-return-dig-off.yaml) | A replanned descent's undercut hole names digging off, then the next action digs out. |
 
 `navigate-route.ts` checks each named arrival with `view_status`, after ten
-physics ticks let the final landing settle. It requires full health at every
-checkpoint. Digging defaults to false; only the cave excavation course enables
-it. Scaffolding is always disabled. Mine Labs also checks the final position,
+server ticks let the final landing settle; a stopped server clock fails the leg.
+It requires full health at every checkpoint. Digging defaults to false and can be
+enabled for the route or overridden per leg. Each leg's `scaffold` defaults to
+false; the staircase return enables it. A leg with `expectFailure` requires a
+failed navigation whose summary contains that text and whose result has no
+`navigation.escapeRelaxed`, then starts the next leg without an arrival check.
+Mine Labs also checks the final position,
 health, deaths and protected or cleared blocks independently.
 
 The workshop runs at 16 TPS and checks inventory between stages, before later
