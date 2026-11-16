@@ -89,9 +89,12 @@ test("a persona allowed to build may improve its house too", () => {
 const BOLDNESS_VALUES = ["cautious", "steady", "bold"];
 const fixtureBase = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
 
-/** A temporary folder for fixture personas, removed when the test ends (the private catalog is never written). */
+const TMPFS_DIRECTORY = "/dev/shm";
+
+/** A temporary folder for fixture personas on tmpfs when the machine has one, removed when the test ends (the private catalog is never written). */
 async function withFixtureFolder(run: (folder: string) => Promise<void>): Promise<void> {
-  const folder = await mkdtemp(join(tmpdir(), "persona-test-"));
+  const parent = existsSync(TMPFS_DIRECTORY) ? TMPFS_DIRECTORY : tmpdir();
+  const folder = await mkdtemp(join(parent, "persona-test-"));
   try {
     await run(folder);
   } finally {
