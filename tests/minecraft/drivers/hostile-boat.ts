@@ -4,7 +4,7 @@ import type { ClientCompletion } from "mine-labs/client";
 import { arenaCell } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { boatNamed, carriedBoats } from "./boat-state.ts";
-import { waitForWorldAge } from "../../../src/world/world-age.ts";
+import { STALE_AGE_TICKS, waitForWorldAge } from "../../../src/world/world-age.ts";
 import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
 
 interface HostileResponse {
@@ -23,7 +23,7 @@ interface HostileResponse {
 async function sampleResponse(context: ScenarioContext, response: HostileResponse, atSea: boolean, responseWithinTicks: number) {
   const { bot } = context;
   // The former 60 s observation window is 1200 ticks; add one packet as waitServerTicks does for a stale starting age.
-  return waitForWorldAge(bot, 1_220, {
+  return waitForWorldAge(bot, 1_200 + STALE_AGE_TICKS + 1, {
     wallMs: Number.POSITIVE_INFINITY, stallMs: DRIVER_CLOCK_STOPPED_MS, pollMs: 20,
     until: () => {
       if (response.hurtAt === null) return false;

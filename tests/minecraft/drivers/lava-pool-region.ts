@@ -6,14 +6,14 @@ import type { ClientCompletion } from "mine-labs/client";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements } from "../../../src/world/life-saving-placements.ts";
-import { waitForWorldAge } from "../../../src/world/world-age.ts";
+import { STALE_AGE_TICKS, waitForWorldAge } from "../../../src/world/world-age.ts";
 import { isInLava } from "../../../src/survival/perception/body.ts";
 import { run as escapePool } from "./lava-pool-escape.ts";
 import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
 import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
 
 // Match waitServerTicks' margin: the entry age may already be 19 server ticks old (scenario-ticks, 2026-11-15).
-const TIME_PACKET_MARGIN_TICKS = 20;
+const TIME_PACKET_MARGIN_TICKS = STALE_AGE_TICKS + 1;
 
 /** Require the server's answer, rather than Mineflayer's predicted air after digging. */
 export async function serverRemoved(context: ScenarioContext, cells: readonly Vec3[], sleep: (ms: number) => Promise<void> = delay): Promise<boolean> {

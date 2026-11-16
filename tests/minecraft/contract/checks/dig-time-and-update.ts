@@ -3,7 +3,7 @@
  * the server keeps it so: once on dry ground, once with the eye in water (5x or more; review #1 was a dig under water).
  */
 import assert from "node:assert/strict";
-import { SERVER_ANSWER_TICKS } from "../../../../src/world/world-age.ts";
+import { SERVER_ANSWER_TICKS, STALE_AGE_TICKS } from "../../../../src/world/world-age.ts";
 import type { ContractSubject, LocalPoint } from "../subject.ts";
 import type { ContractCheck } from "../checks.ts";
 import { afterClientTicks, afterServerTicks, answerArrivesWhileMoving, serverQuiet } from "../server-answer.ts";
@@ -19,9 +19,8 @@ const WATER_FLOW_TICKS = 10;
 const BODY_SETTLE_CLIENT_TICKS = 20;
 /** Mineflayer's (and the game's) factor for the eye in water without Aqua Affinity. */
 const EYE_IN_WATER_FACTOR = 5;
-/** One cached-age phase plus finish rounding (19 each), the existing answer budget, and exact-read uncertainty.
- * P9's real dry/wet checks pass at 20/10 tps; this bound keeps their two-sided duration protection on server time. */
-const DIG_COMPLETION_SLACK_TICKS = 2 * 19 + SERVER_ANSWER_TICKS + READING_TICKS;
+/** Retain P9's two packet phases, answer budget and exact-read uncertainty for the dry/wet contract (2026-11-16). */
+const DIG_COMPLETION_SLACK_TICKS = 2 * STALE_AGE_TICKS + SERVER_ANSWER_TICKS + READING_TICKS;
 
 /** The bot stands in a glass shaft; each dug cell is a glass pocket, so the water put at its head stays there. */
 const GLASS_CELLS = [

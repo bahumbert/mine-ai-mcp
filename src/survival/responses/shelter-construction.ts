@@ -2,9 +2,11 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
+import { nativeDigTicks } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
 import { findPlacementSupport } from "../../world/index.js";
 import { foreignRegionAt, regionRefusalText } from "../../world/protected-regions.js";
+import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
 import {
@@ -63,13 +65,14 @@ const seconds = (ms: number) => (ms / 1000).toFixed(1);
  * own dig time for the held tool (`bot.digTime`), no table of blocks.
  */
 function slowShaftCellFailure(build: ShelterBuild, block: DigBlock): StepFailure | null {
-  const diggingMs = build.bot.digTime(block);
+  const diggingMs = nativeDigTicks(build.bot.digTime(block)) * MS_PER_ON_TIME_TICK;
   const leftMs = Math.max(0, build.constructionDeadline - monotonicNow());
   if (diggingMs <= leftMs) return null;
   return {
     kind: "failed",
     error:
-      `shaft cell ${block.name} digs in ${seconds(diggingMs)} s, ${seconds(leftMs)} s left${shaftAlreadyDug(build)}. ` +
+      `shaft cell ${block.name} digs in ${seconds(build.bot.digTime(block))} s, ${seconds(leftMs)} s left` +
+      `; ${seconds(diggingMs)} s including the server answer${shaftAlreadyDug(build)}. ` +
       `A faster tool, another spot or ${WALL_IN_BLOCKS} blocks to wall in with would let the hide finish.`,
   };
 }

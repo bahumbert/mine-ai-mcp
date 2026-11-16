@@ -1,5 +1,6 @@
 // Server-tick budgets for confirming route effects and freeing a body pinned beneath a block.
-import { MS_PER_ON_TIME_TICK, SERVER_ANSWER_TICKS } from "../../world/world-age.js";
+import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
+import { nativeDigTicks } from "../mineflayer/native-dig-clock.js";
 import { STANCE_LANDING_TICKS } from "../steering/hold-water-position.js";
 
 const MINIMUM_CONFIRMATION_TICKS = 100;
@@ -11,7 +12,7 @@ export function confirmationTicks(input: {
   readonly digMs: number;
   readonly broughtBlocks: number;
 }): number {
-  const digTicks = Math.ceil(input.digMs / MS_PER_ON_TIME_TICK);
+  const digTicks = nativeDigTicks(input.digMs);
   return Math.max(MINIMUM_CONFIRMATION_TICKS, 2 * Math.max(input.expectedTicks, digTicks),
     STANCE_LANDING_TICKS + digTicks + SERVER_ANSWER_TICKS)
     + (2 * SERVER_ANSWER_TICKS + digTicks) * input.broughtBlocks;

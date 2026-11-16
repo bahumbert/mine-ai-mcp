@@ -1,7 +1,8 @@
 // Safe excavation of an obstructed wall within the hide's remaining construction budget.
 import type { Vec3 } from "vec3";
-import { createMovements, selectHarvestTool } from "../../navigation/index.js";
+import { createMovements, nativeDigTicks, selectHarvestTool } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
+import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
 import type { ShelterBuild } from "./shelter-build.js";
 
 /** Refuse unsafe or slow removal before borrowing navigation's confirmed in-place break. */
@@ -17,10 +18,11 @@ export async function clearShelterCell(build: ShelterBuild, cell: Vec3, signal: 
   const tool = selectHarvestTool(bot, block);
   if (tool && bot.heldItem !== tool) await bot.equip(tool, "hand");
   signal.throwIfAborted();
-  const diggingMs = bot.digTime(block);
+  const diggingMs = nativeDigTicks(bot.digTime(block)) * MS_PER_ON_TIME_TICK;
   const leftMs = Math.max(0, build.constructionDeadline - monotonicNow());
   if (diggingMs > leftMs)
-    return `wall cell ${block.name} digs in ${(diggingMs / 1000).toFixed(1)} s, ${(leftMs / 1000).toFixed(1)} s left. ` +
+    return `wall cell ${block.name} digs in ${(bot.digTime(block) / 1000).toFixed(1)} s, ${(leftMs / 1000).toFixed(1)} s left; ` +
+      `${(diggingMs / 1000).toFixed(1)} s including the server answer. ` +
       "Use a faster tool or another shelter cell.";
   const result = await navigation.breakBlockInPlace({
     position: cell, movements: createMovements(bot, { allowDigging: true, scaffolding: false }), signal,

@@ -22,6 +22,22 @@ function harnessAt(ticksPerSecond = 20) {
   return harness;
 }
 
+for (const ticksPerSecond of [20, 10]) for (const phaseTicks of [0, 6, 14]) {
+  test(`a native dirt dig takes at most mining plus 20 answer ticks at ${ticksPerSecond} tps, phase ${phaseTicks}`, async () => {
+    const { bot, clock, server } = harnessAt(ticksPerSecond);
+    using _timers = clock.install();
+    await clock.advance(phaseTicks * 1_000 / ticksPerSecond);
+    const startedTick = server.gameTime;
+    const startedMs = clock.now();
+    const digging = bot.dig(bot.blockAt(NEXT)!, "ignore");
+    await clock.settle(digging, 5_000);
+    const ran = server.gameTime - startedTick;
+    assert.ok(ran >= 15 && ran <= 35, `native dig took ${ran} server ticks; 15 mining + 20 answer allowed`);
+    const finish = server.packets.find(packet => packet.name === "block_dig" && (packet.data as { status: number }).status === 2);
+    assert.equal(finish?.atMs, startedMs + 750, "finish goes out at the dig time, before awaiting server air");
+  });
+}
+
 for (const ticksPerSecond of [20, 10, 5]) {
   test(`native digging counts server ticks at ${ticksPerSecond} tps and ignores prediction and sequence ack`, async () => {
     const { bot, clock, world, server } = harnessAt(ticksPerSecond);
@@ -69,7 +85,17 @@ for (const exit of ["cancel", "death", "stopped clock", "stopped after finish", 
     else if (exit === "death") bot.emit("death");
     else if (exit === "disconnect") bot.end("test connection ended");
     else server.stop();
-    const error = await clock.settle(outcome, exit === "stopped after finish" ? 55_000 : 45_000);
+    if (exit === "unconfirmed") {
+      await clock.advance(35_800);
+      server.resendTime();
+      await clock.advance(25);
+      assert.equal(bot.time.age, 24_358);
+      assert.equal(settled, 0, "358 ticks leaves one tick of mining, stale-age and answer allowance");
+      await clock.advance(75);
+      server.resendTime();
+    }
+    const error = await clock.settle(outcome, exit === "unconfirmed" ? 25 : exit === "stopped after finish" ? 55_000 : 45_000, 25);
+    if (exit === "unconfirmed") assert.equal(bot.time.age, 24_359, "unconfirmed at the exact 300 + 19 + 40 tick deadline");
     unsubscribe();
     assert.ok(error instanceof Error);
     assert.match(error.message, exit.startsWith("stopped") ? /DIG_SERVER_CLOCK_STOPPED/ : exit.startsWith("disconnect") ? /DIG_DISCONNECTED/ : exit === "unconfirmed" ? /DIG_NOT_CONFIRMED/ : /Digging aborted/);

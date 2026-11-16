@@ -32,6 +32,7 @@ export const nativeDigClock: ContractCheck = {
       const end = markNow(subject);
       const ran = (await tickOf(subject, end)) - (await tickOf(subject, start));
       assert.ok(ran >= expectedTicks - READING_TICKS, `native dig ran ${ran} server ticks, expected at least ${expectedTicks - READING_TICKS}`);
+      assert.ok(ran <= expectedTicks + 20 + READING_TICKS, `native dig exceeded ${expectedTicks + 20 + READING_TICKS} server ticks: ${ran}`);
       assert.equal(bot.blockAt(target)?.type, 0);
       return `native dig: ${ran} server ticks for ${expectedTicks} required; authoritative air before return`;
     } finally {
