@@ -11,6 +11,7 @@ import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { type FakeChatOptions, attachFakeChat } from "./fake-bot-chat.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
+import { attachServerDigging } from "./fake-server-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
 import { attachFakeFindBlocks } from "./fake-bot-find-blocks.js";
 import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-bot-items.js";
@@ -221,6 +222,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   server.onPosition(({ x, y, z }) => client.emit("position", { x, y, z, yaw: 0, pitch: 0, flags: {}, teleportId: 0 }));
   attachFakePhysics(bot, clock, options.simulatePhysics);
   attachFakeDigging(bot, clock, world);
+  attachServerDigging(bot, server, world);
   const serverEntities = attachFakeEntities(bot, { server, inventory, entities });
   attachFakeVehicle(bot, { server, seatPositionLeadTicks: options.server?.seatPositionLeadTicks ?? 0 });
   attachFakeArmour(bot, { server, inventory });

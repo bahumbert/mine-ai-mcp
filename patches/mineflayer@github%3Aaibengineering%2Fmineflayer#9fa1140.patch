@@ -124,3 +124,114 @@ index f09298c0d3a6366889b30ea60a4f87caffc50fda..ee4b23516b8dacd9797ba2af9a410691
          }
        }
  
+diff --git a/lib/plugins/digging.js b/lib/plugins/digging.js
+--- a/lib/plugins/digging.js
++++ b/lib/plugins/digging.js
+@@ -9,6 +9,7 @@
+ function inject (bot) {
+   let swingInterval = null
+   let waitTimeout = null
++  let cancelServerDig = null
+ 
+   let diggingTask = createDoneTask()
+ 
+@@ -134,7 +135,8 @@
+       location: block.position,
+       face: bot.targetDigFace // default face is 1 (top)
+     })
+-    waitTimeout = setTimeout(finishDigging, waitTime)
++    const serverClock = bot._startServerDig
++    if (!serverClock) waitTimeout = setTimeout(finishDigging, waitTime)
+     bot.targetDigBlock = block
+     bot.swingArm()
+ 
+@@ -155,17 +157,20 @@
+           face: bot.targetDigFace // always the same as the start face
+         })
+       }
+-      bot.targetDigBlock = null
+-      bot.targetDigFace = null
+-      bot.lastDigTime = performance.now()
+-      bot._updateBlockState(block.position, 0)
++      if (!serverClock) {
++        bot.targetDigBlock = null
++        bot.targetDigFace = null
++        bot.lastDigTime = performance.now()
++        bot._updateBlockState(block.position, 0)
++      }
+     }
+ 
+     const eventName = `blockUpdate:${block.position}`
+-    bot.on(eventName, onBlockUpdate)
++    if (!serverClock) bot.on(eventName, onBlockUpdate)
+ 
+     const currentBlock = block
+-    bot.stopDigging = () => {
++    bot.stopDigging = stopDigging
++    function stopDigging (error = new Error('Digging aborted')) {
+       if (!bot.targetDigBlock) return
+ 
+       // Replicate the odd vanilla cancellation face value.
+@@ -174,23 +179,31 @@
+       const cancellationDiggingFace = !stoppedBecauseOfNewDigRequest ? bot.targetDigFace : 0
+ 
+       bot.removeListener(eventName, onBlockUpdate)
++      cancelServerDig?.()
++      cancelServerDig = null
+       clearInterval(swingInterval)
+       clearTimeout(waitTimeout)
+       swingInterval = null
+       waitTimeout = null
+-      bot._client.write('block_dig', {
+-        sequence: nextInteractionSequence(bot),
+-        status: 1, // cancel digging
+-        location: bot.targetDigBlock.position,
+-        face: cancellationDiggingFace
+-      })
+       const block = bot.targetDigBlock
+       bot.targetDigBlock = null
+       bot.targetDigFace = null
+       bot.lastDigTime = performance.now()
+-      bot.emit('diggingAborted', block)
+       bot.stopDigging = noop
+-      diggingTask.cancel(new Error('Digging aborted'))
++      try {
++        bot._client.write('block_dig', {
++          sequence: nextInteractionSequence(bot),
++          status: 1, // cancel digging
++          location: block.position,
++          face: cancellationDiggingFace
++        })
++      } finally {
++        try {
++          bot.emit('diggingAborted', block)
++        } finally {
++          diggingTask.cancel(error)
++        }
++      }
+     }
+ 
+     function onBlockUpdate (oldBlock, newBlock) {
+@@ -199,6 +212,8 @@
+       // All block update listeners receive (null, null) when the world is unloaded. So newBlock can be null.
+       if (newBlock?.type !== 0) return
+       bot.removeListener(eventName, onBlockUpdate)
++      cancelServerDig?.()
++      cancelServerDig = null
+       clearInterval(swingInterval)
+       clearTimeout(waitTimeout)
+       swingInterval = null
+@@ -210,6 +225,13 @@
+       diggingTask.finish()
+     }
+ 
++    if (serverClock) {
++      cancelServerDig = serverClock(block, waitTime, {
++        finish: finishDigging,
++        complete: newBlock => onBlockUpdate(block, newBlock),
++        fail: stopDigging
++      })
++    }
+     await diggingTask.promise
+   }
+ 

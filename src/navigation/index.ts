@@ -94,3 +94,4 @@ export { canAccessLiquid, liquidAccessGoal } from "./goals/liquid-access.js";
 export { dryLandGoal } from "./goals/dry-land.js";
 export { DIG_REACH } from "./movements/excavation.js";
 export { watchServerChange } from "./mineflayer/server-block-changes.js";
+export { installNativeDigClock } from "./mineflayer/native-dig-clock.js";
