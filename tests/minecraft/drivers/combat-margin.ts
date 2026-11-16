@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { ClientCompletion } from "mine-labs/client";
 import type { Entity } from "prismarine-entity";
 import { z } from "zod";
-import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { SERVER_ANSWER_TICKS } from "../../../src/world/world-age.ts";
 import { readRecentEventsResultSchema } from "../../../src/actions/read-recent-events/contract.ts";
 import { arenaActionInput } from "../arena/frame.ts";
 import { arenaPoint } from "../arena/params.ts";
@@ -25,7 +25,6 @@ const paramsSchema = z.strictObject({
     logMax: z.tuple([z.number(), z.number(), z.number()]),
   }).optional(),
 });
-const POLL_MS = 100;
 // Empty equipment prevents finalizeSpawn from randomly changing the measured encounter (P4-06a T6).
 const EMPTY_MOB = "{PersistenceRequired:1b,IsBaby:0b,HandItems:[{},{}],ArmorItems:[{},{},{},{}]}";
 
@@ -39,13 +38,13 @@ export async function run(context: ScenarioContext, sleep: (ms: number) => Promi
   const onDead = (entity: Entity) => { if (entity.id === targetId) killed.add(entity.id); };
   bot.on("entityDead", onDead);
   try {
-    if (params.bagItem) await putStartingItemInBag(context, params.bagItem);
+    if (params.bagItem) await putStartingItemInBag(context, params.bagItem, sleep);
     bot.chat(`/execute at @s run summon minecraft:${params.mob} ~3 ~ ~ ${EMPTY_MOB}`);
-    const started = monotonicNow();
-    while (targetId === null && monotonicNow() - started < 5_000) {
-      targetId = Object.values(bot.entities).find(entity => entity.name === params.mob)?.id ?? null;
-      if (targetId === null) await sleep(POLL_MS);
-    }
+    const seen = await waitServerTicks(bot, SERVER_ANSWER_TICKS, {
+      until: () => (targetId = Object.values(bot.entities).find(entity => entity.name === params.mob)?.id ?? null) !== null,
+      sleep,
+    });
+    assert.notEqual(seen, "stalled", "the server's clock stood still while waiting for the summoned contact");
     assert.notEqual(targetId, null, "the summoned contact was never seen");
     // Encounters need the same game time at every rate, plus a packet of margin for a stale age (scenario-ticks P5, 2026-11-15).
     const observed = await waitServerTicks(bot, params.observeSeconds * 20, {
@@ -72,13 +71,16 @@ export async function run(context: ScenarioContext, sleep: (ms: number) => Promi
 }
 
 /** Mine Labs grants into the selected hotbar slot; move that grant into the bag before any hostile exists. */
-async function putStartingItemInBag(context: ScenarioContext, item: string): Promise<void> {
+async function putStartingItemInBag(context: ScenarioContext, item: string, sleep: (ms: number) => Promise<void>): Promise<void> {
   const { bot } = context;
   assert.equal(bot.heldItem?.name, item, "the declared inventory grant was not held");
   bot.chat("/item replace entity @s inventory.0 from entity @s weapon.mainhand");
   bot.chat("/item replace entity @s weapon.mainhand with minecraft:air");
-  const deadline = monotonicNow() + 5_000;
-  while ((bot.heldItem !== null || bot.inventory.slots[9]?.name !== item) && monotonicNow() < deadline) await delay(POLL_MS);
+  const moved = await waitServerTicks(bot, SERVER_ANSWER_TICKS, {
+    until: () => bot.heldItem === null && bot.inventory.slots[9]?.name === item,
+    sleep,
+  });
+  assert.notEqual(moved, "stalled", "the server's clock stood still while moving the starting weapon into the bag");
   assert.equal(bot.heldItem, null, "the starting hand was not emptied");
   assert.equal(bot.inventory.slots[9]?.name, item, "the starting weapon was not in the bag");
 }
