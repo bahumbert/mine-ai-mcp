@@ -28,6 +28,16 @@ test("the outcome line shows the evade's end detail", () => {
   assert.ok(line.includes("out of sight at 9.0 blocks"));
 });
 
+test("the outcome line shows the chain for a separated evade, an exhausted evade and a fight", () => {
+  for (const [response, outcome] of [["evade", "safe_separation"], ["evade", "capability_limit"], ["fight", "target_died"]]) {
+    const line = formatSurvivalOutcome({ kind: "outcome", source: "hostile_reflex", status: snapshot(),
+      evidence: { outcome: { response, outcome, chain: {
+        threatId: 12, name: "zombie", responses: 3, evades: 2, seconds: 41, gained: 12,
+      } } } });
+    assert.ok(line.endsWith("; 3rd response to zombie#12 in 41 s, 2 evades, gained 12.0 blocks overall"), line);
+  }
+});
+
 test("ordinary replies omit diagnostics without losing them from JSON", () => {
   const status = snapshot();
   const before = structuredClone(status);

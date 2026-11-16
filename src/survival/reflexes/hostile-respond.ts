@@ -9,6 +9,7 @@ import { shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, messageOf, type HostileScene } from "./hostile-scene.js";
 import { seatedAtSea } from "../../actions/navigate/boat-seated-response.js";
 import { respondToHostileFromBoat } from "./hostile-boat-response.js";
+import { monotonicNow } from "../../utils/index.js";
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
 export const HOSTILE_TAKE_BACK_HITS = 15;
@@ -62,6 +63,7 @@ function abandonedEvidence(
     kind: signal.aborted && cause === signal.reason ? "cancelled" : "failed",
     reason: messageOf(cause),
     physical: null,
+    chain: null,
     evidence: {
       ...encounterBaseline(bot, directive, healthBefore),
       killedTargetIds: [],
@@ -120,6 +122,15 @@ export async function respondToHostile(
   directive: HostileResponse,
   signal: AbortSignal,
 ): Promise<HostileSettlement> {
+  const generation = scene.chains.generation;
+  const startedAtMs = monotonicNow();
+  const firstDistances = new Map(directive.threats.map((threat) => [threat.id, threat.distance]));
+  const finalize = (settlement: HostileSettlement): HostileSettlement => ({
+    ...settlement,
+    chain: scene.chains.record({ generation, startedAtMs, endedAtMs: monotonicNow(), settlement,
+      firstDistances: settlement.physical?.response === "evade"
+        ? new Map(settlement.physical.ends.map((end) => [end.id, end.firstDistance])) : firstDistances }),
+  });
   const { bot, policy, perception } = scene;
   const { resolvedIds, attackerIds } = perception;
   scene.activeResponse = directive.kind;
@@ -146,16 +157,16 @@ export async function respondToHostile(
     } catch (cause) {
       settlement = abandonedEvidence(bot, directive, healthBefore, cause, signal);
     }
-    if (death.value) return diedDuring(settlement, death.value);
+    if (death.value) return finalize(diedDuring(settlement, death.value));
     if (signal.aborted && settlement.kind !== "failed")
-      return { ...settlement, kind: "cancelled", reason: messageOf(signal.reason) };
+      return finalize({ ...settlement, kind: "cancelled", reason: messageOf(signal.reason) });
     for (const id of settlement.evidence.killedTargetIds) {
       resolvedIds.add(id);
       attackerIds.delete(id);
     }
     if (settlement.physical?.response === "evade" && settlement.physical.result.kind === "separated")
       for (const id of answeredAttackers) attackerIds.delete(id);
-    return settlement;
+    return finalize(settlement);
   } finally {
     bot.off("death", capture);
     bot.off("entityHurt", preserveNewAttack);

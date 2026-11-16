@@ -5,6 +5,7 @@ import type { deflectFireball } from "../../responses/deflect.js";
 import type { HideResult } from "../../responses/hide.js";
 import type { CombatOutcome, CombatStyle } from "./contract.js";
 import type { ReachBasis } from "../../responses/evade-reach.js";
+import type { ChainFacts } from "../../state/threat-chains.js";
 export interface EncounterEvidence {
   readonly reason: string;
   readonly threats: readonly HostileThreat[];
@@ -54,6 +55,7 @@ export type DeflectResponseResult = EncounterEvidence & {
 export type HostileResponseResult =
   FightResponseResult | EvadeResponseResult | HideResponseResult | DeflectResponseResult;
 export type HostileSettlement = {
+  readonly chain: ChainFacts | null;
   readonly response: HostileResponse["kind"];
   readonly evidence: EncounterEvidence;
   readonly physical: HostileResponseResult | null;

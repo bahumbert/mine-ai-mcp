@@ -2,10 +2,11 @@ import type { Continuation } from "../../../session/abort.js";
 import type { AnsweredEntry, Facts } from "../../state/answered.js";
 import type { HostileResponseResult, HostileSettlement } from "./response-result.js";
 import { evadeDetail } from "../../responses/evade-detail.js";
+import { chainSuffix } from "../../state/threat-chains.js";
 
 export function completeResponse(physical: HostileResponseResult, signal: AbortSignal): HostileSettlement {
   const { result: _result, response, ...evidence } = physical;
-  const common = { response, physical, evidence };
+  const common = { response, physical, evidence, chain: null };
   return signal.aborted
     ? {
         ...common,
@@ -71,6 +72,7 @@ export function encounterReceipt(settlement: HostileSettlement) {
   return {
     ...settlement.evidence,
     response: settlement.response,
+    chain: settlement.chain ? { ...settlement.chain } : null,
     outcome: summary.outcome,
     ...(summary.error === null ? {} : { error: summary.error }),
     ...(settlement.physical?.response === "evade" ? {
@@ -102,7 +104,7 @@ export function responseContinuation(settlement: HostileSettlement): Continuatio
   const receipt = encounterReceipt(settlement);
   return {
     kind: "return",
-    reason: `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}: ${receipt.error ?? receipt.reason}.`,
+    reason: `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}: ${receipt.error ?? receipt.reason}${settlement.chain && settlement.chain.responses >= 2 ? chainSuffix(settlement.chain) : ""}.`,
   };
 }
 

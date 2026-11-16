@@ -20,6 +20,8 @@ import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { observeCombatDecision } from "../control/combat/observation.js";
 import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
+import { ThreatChains } from "../state/threat-chains.js";
+import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
 
 for (const recovery of [true, false]) test(recovery
   ? "recovery's evade that separates in its start cell is no new recovery cell"
@@ -87,9 +89,8 @@ function responseFixture(occluded = false, harness = createFakeBot({
       7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
       8: { name: "zombie", position: new Vec3(occluded ? 10.5 : 100.5, 64, 0.5) },
     },
-  })) {
+  }), navigation = { cancel: () => undefined } as unknown as NavigationRuntime) {
   const { bot, clock } = harness;
-  const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
   const controller = engagingCombat(bot, unexpectedEngage);
   const runner = new ActionRunner({ clock });
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
@@ -97,7 +98,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
   const reflex = attachHostileReflex(bot, driver, navigation, controller, perception);
   const scene: HostileScene = {
     bot, navigation, controller, driver, perception, policy: controller.policy,
-    context: reflex.threats, encounterThreats: new Set(), activeResponse: null,
+    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(),
     transition: (pending) => { void pending; },
   };
   return { ...harness, driver, perception, scene, async [Symbol.asyncDispose]() {
@@ -106,6 +107,47 @@ function responseFixture(occluded = false, harness = createFakeBot({
     perception[Symbol.dispose]();
   } };
 }
+
+test("a second evade on the same zombie carries its chain into the settled text", async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: 63,
+    position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const navigation = { world: new MemoryWorld(), cancel: () => undefined, navigate: async () => {
+    harness.bot.entity.position.x -= 6;
+    return { status: "stopped", reason: "no path", elapsedMs: 0 };
+  } } as unknown as NavigationRuntime;
+  await using fixture = responseFixture(false, harness, navigation);
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const evade = () => respondToHostile(fixture.scene, { kind: "evade", reason: "hurt", safeRange: 36,
+    threats: [{ id: 8, name: "zombie", position: harness.bot.entities[8]!.position,
+      distance: 1 }] }, new AbortController().signal);
+  const first = await fixture.clock.settle(evade(), 1_000);
+  assert.equal(first.chain, null);
+  const second = await fixture.clock.settle(evade(), 1_000);
+  assert.equal(second.chain?.responses, 2);
+  assert.equal(second.chain?.evades, 2);
+  assert.equal(second.chain?.gained, 12, "evades use the entry observation rather than the earlier decision distance");
+  const continuation = responseContinuation(second);
+  assert.equal(continuation.kind, "return");
+  assert.match(continuation.kind === "return" ? continuation.reason ?? "" : "", /2nd response to zombie#8/);
+  assert.deepEqual(JSON.parse(JSON.stringify(describeResponse(second))).chain, second.chain);
+});
+
+test("a cancelled response is recorded once", async () => {
+  await using fixture = responseFixture(false, createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } }));
+  using _clock = fixture.clock.install();
+  await fixture.driver[Symbol.asyncDispose]();
+  const directive: HostileResponse = { kind: "fight", targetId: 8,
+    threats: [{ id: 8, name: "zombie", position: fixture.bot.entities[8]!.position, distance: 4 }] };
+  const signal = AbortSignal.abort(new Error("caller cancelled"));
+  const first = await respondToHostile(fixture.scene, directive, signal);
+  const second = await respondToHostile(fixture.scene, directive, signal);
+  assert.equal(first.kind, "cancelled");
+  assert.equal(first.chain, null);
+  assert.equal(second.chain?.responses, 2);
+  assert.equal(second.chain?.evades, 0);
+});
 
 for (const { hit, occluded, name } of [
   { hit: false, occluded: false, name: "the hostile reflex senses a zombie while seated" },

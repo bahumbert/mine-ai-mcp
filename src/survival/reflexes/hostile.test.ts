@@ -1119,6 +1119,50 @@ test("a cancelled escape preserves its attack and kill evidence when navigation 
   }
 });
 
+for (const reset of ["death", "dimension"] as const) {
+  test(reset === "death" ? "a death during a response records no chain into the next life"
+    : "a dimension change during a response starts a new chain", async () => {
+    let calls = 0;
+    let finish: () => void = () => assert.fail("response not started");
+    const fixture = reflexFixture((targetId): Promise<CombatOutcome> => {
+      calls++;
+      if (calls === 1) return new Promise((resolve) => {
+        finish = () => resolve({ ...died(targetId), kind: "target_lost" });
+      });
+      return Promise.resolve(died(targetId));
+    }, undefined, { clock: createFakeClock({ mode: "mocked" }), entities: { 7: hostile("zombie", 2) } });
+    using _clock = fixture.clock.install();
+    const outcomes = () => fixture.data.read(
+      "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
+    ).map((row) => JSON.parse(String(row.payload_json)));
+    try {
+      fixture.tick();
+      await fixture.clock.advance(50);
+      assert.equal(calls, 1);
+      if (reset === "death") {
+        fixture.combat.setHealth(0);
+        await fixture.clock.advance(150);
+        assert.equal(fixture.bot.health, 20, "the shared fake respawn must precede response cleanup");
+      } else {
+        fixture.bot.game.dimension = "the_nether";
+        fixture.bot.emit("game");
+      }
+      finish();
+      await fixture.clock.advance(50);
+      assert.equal(outcomes()[0]?.chain, null, "the old in-flight generation must not be recorded");
+      // Admit the next response independently of the driver's retained target-lost answer.
+      fixture.driver.answered.clear();
+      fixture.tick();
+      await fixture.clock.advance(50);
+      assert.equal(outcomes()[1]?.chain, null, "the next response is the first in the new life or dimension");
+    } finally {
+      finish();
+      await fixture.clock.settle(fixture.observer.close(), 2_000);
+      fixture.data.close();
+    }
+  });
+}
+
 for (const cleanup of ["returns", "throws"] as const) {
   test(`encounter death evidence survives respawn before cleanup ${cleanup}`, async () => {
     let started = false;
