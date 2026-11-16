@@ -61,6 +61,7 @@ import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { respawnAfterDeath } from "./checks/respawn-after-death.ts";
+import { respawnAtSetPoint } from "./checks/respawn-at-set-point.ts";
 import { respawnWhileAsleep } from "./checks/respawn-while-asleep.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
 import { serverTags } from "./checks/server-tags.ts";
@@ -195,6 +196,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   lavaOverPassable,
   whisperEcho,
   respawnAfterDeath,
+  respawnAtSetPoint,
   respawnWhileAsleep,
   lightInCells,
   armourPointsWorn,
