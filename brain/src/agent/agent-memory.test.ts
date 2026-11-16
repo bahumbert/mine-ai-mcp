@@ -123,8 +123,10 @@ test("a house the agent built becomes a known place, with its roof, for what com
   const runtime = new FakeRuntime();
   runtime.blockTags = { ...runtime.blockTags, air: ["air"] };
   runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: SMALL_MEDIEVAL_HOUSE, players: [{ username: "Steve", position: { x: 8, y: 64, z: 1 } }] };
-  const { agent, chat, action } = agentFor(t, runtime);
-  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { lines: [] }, { lines: [] }, { say: "Done!" });
+  const { agent, chat, action, mind } = agentFor(t, runtime);
+  // Claim visits also request sign text before narration (D7, 2026-11-16); keep its replies separate.
+  mind.signLines = async () => [];
+  chat.reply({ say: "Sure.", route: "act", request: "build Steve a small house" }, { say: "Done!" });
   action.reply({ step: { skill: "build" } }, { done: "built the house" });
   await agent.handle(say("Steve", "build me a house"));
   await until(() => runtime.said.length === 2);
