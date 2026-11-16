@@ -303,10 +303,10 @@ index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
 diff --git a/src/player/prepare.test.ts b/src/player/prepare.test.ts
-index 7c681e01ae60e6fa308ba47ec838a68e64df0794..3011dffea73960308ae2a3458a107033be02b216 100644
+index 7c681e01ae60e6fa308ba47ec838a68e64df0794..3d514528b165df6d56974a0dc137d2deb4344aaa 100644
 --- a/src/player/prepare.test.ts
 +++ b/src/player/prepare.test.ts
-@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
+@@ -2,6 +2,34 @@ import assert from "node:assert/strict";
  import test from "node:test";
  import { preparePlayerForTrial, type PlayerCommandHost } from "./prepare.js";
  
@@ -324,26 +324,40 @@ index 7c681e01ae60e6fa308ba47ec838a68e64df0794..3011dffea73960308ae2a3458a107033
 +  }
 +});
 +
++test("a wound read one point high is refused when game time did not move", async () => {
++  const host = new FakePlayerHost();
++  const command = host.command.bind(host);
++  host.command = async (value) => value.endsWith(" Health")
++    ? "Wounded has the following entity data: 12.0f"
++    : command(value);
++  await assert.rejects(preparePlayerForTrial({
++    commands: host,
++    player: { name: "Wounded", pos: [192.5, 49, -19.5], inventory: [], op: false, health: 11 },
++    dimension: "the_nether",
++    resetReusablePlayer: false,
++  }), /health did not settle at 11/u);
++});
++
  test("equipment follows reusable cleanup and precedes inventory grants and teleport", async () => {
    const host = new FakePlayerHost();
    await preparePlayerForTrial({ commands: host, resetReusablePlayer: true,
-@@ -83,9 +97,15 @@ class FakePlayerHost implements PlayerCommandHost {
+@@ -83,9 +111,15 @@ class FakePlayerHost implements PlayerCommandHost {
    readonly inventory: string[] = [];
    /** Queued answers to `data get entity <name> Fire`; a settled body answers -20s. */
    readonly fire: string[] = [];
-+  private tick = 0;
++  gameTime = 0;
 +  private health = 20;
  
    async command(command: string): Promise<string> {
      this.commands.push(command);
 +    if (command.endsWith(" active_effects")) return "Found no elements matching active_effects";
-+    if (command === "time query gametime") return `The time is ${this.tick++}`;
++    if (command === "time query gametime") return `The time is ${this.gameTime}`;
 +    if (command.startsWith("damage ")) this.health = 20 - Number(command.split(" ")[2]);
 +    if (command.endsWith(" Health")) return `Player has the following entity data: ${this.health.toFixed(1)}f`;
      const fire = /^data get entity (\S+) Fire$/u.exec(command);
      if (fire) return this.fire.shift() ?? `${fire[1]} has the following entity data: -20s`;
      if (command === "clear Collector") this.inventory.length = 0;
-@@ -122,7 +142,10 @@ test("a declared starting health wounds a fresh body before it leaves the overwo
+@@ -122,7 +156,10 @@ test("a declared starting health wounds a fresh body before it leaves the overwo
      resetReusablePlayer: false,
    });
    assert.deepEqual(host.commands, [
