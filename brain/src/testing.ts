@@ -665,6 +665,7 @@ export class ScriptedModel implements ChatModel {
 export interface ReplyCounts {
   readonly promptTokens: number | null;
   readonly contextTokens: number | null;
+  readonly replyTokens?: number | null;
 }
 const NO_COUNTS: ReplyCounts = { promptTokens: null, contextTokens: null };
 

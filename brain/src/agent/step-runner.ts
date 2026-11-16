@@ -41,6 +41,7 @@ interface StepRunnerHost {
   progress(work: Work, fact: string): void;
   journalState(step: string | null): void;
   runSignal(): AbortSignal;
+  neededWork(work: Work): Work;
 }
 
 export class StepRunner {
@@ -207,6 +208,7 @@ export class StepRunner {
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
     const house = this.host.memory.building.unfinished;
     const houseBill = house === null ? [] : planHouse(styleOrDefault(this.host.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
-    return neededItems(snapshot, { houseBill, wanted: work.wanted, objective: work.objective.text });
+    const needed = this.host.neededWork(work);
+    return neededItems(snapshot, { houseBill, wanted: needed.wanted, objective: needed.objective.text });
   }
 }

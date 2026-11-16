@@ -1,7 +1,7 @@
 // Tests of the work loop: objectives, step guards, repeat and failure rules, and a model that is unavailable.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock, flush } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { createFakeClock, flush, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { Agent } from "../agent.ts";
 import { INSTANT_TYPING } from "../body.ts";
 import type { BrainEvent } from "../brain-log.ts";
@@ -813,6 +813,103 @@ function stepOutcomes(events: BrainEvent[]): string[] {
 }
 
 const GO_TO = { skill: "go_to", x: 100, y: 64, z: 0 } as const;
+
+/** Drive the agent until its observable state changes. */
+async function clockUntil(clock: FakeClock, condition: () => boolean): Promise<void> {
+  if (condition()) return;
+  let cancel = () => {};
+  try {
+    await clock.settle(new Promise<void>((resolve) => { cancel = clock.every(() => { if (condition()) resolve(); }, 5); }), 10_000);
+  } finally { cancel(); }
+}
+
+test("an idle respawn situation runs its planned step and is described as an event", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const runtime = new FakeRuntime();
+  const { mind, action } = scriptedMind();
+  const agent = new Agent({ persona: testPersona({ settings: { ...testPersona().settings, goalCallsPerMinute: 1 } }), runtime, mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  let running: Promise<void> | undefined;
+  try {
+  const guards = (agent as unknown as { guards: { waitForGoalBudget(): Promise<boolean> } }).guards;
+  assert.equal(await clock.settle(guards.waitForGoalBudget(), 10_000), true);
+  const planned: StepDecision = { kind: "step", thought: "", step: GO_TO };
+  const situation = { info: { kind: "respawn" as const, cause: "respawn", raisedAt: 0 }, order: null, told: false };
+  stackOf(agent).push(newWork({ text: "respawn", requester: null, purpose: null }, null, situation, planned));
+  assert.match(agent.activity, /an event/u);
+  action.reply({ done: "finished" });
+  running = agent.run(controller.signal);
+  await clockUntil(clock, () => action.requests.length === 1);
+  assert.equal(action.requests.length, 1);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1);
+  } finally { controller.abort(); if (running !== undefined) await clock.settle(running, 10_000); }
+});
+
+for (const underlying of ["goal", "respawn"] as const) test(`nested situations protect ${underlying} materials from the junk hint`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 256 }, { name: "dirt", count: 128 }] };
+  runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
+  let stop!: () => Promise<void>;
+  const { agent, events, action } = journaledAgent({ after: (fn) => { stop = fn; } }, runtime);
+  try {
+    const state = (kind: "respawn" | "night" | "low_health") => ({ info: { kind, cause: kind, raisedAt: 0 }, order: null, told: false });
+    const base = newWork({ text: "gather supplies", requester: null, purpose: null }, null, underlying === "respawn" ? state("respawn") : null);
+    base.wanted.add("oak_planks");
+    const planned: StepDecision = { kind: "step", thought: "", step: { skill: "collect_block", block: "stone", count: 5 } };
+    const health = newWork({ text: "health", requester: null, purpose: null }, null, state("low_health"), planned);
+    stackOf(agent).push(base, ...(underlying === "goal" ? [newWork({ text: "night", requester: null, purpose: null }, null, state("night"))] : []), health);
+    action.reply({ done: "finished" });
+    await clockUntil(clock, () => stepOutcomes(events).length > 0);
+    const detail = stepOutcomes(events).join(" ");
+    assert.match(detail, /128 dirt/u);
+    assert.doesNotMatch(detail, /nothing you are doing needs[^;]*oak_planks/u);
+  } finally { await clock.settle(stop(), 10_000); }
+});
+
+for (const depth of [1, 2]) test(`later work queues below an order under ${depth} situation(s)`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const runtime = new FakeRuntime();
+  const { mind, chat, action } = scriptedMind();
+  const agent = new Agent({ persona: testPersona(), runtime, mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING, pollMs: 5 });
+  const controller = new AbortController();
+  let running: Promise<void> | undefined;
+  try {
+  const own = newWork({ text: "own", requester: null, purpose: null });
+  const order = newWork({ text: "first order", requester: "Steve", purpose: null });
+  const event = () => newWork({ text: "event", requester: null, purpose: null }, null, { info: { kind: "night", cause: "night", raisedAt: 0 }, order, told: false });
+  stackOf(agent).push(own, order, ...Array.from({ length: depth }, event));
+  chat.reply({ say: "Later", route: "later", request: "second order" });
+  await clock.settle(agent.handle(say("Bob", "second order")), 10_000);
+  assert.deepEqual(stackOf(agent).map((work) => work.objective.text), ["own", "second order", "first order", ...Array(depth).fill("event")]);
+  assert.match(chat.requests[0]?.[0]?.content ?? "", /"later" =/u);
+  action.reply({ done: "first done" }, { done: "second done" });
+  const internals = agent as unknown as { finish(work: Work, outcome: "done", detail: string): void; guards: { waitForGoalBudget(): Promise<boolean> } };
+  assert.equal(await clock.settle(internals.guards.waitForGoalBudget(), 10_000), false);
+  for (const work of [...stackOf(agent)].reverse()) if (work.situation !== null) internals.finish(work, "done", "ended");
+  running = agent.run(controller.signal);
+  await clockUntil(clock, () => action.requests.length >= 2);
+  assert.match(JSON.stringify(action.requests[0]), /first order/u);
+  assert.match(JSON.stringify(action.requests[1]), /second order/u);
+  } finally { controller.abort(); if (running !== undefined) await clock.settle(running, 10_000); }
+});
+
+test("finishing a failed situation does not record an own-goal outcome", () => {
+  const runtime = new FakeRuntime();
+  const agent = new Agent({ persona: testPersona(), runtime, mind: scriptedMind().mind, otherAgents: others(), log: () => undefined, typing: INSTANT_TYPING });
+  const situation = newWork({ text: "event", requester: null, purpose: null }, null, { info: { kind: "night", cause: "night", raisedAt: 0 }, order: null, told: false });
+  stackOf(agent).push(situation);
+  const internals = agent as unknown as { finish(work: Work, outcome: "failed", detail: string): void; lastFailed: unknown; memory: { lately: unknown[] } };
+  const previous = { objective: "earlier", reason: "failed" };
+  internals.lastFailed = previous;
+  internals.finish(situation, "failed", "event ended");
+  assert.equal(internals.lastFailed, previous);
+  assert.equal(internals.memory.lately.length, 0);
+  assert.equal(runtime.notes.length, 0);
+});
 
 test("the running step is known while it runs and cleared after", async (t) => {
   const runtime = new FakeRuntime();

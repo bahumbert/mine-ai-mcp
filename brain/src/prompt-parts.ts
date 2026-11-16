@@ -287,7 +287,7 @@ export function situationEventPart(situation: NonNullable<WorkInput["situation"]
 /** The work tier's user message as parts, in the order it has always had them. */
 export function workParts(input: WorkInput): PromptPart[] {
   const { objective } = input;
-  const whose = objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
+  const whose = input.situation !== undefined ? "an event" : objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
   return [
     ...situationParts(input.snapshot, "working on this objective", input.places, input.areas, objective.requester === null ? [] : [objective.requester]),
     ...(input.situation === undefined ? [] : [situationEventPart(input.situation)]),

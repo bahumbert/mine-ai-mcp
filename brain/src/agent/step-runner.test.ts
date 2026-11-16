@@ -38,7 +38,7 @@ for (const throws of [false, true]) test(`a house claim uses the persona's sign 
   const options = { runtime, persona, mind, otherAgents: { names: () => [] }, log: () => {} };
   const body = new Body(runtime, () => {}, INSTANT_TYPING);
   const memory = new AgentMemory(options, body);
-  const runner = new StepRunner({ options, body, memory, facts: new GameFacts(runtime, options.log), failedSteps: new FailedSteps(), soil: new TillFacts(), lastHeard: new Map(), progress: () => {}, journalState: () => {}, runSignal: () => new AbortController().signal });
+  const runner = new StepRunner({ options, body, memory, facts: new GameFacts(runtime, options.log), failedSteps: new FailedSteps(), soil: new TillFacts(), lastHeard: new Map(), progress: () => {}, journalState: () => {}, runSignal: () => new AbortController().signal, neededWork: (work) => work });
   const work = newWork({ text: "build a house", requester: null, purpose: "building" });
   const run = await clock.settle(runner.runChosenStep(work, { kind: "step", thought: "", step: { skill: "build", structure: "house", size: "small" } }, await runtime.status()), 1_000);
   assert.equal(run.result.status, "done");
