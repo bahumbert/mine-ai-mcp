@@ -23,6 +23,8 @@ export class NodeStore {
   cost = new Float64Array(INITIAL_CAPACITY);
   /** The goal's estimate from the node, taken once when the node is made. */
   heuristic = new Float64Array(INITIAL_CAPACITY);
+  /** Remaining distance used to select partial routes. */
+  progress = new Float64Array(INITIAL_CAPACITY);
   /** What orders the open set: cost plus heuristic, or the cost alone for a terminal node. */
   estimate = new Float64Array(INITIAL_CAPACITY);
   /** Scaffold blocks left on arrival. */
@@ -50,6 +52,7 @@ export class NodeStore {
     this.key[node] = key;
     this.cost[node] = cost;
     this.heuristic[node] = heuristic;
+    this.progress[node] = heuristic;
     this.estimate[node] = estimate;
     this.remaining[node] = state.node.remainingScaffolds;
     this.depth[node] = depth;
@@ -70,6 +73,7 @@ export class NodeStore {
     this.key = grown(this.key, this.#capacity);
     this.cost = grown(this.cost, this.#capacity);
     this.heuristic = grown(this.heuristic, this.#capacity);
+    this.progress = grown(this.progress, this.#capacity);
     this.estimate = grown(this.estimate, this.#capacity);
     this.remaining = grown(this.remaining, this.#capacity);
     this.depth = grown(this.depth, this.#capacity);

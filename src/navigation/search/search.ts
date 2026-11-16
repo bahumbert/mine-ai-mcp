@@ -93,7 +93,7 @@ interface ProgressSelection {
 /**
  * The best node seen for one appetite for spending.
  *
- * A node scores `heuristic + cost / coefficient`. A small coefficient charges
+ * A node scores `progress + cost / coefficient`. A small coefficient charges
  * the cost nearly in full, so the slot holds a node that got nearer the goal
  * cheaply; a large one barely charges it, so the slot holds whatever is
  * nearest the goal at almost any price.
@@ -117,7 +117,7 @@ interface Candidate {
 class PartialRouteCandidates {
   readonly #store: NodeStore;
   readonly #candidates: readonly Candidate[];
-  /** The nearest node seen by heuristic alone, whatever it cost: the limit of the family. */
+  /** The nearest node by progress alone, whatever it cost: the limit of the family. */
   #nearest = NO_NODE;
   #nearestHeuristic = Number.POSITIVE_INFINITY;
   /** The best node by the most permissive score, kept even when it never beat the root, so a checkpoint can say how far short it fell. */
@@ -129,12 +129,12 @@ class PartialRouteCandidates {
     readonly root: number,
   ) {
     this.#store = store;
-    const estimate = store.estimate[root]!;
+    const estimate = store.progress[root]!;
     this.#candidates = PROGRESS_COEFFICIENTS.map((coefficient) => ({ coefficient, node: root, score: estimate }));
   }
 
   consider(node: number): void {
-    const heuristic = this.#store.heuristic[node]!;
+    const heuristic = this.#store.progress[node]!;
     const cost = this.#store.cost[node]!;
     if (heuristic < this.#nearestHeuristic) {
       this.#nearest = node;
@@ -366,7 +366,7 @@ export class IncrementalSearch {
   readonly #arrivals = new ArrivalFrontier(this.#store);
   readonly #root: number;
   readonly #candidates: PartialRouteCandidates;
-  /** The lowest-estimate node expanded so far, ties to the cheaper route; what a failure points at. */
+  /** The lowest-progress node expanded so far, ties to the cheaper route; what a failure points at. */
   #closest: number;
   /** The cheapest goal-satisfying node generated so far, offered first when a partial route is cut. */
   #bestGoal = NO_NODE;
@@ -399,6 +399,7 @@ export class IncrementalSearch {
     this.#goal = {
       ...options.goal,
       heuristic: (node) => options.goal.heuristic(node) * options.context.policy.heuristicWeight,
+      progress: (node) => (options.goal.progress ?? options.goal.heuristic)(node) * options.context.policy.heuristicWeight,
     };
     const heuristic = this.#goal.heuristic(options.start.node);
     this.#root = this.#store.add(
@@ -411,6 +412,7 @@ export class IncrementalSearch {
       NO_NODE,
       null,
     );
+    this.#store.progress[this.#root] = this.#goal.progress!(options.start.node);
     this.#open.push(this.#root);
     this.#arrivals.keep(this.#root);
     this.#closest = this.#root;
@@ -576,8 +578,8 @@ export class IncrementalSearch {
   #noteClosest(current: number): void {
     const store = this.#store;
     const closest = this.#closest;
-    const heuristic = store.heuristic[current]!;
-    const closestHeuristic = store.heuristic[closest]!;
+    const heuristic = store.progress[current]!;
+    const closestHeuristic = store.progress[closest]!;
     if (
       heuristic < closestHeuristic ||
       (heuristic === closestHeuristic && store.cost[current]! < store.cost[closest]!)
@@ -620,6 +622,7 @@ export class IncrementalSearch {
         current,
         finish,
       );
+      store.progress[terminal] = this.#goal.progress!(finish.state.node);
       if (this.#bestGoal === NO_NODE || cost < store.cost[this.#bestGoal]!) this.#bestGoal = terminal;
       this.#open.push(terminal);
       this.#generated += 1;
@@ -645,6 +648,7 @@ export class IncrementalSearch {
       const arrival = movement.state;
       const heuristic = this.#goal.heuristic(arrival.node);
       const node = store.add(key, arrival, cost, heuristic, cost + heuristic, depth, current, null);
+      store.progress[node] = this.#goal.progress!(arrival.node);
       this.#arrivals.keep(node);
       if (
         this.#goal.isSatisfied(arrival.node, arrival.overlay.view(this.#options.context.world)) &&
@@ -700,7 +704,7 @@ export class IncrementalSearch {
         mostPermissiveProgress: {
           coefficient: permissive.coefficient,
           score: permissive.score,
-          requiredBelow: this.#store.estimate[this.#root]!,
+          requiredBelow: this.#store.progress[this.#root]!,
           node: this.#nodeEvidence(permissive.node),
         },
       }),

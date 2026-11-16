@@ -12,14 +12,19 @@
  * Heuristics are priced in ticks per axis, following Baritone, because a
  * block upward costs twice a block sideways; the constants below say why.
  */
+import { Vec3 } from "vec3";
+import { exposedBodyFrom } from "../../world/entity-geometry.js";
+import { PLAYER_HALF_WIDTH, PLAYER_STANDING_HEIGHT } from "../../world/player-physics.js";
 import type { GeneratedMovement } from "../movements/catalogue.js";
 import { navigationFeet } from "../world/block-geometry.js";
+import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { withinItemPickupReach } from "../world/item-geometry.js";
 import {
   samePosition,
   type BlockPosition,
   type EntityObservation,
   type NavigationObservation,
+  type WorldView,
 } from "../world/world.js";
 import type { Goal, GoalEndPredicate, PlanningNode, ResolvedGoal } from "./goal.js";
 type Distance = (position: BlockPosition) => number;
@@ -325,6 +330,30 @@ export interface SafeFromEntity extends Pick<EntityObservation, "id" | "position
   readonly cover?: { readonly minRange: number; readonly eyeHeight: number; readonly width: number };
 }
 
+/** Whether every shooter eye is blocked by loaded geometry before it reaches the standing body. */
+function coveredFrom(threat: SafeFromEntity, node: PlanningNode, world: WorldView): boolean {
+  const cover = threat.cover;
+  if (!cover) return false;
+  let unknown = false;
+  const ray = worldViewRaycaster((x, y, z) => {
+    const obstacles = obstaclesOf(world.blockAt(x, y, z));
+    if (obstacles === null) unknown = true;
+    return obstacles;
+  });
+  const eye = new Vec3(threat.position.x, threat.position.y + cover.eyeHeight, threat.position.z);
+  const half = cover.width / 2;
+  const body = { position: new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5),
+    width: PLAYER_HALF_WIDTH * 2, height: PLAYER_STANDING_HEIGHT };
+  return [eye, eye.offset(half, 0, 0), eye.offset(-half, 0, 0), eye.offset(0, 0, half), eye.offset(0, 0, -half)]
+    .every((point) => !exposedBodyFrom(ray, point, body) && !unknown);
+}
+
+/** Identify cover geometry alongside each frozen threat position. */
+function coverRevision(threat: SafeFromEntity): string {
+  const { id, position, cover } = threat;
+  return `${id}@${position.x},${position.y},${position.z}${cover ? `:${cover.minRange},${cover.eyeHeight},${cover.width}` : ""}`;
+}
+
 /**
  * Reach a stance at least `range` from every supplied threat, using its current
  * position when observed and the caller's last observation otherwise, unless
@@ -350,13 +379,18 @@ export function safeFromEntitiesGoal(
   return {
     resolve(observation) {
       const threats = snapshot ? known : known.map((lastSeen) => ({ ...lastSeen, ...observation.entities.get(lastSeen.id) }));
-      const revision = snapshot
+      const revision = threats.some((threat) => threat.cover)
+        ? `safe-from:${range}:${snapshot ? "snapshot" : "live"}:${threats.map(coverRevision).join("|")}`
+        : snapshot
         ? `safe-from:${range}:snapshot:${threats.map(({ id, position }) => `${id}@${position.x},${position.y},${position.z}`).join("|")}`
         : `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
+      const cache = new Map<string, boolean>();
       const shortfall = (position: BlockPosition): number => {
         let largest = 0;
         for (const threat of threats) {
-          largest = Math.max(largest, range - spatialDistance(position, threat.position));
+          const distance = spatialDistance(position, threat.position);
+          const target = threat.cover?.minRange ?? range;
+          largest = Math.max(largest, target - distance);
         }
         return Math.max(0, largest);
       };
@@ -364,7 +398,18 @@ export function safeFromEntitiesGoal(
         kind: "active",
         revision,
         heuristic: (node) => shortfall(node.feet) * HORIZONTAL_TICKS_PER_BLOCK,
-        isSatisfied: (node) => shortfall(node.feet) === 0,
+        progress: (node) => Math.max(0, ...threats.map((threat) => range - spatialDistance(node.feet, threat.position))) * HORIZONTAL_TICKS_PER_BLOCK,
+        isSatisfied: (node, world) => {
+          const key = `${node.overlayId}|${node.feet.x},${node.feet.y},${node.feet.z}`;
+          const cached = cache.get(key);
+          if (cached !== undefined) return cached;
+          const satisfied = threats.every((threat) => {
+            const distance = spatialDistance(node.feet, threat.position);
+            return distance >= range || (threat.cover !== undefined && distance >= threat.cover.minRange && coveredFrom(threat, node, world));
+          });
+          cache.set(key, satisfied);
+          return satisfied;
+        },
       };
     },
   };

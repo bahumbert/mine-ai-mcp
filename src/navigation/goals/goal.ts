@@ -32,6 +32,8 @@ export type ResolvedGoal =
        */
       readonly revision: string;
       heuristic(node: PlanningNode): number;
+      /** Distance remaining for partial-route selection, when it differs from A* ordering. */
+      progress?(node: PlanningNode): number;
       /** Search supplies predicted edits; arrival supplies the observed world. */
       isSatisfied(node: PlanningNode, world: WorldView): boolean;
       /** Work priced alongside travel; only the physical search root receives an actual pose. */
