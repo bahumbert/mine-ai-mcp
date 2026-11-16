@@ -71,6 +71,7 @@ for (const ticksPerSecond of [20, 10]) {
   test(`no editor answer: partial unconfirmed, the sign named, no update_sign sent (${ticksPerSecond} tps)`, async (t) => {
     const h = setup(t, { signs: { withheld: true }, server: { ticksPerSecond } });
     using _timers = h.clock.install();
+    const added = listenersAddedSince(h.bot);
     const result = await h.clock.settle(h.run(), 6_000);
     assert.equal(result.status, "partial");
     assert.match("error" in result ? result.error : "", /PLACE_SIGN_TEXT_UNCONFIRMED/);
@@ -82,6 +83,7 @@ for (const ticksPerSecond of [20, 10]) {
     const row = h.data.read("SELECT * FROM observed_signs")[0]!;
     assert.equal(row.placed_by_bot_id, h.bot.username);
     assert.equal(row.front_json, '["","","",""]');
+    await assertReleased(h, added);
     await placeNext(h);
   });
 
@@ -89,6 +91,7 @@ for (const ticksPerSecond of [20, 10]) {
     const h = setup(t, { signs: { withheld: true }, server: { ticksPerSecond } });
     using _timers = h.clock.install();
     const stopped = new Promise<void>((resolve) => h.inventory.once("updateSlot", () => { h.server.stop(); resolve(); }));
+    const added = listenersAddedSince(h.bot);
     const pending = h.run();
     await h.clock.settle(stopped, 6_000);
     const stoppedAge = h.bot.time.age;
@@ -97,6 +100,7 @@ for (const ticksPerSecond of [20, 10]) {
     assert.equal(result.status, "partial");
     assert.equal(h.bot.time.age, stoppedAge);
     assert.ok(h.clock.now() - stoppedAt >= SERVER_CLOCK_STOPPED_MS);
+    await assertReleased(h, added);
     h.server.resume();
     await placeNext(h);
   });
