@@ -69,9 +69,9 @@ jobs:
         with:
           node-version: "22"
       - run: bun install --frozen-lockfile
-      - name: Quality gate, checks 6-10 and 12 block
+      - name: Quality gate, checks 6-10, 12 and 15 block
         shell: bash
-        run: bash .agent/scripts/quality/quality-gate.sh "origin/${{ github.base_ref }}" --only 6,7,8,9,10,12
+        run: bash .agent/scripts/quality/quality-gate.sh "origin/${{ github.base_ref }}" --only 6,7,8,9,10,12,15
       # Report only: the other checks' hits are answered at the merge, which CI cannot see.
       - name: Quality gate, whole report
         if: ${{ !cancelled() }}
