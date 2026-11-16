@@ -7,6 +7,10 @@ import { ACTIVITIES, NEUTRAL_ACTIVITIES } from "./activities.ts";
 export const STANCES = ["companion", "neutral", "rival"] as const;
 export type Stance = (typeof STANCES)[number];
 
+/** how much risk the character takes, low to high; shown to the model as a fact in a situation event (spec 2026-11-15-p4-18 D7), never turned into a sentence. */
+export const BOLDNESS = ["cautious", "steady", "bold"] as const;
+export type Boldness = (typeof BOLDNESS)[number];
+
 /** How a character feels about activities, strongest liking first (ADR-015). */
 export const FEELINGS = ["loves", "likes", "dislikes", "hates"] as const;
 export type Feeling = (typeof FEELINGS)[number];
@@ -46,6 +50,7 @@ export const personaSchema = z.strictObject({
   stance: z.enum(STANCES),
   description: z.string().trim().min(1).max(1_000),
   traits: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
+  boldness: z.enum(BOLDNESS).default("steady"),
   voice: z.string().trim().min(1).max(400),
   /** What it prefers and avoids doing; none: it feels the same about everything. */
   preferences: preferencesSchema.optional(),
@@ -88,10 +93,8 @@ export const personaSchema = z.strictObject({
     chatBurstMs: z.number().int().min(0).max(10_000).default(1_500),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
-    /**
-     * Read by P4-18 T4c (plan 2026-11-08-p4-18); no effect until then.
-     */
-    shelterAtNight: z.boolean().default(true),
+    /** Ignored since P4-18 (spec D7), as `maxStepMinutes`; persona files that still carry it parse. */
+    shelterAtNight: z.boolean().optional(),
     /**
      * How strongly each feeling pulls when it picks its own objective (spec 2026-10-09-activity-draw): the chance of an
      * activity is its feeling's multiplier over the sum of them all. A character may be more or less driven by its

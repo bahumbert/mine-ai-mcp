@@ -14,6 +14,8 @@ code gives basic functions, settings and safety checks, the models decide.
    first). Its own goal always gives way to any player's request; the authority order only ranks players against
    whoever it is already working for. It decides how to do things and may say a request is unclear, impossible, or
    that it does not know how.
+   `boldness` (`cautious`, `steady` or `bold`; default `steady`; spec 2026-11-15-p4-18 D7) is not in the init prompt: the
+   model reads it only as a fact in a situation event's `Weigh` line, beside its gear and whose work, and decides.
 2. **Chat tier** (fast model, in character): hears every chat line from players it listens to, answers right away,
    and routes it: `ignore` (clearly for someone else — a message naming nobody is for it), `talk`, `stop`, `act`
    (it takes the request on now) or `later` (only when the player says it can wait, or while it works for someone

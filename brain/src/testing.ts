@@ -601,10 +601,11 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
     description: "A test companion.",
     traits: [],
     voice: "Plain.",
+    boldness: "steady",
     listensTo: [],
     authority: ["*"],
     // Tests never wait on pacing: 600 goal calls a minute is one every 100 ms. No progress lines unless a test asks.
-    settings: { signLineChars: 15, goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, shelterAtNight: true, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 } },
+    settings: { signLineChars: 15, goalCallsPerMinute: 600, maxStepsPerObjective: 40, maxSameStepInARow: 3, maxSkillFailuresInARow: 6, restAfterStopSeconds: 0, narrateEverySeconds: 3_600, chatBurstMs: 0, digStraightDown: false, feelingMultipliers: { loves: 2, likes: 1.5, neutral: 1, dislikes: 0.6, hates: 0.3 } },
     models: {},
     ...overrides,
   };
