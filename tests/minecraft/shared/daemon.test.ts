@@ -91,9 +91,9 @@ test("a featured socket submission runs a canary before its batch and sends no i
 });
 
 test("a second daemon on a live socket refuses to start", async () => {
-  await withDaemon(async ({ socketPath }) => {
+  await withDaemon(async ({ socketPath, dir }) => {
     const second = startDaemon({
-      socketPath, config: loadScenarioServerConfig({}), stateDir: "/tmp/never", portBlock: { first: 25_400, last: 25_559 }, log: () => {},
+      socketPath, config: loadScenarioServerConfig({}), stateDir: join(dir, "never"), portBlock: { first: 25_400, last: 25_559 }, log: () => {},
       factory: new FakeFactory(), runTrial: passing, machine: { read: async () => ({ cpuBusy: 0, memAvailableMb: 1, threads: 1 }) },
       residentMbOf: async () => 0,
     });
