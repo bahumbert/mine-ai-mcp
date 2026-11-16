@@ -399,9 +399,11 @@ export class Agent {
     const snapshot = await runtime.status();
     this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     await this.keepSettings(snapshot);
-    const decision = await this.decideStep(work, snapshot);
+    // A planned step (a situation's, decided when it was raised) runs without a model call, once.
+    const decision = work.planned ?? (await this.decideStep(work, snapshot));
     // Set aside or stopped while it was thinking: it thinks again once the objective is back on top.
     if (decision === null || this.stack.at(-1) !== work) return;
+    work.planned = null;
     if (decision.kind === "done") return this.finish(work, "done", decision.summary);
     if (decision.kind === "give_up") return this.finish(work, "failed", decision.reason);
     if (work.taken >= persona.settings.maxStepsPerObjective) return this.finish(work, "failed", `still not done after ${work.taken} steps`);

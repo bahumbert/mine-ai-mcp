@@ -5,6 +5,16 @@ import type { Objective, StepRecord, WorkDecision } from "../mind.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import type { SkillResult } from "../skills.ts";
+import type { SituationInfo } from "./situations.ts";
+
+/** A situation event on the stack (a night, a respawn, low health): what raised it and the order that was on top when it came. */
+export interface SituationState {
+  readonly info: SituationInfo;
+  /** The order that was on top when the situation came, or null: a situation over the own goal has none. */
+  readonly order: Work | null;
+  /** Whether the model was told this situation's latest decision (a decision per situation, not per poll). */
+  told: boolean;
+}
 
 /** One objective on the stack and what was done for it. */
 export interface Work {
@@ -17,6 +27,12 @@ export interface Work {
   sentBacks: number;
   /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
   step: AbortController | null;
+  /** The step running now and its controller, for the monitor and the situation events (null when none runs). */
+  running: { readonly step: Step; readonly controller: AbortController } | null;
+  /** A situation's state, or null for an objective the character or a player took on. */
+  situation: SituationState | null;
+  /** The step a situation chose already, run next without a model call (its decision was made when it was raised). */
+  planned: StepDecision | null;
   /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
   lastFact: string;
   spokenAt: number;
@@ -66,6 +82,6 @@ export function carriedOf(snapshot: BotSnapshot): string {
 /** Skills that are an end in themselves: an objective that runs one is for that work (its fetches included). */
 export const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
 
-export function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
+export function newWork(objective: Objective, whisperTo: string | null = null, situation: SituationState | null = null, planned: StepDecision | null = null): Work {
+  return { objective, steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, running: null, situation, planned, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
 }

@@ -9,6 +9,8 @@ import { CHAT_RETRY_MS } from "../model-wait.ts";
 import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
 import { planFollowStep } from "../skills/follow.ts";
 import { say, agentFor, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
+import type { Step } from "../actions.ts";
+import { newWork, type StepDecision, type Work } from "./work.ts";
 
 function bodyCalls(runtime: FakeRuntime): string[] {
   return runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool);
@@ -798,4 +800,108 @@ test("a follow ordered by a player counts their silence in monotonic time: a wal
   clock.stepWallClock(11 * 60_000);
   await clock.advance(1_000);
   assert.deepEqual(events.filter((event) => event.kind === "step"), [], "still following after a poll (750 ms): the silence is 1 s of controlled time");
+});
+
+/** The agent's objective stack (private): a test puts a Work it built on it, then reads what the loop does to that Work. */
+function stackOf(agent: Agent): Work[] {
+  return (agent as unknown as { stack: Work[] }).stack;
+}
+
+/** The recorded step outcomes, as `outcome: detail`. */
+function stepOutcomes(events: BrainEvent[]): string[] {
+  return events.flatMap((event) => event.kind === "step" ? [`${event.outcome}: ${event.detail}`] : []);
+}
+
+const GO_TO = { skill: "go_to", x: 100, y: 64, z: 0 } as const;
+
+test("the running step is known while it runs and cleared after", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, lastDeath: null };
+  runtime.durations.navigate = 100_000;
+  const { agent, action } = journaledAgent(t, runtime);
+  const work = newWork({ text: "walk to the hill", requester: null, purpose: null });
+  stackOf(agent).push(work);
+  action.reply({ step: GO_TO }, { give_up: "stopped" });
+  await until(() => runtime.submitted.some((call) => call.tool === "navigate"));
+  assert.deepEqual(work.running?.step, GO_TO, "the step is known while it runs");
+  work.step?.abort();
+  await until(() => action.requests.length === 2);
+  assert.equal(work.running, null, "cleared once the step ended");
+  assert.equal(work.step, null);
+});
+
+/**
+ * The ways a step can end: each clears `running` and `step` and records its own outcome. `arrange` sets the fake
+ * before the step starts; `afterStart` ends it while it runs (a death) and is empty for the other two.
+ */
+const ENDINGS: readonly { how: string; step: Step; arrange: (runtime: FakeRuntime) => void; afterStart: (runtime: FakeRuntime) => Promise<void>; outcome: RegExp }[] = [
+  { how: "a normal end", step: { skill: "collect_block", block: "dirt", count: 2 }, arrange: () => {}, afterStart: async () => {}, outcome: /^done: collected 2 dirt$/u },
+  { how: "a thrown skill", step: GO_TO, arrange: (runtime) => { runtime.throwNext.navigate = "the link dropped"; }, afterStart: async () => {}, outcome: /^failed: .*the link dropped$/u },
+  { how: "a death", step: GO_TO, arrange: () => {}, afterStart: async (runtime) => {
+    await until(() => runtime.submitted.some((call) => call.tool === "navigate"));
+    runtime.die("Zombie");
+  }, outcome: /^interrupted: you died during this step .*\(Zombie\)$/u },
+];
+
+for (const ending of ENDINGS) test(`a step cleared after ${ending.how}, recorded as its outcome`, async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, lastDeath: null };
+  runtime.durations.navigate = 100_000;
+  ending.arrange(runtime);
+  const { agent, action, events } = journaledAgent(t, runtime);
+  const work = newWork({ text: "one step", requester: null, purpose: null });
+  stackOf(agent).push(work);
+  action.reply({ step: ending.step }, { give_up: "the step is over" });
+  await ending.afterStart(runtime);
+  await until(() => action.requests.length === 2, 5_000);
+  assert.equal(work.running, null);
+  assert.equal(work.step, null);
+  assert.match(stepOutcomes(events)[0] ?? "", ending.outcome);
+});
+
+test("a replaced step is not cleared by the old step's finally: neither its controller nor its running record", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, lastDeath: null };
+  runtime.durations.navigate = 100_000;
+  const { agent, action } = journaledAgent(t, runtime);
+  const work = newWork({ text: "walk to the hill", requester: null, purpose: null });
+  stackOf(agent).push(work);
+  action.reply({ step: GO_TO }, { give_up: "stopped" });
+  await until(() => runtime.submitted.some((call) => call.tool === "navigate"));
+  const old = work.step;
+  // A newer step replaces both records while the old one unwinds (an order's take starts it on the same work).
+  const newerController = new AbortController();
+  const newer = { step: { skill: "collect_block", block: "dirt", count: 2 } as const, controller: newerController };
+  work.step = newerController;
+  work.running = newer;
+  old?.abort();
+  await until(() => action.requests.length === 2);
+  assert.equal(work.step, newerController, "the old step's finally left the newer controller alone");
+  assert.equal(work.running, newer, "the old step's finally left the newer record alone");
+});
+
+test("a planned step runs without a model call and counts as one step", async (t) => {
+  const runtime = new FakeRuntime();
+  const { agent, action, events } = journaledAgent(t, runtime);
+  const planned: StepDecision = { kind: "step", thought: "", step: { skill: "collect_block", block: "dirt", count: 2 } };
+  stackOf(agent).push(newWork({ text: "collect 2 dirt", requester: null, purpose: null }, null, null, planned));
+  action.reply({ done: "collected 2 dirt" });
+  await until(() => action.requests.length === 1);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1, "the planned step ran");
+  assert.equal(events.filter((event) => event.kind === "step").length, 1, "the planned step is one recorded step");
+  assert.match(action.requests[0]?.[1]?.content ?? "", /1\. collect 2 dirt -> done: collected 2 dirt/u, "the next decision sees the planned step");
+});
+
+test("a planned step waiting under another objective runs once that objective ends, with no model call for it", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, lastDeath: null };
+  const { agent, action, events } = journaledAgent(t, runtime);
+  const planned: StepDecision = { kind: "step", thought: "", step: { skill: "collect_block", block: "dirt", count: 2 } };
+  // Pushed bottom first: the top objective is worked, the planned one waits below it (set aside, not run).
+  stackOf(agent).push(newWork({ text: "collect 2 dirt", requester: null, purpose: null }, null, null, planned), newWork({ text: "rest for a while", requester: null, purpose: null }));
+  action.reply({ done: "rested" }, { done: "collected 2 dirt" });
+  await until(() => action.requests.length === 2);
+  assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 1, "the waiting planned step ran once");
+  assert.deepEqual(stepOutcomes(events), ["done: collected 2 dirt"]);
+  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. collect 2 dirt -> done: collected 2 dirt/u, "the decision after the planned step sees it");
 });

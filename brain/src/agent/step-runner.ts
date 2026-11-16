@@ -56,6 +56,7 @@ export class StepRunner {
     options.log(`step ${work.taken} for ${JSON.stringify(work.objective.text)}: ${label}${decision.thought === "" ? "" : ` (${decision.thought})`}`);
     const controller = new AbortController();
     work.step = controller;
+    work.running = { step: decision.step, controller };
     this.host.journalState(label);
     const started = monotonicNow();
     // The runtime actions the step runs, timed: what a get_items step mostly did is its activity, and its walking is
@@ -89,7 +90,9 @@ export class StepRunner {
       result = { status: "failed", detail: error instanceof Error ? error.message : String(error) };
     } finally {
       gain.stop();
-      work.step = null;
+      // Cleared only while they are still this step's: a newer step may have replaced them while this one unwound.
+      if (work.step === controller) work.step = null;
+      if (work.running?.controller === controller) work.running = null;
       body.onAction = null;
     }
     await death.settled();
