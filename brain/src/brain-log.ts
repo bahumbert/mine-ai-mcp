@@ -37,6 +37,8 @@ export interface ModelCall {
   readonly replies: readonly string[];
   /** The largest prompt of the attempts, in tokens as the server counted them; null when it does not say. */
   readonly promptTokens?: number | null;
+  /** Reply tokens of all attempts, summed as counted by the server; null when any count is unknown. */
+  readonly replyTokens?: number | null;
   /** The context window the model ran with; null when unknown. A prompt near it was probably cut. */
   readonly contextTokens?: number | null;
   /** The prompt budget the first turn was fitted to (spec 2026-11-06-p4-02a-prompt-budget); absent in older logs. */

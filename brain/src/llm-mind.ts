@@ -10,6 +10,7 @@ import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import { budgetFor, fitPrompt, ModelCalibration, type PromptPart } from "./prompt-budget.ts";
 import { goalParts, historyPart, narrateParts, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
 import { extractJsonObject, signFlipped } from "./model-reply-checks.ts";
+import { fitSignLines, fittingSignPrefix, signLineProblems } from "./sign-lines.ts";
 export { extractJsonObject } from "./model-reply-checks.ts";
 
 /** A disposition, not a rule: what the character does with a request stays its own call (Rule #0). */
@@ -98,12 +99,14 @@ export class LlmMind implements Mind {
   private readonly calibration = new ModelCalibration();
 
   async signLines(input: SignLinesInput, signal: AbortSignal): Promise<string[]> {
-    const prompt = `You put a sign beside the door of ${JSON.stringify(input.what)}; its first line already says ${JSON.stringify(input.owner)}. Write up to three short lines for the rest, in character. The sign is public: never coordinates, stocks or anything private. Each line must be at most ${input.persona.settings.signLineChars} characters.`;
-    return this.ask("sign", this.models.chat, signLinesSystemPrompt(input.persona), [{ key: "occasion", maxLevel: 0, render: () => prompt }], signal, (json) => {
+    const width = input.persona.settings.signLineChars;
+    const prompt = `You put a sign beside the door of ${JSON.stringify(input.what)}; its first line already says ${JSON.stringify(input.owner)}. Write up to three short lines for the rest, in character. The sign is public: never coordinates, stocks or anything private. Each line holds at most ${width} characters, spaces and punctuation included; a longer sentence goes on over the next line.`;
+    return this.ask("sign", this.models.chat, signLinesSystemPrompt(input.persona), [{ key: "occasion", maxLevel: 0, render: () => prompt }], signal, (json, attempt) => {
       const lines = z.object({ lines: z.array(z.string()) }).parse(json).lines;
-      const invalid = lines.length > 3 || lines.some((line) => line.length > input.persona.settings.signLineChars || /[\r\n]|(?:^|\D)-?\d+\s+-?\d+\s+-?\d+(?:\D|$)/u.test(line));
-      if (!invalid) return lines;
-      throw new SendBack("Use at most three short lines, without line breaks or coordinates");
+      const fitted = fitSignLines(lines, width);
+      if (attempt === 2) return fittingSignPrefix(lines, width);
+      if (fitted.lines.length <= 3 && fitted.refused.length === 0) return fitted.lines;
+      throw new SendBack(signLineProblems(lines, width, fitted).join("; "));
     }, []);
   }
 
@@ -111,7 +114,7 @@ export class LlmMind implements Mind {
    * One call: the parts fitted to the tier's budget (cut to the model's window, estimated at its own characters per
    * token), sent as one text that every repair round repeats; the first reply teaches the calibration.
    */
-  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown) => T, badReplyFallback?: T): Promise<T> {
+  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown, attempt: number) => T, badReplyFallback?: T): Promise<T> {
     const tokens = budgetFor(tier, this.calibration.window(model.name));
     const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], tokens, this.calibration.charsPerToken(model.name));
     const budget: PromptBudgetUse = { tokens, estimated: fitted.estimated, shrunk: fitted.shrunk, overBudget: fitted.overBudget };
@@ -341,7 +344,7 @@ const SEND_BACK_ROUNDS = 4;
 class SendBack extends Error {}
 /** `onFirstReply` hears the counts of the first reply only (a repair round's count is not a sample), whether `report` is set or not. */
 async function ask<T>(
-  model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T,
+  model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown, attempt: number) => T,
   options: { report?: (call: Omit<ModelCall, "tier" | "budget">) => void; learn?: (promptTokens: number | null, contextTokens: number | null) => void; badReplyFallback?: T },
 ): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
@@ -349,7 +352,9 @@ async function ask<T>(
   const started = monotonicNow();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
-  const done = (outcome: { result: unknown } | { error: string }) => options.report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
+  let replyTokens = 0;
+  let replyTokensKnown = true;
+  const done = (outcome: { result: unknown } | { error: string }) => options.report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, replyTokens: replyTokensKnown ? replyTokens : null, ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;
@@ -357,6 +362,8 @@ async function ask<T>(
     let text: string;
     try {
       const reply = await model.complete(turns, signal);
+      if (typeof reply.replyTokens === "number") replyTokens += reply.replyTokens;
+      else replyTokensKnown = false;
       if (replies.length === 0) options.learn?.(reply.promptTokens, reply.contextTokens ?? null);
       text = reply.text;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
@@ -367,7 +374,7 @@ async function ask<T>(
     }
     replies.push(text);
     try {
-      const result = read(JSON.parse(extractJsonObject(text)));
+      const result = read(JSON.parse(extractJsonObject(text)), replies.length);
       done({ result });
       return result;
     } catch (error) {
