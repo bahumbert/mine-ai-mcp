@@ -11,6 +11,7 @@ import { startMcpSupervisor, type McpSupervisorOptions } from "./runtime-supervi
 import { createFakeRuntimeChild } from "../test-support/fake-runtime-child.js";
 import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
 import { sleepMs } from "../utils/wall-timers.js";
+import { setImmediate as nextTurn } from "node:timers/promises";
 
 const executable = process.execPath;
 const args = [...process.execArgv, fileURLToPath(new URL("../test-support/wedged-runtime.ts", import.meta.url))];
@@ -87,7 +88,7 @@ async function fakeSupervised(
 
 /** Every test acts only once the runtime is answering for itself. */
 async function whenHealthy(url: string): Promise<void> {
-  while (!(await fetch(`${url}/health`)).ok) await sleepMs(20);
+  while (!(await fetch(`${url}/health`)).ok) await nextTurn();
 }
 
 /**
@@ -111,7 +112,7 @@ async function whenReported(url: string) {
   while (true) {
     const diagnostics = await (await fetch(`${url}/diagnostics/runtime`)).json();
     if (diagnostics.heartbeat && diagnostics.activity?.active.length) return diagnostics;
-    await sleepMs(50);
+    await nextTurn();
   }
 }
 
@@ -374,7 +375,7 @@ test("a runtime killed as unresponsive is started again and answers", { timeout:
   const { url } = await supervised(t, "restart", undefined, fastDeadlines, RUNTIME_RESTART_WINDOW_MS);
   await whenHealthy(url);
   assert.match(await (await mcpCall(url, 90, "hang")).text(), /RUNTIME_UNRESPONSIVE/, "the call that met the hang is answered with the failure");
-  while ((await fetch(`${url}/health`)).status !== 200) await sleepMs(50);
+  while ((await fetch(`${url}/health`)).status !== 200) await nextTurn();
   assert.equal(await stateOf(url), "ready");
 });
 
@@ -385,7 +386,7 @@ test("a second failure inside the restart window stays down and says it restarte
   await fake.arrived("/hang");
   await clock.advance(1_250);
   await first;
-  while ((await fetch(`${url}/health`)).status !== 200) await sleepMs(50);
+  while ((await fetch(`${url}/health`)).status !== 200) await nextTurn();
   const second = mcpCall(url, 92, "hang");
   await children.at(-1)!.arrived("/hang");
   await clock.advance(1_250);
@@ -413,7 +414,7 @@ const sigtermIgnoringRuntime = (): { executable: string; args: string[] } => ({
 
 test("a runtime that ignores SIGTERM is killed once the kill grace has passed", { timeout: 8_000 }, async (t) => {
   const { supervisor, url } = await supervised(t, "kill-grace", sigtermIgnoringRuntime, { startupMs: 60_000, unresponsiveMs: 60_000, killGraceMs: 200 });
-  while ((await stateOf(url)) !== "ready") await sleepMs(20);
+  while ((await stateOf(url)) !== "ready") await nextTurn();
   const closing = performance.now();
   await supervisor.close();
   const closedAfterMs = performance.now() - closing;
@@ -458,7 +459,7 @@ async function processFaultIncidents(directory: string, wanted = 1): Promise<Inc
       if (records.some((row) => row.kind === "process_fault")) incidents.push(records);
     }
     if (incidents.length >= wanted || performance.now() > deadline) return incidents;
-    await sleepMs(50);
+    await nextTurn();
   }
 }
 
@@ -556,7 +557,7 @@ test("a restart whose spawn throws leaves the supervisor failed with RUNTIME_RES
 
   let body: string;
   do {
-    await sleepMs(50);
+    await nextTurn();
     body = await (await fetch(`${url}/health`)).text();
   } while (body.includes('"state":"failing"') || body.includes('"state":"starting"'));
   assert.match(body, /"state":"failed"/);

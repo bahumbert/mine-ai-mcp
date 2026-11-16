@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import mineflayer from "mineflayer";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
@@ -64,7 +65,7 @@ async function answeredWhileClockMoves<T>(clock: { advance(ms: number): Promise<
   const deadline = performance.now() + ROUTE_ANSWER_REAL_MS;
   while (!settled && performance.now() < deadline) {
     await clock.advance(100);
-    await sleepMs(5);
+    await nextTurn();
   }
   assert.ok(settled, `the route did not answer within ${ROUTE_ANSWER_REAL_MS} ms of real time`);
   return pending;
