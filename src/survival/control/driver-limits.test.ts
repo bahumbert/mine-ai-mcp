@@ -6,7 +6,7 @@ import { actionResultSchema, defineAction } from "../../actions/index.js";
 import { BodyAbort } from "../../session/abort.js";
 import { forgetVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { ActionRunner } from "../../session/action-runner.js";
-import { type FakeClock, createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, flush } from "../../test-support/fake-bot/index.js";
 import type { ReflexDefinition, ReflexLimits, SurvivalTransition } from "./contract.js";
 import { ReflexDriver, type ReflexDriverOptions } from "./driver.js";
 
@@ -17,8 +17,8 @@ const LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 1_000, standDow
  * would. A boat (#7) floats beside the bot; `clock` is a mocked one for a test of the driver's own interval, and
  * `driverOptions: {}` builds the driver as production does, on the global monotonic clock that mocked clock drives.
  */
-function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock, driverOptions?: ReflexDriverOptions) {
-  const { bot, combat, clock: time } = createFakeBot({ clock, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
+function scene(limits: ReflexLimits = LIMITS, clock?: FakeClock, driverOptions?: ReflexDriverOptions, server?: FakeBotOptions["server"]) {
+  const { bot, combat, clock: time } = createFakeBot({ clock, server, entities: { 7: { name: "oak_boat", position: { x: 1.5, y: 64, z: 0.5 } } } });
   const runner = new ActionRunner({ clock: time, cancelGraceMs: 500 });
   const driver = new ReflexDriver(bot, runner, driverOptions ?? { now: time.now });
   const events: SurvivalTransition[] = [];
@@ -65,7 +65,7 @@ test("a claim with no progress is released, stands down for standDownMs whatever
   driver.register(definition());
   await pass(100);
   assert.equal(counts.claims, 1);
-  await pass(1_000);
+  await pass(2_300); // the 1 s window is 20 world ticks: it ends at the packet of age A + 40, 2 s in at 20 tps (plan 2026-11-16-reflex-limits-ticks)
   assert.equal(counts.aborted, 1, "the work was told to stop at the no-progress limit");
   assert.equal(runner.status().owner, "idle");
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "reflex_limit");
@@ -76,6 +76,24 @@ test("a claim with no progress is released, stands down for standDownMs whatever
   assert.equal(counts.claims, 2, "after the stand-down it claims again");
 });
 
+// A 10 tps server gives the claim the same game time (plan 2026-11-16-reflex-limits-ticks T2): the 1 s window is 20 ticks and
+// one packet, so it ends at the packet of age A + 40, 4 s in at 10 tps (the old wall window ended it 1 s in). The claim starts
+// ~100 ms in, its cached age is A, the check falls every 250 ms: the limit is read at the first check after 4 s.
+test("at 10 tps a claim with no progress for 20 ticks is released after the packet of age A + 40, not 1 s in", async () => {
+  const { bot, driver, counts, definition, pass } = scene(LIMITS, undefined, undefined, { ticksPerSecond: 10 });
+  const startAge = bot.time.age;
+  driver.register(definition());
+  await pass(100);
+  assert.equal(counts.claims, 1);
+  await pass(3_000);
+  assert.equal(bot.time.age, startAge + 20, "3.1 s in, one packet after the start: 20 of the 40 ticks");
+  assert.equal(counts.aborted, 0, "the old wall window of 1 s would have ended it long ago");
+  await pass(1_300);
+  assert.equal(bot.time.age, startAge + 40);
+  assert.equal(counts.aborted, 1, "released at the first check after the packet of age A + 40");
+  await driver[Symbol.asyncDispose]();
+});
+
 test("repeated life-saving limits keep their declared pause, including an independent footing impulse", async () => {
   for (const name of ["breath_reflex", "fire_reflex", "recover_footing", "hunger_reflex"] as const) {
     const { driver, definition, pass } = scene();
@@ -84,7 +102,7 @@ test("repeated life-saving limits keep their declared pause, including an indepe
       sense: () => needed ? { kind: "observed", danger: true, evidence: true } : null });
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
-        await pass(1_100);
+        await pass(2_300);
         const answer = driver.answered.snapshot()[0]!;
         assert.equal(answer.temporal!.expiresAt - answer.since, 3_000, name);
         needed = false;
@@ -103,7 +121,7 @@ async function claimsAfterStandDown(wallStepMs: number, passAfterStepMs: number)
   clock.stepWallClock(5_000);
   const { driver, counts, definition, pass } = scene(LIMITS, clock, {});
   driver.register(definition());
-  await pass(1_300); // the no-progress limit hits at ~1 s: the 3 s stand-down starts there
+  await pass(2_300); // the no-progress limit hits at ~2 s (20 world ticks and one packet): the 3 s stand-down starts there
   assert.equal(counts.claims, 1);
   clock.stepWallClock(wallStepMs);
   await pass(passAfterStepMs);
@@ -111,12 +129,12 @@ async function claimsAfterStandDown(wallStepMs: number, passAfterStepMs: number)
   return counts.claims;
 }
 
-// The limit hits ~1.1 s in and the stand-down ends ~4.1 s in; the helper has passed 1.3 s before the wall clock steps.
+// The limit hits ~2.05 s in and the stand-down ends ~5.05 s in; the helper has passed 2.3 s before the wall clock steps.
 const STAND_DOWN_ROWS: ReadonlyArray<readonly [wallStepMs: number, passAfterStepMs: number, claims: number, why: string]> = [
-  [-800, 2_500, 1, "3.8 s in: ~0.3 s are left"],
-  [-800, 3_000, 2, "4.3 s in: over, the wall clock's 0.8 s do not stretch it"],
-  [1_200, 2_000, 1, "3.3 s in: 0.8 s are left, the wall clock alone would call it over"],
-  [1_200, 3_000, 2, "4.3 s in: over"],
+  [-800, 2_500, 1, "4.8 s in: ~0.25 s are left"],
+  [-800, 3_000, 2, "5.3 s in: over, the wall clock's 0.8 s do not stretch it"],
+  [1_200, 2_000, 1, "4.3 s in: 0.75 s are left, the wall clock alone would call it over"],
+  [1_200, 3_000, 2, "5.3 s in: over"],
 ];
 for (const [wallStepMs, passAfterStepMs, claims, why] of STAND_DOWN_ROWS)
   test(`a 3 s stand-down counts monotonic time: wall step ${wallStepMs} ms, ${passAfterStepMs} ms later it has claimed ${claims} time(s) (${why})`, async () => {
@@ -126,7 +144,7 @@ for (const [wallStepMs, passAfterStepMs, claims, why] of STAND_DOWN_ROWS)
 test("a limit is not a cancel: no claim on the next tick, and the decision says it stands down", async () => {
   const { driver, events, counts, definition, pass } = scene();
   driver.register(definition());
-  await pass(1_300);
+  await pass(2_300);
   const afterLimit = counts.claims;
   await pass(500);
   assert.equal(counts.claims, afterLimit);
@@ -138,8 +156,8 @@ test("the limit outcome names the limit and the last progress", async () => {
   const { combat, events, driver, definition, pass } = scene();
   driver.register(definition());
   await pass(300);
-  combat.setHealth(18);
-  await pass(1_300);
+  combat.setHealth(18); // a mark: the window restarts from the age cached at the next check (A, the next packet is at 1 s)
+  await pass(2_000);
   const limit = outcomes(events).at(0);
   assert.equal(limit?.cancelled, false);
   assert.equal(limit?.outcome.kind, "limit");
@@ -150,7 +168,7 @@ test("the limit outcome names the limit and the last progress", async () => {
 test("a claim that keeps marking runs into its ceiling, not the no-progress limit", async () => {
   const { combat, events, driver, definition, pass } = scene({ ceilingMs: 2_000, noProgressMs: 1_000, standDownMs: 3_000 });
   driver.register(definition());
-  for (let step = 0; step < 50; step++) {
+  for (let step = 0; step < 70; step++) { // the 2 s ceiling is 40 ticks and one packet: 3 s in at 20 tps
     combat.setHealth(step % 2 === 0 ? 19 : 20);
     await pass(50);
   }
@@ -160,7 +178,7 @@ test("a claim that keeps marking runs into its ceiling, not the no-progress limi
 test("a work that ignores the abort is released after the grace and the limit still stands the reflex down", async () => {
   const { driver, runner, events, counts, definition, pass } = scene();
   driver.register(definition(true));
-  await pass(1_100);
+  await pass(2_300);
   assert.equal(runner.status().owner, "takeover", "the work has the grace to stop");
   await pass(600);
   assert.equal(runner.status().owner, "idle");
@@ -262,7 +280,7 @@ test("the interrupted request returns with the [REFLEX_LIMIT] reason, not a bare
   await flush();
   // The reflex takes the body from the action; its continuation is `resume`, but a limit returns the request instead.
   driver.register({ ...definition(), continuation: () => ({ kind: "resume" }) });
-  await pass(1_400);
+  await pass(2_400);
   const output = await running;
   assert.equal(attempts, 1, "the request was not resumed into the same danger");
   assert.equal(output.interruptions?.length, 1);

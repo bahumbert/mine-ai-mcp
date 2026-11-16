@@ -9,7 +9,14 @@ export type BodyAbortCause =
   | { readonly kind: "connection_lost" }
   | { readonly kind: "death" }
   | { readonly kind: "dimension_changed"; readonly from: string; readonly to: string }
-  | { readonly kind: "reflex_limit"; readonly reflex: string; readonly limit: ReflexLimitKind; readonly elapsedMs: number };
+  | {
+      readonly kind: "reflex_limit";
+      readonly reflex: string;
+      readonly limit: ReflexLimitKind;
+      readonly elapsedMs: number;
+      /** World ticks the limit counted; null: none heard (or the stall limit); absent: a receipt written before ticks were counted. */
+      readonly elapsedTicks?: number | null;
+    };
 
 /** Still an Error for physical APIs; consumers branch on the cause, never its prose. */
 export class BodyAbort extends Error {

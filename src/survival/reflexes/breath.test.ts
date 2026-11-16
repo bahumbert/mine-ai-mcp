@@ -2,9 +2,10 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
+import { installNativeDigClock, longestBreakDurationMs } from "../../navigation/index.js";
 import type { ActionRunnerOptions } from "../../session/action-runner.js";
 import { type FakeClock, type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
-import { waterFixture } from "../../test-support/water.js";
+import { type WaterFixtureOptions, waterFixture } from "../../test-support/water.js";
 import { type SurvivalTransition } from "../control/contract.js";
 import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
 import { attachBreathReflex } from "./breath.js";
@@ -27,8 +28,8 @@ function setAirTicks(bot: Bot, ticks: number): void {
 const setAir = (bot: Bot, points: number) => setAirTicks(bot, points * AIR_TICKS_PER_POINT);
 
 /** A bot at (0, 64, 0) in the shared fake with a reflex driver, its clock and the controls it set in order. */
-function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}, clock: FakeClock = createFakeClock({ mode: "manual" })) {
-  const fixture = waterFixture(t, {}, runnerOptions, { clock });
+function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}, clock: FakeClock = createFakeClock({ mode: "manual" }), server?: WaterFixtureOptions["server"]) {
+  const fixture = waterFixture(t, {}, runnerOptions, { clock, server });
   return { ...fixture, clock };
 }
 
@@ -219,6 +220,47 @@ test("a swimmer sealed under a roof digs it with the best tool it carries", asyn
   assert.equal(fixture.bot.heldItem?.name, "stone_pickaxe");
   await control[Symbol.asyncDispose]();
 });
+
+// The roof dig inside the claim (plan 2026-11-16-reflex-limits-ticks C5), with the production dig clock (`installNativeDigClock`).
+// The swimmer's eyes are in water and she is off the ground, so her stone pickaxe takes the game's own 25 times longer on
+// netherrack (`digging.js` digTime: x5 in water, x5 airborne; `roofDigFits` prices the same flags): the server mines the roof
+// for the ticks of that digTime (about 80) and answers the removal then, 4 s at 20 tps and 8 s at 10 tps. The 5 s no-progress
+// window counts world ticks now (100, ended at A + 120), so the slower server's 8 s dig is not cut at 5 s, and its end
+// (`diggingCompleted`) is the claim's progress; the old wall window cut it at 5 s and left a `no_progress` receipt.
+for (const ticksPerSecond of [20, 10]) {
+  test(`a roof dig the server mines for about 80 ticks finishes inside the surfacing's window (${ticksPerSecond} tps)`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const fixture = diver(t, {}, clock, { ticksPerSecond });
+    const { bot, harness, entity } = fixture;
+    installNativeDigClock(bot);
+    const { digs } = sealedPocket(fixture, true);
+    fill(harness.world, "water", new Vec3(0, 64, 0), new Vec3(0, 65, 0)); // the head is under water, the roof (0, 66, 0) above it
+    Object.assign(entity, { onGround: false });
+    // The dig the reflex prices (`roofDigFits`), with the pickaxe it will equip; the fake server's own digTime must agree once it is held.
+    const digTicks = Math.ceil(longestBreakDurationMs(bot, new Vec3(0, 66, 0), itemOf(bot.registry, "stone_pickaxe").type)! / 50);
+    assert.ok(digTicks >= 70 && digTicks <= 90, `the pickaxe's game-data dig of the roof is ${digTicks} server ticks`);
+    const outcomes: Array<{ outcome: { kind?: string; limit?: string } }> = [];
+    let startedTick: number | undefined;
+    let dugTick: number | undefined;
+    let dugAtMs: number | undefined;
+    fixture.reflex.onTransition((event) => {
+      if (event.kind === "outcome") outcomes.push(event.evidence as never);
+    });
+    harness.server.onPacket("block_dig", (packet) => void ((packet as { status: number }).status === 0 && (startedTick ??= harness.server.gameTime)));
+    bot.on("diggingCompleted", () => {
+      dugTick ??= harness.server.gameTime;
+      dugAtMs ??= clock.now();
+    });
+    const control = attachBreathReflex(bot, fixture.reflex);
+    await clock.advance(digTicks * (1_000 / ticksPerSecond) + 3_000);
+    assert.deepEqual(digs, ["roof"], "the dig ended");
+    assert.ok(dugTick! - startedTick! >= digTicks, `the server mined the roof ${dugTick! - startedTick!} ticks, its digTime of ${digTicks}`);
+    assert.ok(dugAtMs! >= digTicks * (1_000 / ticksPerSecond), `the dig ended ${dugAtMs} ms in: ${ticksPerSecond === 10 ? "past" : "inside"} the old 5 000 ms window`);
+    assert.deepEqual(outcomes.filter((outcome) => outcome.outcome.kind === "limit"), [], "no limit receipt");
+    await control[Symbol.asyncDispose]();
+  });
+}
 
 test("a dry bot under the same roof is left alone by the breath reflex", async (t) => {
   const fixture = diver(t);
@@ -413,7 +455,8 @@ test("under an undiggable roof the surfacing is released after 5 s without progr
   await clock.advance(4_800);
   assert.equal(claims.length, 1, "claimed once, still within the 5 s window");
   assert.equal(outcomes.length, 0);
-  await clock.advance(1_000);
+  // The 5 s window is 100 world ticks and one packet: it ends at the packet of age A + 120, 6 s in at 20 tps.
+  await clock.advance(2_000);
   assert.equal(outcomes[0]?.outcome.limit, "no_progress", "the 600-tick budget would have held it 30 s");
   assert.equal(fixture.reflex.runner.status().owner, "idle");
   const released = releasedAt!;

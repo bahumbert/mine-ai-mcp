@@ -848,7 +848,7 @@ test("with physics stopped the grace does not count and the 30 s no-progress lim
     scene.bot.entities[7]!.position.x = 12;
     await scene.clock.advance(25_000);
     assert.equal(scene.fighting(), true, "no tick, no grace: 25 s later the fight is still held");
-    await scene.clock.advance(6_000);
+    await scene.clock.advance(7_000); // the 30 s window is 600 world ticks and one packet: it ends at the packet of age A + 620, 31 s in at 20 tps
     await until(() => !scene.fighting());
     assert.equal(scene.fighting(), false, "the 30 s no-progress limit ended it");
     assert.equal(scene.driver.answered.snapshot()[0]?.failure.kind, "reflex_limit", "a limit, not contact_ended");
@@ -1507,7 +1507,7 @@ function standoffScene(...zombies: number[]) {
 test("a wounded defender after its fight's limit picks evade, and target A is not fought again during stand-down", async () => {
   const scene = standoffScene(7);
   try {
-    await scene.pass(31_000);
+    await scene.pass(32_000); // the 30 s window is 600 world ticks and one packet: 31 s in at 20 tps
     assert.equal(scene.active(), false);
     scene.combat.setHealth(11);
     await scene.pass(500);
@@ -1560,7 +1560,7 @@ test("the probes of a limited fight are off after it: no listener is left on the
   const scene = standoffScene(7);
   try {
     const before = [scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")];
-    await scene.pass(31_000);
+    await scene.pass(32_000);
     assert.equal(scene.active(), false);
     assert.deepEqual([scene.bot._client.listenerCount("entity_status"), scene.bot.listenerCount("entityDead"), scene.bot.listenerCount("entityHurt")], before);
   } finally {
@@ -1575,7 +1575,7 @@ test("a second no_progress limit against the same target stands down 20 s, a thi
     await scene.pass(28_950);
     assert.ok(scene.active(), "29 s: the window is open");
     for (const duration of [10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]) {
-      for (let ms = 0; scene.active() && ms <= 30_100; ms += 50) await scene.pass(50);
+      for (let ms = 0; scene.active() && ms <= 32_000; ms += 50) await scene.pass(50); // 31 s: 600 world ticks and one packet
       assert.equal(scene.active(), false);
       const claims = scene.engaged.length;
       scene.bot.physicsEnabled = false;
@@ -1591,7 +1591,7 @@ test("a second no_progress limit against the same target stands down 20 s, a thi
 test("another target is not stood down", async () => {
   const scene = standoffScene(7);
   try {
-    await scene.pass(31_000);
+    await scene.pass(32_000);
     scene.entities.remove(7);
     scene.entities.spawn({ id: 8, ...hostile("zombie", 2) });
     await scene.pass(100);

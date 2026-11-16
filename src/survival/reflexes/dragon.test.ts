@@ -97,14 +97,15 @@ test("the dragon evade with no progress is released after 30 s and stands down 1
     },
   });
   const pass = (ms: number) => clock.advance(ms);
-  await pass(29_000);
-  assert.equal(runner.status().activeAction?.action, "dragon_reflex", "29 s: the window is open");
-  await pass(2_000);
-  assert.equal(runner.status().owner, "idle", "released at 30 s without hurt, travel or a blocked hit");
+  // The 30 s window is 600 world ticks and one packet: it ends at the packet of age A + 620, 31 s in at 20 tps (the stand-down is still wall time).
+  await pass(30_500);
+  assert.equal(runner.status().activeAction?.action, "dragon_reflex", "30.5 s: the window is open");
+  await pass(1_800);
+  assert.equal(runner.status().owner, "idle", "released at 31 s without hurt, travel or a blocked hit");
   const callsAtRelease = calls;
-  await pass(9_000);
+  await pass(8_500);
   assert.equal(calls, callsAtRelease, "no new evade within the 10 s stand-down");
-  await pass(2_000);
+  await pass(2_500);
   assert.equal(calls, callsAtRelease + 1, "after it, the reflex evades again");
   await reflex[Symbol.asyncDispose]();
   await driver[Symbol.asyncDispose]();

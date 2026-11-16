@@ -719,14 +719,14 @@ test("the escape facts read two rows below and three above the feet", async () =
   assert.deepEqual(fireEscapeFacts(bot).cells, withRowThree, "the row four above the feet is not");
 });
 
-test("an escape with no ticks is released at 6 s", async () => {
+test("an escape with no ticks is released after its 6 s window of world ticks (120 and one packet: 7 s at 20 tps)", async () => {
   const clock = createFakeClock({ mode: "manual" });
   await using resources = new AsyncDisposableStack();
   const scene = limitedLavaScene(resources, clock);
   const { output } = await scene.startInterrupted();
-  await scene.pass(5_900, false);
-  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "5.9 s: the window is still open");
-  await scene.pass(1_200, false);
+  await scene.pass(6_800, false);
+  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "6.8 s: the window is still open, it ends at the packet of age A + 140");
+  await scene.pass(1_300, false); // the limit's check (7 s plus up to 250 ms), then the 500 ms grace
   const finished = await output;
   assert.match((finished.interruptions ?? []).join("|"), /\[REFLEX_LIMIT\] fire_reflex .*without progress/);
   assert.equal(scene.runner.status().owner, "idle");

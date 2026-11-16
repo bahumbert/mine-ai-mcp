@@ -99,13 +99,16 @@ export type ForegroundCancellation =
   | { readonly kind: "idle"; readonly reason: string };
 
 /**
- * What a reflex claim is held to besides the physics-stall limit, on the wall clock: the longest it may hold the body,
- * and how long `progressMarks()` (a count that rises when the reflex makes progress) may stay unchanged.
+ * What a reflex claim is held to besides the physics-stall limit, in server ticks (world age; a real-time wall of
+ * 3x + one packet backs each, `serverPacedWallMs`): the longest it may hold the body, and how long `progressMarks()`
+ * (a count that rises when the reflex makes progress) may stay unchanged.
  */
 export interface ClaimLimits {
-  readonly ceilingMs: number;
-  readonly noProgressMs: number;
+  readonly ceilingTicks: number;
+  readonly noProgressTicks: number;
   readonly progressMarks: () => number;
+  /** The server's world age (`bot.time.age`), null before any time packet. */
+  readonly worldAge: () => number | null;
 }
 
 /** What a reflex reports when it releases the body. */
@@ -662,12 +665,13 @@ export class ActionRunner {
     return {
       ...this.#bodyWatch(owner, signal, takeover.controller),
       stallMs: this.#physicsStallMs,
-      ceilingMs: limits?.ceilingMs,
-      noProgress: limits && { ms: limits.noProgressMs, marks: limits.progressMarks },
+      worldAge: limits?.worldAge,
+      ceilingTicks: limits?.ceilingTicks,
+      noProgress: limits && { ticks: limits.noProgressTicks, marks: limits.progressMarks },
       abandon: this.#connection.signal,
-      abortFor: (limit, elapsedMs) => new BodyAbort(
-        { kind: "reflex_limit", reflex: owner, limit, elapsedMs },
-        limit === "physics_stalled" ? outcomes.physicsStalled(owner, elapsedMs) : outcomes.reflexLimit(owner, limit, elapsedMs),
+      abortFor: (limit, elapsedMs, elapsedTicks) => new BodyAbort(
+        { kind: "reflex_limit", reflex: owner, limit, elapsedMs, elapsedTicks },
+        limit === "physics_stalled" ? outcomes.physicsStalled(owner, elapsedMs) : outcomes.reflexLimit(owner, limit, elapsedMs, elapsedTicks),
       ),
       onLimit: (hit) => this.#onBodyLimit(owner, hit.limit),
     };

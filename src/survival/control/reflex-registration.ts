@@ -3,6 +3,7 @@ import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
 import { BodyAbort, type BodyAbortCause, type Continuation } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
+import { ticksOnTime } from "../../world/world-age.js";
 import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
 import type {
   DangerObservation,
@@ -258,7 +259,13 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         return { value: outcome, continuation: this.#continuationAfter(signal, continuation) };
       },
       definition.releaseAfterAdmission,
-      { ceilingMs: limits.ceilingMs, noProgressMs: limits.noProgressMs, progressMarks: () => progress.marks },
+      {
+        // The limits are still written in ms: converted here until T4a/T4b of plan 2026-11-16-reflex-limits-ticks.
+        ceilingTicks: ticksOnTime(limits.ceilingMs),
+        noProgressTicks: ticksOnTime(limits.noProgressMs),
+        progressMarks: () => progress.marks,
+        worldAge: () => host.bot.time?.age ?? null,
+      },
     );
     if (claim.kind !== "claimed") {
       detach();
@@ -382,6 +389,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       kind: "limit",
       limit: limit.limit,
       elapsedMs: Math.round(limit.elapsedMs),
+      elapsedTicks: limit.elapsedTicks ?? null,
       lastProgress: run.progress.lastReason,
     };
   }

@@ -3,16 +3,18 @@ import { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner, type ActionRunnerOptions } from "../session/action-runner.js";
 import { ReflexDriver, type ReflexDriverOptions } from "../survival/control/driver.js";
-import { type FakeClock, type FakeHarness, createFakeBot } from "./fake-bot/index.js";
+import { type FakeBotOptions, type FakeClock, type FakeHarness, createFakeBot } from "./fake-bot/index.js";
 
 export interface WaterFixtureOptions {
   /** The harness's clock, which the test drives and the driver and the runner read (their own `now` and `clock` options win); a new manual clock otherwise. */
   readonly clock?: FakeClock;
+  /** The fake server the bot is on (20 ticks a second by default; `{ ticksPerSecond: 10 }` for a server behind). */
+  readonly server?: FakeBotOptions["server"];
 }
 
 /** The shared fake's bot standing at (0, 64, 0), its controls recorded. */
-function harnessBot(setControlState: Bot["setControlState"], clock: FakeClock | undefined) {
-  const harness: FakeHarness = createFakeBot({ position: new Vec3(0, 64, 0), clock });
+function harnessBot(setControlState: Bot["setControlState"], clock: FakeClock | undefined, server: FakeBotOptions["server"]) {
+  const harness: FakeHarness = createFakeBot({ position: new Vec3(0, 64, 0), clock, server });
   // Recorded, then the fake's own setter (`physics.js`: the control, and sprint or sneak sent on a change).
   const own = harness.bot.setControlState.bind(harness.bot);
   harness.bot.setControlState = (control, state) => {
@@ -33,7 +35,7 @@ export function waterFixture(
   let moving = false;
   const controls: Array<readonly [control: string, state: boolean]> = [];
   const record: Bot["setControlState"] = (control, state) => void controls.push([control, state]);
-  const { bot, entity, harness } = harnessBot(record, options.clock);
+  const { bot, entity, harness } = harnessBot(record, options.clock, options.server);
   const reflex = new ReflexDriver(
     bot,
     new ActionRunner({ ...(options.clock && { clock: options.clock }), ...runnerOptions }),
