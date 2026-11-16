@@ -3,7 +3,7 @@ import { sleepMs } from "../wall-timers.ts";
 import { elapsedSince, monotonicNow } from "../monotonic-clock.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
-import { distanceBetween, findPlayer, navigateInput } from "./positions.ts";
+import { distanceBetween, findPlayer, navigateInput, unseenPlayer } from "./positions.ts";
 
 /** Pause between follow checks while already close enough. */
 const FOLLOW_POLL_MS = 750;
@@ -54,10 +54,11 @@ export async function follow(context: SkillContext, player: string, distance: nu
     } else if (monotonicNow() >= until) {
       return { status: "done", detail: `followed ${player} for ${Math.round(elapsedSince(started) / 60_000)} minutes` };
     }
-    const step = planFollowStep(await runtime.status(), player, distance);
+    const snapshot = await runtime.status();
+    const step = planFollowStep(snapshot, player, distance);
     if (step.kind === "lost") {
       unseen += 1;
-      if (unseen >= FOLLOW_LOST_CHECKS) return { status: "failed", detail: `lost sight of ${player}` };
+      if (unseen >= FOLLOW_LOST_CHECKS) return { status: "failed", detail: `lost sight of ${player}: ${unseenPlayer(snapshot, player)}` };
       await sleepMs(FOLLOW_POLL_MS, signal);
       continue;
     }
@@ -88,8 +89,9 @@ export async function follow(context: SkillContext, player: string, distance: nu
 }
 
 export async function come(context: SkillContext, player: string): Promise<SkillResult> {
-  const target = findPlayer(await context.runtime.status(), player)?.position ?? null;
-  if (target === null) return { status: "failed", detail: `cannot see ${player}` };
+  const snapshot = await context.runtime.status();
+  const target = findPlayer(snapshot, player)?.position ?? null;
+  if (target === null) return { status: "failed", detail: `cannot see ${player}: ${unseenPlayer(snapshot, player)}` };
   const outcome = await context.body.act("navigate", navigateInput(target, COME_RANGE), `Go to ${player} who called me.`, { signal: context.signal });
   if (context.signal.aborted) return { status: "stopped" };
   if (outcome.status === "succeeded") return { status: "done", detail: `reached ${player}` };

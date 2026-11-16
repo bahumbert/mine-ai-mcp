@@ -8,6 +8,32 @@ import { runStep } from "../skills.ts";
 import { FakeRuntime, steppedClocks } from "../testing.ts";
 import { contextFor } from "./skill-fixtures.test.ts";
 
+test("go_to_player explains an unseen online or offline player without navigating", async () => {
+  for (const { players, player, detail } of [
+    { players: [{ username: "Tester", position: null }], player: "tester", detail: "cannot see tester: Tester is online but too far away for you to know where they are: go_to a place you know, or say so and ask them where they are" },
+    { players: [], player: "Tom", detail: "cannot see Tom: Tom is not online now" },
+  ]) {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players };
+    assert.deepEqual(await runStep({ skill: "go_to_player", player }, contextFor(runtime)), { status: "failed", detail });
+    assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 0);
+  }
+});
+
+test("a followed player lost from sight ends with the online explanation", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 1, y: 64, z: 0 } }] };
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const following = runStep({ skill: "follow_player", player: "Tom", distance: 3, minutes: 2 }, contextFor(runtime, { signal: controller.signal }));
+  await flush();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: null }] };
+  for (let i = 0; i < 8; i++) await clock.advance(750);
+  assert.deepEqual(await following, { status: "failed", detail: "lost sight of Tom: Tom is online but too far away for you to know where they are: go_to a place you know, or say so and ask them where they are" });
+});
+
 test("the follow line shows no minutes literal and names the field", () => {
   assert.equal(skillUsage("follow_player", styleOrDefault(undefined)), '{"skill":"follow_player","player":"<username>","distance":3}  follow that player: asked by them, it lasts until they stop talking to you for 10 minutes (or say stop); on your own, add "minutes":<1-15> for how long');
 });

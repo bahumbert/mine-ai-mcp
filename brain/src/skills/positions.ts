@@ -9,6 +9,14 @@ export function findPlayer(snapshot: BotSnapshot, username: string): NearbyPlaye
   return snapshot.players.find((entry) => entry.username.toLowerCase() === wanted);
 }
 
+/** Explain why a player cannot be located from this snapshot. */
+export function unseenPlayer(snapshot: BotSnapshot, player: string): string {
+  const found = findPlayer(snapshot, player);
+  return found === undefined
+    ? `${player} is not online now`
+    : `${found.username} is online but too far away for you to know where they are: go_to a place you know, or say so and ask them where they are`;
+}
+
 /** Whether a username named in a step is her own. */
 export function isSelf(username: string, self: string | undefined): boolean {
   return self !== undefined && username.toLowerCase() === self.toLowerCase();

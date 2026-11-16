@@ -2,15 +2,16 @@
 import type { Step } from "../actions.ts";
 import type { Position } from "../runtime-client.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
-import { isSelf, whereIs } from "./positions.ts";
+import { isSelf, unseenPlayer, whereIs } from "./positions.ts";
 import { noteArea } from "./protected-areas.ts";
 
 /** Keeps the character's own digging and scaffolding out of an area (ADR-012); its own choice, e.g. when asked. */
 export async function protectArea(context: SkillContext, step: Extract<Step, { skill: "protect_area" }>): Promise<SkillResult> {
   let centre: Position;
   if (step.player !== undefined) {
-    const seen = whereIs(await context.runtime.status(), step.player, context.self);
-    if (seen === null) return { status: "failed", detail: `cannot see ${step.player} to protect the area around them` };
+    const snapshot = await context.runtime.status();
+    const seen = whereIs(snapshot, step.player, context.self);
+    if (seen === null) return { status: "failed", detail: `cannot see ${step.player} to protect the area around them: ${unseenPlayer(snapshot, step.player)}` };
     centre = seen;
   } else if (step.x !== undefined && step.y !== undefined && step.z !== undefined) {
     centre = { x: step.x, y: step.y, z: step.z };

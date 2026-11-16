@@ -3,7 +3,7 @@ import type { Step } from "../actions.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, type Zone } from "../building/terrain.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
 import { levelZone } from "./level-zone.ts";
-import { distanceBetween, whereIs } from "./positions.ts";
+import { distanceBetween, unseenPlayer, whereIs } from "./positions.ts";
 
 /** How far away marker blocks are looked for. */
 const MARKER_RANGE = 48;
@@ -37,7 +37,7 @@ export async function levelArea(context: SkillContext, step: Extract<Step, { ski
     // The first look fixes the place for the whole objective (the player may walk or fly away between two steps).
     const fixed = context.levelSites?.get(step.around.toLowerCase());
     const seen = fixed ?? whereIs(snapshot, step.around, context.self);
-    if (seen === null) return { status: "failed", detail: `cannot see ${step.around} to level the ground around them` };
+    if (seen === null) return { status: "failed", detail: `cannot see ${step.around} to level the ground around them: ${unseenPlayer(snapshot, step.around)}` };
     const site = { x: Math.floor(seen.x), y: Math.floor(seen.y), z: Math.floor(seen.z) };
     if (fixed === undefined) context.levelSites?.set(step.around.toLowerCase(), site);
     zone = { minX: site.x - step.radius, maxX: site.x + step.radius, minZ: site.z - step.radius, maxZ: site.z + step.radius };

@@ -7,6 +7,13 @@ import type { ProtectedArea } from "../runtime-client.ts";
 import { FakeRuntime } from "../testing.ts";
 import { contextFor, describeCall, HOUSE_RECIPES, builds, refusedBuild } from "./skill-fixtures.test.ts";
 
+test("level_area explains when the player is online but out of sight", async () => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: null }] };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", around: "Tom" }), contextFor(runtime));
+  assert.deepEqual(result, { status: "failed", detail: "cannot see Tom to level the ground around them: Tom is online but too far away for you to know where they are: go_to a place you know, or say so and ask them where they are" });
+});
+
 test("protect_area keeps a radius around a seen player, owned by that player, and release_area gives it back", async () => {
   const runtime = new FakeRuntime();
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Tom", position: { x: 10.4, y: 64, z: -3.6 } }] };
@@ -24,7 +31,7 @@ test("protect_area keeps a radius around a seen player, owned by that player, an
 test("protect_area needs a player in sight or coordinates", async () => {
   const runtime = new FakeRuntime();
   const context = contextFor(runtime);
-  assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", player: "Tom", label: "x" }), context), { status: "failed", detail: "cannot see Tom to protect the area around them" });
+  assert.deepEqual(await runStep(stepSchema.parse({ skill: "protect_area", player: "Tom", label: "x" }), context), { status: "failed", detail: "cannot see Tom to protect the area around them: Tom is not online now" });
   assert.equal((await runStep(stepSchema.parse({ skill: "protect_area", x: 1, y: 64, z: 1, radius: 2, label: "spot" }), context)).status, "done");
   assert.equal(runtime.areas[0]?.owner, "self", "coordinates alone protect the character's own area");
   assert.equal(stepSchema.safeParse({ skill: "protect_area", player: "Tom", radius: 32, label: "x" }).success, false);
@@ -267,7 +274,7 @@ test("her own name in a step is where she stands: protecting the area around her
   assert.equal(result.status, "done");
   assert.deepEqual(runtime.areas[0]?.min, { x: 6, y: 60, z: -8 });
   const other = await runStep({ skill: "protect_area", player: "Bob", radius: 4, label: "camp" }, contextFor(runtime, { self: "Ayla" }));
-  assert.deepEqual(other, { status: "failed", detail: "cannot see Bob to protect the area around them" });
+  assert.deepEqual(other, { status: "failed", detail: "cannot see Bob to protect the area around them: Bob is not online now" });
 });
 
 test("protect_area with no player and no coordinates protects around herself, owned as her own (live 2026-10-11: 'around you' came as the speaker's name)", async () => {
