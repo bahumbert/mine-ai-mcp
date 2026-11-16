@@ -2,7 +2,7 @@ template: ../../templates/flat-single-action.yaml
 name: contract-dig-time-and-update
 tags:
   - contract
-description: A dig ends at Mineflayer's digTime and the server keeps the cell open, on dry ground and with the eye in
+description: A dig takes Mineflayer's digTime in server ticks and the server keeps the cell open, on dry ground and with the eye in
   water (5x or more). Contract check tests/minecraft/contract/checks/dig-time-and-update.ts, also run on the fake bot
   (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts).
 client:

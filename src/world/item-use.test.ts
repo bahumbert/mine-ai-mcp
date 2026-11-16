@@ -19,10 +19,10 @@ const TICK_MS = 50;
  * A look that fills the bucket aims just over the source's surface (y 63.9; 63.889 is the surface): from the eye a lower aim
  * meets the floor's edge first, as it would in the game.
  */
-function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, number>> = { bucket: 1 }) {
+function usingBot(ticksUntilEffect: number, carried: Readonly<Record<string, number>> = { bucket: 1 }, ticksPerSecond = 20) {
   const target = new Vec3(3, 63, 0);
   const calls: string[] = [];
-  const harness = createFakeBot({ lagMs: ticksUntilEffect * TICK_MS, carried, cells: { "3,63,0": "water", "3,62,0": "obsidian" } });
+  const harness = createFakeBot({ lagMs: ticksUntilEffect * 1000 / ticksPerSecond, server: { ticksPerSecond }, carried, cells: { "3,63,0": "water", "3,62,0": "obsidian" } });
   const { bot, server, world } = harness;
   const effect = () => world.setCell(target, "air");
   const equip = bot.equip;
@@ -211,8 +211,8 @@ test("an unconfirmed use says how far the server clock moved after the use went 
 });
 
 /** Server wait: the world age (not client ticks) decides, and the wall clock bounds it. */
-function serverWaitWorld(ticksUntilEffect = 1_000) {
-  const world = usingBot(ticksUntilEffect);
+function serverWaitWorld(ticksUntilEffect = 1_000, ticksPerSecond = 20) {
+  const world = usingBot(ticksUntilEffect, undefined, ticksPerSecond);
   return { ...world, timing: { now: world.clock.now, sleep: world.clock.sleep } };
 }
 
@@ -228,6 +228,24 @@ test("a server wait confirms an unchanged block only once the world age moved 40
   if (result.kind !== "failed") return;
   assert.ok((result.serverTicksWaited ?? 0) >= 40);
   assert.equal(result.timedOut, undefined);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`an effect 15 ticks after the use is seen by a server wait at ${ticksPerSecond} tps`, async () => {
+  // The cause of the tend-crops red (plan 2026-11-14-tests-phase4-sibling): a seed's use judged on 10 client ticks.
+  const use = (world: ReturnType<typeof serverWaitWorld>, wait: Partial<Parameters<typeof useItemAt>[1]>) => useItemAt(world.bot, {
+    item: world.stack("bucket"),
+    lookAt: { x: 3.5, y: 63.5, z: 0.5 },
+    expectedCells: [{ position: world.target, matches: (block) => block.name === "air" }],
+    ...wait,
+  });
+  const clientWait = serverWaitWorld(15, ticksPerSecond);
+  const missed = await clientWait.clock.settle(use(clientWait, { timeoutTicks: 10 }), 12 * TICK_MS);
+  assert.equal(missed.kind, "failed");
+  const serverWorld = serverWaitWorld(15, ticksPerSecond);
+  const startAge = serverWorld.bot.time.age;
+  const seen = await serverWorld.clock.settle(use(serverWorld, { serverWait: { ticks: 40, wallMs: 10_000, ...serverWorld.timing } }), 4_100);
+  assert.deepEqual(seen, { kind: "used" });
+  assert.equal(serverWorld.bot.time.age - startAge, 0, "the effect arrives at 15 ticks, before the first age packet");
 });
 
 test("a cancel ends the wait for the use's effect at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {

@@ -9,7 +9,6 @@ import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/inde
 import { FakeNavigationBot, flatWorld, movementStep, routePlan } from "../../test-support/navigation.js";
 import type { EffectHandle } from "../bot.js";
 import type { PlannedOperation, PlannedStep } from "../movements/movement.js";
-import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { OpenedPassages } from "./opened-passages.js";
 import { RouteExecutor } from "./route-executor.js";
@@ -90,10 +89,10 @@ async function startBreak(bot: FakeNavigationBot, step: PlannedStep) {
 test("route confirmation budgets cover live digs, planned work, falling columns and unknown durations", async () => {
   const brings = [{ x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 }];
   for (const [label, digMs, plannedTicks, column, budget] of [
-    ["dry grounded", 600, 12, [], 100],
-    ["floating", FLOATING_ANDESITE_MS, 12, [], 564],
+    ["dry grounded", 600, 12, [], 112],
+    ["floating", FLOATING_ANDESITE_MS, 12, [], 604],
     ["planned above actual", 600, 400, [], 800],
-    ["falling column", FLOATING_ANDESITE_MS, 12, brings, 1288],
+    ["falling column", FLOATING_ANDESITE_MS, 12, brings, 1368],
     ["unloaded", null, 12, [], 100],
     ["no duration method", undefined, 12, [], 100],
   ] as const) {
@@ -109,27 +108,31 @@ test("route confirmation budgets cover live digs, planned work, falling columns 
 });
 
 test("a cancel during the long dig ends the step at once and leaves no expectation behind", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const bot = new TimedDiggingBot(FLOATING_ANDESITE_MS);
   const run = await startBreak(bot, breakStep(12));
-  const before = monotonicNow();
+  const before = clock.now();
   run.abort();
   assert.equal((await run.execution).kind, "cancelled");
-  assert.ok(monotonicNow() - before < 1_000, "the 28 s deadline does not hold the cancel");
+  assert.equal(clock.now(), before, "the 30.2 s deadline does not hold the cancel");
   assert.equal(bot.cancelled, true);
   assert.equal(run.ledger.activeCount, 0);
 });
 
-test("the confirmation deadline counts monotonic time: a 1.2 s wall step forward does not expire a 5 s deadline at 4 s", async () => {
+test("the confirmation deadline counts monotonic time: a 1.2 s wall step forward does not expire a 5.6 s deadline at 4.5 s", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   const bot = new TimedDiggingBot(600);
   const run = await startBreak(bot, breakStep(12));
-  await clock.advance(4_000);
+  await clock.advance(4_500);
   clock.stepWallClock(1_200);
   for (const tick of bot.ticks) tick();
   await nextTurn();
-  assert.equal(run.ledger.activeCount, 1, "the physics tick's clock reading is monotonic: 4 s in, 1 s to go");
-  await clock.advance(1_000);
+  assert.equal(run.ledger.activeCount, 1, "the wall clock passed 5.6 s, but the monotonic clock is only at 4.5 s");
+  await clock.advance(1_099);
+  assert.equal(run.ledger.activeCount, 1, "the deadline remains open one millisecond before 5.6 s");
+  await clock.advance(1);
   const result = await run.execution;
   assert.equal(result.kind, "failed");
   assert.match(JSON.stringify(result), /Server confirmation deadline elapsed/);
@@ -141,8 +144,8 @@ test("a block that never changes expires at the longer deadline, with the step f
   const fake = createFakeBot({ clock });
   const bot = Object.assign(new TimedDiggingBot(FLOATING_ANDESITE_MS), { worldAge: () => fake.bot.time.age });
   const run = await startBreak(bot, breakStep(12));
-  // The first +20 packet past the 564-tick budget is at 29 s (+580 ticks).
-  await clock.advance(28_975, 25);
+  // The first +20 packet past the 604-tick budget is at 31 s (+620 ticks).
+  await clock.advance(30_975, 25);
   await nextTurn();
   assert.equal(run.ledger.activeCount, 1, "not expired a moment before the deadline");
   await clock.advance(50, 25);

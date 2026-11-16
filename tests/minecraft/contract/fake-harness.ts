@@ -1,5 +1,6 @@
 /** A contract check's fixture built on the shared fake bot, in the lane a frame names: what `bot-contract.test.ts` and the tests of one check's edge cases run on. */
 import { Vec3 } from "vec3";
+import { installNativeDigClock } from "../../../src/navigation/index.ts";
 import { type FakeEntitySpec, type FakeServerOptions, createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import type { ContractFixture } from "./checks.ts";
@@ -26,7 +27,7 @@ export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, serv
   /** A fixture map keyed by `"x,y,z"` (cells, containers), keyed by the lane's cells. */
   const inLane = <T>(byCell: Readonly<Record<string, T>> | undefined) =>
     byCell && Object.fromEntries(Object.entries(byCell).map(([key, value]) => [frame.world(key.split(",").map(Number) as [number, number, number]).join(","), value]));
-  return createFakeBot({
+  const harness = createFakeBot({
     clock: createFakeClock({ mode: "mocked" }),
     position: point(fixture.position),
     spawn: point(fixture.position).offset(WORLD_SPAWN_AWAY_BLOCKS, 0, 0),
@@ -38,4 +39,6 @@ export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, serv
     simulatePhysics,
     server: { timeOfDay: fixture.timeOfDay, weather: fixture.weather, ticksPerSecond: fixture.tickRate, seatPositionLeadTicks: SEAT_POSITION_LEAD_TICKS, ...server },
   });
+  installNativeDigClock(harness.bot);
+  return harness;
 }

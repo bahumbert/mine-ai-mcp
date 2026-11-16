@@ -29,6 +29,8 @@ export interface SeaOptions {
   /** A block in the air over the water from this z on, which a boat on the water runs into: the server puts the boat back. */
   readonly barrierFromZ?: number;
   readonly lagMs?: number;
+  /** Server tick rate; defaults to 20. */
+  readonly ticksPerSecond?: number;
   /** Move the body by Mineflayer's physics (she swims after a boat's item). */
   readonly physics?: boolean;
   /** Entities in view from the start, by id (a boat to sit in, a threat). */
@@ -65,6 +67,7 @@ export function seaHarness(options: SeaOptions = {}): FakeHarness {
     cells: seaCells(options),
     carried,
     lagMs: options.lagMs,
+    server: { ticksPerSecond: options.ticksPerSecond },
     entities: options.entities,
     simulatePhysics: options.physics,
   });

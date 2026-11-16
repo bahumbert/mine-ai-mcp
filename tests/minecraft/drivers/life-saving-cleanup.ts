@@ -8,15 +8,16 @@ import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 /** Hold the arranged body until the fire packet arrives, so a delayed command cannot light the route behind it. */
-async function injectFire(context: ScenarioContext): Promise<boolean> {
+async function injectFire(context: ScenarioContext, sleep: (ms: number) => Promise<void>): Promise<boolean> {
   context.physics.pause();
   const cell = context.bot.entity.position.floored();
   try {
     context.bot.chat(`/setblock ${cell.x} ${cell.y} ${cell.z} fire`);
     const deadline = monotonicNow() + 2_000;
-    while (context.bot.blockAt(cell)?.name !== "fire" && monotonicNow() < deadline) await delay(20);
+    while (context.bot.blockAt(cell)?.name !== "fire" && monotonicNow() < deadline) await sleep(20);
     return context.bot.blockAt(cell)?.name === "fire";
   } finally {
     context.physics.resume();
@@ -24,7 +25,7 @@ async function injectFire(context: ScenarioContext): Promise<boolean> {
 }
 
 /** The arranged block stands for a confirmed T5a placement; the runtime's real driver owns all subsequent work. */
-export async function run(context: ScenarioContext): Promise<ClientCompletion> {
+export async function run(context: ScenarioContext, sleep: (ms: number) => Promise<void> = delay): Promise<ClientCompletion> {
   const { cell, next } = z.strictObject({ cell: arenaPoint(context.arena), next: arenaPoint(context.arena) }).parse(context.scenario.params);
   const { bot } = context;
   const target = new Vec3(...cell);
@@ -46,7 +47,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     const owner = status.survival?.owner.current;
     if (owner === "remove_life_saving_placements") cleanupSeen = true;
     if (cleanupSeen && !injected && bot.entity.position.distanceTo(start) > 0.1) {
-      injected = await injectFire(context);
+      injected = await injectFire(context, sleep);
       firedAt = burnStartNow(bot);
     }
     if (owner === "fire_reflex") {
@@ -54,7 +55,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       retainedDuringFire ||= pendingLifeSavingPlacements(bot).length === 1 && bot.targetDigBlock == null;
     }
     if (fireOwned && pendingLifeSavingPlacements(bot).length === 0) break;
-    await delay(20);
+    await sleep(20);
   }
   if (!cleanupSeen || !injected || !fireOwned || !retainedDuringFire || pendingLifeSavingPlacements(bot).length > 0 || bot.blockAt(target)?.type !== 0)
     return { status: "failed", detail: JSON.stringify({ cleanupSeen, injected, fireOwned, retainedDuringFire, pending: pendingLifeSavingPlacements(bot), block: bot.blockAt(target)?.name, health: bot.health }) };
@@ -63,8 +64,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   bot.on("messagestr", answer);
   try {
     bot.chat(`/execute if block ${cell.join(" ")} minecraft:air run tellraw @s {"text":"cleanup-server-air"}`);
-    const answerDeadline = monotonicNow() + 2_000;
-    while (!serverAir && monotonicNow() < answerDeadline) await delay(20);
+    const waited = await waitServerTicks(bot, 40, { until: () => serverAir });
+    if (waited === "stalled") return { status: "failed", detail: "the server's clock stood still while waiting for cleanup confirmation" };
   } finally {
     bot.off("messagestr", answer);
   }

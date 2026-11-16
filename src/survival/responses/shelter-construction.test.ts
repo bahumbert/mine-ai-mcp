@@ -2,10 +2,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createNavigationRuntime, type NavigationRuntime } from "../../navigation/index.js";
+import { createNavigationRuntime, installNativeDigClock, type NavigationRuntime } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext, onAttack } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock, type FakeBot, type FakeClock } from "../../test-support/fake-bot/index.js";
+import { waitForServerTicks } from "../../world/world-age.js";
 import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { hideInPlace, enclosedInPlace } from "./hide.js";
@@ -23,6 +24,24 @@ function createTestShelterBuild(bot: FakeBot, clock: FakeClock): ShelterBuild {
     pass: 0, blockedCells: new Map(),
   };
 }
+
+test("shaft construction reserves the native dig answer before opening its first cell", async () => {
+  for (const leftMs of [1_750, 1_700]) {
+    const clock = createFakeClock({ mode: "mocked" });
+    const { bot } = createFakeBot({ clock, simulatePhysics: true, cells: { "0,63,0": "dirt" } });
+    using _installed = clock.install();
+    installNativeDigClock(bot);
+    bot.entity.onGround = false;
+    await clock.settle(waitForServerTicks(bot, 40, { until: () => bot.entity.onGround }), 1_000);
+    // Centring observes one stationary physics tick before pricing the first shaft cell.
+    const build = { ...createTestShelterBuild(bot, clock), constructionDeadline: clock.now() + 50 + leftMs };
+    const result = await clock.settle(constructShelterPass(build), 5_000);
+    assert.equal(typeof result, "object", `${leftMs} ms: ${JSON.stringify(result)}, dug ${build.dug}, at ${bot.entity.position}`);
+    if (typeof result === "object") assert.match(result.error, /shaft cell .* digs in/);
+    assert.equal(build.dug, leftMs === 1_750 ? 1 : 0);
+    assert.equal(bot.blockAt(new Vec3(0, 63, 0))?.name, leftMs === 1_750 ? "air" : "dirt");
+  }
+});
 
 test("a fence wall is broken with a server answer, closed, and recovery continues from the completed shelter", async () => {
   const clock = createFakeClock({ mode: "mocked" });

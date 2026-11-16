@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
 import { cellKey } from "../../utils/index.js";
 import { pendingLifeSavingPlacements } from "../../world/life-saving-placements.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { FootingRecovery } from "./footing.js";
+import { forgetVehicle, resumePhysics } from "../../actions/navigate/vehicle-sync.js";
+import { createNavigateAction } from "../../actions/navigate/navigate.js";
+import type { NavigationRuntime } from "../../navigation/index.js";
+import { ActionRunner } from "../../session/action-runner.js";
+import { ReflexDriver } from "../control/driver.js";
+import { attachFootingReflex } from "../reflexes/footing.js";
+import { waterLandingActive } from "../../navigation/mineflayer/water-landing.js";
 
 /** Physics ticks `clock` runs until `pending` settles (at most `max`), as Mineflayer's ticks would drive it. */
 async function ticksUntilSettled(clock: FakeClock, pending: Promise<unknown>, max = 20): Promise<number> {
@@ -78,6 +85,123 @@ test("an idle edge hit retains the departure support after the bot becomes airbo
   assert.equal(recovery.needed, true);
   assert.deepEqual(recovery.snapshot()?.support, { x: 0, y: 47, z: 0 });
   assert.equal(fixtureBot.controls.size, 0, "observation never drives before a body owner calls recover");
+});
+
+test("mounting clears a pending land impulse", async () => {
+  const f = fixture(false, undefined, { entities: { 7: { name: "oak_boat", position: new Vec3(0.8, 47, 0.5) } } });
+  using recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  assert.equal(recovery.needed, true);
+  f.bot.mount(f.bot.entities[7]!);
+  await f.clock.advance(50);
+  assert.ok(f.bot.vehicle);
+  assert.equal(recovery.needed, false, "the old land impulse must not survive mounting");
+});
+
+test("after seated combat the next navigate is not interrupted by old footing", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture(false, clock, { groundY: 46, entities: { 7: { name: "oak_boat", position: new Vec3(0.8, 47, 0.5) } } });
+  using recovery = new FootingRecovery(f.bot, f.world);
+  const runner = new ActionRunner({ clock: f.clock });
+  await using driver = new ReflexDriver(f.bot, runner, { now: f.clock.now });
+  let fighting = true;
+  let released = false;
+  const reflex = attachFootingReflex(driver, { activeEngagement: () => fighting ? {} as never : null }, recovery, () => { released = true; });
+  try {
+    f.bot.mount(f.bot.entities[7]!);
+    await f.clock.advance(50);
+    f.entity.position.set(0.8, 47, 0.5);
+    f.impulse();
+    assert.equal(recovery.needed, false, "a seated hit must not queue land recovery");
+    fighting = false;
+    forgetVehicle(f.bot);
+    resumePhysics(f.bot);
+    const navigation = { cancel: () => {}, onEvent: () => () => {} } as unknown as NavigationRuntime;
+    const action = createNavigateAction(f.bot, navigation, {
+      createMovements: (() => ({})) as never,
+      navigate: async ({ signal }) => {
+        await f.clock.sleep(100);
+        signal?.throwIfAborted();
+        f.entity.position.set(2.5, 47, 0.5);
+        return { status: "completed", elapsedMs: 100 };
+      },
+    });
+    const pending = runner.run(action, { x: 2, y: 47, z: 0, range: 0 });
+    await f.clock.advance(50);
+    assert.equal(released, false, "Footing recovery is taking control of the airborne body");
+    const result = await f.clock.settle(pending, 10_000);
+    assert.equal(result.result.status, "succeeded", JSON.stringify(result.result));
+  } finally {
+    await reflex[Symbol.asyncDispose]();
+  }
+});
+
+test("mount interrupts active recovery, releases controls and allows a fresh recovery", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture(false, clock, { entities: { 7: { name: "oak_boat", position: new Vec3(0.8, 47, 0.5) } } });
+  const added = listenersAddedSince(f.bot);
+  const clientAdded = listenersAddedSince(f.bot._client);
+  const recovery = new FootingRecovery(f.bot, f.world);
+  f.impulse();
+  const pending = recovery.recover(new AbortController().signal);
+  pending.catch(() => {});
+  assert.equal(recovery.active, true);
+  f.bot.mount(f.bot.entities[7]!);
+  await clock.advance(50);
+  await assert.rejects(clock.settle(pending, 1_000), /vehicle context changed/);
+  assert.equal(recovery.active, false);
+  assert.equal(f.controls.size, 0);
+  forgetVehicle(f.bot);
+  resumePhysics(f.bot);
+  f.entity.position.set(0.8, 47, 0.5);
+  f.entity.onGround = true;
+  f.bot.emit("physicsTick");
+  f.impulse();
+  const next = recovery.recover(new AbortController().signal);
+  await clock.advance(50);
+  assert.equal(await next, "landed");
+  recovery[Symbol.dispose]();
+  for (const event of ["mount", "dismount", "physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+  assert.equal(clientAdded("entity_velocity"), 0);
+  await clock.advance(31_000);
+  assert.equal(f.controls.size, 0);
+});
+
+test("mount interrupts an active water landing", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const f = fixture(true, clock, { carried: { water_bucket: 1 }, entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 51, 0.5) } } });
+  for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++)
+    for (let y = 50; y <= 53; y++) f.world.load({ x, y, z }, { stateId: 0 });
+  f.entity.position.set(0.5, 51, 0.5);
+  f.entity.velocity.set(0, -1, 0);
+  f.entity.onGround = false;
+  using recovery = new FootingRecovery(f.bot, f.world);
+  assert.equal(recovery.bucketNeeded, true);
+  const pending = recovery.recover(new AbortController().signal);
+  pending.catch(() => {});
+  assert.equal(recovery.active, true);
+  f.bot.mount(f.bot.entities[7]!);
+  await clock.advance(50);
+  await assert.rejects(clock.settle(pending, 1_000), /vehicle context changed/);
+  assert.equal(recovery.active, false);
+  assert.equal(waterLandingActive(f.bot), false);
+  forgetVehicle(f.bot);
+  resumePhysics(f.bot);
+  for (let x = 1; x <= 5; x++) for (let z = -3; z <= 3; z++) f.world.load({ x, y: 46, z }, { stateId: 0 });
+  f.entity.position.set(0.5, 47, 0.5);
+  f.entity.velocity.set(0, 0, 0);
+  f.entity.onGround = true;
+  f.bot.emit("physicsTick");
+  f.entity.position.x = 0.8;
+  f.impulse();
+  const next = recovery.recover(new AbortController().signal);
+  await clock.advance(50);
+  assert.equal(await next, "landed");
+  await clock.advance(31_000);
+  assert.equal(f.controls.size, 0);
 });
 
 test("missing catching geometry reports failure and releases movement instead of claiming a landing", async () => {

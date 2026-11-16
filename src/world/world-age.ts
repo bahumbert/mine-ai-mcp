@@ -34,6 +34,9 @@ export const DEFAULT_POLL_MS = 25;
 /** Milliseconds per server tick when the server runs on time; used only before any age was heard. */
 export const MS_PER_ON_TIME_TICK = 50;
 
+/** A cached age is up to 19 ticks old between regular 20-tick broadcasts (world-age-per-second contract). */
+export const STALE_AGE_TICKS = 19;
+
 export interface ServerTickDeadline {
   readonly ticks: number;
   /** Observe the age and latch expiry once the tick budget or stopped-clock bound passes. */

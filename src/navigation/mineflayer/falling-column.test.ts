@@ -9,9 +9,31 @@ import { MineflayerWorldView } from "./world.js";
 import { createNavigator } from "../orchestration/navigator.js";
 import { exactBlockGoal } from "../goals/index.js";
 import { createMovementPolicy } from "../movements/policy.js";
+import { useNativeDigging } from "../../test-support/fake-bot/native-digging.js";
+import { installNativeDigClock } from "./native-dig-clock.js";
 
 const CELL = new Vec3(1, 64, 0);
 const TOKEN = { runId: "column", planId: "column", stepId: "dig", attempt: 0 };
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a route's native hand dig is confirmed after its server mining ticks at ${ticksPerSecond} tps`, async () => {
+    const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+      server: { ticksPerSecond }, cells: { "1,64,0": "deepslate" } });
+    const { bot, clock, server } = harness;
+    using _timers = clock.install();
+    useNativeDigging(harness);
+    installNativeDigClock(bot);
+    const actuator = new MineflayerBot(mineflayerBotSurface(bot), { revision: 1 });
+    const effect = actuator.startEffect({ kind: "break", position: CELL,
+      expectedStateId: bot.blockAt(CELL)!.stateId, toolType: null, brings: [] }, TOKEN, new AbortController().signal);
+    const pending = watch(effect.completion);
+    await clock.advance(14_000);
+    assert.equal(pending.over, false);
+    assert.deepEqual(await clock.settle(effect.completion, 25_000), { kind: "accepted" });
+    assert.ok(server.gameTime >= 24_300);
+    assert.equal(actuator.ownedControlCount, 0);
+  });
+}
 
 /** Stage the measured packet order: client blockUpdate first, covering packet second (12b trace, 2026-11-15). */
 function column(ticksPerSecond = 5, broughtBlocks = 2, tool = "iron_shovel", simulatePhysics = false) {

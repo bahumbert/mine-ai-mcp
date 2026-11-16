@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
 import { waterFixture } from "../../test-support/water.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { Budgets } from "../state/budgets.js";
-import { surface } from "./breath.js";
+import { roofDigFits, surface } from "./breath.js";
+
+test("a roof dig reserves its answer margin: exactly enough air fits, one tick short refuses", () => {
+  const { bot, breath } = createFakeBot({ cells: { "0,65,0": "water", "0,66,0": "oak_leaves" } });
+  Object.assign(bot.entity, { isInWater: true, onGround: false });
+  const roof = bot.blockAt(new Vec3(0, 66, 0))!;
+  // Leaves take 150 mining ticks with both water penalties; 20 answer + 10 rise, less 100 half-health ticks.
+  breath.setAirSupply(80);
+  assert.equal(roofDigFits(bot, roof, null), true);
+  breath.setAirSupply(79);
+  assert.equal(roofDigFits(bot, roof, null), false, "one tick short of the dig, answer and rise budget");
+});
 
 /** What a test cell holds; leaves are a roof dug by hand within a breath, stone is not (owner 2026-10-19: Q2). */
 type Cell = "water" | "air" | "stone" | "oak_leaves";

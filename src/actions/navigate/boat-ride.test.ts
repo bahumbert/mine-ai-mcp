@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BoatRide, crossByBoat } from "./boat-crossing.js";
 import { mountedSea, settled, theBoat } from "./boat-fixtures.test.js";
+import { listenersAddedSince } from "../../test-support/fake-bot/index.js";
 
 const AHEAD = { x: 0, z: 1 };
 
@@ -64,12 +65,35 @@ test("a stop without a server answer fails explicitly and a later ride can resum
   using _clock = world.clock.install();
   world.server.stop();
   const ride = new BoatRide(world.bot, theBoat(world), AHEAD, world.bot.entity.position, undefined);
+  const startedAt = world.clock.now();
   await assert.rejects(settled(world, ride.end()), /\[BOAT_STOP_UNCONFIRMED\]/u);
+  assert.ok(world.clock.now() - startedAt >= 20_200, "the stopped age gets twenty seconds after the stop writes");
   assert.equal(world.bot._client.listenerCount("vehicle_move"), 0);
   world.server.resume();
   const next = await settled(world, crossByBoat(world.bot, AHEAD, undefined, 5));
   assert.equal(next.atSea, true, next.detail);
   assert.equal(next.blocks, 5);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a boat stop survives eleven seconds without server time at ${ticksPerSecond} tps`, async () => {
+  const world = await mountedSea({ ticksPerSecond });
+  using _clock = world.clock.install();
+  world.server.stop();
+  const age = world.bot.time.age;
+  world.clock.after(11_000, () => world.server.resume());
+  const botAdded = listenersAddedSince(world.bot);
+  const clientAdded = listenersAddedSince(world.bot._client);
+  const ride = new BoatRide(world.bot, theBoat(world), AHEAD, world.bot.entity.position, undefined);
+  let settlements = 0;
+  const stopped = await settled(world, ride.end().then((position) => { settlements += 1; return position; }));
+  assert.equal(stopped.z, 3.5);
+  assert.ok(world.bot.time.age > age, "the stop was confirmed after server age advanced");
+  const packets = world.server.packets.length;
+  await world.clock.advance(31_000);
+  assert.equal(settlements, 1);
+  assert.equal(world.server.packets.length, packets);
+  assert.equal(botAdded("death"), 0);
+  assert.equal(clientAdded("vehicle_move"), 0);
 });
 
 test("cancel or death during stop settlement cannot start a get-off or take-back", async () => {

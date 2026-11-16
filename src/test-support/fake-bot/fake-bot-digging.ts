@@ -1,6 +1,6 @@
 /**
  * The fake bot's dig as Mineflayer's digging plugin runs it (`digging.js`): the look first, then the start packet,
- * the block's own dig time fed the same inputs, the client turning the cell to air, and `stopDigging`'s two windows.
+ * the block's own dig time fed the same inputs, the optional server-clock seam, and `stopDigging`'s two windows.
  */
 import type { Bot } from "mineflayer";
 import type { FakeBot } from "./fake-bot.js";
@@ -52,6 +52,7 @@ export function attachFakeDigging(bot: FakeBot, clock: FakeClock, world: FakeWor
 /** From the start packet to the cell turned to air (`diggingCompleted`) or a `stopDigging` (`Digging aborted`). */
 function digOnce(bot: FakeBot, clock: FakeClock, world: FakeWorld, block: MineflayerBlock, waitTime: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let cancelFinish: () => void = noop;
     const eventName = blockUpdateEventOf(block.position);
     const position = block.position.clone();
     const write = (status: number) => bot._client.write("block_dig", { status, location: position, face: 1 });
@@ -72,16 +73,26 @@ function digOnce(bot: FakeBot, clock: FakeClock, world: FakeWorld, block: Minefl
       bot.targetDigBlock = null as never;
       world.setCell(position, "air"); // the client's own prediction (`_updateBlockState(pos, 0)`)
     };
-    write(0);
-    const cancelFinish = clock.after(waitTime, finish);
-    bot.targetDigBlock = block;
-    bot.on(eventName, onBlockUpdate);
-    bot.stopDigging = () => {
+    const abort = (error = new Error("Digging aborted")) => {
       if (!bot.targetDigBlock) return;
-      write(1);
       end();
-      bot.emit("diggingAborted", block);
-      reject(new Error("Digging aborted"));
+      try {
+        write(1);
+      } finally {
+        try { bot.emit("diggingAborted", block); }
+        finally { reject(error); }
+      }
     };
+    write(0);
+    bot.targetDigBlock = block;
+    bot.stopDigging = abort;
+    if (bot._startServerDig) {
+      cancelFinish = bot._startServerDig(block, waitTime, {
+        finish: () => write(2), complete: after => onBlockUpdate(block, after), fail: abort,
+      });
+    } else {
+      bot.on(eventName, onBlockUpdate);
+      cancelFinish = clock.after(waitTime, finish);
+    }
   });
 }

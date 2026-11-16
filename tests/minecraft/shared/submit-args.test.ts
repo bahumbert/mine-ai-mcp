@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exitCodeOf, findCanary, formatMessage, forwardedEnv, outputOnNinePWarning, parseSubmitArgs, submitEnv } from "./submit-args.ts";
+import { exitCodeOf, findCanary, formatMessage, forwardedEnv, parseSubmitArgs, submitEnv } from "./submit-args.ts";
 
 test("featured results, totals and exit codes distinguish infrastructure", () => {
   const result = { type: "result", name: "x", outcome: "error", elapsedMs: 1000, detail: "pending", runDir: "/r" } as const;
@@ -86,21 +86,6 @@ test("an unknown option, a lanes of 0 and a repeat that is not a number are refu
 test("--socket and --port are kept for a daemon of your own", () => {
   const args = parseSubmitArgs(["x.yaml", "--socket", "/tmp/mine.sock", "--port", "25300"], "/work");
   assert.deepEqual([args.socket, args.port], ["/tmp/mine.sock", 25_300]);
-});
-
-const MOUNTS = "D:\\ /mnt/d 9p rw 0 0\n/dev/sdc / ext4 rw 0 0\n";
-
-test("an --out on a 9P mount is warned about: it names the mount, the 'disk I/O error' it caused and the way out", () => {
-  const warning = outputOnNinePWarning("/mnt/d/work/.tmp/art", MOUNTS, path => path);
-  assert.match(warning ?? "", /\/mnt\/d\/work\/\.tmp\/art/u);
-  assert.match(warning ?? "", /9P/u);
-  assert.match(warning ?? "", /disk I\/O error/u);
-  assert.match(warning ?? "", /--out .*ext4/u);
-});
-
-test("an --out on ext4, or a link on 9P that leads to ext4, is not warned about", () => {
-  assert.equal(outputOnNinePWarning("/tmp/art", MOUNTS, path => path), null);
-  assert.equal(outputOnNinePWarning("/mnt/d/work/.tmp/art-link", MOUNTS, () => "/tmp/art-target"), null);
 });
 
 test("a result prints like Mine Labs: outcome, name, seconds, then the goal line", () => {

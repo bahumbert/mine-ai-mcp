@@ -5,7 +5,7 @@ import { confirmationTicks, pinReleaseTicks } from "./confirmation-deadline.js";
 
 test("confirmation budgets cover landing, the dig, its answer and each brought block", () => {
   for (const [expectedTicks, digMs, broughtBlocks, ticks] of [
-    [12, 600, 0, 100], [30, 1_500, 0, 110], [15, 750, 2, 290], [12, 14_100, 0, 564],
+    [12, 600, 0, 112], [30, 1_500, 0, 130], [15, 750, 2, 345], [12, 14_100, 0, 604],
   ]) assert.equal(confirmationTicks({ expectedTicks: expectedTicks!, digMs: digMs!, broughtBlocks: broughtBlocks! }), ticks);
   assert.equal(pinReleaseTicks(10), 300);
   assert.equal(pinReleaseTicks(200), 400);

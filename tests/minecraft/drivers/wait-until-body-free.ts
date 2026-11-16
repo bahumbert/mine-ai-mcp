@@ -9,6 +9,8 @@ import { viewStatusResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ScenarioContext } from "../scenario.ts";
 import { isBurning } from "../../../src/survival/perception/body.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { waitForWorldAge } from "../../../src/world/world-age.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
 
 /**
  * The bound, in ticks of the world age (the server's own ticks: a slow server takes more wall seconds for the same burn). Measured over 30 runs of
@@ -21,11 +23,6 @@ import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
  * worst run to 338 ticks was the cleanup digging the step under the body, now a bug the driver fails on. No change without new numbers.
  */
 export const BODY_FREE_BOUND_TICKS = 400;
-/**
- * The wall guard on top of the tick bound, for a server that stops (then the world age never moves: facts `scenario-timing-pitfalls.md`, "A limit must work when its
- * clock stops"). 1.5 times the bound at 20 ticks a second: past the 20 s a server on time needs, and the scenarios' goal of 50 s still ends after it.
- */
-export const BODY_FREE_WALL_GUARD_MS = 30_000;
 const POLL_MS = 100;
 
 /** The moment a burn starts, on both clocks: the last tick in lava, or the moment the fire was lit. */
@@ -67,28 +64,39 @@ export interface BodyFreeWait {
 }
 
 /**
- * Wait until the bot is not burning and no action holds the body, at most `BODY_FREE_BOUND_TICKS` of world age after `since` (and `BODY_FREE_WALL_GUARD_MS` of wall time); a
- * death ends it at once. `sleep` is the driver clock's wait (a test's fake clock).
+ * Wait until the bot is not burning and no action holds the body, at most `BODY_FREE_BOUND_TICKS` of world age after `since`.
+ * A death or `DRIVER_CLOCK_STOPPED_MS` without an age advance ends it; `sleep` is the driver clock's wait (a test's fake clock).
  */
 export async function waitUntilBodyFree(context: ScenarioContext, since: BurnStart, sleep: (ms: number) => Promise<void> = delay): Promise<BodyFreeWait> {
   const { bot } = context;
   const began = monotonicNow();
   const owners: string[] = [];
   let fireOutAfterTicks: number | null = null;
-  for (;;) {
-    const owner = await readActiveOwner(context);
-    if (owner !== undefined && owner !== null && !owners.includes(owner)) owners.push(owner);
-    const burning = isBurning(bot);
-    const now = monotonicNow();
-    const afterStartTicks = bot.time.age - since.age;
-    if (!burning && fireOutAfterTicks === null) fireOutAfterTicks = afterStartTicks;
-    const ended = { waitedMs: Math.round(now - began), afterStartTicks, fireOutAfterTicks, burning, owners };
-    if (bot.health <= 0) return { freed: false, reason: "the bot died while the wait ran", ...ended };
-    if (!burning && owner === undefined) return { freed: true, reason: "free", ...ended };
-    if (afterStartTicks >= BODY_FREE_BOUND_TICKS) return { freed: false, reason: describeBlocked(burning, owners, owner, `${afterStartTicks} ticks`), ...ended };
-    if (now - since.atMs >= BODY_FREE_WALL_GUARD_MS) return { freed: false, reason: describeBlocked(burning, owners, owner, `${Math.round(now - since.atMs)} ms of wall time (the world age moved ${afterStartTicks} ticks: the server may have stopped)`), ...ended };
-    await sleep(POLL_MS);
-  }
+  let owner = await readActiveOwner(context);
+  // A moving 10 tps burn exceeds 30 wall seconds; only a still world age is a stopped clock (P4b, 2026-11-15).
+  const result = await waitForWorldAge(bot, Infinity, {
+    wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS, pollMs: POLL_MS, now: monotonicNow,
+    until: () => {
+      if (owner !== undefined && owner !== null && !owners.includes(owner)) owners.push(owner);
+      const burning = isBurning(bot);
+      const afterStartTicks = bot.time.age - since.age;
+      if (!burning && fireOutAfterTicks === null) fireOutAfterTicks = afterStartTicks;
+      return bot.health <= 0 || (!burning && owner === undefined) || afterStartTicks >= BODY_FREE_BOUND_TICKS;
+    },
+    sleep: async (ms) => {
+      await sleep(ms);
+      owner = await readActiveOwner(context);
+    },
+  });
+  const burning = isBurning(bot);
+  const afterStartTicks = bot.time.age - since.age;
+  const ended = { waitedMs: Math.round(monotonicNow() - began), afterStartTicks, fireOutAfterTicks, burning, owners };
+  if (bot.health <= 0) return { freed: false, reason: "the bot died while the wait ran", ...ended };
+  if (!burning && owner === undefined) return { freed: true, reason: "free", ...ended };
+  const after = result === "stalled"
+    ? `${afterStartTicks} ticks (the world age stood still for ${DRIVER_CLOCK_STOPPED_MS} ms of wall time: the server may have stopped)`
+    : `${afterStartTicks} ticks`;
+  return { freed: false, reason: describeBlocked(burning, owners, owner, after), ...ended };
 }
 
 /** What kept the body from being free at the bound, for the completion detail. */

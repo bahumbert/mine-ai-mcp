@@ -33,6 +33,7 @@ params:
   equipped: { x: -25, y: -60, z: 0, range: 0, dig: true, scaffold: false }
 goal:
   kind: all
+  stillTicks: 1340 # P11: longest passing still span 666 ticks; 2x rounded up to 20 (2026-11-16).
   timeout: 300
   goals:
     - { kind: reach, who: Actor, pos: [-24.5, -60, 0.5], radius: 2 }

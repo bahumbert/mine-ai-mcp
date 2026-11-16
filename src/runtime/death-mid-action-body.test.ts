@@ -90,11 +90,8 @@ const CLOCK_SLICE_MS = 50;
  */
 const DEATH_CANCEL_BOUND_MS = 1_000;
 
-/**
- * The 20-runtime tests take 1.7 s (eat_food) to 6.2 s (build_structure, craft_item) of wall time on this machine (2026-11-06,
- * WSL on the D: mount), against the runner's 5 s default: each builds 20 runtimes, so they carry their own bound.
- */
-const TWENTY_BOTS_TIMEOUT_MS = 20_000;
+// Two survivors expose shared records while a third bot dies (mutation check 2026-11-15).
+const BOTS = 3;
 
 const resultOf = (output: { readonly result: unknown }) => output.result as Record<string, any>;
 
@@ -295,16 +292,16 @@ for (const [label, make] of Object.entries(SCENES)) {
     assert.deepEqual(scene.report(second.result), scene.afterRespawn);
   });
 
-  test(`${label}: 20 bots keep their own records`, { timeout: TWENTY_BOTS_TIMEOUT_MS }, async () => {
+  test(`${label}: ${BOTS} bots keep their own records`, async () => {
     const clock = createFakeClock({ mode: "mocked" });
     using _installed = clock.install();
     await using closing = new AsyncDisposableStack();
-    const scenes = Array.from({ length: 20 }, (_, index) => make(clock, index));
+    const scenes = Array.from({ length: BOTS }, (_, index) => make(clock, index));
     const runtimes = await Promise.all(scenes.map((scene) => runtimeOn(closing, scene)));
     const running = scenes.map((scene, index) => startRequest(runtimes[index]!, scene));
     await untilAtWait(clock, scenes);
 
-    const killed = 7;
+    const killed = BOTS - 1;
     die(scenes[killed]!);
     for (const [index, scene] of scenes.entries()) if (index !== killed) scene.proceed();
     const outputs = await Promise.all(running.map((request) => clock.settle(request, 60_000)));

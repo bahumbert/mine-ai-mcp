@@ -12,7 +12,8 @@ import { createViewStatusAction } from "../../../src/actions/view-status/view-st
 import { temporaryBotData } from "../../../src/test-support/bot-data.ts";
 import type { ScenarioCall } from "../scenario.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
-import { BODY_FREE_BOUND_TICKS, BODY_FREE_WALL_GUARD_MS, burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { BODY_FREE_BOUND_TICKS, burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
 
 const TICKS_PER_SECOND = 20;
 /** The world age comes one packet per 20 ticks: a tick count read from it is up to this far behind (`ContractSubject.serverTicks`). */
@@ -47,37 +48,55 @@ test("a bot that is free and not burning is waited for 0 ms", async (t) => {
   assert.deepEqual(waited, { freed: true, reason: "free", waitedMs: 0, afterStartTicks: 0, fireOutAfterTicks: 0, burning: false, owners: [] });
 });
 
-test("the wait ends only when the fire is out and the reflex let go, whichever comes last, and names the owner and the ticks since the start", async (t) => {
-  for (const { fireOutAtMs, releasedAtMs, freeAtMs } of [{ fireOutAtMs: 9_000, releasedAtMs: 6_000, freeAtMs: 9_000 }, { fireOutAtMs: 5_000, releasedAtMs: 7_000, freeAtMs: 7_000 }]) {
-    const { clock, installed, context, state, burn } = bodyOf(t);
-    using _installed = installed;
-    burn(true);
-    state.owner = "fire_reflex";
-    clock.after(releasedAtMs, () => void (state.owner = null));
-    clock.after(fireOutAtMs, () => burn(false));
-    const waited = await clock.settle(waitUntilBodyFree(context, burnStartNow(context.bot), clock.sleep), 20_000);
-    assert.equal(waited.freed, true, JSON.stringify(waited));
-    assert.ok(waited.waitedMs >= freeAtMs && waited.waitedMs < freeAtMs + 300, JSON.stringify(waited));
-    assert.deepEqual(waited.owners, ["fire_reflex"]);
-    const fireOutTicks = (fireOutAtMs / 1_000) * TICKS_PER_SECOND;
-    assert.ok(waited.fireOutAfterTicks !== null && Math.abs(waited.fireOutAfterTicks - fireOutTicks) <= AGE_STALENESS_TICKS + TICKS_PER_SECOND / 4, JSON.stringify(waited));
-  }
-});
-
-test("a bot that burns to the bound ends the wait there, failed, with the owner seen, the burning flag and the reason; the bound counts from the start given", async (t) => {
-  for (const alreadyElapsedTicks of [0, 240]) {
-    const { clock, installed, context, state, burn } = bodyOf(t);
+test("fire-out and owner release both precede freedom, including a moving 10 tps burn past 300 ticks and a late call", async (t) => {
+  for (const { ticksPerSecond, fireOutAtMs, releasedAtMs, waitStartsAtMs } of [
+    { ticksPerSecond: 20, fireOutAtMs: 9_000, releasedAtMs: 6_000, waitStartsAtMs: 0 },
+    { ticksPerSecond: 20, fireOutAtMs: 5_000, releasedAtMs: 7_000, waitStartsAtMs: 0 },
+    { ticksPerSecond: 10, fireOutAtMs: 32_000, releasedAtMs: 34_000, waitStartsAtMs: 0 },
+    { ticksPerSecond: 10, fireOutAtMs: 32_000, releasedAtMs: 34_000, waitStartsAtMs: 31_000 },
+    { ticksPerSecond: 10, fireOutAtMs: 34_000, releasedAtMs: 32_000, waitStartsAtMs: 0 },
+    { ticksPerSecond: 10, fireOutAtMs: 34_000, releasedAtMs: 32_000, waitStartsAtMs: 31_000 },
+  ]) {
+    const { clock, installed, context, state, burn } = bodyOf(t, { ticksPerSecond });
     using _installed = installed;
     burn(true);
     state.owner = "fire_reflex";
     const start = burnStartNow(context.bot);
-    const waited = await clock.settle(waitUntilBodyFree(context, { atMs: start.atMs - (alreadyElapsedTicks / TICKS_PER_SECOND) * 1_000, age: start.age - alreadyElapsedTicks }, clock.sleep), BODY_FREE_WALL_GUARD_MS);
-    const leftMs = ((BODY_FREE_BOUND_TICKS - alreadyElapsedTicks) / TICKS_PER_SECOND) * 1_000;
+    clock.after(releasedAtMs, () => void (state.owner = null));
+    clock.after(fireOutAtMs, () => burn(false));
+    await clock.advance(waitStartsAtMs);
+    const waited = await clock.settle(waitUntilBodyFree(context, start, clock.sleep), 41_000 - waitStartsAtMs);
+    const freeAtMs = Math.max(fireOutAtMs, releasedAtMs) - waitStartsAtMs;
+    assert.equal(waited.freed, true, JSON.stringify(waited));
+    assert.ok(waited.waitedMs >= freeAtMs && waited.waitedMs < freeAtMs + 300, JSON.stringify(waited));
+    assert.ok(waited.afterStartTicks < 400 && (ticksPerSecond !== 10 || waited.afterStartTicks >= 320), JSON.stringify(waited));
+    assert.deepEqual(waited.owners, ["fire_reflex"]);
+    const fireOutTicks = (fireOutAtMs / 1_000) * ticksPerSecond;
+    const toleranceTicks = ticksPerSecond === 10 ? AGE_STALENESS_TICKS : AGE_STALENESS_TICKS + TICKS_PER_SECOND / 4;
+    assert.ok(waited.fireOutAfterTicks !== null && Math.abs(waited.fireOutAfterTicks - fireOutTicks) <= toleranceTicks, JSON.stringify(waited));
+  }
+});
+
+test("a bot that burns to the bound ends the wait there, failed, with the owner seen, the burning flag and the reason; the bound counts from the start given", async (t) => {
+  for (const { ticksPerSecond, alreadyElapsedTicks } of [
+    { ticksPerSecond: 20, alreadyElapsedTicks: 0 }, { ticksPerSecond: 20, alreadyElapsedTicks: 240 },
+    { ticksPerSecond: 20, alreadyElapsedTicks: 400 }, { ticksPerSecond: 10, alreadyElapsedTicks: 0 },
+    { ticksPerSecond: 10, alreadyElapsedTicks: 300 },
+  ]) {
+    const { clock, installed, context, state, burn } = bodyOf(t, { ticksPerSecond });
+    using _installed = installed;
+    burn(true);
+    state.owner = "fire_reflex";
+    const start = burnStartNow(context.bot);
+    const leftMs = ((BODY_FREE_BOUND_TICKS - alreadyElapsedTicks) / ticksPerSecond) * 1_000;
+    const waited = await clock.settle(waitUntilBodyFree(context, { atMs: start.atMs - (alreadyElapsedTicks / ticksPerSecond) * 1_000, age: start.age - alreadyElapsedTicks }, clock.sleep), leftMs + 2_000);
     assert.equal(waited.freed, false);
     assert.equal(waited.burning, true);
     assert.deepEqual(waited.owners, ["fire_reflex"]);
+    assert.ok(waited.afterStartTicks >= 400, JSON.stringify(waited));
     assert.match(waited.reason, /still burning|held by fire_reflex/);
-    assert.ok(waited.waitedMs >= leftMs - 1_100 && waited.waitedMs < leftMs + 1_100, `left ${leftMs} ms, waited ${JSON.stringify(waited)}`);
+    const packetMs = (TICKS_PER_SECOND / ticksPerSecond) * 1_000;
+    assert.ok(waited.waitedMs >= leftMs - packetMs && waited.waitedMs < leftMs + 100, `left ${leftMs} ms, waited ${JSON.stringify(waited)}`);
   }
 });
 
@@ -88,20 +107,25 @@ test("a slow server takes more wall seconds for the same burn: 338 ticks at 15 t
   const start = burnStartNow(context.bot);
   const MEASURED_BURN_TICKS = 338; // the longest burn of the 30 runs of `lava-pool-two-deep-foreign-region`: 16.906 s at 20 ticks a second
   context.bot.on("time", () => void (context.bot.time.age - start.age >= MEASURED_BURN_TICKS && burn(false)));
-  const waited = await clock.settle(waitUntilBodyFree(context, start, clock.sleep), BODY_FREE_WALL_GUARD_MS);
+  const waited = await clock.settle(waitUntilBodyFree(context, start, clock.sleep), DRIVER_CLOCK_STOPPED_MS);
   assert.equal(waited.freed, true, JSON.stringify({ waited, serverTicks: harness.server.gameTime }));
   assert.ok(waited.waitedMs > 20_000, `waited ${waited.waitedMs} ms`);
 });
 
-test("a server that stops ticking ends the wait at the wall guard, failed", async (t) => {
-  const { clock, installed, harness, context, burn } = bodyOf(t);
-  using _installed = installed;
-  burn(true);
-  harness.server.stop();
-  const waited = await clock.settle(waitUntilBodyFree(context, burnStartNow(context.bot), clock.sleep), BODY_FREE_WALL_GUARD_MS + 1_000);
-  assert.equal(waited.freed, false);
-  assert.match(waited.reason, /wall/);
-  assert.ok(waited.waitedMs >= BODY_FREE_WALL_GUARD_MS && waited.waitedMs < BODY_FREE_WALL_GUARD_MS + 500, JSON.stringify(waited));
+test("a stopped clock ends the wait at the wall guard since its last advance even without physics ticks", async (t) => {
+  for (const stopAtMs of [0, 4_000]) {
+    const { clock, installed, harness, context, burn } = bodyOf(t);
+    using _installed = installed;
+    burn(true);
+    context.bot.physicsEnabled = false;
+    clock.after(stopAtMs, () => harness.server.stop());
+    const waited = await clock.settle(waitUntilBodyFree(context, burnStartNow(context.bot), clock.sleep), stopAtMs + DRIVER_CLOCK_STOPPED_MS + 1_000);
+    assert.equal(waited.freed, false);
+    assert.match(waited.reason, /wall/);
+    // A time packet carries 20 ticks; stopping just before one leaves the previous packet as the last advance.
+    const lastAdvanceAtMs = stopAtMs === 0 ? 0 : 3_000;
+    assert.ok(waited.waitedMs >= lastAdvanceAtMs + DRIVER_CLOCK_STOPPED_MS && waited.waitedMs < lastAdvanceAtMs + DRIVER_CLOCK_STOPPED_MS + 500, JSON.stringify(waited));
+  }
 });
 
 test("a bot that died ends the wait at once, failed, naming the death", async (t) => {

@@ -1,8 +1,8 @@
 // Server-paced boat movement and monotonic progress bounds shared by rowing legs.
 import type { Bot } from "mineflayer";
-import { waitForWorldAge } from "../../world/world-age.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForWorldAge } from "../../world/world-age.js";
 
-export const BOAT_PROGRESS_WALL_MS = 10_000;
+const BOAT_PROGRESS_WALL_MS = 10_000;
 /** Time packets cover twenty server ticks: never send more than that many steps without another age. */
 const STEPS_PER_TIME_PACKET = 20;
 
@@ -19,7 +19,9 @@ export async function waitForBoatStep(bot: Bot, credit: BoatStepCredit, stopped:
     credit.steps = 0;
   }
   if (credit.steps >= STEPS_PER_TIME_PACKET) {
-    const answer = await waitForWorldAge(bot, 1, { wallMs: BOAT_PROGRESS_WALL_MS, until: stopped });
+    const answer = await waitForWorldAge(bot, 1, {
+      wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, until: stopped,
+    });
     if (answer !== "moved") return false;
     credit.age = bot.time?.age;
     credit.steps = 0;

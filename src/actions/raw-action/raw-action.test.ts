@@ -3,7 +3,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { temporaryBotData } from "../../test-support/bot-data.js";
-import { createFakeBot, type FakeBot, type FakeHarness } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeBot, type FakeHarness } from "../../test-support/fake-bot/index.js";
+import { useNativeDigging } from "../../test-support/fake-bot/native-digging.js";
+import { installNativeDigClock } from "../../navigation/index.js";
+import { watch } from "../../test-support/pending.js";
 import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
@@ -120,24 +123,27 @@ test("dig refuses beyond eye reach without calling Mineflayer", async () => {
   assert.equal(result.afterBlock, "stone");
 });
 
-test("dig success is based on the block observed after the native call", async () => {
-  const { bot, clock } = createFakeBot({
-    position: new Vec3(0.5, 64, 0.5),
-    cells: { "1,64,0": "pointed_dripstone" },
+for (const ticksPerSecond of [20, 10]) {
+  test(`raw dig waits for authoritative removal at ${ticksPerSecond} tps`, async () => {
+    const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+      server: { ticksPerSecond }, cells: { "1,64,0": "deepslate" } });
+    const { bot, clock, server } = harness;
+    using _timers = clock.install();
+    useNativeDigging(harness);
+    installNativeDigClock(bot);
+    const running = executeRawAction(bot, { operation: "dig", target: { x: 1, y: 64, z: 0 } }, {});
+    const pending = watch(running);
+    await clock.advance(14_000);
+    assert.equal(pending.over, false);
+    const result = await clock.settle(running, 25_000);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.beforeBlock, "deepslate");
+    assert.equal(result.afterBlock, "air");
+    assert.equal(result.attempted, true);
+    assert.equal(result.effectObserved, true);
+    assert.ok(server.gameTime >= 24_300);
   });
-  const running = executeRawAction(
-    bot,
-    { operation: "dig", target: { x: 1, y: 64, z: 0 } },
-    {},
-  );
-  await clock.advance(10_000);
-  const result = await running;
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.beforeBlock, "pointed_dripstone");
-  assert.equal(result.afterBlock, "air");
-  assert.equal(result.attempted, true);
-  assert.equal(result.effectObserved, true);
-});
+}
 
 test("dig cancellation calls stopDigging and drains the native operation before returning ownership", async () => {
   const stop = new AbortController();

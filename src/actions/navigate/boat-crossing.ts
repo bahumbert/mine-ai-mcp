@@ -24,8 +24,8 @@ import { MOUNT_WALL_MS, mountBoat } from "./boat-mount.js";
 import { PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
 import { foreignRegionAt, regionChangeRefusal } from "../../world/protected-regions.js";
 import { currentVehicle, ridersOf } from "./vehicle-sync.js";
-import { waitForServerAnswer } from "../../world/world-age.js";
-import { BOAT_PROGRESS_WALL_MS, BoatLegProgress, waitForBoatStep, type BoatStepCredit } from "./boat-server-progress.js";
+import { SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "../../world/world-age.js";
+import { BoatLegProgress, waitForBoatStep, type BoatStepCredit } from "./boat-server-progress.js";
 
 /** Blocks a boat moves per tick: about 7 blocks a second, under the 8 a player's boat reaches on water. */
 const BOAT_STEP = 0.35;
@@ -433,9 +433,9 @@ export class BoatRide {
         await sleep(50);
       }
       const answer = await waitForServerAnswer(this.#bot, this.#bot.time?.age, {
-        wallMs: BOAT_PROGRESS_WALL_MS, until: () => this.#corrected || this.died,
+        wallMs: Number.POSITIVE_INFINITY, stallMs: SERVER_CLOCK_STOPPED_MS, until: () => this.#corrected || this.died,
       });
-      if (answer === "timeout") throw new Error("[BOAT_STOP_UNCONFIRMED] The server did not answer the boat stop. The rider remains seated; retry movement when the server responds.");
+      if (answer === "stalled") throw new Error("[BOAT_STOP_UNCONFIRMED] The server did not answer the boat stop. The rider remains seated; retry movement when the server responds.");
       return { ...this.#position };
     } finally {
       this.close();

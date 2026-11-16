@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { horizontalControlsToward, longestBreakDurationMs, SWIM_UP_TICKS } from "../../navigation/index.js";
+import { horizontalControlsToward, longestBreakDurationMs, nativeDigTicks, SWIM_UP_TICKS } from "../../navigation/index.js";
 import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
@@ -157,7 +157,7 @@ export function roofDigFits(bot: Bot, roof: Roof, toolType: number | null): bool
   if (digMs === null) return false;
   const air = Math.max(0, airSupplyTicks(bot) ?? 0);
   const drowningHits = Math.floor(bot.health / 2 / DROWNING_DAMAGE);
-  return Math.ceil(digMs / TICK_MS) + SWIM_UP_TICKS <= air + drowningHits * DROWNING_DAMAGE_INTERVAL_TICKS;
+  return nativeDigTicks(digMs) + SWIM_UP_TICKS <= air + drowningHits * DROWNING_DAMAGE_INTERVAL_TICKS;
 }
 
 /** `work`, or a rejection with `signal`'s reason as soon as it aborts; the listener goes either way. */
