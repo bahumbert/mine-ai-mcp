@@ -347,3 +347,20 @@ export function goalParts(input: GoalInput): PromptPart[] {
 export function narrateParts(input: NarrateInput, news: string, tell: string): PromptPart[] {
   return [historyPart(input.history), fixedPart("news", news, "\n\n"), fixedPart("tell", tell, "\n\n")];
 }
+
+/** An order outcome, new phase or event fact, with the matching instruction to tell its requester. */
+export function narrateText(input: NarrateInput): { readonly news: string; readonly tell: string } {
+  const news = input.outcome === "event"
+    ? `A situation related to the request ${JSON.stringify(input.objective)} has this answer or end: ${input.detail}.`
+    : input.outcome === "done"
+      ? `What you were asked ("${input.objective}") is done: ${input.detail}.`
+      : input.outcome === "failed"
+        ? `You stopped working on "${input.objective}": ${input.detail}.`
+        : `You are working on what you were asked ("${input.objective}"). Now you start ${input.detail}.`;
+  const tell = input.outcome === "progress"
+    ? "If it helps the players around you follow what you do and why, tell them in one short line, in character; if it adds nothing to what was already said, reply with an empty say."
+    : input.outcome === "event"
+      ? "Tell the requester this event fact in one short line, in character."
+      : "Tell the players around you in one short line, in character.";
+  return { news, tell };
+}

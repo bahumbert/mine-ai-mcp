@@ -1,6 +1,6 @@
 // Order progress and outcome narration, kept separate from the work loop.
 import type { AgentOptions } from "../agent.ts";
-import type { ChatLine } from "../mind.ts";
+import type { ChatLine, NarrateInput } from "../mind.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
 import type { Work } from "./work.ts";
 
@@ -29,7 +29,7 @@ export class AgentNarration {
   }
 
   /** A late progress line is dropped if its order stopped while the chat tier thought (BRN-11). */
-  async narrate(objective: string, outcome: "done" | "failed" | "progress", detail: string, whisperTo: string | null, stillOn: () => boolean = () => true): Promise<void> {
+  async narrate(objective: string, outcome: NarrateInput["outcome"], detail: string, whisperTo: string | null, stillOn: () => boolean = () => true): Promise<void> {
     if (this.host.runSignal().aborted) return;
     const { options, history } = this.host;
     try {

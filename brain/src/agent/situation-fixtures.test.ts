@@ -26,7 +26,7 @@ export async function reaches(clock: FakeClock, condition: () => boolean): Promi
 export function setup(clock: FakeClock, options: Partial<AgentOptions> = {}) {
   const runtime = new FakeRuntime();
   runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, lastDeath: null, clock: { timeOfDay: 11_900, phase: "day", minutesUntilChange: 1, sleeping: false }, footing: { onGround: true, inWater: false, inLava: false }, vehicle: null, armourPoints: 0, combat: { melee: null, bow: null, arrows: 0, shield: null } };
+  runtime.snapshot = { ...runtime.snapshot, lastDeath: null, clock: { timeOfDay: 11_900, phase: "day", minutesUntilChange: 642 / 1_200, sleeping: false }, footing: { onGround: true, inWater: false, inLava: false }, vehicle: null, armourPoints: 0, combat: { melee: null, bow: null, arrows: 0, shield: null } };
   runtime.durations.collect_block = 100_000;
   runtime.durations.navigate = 100_000;
   const tiers = scriptedMind();
@@ -46,7 +46,7 @@ export function setup(clock: FakeClock, options: Partial<AgentOptions> = {}) {
     try { await clock.settle(held.started, 20_000); } finally { held.release(); }
     await flush();
   };
-  const night = () => sample({ clock: { timeOfDay: 12_100, phase: "day", minutesUntilChange: 1, sleeping: false } });
+  const night = () => sample({ clock: { timeOfDay: 12_100, phase: "day", minutesUntilChange: 442 / 1_200, sleeping: false } });
   const stop = async () => {
     controller.abort();
     for (const release of releases) release();

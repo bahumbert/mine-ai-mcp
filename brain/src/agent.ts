@@ -112,7 +112,7 @@ export class Agent {
     this.facts = new GameFacts(options.runtime, options.log);
     this.memory = new AgentMemory(options, this.body);
     this.narration = new AgentNarration({ options, stack: this.stack, history: this.history, runSignal: () => this.runSignal, speak: (line, whisperTo) => this.speak(line, undefined, undefined, whisperTo) });
-    this.situations = new SituationDecisions({ options, stack: this.stack, places: () => this.memory.knownPlaces(), runSignal: () => this.runSignal, wake: () => this.wake?.(), journal: (event) => options.journal?.(event), narrate: (work, line) => { void this.narration.narrate(work.objective.text, "progress", line, work.whisperTo); } });
+    this.situations = new SituationDecisions({ options, stack: this.stack, places: () => this.memory.knownPlaces(), runSignal: () => this.runSignal, wake: () => this.wake?.(), journal: (event) => options.journal?.(event), narrate: (work, line) => { void this.narration.narrate(work.objective.text, "event", line, work.whisperTo); } });
     this.guards = new StepGuards({
       options,
       pollMs: options.pollMs ?? DEFAULT_POLL_MS,
@@ -426,6 +426,7 @@ export class Agent {
     if (this.stack.at(-1) !== work) return;
     const snapshot = await runtime.status();
     this.situations.observe(snapshot);
+    if (this.stack.at(-1) !== work) return;
     this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
     await this.keepSettings(snapshot);
     // A planned step (a situation's, decided when it was raised) runs without a model call, once.
@@ -454,7 +455,7 @@ export class Agent {
     const validation = stageWorkValidation(work);
     try {
       const paused = this.stack.slice(0, -1).map((below) => below.objective);
-      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], steps: [...work.steps], paused, earlierFailures: this.failedSteps.earlier(snapshot), ownsTemporaryHouse: this.memory.temporaryHouse() !== null, refused: validation.refused, sentBackSteps: validation.sentBackSteps }, this.runSignal);
+      const decision = await mind.next({ persona, objective: work.objective, snapshot, places: this.memory.knownPlaces(), areas: [...this.memory.areas], steps: [...work.steps], paused, earlierFailures: this.failedSteps.earlier(snapshot), ownsTemporaryHouse: this.memory.temporaryHouse() !== null, refused: validation.refused, sentBackSteps: validation.sentBackSteps, situation: this.situations.laterInput(work, snapshot) }, this.runSignal);
       await this.situations.settled();
       if (this.runSignal.aborted || this.stack.at(-1) !== work) return null;
       validation.commit();
@@ -496,7 +497,7 @@ export class Agent {
     this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
     this.options.journal?.({ kind: "objective", event: "finished", text: objective.text, requester: objective.requester, outcome, detail });
     this.journalState(null);
-    if (work.situation !== null) return;
+    if (work.situation !== null) { this.situations.closed(work, detail); return; }
     if (objective.requester === null) {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lastFailed = outcome === "failed" ? { objective: objective.text, reason: detail } : null;
@@ -545,7 +546,9 @@ export class Agent {
   /** "stop": everything on the stack ends, its own goal included. */
   private stopAll(): void {
     this.situations.stopFor(null);
+    const removed = [...this.stack];
     stopAll(this.stack);
+    for (const work of removed) this.situations.closed(work, "stopped");
     this.journalState(null);
     this.wake?.();
   }
@@ -553,7 +556,9 @@ export class Agent {
   /** "stop" from a player: only that player's share of the stack ends (see `stopWorkOf`). */
   private stopWorkOf(speaker: string): void {
     this.situations.stopFor(speaker);
+    const before = [...this.stack];
     stopWorkOf(this.stack, speaker);
+    for (const work of before) if (!this.stack.includes(work)) this.situations.closed(work, `stopped by ${speaker}`);
     this.journalState(null);
     this.wake?.();
   }

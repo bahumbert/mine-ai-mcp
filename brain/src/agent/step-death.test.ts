@@ -77,7 +77,7 @@ test("a death between two actions ends the step at the next sample", async (t) =
   await agent.handle(say("Steve", "collect logs"));
   await until(collecting);
   runtime.die(null, { cancelRunning: false });
-  await until(() => runtime.said.length === 2, 5_000);
+  await until(() => outcomes().length === 1, 5_000);
   assert.deepEqual(outcomes(), [`interrupted: ${DIED_AT_ORIGIN}`], "no cause: no parentheses");
   assert.equal(runtime.cancelled.length, 1, "the brain cancelled the action that kept running");
 });
@@ -90,7 +90,7 @@ test("a death is not a failure, and the same step runs again to its end from the
   runtime.die("Zombie");
   runtime.durations.collect_block = 0;
   runtime.snapshot = { ...runtime.snapshot, position: { x: 100, y: 70, z: 100 } };
-  await until(() => runtime.said.length === 2, 5_000);
+  await until(() => outcomes().length === 2, 5_000);
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2, "the second try ran: it was not refused");
   assert.deepEqual(outcomes(), [`interrupted: ${DIED_AT_ORIGIN} (Zombie)`, "done: collected 16 oak_log"]);
   assert.doesNotMatch(action.requests[2]?.[1]?.content ?? "", /failed lately/u, "an interrupted step is not remembered as a failed one");
@@ -112,7 +112,7 @@ test("a death before the step starts (during the model call) does not fire, even
   };
   action.reply(COLLECT, { done: "carry on" }, { done: "got the logs" });
   await agent.handle(say("Steve", "collect logs"));
-  await until(() => runtime.said.length === 2, 5_000);
+  await until(() => outcomes().length === 1, 5_000);
   assert.ok(dead, "the death came during the step's own start");
   assert.deepEqual(outcomes(), ["done: collected 16 oak_log"]);
 });
@@ -123,7 +123,7 @@ test("the first abort wins: a no-gain stop is not relabelled by a death that com
   await agent.handle(say("Steve", "collect logs"));
   await until(() => runtime.cancelled.length === 1, 5_000);
   runtime.die("Zombie");
-  await until(() => runtime.said.length === 2, 5_000);
+  await until(() => outcomes().length === 1, 5_000);
   assert.match(outcomes()[0] ?? "", /^failed: the action gave no sign of life for 0\.002 minutes/u);
 });
 
@@ -147,7 +147,7 @@ test("the first abort wins: a death is not relabelled nothing-gained while the c
   await until(() => cancelSent);
   clocks.monotonic(6 * 60_000);
   release();
-  await until(() => runtime.said.length === 2, 5_000);
+  await until(() => outcomes().length === 1, 5_000);
   assert.deepEqual(outcomes(), [`interrupted: ${DIED_AT_ORIGIN} (Zombie)`]);
 });
 

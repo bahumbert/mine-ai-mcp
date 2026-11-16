@@ -8,7 +8,7 @@ import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./ac
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import { budgetFor, fitPrompt, ModelCalibration, type PromptPart } from "./prompt-budget.ts";
-import { goalParts, historyPart, narrateParts, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
+import { goalParts, historyPart, narrateParts, narrateText, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
 import { extractJsonObject, signFlipped } from "./model-reply-checks.ts";
 import { fitSignLines, fittingSignPrefix, signLineProblems } from "./sign-lines.ts";
 export { extractJsonObject } from "./model-reply-checks.ts";
@@ -321,14 +321,7 @@ export class LlmMind implements Mind {
   }
 
   async narrate(input: NarrateInput, signal: AbortSignal): Promise<string> {
-    const news = input.outcome === "done"
-      ? `What you were asked ("${input.objective}") is done: ${input.detail}.`
-      : input.outcome === "failed"
-        ? `You stopped working on "${input.objective}": ${input.detail}.`
-        : `You are working on what you were asked ("${input.objective}"). Now you start ${input.detail}.`;
-    const tell = input.outcome === "progress"
-      ? "If it helps the players around you follow what you do and why, tell them in one short line, in character; if it adds nothing to what was already said, reply with an empty say."
-      : "Tell the players around you in one short line, in character.";
+    const { news, tell } = narrateText(input);
     return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), narrateParts(input, news, tell), signal, (json) => narrateReplySchema.parse(json).say);
   }
 }

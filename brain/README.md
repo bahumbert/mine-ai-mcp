@@ -66,7 +66,9 @@ from the catalog.
 `dig_shelter` digs a closed hole nearby, roofs it with a carried full block that stays put (keeping materials its
 objective needs), waits inside until day or the optional `minutes` (1–15), then climbs out. By day, give minutes to
 dig in; without them it is done without digging. The model or a player's order chooses the skill: there is no
-automatic night dig or periodic nightfall abort. P4-18 owns the night check. The newest hole is saved for the monitor.
+automatic night dig or periodic nightfall abort. Situation events ask the model beside the running step; its choice
+stops that step only at a safe point on a fresh read. Dawn ends the night situation and resumes the set-aside work;
+later calls keep the event's fresh facts, and an order's requester hears its choice once. The newest hole is saved for the monitor.
 
 **Building** (`src/building/`, ADR-010): a style is a JSON palette (`building-styles/<id>.json`: block per material role +
 roof type, plus `variants`: the stairs and slab of a role) fed to a parametric generator (`house.ts`): stair roofs

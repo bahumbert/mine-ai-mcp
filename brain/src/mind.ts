@@ -230,8 +230,8 @@ export interface SignLinesInput {
 export interface NarrateInput {
   readonly persona: Persona;
   readonly objective: string;
-  /** How the order ended, or "progress": what it starts doing now (`detail`), the order still under way. */
-  readonly outcome: "done" | "failed" | "progress";
+  /** An order's end or new phase, or an event fact that does not claim the order is still active. */
+  readonly outcome: "done" | "failed" | "progress" | "event";
   readonly detail: string;
   readonly history: readonly ChatLine[];
 }

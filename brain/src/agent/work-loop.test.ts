@@ -850,7 +850,7 @@ for (const underlying of ["goal", "respawn"] as const) test(`nested situations p
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "oak_planks", count: 256 }, { name: "dirt", count: 128 }] };
+  runtime.snapshot = { ...runtime.snapshot, health: 7, clock: { timeOfDay: 12_100, phase: "day", minutesUntilChange: 442 / 1_200, sleeping: false }, inventory: [{ name: "oak_planks", count: 256 }, { name: "dirt", count: 128 }] };
   runtime.failures.collect_block = "[INVENTORY_FULL] no free inventory slot";
   let stop!: () => Promise<void>;
   const { agent, events, action } = journaledAgent({ after: (fn) => { stop = fn; } }, runtime);
