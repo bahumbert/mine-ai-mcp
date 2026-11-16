@@ -5,7 +5,7 @@ import { blockClass } from "../navigation/mineflayer/world.js";
 import { asVec3, cellIntersectsBody, raceSignal, type Position3 } from "../utils/index.js";
 import { isReplaceableForPlacement } from "./block-classification.js";
 import { carriedCount, settleInventoryCount } from "./inventory-count.js";
-import { SERVER_ANSWER_TICKS, waitForServerAnswer } from "./world-age.js";
+import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, waitForServerAnswer } from "./world-age.js";
 import { recordCombatResourceReceipt } from "../runtime/combat-resource-receipts.js";
 import { recordLifeSavingPlacement } from "./life-saving-placements.js";
 import { regionChangeRefusal } from "./protected-regions.js";
@@ -51,17 +51,12 @@ export interface BlockPlacement {
   readonly signal?: AbortSignal;
   /** Called right before the placement packet is sent: an abort after it may still leave the block placed. */
   readonly onSent?: () => void;
-  /** Longest wait for the server's answer on the wall clock; default `PLACEMENT_ANSWER_WALL_MS`. */
-  readonly answerWallMs?: number;
   /**
    * A reflex saving the body (a footing block under a fall) may place inside someone else's protected region; the
    * placement is then recorded in the life-saving ledger so the block can be taken out again (T5c).
    */
   readonly lifeSaving?: true;
 }
-
-/** The wall-clock bound of the answer wait: a server seconds behind answers inside it, a stopped server clock does not. */
-export const PLACEMENT_ANSWER_WALL_MS = 5_000;
 
 /**
  * What refused a cell a build gave up on, so a caller can tell a refusal that asking again can change from one that
@@ -229,15 +224,15 @@ type PlacedBlocksSeen =
 
 /**
  * Wait for every expected cell to show the placed block: the world shows it, or the server answered (its world age
- * moved `SERVER_ANSWER_TICKS` past the send) without it, or the wall clock ran out because the server clock stopped.
+ * moved `SERVER_ANSWER_TICKS` past the send) without it, or its clock stood still for `SERVER_CLOCK_STOPPED_MS`.
  */
 async function awaitPlacedBlocks(bot: Bot, placement: BlockPlacement, sentAtAge: number | undefined): Promise<PlacedBlocksSeen> {
   const look = () => placement.expectedCells.map((position) => bot.blockAt(asVec3(position)));
   const allPlaced = () => look().every((block) => Boolean(block && placement.matches(block)));
-  const wallMs = placement.answerWallMs ?? PLACEMENT_ANSWER_WALL_MS;
   const outcome = await waitForServerAnswer(bot, sentAtAge, {
     until: allPlaced,
-    wallMs,
+    wallMs: Number.POSITIVE_INFINITY,
+    stallMs: SERVER_CLOCK_STOPPED_MS,
     ...(placement.signal && { signal: placement.signal }),
   });
   if (outcome === "until" || allPlaced()) return { kind: "seen", blocks: look() as [WorldBlock, ...WorldBlock[]] };
@@ -247,7 +242,7 @@ async function awaitPlacedBlocks(bot: Bot, placement: BlockPlacement, sentAtAge:
     because:
       outcome === "moved"
         ? `the server moved ${SERVER_ANSWER_TICKS} ticks past it and ${observed}.`
-        : `the server's clock did not move ${SERVER_ANSWER_TICKS} ticks in ${wallMs} ms and ${observed}.`,
+        : `the server's clock stood still for ${SERVER_CLOCK_STOPPED_MS} ms and ${observed}; wait for the server to resume before placing again.`,
   };
 }
 

@@ -34,15 +34,13 @@ import type { MovementController, MovementExecution, MovementSnapshot } from "./
 import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "./mutations.js";
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
+import { confirmationTicks } from "./confirmation-deadline.js";
 import type { OpenedPassages } from "./opened-passages.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { armNoTickCancel } from "./no-tick-cancel.js";
 import { SupportedPositionController } from "./supported-position-controller.js";
 
 export type StepDecision = "continue" | "goal_satisfied" | "goal_revised";
-
-/** The least time the server gets to confirm an effect, however cheap the plan priced it. */
-const MINIMUM_CONFIRMATION_MS = 5_000;
 
 /** The longest the body can take to dig a break operation from its state now (0 for any other operation, an unloaded block or a bot that cannot tell). */
 function longestDigTime(bot: NavigationBot, operation: PlannedOperation): number {
@@ -387,10 +385,7 @@ export class RouteExecutor {
           : operation.after;
     const world = this.request.context.world;
     const targets = mutationTargets(world, step, operation, position, before, after);
-    // Each brought block takes a fall and a second swing beyond the dig time.
-    const settling = operation.kind === "break" ? operation.brings.length * 3_000 : 0;
     const { bot } = this.request.context;
-    const plannedMs = step.cost.expectedTicks * 50;
     const opened = operation.kind === "activate" ? this.request.passages.closedAt(position) : null;
     this.#state = { kind: "awaiting_effect", stepIndex, operationIndex, token };
     this.request.phase(step, "confirming");
@@ -399,10 +394,8 @@ export class RouteExecutor {
       token,
       operation,
       targets,
-      // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
-      // it plans, so a body in water over a solid cell is priced as standing, and one that has not landed when its swing
-      // starts digs 25 times slower), and the falling column.
-      deadlineMs: monotonicNow() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
+      deadlineTicks: confirmationTicks({ expectedTicks: step.cost.expectedTicks, digMs: longestDigTime(bot, operation),
+        broughtBlocks: operation.kind === "break" ? operation.brings.length : 0 }),
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);

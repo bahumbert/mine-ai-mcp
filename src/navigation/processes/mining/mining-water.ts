@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { waitForWorldAge } from "../../../world/world-age.js";
+import { waitForServerTicks } from "../../../world/world-age.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { HORIZONTAL, sourceFeeding, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
@@ -12,8 +12,6 @@ import { waterMiningStance } from "../../world/water.js";
 
 /** World ticks a removed source's spread takes to drain (seven cells, a water update every 5 ticks, and a margin). */
 const DRAIN_TICKS = 40;
-/** Longest wall-clock wait for that drain, whatever the server's clock does. */
-const DRAIN_WALL_MS = 5_000;
 
 export const touching = (cell: Vec3) => [
   cell.offset(0, 1, 0),
@@ -66,9 +64,8 @@ export async function clearMiningWater(
       const plugged = await place(bot, source, { ...(signal && { signal }) });
       if (plugged.kind !== "failed") removedSource = true;
     }
-    // A removed source drains its spread on the server's scheduled water updates: wait on the world age, bounded on
-    // the wall clock, never on client ticks, which stop with physics.
-    if (removedSource) await waitForWorldAge(bot, DRAIN_TICKS, { wallMs: DRAIN_WALL_MS, signal: lifetime,
+    // Scheduled water updates follow world age; only a still server clock ends the wait early (scenario-ticks C8, 2026-11-15).
+    if (removedSource) await waitForServerTicks(bot, DRAIN_TICKS, { signal: lifetime,
       until: () => wetFaces().length === 0 && !holdsWaterAt(bot.entity.position.floored()) });
     for (const cell of wetFaces()) {
       const placed = await place(bot, cell, { ...(signal && { signal }) });

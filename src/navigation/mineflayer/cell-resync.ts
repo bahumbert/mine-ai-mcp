@@ -44,7 +44,7 @@ function canUseOffHand(bot: Bot): boolean {
 
 /**
  * Sends the use and waits for the server's packet for `cell` (`block_change`, a `multi_block_change` listing it, or its
- * column sent again) for `SERVER_ANSWER_TICKS` of world age or `SERVER_ANSWER_WALL_MS`, whichever comes first. Every
+ * column sent again) for `SERVER_ANSWER_TICKS` of world age or `SERVER_CLOCK_STOPPED_MS` of a still age. Every
  * listener is removed and the bot stands up on every path; an abort rejects with the signal's reason.
  */
 export async function requestCellResync(

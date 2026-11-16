@@ -1,7 +1,7 @@
 // Tests of how the agent reads chat: routes, queued requests, superseded lines, whispers and stop.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { Agent } from "../agent.ts";
 import { INSTANT_TYPING } from "../body.ts";
 import type { BrainEvent } from "../brain-log.ts";
@@ -125,17 +125,19 @@ test("a player's request never waits behind the character's own goal: a \"later\
 });
 
 test("stop ends everything, its own goal included, and it rests before going back to that goal", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 100_000;
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, restAfterStopSeconds: 60 } });
   planner.reply({ objective: "collect 16 oak_log" });
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
-  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await clock.settle(until(() => runtime.submitted.some((call) => call.tool === "collect_block")), 10_000);
   chat.reply({ say: "Okay, I'll take a break.", route: "stop", request: "" });
-  await agent.handle(say("Steve", "stop, take a break"));
-  await until(() => runtime.cancelled.length === 1);
+  await clock.settle(agent.handle(say("Steve", "stop, take a break")), 10_000);
+  await clock.settle(until(() => runtime.cancelled.length === 1), 10_000);
   assert.equal(agent.activity, "idle");
-  await sleep(300);
+  await clock.advance(59_000);
   assert.equal(planner.requests.length, 1, "no new own objective while resting");
 });
 
@@ -168,7 +170,7 @@ test("a name added to the live list of other agents after construction is not an
 
 test("under an order, what it starts doing and why is given to the chat tier, which says it; its own goals stay silent", async (t) => {
   const runtime = new FakeRuntime();
-  const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "gather dirt", settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
+  const { agent, chat, action, planner, events } = journaledAgent(t, runtime, { goal: "gather dirt", settings: { ...testPersona().settings, narrateEverySeconds: 0 } });
   chat.reply({ say: "Sure.", route: "act", request: "get 2 dirt" }, { say: "Digging a bit of dirt for you." }, { say: "Got it!" });
   action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 2 dirt" });
   await agent.handle(say("Steve", "get me 2 dirt"));
@@ -180,7 +182,7 @@ test("under an order, what it starts doing and why is given to the chat tier, wh
   planner.reply({ objective: "get 2 dirt" });
   action.reply({ step: { skill: "get_items", items: [{ item: "dirt", count: 2 }] } }, { done: "carrying 4 dirt" });
   await until(() => action.requests.length === 4);
-  await sleep(50);
+  await until(() => events.filter((event) => event.kind === "objective" && event.event === "finished").length === 2);
   assert.equal(chat.requests.length, 3, "no narration for its own goal");
 });
 
@@ -239,7 +241,7 @@ test("a reply whose speaker said something since is dropped unspoken; the newest
   runtime.inbox.push(say("Steve", "Ayla build a house"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Steve", "Ayla no wait, stop"));
-  await sleep(40);
+  await until(() => runtime.inbox.length === 0);
   release();
   await until(() => runtime.said.length === 1);
   // One answer, to the latest state: the stale "On it!" was never spoken and nothing was taken on.
@@ -252,27 +254,29 @@ test("a reply whose speaker said something since is dropped unspoken; the newest
 });
 
 test("a superseded stop still stops; only its line is dropped", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 100_000;
   const { agent, chat, action, planner } = agentFor(t, runtime, { goal: "build yourself a base", settings: { ...testPersona().settings, restAfterStopSeconds: 60 } });
   planner.reply({ objective: "collect 16 oak_log" });
   action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
-  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await clock.settle(until(() => runtime.submitted.some((call) => call.tool === "collect_block")), 10_000);
   const release = chat.hold();
   chat.reply(
     { spoken_to: ["Ayla"], say: "Okay, stopping.", route: "stop", request: "" },
     { spoken_to: ["Ayla"], say: "Right.", route: "talk", request: "" },
   );
   runtime.inbox.push(say("Steve", "Ayla, stop"));
-  await until(() => chat.requests.length === 1);
+  await clock.settle(until(() => chat.requests.length === 1), 10_000);
   runtime.inbox.push(say("Steve", "Ayla, please"));
-  await sleep(40);
+  await clock.settle(until(() => runtime.inbox.length === 0), 10_000);
   release();
-  await until(() => runtime.said.length === 1);
-  await until(() => runtime.cancelled.length === 1);
+  await clock.settle(until(() => runtime.said.length === 1), 10_000);
+  await clock.settle(until(() => runtime.cancelled.length === 1), 10_000);
   assert.deepEqual(runtime.said, ["Right."]);
   assert.equal(agent.activity, "idle");
-  await sleep(300);
+  await clock.advance(59_000);
   assert.equal(planner.requests.length, 1, "no new own objective while resting");
 });
 
@@ -284,7 +288,7 @@ test("another player's line does not supersede a reply", async (t) => {
   runtime.inbox.push(say("Steve", "hi Ayla"));
   await until(() => chat.requests.length === 1);
   runtime.inbox.push(say("Bob", "hi Ayla"));
-  await sleep(40);
+  await until(() => runtime.inbox.length === 0);
   release();
   await until(() => runtime.said.length === 2);
   assert.deepEqual(runtime.said, ["Hi Steve!", "Hi Bob!"]);

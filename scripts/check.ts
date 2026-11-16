@@ -21,8 +21,9 @@ import {
 } from "./import-graph.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport, type DataReadPlan } from "./data-readers.js";
 import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
+import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
 
-const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: readonly string[] }[] = [
+export const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: readonly string[] }[] = [
   { dir: "src/", typecheck: "typecheck", tests: ["./src"] },
   { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: ["./scenarios/src", "./scenarios/default"] },
   { dir: "tests/", typecheck: "typecheck:tests", tests: ["./tests"] },
@@ -208,9 +209,22 @@ export function typecheckPlan(
   });
 }
 
-/** The suite's `bun test` call: every test path, then the arguments given after `--all` (`--coverage ...` in CI). */
-export function suiteTestCommand(testPaths: readonly string[], extraArgs: readonly string[]): string[] {
-  return ["bun", "test", ...testPaths, ...extraArgs];
+/**
+ * Every `bun test` call of check: the suite's 30 s limit first (Bun 1.4.2 applies the preload default to the first file
+ * only), then the test paths, then the arguments given after `--all` (`--coverage ...` in CI).
+ */
+function bunTestCommand(testPaths: readonly string[], extraArgs: readonly string[]): string[] {
+  return ["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...testPaths, ...extraArgs];
+}
+
+/** The `--all` suite's `bun test` call (`bun run test [-- <bun test args>]`): every test root, then the extra arguments. */
+export function suiteTestCommand(testRoots: readonly string[], extraArgs: readonly string[]): string[] {
+  return bunTestCommand(testRoots, extraArgs);
+}
+
+/** The quick loop's `bun test` call: the changed files' test files, each as `./<file>`. */
+export function importerTestCommand(testFiles: readonly string[]): string[] {
+  return bunTestCommand(testFiles.map((file) => `./${file}`), []);
 }
 
 /** `bun run test [-- <bun test args>]`: every typecheck, then every test path. */
@@ -263,7 +277,7 @@ function main(): never {
     if (typecheck.reason !== "changed") console.log(`check: ${typecheck.script}: ${typecheck.reason}`);
     ok = run(["bun", "run", "--silent", typecheck.script]) && ok;
   }
-  if (tests.length > 0) ok = run(["bun", "test", ...tests.map((file) => `./${file}`)]) && ok;
+  if (tests.length > 0) ok = run(importerTestCommand(tests)) && ok;
   else if (config.pointer === undefined) console.log("check: no test file next to or importing the changed files (bun run test for everything)");
   console.log(`check: ${new Set([...changedAll, ...configFiles(changedRaw), ...dataReads.reads.map((read) => read.data)]).size} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
   process.exit(ok ? 0 : 1);

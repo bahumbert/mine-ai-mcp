@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { timeoutSignal } from "./wall-timers.ts";
 
 export interface ChatTurn {
   readonly role: "system" | "user" | "assistant";
@@ -108,7 +109,7 @@ export class OpenAiCompatibleModel implements ChatModel {
         ...(this.config.jsonMode ? { response_format: { type: "json_object" } } : {}),
         ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       }),
-      signal: AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]),
+      signal: AbortSignal.any([signal, timeoutSignal(this.config.timeoutMs)]),
     });
     if (!response.ok) {
       throw new ModelUnavailable(`[LLM_HTTP_${response.status}] ${this.config.model}: ${(await response.text()).slice(0, 300)}`);
@@ -129,7 +130,7 @@ export class OpenAiCompatibleModel implements ChatModel {
   /** The window Ollama loaded this model with (asked once, after a first answer so the model is loaded); null elsewhere. */
   private async askOllamaContext(signal: AbortSignal): Promise<number | null> {
     try {
-      const response = await fetch(`${this.baseUrl.replace(/\/v1$/u, "")}/api/ps`, { signal: AbortSignal.any([signal, AbortSignal.timeout(2_000)]) });
+      const response = await fetch(`${this.baseUrl.replace(/\/v1$/u, "")}/api/ps`, { signal: AbortSignal.any([signal, timeoutSignal(2_000)]) });
       if (!response.ok) return null;
       const running = ollamaRunningSchema.parse(await response.json());
       return running.models.find((model) => model.name === this.config.model || model.model === this.config.model)?.context_length ?? null;

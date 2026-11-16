@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
-import type { Bot } from "mineflayer";
+import type { EventEmitter } from "node:events";
 import { Vec3 } from "vec3";
-import { botFixture } from "../../src/test-support/bot.js";
+import { createFakeBot } from "../../src/test-support/fake-bot/index.js";
 import type { IncidentRecorder } from "../../src/diagnostics/incident-recorder.js";
 import { observeProjectilePackets } from "./projectile-packets.js";
 
 test("arrow telemetry observes applied state, and detaches without mutating entities", () => {
-  const bot = botFixture();
-  const client = new EventEmitter();
-  bot._client = client as Bot["_client"];
-  const arrow = { id: 8, name: "arrow", isValid: true, metadata: [],
-    position: new Vec3(0, 67, 8), velocity: new Vec3(0, 0, -1) } as unknown as Bot["entity"];
-  bot.entities[8] = arrow;
+  const { bot } = createFakeBot({
+    entities: { 8: { name: "arrow", position: new Vec3(0, 67, 8), velocity: new Vec3(0, 0, -1) } },
+  });
+  const client = bot._client as unknown as EventEmitter; // the test drives raw packets by name, which the protocol client's types refuse
+  const arrow = bot.entities[8]!;
   client.on("rel_entity_move", () => arrow.position.z--);
   client.on("entity_destroy", () => { delete bot.entities[8]; });
   const rows: any[] = [];

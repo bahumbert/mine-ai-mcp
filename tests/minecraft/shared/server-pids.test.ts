@@ -59,6 +59,22 @@ test("leftover cleanup kills a listed pid that runs server.jar under the server 
   }
 });
 
+test("a listed server whose root was removed while its java lives on (an abandoned RAM-root server) is killed: Linux reports its cwd as `<root> (deleted)`", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pids-"));
+  try {
+    const file = new PidFile(join(dir, "daemon.pids"));
+    await file.add({ pid: 10, root: "/dev/shm/mine-ai-worlds-x/s1-1" });
+    await file.add({ pid: 11, root: "/dev/shm/mine-ai-worlds-x/s2-1" });
+    // Measured on WSL 5.15 (task review 2026-11-15): `readlink /proc/<pid>/cwd` of a process whose directory was removed ends in " (deleted)".
+    const proc = fakeProc({ 10: javaServer("/dev/shm/mine-ai-worlds-x/s1-1 (deleted)"), 11: javaServer("/dev/shm/mine-ai-worlds-x/s2-1 (deleted)/other") });
+    const killed: number[] = [];
+    const report = await killLeftoverServers(file, proc, pid => killed.push(pid));
+    assert.deepEqual(report, { killed: [10], left: [11], gone: [] }, "only the exact root plus the suffix matches");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("the real /proc reader finds this very process and reads its command line", () => {
   assert.ok(procFs.list().includes(process.pid));
   assert.ok((procFs.cmdline(process.pid) ?? []).length > 0);

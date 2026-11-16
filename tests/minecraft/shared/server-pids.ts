@@ -79,6 +79,13 @@ export class PidFile {
   }
 }
 
+/** Linux ends the cwd of a process whose directory was removed with this suffix (measured on WSL 5.15, 2026-11-15): a RAM root a stop removed under a java process that outlived its kill. */
+const REMOVED_DIRECTORY_SUFFIX = " (deleted)";
+
+function runsIn(cwd: string | null, root: string): boolean {
+  return cwd === root || cwd === `${root}${REMOVED_DIRECTORY_SUFFIX}`;
+}
+
 export interface LeftoverReport { readonly killed: number[]; readonly left: number[]; readonly gone: number[] }
 
 /**
@@ -90,7 +97,7 @@ export async function killLeftoverServers(file: PidFile, proc: ProcFs, kill: (pi
   const report: LeftoverReport = { killed: [], left: [], gone: [] };
   for (const { pid, root } of await file.read()) {
     if (proc.cmdline(pid) === null) report.gone.push(pid);
-    else if (isServerJar(proc.cmdline(pid)) && proc.cwd(pid) === root) { kill(pid); report.killed.push(pid); }
+    else if (isServerJar(proc.cmdline(pid)) && runsIn(proc.cwd(pid), root)) { kill(pid); report.killed.push(pid); }
     else report.left.push(pid);
   }
   await file.clear();

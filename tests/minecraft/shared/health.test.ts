@@ -21,11 +21,29 @@ test("an answer that is not a tick query reading is null, not zero", () => {
   assert.equal(parseTickQuery("Unknown or incomplete command"), null);
 });
 
-test("a server that answers resets the stall clock; silent for the bound it is stalled", () => {
-  const watch = new StallWatch(30_000, 0);
-  assert.equal(watch.isStalled(29_999), false);
-  assert.equal(watch.isStalled(30_000), true);
-  watch.answered(40_000);
-  assert.equal(watch.isStalled(69_999), false);
-  assert.equal(watch.isStalled(70_000), true);
+// A server is stalled after the stall bound of questions it did not answer, counted from the first one (spec 2026-11-15 F3): time nobody asked is not its silence.
+
+test("never asked: not stalled however long", () => {
+  const watch = new StallWatch(30_000);
+  assert.equal(watch.isStalled(100_000), false);
+});
+
+test("asked at 10 s, no answer: stalled at 40 s, not at 39.999 s; a second question at 25 s moves nothing (the first counts)", () => {
+  for (const laterQuestions of [[], [25_000]]) {
+    const watch = new StallWatch(30_000);
+    watch.asked(10_000);
+    for (const at of laterQuestions) watch.asked(at);
+    assert.equal(watch.isStalled(39_999), false, `questions ${laterQuestions.length + 1}`);
+    assert.equal(watch.isStalled(40_000), true, `questions ${laterQuestions.length + 1}`);
+  }
+});
+
+test("answered at 20 s after asking at 10 s, asked again at 50 s: not stalled at 79.999 s, stalled at 80 s", () => {
+  const watch = new StallWatch(30_000);
+  watch.asked(10_000);
+  watch.answered(20_000);
+  assert.equal(watch.isStalled(100_000), false, "an answered question leaves nothing pending, however long ago");
+  watch.asked(50_000);
+  assert.equal(watch.isStalled(79_999), false);
+  assert.equal(watch.isStalled(80_000), true);
 });

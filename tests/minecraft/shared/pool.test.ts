@@ -2,8 +2,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { LAST_BODY } from "../arena/lanes.ts";
+import { FakeFactory } from "./fake-servers.ts";
 import { ServerPool } from "./pool.ts";
 import { config, spec, end, setup } from "./pool-fixtures.ts";
+import { settlesWithin } from "./settles-within.ts";
 
 test("a new shared server of a key is listed as starting, then runs the key's setup commands once and is ready", async () => {
   const { factory, pool } = setup();
@@ -160,16 +162,82 @@ test("stopAll stops servers that are ready and those still starting", async () =
   assert.deepEqual(factory.created.map(server => server.stopped), [true, true]);
 });
 
-test("a ready server that answered nothing for STALL_STOP is stopped and leaves the pool; one that answered is kept", async () => {
+test("a ready server that answered nothing for STALL_STOP of questions is stopped and leaves the pool; one that answered, or was not asked, is kept", async () => {
   const { factory, pool } = setup();
   const silent = pool.startServer(spec({ key: "silent" }), 0);
   const talking = pool.startServer(spec({ key: "talking" }), 0);
   await Promise.all([silent.ready, talking.ready]);
+  pool.asked(silent.id, 0);
+  pool.asked(talking.id, 0);
   pool.answered(talking.id, config.stallStopMs - 1);
   const stopped = await pool.stopStalled(config.stallStopMs);
   assert.deepEqual(stopped, [silent.id]);
+  assert.equal(silent.died.aborted, true, "the stalled server aborts its trials before stopping");
+  assert.equal(silent.died.reason, `it answered nothing for ${config.stallStopMs} ms`);
+  assert.equal(talking.died.aborted, false);
   assert.deepEqual(factory.created.map(server => server.stopped), [true, false]);
   assert.deepEqual(pool.readings().map(reading => reading.id), [talking.id]);
+});
+
+// Stops are started, not awaited: a slow stop must not hold the sample (spec 2026-11-15 section 1, F1).
+
+/** Makes the fake's `stop` wait for `release()`; `started` says whether the pool has called it. */
+function gateStop(server: { stop(): Promise<void> }): { release(): void; readonly started: () => boolean } {
+  let started = false;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  server.stop = async () => { started = true; await gate; };
+  return { release, started: () => started };
+}
+
+test("stopAll awaits a stop the sampler started and has not ended", async () => {
+  const { factory, pool } = setup();
+  const managed = pool.startServer(spec(), 0);
+  await managed.ready;
+  const stop = gateStop(factory.created[0]!);
+  pool.reap(1_600, new Set());
+  assert.equal(stop.started(), true, "reap calls the server's stop at once");
+  assert.equal(pool.readings().length, 0);
+  const all = pool.stopAll();
+  assert.equal(await settlesWithin(all), false, "the reaped server's stop is still running");
+  stop.release();
+  assert.equal(await settlesWithin(all), true);
+});
+
+test("stopDeadJava and stopStalled return their ids at once, while the stops of those servers run", async () => {
+  const { factory, pool } = setup();
+  const dead = pool.startServer(spec({ key: "dead" }), 0);
+  const stalled = pool.startServer(spec({ key: "stalled" }), 0);
+  await Promise.all([dead.ready, stalled.ready]);
+  const stops = factory.created.map(gateStop);
+  for (let reading = 0; reading < 2; reading++) pool.noteJavaProcess(dead.id, false);
+  pool.asked(stalled.id, 0);
+  assert.deepEqual(pool.stopDeadJava(), [dead.id]);
+  assert.deepEqual(pool.stopStalled(config.stallStopMs), [stalled.id]);
+  assert.deepEqual(stops.map(stop => stop.started()), [true, true]);
+  for (const stop of stops) stop.release();
+  await pool.stopAll();
+});
+
+test("a stop that throws is logged and leaves no unhandled rejection", async () => {
+  const factory = new FakeFactory();
+  const logged: string[] = [];
+  const pool = new ServerPool(factory, config, message => logged.push(message));
+  const managed = pool.startServer(spec(), 0);
+  await managed.ready;
+  factory.created[0]!.stop = async () => { throw new Error("x"); };
+  pool.reap(1_600, new Set());
+  await pool.stopAll();
+  assert.ok(logged.includes("server s1 stop failed: x"), logged.join(" | "));
+});
+
+test("a server marked late keeps its resident size (the ledger still counts its growth)", async () => {
+  const { pool } = setup();
+  const managed = pool.startServer(spec(), 0);
+  await managed.ready;
+  pool.setHealth(managed.id, { msptP95: 30, residentMb: 1_200 });
+  pool.markLate(managed.id);
+  assert.equal(pool.readings()[0]?.residentMb, 1_200);
 });
 
 test("a ready server whose java process read as gone twice in a row is stopped, left the pool and told its trials, a sick one included", async () => {
@@ -284,6 +352,42 @@ test("a server is busy while it starts and while a trial is on it (admitted or r
   marks.leave();
   pool.finishTrial(managed.id, lane, end({ restored: false }), 10);
   assert.equal(busyOf(pool, managed.id), false, "cancelled before its arrangement");
+});
+
+test("a server made for a RAM world reads its world as pending until its copy ends, then 0; a server of no RAM world never reads one", async () => {
+  const { factory, pool } = setup();
+  let release!: () => void;
+  factory.startGate = new Promise<void>(resolve => { release = resolve; });
+  const copying = pool.startServer(spec({ worldMb: 440 }), 0);
+  const plain = pool.startServer(spec({ key: "k2" }), 0);
+  const worldOf = (id: string) => pool.readings().find(reading => reading.id === id)?.worldPendingMb ?? 0;
+  assert.deepEqual([worldOf(copying.id), worldOf(plain.id)], [440, 0], "starting: the copy has not run");
+  factory.requests[0]!.onWorldCopied?.();
+  assert.equal(worldOf(copying.id), 0, "copy ended, the server is not ready yet");
+  assert.equal(pool.readings().find(reading => reading.id === copying.id)?.status, "starting");
+  release();
+  await Promise.all([copying.ready, plain.ready]);
+  assert.equal(worldOf(copying.id), 0);
+});
+
+test("a RAM world still pending when its server is ready (a copy that was skipped or failed) reads 0 from then on, and a second end of the copy changes nothing", async () => {
+  const { factory, pool } = setup();
+  const managed = pool.startServer(spec({ worldMb: 440 }), 0);
+  assert.equal(pool.readings()[0]?.worldPendingMb, 440);
+  await managed.ready;
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+  factory.requests[0]!.onWorldCopied?.();
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+});
+
+test("a factory that reports the copy before its first await (a root already made) is heard: the world reads 0", async () => {
+  const eager = new FakeFactory();
+  const create = eager.create.bind(eager);
+  eager.create = request => { request.onWorldCopied?.(); return create(request); };
+  const pool = new ServerPool(eager, config, () => {});
+  const managed = pool.startServer(spec({ worldMb: 440 }), 0);
+  assert.equal(pool.readings()[0]?.worldPendingMb ?? 0, 0);
+  await managed.ready;
 });
 
 test("an idle reusable single server is idle, and busy again while its next scenario runs", async () => {

@@ -2,12 +2,13 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { asVec3, cellKey } from "../../../utils/index.js";
-import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
+import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../../world/block-visibility.js";
 import { sourceInSight, USE_RAY_REACH } from "../../../world/liquid.js";
 import { excavateGoal } from "../../goals/excavate.js";
 import { anyGoal, exactBlockGoal, itemPickupGoal, nearGoal, occupyGoal,
   type BlockPosition, type Goal, type MovementPolicy } from "../../index.js";
-import { liveBlockReader } from "../../mineflayer/world.js";
+import { liveBlockReader, observeMineflayerBlock } from "../../mineflayer/world.js";
+import { DIG_REACH } from "../../movements/excavation.js";
 import { isSafeSupport, isWater } from "../../world/block-geometry.js";
 import { admitsDive, openWaterSurface } from "../../world/swimming.js";
 import { CAST_REACH } from "./cast-obsidian.js";
@@ -22,6 +23,15 @@ import type { MineAnticipatedDropTarget, MineBlockTarget, MineDropTarget,
  * whole surface on the hot path to describe the same near edge.
  */
 const POOL_GOAL_LIPS = 8;
+
+/** Whether the live target exposes a dig face from this working eye position. */
+export function targetInSight(bot: Bot, eye: Vec3, position: BlockPosition): boolean {
+  const block = bot.blockAt(asVec3(position));
+  return (
+    block !== null &&
+    visibleBlockAim(bot.world, eye, position, DIG_REACH, observeMineflayerBlock(block).collisionShapes) !== null
+  );
+}
 
 /** A stable target identity for refresh notifications and route revalidation. */
 export function targetIdentity(target: MineTarget): string {

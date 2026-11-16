@@ -29,7 +29,7 @@ export function result(outcome: RunResult["outcome"]): RunResult {
 /** A lane trial of lane 3 on a mutex of its own. */
 export function job(overrides: Partial<TrialJob> = {}): TrialJob {
   return {
-    name: "demo", scenario: scenario(), lane: laneOf(3), server, mutex: new ArrangementMutex(), runDir: "/tmp/run", log: () => {},
+    name: "demo", scenario: scenario(), tickRate: null, lane: laneOf(3), server, mutex: new ArrangementMutex(), runDir: "/tmp/run", log: () => {},
     signal: new AbortController().signal, reuseServer: true, ...overrides,
   };
 }

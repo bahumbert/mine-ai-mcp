@@ -2,7 +2,7 @@ import { eatCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import { recordCombatResourceReceipt } from "../../runtime/combat-resource-receipts.js";
 import { monotonicNow, raceSignal } from "../../utils/index.js";
-import { carriedCount, INVENTORY_SETTLE_WALL_MS, settledNow, type SettledInventoryCount } from "../../world/index.js";
+import { carriedCount, settledNow, type SettledInventoryCount } from "../../world/index.js";
 import { hasItemFamily } from "../../world/item-families.js";
 import { SERVER_ANSWER_TICKS, waitForServerAnswer, waitForWorldAge } from "../../world/world-age.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
@@ -147,7 +147,7 @@ async function settleBiteSlot(
   const shown = () => slotShowsBite(bot, request, mark);
   await waitForServerAnswer(bot, undefined, {
     until: () => shown() || diedSince(bot, mark),
-    wallMs: Math.min(INVENTORY_SETTLE_WALL_MS, wallLeft(limits.startedAt, limits.wallMs)),
+    wallMs: wallLeft(limits.startedAt, limits.wallMs),
     ...(limits.signal && { signal: limits.signal }),
   });
   return { count: carriedCount(bot, request.foodName), confirmed: shown() };

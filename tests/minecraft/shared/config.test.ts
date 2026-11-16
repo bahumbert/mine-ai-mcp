@@ -121,8 +121,19 @@ test("MINE_AI_SCENARIO_WORLD_TEMPLATE=0 turns the template off, the lanes, bound
   assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_TEMPLATE_LANES: "2.5" }), /MINE_AI_SCENARIO_TEMPLATE_LANES=2\.5/u);
 });
 
+test("the lane worlds' RAM root: on in /dev/shm by default, MINE_AI_SCENARIO_WORLD_RAM=0 turns it off, the directory takes an override, a switch of 2 is refused", () => {
+  const config = loadScenarioServerConfig({});
+  assert.equal(config.worldRam, 1);
+  assert.equal(config.worldRamDir, "/dev/shm");
+  const changed = loadScenarioServerConfig({ MINE_AI_SCENARIO_WORLD_RAM: "0", MINE_AI_SCENARIO_WORLD_RAM_DIR: "/tmp/r" });
+  assert.equal(changed.worldRam, 0);
+  assert.equal(changed.worldRamDir, "/tmp/r");
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_WORLD_RAM: "2" }), /MINE_AI_SCENARIO_WORLD_RAM=2/u);
+  assert.throws(() => loadScenarioServerConfig({ MINE_AI_SCENARIO_WORLD_RAM: "0.5" }), /MINE_AI_SCENARIO_WORLD_RAM=0\.5/u);
+});
+
 test("the daemon's template variables are its own: a submitter does not forward them to the clients", () => {
-  for (const name of ["WORLD_TEMPLATE", "TEMPLATE_LANES", "TEMPLATE_BUILD_BOUND_MS", "TEMPLATE_COPY_BOUND_MS", "TEMPLATE_DIR"]) {
+  for (const name of ["WORLD_TEMPLATE", "TEMPLATE_LANES", "TEMPLATE_BUILD_BOUND_MS", "TEMPLATE_COPY_BOUND_MS", "TEMPLATE_DIR", "WORLD_RAM", "WORLD_RAM_DIR"]) {
     assert.ok(SCENARIO_SERVER_ENV_NAMES.has(`MINE_AI_SCENARIO_${name}`), name);
   }
 });

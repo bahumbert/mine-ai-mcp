@@ -88,7 +88,7 @@ test("unsafe fence breaks leave the wall intact and name why the shelter is open
         : variant === "falling" ? /falling block/
         : variant === "lava" ? /liquid/
         : variant === "server silent" ? /server did not confirm/
-        : variant === "server fence" ? /removal was not observed|block never changed/
+        : variant === "server fence" ? /server did not confirm breaking the block/
         : /cannot be replaced by placement/;
       assert.match(result.error ?? "", reason, variant);
       assert.equal(bot.blockAt(new Vec3(1, 65, 0))?.name, variant === "unloaded target" ? undefined : "nether_brick_fence", variant);

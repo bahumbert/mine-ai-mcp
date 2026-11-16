@@ -28,9 +28,10 @@ client:
 params:
   actions:
     - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
-    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -61, z: 0 } }
-    - { action: raw_action, waitTicks: 10, input: { operation: dig, x: 0, y: -62, z: 0 } }
-    - { action: raw_action, waitTicks: 10, input: { operation: place, block_name: dirt, x: 1, y: -60, z: 0, face: west } }
+    # One full server second after each dig, plus the driver's time-packet margin (scenario-ticks T9, 2026-11-15).
+    - { action: raw_action, waitServerTicks: 20, input: { operation: dig, x: 0, y: -61, z: 0 } }
+    - { action: raw_action, waitServerTicks: 20, input: { operation: dig, x: 0, y: -62, z: 0 } }
+    - { action: raw_action, waitServerTicks: 20, input: { operation: place, block_name: dirt, x: 1, y: -60, z: 0, face: west } }
     - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
     - { action: navigate, input: { x: 0, y: -59, z: 0, range: 1 } }
 
