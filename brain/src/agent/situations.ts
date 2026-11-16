@@ -41,6 +41,8 @@ export interface SituationHost {
   answeringNight(): "night" | "for now" | null;
   raise(info: SituationInfo, snapshot: BotSnapshot): void;
   end(kind: SituationKind, detail: string, snapshot: BotSnapshot): void;
+  /** Each drained observation, fallback polls included, after its events are decided (the open-sky report follows the night). */
+  observed?(snapshot: BotSnapshot): void;
 }
 
 /** One test of this bot's night, including its early dusk point. */
@@ -188,6 +190,7 @@ export class SituationWatch {
         const respawned = this.observeDeath(observation.snapshot, wasNight);
         this.observeHealth(observation.snapshot, respawned);
         await this.observeExposure(observation);
+        this.host.observed?.(observation.snapshot);
       }
     } finally {
       // Clear ownership in the same turn as the empty-queue check, before another observe can join it (T2 review).

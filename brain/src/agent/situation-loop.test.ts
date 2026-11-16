@@ -274,6 +274,63 @@ test("a player's stop ends pushed situations and decisions; the night stays hand
   } finally { await h.stop(); }
 });
 
+test("a covered bot at dusk has the open-sky report on, with no night event (plan 2026-11-15-p4-18-night-reflex-l2-part2 T9)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock);
+  h.runtime.snapshot = { ...h.runtime.snapshot, policy: { revision: "r1", digStraightDown: false, reportOpenSky: false } };
+  const decisions = h.agent["situations"];
+  decisions.underCover = async () => true;
+  ordinary(h);
+  h.action.reply(FETCH, HOME);
+  try {
+    await h.start();
+    assert.equal(h.runtime.snapshot.policy?.reportOpenSky, false);
+    await h.night();
+    await reaches(clock, () => h.runtime.snapshot.policy?.reportOpenSky === true);
+    assert.equal(h.runtime.snapshot.policy?.reportOpenSky, true);
+    assert.equal(h.situations().filter((entry) => entry.event === "raised").length, 0);
+  } finally { await h.stop(); }
+});
+
+test("an order on top of a covered night sets the open-sky report on as for an own goal (plan 2026-11-15-p4-18-night-reflex-l2-part2 T9)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock);
+  h.runtime.snapshot = { ...h.runtime.snapshot, policy: { revision: "r1", digStraightDown: false, reportOpenSky: false } };
+  h.agent["situations"].underCover = async () => true;
+  ordinary(h, "Bob");
+  h.action.reply(FETCH, HOME);
+  try {
+    await h.start();
+    await h.night();
+    await reaches(clock, () => h.runtime.snapshot.policy?.reportOpenSky === true);
+    assert.equal(h.situations().filter((entry) => entry.event === "raised").length, 0);
+  } finally { await h.stop(); }
+});
+
+test("a fallback poll sets the open-sky report like any observation (plan 2026-11-15-p4-18-night-reflex-l2-part2 T9)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock);
+  h.runtime.snapshot = { ...h.runtime.snapshot, clock: { timeOfDay: 12_100, phase: "day", minutesUntilChange: 442 / 1_200, sleeping: false }, policy: { revision: "r1", digStraightDown: false, reportOpenSky: false } };
+  h.agent["situations"].underCover = async () => true;
+  await h.agent["situations"].poll();
+  assert.equal(h.runtime.snapshot.policy?.reportOpenSky, true);
+});
+
+test("a held open-sky write never holds back a fallback poll (plan 2026-11-15-p4-18-night-reflex-l2-part2 T9)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock);
+  h.runtime.snapshot = { ...h.runtime.snapshot, clock: { timeOfDay: 12_100, phase: "day", minutesUntilChange: 442 / 1_200, sleeping: false }, policy: { revision: "r1", digStraightDown: false, reportOpenSky: false } };
+  h.agent["situations"].underCover = async () => true;
+  let writes = 0;
+  h.runtime.setReportOpenSky = () => { writes++; return new Promise<boolean>(() => undefined); };
+  await h.agent["situations"].poll();
+  assert.equal(writes, 1);
+});
+
 test("stop while a cover read is held raises nothing after release", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();

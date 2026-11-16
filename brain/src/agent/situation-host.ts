@@ -10,6 +10,7 @@ import { personaSkills } from "../persona.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { underCover } from "../shelter/spot.ts";
 import { sleepMs } from "../wall-timers.ts";
+import { keepOpenSkyReport } from "./open-sky-keeper.ts";
 import { situationView } from "./situation-options.ts";
 import { restsOnLand, SituationWatch, type SituationHost, type SituationInfo, type SituationKind } from "./situations.ts";
 import { pushSituation, situationOf, topWork } from "./stack.ts";
@@ -86,6 +87,11 @@ export class SituationDecisions implements SituationHost {
     }).catch((error: unknown) => this.host.options.log(`situation observation failed: ${String(error)}`));
   }
   poll(): Promise<void> { return this.host.runSignal().aborted ? Promise.resolve() : this.watch.poll(); }
+
+  /** Every drained observation (fallback polls included) sets the open-sky report; its write never holds a stop back. */
+  observed(snapshot: BotSnapshot): void {
+    void keepOpenSkyReport(snapshot, this.watch, this.host.options.runtime, this.host.options.log);
+  }
 
   busy(): readonly SituationKind[] {
     return [...new Set([
