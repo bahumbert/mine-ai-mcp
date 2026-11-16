@@ -1,5 +1,6 @@
 // The model-callable shelter skill supplies objective, memory and liveness context to the shelter flow.
 import type { Step } from "../actions.ts";
+import { BEDTIME_START_TICK, DUSK_FROM_TICK } from "../agent/situations.ts";
 import { digShelterFlow } from "../shelter/dig-in.ts";
 import type { SkillContext, SkillResult } from "../skills.ts";
 
@@ -13,7 +14,11 @@ export async function digShelter(context: SkillContext, step: Extract<Step, { sk
     areas: context.areas ?? [],
     needed: context.needed?.(snapshot),
     alive: context.alive,
-    dayCame: async () => (await context.runtime.status()).clock?.phase !== "night",
+    dayCame: async () => {
+      const clock = (await context.runtime.status()).clock;
+      const evening = clock?.timeOfDay !== undefined && clock.timeOfDay >= DUSK_FROM_TICK && clock.timeOfDay < BEDTIME_START_TICK;
+      return clock?.phase !== "night" && !evening;
+    },
     onHole: context.rememberShelter,
   }, step);
 }

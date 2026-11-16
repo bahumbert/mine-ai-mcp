@@ -1,6 +1,8 @@
 // The model's shelter contract and the context passed to the existing shelter flow.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../../src/world/daylight.ts";
 import { describeStep, skillUsage, stepSchema } from "../actions.ts";
 import { Body, INSTANT_TYPING } from "../body.ts";
 import { styleOrDefault } from "../building/plan.ts";
@@ -24,15 +26,111 @@ test("the sleep line names the carried bed and the respawn point", () => {
   assert.equal(stepSchema.safeParse({ skill: "sleep" }).success, true);
 });
 
-test("runStep by day without shelter minutes is done without submitting anything", async () => {
+test("a dig begun by day at 6000 without minutes still does nothing; older statuses keep that behaviour", async () => {
+  for (const time of [6_000, 11_999, 23_459, undefined]) {
+    const runtime = new FakeRuntime();
+    if (time === undefined) runtime.snapshot = { ...runtime.snapshot, clock: { phase: "day", minutesUntilChange: 5 } };
+    else setShelterTime(runtime, time);
+    const result = await runStep({ skill: "dig_shelter" }, {
+      runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: new AbortController().signal,
+    });
+    assert.equal(result.status, "done");
+    assert.match(result.detail, /give minutes/u);
+    assert.deepEqual(runtime.submitted, []);
+  }
+});
+
+/** The same clock fields view_status derives through world/daylight.ts. */
+function setShelterTime(runtime: FakeRuntime, timeOfDay: number): void {
+  const phase = dayPhase(timeOfDay);
+  const minutesUntilChange = ticksToMinutes(phase === "night" ? ticksUntilDay(timeOfDay) : ticksUntilNight(timeOfDay));
+  runtime.snapshot = { ...runtime.snapshot, clock: { phase, timeOfDay, minutesUntilChange } };
+}
+
+/** Reuse the runtime's world; shelter/dig-in-and-climb-out measured the range-1 exit at y=63. */
+function shelterRuntime(timeOfDay: number): FakeRuntime {
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, clock: { phase: "day", minutesUntilChange: 5 } };
-  const result = await runStep({ skill: "dig_shelter" }, {
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [{ name: "dirt", count: 4 }] };
+  setShelterTime(runtime, timeOfDay);
+  runtime.succeedEffects.raw_action = (input) => {
+    if (input.operation === "place") runtime.world.set("0,63,0", String(input.block_name));
+    if (input.operation !== "dig") return;
+    runtime.world.set(`${String(input.x)},${String(input.y)},${String(input.z)}`, "air");
+    if (Number(input.y) < runtime.snapshot.position.y) runtime.snapshot = { ...runtime.snapshot, position: { x: 0.5, y: Number(input.y), z: 0.5 } };
+  };
+  runtime.succeedEffects.navigate = (input) => {
+    runtime.snapshot = { ...runtime.snapshot, position: { x: Number(input.x) + 0.5, y: Number(input.y) - (input.range === 1 ? 1 : 0), z: Number(input.z) + 0.5 } };
+  };
+  return runtime;
+}
+
+for (const row of [
+  { name: "a dig begun at 12100 waits until day and climbs out", start: 12_100, end: 23_459 },
+  { name: "a sleep skip ends that shelter", start: 12_300, end: 0 },
+  { name: "shelter waits at the evening and bedtime boundaries", start: 12_000, end: 23_459 },
+  { name: "shelter waits through the final evening tick", start: 12_541, end: 23_459 },
+  { name: "shelter still waits from the first night tick", start: 12_542, end: 23_459 },
+]) {
+  test(row.name, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const runtime = shelterRuntime(row.start);
+    const body = new Body(runtime, () => undefined, INSTANT_TYPING);
+    let finished = false;
+    const running = runStep({ skill: "dig_shelter" }, { runtime, body, signal: new AbortController().signal }).then((result) => { finished = true; return result; });
+    await clock.advance(0);
+    assert.equal(runtime.snapshot.position.y, 61, "the evening call digs down into shelter");
+    assert.equal(finished, false);
+    setShelterTime(runtime, 13_000);
+    await clock.advance(15_000);
+    assert.equal(finished, false, "night does not end the shelter");
+    assert.equal(runtime.snapshot.position.y, 61);
+    setShelterTime(runtime, 23_458);
+    await clock.advance(15_000);
+    assert.equal(finished, false, "the last night tick still shelters");
+    setShelterTime(runtime, row.end);
+    const result = await clock.settle(running, 15_000);
+    assert.equal(result.status, "done");
+    assert.match(result.detail, /climbed out/u);
+    assert.equal(runtime.snapshot.position.y, 63);
+    const next = await body.act("navigate", { x: 2, y: 64, z: 0, range: 0 }, "the next order after shelter");
+    assert.equal(next.status, "succeeded");
+    assert.equal(runtime.snapshot.position.x, 2.5);
+    assert.equal(runtime.snapshot.position.y, 64);
+  });
+}
+
+test("a dig begun by day at 6000 with minutes ends at its deadline", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const runtime = shelterRuntime(6_000);
+  let finished = false;
+  const running = runStep({ skill: "dig_shelter", minutes: 1 }, {
+    runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: new AbortController().signal,
+  }).then((result) => { finished = true; return result; });
+  await clock.advance(0);
+  assert.equal(runtime.snapshot.position.y, 61);
+  await clock.advance(59_999, 15_000);
+  assert.equal(finished, false, "daytime minutes do not end before their deadline");
+  const result = await clock.settle(running, 1, 1);
+  assert.equal(result.status, "done");
+  assert.match(result.detail, /climbed out/u);
+  assert.equal(runtime.snapshot.position.y, 63);
+});
+
+test("an older status without timeOfDay keeps sheltering at night", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const runtime = shelterRuntime(13_000);
+  runtime.snapshot = { ...runtime.snapshot, clock: { phase: "night", minutesUntilChange: 5 } };
+  const running = runStep({ skill: "dig_shelter" }, {
     runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: new AbortController().signal,
   });
-  assert.equal(result.status, "done");
-  assert.match(result.detail, /give minutes/u);
-  assert.deepEqual(runtime.submitted, []);
+  await clock.advance(0);
+  assert.equal(runtime.snapshot.position.y, 61);
+  runtime.snapshot = { ...runtime.snapshot, clock: { phase: "day", minutesUntilChange: 5 } };
+  assert.equal((await clock.settle(running, 15_000)).status, "done");
+  assert.equal(runtime.snapshot.position.y, 63);
 });
 
 test("daytime shelter minutes dig and remember a roof that spares the objective's needed dirt", async () => {
