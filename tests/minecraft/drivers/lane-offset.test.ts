@@ -16,7 +16,7 @@ import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-b
 import { DEFAULT_SURVIVAL_POLICY } from "../../../src/survival/policy/contract.ts";
 import { temporaryBotData } from "../../../src/test-support/bot-data.ts";
 import { ZERO_ARENA, arenaActionInput, arenaFrame, type ArenaFrame } from "../arena/frame.ts";
-import type { ScenarioRun } from "../scenario.ts";
+import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
 
 // check-reads: tests/minecraft/scenarios/**/*.yaml, tests/minecraft/templates/**/*.yaml
@@ -28,6 +28,15 @@ const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts", "life
 /** Wall-clock waits of a driver's params, cut to nothing: the census reads what the driver asks, not how long it waits. */
 const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0 };
 
+/** These drivers need physical observations or richer action results than the coordinate stand-in supplies. */
+const CENSUS_BOUNDARIES: Readonly<Record<string, string>> = {
+  "arrow-reservation.ts": "view_status", "ground-first-barter.ts": "view_status",
+  "netherrack-bank.ts": "view_blocks", "preserve-storage.ts": "use_container",
+  "workshop.ts": "craft_item", "lava-pool-escape.ts": "view_status", "explore-frontier.ts": "explore_frontier",
+};
+const CHAT_BOUNDARIES = new Set(["death-is-read.ts", "zombie-at-night.ts", "unreachable-shooter-ledge.ts", "killed-mid-action.ts"]);
+const CENSUS_STOP = Symbol("stand-in has no answer");
+
 /** A step of `params.actions` (action-sequence, buried-items-stay-buried): the status it must end with, and the text its error must hold. */
 interface ParamsStep {
   readonly expect?: "succeeded" | "failed";
@@ -38,6 +47,9 @@ interface Recorded {
   readonly action: string;
   readonly input: Record<string, unknown>;
 }
+
+/** Drivers may inject a sleeper so this coordinate census skips fixture pacing (task review, 2026-11-16). */
+type CensusRun = (context: ScenarioContext, sleep?: (ms: number) => Promise<void>) => ReturnType<ScenarioRun>;
 
 function yamlFilesUnder(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -68,15 +80,29 @@ function smeltedResult(produced: unknown): ActionResult {
  * says, a bucket used on the `refuse` cell is refused, the first navigate of a cancel scenario (`settleWithinMs`) stays
  * pending until `cancel_foreground_action` and reads cancelled, anything else succeeds.
  */
-async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame): Promise<Recorded[]> {
+async function recordDriverRun(run: CensusRun, file: string, frame: ArenaFrame): Promise<Recorded[]> {
   const { client: _launch, ...scenario } = await loadScenario(file);
+  const driver = path.basename(_launch.args.find((arg) => arg.startsWith("drivers/"))!);
   const definition = scenarioDefinitionSchema.parse({ ...scenario, params: withoutWallWaits(scenario.params) });
   const [x, y, z] = frame.world(scenario.players[0]!.pos as [number, number, number]);
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const { bot } = createFakeBot({ position: new Vec3(x, y, z), clock });
+  const spawn = definition.params.spawn;
+  const entities = definition.params.holdShooter === true && Array.isArray(spawn)
+    ? { 2: { name: String(definition.params.mob), position: new Vec3(...frame.world(spawn as [number, number, number])) } } : undefined;
+  const { bot } = createFakeBot({ position: new Vec3(x, y, z), health: scenario.players[0]!.health, clock, entities });
   const data = temporaryBotData({ botId: "Actor" });
   const recorded: Recorded[] = [];
+  const chat = bot.chat.bind(bot);
+  bot.chat = (command) => {
+    if (path.basename(file).startsWith("evade-flat-")) {
+      const summon = command.match(/^\/summon minecraft:(\w+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)/);
+      if (summon) recorded.push({ action: "summon", input: { mob: summon[1], x: Number(summon[2]), y: Number(summon[3]), z: Number(summon[4]) } });
+      if (command.startsWith("/attribute ")) recorded.push({ action: "hold", input: { command } });
+    }
+    if (CHAT_BOUNDARIES.has(driver)) throw CENSUS_STOP;
+    chat(command);
+  };
   const steps = (definition.params.actions ?? []) as ParamsStep[];
   const refused = definition.params.refuse as { x: number; y: number; z: number } | undefined;
   const [refusedX, refusedY, refusedZ] = refused === undefined ? [] : frame.world([refused.x, refused.y, refused.z]);
@@ -84,6 +110,7 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
   let cancelFirstNavigate: () => void = () => {};
   const firstNavigateCancelled = new Promise<void>((resolve) => void (cancelFirstNavigate = resolve));
   let calls = 0;
+  let policy = POLICY_SNAPSHOT;
   const context = scenarioTestContext({
     scenario: definition,
     arena: frame,
@@ -94,6 +121,7 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
     },
     call: async (action, input) => {
       recorded.push({ action, input });
+      if (CENSUS_BOUNDARIES[driver] === "*" || CENSUS_BOUNDARIES[driver] === action) throw CENSUS_STOP;
       const step = steps[calls++];
       let result: ActionResult = { status: "succeeded" };
       if (step?.expect === "failed") result = { status: "failed", error: step.error_contains ?? "failed" };
@@ -104,21 +132,36 @@ async function recordDriverRun(run: ScenarioRun, file: string, frame: ArenaFrame
         result = { status: "cancelled", error: "cancelled" };
       } else if (action === "navigate") bot.entity.position.set(Number(input.x) + 0.5, Number(input.y), Number(input.z) + 0.5);
       if (action === "smelt_item") result = smeltedResult(definition.params.produced);
+      if (action === "read_recent_events") result = { status: "succeeded", events: [], readThroughEventId: 0,
+        remainingEventCount: 0, source: { queryIds: ["read_recent_events"] } } as ActionResult;
+      if (action === "set_survival_policy") {
+        const changes = input.changes as { combat?: Partial<typeof DEFAULT_SURVIVAL_POLICY.combat> };
+        policy = { ...policy, effective: { ...policy.effective,
+          combat: { ...policy.effective.combat, ...changes.combat } } };
+      }
       if (action === "view_status") result = { status: "succeeded", situation: observeLiveSituation(bot, data, () => ({ owner: "idle", activeAction: null })) } as ActionResult;
-      return { action, durationMs: 1, result, summary: action, ...(action === "view_status" && { survivalPolicy: POLICY_SNAPSHOT }) };
+      return { action, durationMs: 1, result, summary: action, ...(action === "view_status" && { survivalPolicy: policy }) };
     },
   });
   try {
-    // A stand-in result a driver cannot read ends its run here; what it asked before that is what is compared.
-    const running = run(context).catch(() => null);
+    const running = run(context, async () => {});
     // Advance server packets within Mine Labs' goal budget (trial/run.ts, default 120s), T9 2026-11-15.
-    const completion = await clock.settle(running, (scenario.goal.timeout ?? 120) * 1_000);
-    if (completion !== null) recorded.push({ action: "(completion)", input: { status: completion.status } });
+    try {
+      const completion = await clock.settle(running, (scenario.goal.timeout ?? 120) * 1_000);
+      recorded.push({ action: "(completion)", input: { status: completion.status } });
+    } catch (error) {
+      if (error !== CENSUS_STOP) throw error;
+    }
   } finally {
     data.close();
   }
   return recorded;
 }
+
+test("a driver exception is reported by the census", async () => {
+  const file = path.join(MINECRAFT_DIR, "scenarios/pathfinder/movement-course.yaml");
+  await assert.rejects(recordDriverRun(async () => { throw new Error("driver failure"); }, file, SIDEWAYS), /driver failure/);
+});
 
 /** The params with the wall-clock waits they name (`NO_WAIT_PARAMS`) cut to nothing. */
 function withoutWallWaits(params: Record<string, unknown>): Record<string, unknown> {
@@ -161,6 +204,12 @@ for (const { file, driver, run, name } of scenarios.filter(({ driver }) => !OWN_
     const atZero = await recordDriverRun(run, file, arenaFrame(ZERO_ARENA));
     const inLane = await recordDriverRun(run, file, SIDEWAYS);
     assert.deepEqual(inLane, shifted(atZero, SIDEWAYS));
+    if (name === "scenarios/combat/evade-flat-skeleton-held-cover.yaml") {
+      assert.deepEqual(inLane.find(({ action }) => action === "summon"),
+        { action: "summon", input: { mob: "skeleton", x: 58, y: -60, z: 1536 } });
+      assert.ok(inLane.some(({ action, input }) => action === "hold" && String(input.command).includes("@e[type=minecraft:skeleton,limit=1,sort=nearest]")));
+      assert.ok(inLane.some(({ action }) => action === "read_recent_events"));
+    }
     if (JSON.stringify(inLane) !== JSON.stringify(atZero)) driversThatMoved.add(path.basename(driver));
   });
 }

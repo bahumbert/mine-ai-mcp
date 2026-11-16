@@ -10,6 +10,7 @@ import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
 import { type FakeBreath, attachFakeBreath } from "./fake-bot-breath.js";
 import { type FakeChatOptions, attachFakeChat } from "./fake-bot-chat.js";
+import { attachHeldShooterCommands } from "./fake-held-shooter-command.js";
 import { attachFakeDigging } from "./fake-bot-digging.js";
 import { attachServerDigging } from "./fake-server-digging.js";
 import { type ServerEntities, attachFakeEntities } from "./fake-bot-entities.js";
@@ -244,6 +245,7 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const breath = attachFakeBreath(bot, { server });
   attachFakeSleep(bot, { server, world, combat });
   attachFakeChat(bot, { server, options: options.chat });
+  attachHeldShooterCommands(bot, server);
   attachFakePlugins(bot, client, username);
   Object.defineProperties(bot, Object.getOwnPropertyDescriptors(options.overrides ?? {}));
   return { bot, clock, server, world, inventory, entities: serverEntities, breath, windows, combat, emitTags: (groups) => emitFakeTags(bot, groups) };

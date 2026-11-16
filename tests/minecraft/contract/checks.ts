@@ -25,6 +25,7 @@ import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { waterExtinguishesBurning } from "./checks/water-extinguishes-burning.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
+import { heldShooter } from "./checks/held-shooter.ts";
 import { armourPointsWorn } from "./checks/armour-points-worn.ts";
 import { heightmapInChunkPacket } from "./checks/heightmap-in-chunk-packet.ts";
 import { lightInCells } from "./checks/light-in-cells.ts";
@@ -205,6 +206,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   lavaOverHole,
   lavaOverPassable,
   whisperEcho,
+  heldShooter,
   respawnAfterDeath,
   respawnAtSetPoint,
   respawnWhileAsleep,

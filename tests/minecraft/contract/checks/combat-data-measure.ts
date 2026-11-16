@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import type { CombatDataFile, MeasuredPart } from "../../../../src/world/combat-data-file.ts";
-import { ANSWER_WALL_MS } from "../server-answer.ts";
 import type { ContractSubject } from "../subject.ts";
+import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, STALE_AGE_TICKS, waitForWorldAge } from "../../../../src/world/world-age.ts";
 
 /** The command storage the reads go through; a key per bot and per read, so lanes never read each other's. */
 const STORAGE = "mine_ai:cm";
@@ -59,30 +59,31 @@ export function failWithMeasured(measured: MeasuredPart, differences: readonly s
 
 /** Reads batches of commands on a real server; one batch at a time. */
 export interface MeasureReader {
-  /** Runs every command and resolves with one reading each, in order. Throws when the answer does not arrive within `ANSWER_WALL_MS`. */
+  /** Runs every command in order; waits on server age and fails on a missing reply or a stopped clock. */
   read(commands: readonly ReadCommand[]): Promise<Reading[]>;
   /** Sends a command that answers nothing we read (a summon, an item replace); it keeps its order with the reads. */
   send(command: string): void;
 }
 
-export function createMeasureReader(subject: ContractSubject): MeasureReader {
+/** Await an answer for the stated observed-age budget, with an independent stopped-clock bound. */
+export async function waitForCommandReply(bot: Pick<ContractSubject["bot"], "time">, arrived: () => boolean,
+  options: { observedTicks: number; stallMs: number; now?: () => number; sleep?: (ms: number) => Promise<void> }): Promise<void> {
+  const result = await waitForWorldAge(bot, options.observedTicks, { wallMs: Infinity, stallMs: options.stallMs,
+    until: arrived, now: options.now, sleep: options.sleep });
+  if (result !== "until") throw new Error(result === "stalled" ? "server stalled" : "reply missing");
+}
+
+export function createMeasureReader(subject: Pick<ContractSubject, "bot">, timing?: { responseWithinTicks: number; stallMs: number }): MeasureReader {
   const { bot } = subject;
   let batch = 0;
-  const readBatch = (number: number, commands: readonly ReadCommand[]): Promise<Reading[]> => {
+  const readBatch = async (number: number, commands: readonly ReadCommand[]): Promise<Reading[]> => {
     const prefix = `${LINE}${number} `;
-    return new Promise<Reading[]>((resolve, reject) => {
-      const onMessage = (text: string) => {
-        if (!text.startsWith(prefix)) return;
-        clearTimeout(timer);
-        bot.off("messagestr", onMessage as never);
-        const numbers = text.slice(prefix.length).trim().split(" ").map(Number);
-        resolve(commands.map((_, index) => ({ present: numbers[2 * index] === 1, raw: numbers[2 * index + 1] ?? 0 })));
-      };
-      const timer = setTimeout(() => {
-        bot.off("messagestr", onMessage as never);
-        reject(new Error(`measure batch ${number} (${commands[0]} ...): no answer after ${ANSWER_WALL_MS} ms (is the bot op? or the server stalled)`));
-      }, ANSWER_WALL_MS);
-      bot.on("messagestr", onMessage as never);
+    let answer: string | undefined;
+    const onMessage = (text: string) => {
+      if (text.startsWith(prefix)) answer = text.slice(prefix.length);
+    };
+    bot.on("messagestr", onMessage as never);
+    try {
       // Keys carry the bot's name: lanes share the server, and their commands interleave between a store and its tellraw.
       const key = (kind: "p" | "v", index: number) => `${kind}${index}_${bot.username}`;
       const extra = commands.flatMap((_, index) => [{ nbt: key("p", index), storage: STORAGE }, { text: " " }, { nbt: key("v", index), storage: STORAGE }, { text: " " }]);
@@ -90,7 +91,16 @@ export function createMeasureReader(subject: ContractSubject): MeasureReader {
         bot.chat(`/execute store success storage ${STORAGE} ${key("p", index)} int 1 store result storage ${STORAGE} ${key("v", index)} int 1 ${command}`);
       });
       bot.chat(`/tellraw @s ${JSON.stringify({ text: prefix, extra })}`);
-    });
+      await waitForCommandReply(bot, () => answer !== undefined, {
+        observedTicks: timing ? timing.responseWithinTicks + STALE_AGE_TICKS : SERVER_ANSWER_TICKS,
+        stallMs: timing?.stallMs ?? SERVER_CLOCK_STOPPED_MS,
+      });
+      const numbers = answer!.trim().split(/\s+/).map(Number);
+      if (numbers.length !== commands.length * 2 || numbers.some((value) => !Number.isFinite(value))) throw new Error(`measure batch ${number}: malformed reply ${answer}`);
+      return commands.map((_, index) => ({ present: numbers[2 * index] === 1, raw: numbers[2 * index + 1]! }));
+    } finally {
+      bot.off("messagestr", onMessage as never);
+    }
   };
   return {
     send: (command) => void bot.chat(`/${command}`),
