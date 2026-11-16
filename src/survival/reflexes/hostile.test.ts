@@ -863,8 +863,8 @@ test("damage below the hide threshold does not stop an already admitted escape",
   const navigate: NavigationRuntime["navigate"] = async ({ signal, stopSignal, timeoutMs }) => {
     assert.equal(stopSignal?.aborted, false, "only an incoming projectile can pause this route");
     assert.ok(
-      typeof timeoutMs === "number" && timeoutMs > 0 && timeoutMs <= 15_000,
-      "the route shares the existing emergency limit with guards",
+      typeof timeoutMs === "number" && timeoutMs > 0 && timeoutMs <= 45_000,
+      "the route shares the evade clock's wall (3x the 15 s of game time) with guards",
     );
     escaping = true;
     await new Promise<void>((resolve) => {

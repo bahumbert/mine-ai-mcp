@@ -39,6 +39,12 @@ export interface FakeClock extends StallClock {
   /** Timers (`after`, `every`, `sleep`) still waiting: a wait that is over leaves none. */
   pendingTimers(): number;
   /**
+   * `mocked` and installed: the global `setTimeout`/`setInterval` timers the code under test made that have neither fired
+   * (a timeout) nor been cleared; counted apart from `pendingTimers`. A subject that must leave no wall timer takes this
+   * before and after (T6): the clock's own timers do not see it.
+   */
+  pendingGlobalTimers(): number;
+  /**
    * `mocked` and installed only: move `Date.now()` by `deltaMs` and nothing else (not `performance.now`, `now()` or a
    * timer's due time), as WSL steps its wall clock under a running process. Steps add up; disposing undoes them.
    * `new Date()` is not moved (it reads the mock's own time): code under test reads `Date.now()` for a wall step.
@@ -102,11 +108,21 @@ function fireDueTimers(timers: Set<ClockTimer>, now: number): void {
   }
 }
 
-/** A mocked create function that also remembers each handle it returns: the handles a clear must send to the mock. */
-function recordMockHandles<Create extends (...args: never[]) => unknown>(createMocked: Create, mockHandles: Set<unknown>): Create {
-  return ((...args: unknown[]) => {
-    const handle = Reflect.apply(createMocked, globalThis, args);
+/** The global timers made while a clock is installed that have not fired (a timeout) or been cleared: `FakeClock.pendingGlobalTimers`. */
+const liveGlobalTimers = new Set<unknown>();
+
+/**
+ * A mocked create function that also remembers each handle it returns (the handles a clear must send to the mock) and
+ * keeps it in `liveGlobalTimers` until its callback has run (a timeout; an interval stays) or a clear removes it.
+ */
+function recordMockHandles<Create extends (...args: never[]) => unknown>(createMocked: Create, mockHandles: Set<unknown>, once: boolean): Create {
+  return ((callback: unknown, ...rest: unknown[]) => {
+    const wrapped = typeof callback === "function" && once
+      ? (...args: unknown[]) => { liveGlobalTimers.delete(handle); return Reflect.apply(callback, undefined, args); }
+      : callback;
+    const handle = Reflect.apply(createMocked, globalThis, [wrapped, ...rest]);
     mockHandles.add(handle);
+    liveGlobalTimers.add(handle);
     return handle;
   }) as unknown as Create;
 }
@@ -114,6 +130,7 @@ function recordMockHandles<Create extends (...args: never[]) => unknown>(createM
 /** A clear that sends a handle the mock created to the mock's clear, and any other handle (a real timer made before the install) to the real one. */
 function clearByHandleOrigin<Clear extends (handle: never) => void>(clearMocked: Clear, clearReal: Clear, mockHandles: Set<unknown>): Clear {
   return ((handle: unknown) => {
+    liveGlobalTimers.delete(handle);
     if (mockHandles.has(handle)) Reflect.apply(clearMocked, globalThis, [handle]);
     else Reflect.apply(clearReal, globalThis, [handle]);
   }) as unknown as Clear;
@@ -130,12 +147,14 @@ function installGlobals(now: () => number): () => void {
   mock.timers.enable({ apis: [...MOCKED_APIS], now: now() });
   performance.now = now;
   const mockHandles = new Set<unknown>();
-  globalThis.setTimeout = recordMockHandles(globalThis.setTimeout, mockHandles);
-  globalThis.setInterval = recordMockHandles(globalThis.setInterval, mockHandles);
+  liveGlobalTimers.clear();
+  globalThis.setTimeout = recordMockHandles(globalThis.setTimeout, mockHandles, true);
+  globalThis.setInterval = recordMockHandles(globalThis.setInterval, mockHandles, false);
   globalThis.clearTimeout = clearByHandleOrigin(globalThis.clearTimeout, realTimers.clearTimeout, mockHandles);
   globalThis.clearInterval = clearByHandleOrigin(globalThis.clearInterval, realTimers.clearInterval, mockHandles);
   return () => {
     mock.timers.reset();
+    liveGlobalTimers.clear();
     performance.now = realPerformanceNow;
     // Guard: `reset()` already gives back the four functions on Bun 1.4.2, but the wrapper must not outlive the install.
     globalThis.setTimeout = realTimers.setTimeout;
@@ -200,7 +219,7 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
       stages[stage].add(step);
       return () => void stages[stage].delete(step);
     },
-    pendingTimers: () => timers.size,
+    pendingTimers: () => timers.size, pendingGlobalTimers: () => liveGlobalTimers.size,
     stepWallClock(deltaMs) {
       if (options.mode !== "mocked") throw new Error("a manual fake clock has no Date to step: create it with mode mocked");
       if (!ownsGlobals) throw new Error("this fake clock is not installed: install it (`using installed = clock.install()`) before stepping its wall clock");

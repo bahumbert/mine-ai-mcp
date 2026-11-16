@@ -110,6 +110,25 @@ test("an aborted sleep rejects with the signal's reason and leaves no timer", as
   assert.equal(clock.pendingTimers(), 0);
 });
 
+test("pendingGlobalTimers counts the global timeouts and intervals of the code under test until each fires or is cleared", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  const cleared = setTimeout(() => undefined, 1_000);
+  const fired: number[] = [];
+  setTimeout((value: number) => { fired.push(value); }, 500, 7);
+  const interval = setInterval(() => undefined, 300);
+  assert.equal(clock.pendingGlobalTimers(), 3);
+  clearTimeout(cleared);
+  assert.equal(clock.pendingGlobalTimers(), 2);
+  await clock.advance(600);
+  assert.deepEqual(fired, [7], "a wrapped callback still gets its arguments");
+  assert.equal(clock.pendingGlobalTimers(), 1, "a fired timeout is no longer pending; an interval stays until cleared");
+  clearInterval(interval);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  assert.equal(clock.pendingTimers(), 0, "the clock's own timers are counted apart");
+});
+
 for (const [how, installFirst] of [["the test", (clock: FakeClock) => clock.install()], ["a shared helper for the test", installClockForTest]] as const) {
   test(`a second install while a clock is installed throws, naming the test that installed the first (${how} called install)`, () => {
     using _installed = installFirst(createFakeClock({ mode: "mocked" }));

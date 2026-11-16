@@ -22,6 +22,7 @@ function reachInput(overrides: Partial<ReachInput> = {}): ReachInput {
     botPosition: new Vec3(17, 64, 0),
     ageNow: 40,
     ageMovedAtMs: 2_000,
+    staleAfterMs: 1_500,
     nowMs: 2_000,
     exposed: () => true,
     shotInWindow: false,
@@ -96,32 +97,42 @@ for (const observed of [false, true]) {
   });
 }
 
-test("stale or incomplete world-age windows give no early basis", () => {
-  const cases: readonly [string, Partial<ReachInput>][] = [
-    ["a stall after a full window", { ageMovedAtMs: 0 }],
-    ["a missing world age", { ageMovedAtMs: null }],
-    ["an old newest sample", { ageNow: 60 }],
-    ["fewer than three samples", { samples: [samplesOf()[0]!, samplesOf()[2]!] }],
-    ["less than forty ticks", { samples: samplesOf().map((sample) => ({ ...sample, age: 20 + sample.age / 2 })) }],
+// The freshness limit is the caller's, measured from the server's own packet cadence: 30 ticks = 1 500 ms at 20 tps, 3 000 ms at 10, 4 500 backstop.
+const FRESHNESS_LIMITS = [1_500, 3_000, 4_500] as const;
+
+test("stale or incomplete world-age windows give no early basis, whatever the freshness limit", () => {
+  const cases: readonly [string, Partial<ReachInput>, readonly number[]][] = [
+    // At nowMs 2 000 an age that last moved at 0 is stale only for the 1 500 ms limit.
+    ["a stall after a full window", { ageMovedAtMs: 0 }, [1_500]],
+    ["a missing world age", { ageMovedAtMs: null }, FRESHNESS_LIMITS],
+    ["an old newest sample", { ageNow: 60 }, FRESHNESS_LIMITS],
+    ["fewer than three samples", { samples: [samplesOf()[0]!, samplesOf()[2]!] }, FRESHNESS_LIMITS],
+    ["less than forty ticks", { samples: samplesOf().map((sample) => ({ ...sample, age: 20 + sample.age / 2 })) }, FRESHNESS_LIMITS],
   ];
-  for (const [label, overrides] of cases) {
-    const verdict = judgeReach(reachInput(overrides));
-    assert.equal(verdict.basis, null, label);
-    assert.equal(verdict.advancing, null, label);
+  for (const [label, overrides, limits] of cases) for (const staleAfterMs of limits) {
+    const verdict = judgeReach(reachInput({ ...overrides, staleAfterMs }));
+    assert.equal(verdict.basis, null, `${label} at ${staleAfterMs}`);
+    assert.equal(verdict.advancing, null, `${label} at ${staleAfterMs}`);
   }
 });
 
-test("the age freshness boundary and advance tolerance are inclusive", () => {
-  for (const [moved, basis, advancing] of [[1, "disengaged", false], [1.01, null, true]] as const) {
-    const verdict = judgeReach(reachInput({
-      ageMovedAtMs: 500,
-      samples: samplesOf([new Vec3(0, 64, 0), new Vec3(moved / 2, 64, 0), new Vec3(moved, 64, 0)]),
-    }));
-    assert.equal(verdict.basis, basis);
-    assert.equal(verdict.advancing, advancing);
-  }
-  assert.equal(judgeReach(reachInput({ ageMovedAtMs: 499 })).advancing, null);
-});
+for (const staleAfterMs of [1_500, 3_000]) {
+  test(`the age freshness boundary is inclusive at ${staleAfterMs} ms, and so is the advance tolerance`, () => {
+    // The age last moved exactly `staleAfterMs` before the judgement: fresh; one ms more: unknown.
+    const nowMs = 10_000;
+    const at = (agoMs: number, moved = 2) => judgeReach(reachInput({ staleAfterMs, nowMs, ageMovedAtMs: nowMs - agoMs,
+      samples: samplesOf([new Vec3(0, 64, 0), new Vec3(moved / 2, 64, 0), new Vec3(moved, 64, 0)]) }));
+    assert.equal(at(staleAfterMs - 1).advancing, true);
+    assert.equal(at(staleAfterMs).advancing, true);
+    assert.equal(at(staleAfterMs + 1).advancing, null);
+    assert.equal(at(staleAfterMs + 1).basis, null);
+    for (const [moved, basis, advancing] of [[1, "disengaged", false], [1.01, null, true]] as const) {
+      const verdict = at(staleAfterMs, moved);
+      assert.equal(verdict.basis, basis);
+      assert.equal(verdict.advancing, advancing);
+    }
+  });
+}
 
 test("only movement within the closing window determines whether pursuit stopped", () => {
   const samples = [

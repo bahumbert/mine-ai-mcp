@@ -72,7 +72,9 @@ export async function respondToHostileFromBoat(
         gained: distance - firstDistance, advancing: null,
         basis: killed.has(threat.id) ? "dead" as const : distance >= policy.combat.evade_safe_range ? "range" as const : null };
     });
-    return { ...common, response: "evade", startPosition, elapsedMs: monotonicNow() - startedAtMs, goalRefreshes: 0,
+    return { ...common, response: "evade", startPosition, elapsedMs: monotonicNow() - startedAtMs,
+      // The seated evade still counts real milliseconds (census ticket: a boat leg and its stop confirmation).
+      elapsedTicks: null, goalRefreshes: 0,
       ends, result: separated ? { kind: "separated" } : { kind: "exhausted", reason: observation } };
   }
   if (directive.kind === "deflect")

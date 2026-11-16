@@ -78,6 +78,7 @@ export function encounterReceipt(settlement: HostileSettlement) {
     ...(settlement.physical?.response === "evade" ? {
       ends: settlement.physical.ends.map((end) => ({ ...end })),
       startPosition: { ...settlement.physical.startPosition }, elapsedMs: settlement.physical.elapsedMs,
+      elapsedTicks: settlement.physical.elapsedTicks,
       goalRefreshes: settlement.physical.goalRefreshes,
       ...(settlement.kind === "completed" && settlement.physical.result.kind === "separated"
         ? { detail: evadeDetail(settlement.physical.ends) } : {}),

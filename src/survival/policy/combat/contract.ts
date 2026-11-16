@@ -64,7 +64,7 @@ export const combatPolicySchema = z.strictObject({
     .number()
     .int()
     .positive()
-    .describe("Milliseconds allowed for one emergency withdrawal, including projectile defence and route changes."),
+    .describe("Time allowed for one emergency withdrawal, including projectile defence and route changes. For the on-foot evade it is game time at 20 ticks a second (15 000 ms = 300 world ticks at any server speed), with a wall-clock backstop of 3x; the seated evade and the End's withdrawal still count real milliseconds."),
   evade_safe_range: z
     .number()
     .finite()

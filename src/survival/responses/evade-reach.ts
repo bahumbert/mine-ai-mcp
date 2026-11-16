@@ -30,7 +30,10 @@ export interface ReachVerdict {
 
 export const EVADE_CLOSING_WINDOW_TICKS = 40;
 export const EVADE_ADVANCE_TOLERANCE = 1.0;
-export const EVADE_AGE_STALE_MS = 1_500;
+/** Freshness of the world age: this many ticks at the server's own packet cadence (1 500 ms at 20 tps, 3 000 ms at 10)... */
+export const EVADE_AGE_STALE_TICKS = 30;
+/** ...and never more than this (3x the on-time value, as the evade's wall): a stopped or crawling server is unknown, not advancing. */
+export const EVADE_AGE_STALE_BACKSTOP_MS = 4_500;
 
 interface ReachInput {
   readonly threat: ReachThreat;
@@ -41,6 +44,8 @@ interface ReachInput {
   readonly botPosition: Vec3;
   readonly ageNow: number;
   readonly ageMovedAtMs: number | null;
+  /** The longest the age may stand still and still count as fresh, measured by the caller from the server's packet cadence. */
+  readonly staleAfterMs: number;
   readonly nowMs: number;
   readonly exposed: () => boolean;
   readonly shotInWindow: boolean;
@@ -49,7 +54,7 @@ interface ReachInput {
 
 /** Judge the threat's own displacement; a constant gap can still mean pursuit. */
 function threatAdvancing(input: ReachInput): boolean | null {
-  if (input.ageMovedAtMs === null || input.nowMs - input.ageMovedAtMs > EVADE_AGE_STALE_MS) return null;
+  if (input.ageMovedAtMs === null || input.nowMs - input.ageMovedAtMs > input.staleAfterMs) return null;
   const window = input.samples.filter((sample) => sample.age >= input.ageNow - EVADE_CLOSING_WINDOW_TICKS);
   const oldest = window[0];
   const newest = window.at(-1);

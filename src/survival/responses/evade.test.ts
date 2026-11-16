@@ -1,74 +1,15 @@
 import assert from "node:assert/strict";
-import test, { after } from "node:test";
+import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
-import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { observation } from "../../test-support/navigation.js";
-import type { Goal } from "../../navigation/index.js";
 import { completeResponse, describeResponse } from "../control/combat/settlement.js";
-import { CombatPerception } from "../perception/combat/observations.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
 import { EvadeObservation } from "./evade-observation.js";
-
-const EVADE_BUDGET_MS = 3_000;
-const ROUTE_MS = 1_000;
-const ZOMBIE = 7;
-
-/** Shared game clock and body, with navigation stopping only at its signal or timeout. */
-function reachFixture({ shooter = false, distance = 17, budget = 15_000, cover = false, ticksPerSecond = 20 } = {}) {
-  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
-    server: { ticksPerSecond },
-    position: new Vec3(0.5, 64, 0.5), groundY: 63,
-    entities: { 7: { name: shooter ? "skeleton" : "zombie", position: new Vec3(distance + 0.5, 64, 0.5) } } });
-  if (shooter) harness.bot.entities[7]!.equipment[0] = itemOf(harness.bot.registry, "bow", 1);
-  const world = new MemoryWorld();
-  for (let x = -40; x <= 80; x++) for (let z = -2; z <= 2; z++)
-    for (let y = 63; y <= 66; y++) world.load({ x, y, z }, { stateId: y === 63 ? 1 : 0 });
-  const wall = (present: boolean) => {
-    for (let y = 64; y <= 67; y++) for (let z = -2; z <= 2; z++)
-      harness.world.setCell(new Vec3(4, y, z), present ? "stone" : "air");
-  };
-  wall(cover);
-  const stops: string[] = [];
-  let routes = 0;
-  let goal: Goal | undefined;
-  const navigation: { world: MemoryWorld; navigate: NavigationRuntime["navigate"] } = { world, navigate: async ({ goal: received, signal, stopSignal, timeoutMs }) => {
-    goal = received;
-    routes++;
-    return await new Promise<{ status: "stopped"; reason: string; elapsedMs: number }>((resolve) => {
-      const started = harness.clock.now();
-      const finish = () => {
-        cancel();
-        stopSignal?.removeEventListener("abort", finish);
-        signal?.removeEventListener("abort", finish);
-        const reason = stopSignal?.aborted ? String(stopSignal.reason) : signal?.aborted ? String(signal.reason) : "navigation timeout";
-        stops.push(reason);
-        resolve({ status: "stopped", reason, elapsedMs: harness.clock.now() - started });
-      };
-      const cancel = harness.clock.after(timeoutMs ?? budget, finish);
-      stopSignal?.addEventListener("abort", finish, { once: true });
-      signal?.addEventListener("abort", finish, { once: true });
-      if (stopSignal?.aborted || signal?.aborted) finish();
-    });
-  } };
-  const perception = new CombatPerception(harness.bot);
-  after(() => perception[Symbol.dispose]());
-  const context = { ...combatTestContext(harness.bot), perception, policy: { ...DEFAULT_COMBAT_POLICY, evade_timeout_ms: budget } };
-  const request = { kind: "evade" as const, threats: [{ id: 7, name: shooter ? "skeleton" : "zombie",
-    position: { x: distance + 0.5, y: 64, z: 0.5 }, distance }], safeRange: 36, reason: "hurt" as const };
-  const run = (signal = new AbortController().signal) => harness.clock.settle(
-    evade(harness.bot, navigation as unknown as NavigationRuntime, request, context, harness.bot.health, signal), budget + 1_000);
-  const revision = () => {
-    assert.ok(goal);
-    const resolved = goal.resolve({ ...observation(), position: harness.bot.entity.position });
-    assert.equal(resolved.kind, "active");
-    return resolved.kind === "active" ? resolved.revision : "";
-  };
-  return { ...harness, navigation, context, request, stops, routes: () => routes, wall, run, revision };
-}
+import { EVADE_BUDGET_MS, evadeWallMs, judgements, leavesNothing, reachFixture, ROUTE_MS, ZOMBIE } from "./evade-fixture.test.js";
 
 for (const ticksPerSecond of [20, 10]) for (const mode of ["sub-block", "stops", "stale", "melee"] as const) {
   test(`${mode} threat updates cover at ${ticksPerSecond} tps`, async () => {
@@ -111,7 +52,8 @@ for (const ticksPerSecond of [20, 10]) for (const mode of ["sub-block", "stops",
       if (mode === "stops" || mode === "stale") moving = false;
       if (mode === "stale") fixture.server.stop();
       if (mode === "sub-block") cancel.abort();
-    }), fixture.clock.after((mode === "stale" ? 40 * tickMs + 2_100 : 100 * tickMs + 100), capture)];
+    // A stopped server's age is unknown 30 ticks of its own cadence after the last packet (1 500 ms at 20 tps, 3 000 at 10): look 500 ms past it.
+    }), fixture.clock.after((mode === "stale" ? 40 * tickMs + 100 + 30 * tickMs + 500 : 100 * tickMs + 100), capture)];
     let settlements = 0;
     let result: Awaited<ReturnType<typeof fixture.run>>;
     try { result = await fixture.run(cancel.signal).then((value) => { settlements++; return value; }); }
@@ -164,27 +106,19 @@ test("a shooter out of sight at the cover range ends the evade separated before 
 test("a melee threat that stops following ends the evade separated", async () => {
   const fixture = reachFixture();
   using _installed = fixture.clock.install();
+  const nothingLeft = leavesNothing(fixture);
   const result = await fixture.run();
   assert.equal(result.result.kind, "separated");
   assert.equal(result.ends[0]?.basis, "disengaged");
-  const receipt = describeResponse(completeResponse(result, new AbortController().signal));
-  assert.equal((receipt as Record<string, unknown>).elapsedMs, 2_000);
+  const receipt = describeResponse(completeResponse(result, new AbortController().signal)) as Record<string, unknown>;
+  assert.equal(receipt.elapsedMs, 2_000);
+  assert.equal(receipt.elapsedTicks, 40, "the receipt of the on-foot evade carries the ticks it spent");
+  assert.equal(result.elapsedTicks, 40);
   console.log("T6 sample receipt", JSON.stringify(receipt));
-  // The early stop must release its listeners so the next escape can own the body.
+  // The early stop must release its listeners and the clock's wall timer so the next escape can own the body.
+  await nothingLeft();
   fixture.bot.entities[7]!.position.x = 40.5;
   assert.equal((await fixture.run()).result.kind, "separated");
-});
-
-test("an equal-speed pursuer at the budget's end is exhausted with the numbers", async () => {
-  const fixture = reachFixture({ distance: 10, budget: 2_000 });
-  using _installed = fixture.clock.install();
-  fixture.bot.on("physicsTick", () => {
-    fixture.bot.entity.position.x += 0.2;
-    fixture.bot.entities[7]!.position.x = fixture.bot.entity.position.x - 10;
-  });
-  fixture.bot.entities[7]!.position.x = -9.5;
-  const result = await fixture.run();
-  assert.deepEqual(result.result, { kind: "exhausted", reason: "Emergency evade stopped without settled safe separation: navigation timeout; after 2.0 s zombie#7 is 10.0 blocks away (gained 0.0), still following." });
 });
 
 test("an arrow in flight keeps the evade going", async () => {
@@ -211,15 +145,29 @@ test("a shooter that hit the bot inside the closing window is not disengaged", a
   assert.notEqual(fixture.context.perception.read().find((threat) => threat.id === 7)?.lastShotTick, null);
 });
 
-test("the budget ends the evade when the world age stands still", async () => {
-  const fixture = reachFixture({ budget: 2_000 });
-  using _installed = fixture.clock.install();
-  fixture.server.stop();
-  const result = await fixture.run();
-  assert.equal(result.result.kind, "exhausted");
-  assert.equal(result.elapsedMs, 2_000);
-  assert.equal(result.ends[0]?.basis, null);
-});
+// The shot window counts world ticks of the age the bot heard (40 of them), not client ticks: at 10 tps 40 client ticks
+// are 20 server ticks, so a shooter between two shots read "no shot in the window" a second too early.
+for (const ticksPerSecond of [20, 10]) {
+  test(`a still shooter between shots keeps its window for 40 world ticks at ${ticksPerSecond} tps`, async () => {
+    const fixture = reachFixture({ shooter: true, distance: 17, ticksPerSecond });
+    using _installed = fixture.clock.install();
+    fixture.clock.after(1_000, () => fixture.combat.shootBot("arrow", 7, 1));
+    let shotAge: number | null = null;
+    // The arrow has landed by 2.5 s: its hit is the last shot, at the age heard then.
+    fixture.clock.after(2_500, () => { shotAge = fixture.context.perception.read().find((threat) => threat.id === 7)?.lastShotAge ?? null; });
+    const { value: result, judged } = await judgements(fixture, () => fixture.run());
+    assert.equal(fixture.bot.health, 19, "the attributed shot landed");
+    assert.ok(shotAge !== null, "the shot has an age");
+    const afterShot = judged.filter(({ at }) => at >= 2_500);
+    const inWindow = afterShot.filter(({ age }) => age <= shotAge! + 40);
+    assert.ok(inWindow.length > 0, "looks inside the window");
+    assert.deepEqual(inWindow.filter(({ basis }) => basis !== null), [], "no basis up to 40 world ticks after the shot");
+    const first = afterShot.find(({ basis }) => basis !== null)!;
+    assert.equal(first.basis, "disengaged");
+    assert.ok(first.age > shotAge! + 40 && first.age <= shotAge! + 40 + 20, `first basis at age ${first.age}, shot at ${shotAge}`);
+    assert.equal(result.result.kind, "separated");
+  });
+}
 
 test("the evade waits in cover for a hidden shooter", async () => {
   const fixture = reachFixture({ shooter: true, distance: 9, cover: true });
@@ -238,7 +186,7 @@ test("the evade waits in cover for a hidden shooter", async () => {
   assert.equal(fixture.bot.entity.position.x, -30.5);
 });
 
-for (const abort of [false, true]) test(`a cover wait releases its listeners when ${abort ? "cancelled" : "physics stops until its budget"}`, async () => {
+for (const abort of [false, true]) test(`a cover wait releases its listeners when ${abort ? "cancelled" : "physics and the server stop until the 3x wall"}`, async () => {
   const fixture = reachFixture({ shooter: true, distance: 9, cover: true, budget: 3_000 });
   using _installed = fixture.clock.install();
   fixture.navigation.navigate = async () => ({ status: "completed", elapsedMs: 0 });
@@ -253,7 +201,7 @@ for (const abort of [false, true]) test(`a cover wait releases its listeners whe
   assert.equal(result.result.kind, abort ? "failed" : "exhausted");
   if (!abort && result.result.kind === "exhausted")
     assert.ok(result.result.reason.startsWith("Emergency evade stopped without settled safe separation: navigation timeout;"));
-  assert.equal(result.elapsedMs, abort ? 500 : 3_000);
+  assert.equal(result.elapsedMs, abort ? 500 : evadeWallMs(3_000));
   assert.equal(fixture.bot.listenerCount("physicsTick"), listeners);
   assert.equal(fixture.clock.pendingTimers(), 0);
 });
@@ -358,56 +306,15 @@ async function secondRouteTimeoutAcrossWallStep(wallStepMs: number): Promise<num
   const threat = { id: ZOMBIE, name: "zombie", position: { x: 2.5, y: 64, z: 0.5 }, distance: 2 };
   await clock.settle(
     evade(bot, navigation, { kind: "evade", threats: [threat], safeRange: 36, reason: "hurt" }, context, bot.health, new AbortController().signal),
-    EVADE_BUDGET_MS + 5_000,
+    evadeWallMs(EVADE_BUDGET_MS) + 1_000,
   );
   return timeouts[1];
 }
 
+// The route's timeout is the evade clock's wall left (3x the budget's game time), read on the monotonic clock.
 for (const wallStepMs of [-800, 1_200]) {
-  test(`the evade budget counts monotonic time: a ${wallStepMs} ms wall step during the first route leaves 2000 ms`, async () => {
-    assert.equal(await secondRouteTimeoutAcrossWallStep(wallStepMs), EVADE_BUDGET_MS - ROUTE_MS);
+  test(`the evade wall counts monotonic time: a ${wallStepMs} ms wall step during the first route leaves 8000 ms of the 9000 ms wall`, async () => {
+    assert.equal(await secondRouteTimeoutAcrossWallStep(wallStepMs), evadeWallMs(EVADE_BUDGET_MS) - ROUTE_MS);
   });
 }
 
-/**
- * An evade whose settled body holds its shield against a fireball that never clears: the projectile guard ends at the
- * evade budget, though the wall clock steps by `wallStepMs` a second in. Returns the clock the evade ran.
- */
-async function evadeGuardedUntilBudgetAcrossWallStep(wallStepMs: number): Promise<number> {
-  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
-  const { bot, entities } = createFakeBot({
-    clock,
-    slots: { 45: { name: "shield" } },
-    entities: { [ZOMBIE]: { name: "zombie", position: new Vec3(2.5, 64, 0.5) } },
-  });
-  using _installed = clock.install();
-  clock.stepWallClock(5_000);
-  entities.spawn({ id: 8, name: "small_fireball", width: 0.3125, position: new Vec3(4, 64.9, 0.5), velocity: new Vec3(-0.5, 0, 0) });
-  clock.after(1_000, () => clock.stepWallClock(wallStepMs));
-  const world = new MemoryWorld();
-  for (let x = -6; x <= 6; x++)
-    for (let z = -6; z <= 6; z++) {
-      world.load({ x, y: 63, z }, { stateId: 1 });
-      world.load({ x, y: 64, z }, { stateId: 0 });
-      world.load({ x, y: 65, z }, { stateId: 0 });
-    }
-  const navigation = {
-    world,
-    navigate: async () => assert.fail("a settled body under fire guards before it routes"),
-  } as unknown as NavigationRuntime;
-  const context = { ...combatTestContext(bot), policy: { ...DEFAULT_COMBAT_POLICY, evade_timeout_ms: EVADE_BUDGET_MS } };
-  const threat = { id: ZOMBIE, name: "zombie", position: { x: 2.5, y: 64, z: 0.5 }, distance: 2 };
-  const started = clock.now();
-  await clock.settle(
-    evade(bot, navigation, { kind: "evade", threats: [threat], safeRange: 36, reason: "hurt" }, context, bot.health, new AbortController().signal),
-    20_000,
-  );
-  return clock.now() - started;
-}
-
-for (const wallStepMs of [-800, 1_200]) {
-  test(`the retreat guard ends at the evade budget: a ${wallStepMs} ms wall step during the guard leaves it at 3 s`, async () => {
-    const ranMs = await evadeGuardedUntilBudgetAcrossWallStep(wallStepMs);
-    assert.ok(ranMs >= EVADE_BUDGET_MS && ranMs < EVADE_BUDGET_MS + 200, `the evade ran ${ranMs} ms of clock, not its ${EVADE_BUDGET_MS} ms budget`);
-  });
-}

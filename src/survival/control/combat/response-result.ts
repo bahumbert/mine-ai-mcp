@@ -42,6 +42,8 @@ export interface EvadeThreatEnd {
 export type EvadeResponseResult = EncounterEvidence & {
   readonly response: "evade";
   readonly elapsedMs: number;
+  /** Server ticks the on-foot evade spent (its budget is 300); null before any world age was heard and for the seated evade. */
+  readonly elapsedTicks: number | null;
   readonly startPosition: Position3;
   readonly goalRefreshes: number;
   readonly ends: readonly EvadeThreatEnd[];

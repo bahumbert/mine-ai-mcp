@@ -238,6 +238,8 @@ for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
       if (settlement.physical?.response === "evade") {
         assert.equal(settlement.physical.goalRefreshes, 0);
         assert.ok(settlement.physical.elapsedMs > 0);
+        assert.equal(settlement.physical.elapsedTicks, null, "the seated evade still counts real milliseconds");
+        assert.equal((describeResponse(settlement) as Record<string, unknown>).elapsedTicks, null, "its receipt says so too");
         assert.ok(Number.isFinite(settlement.physical.startPosition.x));
         assert.equal(settlement.physical.ends[0]?.basis, "dead");
       }

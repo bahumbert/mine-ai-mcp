@@ -235,19 +235,24 @@ for (const offCenter of [false, true]) test(`three blocked passes leave a named 
   assert.doesNotMatch(result.error ?? "", /not finished within/);
   assert.equal(result.capped, true, "other cells are completed despite the blocked wall");
   assert.equal(enclosedInPlace(bot), false);
+  // Read after the call: an assertion inside this double would be caught by the evade as its failure, which also blocks recovery.
+  const routeTimeouts: number[] = [];
   const navigation = {
     world: new MemoryWorld(),
     navigate: async ({ timeoutMs }: { timeoutMs: number }) => {
-      assert.ok(timeoutMs <= context.policy.evade_timeout_ms);
+      routeTimeouts.push(timeoutMs);
       return { status: "stopped", reason: "withdrawal route unavailable", elapsedMs: 0 };
     },
   } as unknown as NavigationRuntime;
   const responses: unknown[] = [];
   const started = clock.now();
   const next = await clock.settle(recoverCombatHealth(bot, navigation, context, new AbortController().signal,
-    (facts) => responses.push(facts)), context.policy.recovery_timeout_ms + context.policy.evade_timeout_ms);
+    (facts) => responses.push(facts)), context.policy.recovery_timeout_ms + 3 * context.policy.evade_timeout_ms);
   assert.equal(next.kind, "blocked");
+  assert.deepEqual(routeTimeouts.length, 1, "the withdrawal route was asked for");
+  assert.ok(routeTimeouts[0]! <= 3 * context.policy.evade_timeout_ms, "its timeout is the evade clock's wall: 3x the budget's game time");
   assert.match(JSON.stringify(responses), /evade/);
-  assert.ok(clock.now() - started < context.policy.recovery_timeout_ms + context.policy.evade_timeout_ms);
+  assert.match(next.kind === "blocked" ? next.observation : "", /withdrawal route unavailable/, "the evade ended on the route's own answer, not on an assertion failure");
+  assert.ok(clock.now() - started < context.policy.recovery_timeout_ms + 3 * context.policy.evade_timeout_ms);
   assert.equal(bot.usingHeldItem, false);
 });

@@ -77,6 +77,41 @@ test("perception caches exposure per tick, retains a distant actual attacker and
   assert.equal(bot._client.listenerCount("spawn_entity"), 0);
 });
 
+// The two ways a shooter's shot is observed: an arrow's hit (`damage_event`: the fake attributes an arrow when it lands, 11 ticks
+// from 17 blocks at 1.6 a tick = 550 ms, before the next time packet at ~1 s) and a blaze's own small fireball spawn
+// (`spawn_entity` with the blaze as `objectData`, the one projectile spawn that names its owner: `projectile-spawn.ts`).
+const SHOT_SOURCES = [
+  { name: "an arrow's hit", shooter: "skeleton",
+    fire: async ({ combat, clock }: ReturnType<typeof createFakeBot>) => { combat.shootBot("arrow", 2, 1); await clock.advance(700); } },
+  { name: "a blaze's small fireball spawn", shooter: "blaze",
+    fire: async ({ bot, clock }: ReturnType<typeof createFakeBot>) => {
+      bot._client.emit("spawn_entity", { entityId: 90, type: bot.registry.entitiesByName.small_fireball!.id, objectData: 2,
+        velocity: { x: 0, y: 0, z: -8000 } });
+      await clock.advance(50);
+    } },
+] as const;
+for (const source of SHOT_SOURCES) for (const heard of [true, false]) {
+  test(`${source.name} records the world age the bot ${heard ? "heard when it was observed" : "had heard: none, so null, with the tick kept"}`, async () => {
+    const world = createFakeBot({
+      position: { x: 0, y: 64, z: 0 }, server: { timePacketYet: heard },
+      entities: { 2: { name: source.shooter, position: { x: 0, y: 64, z: -17 } } },
+    });
+    using perception = new CombatPerception(world.bot);
+    const shot = () => perception.read().find((threat) => threat.id === 2)!;
+    assert.equal(shot().lastShotAge, null, "no shot yet");
+    assert.equal(shot().lastShotTick, null);
+    const first = world.bot.time.age;
+    await source.fire(world);
+    assert.notEqual(shot().lastShotTick, null, "the shot was observed");
+    assert.equal(shot().lastShotAge, heard ? first : null, "the age heard then");
+    if (!heard) return;
+    await world.clock.advance(1_300);
+    assert.ok(world.bot.time.age! > first!, "the world age moved on");
+    await source.fire(world);
+    assert.equal(shot().lastShotAge, world.bot.time.age, "the next shot is at the age heard then");
+  });
+}
+
 test("Enderman attack attribution follows the observed victim, not its anger flag", async () => {
   const { bot, combat: scene, clock } = createFakeBot({
     entities: {

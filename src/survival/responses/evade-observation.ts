@@ -9,6 +9,7 @@ import { positionThreat } from "../perception/combat/observations.js";
 import { observeExposedAvoidanceContact } from "../perception/combat/threats.js";
 import type { HostileThreat } from "../policy/combat/response.js";
 import { positionExposed } from "../positioning/combat/exposure.js";
+import type { EvadeClock } from "./evade-clock.js";
 import { EVADE_CLOSING_WINDOW_TICKS, judgeReach, ReachHistory, type ReachThreat } from "./evade-reach.js";
 
 const EVADE_ARRIVAL_MARGIN = 8;
@@ -29,14 +30,13 @@ export class EvadeObservation {
   readonly #entries = new Map<number, Entry>();
   readonly #dead = new Set<number>();
   readonly #history = new ReachHistory();
-  #age: number | null = null;
-  #ageMovedAtMs: number | null = null;
   #snapshot = new Map<number, ReachThreat & { advancing: boolean | null }>();
   goal!: Goal;
   goalRefreshes = 0;
 
+  /** `clock` tells when the world age last moved and how long it may stand still (the server's own packet cadence). */
   constructor(readonly bot: Bot, readonly context: ResponseContext,
-    threats: readonly HostileThreat[], readonly safeRange: number) {
+    threats: readonly HostileThreat[], readonly safeRange: number, readonly clock: EvadeClock) {
     this.startPosition = { ...bot.entity.position };
     for (const threat of threats) this.#add(threat, "decision");
     this.observe();
@@ -58,7 +58,6 @@ export class EvadeObservation {
     const { bot } = this;
     const now = monotonicNow();
     const age = bot.time.age;
-    if (typeof age === "number" && age !== this.#age) { this.#age = age; this.#ageMovedAtMs = now; }
     for (const [id, entry] of this.#entries) {
       if (this.#dead.has(id)) continue;
       const entity = bot.entities[id];
@@ -112,12 +111,14 @@ export class EvadeObservation {
     const observations = context.perception.read();
     return [...this.#entries].map(([id, entry]) => {
       const distance = entry.body.position.distanceTo(bot.entity.position);
-      const shot = observations.find((threat) => threat.id === id)?.lastShotTick ?? null;
+      const shotAge = observations.find((threat) => threat.id === id)?.lastShotAge ?? null;
       const verdict = judgeReach({ threat: entry.body, dead: this.#dead.has(id), observed: !!bot.entities[id]?.isValid,
         distance, samples: this.#history.samples(id), botPosition: bot.entity.position, ageNow: bot.time.age,
-        ageMovedAtMs: this.#ageMovedAtMs, nowMs: monotonicNow(),
+        ageMovedAtMs: this.clock.ageMovedAtMs(), staleAfterMs: this.clock.staleAfterMs(), nowMs: monotonicNow(),
         exposed: () => positionExposed(bot.world, bot.entity, entry.body),
-        shotInWindow: shot !== null && context.perception.tick - shot <= EVADE_CLOSING_WINDOW_TICKS,
+        // World ticks, not client ticks: a 10 tps server spreads 40 client ticks over 20 of its own. The age is the cached one
+        // (0-19 ticks behind the server at any rate), so the window is 40-59 server ticks.
+        shotInWindow: shotAge !== null && typeof bot.time.age === "number" && bot.time.age - shotAge <= EVADE_CLOSING_WINDOW_TICKS,
         policy: { ...context.policy, evade_safe_range: this.safeRange } });
       return { ...verdict, firstDistance: entry.firstDistance, firstSeen: entry.firstSeen, gained: distance - entry.firstDistance };
     });

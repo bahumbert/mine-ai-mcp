@@ -148,6 +148,8 @@ export interface ObservedThreat extends PositionThreat {
   readonly firstShotInTicks: number | null;
   readonly lastSeenTick: number | null;
   readonly lastShotTick: number | null;
+  /** The world age the bot had heard when that shot was observed; null with no shot or no age heard. */
+  readonly lastShotAge: number | null;
   readonly phase: "winding_up" | "shot_observed" | "unknown";
   /** Hand to hand, this one can hurt the bot with its next action. */
   readonly meleeImminent: boolean;
@@ -162,7 +164,8 @@ export class CombatPerception implements Disposable {
   readonly attackerIds = new Set<number>();
   readonly #owners = new Map<number, number>();
   readonly #lastSeen = new Map<number, number>();
-  readonly #lastShot = new Map<number, number>();
+  /** The client tick and the world age the bot had heard (null with none) when each shooter's last shot was observed. */
+  readonly #lastShot = new Map<number, { readonly tick: number; readonly age: number | null }>();
   readonly #charges = new Map<number, { entity: Entity; charged: boolean | null; startedAt: number | null }>();
   #tick = 0;
   #snapshot: readonly ObservedThreat[] | null = null;
@@ -215,7 +218,7 @@ export class CombatPerception implements Disposable {
       if (!spawn) return;
       if (spawn.ownerId !== null) {
         this.#owners.set(spawn.projectileId, spawn.ownerId);
-        this.#lastShot.set(spawn.ownerId, this.#tick);
+        this.#rememberShot(spawn.ownerId);
       }
       // Remove when Mineflayer retains the 1.21.4 spawn packet's initial velocity.
       bot.entities[spawn.projectileId]?.velocity.update(spawn.velocity);
@@ -252,9 +255,15 @@ export class CombatPerception implements Disposable {
   private recordProjectileHit(packet: unknown): void {
     const shooter = readProjectileHit(this.bot, packet);
     if (shooter === null) return;
-    this.#lastShot.set(shooter, this.#tick);
+    this.#rememberShot(shooter);
     this.#snapshot = null;
     this.#incoming = null;
+  }
+
+  /** The tick counts client physics; the age counts the server's own ticks, which a slow server spreads out (evade shot window). */
+  #rememberShot(shooterId: number): void {
+    const age = this.bot.time?.age;
+    this.#lastShot.set(shooterId, { tick: this.#tick, age: typeof age === "number" ? age : null });
   }
 
   /** The measured cost of this entity's hits to this bot, forgotten with the body or life. */
@@ -304,7 +313,8 @@ export class CombatPerception implements Disposable {
         const offset = entity.position.minus(this.bot.entity.position);
         const angle = Math.atan2(-offset.x, -offset.z) - this.bot.entity.yaw;
         const windingUp = isWindingUp(this.bot, entity);
-        const lastShotTick = this.#lastShot.get(entity.id) ?? null;
+        const lastShot = this.#lastShot.get(entity.id);
+        const lastShotTick = lastShot?.tick ?? null;
         const seenTick = () => {
           visible();
           return this.#lastSeen.get(entity.id) ?? null;
@@ -323,6 +333,7 @@ export class CombatPerception implements Disposable {
             return seenTick();
           },
           lastShotTick,
+          lastShotAge: lastShot?.age ?? null,
           meleeImminent: meleeImminent(this.bot, entity),
           // Without sight a blaze can retain its charge indefinitely. No inferred cooldown promise.
           phase: windingUp ? "winding_up" : lastShotTick === this.#tick ? "shot_observed" : "unknown",
