@@ -1,6 +1,7 @@
 import type { Activity } from "./activities.ts";
 import { describeStep, type Step } from "./actions.ts";
 import type { Materials, Site } from "./building/plan.ts";
+import type { Variants } from "./building/blueprint.ts";
 import type { Body } from "./body.ts";
 import type { KnownPlace, SignLinesInput } from "./mind.ts";
 import type { ClaimResult } from "./skills/claim-sign.ts";
@@ -90,6 +91,8 @@ export interface UnfinishedHouse {
   readonly prepared?: boolean;
   /** The roles built with other blocks than the style's (an older note has none: as the style). */
   readonly materials?: Materials;
+  /** Remembered substitute shapes; an older note without them keeps full blocks. */
+  readonly shapes?: Variants;
   /**
    * The cells the runtime refused in the last run that stopped on them (an older note has none). A refusal is often
    * transient (an animal in the cell, a route that timed out), so the house is kept; it is given up only when a

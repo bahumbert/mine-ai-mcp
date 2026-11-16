@@ -2,7 +2,7 @@
 import type { Step } from "../actions.ts";
 import { isCanopy } from "../block-kinds.ts";
 import { describeMaterials, shortfall } from "../building/blueprint.ts";
-import { checkMaterials } from "../building/materials.ts";
+import { checkMaterials, shapesForMaterials } from "../building/materials.ts";
 import { builderStand, chooseSite, planHouse, siteAt, styleOrDefault, type HousePlan, type Site } from "../building/plan.ts";
 import type { HouseSize } from "../building/house.ts";
 import { levelBox } from "../building/terrain.ts";
@@ -46,7 +46,8 @@ export async function build(context: SkillContext, step: Extract<Step, { skill: 
     const refusal = checkMaterials(materials, style, await context.runtime.blockKinds(Object.values(materials).filter((block) => block !== "air")));
     if (refusal !== null) return { status: "failed", detail: `cannot build ${what} with those materials: ${refusal}` };
   }
-  const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)), materials);
+  const shapes = resumed === null ? shapesForMaterials(style, materials) : resumed.shapes ?? {};
+  const plan = planHouse(style, step.size, resumed?.site ?? (at === null ? chooseSite(snapshot.position, toward) : siteAt(at, toward)), materials, shapes);
   if (resumed === null) {
     // A new site clear of every protected area before anything is protected or dug, and if not, where the nearest
     // clear one is (live 2026-10-03: told only "choose another zone clear of it", she stepped one block at a time,
@@ -138,7 +139,7 @@ async function buildOnSite(context: SkillContext, sitePlan: SitePlan): Promise<S
   noteArea(context, protection.area);
   let claimRecord = resumed?.claim;
   const leaveUnfinished = (part: number, prepared = true, refused = resumed?.refused) => {
-    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...identity, ...(claimRecord !== undefined && { claim: claimRecord }), ...(refused !== undefined && refused.length > 0 && { refused }) };
+    if (context.building !== undefined) context.building.unfinished = { kind, site: plan.site, part, prepared, materials: plan.materials, ...(Object.keys(plan.shapes).length > 0 && { shapes: plan.shapes }), ...identity, ...(claimRecord !== undefined && { claim: claimRecord }), ...(refused !== undefined && refused.length > 0 && { refused }) };
   };
   // The site first, the first time only: everything above the floor in the house's box dug, holes under it filled, so
   // no part meets terrain, water or loose stone (live 2026-10-01/02).
@@ -176,7 +177,7 @@ async function buildOnSite(context: SkillContext, sitePlan: SitePlan): Promise<S
     name: `the ${kind} you built${own ? "" : ` for ${identity.owner ?? context.requester}`}`,
     detail: `door ${door.x} ${door.y} ${door.z} facing ${facing}; stand on its roof at ${roof.x} ${roof.y} ${roof.z}`,
     ...(own && { own: true }),
-    house: { size: step.size, style: style.id, door, facing, materials: plan.materials, ...identity, ...(claimRecord !== undefined && { claim: claimRecord }) },
+    house: { size: step.size, style: style.id, door, facing, materials: plan.materials, ...(Object.keys(plan.shapes).length > 0 && { shapes: plan.shapes }), ...identity, ...(claimRecord !== undefined && { claim: claimRecord }) },
   });
   return { status: "done", detail: `built ${what}, door at ${door.x} ${door.y} ${door.z} facing ${facing}${claimClause(claim, identity.owner)}` };
 }

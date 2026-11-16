@@ -207,7 +207,7 @@ export class StepRunner {
   /** The carried items its work needs: tools, armour, stations, foods, the unfinished house's bill and what the objective is out to get. */
   private neededFor(snapshot: Pick<BotSnapshot, "inventory" | "foods">, work: Work): Set<string> {
     const house = this.host.memory.building.unfinished;
-    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.host.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
+    const houseBill = house === null ? [] : planHouse(styleOrDefault(this.host.options.persona.style), (house.kind.split(" ")[0] ?? "small") as HouseSize, house.site, house.materials ?? {}, house.shapes ?? {}).bill.map((entry) => entry.item);
     const needed = this.host.neededWork(work);
     return neededItems(snapshot, { houseBill, wanted: needed.wanted, objective: needed.objective.text });
   }

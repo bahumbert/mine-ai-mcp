@@ -1,6 +1,6 @@
 import type { Step } from "./actions.ts";
 import type { Activity } from "./activities.ts";
-import type { Facing } from "./building/blueprint.ts";
+import type { Facing, Variants } from "./building/blueprint.ts";
 import type { HouseSize } from "./building/house.ts";
 import type { Materials } from "./building/plan.ts";
 import type { ActivityChance } from "./activity-draw.ts";
@@ -57,6 +57,8 @@ export interface KnownPlace {
     readonly door: Position;
     readonly facing: Facing;
     readonly materials: Materials;
+    /** Substitute stairs and slabs, saved at build time; older notes keep full blocks. */
+    readonly shapes?: Variants;
     readonly owner?: string;
     readonly dimension?: string;
     readonly claim?: NonNullable<ClaimResult["claim"]>;

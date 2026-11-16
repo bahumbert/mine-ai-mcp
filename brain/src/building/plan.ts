@@ -1,4 +1,4 @@
-import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type Variants, type WorldCell } from "./blueprint.ts";
 import { house, HOUSE_SIZES, type HouseSize } from "./house.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 
@@ -47,6 +47,8 @@ export interface HousePlan {
   readonly site: Site;
   /** The roles built with other blocks than the style's; empty for a house as the style. */
   readonly materials: Materials;
+  /** The remembered stairs and slabs of substituted roles; absent in legacy notes, which use full blocks. */
+  readonly shapes: Variants;
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
@@ -66,18 +68,19 @@ export function styleOrDefault(name: string | undefined): Style {
 export type Materials = Partial<Record<BlockRole, string>>;
 
 /**
- * The house for `style` at `site`. `materials` names other blocks for some roles; those roles are built with full
- * blocks (the style's stairs and slabs belong to its own block), and ask no log axis either (live 2026-10-10:
+ * The house for `style` at `site`. Substituted roles use their remembered `shapes`, or full blocks without them,
+ * and ask no log axis either (live 2026-10-10:
  * cobblestone pillars asked an axis cobblestone has, so the audit never saw them right). A role named with the style's
  * own block is the style's.
  */
-export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}): HousePlan {
+export function planHouse(style: Style, size: HouseSize, site: Site, materials: Materials = {}, shapes: Variants = {}): HousePlan {
   const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => style.palette[role as BlockRole] !== block)) as Materials;
-  const variants = Object.fromEntries(Object.entries(style.variants ?? {}).filter(([role]) => other[role as BlockRole] === undefined));
+  const remembered = Object.fromEntries(Object.entries(shapes).filter(([role, variants]) => other[role as BlockRole] !== undefined && Object.keys(variants).length > 0));
+  const variants = { ...Object.fromEntries(Object.entries(style.variants ?? {}).filter(([role]) => other[role as BlockRole] === undefined)), ...remembered };
   const blueprint = house({ ...HOUSE_SIZES[size], ...style.house });
   const cells = placeBlueprint(blueprint, { ...style.palette, ...other }, site.door, site.facing, variants)
     .map((cell) => cell.axis === undefined || other[cell.role as BlockRole] === undefined ? cell : (({ axis: _axis, ...rest }) => rest)(cell));
-  return { style, size, site, materials: other, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), sign: placeSign(blueprint, site.door, site.facing), roofTop: roofTop(cells) };
+  return { style, size, site, materials: other, shapes: remembered, cells, bill: billOfMaterials(cells), batches: buildBatches(cells), sign: placeSign(blueprint, site.door, site.facing), roofTop: roofTop(cells) };
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof). */
