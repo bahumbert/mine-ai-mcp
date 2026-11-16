@@ -13,6 +13,7 @@ export const PROMPT_BUDGET: Readonly<Record<MindTier, number>> = {
   work: 6000,
   goal: 6000,
   narrate: 6000,
+  sign: 6000,
 };
 
 /** Window kept for the reply, its thinking and up to six repair rounds (measured growth max 874 tokens). */

@@ -10,6 +10,7 @@ export interface ChatReply {
   readonly text: string;
   /** Tokens the server read from the prompt (`usage.prompt_tokens`); null when it does not say. */
   readonly promptTokens: number | null;
+  readonly replyTokens?: number | null;
   /** The context window the model ran with: configured, or read from Ollama; null when unknown. */
   readonly contextTokens: number | null;
 }
@@ -62,7 +63,7 @@ export interface OpenAiCompatibleConfig {
 
 const completionSchema = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string().nullable() }) })).min(1),
-  usage: z.object({ prompt_tokens: z.number().int().nonnegative() }).partial().nullish(),
+  usage: z.object({ prompt_tokens: z.number().int().nonnegative(), completion_tokens: z.number().int().nonnegative() }).partial().nullish(),
 });
 
 const ollamaRunningSchema = z.object({
@@ -120,6 +121,7 @@ export class OpenAiCompatibleModel implements ChatModel {
     return {
       text: completion.choices[0]?.message.content ?? "",
       promptTokens: completion.usage?.prompt_tokens ?? null,
+      ...(completion.usage?.completion_tokens === undefined ? {} : { replyTokens: completion.usage.completion_tokens }),
       contextTokens: this.contextTokens,
     };
   }

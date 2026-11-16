@@ -1,14 +1,16 @@
 import { z } from "zod";
-import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
+import { describeStep, describeStepError, skillUsage, stepKey, stepSchema } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import type { ChatModel, ChatTurn } from "./chat-model.ts";
 import type { MindTier, ModelCall, PromptBudgetUse } from "./brain-log.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type GoalInput, type Mind, type NarrateInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type GoalInput, type Mind, type NarrateInput, type SignLinesInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import { budgetFor, fitPrompt, ModelCalibration, type PromptPart } from "./prompt-budget.ts";
 import { goalParts, historyPart, narrateParts, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
+import { extractJsonObject, signFlipped } from "./model-reply-checks.ts";
+export { extractJsonObject } from "./model-reply-checks.ts";
 
 /** A disposition, not a rule: what the character does with a request stays its own call (Rule #0). */
 const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
@@ -95,17 +97,27 @@ export class LlmMind implements Mind {
   /** What each model has shown about its tokens and window: the budget of its next call is fitted to it. */
   private readonly calibration = new ModelCalibration();
 
+  async signLines(input: SignLinesInput, signal: AbortSignal): Promise<string[]> {
+    const prompt = `You put a sign beside the door of ${JSON.stringify(input.what)}; its first line already says ${JSON.stringify(input.owner)}. Write up to three short lines for the rest, in character. The sign is public: never coordinates, stocks or anything private. Each line must be at most ${input.persona.settings.signLineChars} characters.`;
+    return this.ask("sign", this.models.chat, signLinesSystemPrompt(input.persona), [{ key: "occasion", maxLevel: 0, render: () => prompt }], signal, (json) => {
+      const lines = z.object({ lines: z.array(z.string()) }).parse(json).lines;
+      const invalid = lines.length > 3 || lines.some((line) => line.length > input.persona.settings.signLineChars || /[\r\n]|(?:^|\D)-?\d+\s+-?\d+\s+-?\d+(?:\D|$)/u.test(line));
+      if (!invalid) return lines;
+      throw new SendBack("Use at most three short lines, without line breaks or coordinates");
+    }, []);
+  }
+
   /**
    * One call: the parts fitted to the tier's budget (cut to the model's window, estimated at its own characters per
    * token), sent as one text that every repair round repeats; the first reply teaches the calibration.
    */
-  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
+  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown) => T, badReplyFallback?: T): Promise<T> {
     const tokens = budgetFor(tier, this.calibration.window(model.name));
     const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], tokens, this.calibration.charsPerToken(model.name));
     const budget: PromptBudgetUse = { tokens, estimated: fitted.estimated, shrunk: fitted.shrunk, overBudget: fitted.overBudget };
     const condition = parts.find((part) => part.key === "condition")?.render(0);
     const learn = (promptTokens: number | null, contextTokens: number | null) => this.calibration.learn(model.name, system.length + fitted.text.length, promptTokens, contextTokens);
-    return ask(model, system, fitted.text, signal, read, this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget, ...(condition === undefined ? {} : { condition }) }), learn);
+    return ask(model, system, fitted.text, signal, read, { report: this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget, ...(condition === undefined ? {} : { condition }) }), learn, badReplyFallback });
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
@@ -330,14 +342,14 @@ class SendBack extends Error {}
 /** `onFirstReply` hears the counts of the first reply only (a repair round's count is not a sample), whether `report` is set or not. */
 async function ask<T>(
   model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T,
-  report?: (call: Omit<ModelCall, "tier" | "budget">) => void, onFirstReply?: (promptTokens: number | null, contextTokens: number | null) => void,
+  options: { report?: (call: Omit<ModelCall, "tier" | "budget">) => void; learn?: (promptTokens: number | null, contextTokens: number | null) => void; badReplyFallback?: T },
 ): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = monotonicNow();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
+  const done = (outcome: { result: unknown } | { error: string }) => options.report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;
@@ -345,7 +357,7 @@ async function ask<T>(
     let text: string;
     try {
       const reply = await model.complete(turns, signal);
-      if (replies.length === 0) onFirstReply?.(reply.promptTokens, reply.contextTokens ?? null);
+      if (replies.length === 0) options.learn?.(reply.promptTokens, reply.contextTokens ?? null);
       text = reply.text;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
       contextTokens = reply.contextTokens ?? contextTokens;
@@ -359,6 +371,10 @@ async function ask<T>(
       done({ result });
       return result;
     } catch (error) {
+      if (options.badReplyFallback !== undefined && replies.length >= 2) {
+        done({ result: options.badReplyFallback });
+        return options.badReplyFallback;
+      }
       problem = error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error);
       if (error instanceof SendBack) sendBacks += 1;
       else formatFailures += 1;
@@ -499,6 +515,10 @@ export function narrateSystemPrompt(persona: Persona): string {
   return `${personaPrompt(persona)}
 ${persona.preferences === undefined ? "" : "\nYour feelings about the work may show in what you say.\n"}
 Reply with only a JSON object: {"say": "<your chat line>"}.`;
+}
+
+export function signLinesSystemPrompt(persona: Persona): string {
+  return `${personaPrompt(persona)}\nReply with only a JSON object: {"lines": ["..."]}.`;
 }
 
 function skillList(persona: Persona, improveHouse = true): string {
@@ -783,33 +803,4 @@ export function chatParts(input: ChatInput, canWait: boolean): PromptPart[] {
     // 2026-10-07).
     { key: "message", maxLevel: 0, render: () => `New message: ${message.username} ${channel}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)` },
   ];
-}
-
-/** Models often wrap JSON in prose or code fences; take the outermost object. */
-export function extractJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end < start) throw new Error("no JSON object in the reply");
-  return text.slice(start, end + 1);
-}
-
-/** How far off a step's coordinates must be before a turned sign is suspected. */
-const SIGN_SUSPECT_DISTANCE = 256;
-/** ... and how close they come with the sign turned. */
-const SIGN_FIXED_DISTANCE = 128;
-
-/** "x 499 is 998 blocks from you; -499 would be 6": a step's x or z whose sign, turned, puts it near; null otherwise. */
-function signFlipped(step: Step, at: { readonly x: number; readonly z: number }): string | null {
-  const target = step as { readonly x?: unknown; readonly z?: unknown };
-  if (typeof target.x !== "number" || typeof target.z !== "number") return null;
-  const { x, z } = target;
-  const far = Math.hypot(x - at.x, z - at.z);
-  if (far < SIGN_SUSPECT_DISTANCE) return null;
-  for (const [name, turned] of [["x", { x: -x, z }], ["z", { x, z: -z }], ["x and z", { x: -x, z: -z }]] as const) {
-    const near = Math.hypot(turned.x - at.x, turned.z - at.z);
-    if (near <= SIGN_FIXED_DISTANCE) {
-      return `${name} ${name === "z" ? z : x}${name === "x and z" ? ` ${z}` : ""} is ${Math.round(far)} blocks from you, but with the sign turned (${turned.x} ${turned.z}) it is ${Math.round(near)} blocks away: check the minus signs`;
-    }
-  }
-  return null;
 }

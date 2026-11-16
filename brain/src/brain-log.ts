@@ -17,7 +17,7 @@ export const PREVIOUS_BRAIN_LOG_FILE = "brain.prev.jsonl";
 const MAX_BYTES = 20 * 1024 * 1024;
 
 /** Which part of the mind a model call was for. */
-export type MindTier = "chat" | "work" | "goal" | "narrate";
+export type MindTier = "chat" | "work" | "goal" | "narrate" | "sign";
 
 /** What the budget did to one prompt: the tokens allowed, the first turn's estimate, the parts shown shorter, still over. */
 export interface PromptBudgetUse {

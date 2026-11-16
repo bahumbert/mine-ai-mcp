@@ -3,6 +3,7 @@ import test from "node:test";
 import type { ModelCall } from "./brain-log.ts";
 import { chatParts, chatSystemPrompt, LlmMind, workSystemPrompt } from "./llm-mind.ts";
 import { fitPrompt, PROMPT_BUDGET } from "./prompt-budget.ts";
+
 import { SHRINK_ORDER, workParts } from "./prompt-parts.ts";
 import { chatP50, goalP50, narrateWorst, workP50, workWorst } from "./prompt-fixtures.ts";
 import { ScriptedModel } from "./testing.ts";
@@ -81,13 +82,15 @@ test("a small window cuts the budget and still sends", async () => {
 test("every model call logs its budget", async () => {
   const { action, chat, planner, calls, mind } = mindOver();
   action.reply(done);
-  chat.reply({ spoken_to: "Ayla", route: "talk", say: "hi" }, { say: "" });
+  chat.reply({ spoken_to: "Ayla", route: "talk", say: "hi" }, { say: "" }, { lines: ["welcome"] });
   planner.reply({ objective: "Build." });
   await mind.next(workWorst(), signal);
   await mind.chat(chatP50(), signal);
   await mind.chooseObjective(goalP50(), signal);
   await mind.narrate(narrateWorst(), signal);
-  assert.deepEqual(calls.map((call) => call.tier), ["work", "chat", "goal", "narrate"]);
+  await mind.signLines({ persona: narrateWorst().persona, occasion: "claim", owner: "Steve", what: "a house" }, signal);
+  assert.equal(PROMPT_BUDGET.sign, 6000);
+  assert.deepEqual(calls.map((call) => call.tier), ["work", "chat", "goal", "narrate", "sign"]);
   for (const call of calls) {
     assert.equal(call.budget?.tokens, PROMPT_BUDGET[call.tier]);
     assert.ok(Number.isInteger(call.budget?.estimated) && (call.budget?.estimated ?? 0) > 0, call.tier);
