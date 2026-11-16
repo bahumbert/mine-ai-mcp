@@ -38,6 +38,7 @@ const REFUSAL_PHRASES: Readonly<Record<string, (count: number) => string>> = {
   opens_into_liquid: (count) => `${count} digs would open into water or lava`,
   under_water: (count) => `${count} under water`,
   protected: (count) => `${count} protected`,
+  dig_disabled: (count) => `${count} not dug because this request has digging off`,
   policy_dig_down: (count) => `${count} refused by your rule against digging straight down`,
   unloaded: (count) => `${count} not loaded`,
   [LAVA_SPREAD_REASON]: (count) => `${count} exits lava is about to flow into`,

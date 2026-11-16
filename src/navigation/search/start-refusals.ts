@@ -11,7 +11,10 @@ import { isPassable } from "../world/block-geometry.js";
 import type { BlockPosition, WorldView } from "../world/world.js";
 import type { SearchEvidence } from "./search-result.js";
 
-/** Refusal counts by cause: the policy's own causes, `policy_dig_down` (the style override), `unloaded`. */
+/**
+ * Refusal counts by cause: the policy's own causes, `dig_disabled` (the request's own `dig: false`), `policy_dig_down`
+ * (the style override), `unloaded`.
+ */
 export type StartRefusals = Readonly<Record<string, number>>;
 
 /**
@@ -34,6 +37,8 @@ export function countStartRefusals(world: WorldView, policy: MovementPolicy, fee
     const block = world.blockAt(x, y, z);
     if (block.kind === "unloaded") return "unloaded";
     if (isPassable(block) || block.traits.liquid !== null) return null;
+    // With digging off no dig of this search is allowed, whatever the policy would price: the request's own rule shuts in.
+    if (!policy.allowDigging) return "dig_disabled";
     const priced = policy.priceBreak(block, x, y, z, world).decision;
     if (priced.kind === "prohibited") return breakRefusalCause(priced);
     const confirmed = policy.confirmBreak(block, { x, y, z }, world);
@@ -58,10 +63,11 @@ export function countStartRefusals(world: WorldView, policy: MovementPolicy, fee
       if (decision.kind === "prohibited" && decision.reason === LAVA_SPREAD_REASON) count(LAVA_SPREAD_REASON);
     }
   }
-  // The style override refuses a dig down that nothing else refuses, so it is named only when it is the one reason.
+  // The style override refuses a dig down that nothing else refuses, so it is named only when it is the one reason: with
+  // digging off the request's rule is the reason (`dig_disabled`), not the style.
   const below = world.blockAt(feet.x, feet.y - 1, feet.z);
   if (below.kind === "loaded" && !isPassable(below) && refusalAt(feet.x, feet.y - 1, feet.z) === null
-    && !policy.allowDownward && !standsFree(world.blockAt.bind(world), feet.x, feet.y - 1, feet.z)) {
+    && policy.allowDigging && !policy.allowDownward && !standsFree(world.blockAt.bind(world), feet.x, feet.y - 1, feet.z)) {
     count("policy_dig_down");
   }
   return counts;

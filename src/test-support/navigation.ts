@@ -144,6 +144,32 @@ export function flatWorld(): MemoryWorld {
   return world;
 }
 
+/** Where failure A's return search started (its report, `reports/2026-11-16-p4-20-staircase-return-root-cause.md`, z shifted by -4096). */
+export const FAILURE_A_START = { x: 0, y: -56, z: 0 } as const;
+/** The staircase's goal at the top of the shaft (its range 0). */
+export const FAILURE_A_GOAL = { x: 0, y: -45, z: 0 } as const;
+
+/**
+ * Failure A's scene, rebuilt from the report's route: a stone box x,z -6..6, y -63..-46 in air; open the upper treads of the
+ * descent (1, -46-i, i-5) and their heads, the replan's route feet (1,-51,0) to (0,-56,0) with the head over each, and the
+ * undercut cell (0,-55,0) that the replan broke, so tread (0,-54,0) has no floor.
+ */
+export function failureAScene(): MemoryWorld {
+  const world = new MemoryWorld();
+  for (let x = -8; x <= 8; x += 1)
+    for (let z = -8; z <= 8; z += 1)
+      for (let y = -64; y <= -40; y += 1) {
+        const stone = Math.abs(x) <= 6 && Math.abs(z) <= 6 && y >= -63 && y <= -46;
+        world.load({ x, y, z }, stone ? { stateId: 1, traits: { safeToBreak: true } } : { stateId: 0 });
+      }
+  const open: Position3[] = [{ x: 0, y: -55, z: 0 }];
+  for (let i = 0; i <= 5; i += 1) open.push({ x: 1, y: -46 - i, z: i - 5 }, { x: 1, y: -45 - i, z: i - 5 });
+  for (const feet of [{ x: 1, y: -51, z: 0 }, { x: 1, y: -52, z: 1 }, { x: 0, y: -53, z: 1 }, { x: 0, y: -54, z: 0 }, { x: 0, y: -55, z: -1 }, { x: 0, y: -56, z: 0 }])
+    open.push(feet, { x: feet.x, y: feet.y + 1, z: feet.z });
+  for (const cell of open) world.load(cell, { stateId: 0 });
+  return world;
+}
+
 export function gapStep(kind: "jump" | "sprint_jump" | "parkour", span: number, rise = 0): PlannedStep {
   return {
     id: `${kind}-${span}-${rise}`,

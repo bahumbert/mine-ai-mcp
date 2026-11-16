@@ -102,6 +102,16 @@ test("a dead end at the start names the refusals counted there instead of claimi
   assert.match(text, /shut in at the start: 3 digs would open into water or lava, 1 refused by your rule against digging straight down, 1 under water$/);
 });
 
+test("a dead end at the start that digging off closes says so, and names no style rule", () => {
+  const text = describeCalculationFailure({
+    kind: "no_path",
+    search: { ...search, visited: 2, farthestVisited: 1, generated: 2, startRefusals: { dig_disabled: 8 } },
+    closest: { ...closest, position: { x: 0, y: -55, z: -1 }, withinStartBlocks: 1 },
+  });
+  assert.match(text, /shut in at the start: 8 not dug because this request has digging off$/);
+  assert.doesNotMatch(text, /digging straight down/);
+});
+
 test("a start whose exits lava is about to flow into says so, with the count", () => {
   const text = describeCalculationFailure({
     kind: "no_path",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBot, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadLavaAtDiagonals } from "../../test-support/layered-world.js";
-import { flatWorld } from "../../test-support/navigation.js";
+import { FAILURE_A_START, failureAScene, flatWorld } from "../../test-support/navigation.js";
 import type { MovementKind, PlannedStep } from "../movements/movement.js";
 import { BREAK_OPENS_INTO_LIQUID, createMovementPolicy, type MovementPolicy } from "../movements/policy.js";
 import { createMovements } from "../runtime.js";
@@ -109,6 +109,14 @@ const NEVER_LEFT_START: Extract<NavigationCalculationFailure, { readonly kind: "
 test("every exit beside spreading lava: shut in by escapable refusals, the escape prices what lava is about to flow into", () => {
   const { bot } = createFakeBot();
   assert.equal(isShutInByEscapableRefusals(NEVER_LEFT_START, worldWithLavaAtDiagonals(bot), createMovements(bot), FEET), true);
+});
+
+// ── Digging off (plan 2026-11-16-p4-20-descents-a3 T1): the escape keeps the request's rule, so it is no escape case ──
+test("a start shut in only by digging off is no escape case", () => {
+  const failure = { kind: "no_path" as const, search: { queued: 0, visited: 2, farthestVisited: 1, generated: 2, slices: 1, computeMs: 1 },
+    closest: { position: { x: 0, y: -55, z: -1 }, heuristic: 1, routeCost: 10, basis: "best_heuristic_search_node" as const } };
+  const policy = createMovementPolicy({ allowDigging: false, allowDownward: false });
+  assert.equal(isShutInByEscapableRefusals(failure, failureAScene(), policy, FAILURE_A_START), false);
 });
 
 test("no lava near the start: nothing to relax, so no escape search is started", () => {

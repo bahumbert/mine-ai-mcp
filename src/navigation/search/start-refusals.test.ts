@@ -125,3 +125,25 @@ test("fire in the side cells is no lava exit: the policy avoids it, but no refus
   });
   assert.deepEqual(refusals, {});
 });
+
+// ── Digging off (plan 2026-11-16-p4-20-descents-a3 T1): the request's own rule shuts the bot in, not the style override ─
+/** The policy of a request with digging off (its `dig: false`): the start's other rules as the run's own. */
+function digsOffPolicy(bot: FakeBot) {
+  return Object.create(createMovements(bot), { allowDigging: { value: false }, allowDownward: { value: false } });
+}
+
+test("with digging off, every solid start cell counts dig_disabled, the style override is not named, and an unloaded cell still counts as unloaded", () => {
+  const { bot: pocketBot } = createFakeBot({ position: new Vec3(DIRK_START.x + 0.5, DIRK_START.y, DIRK_START.z + 0.5) });
+  const pocket = countStartRefusals(dirkPocket(pocketBot), digsOffPolicy(pocketBot), DIRK_START);
+  assert.ok((pocket.dig_disabled ?? 0) >= 1, JSON.stringify(pocket));
+  assert.equal(pocket.policy_dig_down, undefined, JSON.stringify(pocket));
+
+  const { bot } = createFakeBot();
+  const world = new MemoryWorld();
+  // Stone around the feet cell (0,63,0), except the two cells east of it, at feet and head height, that stay unloaded.
+  for (let y = 62; y <= 65; y++) for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) {
+    if (x === 1 && z === 0 && (y === 63 || y === 64)) continue;
+    world.load({ x, y, z }, { stateId: 1 });
+  }
+  assert.deepEqual(countStartRefusals(world, digsOffPolicy(bot), { x: 0, y: 63, z: 0 }), { unloaded: 2, dig_disabled: 8 });
+});
