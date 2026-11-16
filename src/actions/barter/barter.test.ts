@@ -4,7 +4,8 @@ import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
-import { type FakeClock, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeClock, createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { DROPPED_ITEM_OBSERVATION_EVENTS } from "../../world/item-pickup.js";
 import { beginBarter } from "./barter.js";
 import { barterInputSchema, barterResultSchema } from "./contract.js";
 
@@ -18,12 +19,22 @@ const FREE_SLOT = 37;
 const INVENTORY_SLOTS = Array.from({ length: 36 }, (_, index) => 9 + index);
 
 /**
+ * The fake's look waits for physics ticks of the clock, which the manual-clock tests do not move: the aim before an
+ * offer is answered at once there, as `activateEntity` is faked. Returns the physics look for the aim tests to wrap.
+ */
+function answerAimAtOnce(bot: FakeBot) {
+  const physicsLookAt = bot.lookAt;
+  bot.lookAt = async () => {};
+  return physicsLookAt;
+}
+
+/**
  * A bot holding 3 gold beside an adult piglin, its inventory full but for one slot (dirt elsewhere). Every count
  * change is a slot update of the harness's window, which announces `updateSlot` as the server's `set_slot` does.
  * The pearl drop (#8) and another output (#9) are harness entities out of the bot's sight until a test drops them.
  * Waits for an acknowledgement are global timers: a test that reaches one passes a mocked clock and installs it.
  */
-function fixture(t: TestContext, clock?: FakeClock) {
+function fixture(t: TestContext, clock?: FakeClock, ticksPerSecond = 20) {
   const lifetime = new AbortController();
   t.after(() => lifetime.abort());
   const drops = new Map<number, { name: string; count: number }>([[PEARL_DROP_ID, { name: "ender_pearl", count: 2 }]]);
@@ -39,7 +50,7 @@ function fixture(t: TestContext, clock?: FakeClock) {
   const metadata: unknown[] = [];
   const equipment: (Item | null)[] = [null, null];
   const harness = createFakeBot({
-    clock,
+    clock, server: { ticksPerSecond },
     slots: {
       [GOLD_SLOT]: { name: "gold_ingot", count: 3 },
       ...Object.fromEntries(
@@ -70,6 +81,7 @@ function fixture(t: TestContext, clock?: FakeClock) {
     equipment[1] = itemOf(bot.registry, "gold_ingot", 1);
     bot.emit("entityEquip", target);
   };
+  const physicsLookAt = answerAimAtOnce(bot);
   const navigation = {
     navigate: async () => {
       pearl.count += 2;
@@ -98,7 +110,7 @@ function fixture(t: TestContext, clock?: FakeClock) {
       if (!harness.inventory.slots[slot]) harness.inventory.updateSlot(slot, itemOf(bot.registry, "dirt", 64));
   };
   return {
-    lifetime, events: bot, bot, harness, navigation, gold, pearl, target, metadata, equipment, entities,
+    lifetime, events: bot, bot, harness, navigation, gold, pearl, target, metadata, equipment, entities, physicsLookAt,
     spawn, dropOther, complete, fillFreeSlots, idleSlotListeners, offers: () => offers,
   };
 }
@@ -382,6 +394,111 @@ test("a recipient moving out of reach while equipping receives no reserved offer
   assert.equal(result.barter.goldOffers, 0);
   assert.equal(f.offers(), 0);
 });
+
+/**
+ * The bot faces away from the piglin, so the non-forced aim before the offer waits on physics ticks
+ * (`fake-bot-physics.ts` `bot.lookAt`: the look ends when the sent yaw catches up on a tick).
+ */
+function faceAwayFromPiglin(f: ReturnType<typeof fixture>) {
+  f.bot.entity.yaw = Math.PI / 2;
+}
+
+/** A red run's offer must end for the test to read its result: the piglin takes the ingot and drops its reward. */
+function completeOffers(f: ReturnType<typeof fixture>) {
+  const offer = f.bot.activateEntity;
+  f.bot.activateEntity = async (target) => {
+    await offer(target);
+    f.complete();
+  };
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a desired drop that appears during the aim takes the place of the offer at ${ticksPerSecond} tps`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const f = fixture(t, clock, ticksPerSecond);
+    completeOffers(f);
+    faceAwayFromPiglin(f);
+    const aim = f.physicsLookAt;
+    f.bot.lookAt = (point, force) => {
+      const look = aim(point, force); // the look is pending when the drop appears
+      f.harness.entities.spawn({ name: "item", position: new Vec3(3.5, 64, 0.5), item: { name: "ender_pearl", count: 2 } });
+      return look;
+    };
+    const result = await clock.settle(beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({}), 5_000);
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.barter.goldOffers, 0);
+    assert.equal(result.barter.goldSpent, 0);
+    assert.equal(f.offers(), 0);
+    assert.equal(f.pearl.count, 2);
+  });
+
+  test(`a recipient moving out of reach during the aim receives no reserved offer at ${ticksPerSecond} tps`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const f = fixture(t, clock, ticksPerSecond);
+    completeOffers(f);
+    faceAwayFromPiglin(f);
+    const aim = f.physicsLookAt;
+    f.bot.lookAt = (point, force) => {
+      const look = aim(point, force); // the look is pending when the recipient moves
+      f.target.position.x = 20;
+      return look;
+    };
+    const result = await clock.settle(beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({}), 5_000);
+    assert.equal(result.status, "failed");
+    assert.equal(result.barter.goldOffers, 0);
+    assert.equal(f.offers(), 0);
+  });
+
+  test(`an abort while the aim's look is pending settles at once, reserves no offer, and the next barter runs at ${ticksPerSecond} tps`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const f = fixture(t, clock, ticksPerSecond);
+    faceAwayFromPiglin(f);
+    const lifetime = new AbortController();
+    const addedOnBot = listenersAddedSince(f.bot);
+    const addedOnInventory = listenersAddedSince(f.bot.inventory);
+    const cancel = new AbortController();
+    const aim = f.physicsLookAt;
+    f.bot.lookAt = (point, force) => {
+      const look = aim(point, force); // the look is pending when the cancel arrives
+      cancel.abort(new Error("cancelled while aiming"));
+      return look;
+    };
+    // Zero clock: the cancel settles the barter without any physics tick, so a stopped body cannot hold it.
+    const result = await clock.settle(beginBarter(f.bot, f.navigation, request(), lifetime.signal)({ signal: cancel.signal }), 0);
+    assert.equal(result.status, "failed");
+    assert.match(result.error!, /cancelled while aiming/);
+    assert.equal(result.barter.goldOffers, 0);
+    assert.equal(f.offers(), 0);
+    lifetime.abort();
+    for (const event of ["entityEquip", "entityGone", "playerCollect", ...DROPPED_ITEM_OBSERVATION_EVENTS]) assert.equal(addedOnBot(event), 0);
+    assert.equal(addedOnInventory("updateSlot"), 0);
+    f.bot.lookAt = f.physicsLookAt;
+    clock.after(200, () => f.complete());
+    const next = await clock.settle(beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({}), 5_000);
+    assert.equal(next.status, "succeeded");
+    assert.equal(f.pearl.count, 2);
+  });
+
+  test(`a stalled aim is bounded by the acknowledgement budget and reserves no offer at ${ticksPerSecond} tps`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const f = fixture(t, clock, ticksPerSecond);
+    faceAwayFromPiglin(f);
+    f.bot.lookAt = () => new Promise<void>(() => {}); // physics stopped: the look never ends
+    const result = await clock.settle(beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({}), 5_000);
+    assert.equal(result.status, "failed");
+    assert.match(result.error!, /did not finish; no offer was made/);
+    assert.equal(result.barter.goldOffers, 0);
+    assert.equal(f.offers(), 0);
+    f.bot.lookAt = f.physicsLookAt;
+    clock.after(200, () => f.complete());
+    const next = await clock.settle(beginBarter(f.bot, f.navigation, request(), f.lifetime.signal)({}), 5_000);
+    assert.equal(next.status, "succeeded");
+  });
+}
 
 test("gold hand release without a new output does not make another offer or report success", async (t) => {
   const clock = createFakeClock({ mode: "mocked" });

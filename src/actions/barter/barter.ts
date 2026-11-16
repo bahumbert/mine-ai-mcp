@@ -1,7 +1,9 @@
 import { barterCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
+import type { Vec3 } from "vec3";
 import { createMovements, nearEntityGoal, type NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { raceSignal } from "../../utils/race-signal.js";
 import { armSignal, waitForSignal } from "../../utils/signals.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
 import { carriedCount } from "../../world/inventory-count.js";
@@ -85,6 +87,28 @@ async function waitForExchangeEnd(bot: Bot, piglinId: number, context: ActionCon
     return outcome.kind === "signalled" ? outcome.value : null;
   } finally {
     completed.cancel();
+  }
+}
+
+/**
+ * The non-forced aim before an offer, whose look ends on physics ticks (the ground is read again after it, before the
+ * reservation: facts `item-pickup-and-barter.md`, C1). It is raced with the request's cancel and bounded in real time
+ * by the acknowledgement budget, so a stopped body neither holds a cancel nor gets an offer reserved. False when the
+ * bound ended it first; the look itself keeps running and is not awaited again.
+ */
+async function aimAtPiglin(bot: Bot, point: Vec3, signal: AbortSignal | undefined): Promise<boolean> {
+  const limit = new AbortController();
+  const timer = setTimeout(() => limit.abort(), ACKNOWLEDGEMENT_MS);
+  try {
+    await raceSignal(bot.lookAt(point, false), signal ? AbortSignal.any([signal, limit.signal]) : limit.signal);
+    signal?.throwIfAborted();
+    return true;
+  } catch (cause) {
+    signal?.throwIfAborted();
+    if (limit.signal.aborted) return false;
+    throw cause;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -260,8 +284,9 @@ export function beginBarter(
           }
           await bot.equip(gold, "hand");
           context.signal?.throwIfAborted();
+          if (!(await aimAtPiglin(bot, target.position.offset(0, 1, 0), context.signal))) return result("The aim at the selected piglin did not finish; no offer was made.");
           // A pickup can leave part of its stack behind, and another desired
-          // drop can become readable while approaching or equipping.
+          // drop can become readable while approaching, equipping or aiming.
           if (satisfied() || desiredDrop()) continue;
           target = piglin(bot, request.piglin_id);
           if (target.equipment[1]?.name === "gold_ingot" || target.position.distanceTo(bot.entity.position) > 2)
