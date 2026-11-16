@@ -144,7 +144,8 @@ async function recordDriverRun(run: CensusRun, file: string, frame: ArenaFrame):
     },
   });
   try {
-    const running = run(context, async () => {});
+    // The fake clock's sleep: a driver's wait (ground-first-barter's pearl wait) must move the clock, a no-op sleep never ends it.
+    const running = run(context, clock.sleep);
     // Advance server packets within Mine Labs' goal budget (trial/run.ts, default 120s), T9 2026-11-15.
     try {
       const completion = await clock.settle(running, (scenario.goal.timeout ?? 120) * 1_000);
