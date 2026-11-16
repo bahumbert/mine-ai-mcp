@@ -28,6 +28,7 @@ import {
  */
 import type { z } from "zod";
 import { VIEW_ITEM_FAMILY, VIEW_ITEM_FAMILY_DESCRIPTION, viewItemFamilyInputSchema } from "./view-item-family/contract.js";
+import { READ_SIGNS, READ_SIGNS_DESCRIPTION, readSignsInputSchema } from "./read-signs/contract.js";
 import { submissionMetadataSchema, waitForActionInputSchema, cancelActionInputSchema,
   WAIT_FOR_ACTION_DESCRIPTION, CANCEL_ACTION_DESCRIPTION } from "../session/async-actions.js";
 import {
@@ -211,6 +212,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
       { foreground: false },
     ),
     tool(VIEW_ITEM_FAMILY, VIEW_ITEM_FAMILY_DESCRIPTION, viewItemFamilyInputSchema, { foreground: false }),
+    tool(READ_SIGNS, READ_SIGNS_DESCRIPTION, readSignsInputSchema, { foreground: false }),
     tool(VIEW_SMELTING_RECIPES, VIEW_SMELTING_RECIPES_DESCRIPTION, viewSmeltingRecipesInputSchema, { foreground: false }),
     tool(VIEW_BLOCK_DROPS, VIEW_BLOCK_DROPS_DESCRIPTION, viewBlockDropsInputSchema, { foreground: false }),
     tool(VIEW_FRONTIER, VIEW_FRONTIER_DESCRIPTION, viewFrontierInputSchema, { foreground: false }),

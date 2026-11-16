@@ -48,6 +48,7 @@ import { createEnterEndPortalAction, createEnterNetherPortalAction } from "./por
 import { createQueryBotDataAction } from "./query-bot-data/index.js";
 import { createRawAction } from "./raw-action/index.js";
 import { createReadRecentEventsAction } from "./read-recent-events/index.js";
+import { createReadSignsAction } from "./read-signs/index.js";
 import { createSendMessageAction } from "./send-message/index.js";
 import { createSleepAction } from "./sleep/index.js";
 import { createShootDragonAction } from "./shoot-dragon/index.js";
@@ -136,6 +137,7 @@ export function createActions(
     createRawAction(bot, botData),
     createQueryBotDataAction(botData, () => updateBotStatus(botData, snapshotBotStatus(bot))),
     createReadRecentEventsAction(botData, bot.username),
+    createReadSignsAction(bot, botData),
     createSendMessageAction(bot),
     createSleepAction(bot, navigation),
     createSmeltItemAction(bot, navigation),
@@ -187,6 +189,7 @@ export * from "./portal-entry/index.js";
 export * from "./query-bot-data/index.js";
 export * from "./raw-action/index.js";
 export * from "./read-recent-events/index.js";
+export * from "./read-signs/index.js";
 export * from "./send-message/index.js";
 export * from "./sleep/index.js";
 export * from "./smelt-item/index.js";

@@ -250,6 +250,10 @@ returned event ID. It remains available during foreground execution; its event
 cursor is independent of foreground result retrieval. Defined in
 [src/actions/read-recent-events/contract.ts](../../src/actions/read-recent-events/contract.ts).
 
+### `read_signs`
+
+Read one loaded cell with all of `x`, `y`, and `z`, or scan nearby loaded signs with `max_distance` (1–64, default 16) and `limit` (1–32, default 16). Each reading includes the block, position, four front and back lines, and `known`, which is false when the sign's text has not loaded. An unloaded cell is refused.
+
 ### `view_item_family`
 
 Use `view_item_family` with `family` (an item family such as `sign`) to list its `members` in registry order. The result includes the requested `family` and does not change the world.

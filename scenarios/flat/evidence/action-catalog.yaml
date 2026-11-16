@@ -212,6 +212,8 @@ params:
         sql: SELECT database_name, table_name, column_name, description FROM data_dictionary ORDER BY database_name, table_name, column_name LIMIT 5;
     - action: read_recent_events
       arguments: {}
+    - action: read_signs
+      arguments: {}
     - action: send_message
       arguments:
         message: Hello from EvidenceBot.

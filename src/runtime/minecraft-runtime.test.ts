@@ -338,6 +338,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "raw_action",
       "query_bot_data",
       "read_recent_events",
+      "read_signs",
       "send_message",
       "sleep",
       "smelt_item",
