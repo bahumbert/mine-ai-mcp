@@ -16,7 +16,8 @@ export async function digShelter(context: SkillContext, step: Extract<Step, { sk
     alive: context.alive,
     dayCame: async () => {
       const clock = (await context.runtime.status()).clock;
-      const evening = clock?.timeOfDay !== undefined && clock.timeOfDay >= DUSK_FROM_TICK && clock.timeOfDay < BEDTIME_START_TICK;
+      // The runtime reports a phase only in the overworld (view-status.ts:75): no phase, no evening there (2026-11-16, F19).
+      const evening = clock?.phase != null && clock.timeOfDay !== undefined && clock.timeOfDay >= DUSK_FROM_TICK && clock.timeOfDay < BEDTIME_START_TICK;
       return clock?.phase !== "night" && !evening;
     },
     onHole: context.rememberShelter,

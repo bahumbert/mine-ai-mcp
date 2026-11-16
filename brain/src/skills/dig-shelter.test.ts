@@ -26,14 +26,23 @@ test("the sleep line names the carried bed and the respawn point", () => {
   assert.equal(stepSchema.safeParse({ skill: "sleep" }).success, true);
 });
 
-test("a dig begun by day at 6000 without minutes still does nothing; older statuses keep that behaviour", async () => {
-  for (const time of [6_000, 11_999, 23_459, undefined]) {
+test("a dig begun by day without minutes still does nothing; older statuses and the Nether at 12200 keep that behaviour", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const setups: readonly ((runtime: FakeRuntime) => void)[] = [
+    (runtime) => setShelterTime(runtime, 6_000),
+    (runtime) => setShelterTime(runtime, 11_999),
+    (runtime) => setShelterTime(runtime, 23_459),
+    (runtime) => { runtime.snapshot = { ...runtime.snapshot, clock: { phase: "day", minutesUntilChange: 5 } }; },
+    // Off the overworld the runtime sends no phase (view-status.ts:75), so 12200 is not an evening there (2026-11-16, F19).
+    (runtime) => { runtime.snapshot = { ...runtime.snapshot, clock: { phase: null, timeOfDay: 12_200, minutesUntilChange: null } }; },
+  ];
+  for (const setup of setups) {
     const runtime = new FakeRuntime();
-    if (time === undefined) runtime.snapshot = { ...runtime.snapshot, clock: { phase: "day", minutesUntilChange: 5 } };
-    else setShelterTime(runtime, time);
-    const result = await runStep({ skill: "dig_shelter" }, {
+    setup(runtime);
+    const result = await clock.settle(runStep({ skill: "dig_shelter" }, {
       runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), signal: new AbortController().signal,
-    });
+    }), 15_000);
     assert.equal(result.status, "done");
     assert.match(result.detail, /give minutes/u);
     assert.deepEqual(runtime.submitted, []);
