@@ -135,6 +135,13 @@ export const SKILL_NAMES = [
   "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "dig_shelter", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "farm",
 ] as const satisfies readonly SkillName[];
 
+/** How a situation's answer may treat a running step, spec 2026-11-15-p4-18 D2. */
+export const SKILL_TRAITS: Record<SkillName, { readonly finishesInPlace?: true; readonly answersNight?: true }> = {
+  follow_player: {}, go_to_player: {}, go_to: {}, explore: {}, collect_block: {}, give_item: {}, drop_item: {}, craft_item: {}, get_items: {},
+  eat: { finishesInPlace: true }, equip: { finishesInPlace: true }, sleep: { finishesInPlace: true }, dig_shelter: { answersNight: true },
+  hunt: {}, protect_area: {}, release_area: {}, level_area: {}, build: {}, improve_house: {}, farm: {},
+};
+
 /**
  * One line per skill for the prompts: exact JSON shape, then what it does. The house line lists what the character's
  * own style needs, so the model can fetch it with `get_items` before building.
