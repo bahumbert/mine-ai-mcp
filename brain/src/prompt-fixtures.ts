@@ -196,9 +196,9 @@ function crowdedSnapshotAndAreas() {
 export function situationWorst(): NonNullable<WorkInput["situation"]> {
   const order: Objective = { text: `bring "the iron", the coal and the bread to the farm, ${filler(280, "order")}`, requester: "Requester".padEnd(16, "x"), purpose: null };
   const home: KnownPlace = { name: filler(40, "home"), detail: "", own: true, house: { size: "small", style: "medieval", door: { x: 3, y: 64, z: 0 }, facing: "north", materials: {} } };
-  // The longest gear of spec D5: melee, bow and shield ids of 30 characters.
+  // The longest gear of spec D5: melee, bow and shield ids of 30 characters; exposure 1 gives the longest risk suffix (100%).
   const item30 = (index: number) => `long_gear_item_${index}`.padEnd(30, "x");
-  const snapshot: BotSnapshot = { ...crowdedSnapshotAndAreas().snapshot, combat: { melee: item30(0), bow: item30(1), arrows: 128, shield: item30(2) } };
+  const snapshot: BotSnapshot = { ...crowdedSnapshotAndAreas().snapshot, combat: { melee: item30(0), bow: item30(1), arrows: 128, shield: item30(2), exposure: 1 } };
   const info: SituationInfo = { kind: "respawn", cause: "It is night (day comes in 7.9 min). You died 12 min ago at -645 53 -27 (Zombie) and respawned at 912 64 0", raisedAt: 0 };
   const view = situationView({
     info, snapshot, places: [home], objective: order, pushed: false, skills: SKILL_NAMES, boldness: "cautious", ordinary: order,

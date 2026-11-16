@@ -290,6 +290,9 @@ test("a near-budget prompt keeps the event part whole and cuts the earliest step
   assert.ok(whole.text.includes("get 1 oak_log"), "the first step is shown whole at level 0");
   assert.equal(fitted.text.includes("get 1 oak_log"), false, "the first steps are cut once the deficit is one token");
   assert.ok(fitted.text.includes(situationEventPart(input.situation!).render(0)));
+  const risk = "; risk with this gear 100% (100% = no gear)";
+  for (const level of [0, 1]) assert.ok(situationEventPart(input.situation!).render(level).includes(risk), `level ${level}`);
+  assert.ok(fitted.text.includes(risk));
 });
 
 test("a set-aside text with commas and quotes is shown as JSON at both levels", () => {

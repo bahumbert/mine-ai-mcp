@@ -49,10 +49,16 @@ function goTo(at: Position): string {
   return step({ skill: "go_to", x: Math.floor(at.x), y: Math.floor(at.y), z: Math.floor(at.z) });
 }
 
-/** The gear the snapshot reports, each part only when known (spec D5 "The Weigh line"). */
+/** The gear the snapshot reports, each part only when known (spec D5 "The Weigh line"), then the risk the gear leaves. */
 export function gearFact(snapshot: BotSnapshot): string {
   const parts = [...armourParts(snapshot), ...combatParts(snapshot.combat)];
-  return parts.length === 0 ? "gear: unknown" : `gear: ${parts.join(", ")}`;
+  return parts.length === 0 ? "gear: unknown" : `gear: ${parts.join(", ")}${riskPart(snapshot)}`;
+}
+
+/** The runtime's gear exposure (1 = no gear) as the risk a fight keeps, in percent (spec D2); "" when the runtime sends none. */
+function riskPart(snapshot: BotSnapshot): string {
+  const exposure = snapshot.combat?.exposure;
+  return exposure === undefined ? "" : `; risk with this gear ${Math.round(100 * exposure)}% (100% = no gear)`;
 }
 
 /** Null points mean a piece is worn and the server reported no points (view_status contract, `armour`). */

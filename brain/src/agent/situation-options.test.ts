@@ -308,6 +308,24 @@ test("an older runtime: gear unknown", () => {
   assert.equal(gearFact(older), "gear: unknown");
 });
 
+test("the risk with this gear follows the gear as a percentage of the runtime's exposure (spec D2)", () => {
+  const gear = (exposure: number) => gearFact(snapshot({ combat: { melee: "iron_sword", bow: null, arrows: 0, shield: "shield", exposure } }));
+  assert.equal(gear(1), "gear: melee iron_sword, shield; risk with this gear 100% (100% = no gear)");
+  assert.equal(gear(0.24), "gear: melee iron_sword, shield; risk with this gear 24% (100% = no gear)");
+  assert.equal(gear(0.155), "gear: melee iron_sword, shield; risk with this gear 16% (100% = no gear)");
+  assert.equal(gear(0.154), "gear: melee iron_sword, shield; risk with this gear 15% (100% = no gear)");
+});
+
+test("the risk part is left out when the runtime sends no exposure (an older runtime keeps today's text)", () => {
+  assert.equal(gearFact(snapshot({ combat: { melee: "iron_sword", bow: null, arrows: 0, shield: "shield" } })), "gear: melee iron_sword, shield");
+});
+
+test("the Weigh line keeps three entries, the risk inside the gear entry", () => {
+  const v = view({ snapshot: snapshot({ combat: { melee: "iron_sword", bow: null, arrows: 0, shield: "shield", exposure: 0.53 } }) });
+  assert.equal(v.weigh.length, 3);
+  assert.equal(v.weigh[1], "gear: melee iron_sword, shield; risk with this gear 53% (100% = no gear)");
+});
+
 test("whose work comes from the ordinary work, not the running situation", () => {
   const v = view({ objective: order("Shelter for the night"), ordinary: order("build the farm", "Bob") });
   assert.equal(v.weigh[2], "order from Bob");
