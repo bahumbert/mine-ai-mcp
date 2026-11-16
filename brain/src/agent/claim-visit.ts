@@ -24,7 +24,7 @@ export interface VisitHouse {
 function unfinishedPlan(context: SkillContext, house: UnfinishedHouse): HousePlan {
   const size = house.kind.split(" ")[0] as HouseSize;
   if (!(size in HOUSE_SIZES)) throw new Error(`Unknown unfinished house size: ${size}`);
-  return planHouse(styleOrDefault(context.style), size, house.site, house.materials ?? {});
+  return planHouse(styleOrDefault(context.style), size, house.site, house.materials ?? {}, house.shapes ?? {});
 }
 
 /** Keep only the newest house notes; legacy ownership is safe only for an explicitly own house. */
@@ -36,7 +36,7 @@ export function visitHouses(context: SkillContext, places: readonly KnownPlace[]
     if (house === undefined || owner === undefined || house.dimension === undefined) continue;
     houses.push({
       door: house.door, dimension: house.dimension, owner, what: place.name, claim: house.claim ?? null,
-      plan: () => planHouse(styleOrDefault(house.style), house.size, house, house.materials),
+      plan: () => planHouse(styleOrDefault(house.style), house.size, house, house.materials, house.shapes ?? {}),
       remember: (claim) => context.remember?.({ ...place, house: { ...house, owner, claim } }),
     });
   }

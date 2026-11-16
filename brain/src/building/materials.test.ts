@@ -46,15 +46,32 @@ test("the temporary roles are those whose block differs from the style", () => {
   assert.deepEqual(temporaryRoles({ wall: "oak_planks", roof: "dirt", window: "air" }, medieval), ["roof", "window"]);
 });
 
-test("improving swaps back only the roles asked, the bill is the cells that change", () => {
-  const house = { size: "small" as const, door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: "dirt" } };
-  const all = improvement(medieval, house, ["wall", "roof"]);
+test("improving walls charges only 27 planks and preserves the roof's saved shapes or legacy full blocks", () => {
+  for (const row of [
+    { block: "dirt", shapes: undefined },
+    { block: "oak_planks", shapes: undefined },
+    { block: "oak_planks", shapes: { roof: { stairs: "oak_stairs", slab: "oak_slab" } } },
+  ]) {
+    const house = { size: "small" as const, door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: row.block }, shapes: row.shapes };
+    const walls = improvement(medieval, house, ["wall"]);
+    assert.deepEqual(walls.bill, [{ item: "oak_planks", count: 27 }]);
+    assert.deepEqual(walls.rest, { roof: row.block });
+    const roof = walls.after.cells.filter((cell) => cell.role === "roof");
+    assert.equal(roof.length, 49);
+    if (row.shapes === undefined) assert.ok(roof.every((cell) => cell.block === row.block && cell.half === undefined && cell.facing === undefined));
+    else {
+      assert.equal(roof.filter((cell) => cell.block === "oak_stairs" && cell.half === "bottom" && cell.facing !== undefined).length, 42);
+      assert.equal(roof.filter((cell) => cell.block === "oak_slab" && cell.half === "bottom").length, 7);
+    }
+  }
+});
+
+test("restoring temporary roles clears them and charges the style's changed cells", () => {
+  const house = { size: "small" as const, door: { x: 0, y: 64, z: 0 }, facing: "north" as const };
+  const all = improvement(medieval, { ...house, materials: { wall: "dirt", roof: "dirt" } }, ["wall", "roof"]);
   assert.deepEqual(all.rest, {});
   assert.ok(all.bill.some((entry) => entry.item === "spruce_stairs") && all.bill.every((entry) => entry.item !== "dirt"));
-  const walls = improvement(medieval, house, ["wall"]);
-  assert.deepEqual(walls.rest, { roof: "dirt" });
-  assert.deepEqual(walls.bill.map((entry) => entry.item), ["oak_planks"]);
-  const wallCount = walls.after.cells.filter((cell) => cell.role === "wall").length;
-  assert.equal(walls.bill[0]!.count, wallCount);
-  assert.equal(walls.after.cells.filter((cell) => cell.role === "roof").every((cell) => cell.block === "dirt"), true);
+  const roof = improvement(medieval, { ...house, materials: { roof: "oak_planks" }, shapes: { roof: { stairs: "oak_stairs", slab: "oak_slab" } } }, ["roof"]);
+  assert.deepEqual(roof.bill, [{ item: "spruce_stairs", count: 42 }, { item: "spruce_slab", count: 7 }]);
+  assert.deepEqual(roof.rest, {});
 });

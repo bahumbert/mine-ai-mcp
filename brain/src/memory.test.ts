@@ -104,6 +104,18 @@ test("an unfinished house keeps its materials; an older note has none", () => {
   assert.deepEqual(recall([memoryNote({ kind: "unfinished_house", house: older }).context], LIMITS).unfinished, older);
 });
 
+test("persisted house shapes round-trip in both envelopes, accepting one-character names and rejecting empty ones", () => {
+  for (const value of ["", "a", "oak_stairs"]) for (const kind of ["place", "unfinished_house"] as const) {
+    const shapes = { roof: { stairs: value, slab: "oak_slab" } };
+    const house = { size: "small" as const, style: "medieval", door: { x: 0, y: 64, z: 2 }, facing: "north" as const, materials: { roof: "oak_planks" }, shapes };
+    const place = { name: "my house", detail: "", house };
+    const unfinished = { kind: "small medieval house", site: { door: house.door, facing: house.facing }, part: 0, materials: house.materials, shapes };
+    const note = kind === "place" ? memoryNote({ kind, place }) : memoryNote({ kind, house: unfinished });
+    const recalled = recall([note.context], LIMITS);
+    assert.deepEqual(kind === "place" ? recalled.places : recalled.unfinished, value === "" ? kind === "place" ? [] : null : kind === "place" ? [place] : unfinished, `${kind} shape=${JSON.stringify(value)}`);
+  }
+});
+
 test("a shelter note says the hole in a sentence and in data, and never reaches the memory a prompt is built from", () => {
   const hole = { x: 0, y: 64, z: 0, depth: 3, roofed: true, at: "2026-11-07T21:04:00.000Z" };
   const { note, context } = memoryNote({ kind: "shelter", hole });

@@ -66,16 +66,33 @@ test("pillars and trim built with another block ask no log axis (live 2026-10-10
   assert.ok(frame.length > 0 && frame.every((cell) => cell.block === "cobblestone" && cell.axis === undefined));
 });
 
-test("a roof built with another block builds full blocks: the style's stairs and slabs are not asked", () => {
-  const plan = planHouse(medieval, "small", site, { roof: "dirt" });
-  const roof = plan.cells.filter((cell) => cell.role === "roof");
-  assert.ok(roof.length > 0 && roof.every((cell) => cell.block === "dirt" && cell.facing === undefined && cell.half === undefined));
-  assert.ok(plan.bill.every((entry) => entry.item !== "spruce_stairs" && entry.item !== "spruce_slab"));
-  assert.ok(planHouse(medieval, "small", site, { wall: "dirt" }).bill.some((entry) => entry.item === "spruce_stairs"));
+test("a substitute roof without saved shapes stays 49 full blocks, including legacy oak", () => {
+  for (const block of ["dirt", "oak_planks"]) {
+    const plan = planHouse(medieval, "small", site, { roof: block });
+    const roof = plan.cells.filter((cell) => cell.role === "roof");
+    assert.equal(roof.length, 49);
+    assert.ok(roof.every((cell) => cell.block === block && cell.facing === undefined && cell.half === undefined));
+    assert.ok(plan.bill.every((entry) => entry.item !== "spruce_stairs" && entry.item !== "spruce_slab"));
+  }
 });
 
 test("air windows leave no glass in the bill", () => {
   const plan = planHouse(medieval, "small", site, { window: "air" });
   assert.ok(plan.bill.every((entry) => entry.item !== "glass_pane" && entry.item !== "air"));
   assert.ok(plan.cells.some((cell) => cell.role === "window" && cell.block === "air"));
+});
+
+test("a substitute roof keeps the style's stair and slab cells when its shapes are supplied", () => {
+  const plain = planHouse(medieval, "small", site);
+  const plan = planHouse(medieval, "small", site, { roof: "oak_planks" }, { roof: { stairs: "oak_stairs", slab: "oak_slab" } });
+  const roof = plan.cells.filter((cell) => cell.role === "roof");
+  assert.equal(roof.length, 49);
+  for (const cell of plain.cells.filter((cell) => cell.role === "roof")) {
+    assert.deepEqual(roof.find((other) => other.x === cell.x && other.y === cell.y && other.z === cell.z), {
+      ...cell, block: cell.block === "spruce_stairs" ? "oak_stairs" : "oak_slab",
+    });
+  }
+  assert.deepEqual(plan.bill.filter((entry) => ["oak_stairs", "oak_slab"].includes(entry.item)), [{ item: "oak_stairs", count: 42 }, { item: "oak_slab", count: 7 }]);
+  assert.ok(plan.bill.every((entry) => !entry.item.startsWith("spruce_")));
+  assert.deepEqual(plan.materials, { roof: "oak_planks" });
 });

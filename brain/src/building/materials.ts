@@ -1,7 +1,8 @@
 import type { KnownPlace } from "../mind.ts";
 import type { BlockKind } from "../runtime-client.ts";
-import { billOfMaterials, BUILD_ROLES, STRUCTURAL_ROLES, type BlockRole, type MaterialCount } from "./blueprint.ts";
+import { billOfMaterials, BUILD_ROLES, STRUCTURAL_ROLES, type BlockRole, type MaterialCount, type Variants } from "./blueprint.ts";
 import { planHouse, type HousePlan, type Materials } from "./plan.ts";
+import { shapeVariantsOf } from "./shape-variants.ts";
 import type { Style } from "./styles.ts";
 
 /** The tag the game gives every door block (`doors`), read from `view_blocks` kinds. */
@@ -32,6 +33,16 @@ export function temporaryRoles(materials: Materials, style: Style): BlockRole[] 
   return BUILD_ROLES.filter((role) => materials[role] !== undefined && materials[role] !== style.palette[role]);
 }
 
+/** Derives a new house's substitute shapes once; a resumed house uses its saved shapes instead. */
+export function shapesForMaterials(style: Style, materials: Materials): Variants {
+  return Object.fromEntries(temporaryRoles(materials, style).flatMap((role) => {
+    const like = style.variants?.[role];
+    if (like === undefined) return [];
+    const shapes = shapeVariantsOf(materials[role]!, like);
+    return Object.keys(shapes).length === 0 ? [] : [[role, shapes]];
+  }));
+}
+
 /** What improving a temporary house takes: the house as it would be, the roles left temporary, and the blocks to bring. */
 export interface Improvement {
   readonly after: HousePlan;
@@ -41,11 +52,11 @@ export interface Improvement {
 }
 
 /** The house `house` describes, with `roles` swapped back to the style's blocks (variants included). */
-export function improvement(style: Style, house: Pick<NonNullable<KnownPlace["house"]>, "size" | "door" | "facing" | "materials">, roles: readonly BlockRole[]): Improvement {
+export function improvement(style: Style, house: Pick<NonNullable<KnownPlace["house"]>, "size" | "door" | "facing" | "materials" | "shapes">, roles: readonly BlockRole[]): Improvement {
   const site = { door: house.door, facing: house.facing };
   const rest = Object.fromEntries(Object.entries(house.materials).filter(([role]) => !roles.includes(role as BlockRole))) as Materials;
-  const before = planHouse(style, house.size, site, house.materials);
-  const after = planHouse(style, house.size, site, rest);
+  const before = planHouse(style, house.size, site, house.materials, house.shapes ?? {});
+  const after = planHouse(style, house.size, site, rest, house.shapes ?? {});
   const was = new Map(before.cells.map((cell) => [`${cell.x},${cell.y},${cell.z}`, cell.block]));
   const changed = after.cells.filter((cell) => was.get(`${cell.x},${cell.y},${cell.z}`) !== cell.block);
   return { after, rest, bill: billOfMaterials(changed) };
