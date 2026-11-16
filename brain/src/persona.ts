@@ -95,6 +95,8 @@ export const personaSchema = z.strictObject({
     digStraightDown: z.boolean().default(false),
     /** Ignored since P4-18 (spec D7), as `maxStepMinutes`; persona files that still carry it parse. */
     shelterAtNight: z.boolean().optional(),
+    /** Health below which a situation asks the model; otherwise the runtime's critical_health applies (P4-18 D1). */
+    lowHealthAt: z.number().min(1).max(19).optional(),
     /**
      * How strongly each feeling pulls when it picks its own objective (spec 2026-10-09-activity-draw): the chance of an
      * activity is its feeling's multiplier over the sum of them all. A character may be more or less driven by its

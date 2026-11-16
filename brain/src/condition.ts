@@ -6,7 +6,7 @@ import { cut } from "./prompt-budget.ts";
 import { distanceBetween } from "./skills/positions.ts";
 
 /** Server messages and stored names cannot create a second prompt line. */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
