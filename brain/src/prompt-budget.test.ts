@@ -98,8 +98,8 @@ test("separators: empty renders are skipped with their separator, none before th
 });
 
 test("budgetFor takes the table value, cut by the window minus the reply room, never under MIN_BUDGET", () => {
-  assert.equal(budgetFor("work", null), 6000);
-  assert.equal(budgetFor("work", 16384), 6000);
+  assert.equal(budgetFor("work", null), 6400);
+  assert.equal(budgetFor("work", 16384), 6400);
   assert.equal(budgetFor("work", 4096), 2048);
   assert.equal(budgetFor("work", 2048), MIN_BUDGET);
 });

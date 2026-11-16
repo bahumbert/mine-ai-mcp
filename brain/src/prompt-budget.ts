@@ -10,7 +10,8 @@ import type { MindTier } from "./brain-log.ts";
 /** First-turn prompt tokens a tier may use (spec D1, open choice 1). */
 export const PROMPT_BUDGET: Readonly<Record<MindTier, number>> = {
   chat: 6000,
-  work: 6000,
+  // The work tier: 6400 for the situation event part (plan 2026-11-15-p4-18-night-reflex-l2 T5, master decision 2026-11-16).
+  work: 6400,
   goal: 6000,
   narrate: 6000,
   sign: 6000,
