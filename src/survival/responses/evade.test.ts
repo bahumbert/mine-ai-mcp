@@ -4,19 +4,23 @@ import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext } from "../../test-support/combat.js";
-import { createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { observation } from "../../test-support/navigation.js";
+import type { Goal } from "../../navigation/index.js";
 import { completeResponse, describeResponse } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
+import { EvadeObservation } from "./evade-observation.js";
 
 const EVADE_BUDGET_MS = 3_000;
 const ROUTE_MS = 1_000;
 const ZOMBIE = 7;
 
 /** Shared game clock and body, with navigation stopping only at its signal or timeout. */
-function reachFixture({ shooter = false, distance = 17, budget = 15_000, cover = false } = {}) {
+function reachFixture({ shooter = false, distance = 17, budget = 15_000, cover = false, ticksPerSecond = 20 } = {}) {
   const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    server: { ticksPerSecond },
     position: new Vec3(0.5, 64, 0.5), groundY: 63,
     entities: { 7: { name: shooter ? "skeleton" : "zombie", position: new Vec3(distance + 0.5, 64, 0.5) } } });
   if (shooter) harness.bot.entities[7]!.equipment[0] = itemOf(harness.bot.registry, "bow", 1);
@@ -30,20 +34,24 @@ function reachFixture({ shooter = false, distance = 17, budget = 15_000, cover =
   wall(cover);
   const stops: string[] = [];
   let routes = 0;
-  const navigation: { world: MemoryWorld; navigate: NavigationRuntime["navigate"] } = { world, navigate: async ({ stopSignal, timeoutMs }) => {
+  let goal: Goal | undefined;
+  const navigation: { world: MemoryWorld; navigate: NavigationRuntime["navigate"] } = { world, navigate: async ({ goal: received, signal, stopSignal, timeoutMs }) => {
+    goal = received;
     routes++;
     return await new Promise<{ status: "stopped"; reason: string; elapsedMs: number }>((resolve) => {
       const started = harness.clock.now();
       const finish = () => {
         cancel();
         stopSignal?.removeEventListener("abort", finish);
-        const reason = stopSignal?.aborted ? String(stopSignal.reason) : "navigation timeout";
+        signal?.removeEventListener("abort", finish);
+        const reason = stopSignal?.aborted ? String(stopSignal.reason) : signal?.aborted ? String(signal.reason) : "navigation timeout";
         stops.push(reason);
         resolve({ status: "stopped", reason, elapsedMs: harness.clock.now() - started });
       };
       const cancel = harness.clock.after(timeoutMs ?? budget, finish);
       stopSignal?.addEventListener("abort", finish, { once: true });
-      if (stopSignal?.aborted) finish();
+      signal?.addEventListener("abort", finish, { once: true });
+      if (stopSignal?.aborted || signal?.aborted) finish();
     });
   } };
   const perception = new CombatPerception(harness.bot);
@@ -53,7 +61,94 @@ function reachFixture({ shooter = false, distance = 17, budget = 15_000, cover =
     position: { x: distance + 0.5, y: 64, z: 0.5 }, distance }], safeRange: 36, reason: "hurt" as const };
   const run = (signal = new AbortController().signal) => harness.clock.settle(
     evade(harness.bot, navigation as unknown as NavigationRuntime, request, context, harness.bot.health, signal), budget + 1_000);
-  return { ...harness, navigation, context, request, stops, routes: () => routes, wall, run };
+  const revision = () => {
+    assert.ok(goal);
+    const resolved = goal.resolve({ ...observation(), position: harness.bot.entity.position });
+    assert.equal(resolved.kind, "active");
+    return resolved.kind === "active" ? resolved.revision : "";
+  };
+  return { ...harness, navigation, context, request, stops, routes: () => routes, wall, run, revision };
+}
+
+for (const ticksPerSecond of [20, 10]) for (const mode of ["sub-block", "stops", "stale", "melee"] as const) {
+  test(`${mode} threat updates cover at ${ticksPerSecond} tps`, async () => {
+    const fixture = reachFixture({ shooter: mode !== "melee", distance: 9, cover: true, ticksPerSecond });
+    using _installed = fixture.clock.install();
+    const snapshots: { age: number; time: number; revision: string; x: number; refreshes: number }[] = [];
+    const initialAge = fixture.bot.time.age;
+    let moving = true;
+    const cancel = new AbortController();
+    let observed: EvadeObservation | undefined;
+    const transitions: { before: boolean; after: boolean; delta: number; age: number; time: number }[] = [];
+    const originalRefresh = EvadeObservation.prototype.refreshGoal;
+    EvadeObservation.prototype.refreshGoal = function (...args) {
+      const hasCover = () => {
+        const resolved = this.goal?.resolve(observation());
+        return resolved?.kind === "active" && resolved.revision.includes(":8,");
+      };
+      const before = hasCover();
+      const count = this.goalRefreshes;
+      originalRefresh.apply(this, args);
+      if (this.goalRefreshes > count) transitions.push({ before, after: hasCover(), delta: this.goalRefreshes - count,
+        age: fixture.bot.time.age, time: fixture.clock.now() });
+      observed = this;
+    };
+    const step = (mode === "sub-block" ? 0.03 : 0.15) * ticksPerSecond / 20;
+    const move = () => { if (moving) fixture.bot.entities[7]!.position.x -= step; };
+    fixture.bot.on("physicsTick", move);
+    fixture.context.policy.melee = false;
+    const botAdded = listenersAddedSince(fixture.bot);
+    const clientAdded = listenersAddedSince(fixture.bot._client);
+    const capture = () => snapshots.push({ age: fixture.bot.time.age, time: fixture.clock.now(),
+      revision: fixture.revision(), x: fixture.bot.entities[7]!.position.x, refreshes: observed!.goalRefreshes });
+    const tickMs = 1_000 / ticksPerSecond;
+    let beforeFlip = "";
+    let refreshesBeforeFlip = 0;
+    const timers = [fixture.clock.after(20 * tickMs + 100, capture),
+    fixture.clock.after(40 * tickMs - 100, () => { beforeFlip = fixture.revision(); refreshesBeforeFlip = observed!.goalRefreshes; }),
+    fixture.clock.after(40 * tickMs + 100, () => {
+      capture();
+      if (mode === "stops" || mode === "stale") moving = false;
+      if (mode === "stale") fixture.server.stop();
+      if (mode === "sub-block") cancel.abort();
+    }), fixture.clock.after((mode === "stale" ? 40 * tickMs + 2_100 : 100 * tickMs + 100), capture)];
+    let settlements = 0;
+    let result: Awaited<ReturnType<typeof fixture.run>>;
+    try { result = await fixture.run(cancel.signal).then((value) => { settlements++; return value; }); }
+    finally { EvadeObservation.prototype.refreshGoal = originalRefresh; }
+    for (const cancelTimer of timers) cancelTimer();
+    await fixture.clock.advance(16_000);
+    assert.equal(settlements, 1);
+    assert.equal(fixture.stops.length, 1, "navigation settles once, including past its old deadline");
+    for (const event of ["physicsTick", "entityDead"]) assert.equal(botAdded(event), 0, event);
+    assert.equal(clientAdded("explosion"), 0);
+    fixture.bot.off("physicsTick", move);
+    const hasCover = (i: number) => snapshots[i]!.revision.includes(":8,");
+    const where = (i: number) => `time ${snapshots[i]!.time} ms, age ${snapshots[i]!.age}`;
+    assert.equal(snapshots[0]!.age - initialAge, 20, where(0));
+    assert.equal(hasCover(0), mode !== "melee", where(0));
+    assert.equal(snapshots[1]!.age - initialAge, 40, where(1));
+    assert.equal(hasCover(1), false, where(1));
+    if (mode === "sub-block") {
+      assert.ok(9.5 - snapshots[1]!.x > 1, where(1));
+      const snapshotX = Number(beforeFlip.match(/7@([^,]+)/)?.[1]);
+      assert.ok(Math.abs(snapshotX - snapshots[1]!.x) < 1, where(1));
+      assert.equal(snapshots[1]!.refreshes - refreshesBeforeFlip, 1, where(1));
+    }
+    if (mode === "stops" || mode === "stale") assert.equal(hasCover(2), true, where(2));
+    if (mode === "stops") {
+      assert.equal(snapshots[2]!.age - initialAge, 100, where(2));
+      const flip = transitions.find((entry) => !entry.before && entry.after);
+      assert.ok(flip, "cover returns after stopping");
+      assert.equal(flip.delta, 1, `time ${flip.time} ms, age ${flip.age}`);
+    }
+    if (mode === "stale") {
+      assert.equal(snapshots[2]!.age, snapshots[1]!.age, where(2));
+      assert.equal(result.ends[0]?.advancing, null);
+      assert.notEqual(result.result.kind, "separated");
+    }
+    if (mode === "melee") assert.equal(hasCover(2), false, where(2));
+  });
 }
 
 test("a shooter out of sight at the cover range ends the evade separated before the budget", async () => {

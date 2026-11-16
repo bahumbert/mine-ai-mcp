@@ -31,7 +31,7 @@ export class EvadeObservation {
   readonly #history = new ReachHistory();
   #age: number | null = null;
   #ageMovedAtMs: number | null = null;
-  #snapshot = new Map<number, ReachThreat>();
+  #snapshot = new Map<number, ReachThreat & { advancing: boolean | null }>();
   goal!: Goal;
   goalRefreshes = 0;
 
@@ -69,7 +69,10 @@ export class EvadeObservation {
     }
     for (const threat of observeExposedAvoidanceContact(bot, this.context))
       if (!this.#dead.has(threat.id) && !this.#entries.has(threat.id)) this.#add(threat, "joined");
-    if (this.goal && this.#changed()) this.refreshGoal();
+    if (this.goal) {
+      const ends = this.ends();
+      if (this.#changed(ends)) this.refreshGoal(true, ends);
+    }
   }
 
   /** A death changes goal membership but keeps the threat's receipt. */
@@ -79,23 +82,26 @@ export class EvadeObservation {
     this.refreshGoal();
   }
 
-  /** Membership, attack mode and displacement are the only moving-goal refresh triggers. */
-  #changed(): boolean {
+  /** Refresh when a projectile's reach verdict changes as well as when its position moves. */
+  #changed(ends: readonly EvadeThreatEnd[]): boolean {
     const live = [...this.#entries].filter(([id]) => !this.#dead.has(id));
     return live.length !== this.#snapshot.size || live.some(([id, entry]) => {
       const previous = this.#snapshot.get(id);
-      return !previous || previous.attack !== entry.body.attack || previous.position.distanceTo(entry.body.position)
+      return !previous || previous.attack !== entry.body.attack
+        || (entry.body.attack === "projectile" && (previous.advancing === true) !== (ends.find((end) => end.id === id)?.advancing === true))
+        || previous.position.distanceTo(entry.body.position)
         >= (entry.body.attack === "projectile" ? EVADE_COVER_REFRESH_BLOCKS : EVADE_GOAL_REFRESH_BLOCKS);
     });
   }
 
   /** A snapshot lets navigation finish useful steps between observed threat changes. */
-  refreshGoal(count = true): void {
+  refreshGoal(count = true, ends = this.ends()): void {
     this.#snapshot = new Map([...this.#entries].filter(([id]) => !this.#dead.has(id))
-      .map(([id, entry]) => [id, { ...entry.body, position: entry.body.position.clone() }]));
+      .map(([id, entry]) => [id, { ...entry.body, position: entry.body.position.clone(),
+        advancing: ends.find((end) => end.id === id)?.advancing ?? null }]));
     const minRange = Math.min(this.context.policy.evade_cover_range, this.safeRange);
     this.goal = safeFromEntitiesGoal([...this.#snapshot.values()].map((body) => ({ ...body,
-      ...(body.attack === "projectile" ? { cover: { minRange, eyeHeight: body.height * 0.85, width: body.width } } : {}) })),
+      ...(body.attack === "projectile" && body.advancing !== true ? { cover: { minRange, eyeHeight: body.height * 0.85, width: body.width } } : {}) })),
     this.safeRange + EVADE_ARRIVAL_MARGIN, { follow: "snapshot" });
     if (count) this.goalRefreshes++;
   }
