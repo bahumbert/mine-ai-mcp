@@ -109,7 +109,8 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     return { status: "failed", unavailable: block, detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
   }
   let last = failed;
-  let acrossWater = 0;
+  // The nearest place skipped across the water (places come nearest first): the hint names it.
+  let nearestAcross: SeenBlock | undefined;
   let wet = 0;
   let nearestWet: SeenBlock | undefined;
   const boat = carriesFamily((await context.runtime.status()).inventory, "boat");
@@ -126,7 +127,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (!boat) {
       const water = await context.runtime.waterAlong(here, { x: seen.x, y: here.y, z: seen.z }).catch(() => null);
       if (water !== null && water.share > MOSTLY_WATER) {
-        acrossWater += 1;
+        nearestAcross ??= seen;
         continue;
       }
     }
@@ -140,11 +141,12 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     if (there !== null) {
       // A slow walk is about her tools or depth, not the place (spec P4-02c D4, 2026-11-07).
       if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_SLOW") return { ...there, unavailable: block };
-      // A place that could not be reached is not offered again by the next round.
-      tried.add(`${seen.x},${seen.z}`);
       last = there;
       // The same water lies between her and the next far place: not walked to (live 2026-10-10 run 10: ~1500 blocks swum).
-      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, failed) };
+      // The place is not marked tried, as the skip above: a boat may come (live T6 re-run 2026-11-16: the fetch with the boat went elsewhere).
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, nearestAcross ?? seen, failed) };
+      // A place that could not be reached is not offered again by the next round.
+      tried.add(`${seen.x},${seen.z}`);
       continue;
     }
     const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, undefined, observe);
@@ -154,7 +156,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     tried.add(`${seen.x},${seen.z}`);
   }
   if (tries === 0 && wet > 0 && nearestWet !== undefined) return { status: "failed", unavailable: block, detail: wetPlacesHint(block, wet, nearestWet, failed) };
-  if (tries === 0 && acrossWater > 0) return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, failed) };
+  if (tries === 0 && nearestAcross !== undefined) return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, nearestAcross, failed) };
   return last.status === "failed" ? { ...last, unavailable: block } : last;
 }
 
@@ -163,9 +165,18 @@ function wetPlacesHint(block: string, wet: number, nearest: SeenBlock, failed: G
   return `the ${block} you know of farther away lies in chunks that are mostly water (${wet} place${wet === 1 ? "" : "s"}), nearest around ${nearest.x} ${nearest.z}: go_to there yourself if it is worth the trip, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
 }
 
-/** What a fetch tells when the places it knows lie across deep water and no boat is carried. */
-async function acrossWaterHint(runtime: BotRuntime, block: string, failed: GatherResult): Promise<string> {
-  return `the ${block} you know of is across the water: take a boat (get_items ${await boatToMake(runtime)}) and go_to there, use another material, or say so (${failed.status === "failed" ? failed.detail : "none near"})`;
+/**
+ * What a fetch tells when the places it knows lie across deep water and no boat is carried: the nearest such place, with
+ * its way from where she stands now (live T6 re-run 2026-11-16: "go_to there" named no place, and the model had none to go to).
+ */
+async function acrossWaterHint(runtime: BotRuntime, block: string, place: SeenBlock, failed: GatherResult): Promise<string> {
+  const [{ position: from }, boat] = await Promise.all([runtime.status(), boatToMake(runtime)]);
+  return acrossWaterWords(block, boat, from, place, failed.status === "failed" ? failed.detail : "none near");
+}
+
+/** The words for a known place across deep water: where, which way, how to cross, and that a fetch with a boat goes there itself. */
+export function acrossWaterWords(block: string, boat: string, from: { readonly x: number; readonly z: number }, place: { readonly x: number; readonly z: number }, failed: string): string {
+  return `the nearest ${block} you know of is across the water, ${describeWay(from, place)}, around ${place.x} ${place.z}: take a boat (get_items ${boat}); with a boat carried, get_items ${block} again also goes to the places across the water, nearest first, or go_to there yourself. Or use another material, or say so (${failed})`;
 }
 
 /** The eight compass directions, by the angle from east going south (Minecraft's +z is south). */

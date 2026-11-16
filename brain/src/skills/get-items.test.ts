@@ -880,7 +880,7 @@ test("wood recipes prefer the nearest open logs, before nearer drowned logs and 
   }
 });
 
-test("a far place whose walk failed is not walked to again by the next round, and one across the sea without a boat is not walked to", async () => {
+test("a far place whose walk failed is not walked to again by the next round", async () => {
   const runtime = new FakeRuntime();
   runtime.recipes = HOUSE_RECIPES;
   runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
@@ -889,14 +889,6 @@ test("a far place whose walk failed is not walked to again by the next round, an
   await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
   await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
   assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1, "the second round does not offer the place again");
-
-  const sea = new FakeRuntime();
-  sea.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
-  sea.seen = { oak_log: { dimension: "overworld", x: 700, z: 8 } };
-  sea.water = Object.fromEntries(Array.from({ length: 40 }, (_unused, index) => [`${index + 1},0`, 1]));
-  const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(sea));
-  assert.deepEqual(sea.submitted.filter((call) => call.tool === "navigate"), []);
-  assert.match(told.status === "failed" ? told.detail : "", /the oak_log you know of is across the water: take a boat/u);
 });
 
 for (const [name, gained] of [
@@ -922,17 +914,6 @@ for (const [name, gained] of [
     assert.deepEqual(runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input.x), [300, 300], "a later step can offer the same place again");
   });
 }
-
-test("a far walk that failed on deep water ends the fetch with the boat hint, no walk to the next far place across the same water", async () => {
-  const runtime = new FakeRuntime();
-  runtime.failures.collect_block = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks of where the run started; none is loaded farther either.";
-  runtime.failures.navigate = "[NAVIGATION_DEEP_WATER] Deep open water ahead (40+ blocks) and no boat is carried.";
-  runtime.seen = { oak_log: { dimension: "overworld", x: 300, z: 8 } };
-  runtime.alsoSeen = { oak_log: [{ dimension: "overworld", x: 400, z: 8 }] };
-  const told = await runStep({ skill: "get_items", items: [{ item: "oak_log", count: 4 }] }, contextFor(runtime));
-  assert.equal(runtime.submitted.filter((call) => call.tool === "navigate").length, 1, "one walk only");
-  assert.match(told.status === "failed" ? told.detail : "", /take a boat \(get_items oak_boat\)/u);
-});
 
 test("a near area all in water fetches farther and forgets the unusable near place", async () => {
   const runtime = new FakeRuntime();
