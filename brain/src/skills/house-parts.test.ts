@@ -24,12 +24,6 @@ for (const state of ["wrong", "correct", "unloaded", "abort"] as const) test(`a 
     runtime.cellsAt = async (cells) => { const result = await read(cells); controller.abort(); return result; };
   }
   const plan = planHouse(styleOrDefault("medieval"), "small", { door: { x: 0, y: 64, z: 2 }, facing: "north" });
-  const request = parseBuildStructureRequest({ blocks: [{ ...support, block_name: "oak_planks" }], keep: [support], remove_wrong_blocks: true });
-  const { bot } = createFakeBot({ carried: { wooden_shovel: 1, dirt: 3 } });
-  const dirt = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(bot.registry.blocksByName.dirt!.defaultState, 0));
-  const options = { isRequestedBreak: siteBreakRequest(request), ignoreRegionsOwnedBy: bot.username };
-  assert.notEqual(createMovements(bot, options).evaluateBreak(dirt, support, flatWorld()).decision.kind, "prohibited");
-  assert.equal(createMovements(bot, { ...options, protectedCells: new Set([packKey(1, 64, 2)]) }).evaluateBreak(dirt, support, flatWorld()).decision.kind, "prohibited", "production policy protects a keep cell even when its replacement is requested");
   let left: number | null = null;
   const context = contextFor(runtime, { signal: controller.signal });
   const result = await buildParts(context, plan, "my house", { reserved: [], keepAlways: [support], leave: (part) => { left = part; }, again: "; resume here" });
@@ -44,4 +38,14 @@ for (const state of ["wrong", "correct", "unloaded", "abort"] as const) test(`a 
     assert.equal(runtime.submitted.length, 0);
   }
   assert.equal((await runStep({ skill: "go_to", x: 2, y: 64, z: 0 }, { ...context, signal: new AbortController().signal })).status, "done");
+});
+
+test("kept supports are refused to the movement policy", () => {
+  const support = { x: 1, y: 64, z: 2 };
+  const request = parseBuildStructureRequest({ blocks: [{ ...support, block_name: "oak_planks" }], keep: [support], remove_wrong_blocks: true });
+  const { bot } = createFakeBot({ carried: { wooden_shovel: 1, dirt: 3 } });
+  const dirt = observeMineflayerBlock(prismarineBlock(bot.registry).fromStateId(bot.registry.blocksByName.dirt!.defaultState, 0));
+  const options = { isRequestedBreak: siteBreakRequest(request), ignoreRegionsOwnedBy: bot.username };
+  assert.notEqual(createMovements(bot, options).evaluateBreak(dirt, support, flatWorld()).decision.kind, "prohibited");
+  assert.equal(createMovements(bot, { ...options, protectedCells: new Set([packKey(1, 64, 2)]) }).evaluateBreak(dirt, support, flatWorld()).decision.kind, "prohibited", "production policy protects a keep cell even when its replacement is requested");
 });
