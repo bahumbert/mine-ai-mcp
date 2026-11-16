@@ -40,7 +40,7 @@ function fixture() {
   const body = new Body(runtime, options.log, INSTANT_TYPING);
   const memory = new AgentMemory(options, body);
   memory.places.push(HOME);
-  const runner = new StepRunner({ options, body, memory, facts: new GameFacts(runtime, options.log), failedSteps: new FailedSteps(), soil: new TillFacts(), lastHeard: new Map(), progress: () => {}, journalState: () => {}, runSignal: () => new AbortController().signal });
+  const runner = new StepRunner({ options, body, memory, facts: new GameFacts(runtime, options.log), failedSteps: new FailedSteps(), soil: new TillFacts(), lastHeard: new Map(), progress: () => {}, journalState: () => {}, runSignal: () => new AbortController().signal, neededWork: (work) => work });
   const work = newWork({ text: "walk home", requester: null, purpose: "travelling" });
   const run = () => runner.runChosenStep(work, WALK, runtime.snapshot);
   return { runtime, calls, mind, logs, body, memory, runner, work, run };

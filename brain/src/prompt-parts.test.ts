@@ -141,7 +141,7 @@ test("the speaker, the requester and named players stay when players shrink", ()
 
 test("inventory, places, objective, new message and About this message are never shrunk", () => {
   const checks: [MindTier, readonly PromptPart[], string[]][] = [
-    ["work", workParts(workWorst()), ["Inventory: ", "Places you know: ", "Objective (asked by Player4)"]],
+    ["work", workParts(workWorst()), ["Inventory: ", "Places you know: ", "Objective (an event)"]],
     ["chat", chatParts(chatWorst(), true), ["Inventory: ", "Places you know: ", "New message: Player2 says in chat, naming you"]],
     ["goal", goalParts(goalWorst()), ["Inventory: ", "Places you know: ", "How you spent the last hour"]],
   ];
@@ -316,5 +316,11 @@ test("no situation: no event text; with one, the event sits between the situatio
   const withoutEvent = fitPrompt("", workParts({ ...workP50(), situation: undefined }), SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4).text;
   assert.doesNotMatch(withoutEvent, /- Event: /u);
   const withEvent = fitPrompt("", workParts(workWorst()), SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4).text;
-  assert.match(withEvent, /- Currently doing: [^\n]*\n- Event: [\s\S]*\n\nObjective \(asked by Player4\)/u);
+  assert.match(withEvent, /- Currently doing: [^\n]*\n- Event: [\s\S]*\n\nObjective \(an event\)/u);
+});
+
+for (const deciding of [true, false]) test(`a situation objective is an event (deciding: ${deciding})`, () => {
+  const input = { ...workP50(), situation: nightSituation({ deciding }) };
+  const text = fitPrompt("", workParts(input), SHRINK_ORDER.work, Number.POSITIVE_INFINITY, 3.4).text;
+  assert.match(text, /Objective \(an event\)/u);
 });

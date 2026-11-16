@@ -21,7 +21,7 @@ import { GameFacts } from "./agent/game-facts.ts";
 import { opportunitiesFor } from "./agent/house-opportunities.ts";
 import { StepGuards } from "./agent/step-guards.ts";
 import { StepRunner } from "./agent/step-runner.ts";
-import { stopAll, stopWorkOf } from "./agent/stack.ts";
+import { neededWork, stopAll, stopWorkOf, topWork } from "./agent/stack.ts";
 import { newWork, type Work } from "./agent/work.ts";
 
 /** How often the agent checks for new chat. */
@@ -111,7 +111,7 @@ export class Agent {
       options,
       pollMs: options.pollMs ?? DEFAULT_POLL_MS,
       runSignal: () => this.runSignal,
-      top: () => this.stack.at(-1),
+      top: () => topWork(this.stack),
       idle: (ms) => this.idle(ms),
     });
     this.inbox = new Inbox(options.persona.settings.chatBurstMs);
@@ -123,7 +123,7 @@ export class Agent {
       areas: this.memory.areas,
       activity: () => this.activity,
       knownPlaces: () => this.memory.knownPlaces(),
-      orderOnTop: () => (this.stack.at(-1)?.objective.requester ?? null) !== null,
+      orderOnTop: () => (topWork(this.stack)?.objective.requester ?? null) !== null,
       modelFailed: (error) => this.modelFailed(error),
       resetModelFailures: () => { this.modelFailures = 0; },
       runSignal: () => this.runSignal,
@@ -139,13 +139,14 @@ export class Agent {
       progress: (work, fact) => this.progress(work, fact),
       journalState: (step) => this.journalState(step),
       runSignal: () => this.runSignal,
+      neededWork: (work) => neededWork(this.stack, work),
     });
   }
 
   get activity(): string {
     const top = this.stack.at(-1);
     if (top === undefined) return "idle";
-    const whose = top.objective.requester === null ? "your own goal" : `for ${top.objective.requester}`;
+    const whose = top.situation !== null ? "an event" : top.objective.requester === null ? "your own goal" : `for ${top.objective.requester}`;
     const paused = this.stack.slice(0, -1).map((work) => JSON.stringify(work.objective.text));
     return `${JSON.stringify(top.objective.text)} (${whose})${paused.length === 0 ? "" : `; set aside: ${paused.join(", ")}`}`;
   }
@@ -296,7 +297,7 @@ export class Agent {
       // Owner rule (2026-10-01): a player's request always comes before the character's own goal. The prompt says so,
       // but qwen3 still answered "later" to a plain request while on its own goal, so the stack enforces it: "later"
       // only waits behind work done for someone.
-      const top = this.stack.at(-1);
+      const top = topWork(this.stack);
       const objective = asked;
       if (top === undefined || top.objective.requester === null) this.take(objective, whisperTo);
       else this.queue(objective, whisperTo);
@@ -315,8 +316,9 @@ export class Agent {
   /** Takes something on for when the current objective ends: it goes just below it on the stack. */
   private queue(objective: Objective, whisperTo: string | null = null): void {
     const work = newWork(objective, whisperTo);
-    if (this.stack.length === 0) this.stack.push(work);
-    else this.stack.splice(this.stack.length - 1, 0, work);
+    const top = topWork(this.stack);
+    if (top === undefined) this.stack.push(work);
+    else this.stack.splice(this.stack.indexOf(top), 0, work);
     this.journalObjective("queued", objective);
     this.wake?.();
   }
@@ -394,7 +396,7 @@ export class Agent {
   /** Takes one step towards `work`: one model call, then the chosen skill. */
   private async advance(work: Work): Promise<void> {
     const { persona, runtime } = this.options;
-    if (work.objective.requester === null && !(await this.guards.waitForGoalBudget())) return;
+    if (work.situation === null && work.objective.requester === null && !(await this.guards.waitForGoalBudget())) return;
     if (this.stack.at(-1) !== work) return;
     const snapshot = await runtime.status();
     this.memory.notePosition(snapshot.position, snapshot.dimension, monotonicNow());
@@ -460,6 +462,7 @@ export class Agent {
     this.options.log(`objective ${JSON.stringify(objective.text)} (${objective.requester ?? "own goal"}): ${outcome} (${detail})`);
     this.options.journal?.({ kind: "objective", event: "finished", text: objective.text, requester: objective.requester, outcome, detail });
     this.journalState(null);
+    if (work.situation !== null) return;
     if (objective.requester === null) {
       const outcomeLine = `${objective.text}: ${outcome} (${detail})`;
       this.lastFailed = outcome === "failed" ? { objective: objective.text, reason: detail } : null;
