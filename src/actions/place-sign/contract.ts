@@ -3,7 +3,7 @@ import { z } from "zod";
 import { actionResultSchema } from "../action.js";
 
 export const PLACE_SIGN = "place_sign" as const;
-export const PLACE_SIGN_DESCRIPTION = "Place a carried sign on the ground or a wall, write its front text after the server opens the editor, and report whether the server confirmed the lines. Existing signs are read and refused.";
+export const PLACE_SIGN_DESCRIPTION = "Place a carried sign on the ground or a wall, or fill an existing sign known blank on both sides with fill_blank. Write its front text after the server opens the editor and report whether the server confirmed the lines. Signs with text are read and refused.";
 // Contract sign-edit kept 45 and 46 characters; Mineflayer sends at most 45 (T1, 2026-11-15).
 export const SIGN_LINE_MAX = 45;
 export type SignLines = [string, string, string, string];
@@ -20,7 +20,7 @@ export const placeSignInputSchema = z.strictObject({
   attach: attach.default("ground").describe("Ground below the sign, or the wall behind its text."),
   lines: z.array(line).min(1).max(4).describe("One to four front lines, each at most 45 characters without line breaks."),
   sign_item: z.string().min(1).optional().describe("Carried registry item in the sign family; otherwise the first carried sign."),
-  fill_blank: z.boolean().default(false).describe("Request filling an existing blank sign; existing sign cells are currently refused."),
+  fill_blank: z.boolean().default(false).describe("Fill an existing sign only when its front and back are both known blank; no sign item is needed."),
 });
 export type PlaceSignRequest = z.output<typeof placeSignInputSchema>;
 
@@ -39,7 +39,7 @@ export function parsePlaceSignRequest(input: unknown): PlaceSignRequest {
 export const placeSignResultSchema = actionResultSchema({
   sign: z.strictObject({ target: position, block: z.string().nullable(), facing, attach, lines: z.tuple([z.string(), z.string(), z.string(), z.string()]), confirmed: z.boolean(), placed: z.boolean() }),
   members: z.array(z.string()).optional(),
-  existing: z.strictObject({ block: z.string(), front: z.array(z.string()).length(4).optional() }).optional(),
+  existing: z.strictObject({ block: z.string(), front: z.array(z.string()).length(4).optional(), back: z.array(z.string()).length(4).optional() }).optional(),
 });
 export type PlaceSignResult = z.output<typeof placeSignResultSchema>;
 export { placeSignCheckpointSchema } from "../checkpoint-schemas.js";
@@ -50,6 +50,8 @@ export const placeSignOutcomes = {
   noSupport: "[PLACE_SIGN_NO_SUPPORT] No full supporting face or unique sign block is available; choose a supported cell and sign item.",
   lines: "[PLACE_SIGN_LINES] Provide one to four lines, each at most 45 characters without CR or LF, then try again.",
   unloaded: "[PLACE_SIGN_UNLOADED] The target cell is not loaded; move closer and try again.",
-  unconfirmed: (block: string, cause: string) => `[PLACE_SIGN_TEXT_UNCONFIRMED] ${block} was placed, but its front text was not confirmed: ${cause}. Read the sign before deciding what to do next.`,
+  unknown: "[PLACE_SIGN_TEXT_UNKNOWN] The sign's front or back text is not known; move closer and read the sign before filling it.",
+  noEditor: "[PLACE_SIGN_NO_EDITOR] The server did not open the editor after the one click; read the sign before deciding whether to try again.",
+  unconfirmed: (block: string, cause: string, placed = true) => `[PLACE_SIGN_TEXT_UNCONFIRMED] ${block} ${placed ? "was placed" : "was opened"}, but its front text was not confirmed: ${cause}. Read the sign before deciding what to do next.`,
   failed: (cause: string) => `[PLACE_SIGN_FAILED] ${cause}; inspect the cell before trying again.`,
 };

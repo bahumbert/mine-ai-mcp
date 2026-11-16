@@ -87,7 +87,7 @@ for (const rate of [20, 10]) {
     await nextSign(h);
   });
 
-  test(`cut after the edit, text never came, cell blank: partial unconfirmed, clicked false (${rate} tps)`, async (t) => {
+  test(`cut after the edit, text never came, cell blank: one reopen, partial when the server stays stopped (${rate} tps)`, async (t) => {
     const h = setup(t, rate);
     using _timers = h.clock.install();
     const added = listenersAddedSince(h.bot);
@@ -101,7 +101,8 @@ for (const rate of [20, 10]) {
     assert.match("error" in result ? result.error : "", /PLACE_SIGN_TEXT_UNCONFIRMED/);
     assert.equal(result.sign.placed, true);
     assert.deepEqual(result.sign.lines, ["", "", "", ""]);
-    assert.equal(h.checkpoint().clicked, false);
+    assert.equal(h.checkpoint().clicked, true);
+    assert.equal(h.server.packets.filter(({ name }) => name === "block_place").length, 2);
     assert.equal(h.bot.time.age, age);
     assert.equal(h.server.packets.filter(({ name }) => name === "update_sign").length, 1);
     await released(h, added);

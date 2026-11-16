@@ -133,14 +133,17 @@ test("a sign at the cell is read and never overwritten", async (t) => {
   const result = await h.clock.settle(h.run({ ...input, fill_blank: true }), 1_000);
   assert.equal(result.status, "failed");
   assert.match("error" in result ? result.error : "", /PLACE_SIGN_CELL_TAKEN/);
-  assert.deepEqual(result.existing, { block: "oak_sign", front: ["someone", "else", "", ""] });
+  assert.deepEqual(result.existing, { block: "oak_sign", front: ["someone", "else", "", ""], back: ["back", "", "", ""] });
   assert.equal(changes(h).length, 0);
 });
 
-for (const fill_blank of [false, true]) test(`a blank sign is cell taken until T5c (fill_blank ${fill_blank})`, async (t) => {
+test("a blank sign without fill_blank is cell taken", async (t) => {
   const h = setup(t, { cells: { "2,64,0": "oak_sign" } });
   using _timers = h.clock.install();
-  const result = await h.clock.settle(h.run({ ...input, fill_blank }), 1_000);
+  const block = h.bot.blockAt(target)!;
+  block.setSignText("\n\n\n", "\n\n\n");
+  h.world.setCell(target, { name: block.name, properties: {}, entity: block.entity! });
+  const result = await h.clock.settle(h.run(input), 1_000);
   assert.match("error" in result ? result.error : "", /PLACE_SIGN_CELL_TAKEN/);
   assert.equal(changes(h).length, 0);
 });

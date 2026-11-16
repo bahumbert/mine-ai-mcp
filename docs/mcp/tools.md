@@ -265,8 +265,12 @@ the target, observed block and lines, requested facing and attachment, `placed`,
 and `confirmed`. A placed sign without confirmed text returns `partial`
 `PLACE_SIGN_TEXT_UNCONFIRMED`; read it before deciding what to do next. Missing
 items list the family's `members`. Occupied cells return `existing` (including
-front lines for a sign). Existing signs are never overwritten in this placement
-path; `fill_blank` is accepted, but existing sign cells are currently refused.
+front and back lines for a sign). With `fill_blank: true`, an existing sign known
+blank on both sides is opened with one click and filled without using a sign item;
+its evidence has `placed: false`. Text on either side refuses with `CELL_TAKEN`.
+Unknown text refuses with `PLACE_SIGN_TEXT_UNKNOWN`; no editor after the click
+returns `PLACE_SIGN_NO_EDITOR`. A cut preserves the one-click budget, and an
+unconfirmed edit is read back before another write is considered.
 Unloaded targets, missing support and foreign protected regions refuse placement.
 
 ### `read_signs`

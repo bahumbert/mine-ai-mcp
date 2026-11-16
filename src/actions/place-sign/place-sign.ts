@@ -1,20 +1,21 @@
 // Place a sign and obtain its server-confirmed front text.
 import type { Bot } from "mineflayer";
 import type { SqlBotData } from "../../bot-data/index.js";
-import { recordOwnSign } from "../../bot-data/index.js";
+import { observeSign, recordOwnSign } from "../../bot-data/index.js";
 import { Vec3 } from "vec3";
-import { createMovements, type NavigationRuntime } from "../../navigation/index.js";
+import { createMovements, setSneaking, type NavigationRuntime } from "../../navigation/index.js";
 import { familyMembers, signBlockFor } from "../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
 import { placeBlock, type InventoryItem, type WorldBlock } from "../../world/placement.js";
 import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement, type OwnPlacement } from "../../world/own-placement.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
+import { regionChangeRefusal } from "../../world/protected-regions.js";
 import { raceSignal, cellIntersectsPlayerBody } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
 import { approachTarget, isPlacementSupport } from "../place-block/place-block.js";
 import { readSignAt } from "../read-signs/read-signs.js";
-import { watchSignAnswers, type SignAnswers } from "./sign-answers.js";
+import { clickSignNow, watchSignAnswers, type SignAnswers } from "./sign-answers.js";
 import { PLACE_SIGN, PLACE_SIGN_DESCRIPTION, normalizeLines, parsePlaceSignRequest, placeSignInputSchema, placeSignResultSchema, placeSignCheckpointSchema, placeSignAnnotations, placeSignOutcomes, type PlaceSignRequest, type PlaceSignResult, type SignLines } from "./contract.js";
 
 export interface PlaceSignDependencies { readonly bot: Bot; readonly botData: SqlBotData; readonly navigation: NavigationRuntime }
@@ -31,7 +32,10 @@ interface SignRun {
   dispose?: () => void;
   block: string | null;
   consumption: { item: string; expected: number } | null;
-  phase: "approach" | "sent" | "placed" | "edit_sent" | "written";
+  mode: "place" | "fill";
+  clicked: boolean;
+  clickAge?: number;
+  phase: "approach" | "sent" | "placed" | "click_sent" | "edit_sent" | "written";
 }
 
 /** Unit vectors in the caller's requested text direction. */
@@ -68,7 +72,7 @@ function planPlacement(run: SignRun): SignPlacement | PlaceSignResult {
   const current = bot.blockAt(run.target);
   if (!current) return refusal(run, placeSignOutcomes.unloaded);
   const sign = readSignAt(bot, run.target);
-  if (sign || !isReplaceableForPlacement(current, bot.version)) return { ...refusal(run, placeSignOutcomes.taken(current.name)), existing: { block: current.name, ...(sign && { front: sign.front }) } };
+  if (sign || !isReplaceableForPlacement(current, bot.version)) return taken(run);
   const face = run.request.attach === "ground" ? new Vec3(0, 1, 0) : facingVector(run.request.facing);
   const support = bot.blockAt(run.target.minus(face));
   const block = signBlockFor(bot, item.name, run.request.attach);
@@ -76,10 +80,83 @@ function planPlacement(run: SignRun): SignPlacement | PlaceSignResult {
   return { item, block, support, face };
 }
 
-/** Record only complete text read from a sign this request put down. */
+/** Preserve placer evidence only for the sign this request put down. */
 function recordPlacedSign(run: SignRun): void {
   const reading = readSignAt(run.deps.bot, run.target);
-  if (reading?.known) recordOwnSign(run.deps.botData, run.deps.bot.username, { ...reading, dimension: run.deps.bot.game.dimension });
+  if (!reading?.known) return;
+  const sign = { ...reading, dimension: run.deps.bot.game.dimension };
+  if (run.own.cells.length > 0) recordOwnSign(run.deps.botData, run.deps.bot.username, sign);
+  else observeSign(run.deps.botData, sign);
+}
+
+/** Include both sides of a sign the caller must leave alone. */
+function taken(run: SignRun): PlaceSignResult {
+  const block = run.deps.bot.blockAt(run.target);
+  const reading = readSignAt(run.deps.bot, run.target);
+  return { ...refusal(run, placeSignOutcomes.taken(block?.name ?? "an unloaded cell")),
+    existing: { block: block?.name ?? "unknown", ...(reading && { front: reading.front, back: reading.back }) } };
+}
+
+/** Recheck the policy and complete blank text immediately before each fill side effect. */
+function blankSignRefusal(run: SignRun): PlaceSignResult | null {
+  const { bot } = run.deps;
+  const policy = regionChangeRefusal(bot, run.target, "placement");
+  if (policy) return refusal(run, policy);
+  const block = bot.blockAt(run.target);
+  if (!block) return refusal(run, placeSignOutcomes.unloaded);
+  const reading = readSignAt(bot, run.target);
+  if (!reading || (run.block !== null && block.name !== run.block)) return taken(run);
+  if (!reading.known) return refusal(run, placeSignOutcomes.unknown);
+  if ([...reading.front, ...reading.back].some((line) => line !== "")) return taken(run);
+  return null;
+}
+
+/** Open a known blank sign once, with no awaited work between the final guards and its packet. */
+async function fillBlankSign(run: SignRun, signal: AbortSignal): Promise<PlaceSignResult> {
+  const { bot } = run.deps;
+  const refused = blankSignRefusal(run);
+  if (refused) return refused;
+  run.block = bot.blockAt(run.target)!.name;
+  const answers = signAnswers(run);
+  if (!run.clicked) {
+    const face = facingVector(run.request.facing);
+    await raceSignal(bot.lookAt(run.target.offset(0.5, 0.5, 0.5).plus(face.scaled(0.5)), true), signal);
+    signal.throwIfAborted();
+    if (hasConfirmedText(run)) return written(run);
+    const changed = blankSignRefusal(run);
+    if (changed) return changed;
+    setSneaking(bot, false);
+    clickSignNow(bot, bot.blockAt(run.target)!, face, () => {
+      run.phase = "click_sent";
+      run.clicked = true;
+      run.clickAge = bot.time?.age;
+    });
+  }
+  if (!await answers.editor(signal, run.clickAge)) {
+    signal.throwIfAborted();
+    return run.mode === "place" ? unconfirmed(run, "the server did not reopen the editor") : refusal(run, placeSignOutcomes.noEditor);
+  }
+  signal.throwIfAborted();
+  if (hasConfirmedText(run)) return written(run);
+  const changed = blankSignRefusal(run);
+  if (changed) return changed;
+  const cause = await writeSign(run, answers, signal);
+  signal.throwIfAborted();
+  if (cause) return unconfirmed(run, cause);
+  return written(run);
+}
+
+/** A late answer to this request's previous edit can finish a placement while it reopens. */
+function hasConfirmedText(run: SignRun): boolean {
+  const reading = readSignAt(run.deps.bot, run.target);
+  return Boolean(run.answers?.textConfirmed(run.lines) && reading?.known && reading.front.every((line, i) => line === run.lines[i]));
+}
+
+/** One confirmed write shares observation and result semantics across placement and filling. */
+function written(run: SignRun): PlaceSignResult {
+  recordPlacedSign(run);
+  run.phase = "written";
+  return { status: "succeeded", sign: evidence(run, run.own.cells.length > 0, true) };
 }
 
 /** One synchronous Mineflayer write, with its emitted error captured for this call only. */
@@ -122,10 +199,11 @@ async function placeAndWrite(run: SignRun, plan: SignPlacement, answers: SignAns
   return finishWriting(run, answers, signal);
 }
 
-/** A partial never spends another edit permission; T5c can reopen a known blank sign once. */
+/** Unconfirmed text stays partial; an owned placement can reopen once on a resume. */
 function unconfirmed(run: SignRun, cause: string): PlaceSignResult {
   recordPlacedSign(run);
-  return { status: "partial", error: placeSignOutcomes.unconfirmed(run.block!, cause), sign: evidence(run, true) };
+  const placed = run.own.cells.length > 0;
+  return { status: "partial", error: placeSignOutcomes.unconfirmed(run.block!, cause, placed), sign: evidence(run, placed) };
 }
 
 /** Share the original editor permission between placement and its resumed write. */
@@ -134,9 +212,7 @@ async function finishWriting(run: SignRun, answers: SignAnswers, signal: AbortSi
   if (await answers.editor(signal)) cause = await writeSign(run, answers, signal) ?? "";
   signal.throwIfAborted();
   if (cause) return unconfirmed(run, cause);
-  recordPlacedSign(run);
-  run.phase = "written";
-  return { status: "succeeded", sign: evidence(run, true, true) };
+  return written(run);
 }
 
 /** Keep packet evidence during a reflex cut, but release it when the logical request ends. */
@@ -164,6 +240,7 @@ function signAnswers(run: SignRun): SignAnswers {
 /** Settle the earlier packet before planning, and never credit an unsent sign or resend an edit. */
 async function resumeSign(run: SignRun, signal: AbortSignal): Promise<PlaceSignResult | null> {
   const { bot } = run.deps;
+  if (run.mode === "fill") return resumeFill(run, signal);
   const seen = await awaitOwnPlacement(bot, run.own, (block) => block.name === run.block, signal);
   if (seen.kind === "none") return null;
   if (seen.kind === "unloaded") return refusal(run, placeSignOutcomes.unloaded);
@@ -180,16 +257,36 @@ async function resumeSign(run: SignRun, signal: AbortSignal): Promise<PlaceSignR
   }
   const reading = readSignAt(bot, run.target);
   if ((run.phase === "written" || run.answers?.textConfirmed(run.lines)) && reading?.known && reading.front.every((line, index) => line === run.lines[index])) {
-    run.phase = "written";
-    recordPlacedSign(run);
-    return { status: "succeeded", sign: evidence(run, true, true) };
+    return written(run);
   }
   if (reading?.known && [...reading.front, ...reading.back].some((line) => line !== "")) {
-    return { ...refusal(run, placeSignOutcomes.taken(reading.block)), existing: { block: reading.block, front: reading.front } };
+    return taken(run);
   }
-  if (run.phase === "edit_sent" || run.phase === "written") return unconfirmed(run, "the previous edit has no matching text answer; read the sign before filling it");
+  if (run.phase === "edit_sent" || run.phase === "written") {
+    if (reading?.known && !run.clicked) return fillBlankSign(run, signal);
+    return unconfirmed(run, "the previous edit has no matching text answer; read the sign before filling it");
+  }
+  if (run.clicked) return fillBlankSign(run, signal);
   run.phase = "placed";
-  return finishWriting(run, signAnswers(run), signal);
+  const answers = signAnswers(run);
+  if (!await answers.editor(signal)) return fillBlankSign(run, signal);
+  return finishWriting(run, answers, signal);
+}
+
+/** A spent fill click is never repeated, and a spent edit is only read back. */
+async function resumeFill(run: SignRun, signal: AbortSignal): Promise<PlaceSignResult> {
+  const { bot } = run.deps;
+  const policy = regionChangeRefusal(bot, run.target, "placement");
+  if (policy) return refusal(run, policy);
+  if (!bot.blockAt(run.target)) return refusal(run, placeSignOutcomes.unloaded);
+  const reading = readSignAt(bot, run.target);
+  if (!reading || (run.block !== null && reading.block !== run.block)) return taken(run);
+  if (!reading.known) return refusal(run, placeSignOutcomes.unknown);
+  if ((run.phase === "written" || run.answers?.textConfirmed(run.lines)) && reading.front.every((line, i) => line === run.lines[i])) return written(run);
+  const refused = blankSignRefusal(run);
+  if (refused) return refused;
+  if (run.phase === "edit_sent" || run.phase === "written") return unconfirmed(run, "the previous edit has no matching text answer");
+  return fillBlankSign(run, signal);
 }
 
 /** Scope waits to one attempt while packet observations belong to the whole request. */
@@ -198,11 +295,19 @@ async function executeSign(run: SignRun, context: ActionContext): Promise<PlaceS
   const signal = AbortSignal.any([run.lifetime, run.stop.signal, ...(context.signal ? [context.signal] : [])]);
   try {
     signal.throwIfAborted();
+    if (run.mode === "fill" || (run.request.fill_blank && readSignAt(bot, run.target))) {
+      const policy = regionChangeRefusal(bot, run.target, "placement");
+      if (policy) return refusal(run, policy);
+    }
     const route = await raceSignal(approachTarget(bot, run.target, { signal }, { createMovements, navigate: navigation.navigate }), signal);
     if (route?.status === "stopped") return refusal(run, placeSignOutcomes.failed(route.reason));
     if (cellIntersectsPlayerBody(run.target, bot.entity.position)) return refusal(run, placeSignOutcomes.failed("The bot still occupies the sign cell"));
     const resumed = await resumeSign(run, signal);
     if (resumed) return resumed;
+    if (run.request.fill_blank && readSignAt(bot, run.target)) {
+      run.mode = "fill";
+      return await fillBlankSign(run, signal);
+    }
     const plan = planPlacement(run);
     if ("status" in plan) return plan;
     return await placeAndWrite(run, plan, signAnswers(run), signal);
@@ -217,9 +322,9 @@ export function createPlaceSignAction(deps: PlaceSignDependencies) {
     checkpointSchema: placeSignCheckpointSchema, formatResult: (result) => JSON.stringify(result), annotations: placeSignAnnotations,
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(deps.bot, deps.navigation, signal) }, parse: parsePlaceSignRequest,
     begin(request, lifetime, observe) {
-      const run: SignRun = { deps, request, target: new Vec3(request.x, request.y, request.z), lines: normalizeLines(request.lines), own: startOwnPlacement(), phase: "approach", block: null, consumption: null, stop: new AbortController(), lifetime };
+      const run: SignRun = { deps, request, target: new Vec3(request.x, request.y, request.z), lines: normalizeLines(request.lines), own: startOwnPlacement(), mode: "place", clicked: false, phase: "approach", block: null, consumption: null, stop: new AbortController(), lifetime };
       const target = { x: request.x, y: request.y, z: request.z };
-      observe(() => ({ baseline: { target }, checkpoint: { mode: "place", phase: run.phase, target, sentAge: run.own.sentAtAge ?? null, clicked: false }, completion: { kind: "event", observed: run.phase === "written", owes: "server-confirmed front text" } }));
+      observe(() => ({ baseline: { target }, checkpoint: { mode: run.mode, phase: run.phase, target, sentAge: run.own.sentAtAge ?? null, ...(run.clickAge !== undefined && { clickAge: run.clickAge }), clicked: run.clicked }, completion: { kind: "event", observed: run.phase === "written", owes: "server-confirmed front text" } }));
       return (context) => executeSign(run, context);
     } });
 }
