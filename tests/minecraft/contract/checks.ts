@@ -58,6 +58,7 @@ import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-dela
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { itemVariantComponents } from "./checks/item-variant-components.ts";
 import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
+import { signEdit } from "./checks/sign-edit.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
 import { respawnAfterDeath } from "./checks/respawn-after-death.ts";
@@ -191,6 +192,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackMobKnockbackSprint,
   bucketPourAndFill,
   placeBlockWithOptions,
+  signEdit,
   lavaBesideHead,
   lavaOverHole,
   lavaOverPassable,
