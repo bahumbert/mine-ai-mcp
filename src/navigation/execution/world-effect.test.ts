@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test, { type TestContext } from "node:test";
+import test from "node:test";
 import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
 import { FakeNavigationBot, flatWorld } from "../../test-support/navigation.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
@@ -7,30 +7,40 @@ import { airMatcher, stateMatcher } from "../movements/movement.js";
 import { ExpectedMutationLedger } from "./mutations.js";
 import { executeWorldEffect } from "./world-effect.js";
 
+const originalSetInterval = globalThis.setInterval;
+const originalClearInterval = globalThis.clearInterval;
+
 /** Observe global poll handles separately from the fake clock's own scheduled callbacks. */
-function trackPollIntervals(context: TestContext) {
+function trackPollIntervals() {
+  const start = globalThis.setInterval;
   const clear = globalThis.clearInterval;
-  const started = context.mock.method(globalThis, "setInterval");
-  const cleared = context.mock.method(globalThis, "clearInterval");
+  const live = new Set<ReturnType<typeof setInterval>>();
+  globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+    const handle = start(...args);
+    live.add(handle);
+    return handle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((handle: Parameters<typeof clearInterval>[0]) => {
+    live.delete(handle as ReturnType<typeof setInterval>);
+    clear(handle);
+  }) as typeof clearInterval;
   return {
     assertReleased() {
-      const live = new Set<Parameters<typeof clearInterval>[0]>(started.mock.calls.map(call => call.result));
-      for (const call of cleared.mock.calls) live.delete(call.arguments[0]);
       assert.equal(live.size, 0, "the effect released every global polling interval");
     },
     [Symbol.dispose]() {
-      for (const call of started.mock.calls) clear(call.result);
-      cleared.mock.restore();
-      started.mock.restore();
+      for (const handle of live) clear(handle);
+      globalThis.clearInterval = clear;
+      globalThis.setInterval = start;
     },
   };
 }
 
 for (const scenario of ["late answer", "stopped clock", "abort", "on time"] as const) {
-  test(`confirmation uses server age: ${scenario}`, async context => {
+  test(`confirmation uses server age: ${scenario}`, async () => {
     const clock = createFakeClock({ mode: "mocked" });
     using _timers = clock.install();
-    using intervals = trackPollIntervals(context);
+    using intervals = trackPollIntervals();
     const fake = createFakeBot({ clock, server: { ticksPerSecond: scenario === "on time" ? 20 : 5 } });
     const world = flatWorld();
     const position = { x: 0, y: 64, z: 0 };
@@ -85,6 +95,11 @@ for (const scenario of ["late answer", "stopped clock", "abort", "on time"] as c
     }
   });
 }
+
+test("poll interval tracking restores the global timers after the clock is disposed", () => {
+  assert.equal(globalThis.setInterval, originalSetInterval);
+  assert.equal(globalThis.clearInterval, originalClearInterval);
+});
 
 for (const failure of ["timeout", "conflict"] as const) {
   test(`a world effect stops and drains on ${failure}, without physics ticks`, async () => {
