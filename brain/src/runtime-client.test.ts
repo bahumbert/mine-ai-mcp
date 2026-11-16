@@ -391,6 +391,14 @@ test("status reads the condition facts", async () => {
   assert.deepEqual({ saturation: result.saturation, armourPoints: result.armourPoints, armourToughness: result.armourToughness, burn: result.burn, armour: result.armour, light: result.light, combat: result.combat, respawn: result.respawn }, { saturation: 0.5, armourPoints: 7, armourToughness: 8, burn, armour: { worn, carried }, light, combat, respawn });
 });
 
+test("status retains gear exposure and accepts older combat readouts without it", async () => {
+  const combat = { melee: "iron_sword", bow: null, arrows: 0, shield: "shield" };
+  const current = await McpBotRuntime.over(statusClient({ combat: { ...combat, exposure: 0.53 } })).status();
+  assert.equal(current.combat?.exposure, 0.53);
+  const older = await McpBotRuntime.over(statusClient({ combat })).status();
+  assert.equal(older.combat?.exposure, undefined);
+});
+
 test("status accepts last wake and world spawn respawn records", async () => {
   for (const kind of ["last_wake", "world_spawn"] as const) {
     const respawn = { kind, position: { x: 1, y: 64, z: 2 }, distance: 12.4 };

@@ -188,6 +188,7 @@ export const liveSituationSchema = z.strictObject({
       bow: z.string().nullable().describe("The best carried bow, with or without arrows."),
       arrows: z.number().int().nonnegative().describe("Arrows carried, the off-hand included."),
       shield: z.string().nullable(),
+      exposure: z.number().min(0.15).max(1).describe("Gear exposure 0.15..1 (1 = no gear): the share of a fight's risk the gear leaves, src/world/gear-exposure.ts."),
     })
     .describe("What the fight reflex has to work with."),
   respawn: z

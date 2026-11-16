@@ -8,6 +8,8 @@ import { viewStatusResultSchema } from "./contract.js";
 import { formatViewStatusResult, observeLiveSituation } from "./view-status.js";
 import { FEET, idleActivity, liveBot } from "./view-status-fixtures.test.js";
 import { recordWake } from "../portal-entry/respawn-knowledge.js";
+import { gearExposure } from "../../world/gear-exposure.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
 
 /** Open ground under the bot's feet: the fake answers sky 15 / block 0 for open air over a block (measured, light-in-cells). */
 const GROUND = { "-10,98,18": "stone" } as const;
@@ -48,9 +50,26 @@ test("view_status reports armour points, light, combat and respawn", (t) => {
   const situation = situationOf(bot, t);
   assert.equal(viewStatusResultSchema.parse({ status: "succeeded", situation }).situation.light.sky, 15, "the result parses under the schema");
   assert.deepEqual(situation.light, { sky: 15, block: 0, openSkyAbove: null }, "open floor: the measured open values, and no open-sky distance to give");
-  assert.deepEqual(situation.combat, { melee: "iron_sword", bow: "bow", arrows: 0, shield: "shield" });
+  assert.deepEqual(situation.combat, { melee: "iron_sword", bow: "bow", arrows: 0, shield: "shield", exposure: gearExposure(bot).exposure });
   assert.deepEqual(situation.respawn, { kind: "world_spawn", position: { x: FEET.x, y: FEET.y, z: FEET.z + 12 }, distance: 12 });
   assert.deepEqual([situation.vitals.armour, situation.vitals.armourToughness], [null, null], "a piece is worn and the server told no armour attribute: unknown, not 0");
+});
+
+test("view_status reports full exposure with no gear", (t) => {
+  const { bot } = createFakeBot();
+  assert.equal(situationOf(bot, t).combat.exposure, 1);
+});
+
+test("view_status requires exposure within its inclusive bounds", (t) => {
+  const situation = situationOf(liveBot(), t);
+  const { melee, bow, arrows, shield } = situation.combat;
+  const baseCombat = { melee, bow, arrows, shield };
+  for (const [exposure, valid] of [[0.15, true], [1, true], [0.1499, false], [1.0001, false], [undefined, false]] as const) {
+    const combat = exposure === undefined ? baseCombat : { ...baseCombat, exposure };
+    const parse = () => viewStatusResultSchema.parse({ status: "succeeded", situation: { ...situation, combat } });
+    if (valid) assert.equal(parse().situation.combat.exposure, exposure);
+    else assert.throws(parse);
+  }
 });
 
 test("view_status describes the last wake and parses its kind", (t) => {

@@ -1,6 +1,7 @@
 /**
- * The bot's gear exposure (spec D3): 1 for no gear, down to 0.15 for the best protection and weapon with a shield. A fight costs more
- * the less exposure the bot has, so the cave weighing (`target-weighing.ts`) reads it. Built from the shipped combat data and the
+ * The bot's gear exposure (spec D3): 1 for no gear, down to 0.15 for the best protection and weapon with a shield.
+ * The cave weighing will read it through `collect_block`'s cost (cave plan T3, not built);
+ * the night hint reads it through `view_status` (plan 2026-11-16-p4-18-night-choice-a3). Built from the shipped combat data and the
  * readouts the fight reflex already uses: no item list here. The numbers are the owner's (2026-11-08), tuned on the figures of D3.
  */
 import type { Bot } from "mineflayer";

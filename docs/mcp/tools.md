@@ -164,9 +164,9 @@ slot each is for (`gear`/`tools.armour` is the best carried piece, worn or not: 
 sky and block light at the feet and, when the feet are below full sky light, `openSkyAbove`, the blocks up to the first cell of
 full sky light; each is null where the client holds no light data (never 0 for unknown). `combat` is the fight
 reflex's gear: `melee` (null: bare hands), the best `bow` with or without arrows, the `arrows` carried and the
-`shield`. `respawn` is the bed slept in this session, else where the bot last woke after a death, else the world spawn,
+`shield`, and `exposure`, the share of fight risk left by its gear (0.15–1; 1 means no gear). `respawn` is the bed slept in this session, else where the bot last woke after a death, else the world spawn,
 with its distance (null in another dimension). The last wake is an observation, not a promise of the next respawn.
-The text carries them as one `Condition facts:` line under the best tools.
+The text carries the other condition facts as one `Condition facts:` line under the best tools; exposure is in the structured result.
 
 The `mobility` section answers what the carried inventory unlocks, which the
 stack list alone does not say: a route falls at most three blocks unassisted,

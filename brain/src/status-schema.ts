@@ -23,7 +23,7 @@ export const viewStatusSchema = z.object({
       armourWorn: z.array(z.object({ slot: z.string(), item: z.string().nullable() })).nullable().optional(),
       armourCarried: z.array(z.object({ item: z.string(), count: z.number() })).nullable().optional(),
       light: z.object({ sky: z.number().nullable(), block: z.number().nullable(), openSkyAbove: z.number().nullable() }).nullable().optional(),
-      combat: z.object({ melee: z.string().nullable(), bow: z.string().nullable(), arrows: z.number(), shield: z.string().nullable() }).nullable().optional(),
+      combat: z.object({ melee: z.string().nullable(), bow: z.string().nullable(), arrows: z.number(), shield: z.string().nullable(), exposure: z.number().optional() }).nullable().optional(),
       respawn: z.object({ kind: z.enum(["bed", "world_spawn", "last_wake"]), position: positionSchema, distance: z.number().nullable() }).nullable().optional(),
       inventory: z.object({
         stacks: z.array(z.object({ name: z.string(), count: z.number(), durability: z.object({ remaining: z.number(), maximum: z.number() }).nullable().default(null), families: z.array(z.string()).default([]) })),

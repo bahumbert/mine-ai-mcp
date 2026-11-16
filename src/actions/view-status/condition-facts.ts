@@ -7,6 +7,7 @@ import type { Bot } from "mineflayer";
 import { respawnPoint, wornArmour } from "../../runtime/respawn-point.js";
 import { combatReadout } from "../../survival/weapons/equipment.js";
 import { armourPoints } from "../../world/armour-points.js";
+import { gearExposure } from "../../world/gear-exposure.js";
 import { familyIndexOf } from "../../world/item-families.js";
 import { lightAt } from "../../world/light.js";
 import { ARMOUR_CLASSES, equipmentClass } from "../../world/tool-tiers.js";
@@ -34,7 +35,7 @@ export function observeConditionFacts(bot: Bot): ConditionFacts {
     armourWorn: ARMOUR_SLOTS.map((slot) => ({ slot, item: wornBySlot[slot] })),
     armourCarried: carriedArmour(bot),
     light: observeLight(bot),
-    combat: combatReadout(bot),
+    combat: { ...combatReadout(bot), exposure: gearExposure(bot).exposure },
     respawn: spawn && {
       kind: spawn.kind,
       position: { x: round(spawn.x, 2), y: round(spawn.y, 2), z: round(spawn.z, 2) },
