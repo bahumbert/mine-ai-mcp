@@ -243,6 +243,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 
 // A real timer or interval made before install and cleared while installed: `clear` is the call under test, `cleanup` the real one.
 const realTimerKinds: { readonly name: string; readonly start: (fire: () => void) => TimerHandle; readonly clear: (handle: TimerHandle) => void; readonly cleanup: (handle: TimerHandle) => void }[] = [
+  // real wait: the subject is a real timer created before install.
   { name: "timeout", start: (fire) => setTimeout(fire, 20), clear: (handle) => clearTimeout(handle), cleanup: (handle) => realClearTimeout(handle) },
   { name: "interval", start: (fire) => setInterval(fire, 20), clear: (handle) => clearInterval(handle), cleanup: (handle) => realClearInterval(handle) },
 ];
@@ -257,6 +258,7 @@ for (const kind of realTimerKinds) {
         using _installed = clock.install();
         kind.clear(realTimer);
       }
+      // real wait: the subject is a real timer created before install.
       await realDelay(60);
       assert.equal(fired, 0);
     } finally {

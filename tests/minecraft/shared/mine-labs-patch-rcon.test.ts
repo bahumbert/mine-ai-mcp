@@ -25,7 +25,9 @@ test("counts a timed out command", async () => {
   const pending = rcon.command("test");
   await Promise.resolve();
   const rejected = assert.rejects(pending, /timed out/u);
-  await clock.advance(10_000);
+  await clock.advance(9_999);
+  assert.equal(rcon.transportFailures, 0);
+  await clock.advance(1);
   await rejected;
   assert.equal(rcon.transportFailures, 1);
   assert.match(rcon.failureSince(0)!, /^rcon command timed out after/u);
@@ -76,7 +78,7 @@ test("trials retain transport failures through arrangement, goal polling and los
       );
       server.rcon = rcon;
       const scenario = mineLabs.scenarioSchema.parse({ name: "rcon", client: { command: "true" }, goal: { kind: "survive", seconds: 1 } });
-      const result = await mineLabs.runScenarioTrial({ server, scenario, runDir: root, log: () => {}, onArranged: () => { server.rcon = undefined; throw new Error("stop trial"); } });
+      const result = await mineLabs.runScenarioTrial({ server, scenario, runDir: root, log: () => {}, arrangeSettleMs: 0, onArranged: () => { server.rcon = undefined; throw new Error("stop trial"); } });
       if (fail) assert.equal(result.transportFailure, "write failed");
       else assert.equal("transportFailure" in result, false);
     }
@@ -103,7 +105,7 @@ test("trials retain transport failures through arrangement, goal polling and los
       server.rcon = rcon;
       const client = `const readline = require('node:readline'); readline.createInterface({input: process.stdin}).on('line', line => { const type = JSON.parse(line).type; if (type === 'init') console.log(JSON.stringify({type:'ready'})); if (type === 'arranged') console.log(JSON.stringify({type:'prepared'})); if (type === 'stop') process.exit(0); });`;
       const scenario = mineLabs.scenarioSchema.parse({ name: "rcon-goal", client: { command: process.execPath, args: ["-e", client] }, goal: { kind: "survive", seconds: 1 } });
-      const result = await mineLabs.runScenarioTrial({ server, scenario, runDir: root, log: () => {}, signal: abort.signal });
+      const result = await mineLabs.runScenarioTrial({ server, scenario, runDir: root, log: () => {}, signal: abort.signal, arrangeSettleMs: 0 });
       assert.equal(polled, true, "the trial reached its goal poll");
       if (mode === "success") assert.equal("transportFailure" in result, false);
       else assert.equal(result.transportFailure, "goal poll write failed");

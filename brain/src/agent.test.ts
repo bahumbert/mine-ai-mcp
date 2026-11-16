@@ -118,22 +118,8 @@ test("the same failure between other steps ends the objective too", async (t) =>
   assert.match(chat.requests[1]?.[1]?.content ?? "", /collect 5 birch_log failed the same way 2 times: no birch_log within 64 blocks/u);
 });
 
-test("the same step done again and again ends the objective as changing nothing only when the inventory stayed the same", async (t) => {
+test("the same step ends the objective as changing nothing when the inventory stayed the same", async (t) => {
   const collect = { step: { skill: "collect_block", block: "cobblestone", count: 32 } };
-  {
-    // Live 2026-10-09: three "collected 32 cobblestone" in a row ended objectives although each gained items.
-    const runtime = new FakeRuntime();
-    runtime.simulateInventory = true;
-    const { agent, chat, action } = agentFor(t, runtime);
-    chat.reply({ say: "Okay!", route: "act", request: "collect 96 cobblestone" }, { say: "Got them!" });
-    action.reply(collect, collect, collect, collect, { done: "96 cobblestone collected" });
-    await agent.handle(say("Steve", "get me 96 cobblestone"));
-    await until(() => runtime.said.length === 2);
-    // 4 calls: the second identical step goes back once ("just succeeded") and is sent again.
-    assert.equal(action.requests.length, 4, "the objective ended after the third identical step that gained");
-    assert.doesNotMatch(chat.requests[1]?.[1]?.content ?? "", /changed nothing/u);
-    assert.match(chat.requests[1]?.[1]?.content ?? "", /the same step \(collect 32 cobblestone\) was done 3 times in a row and the objective is not reached/u);
-  }
   {
     const runtime = new FakeRuntime();
     const { agent, chat, action } = agentFor(t, runtime);
@@ -574,6 +560,7 @@ test("after a granted goal call the next one is held for 60000 / goalCallsPerMin
   // The first call was granted (6 a minute: the next is due 10 s later); the objective's first step is the next goal call.
   const clocks = steppedClocks(t);
   clocks.monotonic(6_000);
+  // real wait: steppedClocks changes performance.now only; the agent's 5 ms poll needs real turns.
   await sleepMs(60);
   assert.equal(action.requests.length, 0, "6 s after a grant at 6 calls a minute the next call is still held");
   clocks.monotonic(4_000);

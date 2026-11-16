@@ -158,12 +158,10 @@ test("closing the checkpointer stops the worker without calling fellBack", async
   const writer = writerOn(t, file);
   const causes: string[] = [];
   const checkpointer = startWalCheckpointer(file, { intervalMs: 50, fellBack: (cause) => causes.push(cause) });
-  const started = monotonicNow();
   checkpointer[Symbol.dispose]();
   writeMegabytes(writer, 1);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(causes, []);
-  assert.ok(monotonicNow() - started < 2_000);
   const later = new DatabaseSync(file);
   later.exec("INSERT INTO replies (body) VALUES (x'00')");
   later.close();

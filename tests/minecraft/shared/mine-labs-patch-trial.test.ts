@@ -350,8 +350,6 @@ async function settleGameTime(options: {
 }) {
   const abort = new AbortController();
   if (options.initiallyCancelled) abort.abort("before clock");
-  // Bounds the red run against the old loop, which does not yet accept the injected sleep.
-  const guard = setTimeout(() => abort.abort("test guard"), 1_500);
   let wall = 0;
   let polls = 0;
   const observations: string[] = [];
@@ -369,28 +367,24 @@ async function settleGameTime(options: {
     const command = rcon.command.bind(rcon);
     rcon.command = async name => { if (options.cancelDuringObservation === "position" && name.endsWith(" Pos")) abort.abort("during position"); return command(name); };
   }
-  try {
-    const result = await goalRunner.awaitScenarioGoal({
-      scenario: mineLabs.scenarioSchema.parse({
-        name: "game-time", players: options.cancelDuringObservation ? [{ name: "Walker" }, { name: "Actor" }] : [{ name: "Walker" }], client: { command: "true" },
-        goal: options.survive ? { kind: "survive", seconds: 1, timeout: 1 } : { kind: "completion", timeout: 1 },
-      }),
-      server: neverStartedServer("unused", rcon),
-      clients: { processes: new Map(), chat: new Map(), completions },
-      signal: abort.signal,
-      goalStallMs: options.stallMs ?? 30_000,
-      now: () => wall,
-      sleep: async () => {
-        wall += options.wallStep ?? 250;
-        if (++polls === options.cancelAfter) abort.abort("observed pending");
-      },
-      onGoalProgress: (goal) => { observations.push(goal.state); },
-      log: line => logs.push(line),
-    });
-    return { ...result, observations, wall, reads, logs, positions: rcon.sent.filter(command => command.endsWith(" Pos")) };
-  } finally {
-    clearTimeout(guard);
-  }
+  const result = await goalRunner.awaitScenarioGoal({
+    scenario: mineLabs.scenarioSchema.parse({
+      name: "game-time", players: options.cancelDuringObservation ? [{ name: "Walker" }, { name: "Actor" }] : [{ name: "Walker" }], client: { command: "true" },
+      goal: options.survive ? { kind: "survive", seconds: 1, timeout: 1 } : { kind: "completion", timeout: 1 },
+    }),
+    server: neverStartedServer("unused", rcon),
+    clients: { processes: new Map(), chat: new Map(), completions },
+    signal: abort.signal,
+    goalStallMs: options.stallMs ?? 30_000,
+    now: () => wall,
+    sleep: async () => {
+      wall += options.wallStep ?? 250;
+      if (++polls === options.cancelAfter) abort.abort("observed pending");
+    },
+    onGoalProgress: (goal) => { observations.push(goal.state); },
+    log: line => logs.push(line),
+  });
+  return { ...result, observations, wall, reads, logs, positions: rcon.sent.filter(command => command.endsWith(" Pos")) };
 }
 
 test("budget counts game ticks from the first readable sample, including after an unreadable start", async () => {

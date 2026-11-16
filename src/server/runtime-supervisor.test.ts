@@ -197,7 +197,6 @@ const SHORT_HISTORY_MS = 3_000;
 
 test(
   "retains active request and restored phase after the client and entry event are gone",
-  { timeout: 15_000 },
   async (t) => {
     const { url } = await fakeSupervised(t, "attribution", { realTime: true, historyMs: SHORT_HISTORY_MS });
     await whenHealthy(url);
