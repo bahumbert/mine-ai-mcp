@@ -42,7 +42,7 @@ export const placeSignResultSchema = actionResultSchema({
   existing: z.strictObject({ block: z.string(), front: z.array(z.string()).length(4).optional() }).optional(),
 });
 export type PlaceSignResult = z.output<typeof placeSignResultSchema>;
-export const placeSignCheckpointSchema = z.strictObject({ phase: z.enum(["approach", "sent", "placed", "edit_sent", "written"]) });
+export { placeSignCheckpointSchema } from "../checkpoint-schemas.js";
 export const placeSignAnnotations = { destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
 export const placeSignOutcomes = {
   noItem: "[PLACE_SIGN_NO_SIGN_ITEM] No requested carried sign is available; obtain one of the listed family members.",

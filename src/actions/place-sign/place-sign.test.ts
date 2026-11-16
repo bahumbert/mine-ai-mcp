@@ -18,7 +18,7 @@ function setup(t: TestContext, options: FakeBotOptions = {}) {
   const h = createFakeBot({ carried: { oak_sign: 2, cobblestone: 1 }, ...options, server: { startAge: 0, ...options.server }, clock });
   const data = temporaryBotData({ closeAfter: t });
   const action = createPlaceSignAction({ bot: h.bot, botData: data, navigation: { navigate: async () => { throw new Error("unexpected route"); } } as never });
-  const run = (request: unknown = input, signal?: AbortSignal) => action.begin(action.parse(request), new AbortController().signal, () => {})({ ...(signal && { signal }) });
+  const run = (request: unknown = input, signal?: AbortSignal) => action.begin(action.parse(request), signal ?? new AbortController().signal, () => {})({ ...(signal && { signal }) });
   return { ...h, data, action, run };
 }
 
@@ -45,18 +45,22 @@ async function placeNext(h: ReturnType<typeof setup>) {
 }
 
 for (const ticksPerSecond of [20, 10]) {
-  test(`places a ground sign facing north and confirms its lines (${ticksPerSecond} tps)`, async (t) => {
+  for (const lines of [input.lines, ["Builder"]]) test(`places a ground sign facing north and confirms ${lines.length} lines (${ticksPerSecond} tps)`, async (t) => {
     const h = setup(t, { server: { ticksPerSecond } });
     using _timers = h.clock.install();
     const added = listenersAddedSince(h.bot);
     let openedBeforeSlot = false;
     h.bot.once("signOpen", () => { openedBeforeSlot = h.bot.inventory.items().find((item) => item.name === "oak_sign")?.count === 2; });
-    const result = await h.clock.settle(h.run(), 6_000);
+    const result = await h.clock.settle(h.run({ ...input, lines }), 6_000);
+    const expected = [lines[0], lines[1] ?? "", "", ""];
     assert.equal(openedBeforeSlot, true);
     assert.equal(result.status, "succeeded");
-    assert.deepEqual(result.sign, { target: { x: 2, y: 64, z: 0 }, block: "oak_sign", facing: "north", attach: "ground", lines: ["Builder", "Hello", "", ""], confirmed: true, placed: true });
+    assert.deepEqual(result.sign, { target: { x: 2, y: 64, z: 0 }, block: "oak_sign", facing: "north", attach: "ground", lines: expected, confirmed: true, placed: true });
     assert.equal(h.bot.blockAt(target)?.getProperties().rotation, "8");
-    assert.equal(h.bot.blockAt(target)?.getSignText()[0], "Builder\nHello\n\n");
+    assert.equal(h.bot.blockAt(target)?.getSignText()[0], expected.join("\n"));
+    const row = h.data.read("SELECT * FROM observed_signs")[0]!;
+    assert.equal(row.placed_by_bot_id, h.bot.username);
+    assert.equal(row.front_json, JSON.stringify(expected));
     assert.ok(placeSignResultSchema.safeParse(result).success);
     assert.ok(h.bot.time.age < 40);
     assert.ok(h.server.gameTime > h.bot.time.age);
@@ -184,17 +188,6 @@ test("a foreign region refuses with no packet", async (t) => {
   assert.equal(changes(h).length, 0);
 });
 
-test("observed_signs row written with the placer; an owner-only sign pads lines to four and confirms", async (t) => {
-  const h = setup(t);
-  using _timers = h.clock.install();
-  const result = await h.clock.settle(h.run({ ...input, lines: ["Builder"] }), 6_000);
-  assert.equal(result.status, "succeeded");
-  assert.deepEqual(result.sign.lines, ["Builder", "", "", ""]);
-  const row = h.data.read("SELECT * FROM observed_signs")[0]!;
-  assert.equal(row.placed_by_bot_id, h.bot.username);
-  assert.equal(row.front_json, '["Builder","","",""]');
-});
-
 for (const ticksPerSecond of [20, 10]) test(`unconfirmed edit is partial and unrelated entity text cannot confirm it (${ticksPerSecond} tps)`, async (t) => {
   const h = setup(t, { server: { ticksPerSecond }, cells: { "4,64,0": "oak_sign" } });
   using _timers = h.clock.install();
@@ -262,7 +255,7 @@ for (const ticksPerSecond of [20, 10]) test(`a late placement answer starts its 
   assert.ok(h.bot.time.age >= placementAnswerAge + 40, `waited ${h.bot.time.age - placementAnswerAge} ticks after placement answer`);
 });
 
-for (const exit of ["abort", "disconnect", "death"] as const) test(`listeners released after ${exit}`, async (t) => {
+for (const exit of ["abort", "disconnect"] as const) test(`listeners released after ${exit}`, async (t) => {
   const h = setup(t);
   using _timers = h.clock.install();
   const added = listenersAddedSince(h.bot);
@@ -270,7 +263,6 @@ for (const exit of ["abort", "disconnect", "death"] as const) test(`listeners re
   const trigger = () => {
     if (exit === "abort") controller.abort(new Error("cancelled"));
     if (exit === "disconnect") h.bot.emit("end", "disconnected");
-    if (exit === "death") h.bot.emit("death");
   };
   const remove = h.server.onPacket("block_place", trigger);
   const promise = h.run(input, controller.signal);

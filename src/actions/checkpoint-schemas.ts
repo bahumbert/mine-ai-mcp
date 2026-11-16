@@ -39,6 +39,11 @@ export const containerCheckpointSchema = z.strictObject({ phase, inventory: z.re
   requested: z.array(z.strictObject({ itemName: z.string(), count })) });
 export const tendCheckpointSchema = z.strictObject({ phase, cells: count, harvested: count, cleared: count, tilled: count, planted: count });
 export const placeCheckpointSchema = z.strictObject({ phase, inventory: count, target: position.nullable(), currentBlock: z.string().nullable() });
+export const placeSignCheckpointSchema = z.strictObject({
+  mode: z.enum(["place", "fill"]),
+  phase: z.enum(["approach", "sent", "placed", "click_sent", "edit_sent", "written"]),
+  target: position, sentAge: count.nullable(), clickAge: count.optional(), clicked: z.boolean(),
+});
 export const bucketCheckpointSchema = z.strictObject({ phase, held: z.string().nullable(), target: position.nullable(),
   targetBlock: z.string().nullable(), used: z.boolean(), formed: z.record(z.string(), count) });
 export const exploreCheckpointSchema = z.strictObject({ phase, expandedChunks: count, requested: count, enteredBiome: position.nullable() });

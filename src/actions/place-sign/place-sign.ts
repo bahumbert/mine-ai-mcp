@@ -6,8 +6,9 @@ import { Vec3 } from "vec3";
 import { createMovements, type NavigationRuntime } from "../../navigation/index.js";
 import { familyMembers, signBlockFor } from "../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../world/block-classification.js";
+import { carriedCount, settleInventoryCount } from "../../world/inventory-count.js";
 import { placeBlock, type InventoryItem, type WorldBlock } from "../../world/placement.js";
-import { recordPlacementSent, startOwnPlacement, type OwnPlacement } from "../../world/own-placement.js";
+import { awaitOwnPlacement, forgetPlacement, recordPlacementSent, startOwnPlacement, type OwnPlacement } from "../../world/own-placement.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { raceSignal, cellIntersectsPlayerBody } from "../../utils/index.js";
 import { defineAction, type ActionContext } from "../action.js";
@@ -24,6 +25,12 @@ interface SignRun {
   readonly target: Vec3;
   readonly lines: SignLines;
   readonly own: OwnPlacement;
+  readonly stop: AbortController;
+  readonly lifetime: AbortSignal;
+  answers?: SignAnswers;
+  dispose?: () => void;
+  block: string | null;
+  consumption: { item: string; expected: number } | null;
   phase: "approach" | "sent" | "placed" | "edit_sent" | "written";
 }
 
@@ -83,7 +90,7 @@ async function writeSign(run: SignRun, answers: SignAnswers, signal: AbortSignal
   signal.throwIfAborted();
   let error: Error | null = null;
   const onError = (cause: Error) => { error = cause; };
-  const confirmed = answers.text(run.lines, bot.time?.age);
+  const confirmed = answers.text(run.lines, bot.time?.age, signal);
   confirmed.catch(() => undefined);
   bot.once("error", onError);
   try {
@@ -102,43 +109,105 @@ async function placeAndWrite(run: SignRun, plan: SignPlacement, answers: SignAns
   const placed = await placeBlock(bot, { item: plan.item, support: plan.support, face: plan.face, expectedCells: [run.target],
     matches: (block) => block.name === plan.block, signal,
     ...(run.request.attach === "ground" && { lookDirection: facingVector(run.request.facing).scaled(-1) }),
-    onSent: () => { recordPlacementSent(run.own, [run.target], bot.time?.age); run.phase = "sent"; } });
+    onSent: () => {
+      recordPlacementSent(run.own, [run.target], bot.time?.age);
+      run.consumption = bot.game.gameMode === "creative" ? null : { item: plan.item.name, expected: carriedCount(bot, plan.item.name) - 1 };
+      run.block = plan.block;
+      run.phase = "sent";
+    } });
   signal.throwIfAborted();
   const didPlace = run.own.cells.length > 0 && bot.blockAt(run.target)?.name === plan.block;
   if (placed.kind === "failed" && !didPlace) return refusal(run, placed.error);
   run.phase = "placed";
-  let cause = "the server did not open the sign editor";
-  if (await answers.editor()) cause = await writeSign(run, answers, signal) ?? "";
+  return finishWriting(run, answers, signal);
+}
+
+/** A partial never spends another edit permission; T5c can reopen a known blank sign once. */
+function unconfirmed(run: SignRun, cause: string): PlaceSignResult {
   recordPlacedSign(run);
-  if (cause) return { status: "partial", error: placeSignOutcomes.unconfirmed(plan.block, cause), sign: evidence(run, true) };
+  return { status: "partial", error: placeSignOutcomes.unconfirmed(run.block!, cause), sign: evidence(run, true) };
+}
+
+/** Share the original editor permission between placement and its resumed write. */
+async function finishWriting(run: SignRun, answers: SignAnswers, signal: AbortSignal): Promise<PlaceSignResult> {
+  let cause = "the server did not open the sign editor";
+  if (await answers.editor(signal)) cause = await writeSign(run, answers, signal) ?? "";
+  signal.throwIfAborted();
+  if (cause) return unconfirmed(run, cause);
+  recordPlacedSign(run);
   run.phase = "written";
   return { status: "succeeded", sign: evidence(run, true, true) };
 }
 
-/** Scope every attempt's waits to its caller, logical lifetime and connection. */
-async function executeSign(run: SignRun, lifetime: AbortSignal, context: ActionContext): Promise<PlaceSignResult> {
-  const { bot, navigation } = run.deps;
-  const stop = new AbortController();
-  const signal = AbortSignal.any([lifetime, stop.signal, ...(context.signal ? [context.signal] : [])]);
-  const onEnd = () => stop.abort(new Error("Disconnected while placing a sign"));
-  const onDeath = () => stop.abort(new Error("Died while placing a sign"));
+/** Keep packet evidence during a reflex cut, but release it when the logical request ends. */
+function signAnswers(run: SignRun): SignAnswers {
+  if (run.answers) return run.answers;
+  const { bot } = run.deps;
+  const onEnd = () => { run.stop.abort(new Error("Disconnected while placing a sign")); run.dispose?.(); };
+  const onDeath = () => { run.stop.abort(new Error("Died while placing a sign")); run.dispose?.(); };
+  const onAbort = () => run.dispose?.();
+  run.answers = watchSignAnswers(bot, run.target, AbortSignal.any([run.lifetime, run.stop.signal]));
+  run.dispose = () => {
+    run.answers?.dispose();
+    delete run.answers;
+    bot.removeListener("end", onEnd);
+    bot.removeListener("death", onDeath);
+    run.lifetime.removeEventListener("abort", onAbort);
+    delete run.dispose;
+  };
   bot.once("end", onEnd);
   bot.once("death", onDeath);
-  let answers: SignAnswers | undefined;
+  run.lifetime.addEventListener("abort", onAbort, { once: true });
+  return run.answers;
+}
+
+/** Settle the earlier packet before planning, and never credit an unsent sign or resend an edit. */
+async function resumeSign(run: SignRun, signal: AbortSignal): Promise<PlaceSignResult | null> {
+  const { bot } = run.deps;
+  const seen = await awaitOwnPlacement(bot, run.own, (block) => block.name === run.block, signal);
+  if (seen.kind === "none") return null;
+  if (seen.kind === "unloaded") return refusal(run, placeSignOutcomes.unloaded);
+  if (seen.kind === "not_landed") {
+    forgetPlacement(run.own);
+    run.phase = "approach";
+    return null;
+  }
+  if (run.consumption) {
+    await settleInventoryCount(bot, run.consumption.item, run.consumption.expected, {
+      signal, ...(run.own.sentAtAge !== undefined && { sentAtAge: run.own.sentAtAge }),
+    });
+    signal.throwIfAborted();
+  }
+  const reading = readSignAt(bot, run.target);
+  if ((run.phase === "written" || run.answers?.textConfirmed(run.lines)) && reading?.known && reading.front.every((line, index) => line === run.lines[index])) {
+    run.phase = "written";
+    recordPlacedSign(run);
+    return { status: "succeeded", sign: evidence(run, true, true) };
+  }
+  if (reading?.known && [...reading.front, ...reading.back].some((line) => line !== "")) {
+    return { ...refusal(run, placeSignOutcomes.taken(reading.block)), existing: { block: reading.block, front: reading.front } };
+  }
+  if (run.phase === "edit_sent" || run.phase === "written") return unconfirmed(run, "the previous edit has no matching text answer; read the sign before filling it");
+  run.phase = "placed";
+  return finishWriting(run, signAnswers(run), signal);
+}
+
+/** Scope waits to one attempt while packet observations belong to the whole request. */
+async function executeSign(run: SignRun, context: ActionContext): Promise<PlaceSignResult> {
+  const { bot, navigation } = run.deps;
+  const signal = AbortSignal.any([run.lifetime, run.stop.signal, ...(context.signal ? [context.signal] : [])]);
   try {
     signal.throwIfAborted();
     const route = await raceSignal(approachTarget(bot, run.target, { signal }, { createMovements, navigate: navigation.navigate }), signal);
     if (route?.status === "stopped") return refusal(run, placeSignOutcomes.failed(route.reason));
     if (cellIntersectsPlayerBody(run.target, bot.entity.position)) return refusal(run, placeSignOutcomes.failed("The bot still occupies the sign cell"));
+    const resumed = await resumeSign(run, signal);
+    if (resumed) return resumed;
     const plan = planPlacement(run);
     if ("status" in plan) return plan;
-    answers = watchSignAnswers(bot, run.target, signal);
-    return await placeAndWrite(run, plan, answers, signal);
+    return await placeAndWrite(run, plan, signAnswers(run), signal);
   } finally {
-    answers?.dispose();
-    bot.removeListener("end", onEnd);
-    bot.removeListener("death", onDeath);
-    stop.abort(new Error("Sign attempt ended"));
+    if (!context.signal?.aborted || run.lifetime.aborted || run.stop.signal.aborted) run.dispose?.();
   }
 }
 
@@ -148,8 +217,9 @@ export function createPlaceSignAction(deps: PlaceSignDependencies) {
     checkpointSchema: placeSignCheckpointSchema, formatResult: (result) => JSON.stringify(result), annotations: placeSignAnnotations,
     execution: { kind: "resumable_task", prepare: (signal) => prepareBotForMovement(deps.bot, deps.navigation, signal) }, parse: parsePlaceSignRequest,
     begin(request, lifetime, observe) {
-      const run: SignRun = { deps, request, target: new Vec3(request.x, request.y, request.z), lines: normalizeLines(request.lines), own: startOwnPlacement(), phase: "approach" };
-      observe(() => ({ baseline: { target: { x: request.x, y: request.y, z: request.z } }, checkpoint: { phase: run.phase }, completion: { kind: "event", observed: run.phase === "written", owes: "server-confirmed front text" } }));
-      return (context) => executeSign(run, lifetime, context);
+      const run: SignRun = { deps, request, target: new Vec3(request.x, request.y, request.z), lines: normalizeLines(request.lines), own: startOwnPlacement(), phase: "approach", block: null, consumption: null, stop: new AbortController(), lifetime };
+      const target = { x: request.x, y: request.y, z: request.z };
+      observe(() => ({ baseline: { target }, checkpoint: { mode: "place", phase: run.phase, target, sentAge: run.own.sentAtAge ?? null, clicked: false }, completion: { kind: "event", observed: run.phase === "written", owes: "server-confirmed front text" } }));
+      return (context) => executeSign(run, context);
     } });
 }
