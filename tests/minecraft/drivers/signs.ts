@@ -61,7 +61,7 @@ async function cancelSign(context: ScenarioContext, action: string, input: Recor
     if (first === "settled" || first === "cancelled") return `Action ${first} before cancellation`;
     const cancel = await context.call("cancel_foreground_action", { reason: "scenario cancellation" });
     const stopped = await pending;
-    if (first === "stalled") return "Client ticks stalled before cancellation";
+    if (first === "stalled") return "Server clock stalled before cancellation";
     if (first !== "sent") return "Cancellation occurred before the target packet";
     if (cancel.result.status !== "succeeded" || stopped.result.status !== "cancelled") return `Cancellation failed: ${cancel.summary}; ${stopped.summary}`;
     return null;
