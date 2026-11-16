@@ -1,4 +1,6 @@
 import { placeCheckpointSchema } from "../checkpoint-schemas.js";
+import { isSolid } from "../../world/placement.js";
+export { isSolid as isPlacementSupport } from "../../world/placement.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import {
@@ -102,16 +104,16 @@ function evidence(
 function findSupport(bot: Bot, target: Vec3): { block: WorldBlock; face: Vec3 } | null {
   for (const candidate of SUPPORT_DIRECTIONS) {
     const block = bot.blockAt(target.plus(candidate.offset));
-    if (block?.boundingBox === "block") return { block, face: candidate.face };
+    if (isSolid(block)) return { block, face: candidate.face };
   }
   return null;
 }
 
-async function approachTarget(
+export async function approachTarget(
   bot: Bot,
   target: Vec3,
   context: ActionContext,
-  dependencies: PlaceBlockDependencies,
+  dependencies: Pick<PlaceBlockDependencies, "createMovements" | "navigate">,
 ): Promise<NavigationResult | null> {
   if (
     bot.entity.position.distanceTo(target) <= PLACEMENT_REACH &&

@@ -250,6 +250,25 @@ returned event ID. It remains available during foreground execution; its event
 cursor is independent of foreground result retrieval. Defined in
 [src/actions/read-recent-events/contract.ts](../../src/actions/read-recent-events/contract.ts).
 
+### `place_sign`
+
+Place one carried sign at integer `x`, `y`, `z`, with its front toward `facing`
+(`north`, `south`, `east`, or `west`). `attach` defaults to `ground`; `wall`
+uses the full supporting block behind the text. `sign_item` selects a carried
+registry member of the sign family, otherwise the first carried member is used.
+Supply `lines` with one to four strings, each at most 45 characters without CR
+or LF; omitted lines become empty strings.
+
+The action waits for the server's editor permission before writing and confirms
+the four front lines from a new block entity answer. Its `sign` evidence gives
+the target, observed block and lines, requested facing and attachment, `placed`,
+and `confirmed`. A placed sign without confirmed text returns `partial`
+`PLACE_SIGN_TEXT_UNCONFIRMED`; read it before deciding what to do next. Missing
+items list the family's `members`. Occupied cells return `existing` (including
+front lines for a sign). Existing signs are never overwritten in this placement
+path; `fill_blank` is accepted, but existing sign cells are currently refused.
+Unloaded targets, missing support and foreign protected regions refuse placement.
+
 ### `read_signs`
 
 Read one loaded cell with all of `x`, `y`, and `z`, or scan nearby loaded signs with `max_distance` (1–64, default 16) and `limit` (1–32, default 16). Each reading includes the block, position, four front and back lines, and `known`, which is false when the sign's text has not loaded. An unloaded cell is refused.

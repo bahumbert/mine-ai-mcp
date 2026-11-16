@@ -58,6 +58,7 @@ players:
       - { item: coal, count: 1 }
       - { item: gravel, count: 1 }
       - { item: cobblestone, count: 32 }
+      - { item: oak_sign, count: 1 }
 
 client:
   command: bun
@@ -214,6 +215,8 @@ params:
       arguments: {}
     - action: read_signs
       arguments: {}
+    - action: place_sign
+      arguments: { x: 34, y: -59, z: 2, facing: north, lines: [EvidenceBot] }
     - action: send_message
       arguments:
         message: Hello from EvidenceBot.

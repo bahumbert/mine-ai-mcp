@@ -29,6 +29,7 @@ import {
 import type { z } from "zod";
 import { VIEW_ITEM_FAMILY, VIEW_ITEM_FAMILY_DESCRIPTION, viewItemFamilyInputSchema } from "./view-item-family/contract.js";
 import { READ_SIGNS, READ_SIGNS_DESCRIPTION, readSignsInputSchema } from "./read-signs/contract.js";
+import { PLACE_SIGN, PLACE_SIGN_DESCRIPTION, placeSignInputSchema } from "./place-sign/contract.js";
 import { submissionMetadataSchema, waitForActionInputSchema, cancelActionInputSchema,
   WAIT_FOR_ACTION_DESCRIPTION, CANCEL_ACTION_DESCRIPTION } from "../session/async-actions.js";
 import {
@@ -194,6 +195,7 @@ export function describeActionTools(): readonly ActionToolDescription[] {
     tool(PROTECT_REGION, PROTECT_REGION_DESCRIPTION, protectRegionInputSchema, { foreground: false }),
     tool(UNPROTECT_REGION, UNPROTECT_REGION_DESCRIPTION, unprotectRegionInputSchema, { foreground: false }),
     tool(PLACE_BLOCK, PLACE_BLOCK_DESCRIPTION, placeBlockInputSchema),
+    tool(PLACE_SIGN, PLACE_SIGN_DESCRIPTION, placeSignInputSchema),
     tool(PREPARE_DRAGON_PERCH, PREPARE_DRAGON_PERCH_DESCRIPTION, prepareDragonPerchInputSchema),
     tool(SHOOT_DRAGON, SHOOT_DRAGON_DESCRIPTION, shootDragonInputSchema),
     tool(PICK_UP_ITEMS, PICK_UP_ITEMS_DESCRIPTION, pickUpItemsInputSchema),

@@ -42,6 +42,7 @@ import { createNoteSaveAction } from "./note-save/index.js";
 import { createProtectRegionAction } from "./protect-region/index.js";
 import { createUnprotectRegionAction } from "./unprotect-region/index.js";
 import { createPlaceBlockAction } from "./place-block/index.js";
+import { createPlaceSignAction } from "./place-sign/index.js";
 import { createPrepareDragonPerchAction } from "./prepare-dragon-perch/index.js";
 import { createPickUpItemsAction } from "./pick-up-items/index.js";
 import { createEnterEndPortalAction, createEnterNetherPortalAction } from "./portal-entry/index.js";
@@ -132,6 +133,7 @@ export function createActions(
     createProtectRegionAction(bot, protectedRegions),
     createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation, botData),
+    createPlaceSignAction({ bot, navigation, botData }),
     createPrepareDragonPerchAction(bot, combat),
     createPickUpItemsAction(bot, navigation, botData, discarded),
     createRawAction(bot, botData),
@@ -183,6 +185,7 @@ export * from "./note-delete/index.js";
 export * from "./protect-region/index.js";
 export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";
+export * from "./place-sign/index.js";
 export * from "./prepare-dragon-perch/index.js";
 export * from "./pick-up-items/index.js";
 export * from "./portal-entry/index.js";

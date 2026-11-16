@@ -41,6 +41,7 @@ const PUBLISHED: ReadonlyArray<
   ["protect_region", "concurrent", false, false],
   ["unprotect_region", "concurrent", false, false],
   ["place_block", "resumable_task", false, true],
+  ["place_sign", "resumable_task", false, true],
   ["prepare_dragon_perch", "resumable_task", false, true],
   ["pick_up_items", "resumable_task", false, false],
   ["raw_action", "task", false, true],
