@@ -1,5 +1,6 @@
 import { HORIZONTAL_TICKS_PER_BLOCK } from "../goals/index.js";
 import { createMovements } from "../runtime.js";
+import { packKey } from "../world/world.js";
 import { BREAK_OPENS_INTO_LIQUID } from "../movements/policy.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { type LoadedBlock, loadedObservation } from "../world/world.js";
@@ -258,6 +259,19 @@ test("scaffold admission follows other mobs moving into and out of a placement c
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "allowed");
   mob.position.x = 1.1;
   assert.equal(policy.decidePlace(target.x, target.y, target.z, world).kind, "prohibited");
+});
+
+test("a cell the caller names is no scaffold's: placing there is refused with the reason, every other cell stays open, walking is untouched", () => {
+  const bot = botCarrying();
+  const named = { x: 1, y: 64, z: 0 };
+  const policy = createMovements(bot, { scaffoldRefusedCells: new Set([packKey(named.x, named.y, named.z)]) });
+  const refusal = policy.decidePlace(named.x, named.y, named.z, world);
+  assert.equal(refusal.kind, "prohibited");
+  if (refusal.kind === "prohibited") assert.match(refusal.reason, /cell kept for the structure's own block/);
+  assert.equal(policy.decidePlace(named.x + 1, named.y, named.z, world).kind, "allowed", "the cell beside it");
+  assert.equal(policy.decidePlace(named.x, named.y + 1, named.z, world).kind, "allowed", "the cell above it");
+  assert.equal(policy.decideStep(named.x, named.y, named.z, world).kind, "allowed", "walking through stays allowed");
+  assert.equal(createMovements(bot).decidePlace(named.x, named.y, named.z, world).kind, "allowed", "no names: as before");
 });
 
 test("a protected region refuses route digging and scaffolding in it, but not walking, other dimensions or its owner's build", () => {

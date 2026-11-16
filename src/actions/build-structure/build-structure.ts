@@ -15,17 +15,17 @@ import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js"
 import { createMovements, packKey, type NavigationRuntime } from "../../navigation/index.js";
 import { observeMineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { navigationFeet } from "../../navigation/world/block-geometry.js";
-import { DIG_REACH } from "../../navigation/movements/excavation.js";
+import { DIG_REACH, withinDigReach } from "../../navigation/movements/excavation.js";
 import { preferredScaffoldItem, scaffoldBlockNames } from "../../navigation/mineflayer/movement-policy.js";
 import {
   build,
-  BUILD_REACH,
   BuildProgress,
   type BuildCell,
   type BuildCellState,
   type BuildRequest,
   type BuildResult,
 } from "../../navigation/processes/building/build-process.js";
+import { blockRangeOf, eyeOver, withinBlockReach } from "../../navigation/processes/building/build-reach.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
@@ -76,11 +76,15 @@ export function productionPhysics(
   navigation: NavigationRuntime,
   request: BuildStructureRequest,
 ): BuildStructurePhysics {
+  // Where the structure will hold its own block: scaffold there would stand in a cell that is not its own to fill (the
+  // roof call of 2026-11-12 laid its dirt in the doorway and on the floor line). Air cells stay open: an inside pillar.
+  const ownBlockCells = new Set(request.cells.filter((cell) => cell.blockName !== "air").map((cell) => packKey(cell.x, cell.y, cell.z)));
   return {
     // What the structure is made of must not be spent building scaffold to reach it.
     movements: (protectedCells) =>
       createMovements(bot, {
         protectedCells,
+        scaffoldRefusedCells: ownBlockCells,
         isRequestedBreak: siteBreakRequest(request),
         // The build is the deliberate edit of its own house: pillaring up to a roof needs scaffold inside it.
         ignoreRegionsOwnedBy: bot.username,
@@ -92,7 +96,8 @@ export function productionPhysics(
     breakInPlace: navigation.breakBlockInPlace,
     canSeeDig: (target, standing) => {
       const block = bot.blockAt(asVec3(target));
-      if (block === null) return false;
+      // The break the build asks for next is Mineflayer's own `canDigBlock` (centre within reach), not only a face in view.
+      if (block === null || !withinDigReach(target, standing)) return false;
       const eye = { x: standing.x, y: standing.y + STANDING_EYE_HEIGHT, z: standing.z };
       return visibleBlockAim(bot.world, eye, target, DIG_REACH, observeMineflayerBlock(block).collisionShapes) !== null;
     },
@@ -203,7 +208,7 @@ function audit(bot: Bot, result: BuildResult): StructureAudit {
 }
 
 /**
- * Set when a cell the route could not reach lies a build's reach or more above the feet and no block the policy admits
+ * Set when a cell the route could not reach lies out of the eye's reach from the ground under it and no block the policy admits
  * is carried to stand on: the refusal is then the missing scaffold, not distance (live 2026-11-10: the model walked
  * nearer). A route refused at ground level (a pond, a lagged timeout) is no scaffold matter. Every cell of the result
  * is looked at, not the audit's named sample. After a route stop (`result.routeStop`: the idle-passes stop leaves its
@@ -215,7 +220,11 @@ function noScaffoldCarried(bot: Bot, request: BuildStructureRequest, result: Bui
   const feetY = navigationFeet(bot.entity.position, bot.entity.onGround === true).y;
   const lacksRoute = (state: BuildCellState): boolean =>
     state.kind === "refused" ? state.cause === "route" : result.routeStop === true && (state.kind === "placeable" || state.kind === "diggable");
-  const outOfReach = result.cells.some(({ cell, state }) => lacksRoute(state) && cell.position.y - feetY >= BUILD_REACH);
+  // Out of reach even from the cell's own column: its distance from the eye straight under it, as the build measures reach.
+  const range = blockRangeOf(bot);
+  const outOfReach = result.cells.some(
+    ({ cell, state }) => lacksRoute(state) && !withinBlockReach(eyeOver({ ...cell.position, y: feetY }), cell.position, range),
+  );
   const building = structureBlockNames(request);
   if (!outOfReach || preferredScaffoldItem(bot, building) !== null) return undefined;
   return { admitted: scaffoldBlockNames(bot).filter((name) => !building.has(name)) };

@@ -42,6 +42,7 @@ import {
 import {
   anyGoal,
   describeCalculationFailure,
+  exactBlockGoal,
   nearGoal,
   packKey,
   type BlockPosition,
@@ -52,30 +53,17 @@ import {
   type NavigationResult,
 } from "../../index.js";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { navigationFeet } from "../../world/block-geometry.js";
 import type { Position3 } from "../../world/world.js";
 import { facingVector } from "../../../world/facing.js";
 import { clingsBehindFacing } from "../../../world/block-states.js";
 import { described, faceFits, holdsCell, type BuildCell } from "./build-cell.js";
 import { takeScaffoldDown } from "./scaffold-takedown.js";
+import { blockRangeOf, eyeOver, reachGoal, withinBlockReach } from "./build-reach.js";
+import { planStandColumns, type StandColumns } from "./stand-columns.js";
+import { boundsOf, enclosesBot, feetOf, isSolid, keyOf, obstructs } from "./build-enclosure.js";
 
 export { faceFits, holdsCell, type BuildCell } from "./build-cell.js";
-
-/**
- * How far a cell may be from the feet to be worked without moving, measured
- * feet cell to cell the way `nearGoal` measures arrival, so a route that
- * reports "already there" and the in-reach test agree; the first live run
- * looped on their disagreement. Four blocks between cells keeps the eyes within
- * the server's 4.5-block use reach in every direction.
- */
-export const BUILD_REACH = 4;
-
-/**
- * How far a flood fill looks for open ground before calling the bot sealed in.
- * Three blocks beyond the structure is past any wall it could be asked to
- * close, so a doorway or an open top lets the fill out.
- */
-const ENCLOSURE_MARGIN = 3;
+export { enclosesBot } from "./build-enclosure.js";
 
 /**
  * Passes that change nothing before the process stops. One covers a route that
@@ -92,14 +80,8 @@ const IDLE_PASSES = 2;
  */
 const REFRESH_MS = 250;
 
-const NEIGHBOURS = [
-  new Vec3(1, 0, 0),
-  new Vec3(-1, 0, 0),
-  new Vec3(0, 1, 0),
-  new Vec3(0, -1, 0),
-  new Vec3(0, 0, 1),
-  new Vec3(0, 0, -1),
-] as const;
+/** The states of a cell that still asks for a block of its own from the bot (not given up, not one only digging serves). */
+const OWED_KINDS: ReadonlySet<BuildCellState["kind"]> = new Set(["placeable", "unsupported", "not_carried", "would_enclose", "occupied"]);
 
 /** What one cell of the structure is, as of the last look at the world. */
 export type BuildCellState =
@@ -170,74 +152,10 @@ export class BuildProgress {
   passes = 0;
   readonly refused = new Map<number, { readonly reason: string; readonly cause: RefusalCause }>();
   readonly scaffold = new Map<number, PlacedScaffold>();
+  /** The feet level the bot walked on when the request first looked at the world: the level its stand columns rise from. */
+  groundY: number | null = null;
   /** The item entities lying about when the request's first takedown began: a resumed takedown still picks up the drops a cut one left. */
   lyingBeforeTakedown: ReadonlySet<number> | null = null;
-}
-
-const keyOf = (position: BlockPosition) => packKey(position.x, position.y, position.z);
-const isSolid = (block: WorldBlock | null): boolean => block?.boundingBox === "block";
-/**
- * Whether a bot cannot walk through this block's cell. A ladder reads "block" in the registry yet is climbed through:
- * taking it for a wall sealed in every bot standing on one (house-templates scenario saltbox: the roof call ran 290 s,
- * stepping out and back in for every placement).
- */
-const obstructs = (bot: Bot, block: WorldBlock | null): boolean => isSolid(block) && !clingsBehindFacing(bot.registry, block!.name);
-
-/**
- * The cell the bot's feet are in, as navigation counts it: standing on a floor lower than a full block (farmland,
- * soul sand, mud), the floored position is the floor block itself (live 2026-10-03: on farmland at y 75.94, a water
- * cell beside her read as sealing her in).
- */
-function feetOf(bot: Bot): Vec3 {
-  return asVec3(navigationFeet(bot.entity.position, bot.entity.onGround === true));
-}
-
-function withinReach(bot: Bot, position: BlockPosition): boolean {
-  return feetOf(bot).distanceTo(asVec3(position)) <= BUILD_REACH;
-}
-
-/**
- * Whether the bot's feet would be sealed in once `filled` holds blocks: a
- * flood fill through passable cells from the feet that never reaches beyond
- * the structure's surroundings. The world's own blocks bound the fill too, so
- * a floor under a roofed box counts, and a doorway lets the fill out.
- */
-export function enclosesBot(
-  bot: Bot,
-  feet: Vec3,
-  filled: ReadonlySet<number>,
-  bounds: { readonly min: Vec3; readonly max: Vec3 },
-): boolean {
-  const min = bounds.min.offset(-ENCLOSURE_MARGIN, -ENCLOSURE_MARGIN, -ENCLOSURE_MARGIN);
-  const max = bounds.max.offset(ENCLOSURE_MARGIN, ENCLOSURE_MARGIN, ENCLOSURE_MARGIN);
-  const blocked = (position: Vec3) => filled.has(keyOf(position)) || obstructs(bot, bot.blockAt(position));
-  if (blocked(feet)) return true;
-  const seen = new Set<number>([keyOf(feet)]);
-  const queue = [feet];
-  while (queue.length > 0) {
-    const current = queue.pop()!;
-    for (const step of NEIGHBOURS) {
-      const next = current.plus(step);
-      if (next.x < min.x || next.y < min.y || next.z < min.z || next.x > max.x || next.y > max.y || next.z > max.z) {
-        return false;
-      }
-      const key = keyOf(next);
-      if (seen.has(key) || blocked(next)) continue;
-      seen.add(key);
-      queue.push(next);
-    }
-  }
-  return true;
-}
-
-function boundsOf(cells: readonly BuildCell[]): { min: Vec3; max: Vec3 } {
-  const min = new Vec3(Infinity, Infinity, Infinity);
-  const max = new Vec3(-Infinity, -Infinity, -Infinity);
-  for (const { position } of cells) {
-    min.set(Math.min(min.x, position.x), Math.min(min.y, position.y), Math.min(min.z, position.z));
-    max.set(Math.max(max.x, position.x), Math.max(max.y, position.y), Math.max(max.z, position.z));
-  }
-  return { min, max };
 }
 
 function carriedCounts(bot: Bot): Map<string, number> {
@@ -260,6 +178,14 @@ export class BuildTargeting {
   readonly #obstructingCells = new Set<number>();
   readonly #bounds: { readonly min: Vec3; readonly max: Vec3 };
   readonly #cellAt: ReadonlyMap<number, BuildCell>;
+  /** Where the structure will hold a block of its own, built yet or not: no stand column goes through these. */
+  readonly #ownBlockCells: ReadonlySet<number>;
+  /** The reach of the bot's eye, read once per build (the attribute does not change within a call). */
+  readonly #range: number;
+  /** The columns for the cells the ground cannot serve, kept until the next look at the world. */
+  #columns: { readonly look: number; readonly plan: StandColumns } | null = null;
+  /** How many times the world was looked at again; what a plan kept from the last look is checked against. */
+  #looks = 0;
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -272,6 +198,14 @@ export class BuildTargeting {
   ) {
     this.#bounds = boundsOf(request.cells);
     this.#cellAt = new Map(request.cells.map((cell) => [keyOf(cell.position), cell]));
+    this.#ownBlockCells = new Set(request.cells.filter((cell) => cell.blockName !== "air").map((cell) => keyOf(cell.position)));
+    this.#range = blockRangeOf(bot);
+    this.progress.groundY ??= feetOf(bot).y;
+  }
+
+  /** Whether the bot's eye, over its feet cell, reaches this cell: the server's own test of a placement or a dig. */
+  reaches(position: BlockPosition): boolean {
+    return withinBlockReach(eyeOver(feetOf(this.bot)), position, this.#range);
   }
 
   /** Work done or given up on, whose standing still across passes means the run is idle. */
@@ -327,6 +261,7 @@ export class BuildTargeting {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
     }
     this.#refreshedAtMs = now;
+    this.#looks += 1;
     return this.#states;
   }
 
@@ -421,7 +356,7 @@ export class BuildTargeting {
   }
 
   private workGoal(target: BuildCell): Goal {
-    const approach = nearGoal(target.position, BUILD_REACH);
+    const approach = reachGoal(target.position, this.#range);
     return {
       resolve: (observation) => {
         const spatial = approach.resolve(observation);
@@ -448,16 +383,53 @@ export class BuildTargeting {
   }
 
   /**
+   * The columns to stand on for the cells to place that the ground cannot serve, from the last look at the world: a cell
+   * out of the eye's reach from the ground is worked from the top of a pillar chosen to serve many cells, not from
+   * under itself. Only a cell to place is served so (a dig also needs a visible face, which the cell's own goal checks).
+   */
+  private standColumns(): StandColumns {
+    if (this.#columns?.look === this.#looks) return this.#columns.plan;
+    const feet = feetOf(this.bot);
+    const plan = planStandColumns({
+      cells: this.request.cells.flatMap((cell) => {
+        const kind = this.stateOf(cell).kind;
+        // Every block still owed, the layers waiting for their support included: a roof's layers share their pillars.
+        return OWED_KINDS.has(kind) && cell.blockName !== "air"
+          ? [{ ...cell.position, key: keyOf(cell.position), placeable: kind === "placeable" }]
+          : [];
+      }),
+      ground: this.progress.groundY ?? feet.y,
+      range: this.#range,
+      near: feet,
+      isFree: (x, y, z) => {
+        const key = packKey(x, y, z);
+        if (this.#ownBlockCells.has(key)) return false;
+        const block = this.bot.blockAt(new Vec3(x, y, z));
+        return block !== null && (!obstructs(this.bot, block) || this.progress.scaffold.has(key));
+      },
+    });
+    this.#columns = { look: this.#looks, plan };
+    return plan;
+  }
+
+  /**
    * The goal Baritone revalidates rather than reissues: within reach of any
-   * workable cell. Every snapshot is a fresh look at the structure, so a route
-   * already running walks on to whatever is workable now.
+   * workable cell, or on top of a column that serves the cells the ground cannot.
+   * Every snapshot is a fresh look at the structure, so a route already running
+   * walks on to whatever is workable now.
    */
   goal(): Goal {
     return {
       resolve: (observation) => {
         const targets = this.targets();
         if (targets.length === 0) return { kind: "invalid", observation: "No workable cell remains." } as const;
-        return anyGoal(targets.map((target) => this.workGoal(target))).resolve(observation);
+        const { columns, served } = this.standColumns();
+        const ground = this.progress.groundY ?? feetOf(this.bot).y;
+        const goals = [
+          ...columns.map((column) => exactBlockGoal({ x: column.x, y: ground + column.height, z: column.z })),
+          ...targets.filter((target) => !served.has(keyOf(target.position))).map((target) => this.workGoal(target)),
+        ];
+        return anyGoal(goals).resolve(observation);
       },
     };
   }
@@ -504,7 +476,7 @@ async function workInReach(
     if (request.stopSignal?.aborted) return worked;
     const target = targeting
       .targets()
-      .find((cell) => withinReach(bot, cell.position) && targeting.canWorkFrom(cell, bot.entity.position));
+      .find((cell) => targeting.reaches(cell.position) && targeting.canWorkFrom(cell, bot.entity.position));
     if (!target) return worked;
     const state = targeting.stateOf(target);
     if (state.kind === "diggable") await digCell(bot, request, targeting, movements, target, state.holds, signal);

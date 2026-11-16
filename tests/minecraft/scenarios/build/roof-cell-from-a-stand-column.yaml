@@ -1,0 +1,38 @@
+template: ../../templates/flat-single-action.yaml
+name: roof-cell-from-a-stand-column
+tags: [acceptance]
+description: >-
+  A cell 8 above the ground, out of the eye's reach from anywhere on the ground (6.4 from the eye straight under it),
+  is built from the top of a stand column: the build picks a column beside the cell (`stand-columns.ts`), its route
+  pillars up to the column's top with scaffold, places the cell from there and takes the scaffold down. The cell rests
+  on a one-wide stone tower, so the placement has a support and the only thing missing is something to stand on. The
+  actor carries 6 dirt (the policy's scaffold) and the one plank block: the column needs 2 of the dirt.
+  Plan 2026-11-14-house-build-fixes-2 Task 2a (branch P: no measured roof needs a column, this is the one that runs the path).
+
+geometry:
+  - fill: { block: stone, from: [-12, -60, -12], to: [16, -60, 12] }
+  # The support: a stone tower at x 6, z 0, eight blocks (y -59..-52); the cell to build rests on its top.
+  - fill: { block: stone, from: [6, -59, 0], to: [6, -52, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: oak_planks, count: 1 }
+      - { item: dirt, count: 6 }
+
+params:
+  action: build_structure
+  input:
+    blocks:
+      - { x: 6, y: -51, z: 0, block_name: oak_planks }
+  expect: { status: succeeded }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - kind: blocksAt
+      block: oak_planks
+      positions: [[6, -51, 0]]

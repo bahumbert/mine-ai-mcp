@@ -71,6 +71,69 @@ test("reach, not distance, decides which cells are walked to", async () => {
   }
 });
 
+test("a cell 6 above the feet, straight up, is placed from where the bot stands: the reach is the eye's, not the feet's", async () => {
+  const { bot, physics, routes, placements, put } = structureWorld();
+  put(new Vec3(0, 69, 0), "stone");
+  const result = await build(bot, { ...physics, cells: cells([[0, 70, 0]]), removeWrongBlocks: false });
+  assert.equal(result.status, "complete");
+  assert.deepEqual(routes, [], "4.38 from the eye, 4.5 allowed");
+  assert.deepEqual(placements, ["0,70,0"]);
+});
+
+/** What the build asks its route for, with the goal's answers for the given feet cells; the route then stops. */
+async function goalOfTheFirstRoute(world: ReturnType<typeof structureWorld>, request: Pick<BuildRequest, "cells">, feet: [number, number, number][]) {
+  let revision = "";
+  const satisfied: boolean[] = [];
+  await build(world.bot, {
+    ...world.physics,
+    ...request,
+    removeWrongBlocks: false,
+    route: async ({ goal }) => {
+      const resolved = goal.resolve(observation(0, 64, 0));
+      if (resolved.kind === "active") {
+        revision = resolved.revision;
+        for (const [x, y, z] of feet) satisfied.push(resolved.isSatisfied({ feet: { x, y, z }, remainingScaffolds: 0, overlayId: "" }, goalTestWorld));
+      }
+      return { status: "stopped", reason: "the test only reads the goal", elapsedMs: 0 };
+    },
+  });
+  return { revision, satisfied };
+}
+
+test("a cell 7 above the feet is out of reach from the ground: the route's goal is the top of a column one block high, not the cell", async () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 70, 0), "stone");
+  const { revision, satisfied } = await goalOfTheFirstRoute(world, { cells: cells([[0, 71, 0]]) }, [[0, 65, 0], [0, 64, 0], [1, 65, 0], [0, 66, 0]]);
+  assert.equal(revision, "any(block:0,65,0)", "the nearest column of those that serve it from the lowest feet");
+  assert.deepEqual(satisfied, [true, false, false, false], "on the column's top; nothing else (the pillar goes up exactly that far)");
+});
+
+test("a stand column never stands in a cell the request puts a block in", async () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 70, 0), "stone");
+  // The structure's own block lies in the nearest column's head room, (0,66,0): that column is not one.
+  const { revision } = await goalOfTheFirstRoute(world, { cells: cells([[0, 71, 0], [0, 66, 0]]) }, []);
+  assert.doesNotMatch(revision, /block:0,65,0/);
+  assert.match(revision, /block:-?\d+,65,-?\d+/, "another column, still one high");
+});
+
+test("a cell within reach from the ground keeps its own goal, reached from the eye", async () => {
+  const world = structureWorld();
+  world.put(new Vec3(8, 69, 0), "stone");
+  const { revision, satisfied } = await goalOfTheFirstRoute(world, { cells: cells([[8, 70, 0]]) }, [[8, 64, 0], [0, 64, 0]]);
+  assert.equal(revision, "any(reach:8,70,0:4.5)");
+  assert.deepEqual(satisfied, [true, false]);
+});
+
+test("a column under a ceiling is not one: the world's solid blocks stop it, and a cell no column serves keeps its own goal", async () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 70, 0), "stone");
+  // A solid slab over every column the window offers, 2 above the feet: no pillar has head room.
+  for (let x = -12; x <= 12; x += 1) for (let z = -12; z <= 12; z += 1) world.put(new Vec3(x, 66, z), "stone");
+  const { revision } = await goalOfTheFirstRoute(world, { cells: cells([[0, 71, 0]]) }, []);
+  assert.equal(revision, "any(reach:0,71,0:4.5)");
+});
+
 test("walks to cells out of reach under one goal that moves on as cells are placed, protecting the cells already right", async () => {
   const { bot, physics, routes, protectedSets, placements } = structureWorld();
   const result = await build(bot, {
@@ -85,7 +148,7 @@ test("walks to cells out of reach under one goal that moves on as cells are plac
   assert.deepEqual(placements, ["10,64,0", "20,64,0"]);
   assert.equal(routes.length, 2, "one route, two legs: the goal revised itself after the first placement");
   assert.match(routes[0]!, /10,64,0/);
-  assert.match(routes[1]!, /^any\(near:20,64,0:4\)$/, "the second leg names only the cell still wrong");
+  assert.match(routes[1]!, /^any\(reach:20,64,0:4\.5\)$/, "the second leg names only the cell still wrong");
   assert.equal(protectedSets.length, 1, "one policy for the run, over a live set");
   assert.ok(protectedSets[0]!.has(packKey(10, 64, 0)) && protectedSets[0]!.has(packKey(20, 64, 0)));
 });

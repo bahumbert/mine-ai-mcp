@@ -132,7 +132,7 @@ export function confirmDigs(policy: MovementPolicy, world: WorldView, digs: read
 }
 
 /** Mineflayer's `canDigBlock` rule: block centre within `DIG_REACH` of a point 1.65 above the feet. */
-function withinDigReach(position: BlockPosition, standing: Position3): boolean {
+export function withinDigReach(position: BlockPosition, standing: Position3): boolean {
   const dx = position.x + 0.5 - standing.x;
   const dy = position.y + 0.5 - (standing.y + 1.65);
   const dz = position.z + 0.5 - standing.z;

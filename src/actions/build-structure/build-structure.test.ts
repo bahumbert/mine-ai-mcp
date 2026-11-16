@@ -448,7 +448,7 @@ const NO_SCAFFOLD_CLAUSE = /; no scaffold block carried to stand on \(your movem
 
 test("a roof the route could not reach, with no scaffold block carried, says so and names what the policy admits", async () => {
   const world = structureWorld({ carried: { oak_planks: 5 } });
-  const error = await buildOutOfReach(world, supportedCells(world, [[3, 70, 0]], "oak_planks"));
+  const error = await buildOutOfReach(world, supportedCells(world, [[3, 72, 0]], "oak_planks"));
   const admitted = readNavigationPolicy(world.bot).scaffold_blocks.join(", ");
   assert.match(error, /BUILD_INCOMPLETE\] 1 cell still wrong: 1 were refused/);
   assert.equal(NO_SCAFFOLD_CLAUSE.exec(error)?.[1], admitted);
@@ -473,8 +473,35 @@ test("reserve_items reaches the leg's movements: a reserved scaffold is placed o
   assert.equal(movementsFor({ reserve_items: [{ item: "dirt", count: 5 }] }).scaffold, null);
 });
 
+test("a build route never places scaffold in a cell the request puts a block in, built yet or not; its air cells and the world outside stay open", () => {
+  const world = structureWorld({ carried: { dirt: 5 } });
+  const request = parseBuildStructureRequest({
+    blocks: [
+      { x: 3, y: 64, z: 0, block_name: "cobblestone" },
+      { x: 3, y: 65, z: 0, block_name: "air" },
+    ],
+  });
+  const movements = productionPhysics(world.bot, {} as NavigationRuntime, request).movements(new Set());
+  const at = (x: number, y: number, z: number) => movements.decidePlace(x, y, z, {} as never).kind;
+  assert.equal(at(3, 64, 0), "prohibited", "a cell of the structure that holds its own block, though still empty");
+  assert.equal(at(3, 65, 0), "allowed", "the interior air of the structure stays open to an inside pillar");
+  assert.equal(at(4, 64, 0), "allowed", "a cell outside the request");
+});
+
+test("a dig is workable from a stance only where the dig itself would be made: a face in view is not enough when the block's centre is past the dig reach", () => {
+  // Mine Labs 2026-11-16, template-builds-hanok on the eye reach: the floor's ground digs 4.3 away were chosen by the
+  // build (a face seen within 5.1) and refused by the break (centre within 5.1 of the eyes, Mineflayer's `canDigBlock`).
+  const world = structureWorld();
+  world.put(new Vec3(5, 64, 0), "dirt");
+  world.put(new Vec3(4, 64, 0), "dirt");
+  const physics = productionPhysics(world.bot, {} as NavigationRuntime, parseBuildStructureRequest({ blocks: [{ x: 5, y: 64, z: 0, block_name: "air" }] }));
+  const standing = { x: 0.5, y: 64, z: 0.5 };
+  assert.equal(physics.canSeeDig({ x: 4, y: 64, z: 0 }, standing), true, "centre 4.6 from the eyes, its west face in view");
+  assert.equal(physics.canSeeDig({ x: 5, y: 64, z: 0 }, standing), false, "centre 5.13 from the eyes, its top face in view: Mineflayer would refuse the dig");
+});
+
 const NO_CLAUSE_CASES: { name: string; carried: Record<string, number>; cell: [number, number, number]; onSoulSand?: true; placeRefused?: true }[] = [
-  { name: "a scaffold block of the policy is carried", carried: { oak_planks: 5, dirt: 3 }, cell: [3, 70, 0] },
+  { name: "a scaffold block of the policy is carried", carried: { oak_planks: 5, dirt: 3 }, cell: [3, 72, 0] },
   { name: "the route was refused one block above the feet", carried: { oak_planks: 5 }, cell: [12, 65, 0] },
   // The feet count as navigation counts them (a floor lower than a full block lifts them): 3 above is within reach.
   { name: "the bot stands on soul sand and the cell is 3 above its navigation feet", carried: { oak_planks: 5 }, cell: [12, 67, 0], onSoulSand: true },
@@ -502,7 +529,7 @@ for (const { name, carried, cell, onSoulSand, placeRefused } of NO_CLAUSE_CASES)
 test("high cells the audit does not name still bring the clause", async () => {
   const world = structureWorld({ carried: { oak_planks: 30 } });
   const low: [number, number, number][] = [10, 11, 12, 13].map((x) => [x, 64, 0]);
-  const high: [number, number, number][] = Array.from({ length: 12 }, (_, index) => [3 + index, 70, 0]);
+  const high: [number, number, number][] = Array.from({ length: 12 }, (_, index) => [3 + index, 72, 0]);
   const error = await buildOutOfReach(world, supportedCells(world, [...low, ...high], "oak_planks"));
   assert.match(error, /16 cells still wrong/);
   assert.match(error, NO_SCAFFOLD_CLAUSE);
@@ -518,7 +545,7 @@ async function stoppedBuild(world: World, physics: Physics, request: StructureCe
   return result.error;
 }
 
-const HIGH_ROOF: [number, number, number][] = [[3, 70, 0], [4, 70, 0], [5, 70, 0], [6, 70, 0]];
+const HIGH_ROOF: [number, number, number][] = [[3, 72, 0], [4, 72, 0], [5, 72, 0], [6, 72, 0]];
 
 // The stop at `build-process.ts` "no target left to refuse" cannot be reached by a run (the targets that made the route
 // stop are the ones refuseClosest refuses; refused routes end in BUILD_INCOMPLETE, tested above), so its wording is
@@ -569,12 +596,12 @@ test("an idle-passes stop keeps the plain wording when the high cell is blocked,
   const world = structureWorld({ carried: { oak_planks: 5 } });
   world.put(new Vec3(3, 70, 0), "stone");
   const low = supportedCells(world, [10, 11, 12, 13].map((x): [number, number, number] => [x, 64, 0]), "oak_planks");
-  assert.match(await stoppedBuild(world, idleRoutes(world), [...cells([[3, 70, 0]], "oak_planks"), ...low]), IDLE_PLAIN);
+  assert.match(await stoppedBuild(world, idleRoutes(world), [...cells([[3, 72, 0]], "oak_planks"), ...low]), IDLE_PLAIN);
 });
 
 test("a cobblestone structure is not told to be scaffolded with cobblestone", async () => {
   const world = structureWorld({ carried: { cobblestone: 5 } });
-  const error = await buildOutOfReach(world, supportedCells(world, [[3, 70, 0]], "cobblestone"));
+  const error = await buildOutOfReach(world, supportedCells(world, [[3, 72, 0]], "cobblestone"));
   const admitted = NO_SCAFFOLD_CLAUSE.exec(error)?.[1];
   assert.ok(admitted !== undefined, "the clause is there: the cobblestone is the house's, not scaffold");
   assert.doesNotMatch(admitted, /cobblestone/);
@@ -584,7 +611,7 @@ test("a cobblestone structure is not told to be scaffolded with cobblestone", as
 test("a policy that admits no scaffold block says no block may be used, without a list", async () => {
   const world = structureWorld({ carried: { oak_planks: 5 } });
   setNavigationPolicyProvider(world.bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, scaffold_blocks: [] }));
-  const error = await buildOutOfReach(world, supportedCells(world, [[3, 70, 0]], "oak_planks"));
+  const error = await buildOutOfReach(world, supportedCells(world, [[3, 72, 0]], "oak_planks"));
   assert.match(error, /; no block may be used as scaffold to stand on now: your movement policy admits none besides the blocks being built with\.$/);
   assert.doesNotMatch(error, /carry some/);
 });

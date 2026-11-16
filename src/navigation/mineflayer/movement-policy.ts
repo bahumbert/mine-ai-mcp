@@ -83,6 +83,8 @@ export interface MineflayerMovementPolicyOptions {
   readonly breakPenalty?: number;
   /** Cells a route may never dig, as packed keys: the blocks of a structure being built. */
   readonly protectedCells?: ReadonlySet<number>;
+  /** Cells a route may never place scaffold in, as packed keys: where a structure being built will hold its own blocks. */
+  readonly scaffoldRefusedCells?: ReadonlySet<number>;
   /**
    * The owner whose protected regions this caller may dig and scaffold in: a build working on its own house (ADR-012).
    * Every other region refuses both.
@@ -90,6 +92,14 @@ export interface MineflayerMovementPolicyOptions {
   readonly ignoreRegionsOwnedBy?: string;
   /** Lets routes swim deep open water (`deep-water.ts`); off by default: it is crossed by boat (`navigate`). */
   readonly allowDeepWater?: boolean;
+}
+
+/** Why a placement is refused in a cell of `scaffoldRefusedCells`. */
+export const SCAFFOLD_REFUSED_REASON = "a cell kept for the structure's own block";
+
+/** The refusal of a placement in one of the cells the caller keeps for its own blocks, else null. */
+function keptCellRefusal(kept: ReadonlySet<number> | undefined, x: number, y: number, z: number): PolicyDecision | null {
+  return kept?.has(packKey(x, y, z)) ? { kind: "prohibited", reason: SCAFFOLD_REFUSED_REASON } : null;
 }
 
 /**
@@ -510,7 +520,7 @@ export function createMineflayerMovementPolicy(
       return verdict;
     },
     decidePlace: (x, y, z) => {
-      const inRegion = regionRefusal(x, y, z);
+      const inRegion = regionRefusal(x, y, z) ?? keptCellRefusal(options.scaffoldRefusedCells, x, y, z);
       if (inRegion !== null) return inRegion;
       // The route moves our own body before placing; other bodies are live obstacles.
       const reason = occupiedCell(bot, { x, y, z }, bot.entity.id);
