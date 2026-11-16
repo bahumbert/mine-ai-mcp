@@ -2,7 +2,7 @@ import { sleepMs } from "./wall-timers.ts";
 import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn } from "./chat-model.ts";
 import { LlmMind } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
-import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare } from "./runtime-client.ts";
+import type { AreaOutcome, AreaRequest, BotRuntime, BotSnapshot, CraftingNeeds, ForegroundState, ForegroundTool, ItemCount, PlayerMessage, Position, ProtectedArea, SmeltingKnowledge, BlockArea, BlockCell, DropSource, KnownContainer, MobSource, BlockKind, ToolClass, FoundBlock, SeenBlock, WaterShare, SignReading } from "./runtime-client.ts";
 import { chunksAlong, firstUnseen } from "./runtime-client.ts";
 import { MOSTLY_WATER, sameDimension } from "./bot-data-sql.ts";
 import { vanillaItemFamilies } from "./testing-item-families.ts";
@@ -34,6 +34,21 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
 
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {
+  /** Registry members returned by item-family queries. */
+  itemFamilies: Readonly<Record<string, readonly string[]>> = {};
+
+  async itemFamily(family: string): Promise<readonly string[]> {
+    return this.itemFamilies[family] ?? [];
+  }
+
+  /** Scripted sign readings, keyed by cell; reads are recorded for callers' tests. */
+  signs: readonly SignReading[] = [];
+  readonly signReads: Position[] = [];
+  async readSigns(at: Position): Promise<readonly SignReading[]> {
+    this.signReads.push(at);
+    return this.signs.filter(({ position }) => position.x === at.x && position.y === at.y && position.z === at.z);
+  }
+
   /** The cover report a foreground route leaves cover at, as the runtime sends it while `report_open_sky` is on (the shape the scenario `navigation/report-open-sky` reported: `.agent/knowledge/facts/navigation-and-boats.md`). */
   planCoverExit(at: Position): void {
     if (this.snapshot.policy?.reportOpenSky !== true) return;
@@ -568,7 +583,7 @@ export class FakeRuntime implements BotRuntime {
       // It reaches the ground asked for, at the height it stands.
       this.snapshot = { ...this.snapshot, position: { x: Number(action.input.x), y: this.snapshot.position.y, z: Number(action.input.z) } };
     }
-    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : undefined;
+    const result = action.tool === "tend_crops" ? this.tendResult(action.input) : action.tool === "collect_block" ? this.collectResult(action.input) : action.tool === "place_sign" ? { status: "succeeded", sign: { target: { x: action.input.x, y: action.input.y, z: action.input.z }, block: null, facing: action.input.facing, attach: action.input.attach ?? "ground", lines: [...(action.input.lines as string[]), "", "", ""].slice(0, 4), confirmed: true, placed: action.input.fill_blank !== true } } : undefined;
     if (action.tool === "tend_crops" && this.tendSkipped !== null) {
       const cells = Object.values(this.tendSkipped).reduce((sum, list) => sum + list.length, 0);
       return { state: "settled", actionId, status: this.tendSkippedStatus, error: `[TEND_INCOMPLETE] ${cells} cells could not be farmed; see skipped.`, result };

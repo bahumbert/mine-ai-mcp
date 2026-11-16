@@ -6,9 +6,67 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { sameDimensionSql } from "./bot-data-sql.ts";
-import { McpBotRuntime, newToolClient, type ToolClient } from "./runtime-client.js";
+import { McpBotRuntime, newToolClient, parsePlaceSign, type ToolClient } from "./runtime-client.js";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+
+test("readSigns parses four lines a side and preserves unknown text", async () => {
+  const position = { x: 3, y: 64, z: -2 };
+  for (const known of [true, false]) {
+    const reading = { position, block: "oak_sign", known, front: ["owner", "home", "", ""], back: ["back", "", "", ""] };
+    const client: ToolClient = {
+      callTool: async (input) => {
+        assert.equal(input.name, "read_signs");
+        assert.deepEqual({ x: input.arguments?.x, y: input.arguments?.y, z: input.arguments?.z }, position);
+        return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", signs: [reading] } } } } };
+      }, close: async () => {},
+    };
+    assert.deepEqual(await McpBotRuntime.over(client).readSigns(position), [reading]);
+  }
+  for (const length of [3, 5]) for (const side of ["front", "back"]) {
+    const reading = { position, block: "oak_sign", known: true, front: ["", "", "", ""], back: ["", "", "", ""], [side]: Array(length).fill("") };
+    const client: ToolClient = { callTool: async () => ({ structuredContent: { response: { format: "json", data: { result: { status: "succeeded", signs: [reading] } } } } }), close: async () => {} };
+    await assert.rejects(McpBotRuntime.over(client).readSigns(position));
+  }
+});
+
+test("parsePlaceSign preserves confirmation, fill evidence and every refusal", () => {
+  const sign = { target: { x: 3, y: 64, z: -2 }, block: "oak_sign", facing: "north", attach: "ground", lines: ["owner", "", "", ""], confirmed: true, placed: true };
+  assert.deepEqual(parsePlaceSign({ status: "succeeded", sign }), { status: "succeeded", error: null, code: null, sign });
+  const fill = { ...sign, confirmed: false, placed: false };
+  assert.deepEqual(parsePlaceSign({ status: "succeeded", sign: { ...sign, placed: false } }).sign, { ...sign, placed: false });
+  assert.deepEqual(parsePlaceSign({ status: "partial", error: "[PLACE_SIGN_TEXT_UNCONFIRMED] Read it.", sign: fill }),
+    { status: "partial", error: "[PLACE_SIGN_TEXT_UNCONFIRMED] Read it.", code: "PLACE_SIGN_TEXT_UNCONFIRMED", sign: fill });
+  for (const code of ["NO_SIGN_ITEM", "CELL_TAKEN", "NO_SUPPORT", "LINES", "UNLOADED", "TEXT_UNKNOWN", "NO_EDITOR", "FAILED"]) {
+    const error = `[PLACE_SIGN_${code}] Refused.`;
+    const existing = { block: "oak_sign", front: ["other", "", "", ""], back: ["", "", "", ""] };
+    const outcome = parsePlaceSign({ status: "failed", error, sign: fill, existing, members: ["oak_sign"] });
+    assert.equal(outcome.code, `PLACE_SIGN_${code}`);
+    assert.deepEqual(outcome.existing, existing);
+    assert.deepEqual(outcome.members, ["oak_sign"]);
+  }
+  for (const length of [3, 5]) {
+    const invalid = Array(length).fill("");
+    assert.throws(() => parsePlaceSign({ status: "succeeded", sign: { ...sign, lines: invalid } }));
+    for (const side of ["front", "back"]) {
+      assert.throws(() => parsePlaceSign({ status: "failed", error: "[PLACE_SIGN_CELL_TAKEN] Refused.", sign, existing: { block: "oak_sign", [side]: invalid } }));
+    }
+  }
+});
+
+test("itemFamily parses members", async () => {
+  let request: unknown;
+  const client: ToolClient = {
+    callTool: async (input) => {
+      request = input;
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", family: "sign", members: ["oak_sign", "spruce_sign"] } } } } };
+    },
+    close: async () => {},
+  };
+  assert.deepEqual(await McpBotRuntime.over(client).itemFamily("sign"), ["oak_sign", "spruce_sign"]);
+  assert.equal((request as { name: string }).name, "view_item_family");
+  assert.equal((request as { arguments: { family: string } }).arguments.family, "sign");
+});
 
 function dropsClient(sources: readonly Record<string, unknown>[]): ToolClient {
   const data = { result: { drops: { items: [{ item: "wheat", sources, mobs: [] }], blocks: [] } } };
@@ -251,26 +309,6 @@ function queryClient(rows: readonly (readonly (string | number | null)[])[]): To
 
 const AT = { x: 8, y: 64, z: 0 };
 
-test("knownContainers reads only containers the bot placed (placed_containers), with the observed slots when opened", async () => {
-  // Review 2026-10-19 #8: a chest the bot only opened (a village chest, another bot's) took the deposit.
-  const client = queryClient([[10, 64, -3, "chest", 27, 4], [12, 64, 5, "barrel", null, null]]);
-  const found = await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
-  assert.deepEqual(found, [
-    { x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 },
-    { x: 12, y: 64, z: 5, blockName: "barrel", slotCount: null, usedSlots: 0 },
-  ]);
-  assert.match(client.queries[0]!, /FROM placed_containers p LEFT JOIN observed_containers c ON c\.container_key = p\.container_key/u);
-  assert.match(client.queries[0]!, /p\.placed_by_bot_id = 'Tester'/u);
-  assert.doesNotMatch(client.queries[0]!, /observed_by_bot_id/u);
-});
-
-test("knownContainers also takes a container the bot opened inside a protected region it owns (owner 2026-10-19)", async () => {
-  const client = queryClient([]);
-  await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
-  assert.match(client.queries[0]!, /JOIN protected_regions r ON .*lower\(r\.owner\) = lower\('Tester'\)/u);
-  assert.match(client.queries[0]!, /c\.block_x BETWEEN r\.min_x AND r\.max_x AND c\.block_y BETWEEN r\.min_y AND r\.max_y AND c\.block_z BETWEEN r\.min_z AND r\.max_z/u);
-});
-
 test("knownContainers reads the rows of a real Minecraft username (letters, digits, underscore, 1-16)", async () => {
   // Review 2026-10-18 #4: the check was /^w{1,16}$/ (the letter w), so every real name got [] and the chest deposit never ran live.
   const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
@@ -278,8 +316,6 @@ test("knownContainers reads the rows of a real Minecraft username (letters, digi
   for (const owner of ["Tester", "Dirk_77", "a", "x".repeat(16)]) {
     assert.deepEqual(await runtime.knownContainers(owner, AT, 32, "overworld"), [{ x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 }], owner);
   }
-  assert.equal(client.queries.length, 4);
-  assert.match(client.queries[0]!, /placed_by_bot_id = 'Tester'/u);
 });
 
 test("knownContainers refuses a name or a dimension that could break the SQL literal, without querying", async () => {
@@ -405,16 +441,19 @@ test("knownContainers' SQL runs on the real bot-data schema: placed, never opene
   // A stub `call` cannot see a typo in the SQL (review 2026-10-18 #4: a regex typo passed every test and killed the deposit live).
   const database = new DatabaseSync(":memory:");
   database.exec(readFileSync(new URL("../../src/bot-data/bot-data.sql", import.meta.url), "utf8"));
-  const placed = (dimension: string, x: number, bot: string) => database.prepare("INSERT INTO placed_containers VALUES (?, ?, ?, 64, 0, 'chest', ?, 'now')").run(`${dimension}|${x}|64|0`, dimension, x, bot);
+  const placed = (dimension: string, x: number, bot: string, block = "chest") => database.prepare("INSERT INTO placed_containers VALUES (?, ?, ?, 64, 0, ?, ?, 'now')").run(`${dimension}|${x}|64|0`, dimension, x, block, bot);
   const opened = (dimension: string, x: number, used: number) => database.prepare("INSERT INTO observed_containers VALUES (?, ?, ?, 64, 0, 'chest', 27, ?, 'Tester', 'now')").run(`${dimension}|${x}|64|0`, dimension, x, JSON.stringify(Array.from({ length: used }, () => ({}))));
   placed("minecraft:overworld", 10, "Tester");
   opened("minecraft:overworld", 10, 4);
-  placed("overworld", 12, "Tester");
+  placed("overworld", 12, "Tester", "barrel");
   placed("overworld", 14, "Mira");
   opened("overworld", 16, 2);
   opened("overworld", 20, 5);
   placed("the_nether", 11, "Tester");
   database.exec("INSERT INTO protected_regions (dimension, min_x, min_y, min_z, max_x, max_y, max_z, owner, label, reason, created_by_bot_id, created_at) VALUES ('overworld', 18, 60, -3, 24, 70, 3, 'tester', 'house', 'x', 'Tester', 'now')");
+  for (const [x, y, z] of [[25, 64, 0], [20, 71, 0], [20, 64, 4]]) {
+    database.prepare("INSERT INTO observed_containers VALUES (?, 'overworld', ?, ?, ?, 'chest', 27, '[]', 'Tester', 'now')").run(`overworld|${x}|${y}|${z}`, x, y, z);
+  }
   const client: ToolClient = {
     callTool: async (call) => {
       const rows = database.prepare(String((call.arguments as { sql: string }).sql)).all().map((row) => Object.values(row));
@@ -425,7 +464,11 @@ test("knownContainers' SQL runs on the real bot-data schema: placed, never opene
   const runtime = McpBotRuntime.over(client);
   const near = { x: 8, y: 64, z: 0 };
   const overworld = await runtime.knownContainers("Tester", near, 32, "overworld");
-  assert.deepEqual(overworld.map(({ x, slotCount, usedSlots }) => [x, slotCount, usedSlots]), [[10, 27, 4], [12, null, 0], [20, 27, 5]]);
+  assert.deepEqual(overworld, [
+    { x: 10, y: 64, z: 0, blockName: "chest", slotCount: 27, usedSlots: 4 },
+    { x: 12, y: 64, z: 0, blockName: "barrel", slotCount: null, usedSlots: 0 },
+    { x: 20, y: 64, z: 0, blockName: "chest", slotCount: 27, usedSlots: 5 },
+  ]);
   assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "minecraft:overworld")).map(({ x }) => x), [10, 12, 20], "either spelling of the overworld asks the same rows");
   assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "the_nether")).map(({ x }) => x), [11]);
   assert.deepEqual((await runtime.knownContainers("Tester", near, 5, "overworld")).map(({ x }) => x), [10, 12], "the reach bounds it, nearest first");

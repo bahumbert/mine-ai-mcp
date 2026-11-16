@@ -118,7 +118,7 @@ export type ActionStatus = "succeeded" | "partial" | "failed" | "cancelled";
 export type ForegroundTool =
   | "navigate" | "collect_block" | "drop_item"
   | "use_container" | "craft_item" | "smelt_item" | "eat_food" | "equip" | "sleep" | "collect_mob_drop" | "build_structure" | "note_save" | "note_delete"
-  | "tend_crops" | "use_bucket" | "raw_action";
+  | "tend_crops" | "use_bucket" | "raw_action" | "place_sign";
 
 export type ForegroundState =
   | { readonly state: "pending"; readonly actionId: string }
@@ -299,6 +299,10 @@ export function firstUnseen(from: { readonly x: number; readonly z: number }, ch
 
 export interface BotRuntime {
   status(): Promise<BotSnapshot>;
+  /** Registry members of an item family, in registry order. */
+  itemFamily(family: string): Promise<readonly string[]>;
+  /** Read a sign at one loaded cell. */
+  readSigns(at: Position): Promise<readonly SignReading[]>;
   /**
    * What crafting these items would take from the current inventory; crafts nothing. `prefer`: materials to plan with,
    * in order, where recipes accept several and none is carried (the woods growing nearby).
@@ -473,6 +477,23 @@ const sayResultSchema = z.object({
   result: z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional() }),
 });
 
+const itemFamilySchema = z.object({ result: z.object({ members: z.array(z.string()) }) });
+
+const signLinesSchema = z.tuple([z.string(), z.string(), z.string(), z.string()]);
+const signReadingSchema = z.object({ position: positionSchema, block: z.string(), known: z.boolean(), front: signLinesSchema, back: signLinesSchema });
+export type SignReading = z.output<typeof signReadingSchema>;
+const readSignsSchema = z.object({ result: z.object({ signs: z.array(signReadingSchema) }) });
+const signEvidenceSchema = z.object({ target: positionSchema, block: z.string().nullable(), facing: z.enum(["north", "south", "east", "west"]), attach: z.enum(["ground", "wall"]), lines: signLinesSchema, confirmed: z.boolean(), placed: z.boolean() });
+const placeSignSchema = z.object({ status: z.enum(["succeeded", "partial", "failed", "cancelled"]), error: z.string().optional(), sign: signEvidenceSchema.optional(), members: z.array(z.string()).optional(), existing: z.object({ block: z.string(), front: signLinesSchema.optional(), back: signLinesSchema.optional() }).optional() });
+export type PlaceSignOutcome = Omit<z.output<typeof placeSignSchema>, "error"> & { readonly error: string | null; readonly code: string | null };
+
+/** Decode the action evidence returned through the body. */
+export function parsePlaceSign(result: unknown): PlaceSignOutcome {
+  const parsed = placeSignSchema.parse(result);
+  const error = parsed.error ?? null;
+  return { ...parsed, error, code: errorCode(error) };
+}
+
 const queryResultSchema = z.object({
   result: z.object({
     status: z.string(),
@@ -580,6 +601,15 @@ export class McpBotRuntime implements BotRuntime {
 
   async status(): Promise<BotSnapshot> {
     return snapshotOf(viewStatusSchema.parse(await this.call("view_status", {}, "Look around before deciding.")));
+  }
+
+  async itemFamily(family: string): Promise<readonly string[]> {
+    const { result } = itemFamilySchema.parse(await this.call("view_item_family", { family }, "Find the items in this family."));
+    return result.members;
+  }
+
+  async readSigns(at: Position): Promise<readonly SignReading[]> {
+    return readSignsSchema.parse(await this.call("read_signs", { ...at }, "Read the sign at this cell.")).result.signs;
   }
 
   async setScaffoldBlocks(blocks: readonly string[], revision: string): Promise<boolean> {
