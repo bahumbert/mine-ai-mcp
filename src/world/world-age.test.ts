@@ -2,7 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { type FakeBotOptions, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
-import { SERVER_CLOCK_STOPPED_MS, serverTickDeadline, waitForServerAnswer, waitForServerTicks, waitForWorldAge } from "./world-age.js";
+import {
+  AGE_PACKET_TICKS,
+  MS_PER_ON_TIME_TICK,
+  SERVER_CLOCK_STOPPED_MS,
+  type ServerTickDeadlineOptions,
+  serverPacedWallMs,
+  serverTickDeadline,
+  ticksOnTime,
+  waitForServerAnswer,
+  waitForServerTicks,
+  waitForWorldAge,
+} from "./world-age.js";
 
 /** A bot on a server whose world age is `age` and whose clock the test moves; the waits read their time from it. */
 function worldBot(age = 1_000, options: FakeBotOptions = {}) {
@@ -11,16 +22,28 @@ function worldBot(age = 1_000, options: FakeBotOptions = {}) {
   return { ...harness, timing: { now: clock.now, sleep: clock.sleep } };
 }
 
+interface DeadlineSetup {
+  /** The server runs this long before the deadline is created (its age is then the cached age of the last packet). */
+  readonly createdAfterMs?: number;
+  readonly limits?: ServerTickDeadlineOptions;
+  /** False: nobody looks at the deadline until the test does. */
+  readonly lookEachSlice?: boolean;
+}
+
 /** Observe each server slice, including stopped ones, without adding a timer to the deadline. */
-function deadlineOnServer(ticks: number, options: FakeBotOptions = {}) {
+async function deadlineOnServer(ticks: number, options: FakeBotOptions = {}, setup: DeadlineSetup = {}) {
   const harness = worldBot(1_000, options);
   const { bot, clock } = harness;
-  const deadline = serverTickDeadline(() => bot.time?.age, ticks, clock.now());
+  await clock.advance(setup.createdAfterMs ?? 0);
+  const createdMs = clock.now();
+  const deadline = serverTickDeadline(() => bot.time?.age, ticks, createdMs, setup.limits);
   let passedAt: { ms: number; ticks: number | null } | undefined;
-  clock.onSlice("physics", () => {
-    if (deadline.passed(clock.now())) passedAt ??= deadline.elapsed(clock.now());
-  });
-  return { ...harness, deadline, passedAt: () => passedAt };
+  if (setup.lookEachSlice !== false) {
+    clock.onSlice("physics", () => {
+      if (deadline.passed(clock.now())) passedAt ??= deadline.elapsed(clock.now());
+    });
+  }
+  return { ...harness, deadline, createdMs, passedAt: () => passedAt };
 }
 
 test("a server-tick deadline follows the packet's world age at slow and on-time rates", async () => {
@@ -31,7 +54,7 @@ test("a server-tick deadline follows the packet's world age at slow and on-time 
     { ticks: 100, server: { phaseMs: 900 }, beforeMs: 4_050, passedMs: 4_900, elapsedTicks: 100 },
     { ticks: 110, server: {}, beforeMs: 5_999, passedMs: 6_000, elapsedTicks: 120 },
   ]) {
-    const { bot, clock, deadline, passedAt } = deadlineOnServer(ticks, { server: { startAge: 1_000, ...server } });
+    const { bot, clock, deadline, passedAt } = await deadlineOnServer(ticks, { server: { startAge: 1_000, ...server } });
     assert.equal(deadline.ticks, ticks);
     await clock.advance(beforeMs);
     assert.equal(deadline.passed(clock.now()), false, `${ticks} ticks: still pending at ${beforeMs} ms`);
@@ -44,7 +67,7 @@ test("a server-tick deadline follows the packet's world age at slow and on-time 
 });
 
 test("an extra time packet neither passes nor stalls a deadline early", async () => {
-  const { clock, server, deadline, passedAt } = deadlineOnServer(100);
+  const { clock, server, deadline, passedAt } = await deadlineOnServer(100);
   await clock.advance(450);
   server.resendTime();
   assert.deepEqual(deadline.elapsed(clock.now()), { ms: 450, ticks: 9 });
@@ -56,7 +79,7 @@ test("an extra time packet neither passes nor stalls a deadline early", async ()
 });
 
 test("a stopped server passes a deadline 20 seconds after the last moving age", async () => {
-  const { clock, server, deadline, passedAt } = deadlineOnServer(100);
+  const { clock, server, deadline, passedAt } = await deadlineOnServer(100);
   await clock.advance(2_500);
   server.stop();
   await clock.advance(19_450);
@@ -66,7 +89,7 @@ test("a stopped server passes a deadline 20 seconds after the last moving age", 
 });
 
 test("a no-age deadline falls back to on-time milliseconds and stays passed after a late first packet", async () => {
-  const { clock, server, deadline, passedAt } = deadlineOnServer(100, { server: { timePacketYet: false } });
+  const { clock, server, deadline, passedAt } = await deadlineOnServer(100, { server: { timePacketYet: false } });
   server.stop();
   await clock.advance(4_999);
   assert.equal(deadline.passed(clock.now()), false);
@@ -80,7 +103,7 @@ test("a no-age deadline falls back to on-time milliseconds and stays passed afte
 });
 
 test("a deadline starts its tick count at the first age heard, even after starting without one", async () => {
-  const { clock, deadline, passedAt } = deadlineOnServer(100, { server: { startAge: 1_000, timePacketYet: false } });
+  const { clock, deadline, passedAt } = await deadlineOnServer(100, { server: { startAge: 1_000, timePacketYet: false } });
   await clock.advance(1_000);
   assert.deepEqual(deadline.elapsed(clock.now()), { ms: 1_000, ticks: 0 });
   await clock.advance(4_000);
@@ -301,4 +324,139 @@ test("an age that moves under the stall bound but too slowly for the asked ticks
 test("a stall bound counts from the first age a bot hears when it had none", async () => {
   const { bot, clock, timing } = worldBot(1_000, { server: { startAge: 1_000, timePacketYet: false } });
   assert.equal(await clock.settle(waitForWorldAge(bot, 40, { wallMs: 15_000, stallMs: 5_000, ...timing }), 15_000), "moved");
+});
+
+// Server-paced limits (plan 2026-11-16-reflex-limits-ticks T1): the deadline counts from the age read at its start plus
+// one time packet, with a total wall backstop. The packet of age `A + k` falls `k * msPerTick` after the server's start
+// (one packet per 20 ticks at any rate; the start age, 1 000, is the packet of age `A` at 0 ms).
+const START_AGE = 1_000;
+const CREATED_AFTER_MS = 500;
+const RATES = [
+  { ticksPerSecond: 20, msPerTick: 50 },
+  { ticksPerSecond: 10, msPerTick: 100 },
+] as const;
+const LIMIT_TICKS = 200;
+const PACKET_LIMITS = { origin: "packet", wallMs: serverPacedWallMs(LIMIT_TICKS) } as const;
+
+/** A server-paced deadline of `ticks` created `CREATED_AFTER_MS` after the packet of age `START_AGE`. */
+function deadlineAfterPacket(ticks: number, server: NonNullable<FakeBotOptions["server"]>, limits: ServerTickDeadlineOptions, lookEachSlice = true) {
+  return deadlineOnServer(ticks, { server: { startAge: START_AGE, ...server } }, { createdAfterMs: CREATED_AFTER_MS, limits, lookEachSlice });
+}
+
+for (const { ticksPerSecond, msPerTick } of RATES) {
+  for (const { origin, passesAtAge } of [{ origin: "packet", passesAtAge: 220 }, { origin: "cached", passesAtAge: 200 }] as const) {
+    for (const lookEveryMs of [50, 25]) {
+      test(`a ${origin}-origin deadline of 200 ticks passes at the packet of age A + ${passesAtAge}, not at the one before (${ticksPerSecond} tps, looked at every ${lookEveryMs} ms)`, async () => {
+        const { bot, clock, deadline, createdMs, passedAt } = await deadlineAfterPacket(LIMIT_TICKS, { ticksPerSecond }, { ...PACKET_LIMITS, origin });
+        const beforeAge = passesAtAge - AGE_PACKET_TICKS;
+        await clock.advance(beforeAge * msPerTick - createdMs, lookEveryMs);
+        assert.equal(bot.time.age, START_AGE + beforeAge);
+        assert.equal(deadline.passed(clock.now()), false, `A + ${beforeAge} is one packet short of the deadline`);
+        assert.equal(passedAt(), undefined);
+        await clock.advance(AGE_PACKET_TICKS * msPerTick, lookEveryMs);
+        assert.equal(bot.time.age, START_AGE + passesAtAge);
+        assert.deepEqual(passedAt(), { ms: passesAtAge * msPerTick - createdMs, ticks: passesAtAge });
+      });
+    }
+  }
+
+  test(`a packet-origin deadline read only once, long after its limit, is passed at that read (${ticksPerSecond} tps)`, async () => {
+    // Never looked at before: the first read, at the packet of age A + 260, counts from the age at creation.
+    const { clock, deadline, createdMs } = await deadlineAfterPacket(LIMIT_TICKS, { ticksPerSecond }, { ...PACKET_LIMITS, stoppedMs: null }, false);
+    await clock.advance(260 * msPerTick - createdMs);
+    assert.equal(deadline.passed(clock.now()), true);
+    assert.equal(deadline.elapsed(clock.now()).ticks, 260);
+  });
+}
+
+// No age at creation: only `ticks * 50` ms and the wall, whatever packets come later, at the default stopped-clock bound (20 s)
+// too (a 600-tick budget is 30 000 ms, past it).
+for (const ticks of [LIMIT_TICKS, 600]) {
+  for (const { name, ticksPerSecond, stopped } of [
+    { name: "a server running at 20 tps", ticksPerSecond: 20, stopped: false },
+    { name: "a server running at 10 tps", ticksPerSecond: 10, stopped: false },
+    { name: "a stopped server that sends one extra packet", ticksPerSecond: 20, stopped: true },
+  ]) {
+    test(`a packet-origin deadline of ${ticks} ticks created before any time packet ends at ticks times 50 ms: ${name}`, async () => {
+      const expiryMs = ticks * MS_PER_ON_TIME_TICK;
+      const { clock, server, deadline, passedAt } = await deadlineAfterPacket(
+        ticks, { ticksPerSecond, timePacketYet: false }, { origin: "packet", wallMs: serverPacedWallMs(ticks) },
+      );
+      if (stopped) {
+        server.stop();
+        server.resendTime();
+      }
+      await clock.advance(expiryMs - 1);
+      assert.equal(deadline.passed(clock.now()), false);
+      assert.deepEqual(deadline.elapsed(clock.now()), { ms: expiryMs - 1, ticks: null });
+      await clock.advance(1);
+      assert.deepEqual(passedAt(), { ms: expiryMs, ticks: null });
+    });
+  }
+}
+
+// Each stopped-clock bound alone, on independent deadlines one ms either side (T10): a stopped server ends on the last move
+// (polled each slice, so the last look is recent), a moving server read once ends on the last look, `stoppedMs: null`
+// leaves only the wall. Each row's age stays under its budget, so no tick count explains a pass.
+const STOPPED_BOUNDS: ReadonlyArray<{
+  name: string; ticks: number; ticksPerSecond: number; stopped: boolean; polled: boolean;
+  limits: ServerTickDeadlineOptions; boundMs: number; passesAtBound: boolean;
+}> = [
+  { name: "packet, bound off, stopped: the wall", ticks: 200, ticksPerSecond: 20, stopped: true, polled: true, limits: { ...PACKET_LIMITS, stoppedMs: null }, boundMs: 33_000, passesAtBound: true },
+  { name: "packet, default bound, stopped: the last move", ticks: 200, ticksPerSecond: 20, stopped: true, polled: true, limits: PACKET_LIMITS, boundMs: SERVER_CLOCK_STOPPED_MS, passesAtBound: true },
+  { name: "packet, 2 s bound, stopped: the last move", ticks: 200, ticksPerSecond: 20, stopped: true, polled: true, limits: { ...PACKET_LIMITS, stoppedMs: 2_000 }, boundMs: 2_000, passesAtBound: true },
+  { name: "cached, 5 s wall, bound off, stopped", ticks: 200, ticksPerSecond: 20, stopped: true, polled: true, limits: { wallMs: 5_000, stoppedMs: null }, boundMs: 5_000, passesAtBound: true },
+  { name: "packet, default bound, 20 tps read once: the last look", ticks: 600, ticksPerSecond: 20, stopped: false, polled: false, limits: { origin: "packet", wallMs: serverPacedWallMs(600) }, boundMs: SERVER_CLOCK_STOPPED_MS, passesAtBound: true },
+  { name: "packet, default bound, 10 tps read once: the last look", ticks: 600, ticksPerSecond: 10, stopped: false, polled: false, limits: { origin: "packet", wallMs: serverPacedWallMs(600) }, boundMs: SERVER_CLOCK_STOPPED_MS, passesAtBound: true },
+  { name: "packet, 2 s bound, 20 tps read once: the last look", ticks: 600, ticksPerSecond: 20, stopped: false, polled: false, limits: { origin: "packet", wallMs: serverPacedWallMs(600), stoppedMs: 2_000 }, boundMs: 2_000, passesAtBound: true },
+  { name: "packet, bound off, 20 tps read once: no last look", ticks: 600, ticksPerSecond: 20, stopped: false, polled: false, limits: { origin: "packet", wallMs: serverPacedWallMs(600), stoppedMs: null }, boundMs: SERVER_CLOCK_STOPPED_MS, passesAtBound: false },
+  { name: "packet, bound off, 10 tps read once: no last look", ticks: 600, ticksPerSecond: 10, stopped: false, polled: false, limits: { origin: "packet", wallMs: serverPacedWallMs(600), stoppedMs: null }, boundMs: SERVER_CLOCK_STOPPED_MS, passesAtBound: false },
+];
+for (const row of STOPPED_BOUNDS) {
+  test(`a stopped-clock bound ends a deadline exactly at its value: ${row.name}`, async () => {
+    const lookAfter = async (gapMs: number) => {
+      const { clock, server, deadline } = await deadlineAfterPacket(row.ticks, { ticksPerSecond: row.ticksPerSecond }, row.limits, row.polled);
+      if (row.stopped) server.stop();
+      await clock.advance(gapMs);
+      const passed = deadline.passed(clock.now());
+      const { ticks } = deadline.elapsed(clock.now());
+      assert.ok(ticks !== null && ticks < row.ticks + AGE_PACKET_TICKS, `no tick count explains the pass: ${ticks} ticks at ${gapMs} ms`);
+      return passed;
+    };
+    assert.equal(await lookAfter(row.boundMs - 1), false, "one ms short of the bound");
+    assert.equal(await lookAfter(row.boundMs), row.passesAtBound, "at the bound");
+    if (!row.passesAtBound) assert.equal(await lookAfter(row.boundMs + 1), false, "one ms past the bound, still only the wall and the ticks");
+  });
+}
+
+test("a catch-up burst after a stop passes a packet-origin deadline at the first packet of age A + 220 or later", async () => {
+  const { bot, clock, server, deadline } = await deadlineAfterPacket(LIMIT_TICKS, {}, PACKET_LIMITS);
+  await clock.advance(8_900); // 9 400 ms: the packet of age A + 180 was heard at 9 000
+  assert.equal(bot.time.age, START_AGE + 180);
+  const heard: Array<{ age: number; passed: boolean }> = [];
+  bot.on("time", () => void heard.push({ age: bot.time.age, passed: deadline.passed(clock.now()) }));
+  server.stop();
+  await clock.advance(1_700); // 34 owed ticks, under the 2 000 ms the game drops: all run at once at `resume`
+  assert.deepEqual(heard, []);
+  server.resume();
+  assert.deepEqual(heard, [
+    { age: START_AGE + 200, passed: false },
+    { age: START_AGE + 220, passed: true },
+  ]);
+});
+
+test("the wall backstop of a server-paced limit is three times its ticks plus one packet interval at 50 ms a tick", () => {
+  assert.equal(serverPacedWallMs(40), 9_000);
+  assert.equal(serverPacedWallMs(100), 18_000);
+  assert.equal(serverPacedWallMs(200), 33_000);
+  assert.equal(serverPacedWallMs(600), 93_000);
+  assert.equal(serverPacedWallMs(12_000), 1_803_000);
+});
+
+test("milliseconds on a server on time are rounded up to whole ticks", () => {
+  assert.equal(ticksOnTime(30_000), 600);
+  assert.equal(ticksOnTime(55_000), 1_100);
+  assert.equal(ticksOnTime(1), 1);
+  assert.equal(ticksOnTime(50), 1);
+  assert.equal(ticksOnTime(51), 2);
 });

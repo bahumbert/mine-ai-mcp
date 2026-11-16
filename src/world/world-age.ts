@@ -45,27 +45,79 @@ export interface ServerTickDeadline {
   elapsed(nowMs: number): { readonly ms: number; readonly ticks: number | null };
 }
 
-/** A polled, timer-free deadline on the server clock, with a wall fallback before the first time packet. */
+/** Ticks one server time-packet interval covers (one packet per 20 ticks, `world-age-per-second` contract check). */
+export const AGE_PACKET_TICKS = 20;
+
+/** The backstop factor of a server-paced limit: 3x its ticks (P4-29 a4 D1's factor). */
+export const SERVER_PACED_WALL_FACTOR = 3;
+
+/**
+ * The real-time backstop of a server-paced limit of `ticks`: `SERVER_PACED_WALL_FACTOR` times its ticks plus one packet
+ * interval, at 50 ms a tick. A `packet` deadline ends 1 to 39 server ticks after its ticks, so at 10 tps it ends by
+ * `(ticks + 39) * 100` ms, under this value for every `ticks > 18`; at 5 tps (stress) a limit of N ticks may end on
+ * this wall at about `0.75 * N` server ticks.
+ */
+export function serverPacedWallMs(ticks: number): number {
+  return SERVER_PACED_WALL_FACTOR * (ticks + AGE_PACKET_TICKS) * MS_PER_ON_TIME_TICK;
+}
+
+/** Milliseconds of a server on time as ticks, rounded up: `ceil(ms / MS_PER_ON_TIME_TICK)`. */
+export function ticksOnTime(ms: number): number {
+  return Math.ceil(ms / MS_PER_ON_TIME_TICK);
+}
+
+export interface ServerTickDeadlineOptions {
+  /**
+   * `"cached"` (default, as before): the age read at creation, else the first age a look reads. `"packet"`: the age
+   * read at creation plus one packet interval (`AGE_PACKET_TICKS`): the age cached at creation was exact at its packet,
+   * at most 19 ticks before, so the deadline ends `ticks + 1` to `ticks + 39` server ticks after creation, never
+   * early, and a late first look cannot restart it. No age at creation: only `ticks * MS_PER_ON_TIME_TICK` and
+   * `wallMs` from `startedMs`, no stopped-clock term (the ages heard later are ignored).
+   */
+  readonly origin?: "cached" | "packet";
+  /** Total real-time backstop from `startedMs`; absent: none. */
+  readonly wallMs?: number;
+  /**
+   * A clock that stands still this long, or a deadline nobody looked at for this long, ends it. Null: never (only
+   * `wallMs`). Default `SERVER_CLOCK_STOPPED_MS`.
+   */
+  readonly stoppedMs?: number | null;
+}
+
+/**
+ * A polled, timer-free deadline on the server clock, with a wall fallback before the first time packet. With no
+ * options it is the `cached` origin of the world-effect wait; server-paced limits pass `{ origin: "packet", wallMs:
+ * serverPacedWallMs(ticks) }`.
+ */
 export function serverTickDeadline(
   readAge: () => number | null | undefined,
   ticks: number,
   startedMs: number,
+  options: ServerTickDeadlineOptions = {},
 ): ServerTickDeadline {
+  const packetOrigin = options.origin === "packet";
+  const wallMs = options.wallMs ?? Number.POSITIVE_INFINITY;
+  const budgetTicks = packetOrigin ? ticks + AGE_PACKET_TICKS : ticks;
   let firstAge = readAge() ?? undefined;
+  // A packet deadline with no age at creation is only `ticks * 50` ms and `wallMs` (D1): no stopped-clock term, and the
+  // ages heard later are ignored; a long budget must not end at the 20 s a still clock is given up on.
+  const stoppedMs = packetOrigin && firstAge === undefined ? null
+    : options.stoppedMs === undefined ? SERVER_CLOCK_STOPPED_MS : options.stoppedMs;
   let lastAge = firstAge;
   let lastMoveMs = startedMs;
   let lastLookMs = startedMs;
   let passed = false;
   const observe = (nowMs: number) => {
     const age = readAge() ?? undefined;
-    firstAge ??= age;
+    if (!packetOrigin) firstAge ??= age;
     const elapsedTicks = firstAge === undefined || age === undefined ? null : age - firstAge;
     if (age !== undefined && age !== lastAge) [lastAge, lastMoveMs] = [age, nowMs];
     // An unobserved gap cannot distinguish a stopped clock from a later move (a2 review gap 11, 2026-11-15).
-    passed ||= (elapsedTicks !== null && elapsedTicks >= ticks)
-      || nowMs - lastMoveMs >= SERVER_CLOCK_STOPPED_MS
+    passed ||= (elapsedTicks !== null && elapsedTicks >= budgetTicks)
+      || (stoppedMs !== null && nowMs - lastMoveMs >= stoppedMs)
       || (firstAge === undefined && nowMs - startedMs >= ticks * MS_PER_ON_TIME_TICK)
-      || nowMs - lastLookMs >= SERVER_CLOCK_STOPPED_MS;
+      || (stoppedMs !== null && nowMs - lastLookMs >= stoppedMs)
+      || nowMs - startedMs >= wallMs;
     lastLookMs = nowMs;
     return { ms: nowMs - startedMs, ticks: elapsedTicks };
   };
