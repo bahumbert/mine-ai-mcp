@@ -270,6 +270,13 @@ test("get_items fetches items like a player: logs, a table to carry, a wooden pi
     "craft oak_planks+glass_pane at table",
   ]);
   assert.ok(runtime.submitted.filter((call) => call.tool === "collect_block").every((call) => Number(call.input.count) <= 32));
+  const calls = runtime.submitted.map((call) => call.tool === "smelt_item" ? `smelt ${String(call.input.item_name)}` : describeCall(call));
+  assert.ok(calls.indexOf("collect sand") >= 0, calls.join(" | "));
+  assert.ok(calls.indexOf("craft wooden_pickaxe at table") < calls.indexOf("collect stone"), calls.join(" | "));
+  assert.ok(calls.findIndex((call) => call.startsWith("craft") && call.includes("furnace")) < calls.indexOf("smelt sand"), calls.join(" | "));
+  assert.ok(calls.indexOf("smelt sand") < calls.findIndex((call) => call.includes("glass_pane")), calls.join(" | "));
+  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 6, fuel_item_name: "oak_planks", temporary_workstation: true }]);
+  assert.ok(runtime.snapshot.inventory.some((stack) => stack.name === "glass_pane" && stack.count >= 3));
 });
 
 test("a pickaxe that breaks while digging is a setback, not a failure: another one is crafted and digging goes on", async () => {
@@ -679,19 +686,6 @@ test("the raw materials she carries are used by the crafts, never fetched again 
   const result = await runStep({ skill: "get_items", items: [{ item: "crafting_table", count: 1 }] }, contextFor(runtime));
   assert.equal(result.status, "done", JSON.stringify(result));
   assert.deepEqual(runtime.submitted.filter((call) => call.tool === "collect_block"), []);
-});
-
-test("get_items smelts what only a furnace makes: sand, logs and stone gathered, a furnace and fuel crafted, glass smelted, panes crafted", async () => {
-  const runtime = smeltRuntime();
-  const result = await runStep({ skill: "get_items", items: [{ item: "glass_pane", count: 3 }] }, contextFor(runtime));
-  assert.equal(result.status, "done", result.status === "failed" ? result.detail : "");
-  const calls = runtime.submitted.map((call) => call.tool === "smelt_item" ? `smelt ${String(call.input.item_name)}` : describeCall(call));
-  assert.ok(calls.indexOf("collect sand") >= 0, calls.join(" | "));
-  assert.ok(calls.indexOf("craft wooden_pickaxe at table") < calls.indexOf("collect stone"), calls.join(" | "));
-  assert.ok(calls.findIndex((call) => call.startsWith("craft") && call.includes("furnace")) < calls.indexOf("smelt sand"), calls.join(" | "));
-  assert.ok(calls.indexOf("smelt sand") < calls.findIndex((call) => call.includes("glass_pane")), calls.join(" | "));
-  assert.deepEqual(smeltCalls(runtime), [{ item_name: "sand", count: 6, fuel_item_name: "oak_planks", temporary_workstation: true }]);
-  assert.ok(runtime.snapshot.inventory.some((stack) => stack.name === "glass_pane" && stack.count >= 3));
 });
 
 test("carried coal burns before planks, and carried red sand is smelted before any sand is dug", async () => {

@@ -9,6 +9,7 @@ import { collectAll } from "./fetch-farther.ts";
 import { huntAll } from "./hunt-drops.ts";
 import { SAME_HOSTILE_LIMIT, type HostileInterruptions } from "./hostile-interruptions.ts";
 import { howToGet, newKnowledge, RARE_DROP_BREAKS, rareNote, type Knowledge } from "./how-to-get.ts";
+import { itemsNeeding } from "./made-from.ts";
 import { planRound, readyCrafts, requiresTool, smeltReady, TABLE, toolMissing, type Round } from "./plan-round.ts";
 import { carried, type Stacks } from "./stacks.ts";
 import { craft, craftAtHome, smeltAtHome, type Site } from "./stations.ts";
@@ -39,7 +40,7 @@ export interface GatherContext {
 
 export type GatherResult =
   | { readonly status: "done"; readonly detail: string }
-  | { readonly status: "failed"; readonly detail: string }
+  | { readonly status: "failed"; readonly detail: string; readonly unavailable?: string }
   | { readonly status: "stopped" };
 
 /** Told the inventory just before and just after one craft or smelt. */
@@ -238,7 +239,7 @@ async function afterFailedRound(outcome: RoundOutcome): Promise<"continue" | Gat
   if (hostile !== null && hostile.count >= SAME_HOSTILE_LIMIT) {
     const minutes = Math.round((monotonicNow() - hostile.firstAt) / 60_000);
     const detail = `stopped: ${hostile.name}#${hostile.id} at ${hostile.cell} interrupted gathering ${hostile.count} times in ${minutes} min and ${hostile.moved ? "keeps coming back" : "has not moved"}`;
-    return failedWithProgress(context, state, bill, { status: "failed", detail });
+    return failedWithProgress(context, state, bill, { status: "failed", detail }, knowledge);
   }
   const worn = wornOutTool(knowledge);
   if (worn !== null && step.status === "failed" && shortfall(state.wanted, (await context.runtime.status()).inventory).length > 0) {
@@ -274,18 +275,27 @@ async function afterFailedRound(outcome: RoundOutcome): Promise<"continue" | Gat
   // A tool that broke on the way (live 2026-10-04: Tom underground, his pickaxe gone) is a setback too: the next
   // round goes on without it, or makes another.
   if (units(after) >= units(missing) && !["HOSTILE_CONTACT", "TOOL_TIER_LOST"].includes(errorCode(step.detail) ?? "")) {
-    return failedWithProgress(context, state, bill, step);
+    return failedWithProgress(context, state, bill, step, knowledge);
   }
   state.actions.push(`setback (${step.detail})`);
   return "continue";
 }
 
 /** Keeps the items already carried visible when a later round ends the gathering (live 2026-10-10). */
-async function failedWithProgress(context: GatherContext, state: RoundState, bill: readonly ItemCount[], step: GatherResult & { readonly status: "failed" }): Promise<GatherResult> {
-  if (state.actions.length === 0) return step;
+async function failedWithProgress(context: GatherContext, state: RoundState, bill: readonly ItemCount[], step: GatherResult & { readonly status: "failed" }, knowledge: Knowledge): Promise<GatherResult> {
+  const detail = `${step.detail}${unavailableItemsNote(step.unavailable, bill, knowledge)}`;
+  if (state.actions.length === 0) return { ...step, detail };
   const now = (await context.runtime.status()).inventory;
   const carriedNow = describeMaterials(bill.map((entry) => ({ item: entry.item, count: carried(now, entry.item) })).filter((entry) => entry.count > 0));
-  return { status: "failed", detail: `got ${state.actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(state.wanted, now))}: ${step.detail}` };
+  return { ...step, detail: `got ${state.actions.join(", ")} so far (carried now: ${carriedNow === "" ? "none of it" : carriedNow}); still missing ${describeMaterials(shortfall(state.wanted, now))}: ${detail}` };
+}
+
+/** Connect a failed source block to the asked crafts, using the drops learned during this gathering. */
+function unavailableItemsNote(block: string | undefined, bill: readonly ItemCount[], knowledge: Knowledge): string {
+  if (block === undefined) return "";
+  const inputs = [block, ...[...knowledge.source].filter(([, source]) => source === block).map(([item]) => item)];
+  const needed = itemsNeeding(inputs, bill);
+  return needed.length === 0 ? "" : `; ${block} is for ${describeMaterials(needed)}`;
 }
 
 /** `wanted`, raised back to the kept count of every kept item a craft between `before` and `after` used up. */

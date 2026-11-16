@@ -34,7 +34,7 @@ export async function collectAll(context: GatherContext, targets: readonly (read
       if (step?.status === "failed" && noneUsableNear(step.detail)) step = await fetchFarther(context, block, count, purpose, step, countBroken, breaksLeft);
       // The blocks broken, as the runtime counts them, not the drops that came (a rare drop comes from few of them).
       if (rare !== undefined) rare.broken += broken;
-      if (step !== null) return step.status === "failed" ? { status: "failed", detail: await notNear(context, block, step.detail) } : step;
+      if (step !== null) return step.status === "failed" ? { ...step, detail: await notNear(context, block, step.detail) } : step;
     }
     done.push(`collected ${total} ${block}`);
   }
@@ -106,7 +106,7 @@ async function fetchFarther(context: GatherContext, block: string, count: number
   const places = await knownPlaces(context.runtime, block, start);
   if (places.length === 0) {
     const why = failed.status === "failed" ? ` (${failed.detail})` : "";
-    return { status: "failed", detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
+    return { status: "failed", unavailable: block, detail: `no ${block} within ${FETCH_RANGE} blocks that you may take, and you know of none farther away outside protected areas: explore for it (toward land you have not seen), use another material, or say so${why}` };
   }
   let last = failed;
   let acrossWater = 0;
@@ -139,23 +139,23 @@ async function fetchFarther(context: GatherContext, block: string, count: number
     context.heading?.(null);
     if (there !== null) {
       // A slow walk is about her tools or depth, not the place (spec P4-02c D4, 2026-11-07).
-      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_SLOW") return there;
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_SLOW") return { ...there, unavailable: block };
       // A place that could not be reached is not offered again by the next round.
       tried.add(`${seen.x},${seen.z}`);
       last = there;
       // The same water lies between her and the next far place: not walked to (live 2026-10-10 run 10: ~1500 blocks swum).
-      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
+      if (there.status === "failed" && errorCode(there.detail) === "NAVIGATION_DEEP_WATER") return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, failed) };
       continue;
     }
     const step = await act(context, "collect_block", { block_name: block, count, max_distance: FETCH_RANGE, ...(breaksLeft() !== null && { max_breaks: breaksLeft() }) }, `Gather ${count} ${block} for ${purpose}.`, undefined, observe);
     if (step === null) return null;
     last = step;
-    if (step.status !== "failed" || !noneUsableNear(step.detail)) return step;
+    if (step.status !== "failed" || !noneUsableNear(step.detail)) return step.status === "failed" ? { ...step, unavailable: block } : step;
     tried.add(`${seen.x},${seen.z}`);
   }
-  if (tries === 0 && wet > 0 && nearestWet !== undefined) return { status: "failed", detail: wetPlacesHint(block, wet, nearestWet, failed) };
-  if (tries === 0 && acrossWater > 0) return { status: "failed", detail: await acrossWaterHint(context.runtime, block, failed) };
-  return last;
+  if (tries === 0 && wet > 0 && nearestWet !== undefined) return { status: "failed", unavailable: block, detail: wetPlacesHint(block, wet, nearestWet, failed) };
+  if (tries === 0 && acrossWater > 0) return { status: "failed", unavailable: block, detail: await acrossWaterHint(context.runtime, block, failed) };
+  return last.status === "failed" ? { ...last, unavailable: block } : last;
 }
 
 /** Wet places remain visible to the model, which can choose to travel there itself. */
