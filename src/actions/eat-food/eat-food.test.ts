@@ -4,7 +4,6 @@ import { onCombatResourceReceipt } from "../../runtime/combat-resource-receipts.
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { type FakeClock, type FakeServer, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { watch } from "../../test-support/pending.js";
-import { SERVER_CLOCK_STOPPED_MS } from "../../world/world-age.js";
 import { parseEatFoodRequest, type EatFoodResult } from "./contract.js";
 import { beginEatFood, formatEatFoodResult, eatFood, type EatFoodDependencies } from "./eat-food.js";
 
@@ -161,8 +160,8 @@ test("says so rather than presenting a count the server never confirmed", async 
   harness.server.stop();
   const pending = eatFood(bot, { foodName: "cooked_beef" }, {}, dependencies);
   const state = watch(pending);
-  await clock.advance(SERVER_CLOCK_STOPPED_MS - 50);
-  assert.equal(state.over, false, "still awaiting the answer before the stopped-clock bound");
+  await clock.advance(15_000 - 50);
+  assert.equal(state.over, false, "still awaiting the answer before the whole-action wall bound");
   const result = await clock.settle(pending, 50);
 
   assert.equal(result.status, "failed");

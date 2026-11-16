@@ -6,9 +6,8 @@
  * this process owns quantities, target observation, and lava preparation.
  */
 import type { Bot } from "mineflayer";
-import { Vec3 } from "vec3";
 import { asVec3, cellKey, waitForTicksOrCancel } from "../../../utils/index.js";
-import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../../world/block-visibility.js";
+import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { isLiquidSource, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
@@ -16,11 +15,10 @@ import {
   describeCalculationFailure, type BlockPosition, type BreakBlockInPlace,
   type MovementPolicy, type Navigate, type NavigationResult,
 } from "../../index.js";
-import { liveBlockReader, observeMineflayerBlock } from "../../mineflayer/world.js";
+import { liveBlockReader } from "../../mineflayer/world.js";
 import { botEyesInWater } from "../../../world/eyes-in-water.js";
 import { isWater } from "../../world/block-geometry.js";
 import { settleInWaterForDig } from "../../steering/hold-water-position.js";
-import { DIG_REACH } from "../../movements/excavation.js";
 import { carriesWaterBucket, castOntoPool } from "./cast-obsidian.js";
 import type { DropLossObserver } from "./mine-drops.js";
 import { clearMiningWater } from "./mining-water.js";
@@ -29,7 +27,7 @@ import { waterMiningStance } from "../../world/water.js";
 import { lavaClosuresOf, lavaFacesOf, standsOnBlock, type MineTargetDecision } from "./target-safety.js";
 import type { PassedOverNearest } from "./target-weighing.js";
 import { MineTargeting } from "./mine-targeting.js";
-import { castStance, isDropTarget, targetIdentity, waterStance, workingCells } from "./mine-target-goal.js";
+import { castStance, isDropTarget, targetIdentity, targetInSight, waterStance, workingCells } from "./mine-target-goal.js";
 import { mineStopAfterScan, settledMineResult } from "./mine-result.js";
 
 export { MAX_MINE_TARGETS } from "./mine-target-scan.js";
@@ -44,14 +42,6 @@ export type MinecraftBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
  * pinned in its own poured water stopped forty such routes in a row.
  */
 const MAX_FRUITLESS_STOPS = 5;
-
-function targetInSight(bot: Bot, eye: Vec3, position: BlockPosition): boolean {
-  const block = bot.blockAt(asVec3(position));
-  return (
-    block !== null &&
-    visibleBlockAim(bot.world, eye, position, DIG_REACH, observeMineflayerBlock(block).collisionShapes) !== null
-  );
-}
 
 /** A loaded matching block is owned by its world cell. */
 export interface MineBlockTarget {

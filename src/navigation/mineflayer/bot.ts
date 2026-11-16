@@ -725,6 +725,7 @@ export class MineflayerBot implements NavigationBot {
   }
   /** Admit each physical swing only after aiming, using the body and world as they are now. */
   async #swingBreak(operation: Extract<PlannedOperation, { kind: "break" }>, target: unknown, aim: BreakAim, signal: AbortSignal, markIssued: () => void): Promise<EffectFailure | null> {
+    if (!target) return { kind: "failed", observation: "Break target was not loaded." };
     const unavailable = await equipDigTool(this.bot, operation.toolType);
     if (unavailable) return { kind: "failed", observation: unavailable };
     signal.throwIfAborted();

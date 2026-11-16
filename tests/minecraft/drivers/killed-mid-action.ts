@@ -1,4 +1,4 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { sleepMs as delay } from "../../../src/utils/wall-timers.ts";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";

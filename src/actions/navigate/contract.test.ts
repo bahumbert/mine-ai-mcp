@@ -11,6 +11,7 @@ test("a navigate result requires nonnegative whole server ticks when a boat was 
     start: { x: 0.5, y: -60, z: 0.5 }, end: { x: 270.5, y: -60, z: 0.5 },
     remainingDistance: 0.5, elapsedMs: 60_000, scaffolding: [],
     bucketDrops: { count: 0, waterRecovered: 0 }, missingDigTools: [], boatLeft,
+    digs: { count: 0, ms: 0, byHand: 0, byHandMs: 0, byHandBlocks: [], fasterWith: [] },
   };
   const parsed = navigateResultSchema.parse({ status: "succeeded", navigation });
   assert.equal(parsed.navigation.boatLeft?.elapsedTicks, 120);

@@ -537,19 +537,26 @@ type WindowFixture = ReturnType<typeof observedFurnace>;
  * emits `close` on the window and `windowClose` on the bot (`inventory.js:377-382`, `:445-452`).
  */
 function trackWindow(fixture: WindowFixture) {
-  const { bot, furnace } = fixture;
+  const { bot } = fixture;
   const tracking = { closes: 0 };
-  furnace.close = () => {
-    tracking.closes += 1;
-    bot.currentWindow = null;
-    bot.emit("windowClose", furnace as never);
-    furnace.emit("close");
+  const tracked = new WeakSet<object>();
+  const track = (window: WindowFixture["furnace"]) => {
+    if (tracked.has(window)) return;
+    tracked.add(window);
+    const close = window.close.bind(window);
+    window.close = () => {
+      tracking.closes += 1;
+      close();
+      bot.emit("windowClose", window as never);
+    };
   };
+  track(fixture.furnace);
   const openFurnace = fixture.dependencies.openFurnace;
   const dependencies: SmeltItemDependencies = {
     ...fixture.dependencies,
     openFurnace: async (actor, block) => {
       const window = await openFurnace(actor, block);
+      track(fixture.furnace);
       bot.currentWindow = window as never;
       return window;
     },
