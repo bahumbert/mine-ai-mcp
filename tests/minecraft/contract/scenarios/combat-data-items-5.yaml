@@ -26,6 +26,7 @@ players:
 goal:
   kind: all
   timeout: 90
+  stillTicks: 1520 # Task 8: longest passing still span 754 ticks (20 tps; 10 tps 505, base code 502); 2x rounded up to 20.
   goals:
     - kind: completion
       who: Actor

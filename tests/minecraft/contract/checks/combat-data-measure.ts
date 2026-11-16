@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import type { CombatDataFile, MeasuredPart } from "../../../../src/world/combat-data-file.ts";
-import type { ContractSubject } from "../subject.ts";
+import { ANSWER_WALL_MS } from "../server-answer.ts";
+import { type ContractSubject, settleWithin, stallWatch } from "../subject.ts";
 import { SERVER_ANSWER_TICKS, SERVER_CLOCK_STOPPED_MS, STALE_AGE_TICKS, waitForWorldAge } from "../../../../src/world/world-age.ts";
 
 /** The command storage the reads go through; a key per bot and per read, so lanes never read each other's. */
@@ -108,9 +109,27 @@ export function createMeasureReader(subject: Pick<ContractSubject, "bot">, timin
   };
 }
 
-/** The ticks the server has run: `subject.serverGameTime()` until it moved `ticks` past `since` (each ask is a round trip, a fraction of a tick). */
+/**
+ * The ticks the server has run: `subject.serverGameTime()` until it moved `ticks` past `since` (each ask is a round trip, a fraction of a tick).
+ * One ask is outstanding at a time, and each is bounded by `ANSWER_WALL_MS` (`settleWithin`); the wait also fails when the game time has not grown
+ * for `ANSWER_WALL_MS` since its last advance (a stopped server answers nothing, a frozen age answers the same value for ever). A query that lost
+ * is left to the subject: it holds no listener of ours.
+ */
 export async function afterGameTicks(subject: ContractSubject, since: number, ticks: number): Promise<void> {
-  while ((await subject.serverGameTime()) < since + ticks) {
-    /* each ask is a round trip to the server: the loop ends when the server's own clock moved */
+  let age = since;
+  const stall = stallWatch(subject);
+  const stalled = (why: string): never => assert.fail(`afterGameTicks: the server's game time moved ${age - since} of ${ticks} ticks, then ${why}`);
+  const stoodStill = () => stalled(`the game time stood still for ${ANSWER_WALL_MS} ms (the server is stalled)`);
+  while (age < since + ticks) {
+    // Each ask gets what is left of the stall bound, so answers that repeat the same age do not renew it.
+    const leftMs = ANSWER_WALL_MS - stall.stalledMs();
+    if (leftMs <= 0) stoodStill();
+    const answer = await settleWithin(subject, subject.serverGameTime(), leftMs);
+    if (answer === null) stoodStill();
+    else if (answer.error !== undefined) stalled(`the game time query failed: ${answer.error.message}`);
+    else if (answer.value! > age) {
+      age = answer.value!;
+      stall.moved();
+    }
   }
 }
