@@ -1,6 +1,7 @@
 import type { Continuation } from "../../../session/abort.js";
 import type { AnsweredEntry, Facts } from "../../state/answered.js";
 import type { HostileResponseResult, HostileSettlement } from "./response-result.js";
+import { evadeDetail } from "../../responses/evade-detail.js";
 
 export function completeResponse(physical: HostileResponseResult, signal: AbortSignal): HostileSettlement {
   const { result: _result, response, ...evidence } = physical;
@@ -72,6 +73,13 @@ export function encounterReceipt(settlement: HostileSettlement) {
     response: settlement.response,
     outcome: summary.outcome,
     ...(summary.error === null ? {} : { error: summary.error }),
+    ...(settlement.physical?.response === "evade" ? {
+      ends: settlement.physical.ends.map((end) => ({ ...end })),
+      startPosition: { ...settlement.physical.startPosition }, elapsedMs: settlement.physical.elapsedMs,
+      goalRefreshes: settlement.physical.goalRefreshes,
+      ...(settlement.kind === "completed" && settlement.physical.result.kind === "separated"
+        ? { detail: evadeDetail(settlement.physical.ends) } : {}),
+    } : {}),
     hide: settlement.physical?.response === "hide" ? settlement.physical.result : null,
   };
 }

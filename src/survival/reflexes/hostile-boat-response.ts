@@ -6,6 +6,7 @@ import type { HostileResponse } from "../policy/combat/response.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { observedFireballReversal } from "../responses/deflect.js";
+import { monotonicNow } from "../../utils/index.js";
 
 interface Reflection {
   readonly incoming: Vec3 | null;
@@ -29,6 +30,9 @@ export async function respondToHostileFromBoat(
   scene: HostileScene, directive: HostileResponse, healthBefore: number, signal: AbortSignal,
 ): Promise<HostileResponseResult> {
   const { bot, policy } = scene;
+  const startedAtMs = monotonicNow();
+  const startPosition = { ...bot.entity.position };
+  const firstDistances = new Map(encounterBaseline(bot, directive, healthBefore).finalDistances.map((entry) => [entry.id, entry.distance]));
   const killed = new Set<number>();
   const reflection: Reflection = { incoming: directive.kind === "deflect" ? bot.entities[directive.targetId]?.velocity.clone() ?? null : null, reversed: false };
   let explosions = 0;
@@ -61,7 +65,15 @@ export async function respondToHostileFromBoat(
     const separated = directive.threats.every((threat) => killed.has(threat.id) ||
       (bot.entities[threat.id]?.position ?? new Vec3(threat.position.x, threat.position.y, threat.position.z))
         .distanceTo(bot.entity.position) >= policy.combat.evade_safe_range);
-    return { ...common, response: "evade", result: separated ? { kind: "separated" } : { kind: "exhausted", reason: observation } };
+    const ends = directive.threats.map((threat) => {
+      const distance = common.finalDistances.find((entry) => entry.id === threat.id)!.distance;
+      const firstDistance = firstDistances.get(threat.id)!;
+      return { id: threat.id, name: threat.name, firstDistance, firstSeen: "decision" as const, distance,
+        gained: distance - firstDistance, advancing: null,
+        basis: killed.has(threat.id) ? "dead" as const : distance >= policy.combat.evade_safe_range ? "range" as const : null };
+    });
+    return { ...common, response: "evade", startPosition, elapsedMs: monotonicNow() - startedAtMs, goalRefreshes: 0,
+      ends, result: separated ? { kind: "separated" } : { kind: "exhausted", reason: observation } };
   }
   if (directive.kind === "deflect")
     return { ...common, response: "deflect", result: { kind: reflection.reversed ? "reflected" : "unobserved", attacks: outcome.strikes,

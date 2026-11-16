@@ -7,7 +7,7 @@ import type { PositionThreat } from "../../positioning/combat/exposure.js";
 import { bowDrawAimedAtBot, holdsBow, isDrawingBow } from "./attention.js";
 import { incomingBlazeProjectiles, isIncomingBlazeProjectile } from "./blaze-projectiles.js";
 import { holdsRangedWeapon } from "./contact.js";
-import { readProjectileSpawn } from "./projectile-spawn.js";
+import { readProjectileHit, readProjectileSpawn } from "./projectile-spawn.js";
 import { hasSelfExplosion } from "../../../world/combat-data.js";
 import { ObservedHits } from "./observed-hits.js";
 import { canBeBystander, isHostile } from "./threats.js";
@@ -238,11 +238,23 @@ export class CombatPerception implements Disposable {
     this.#listeners.defer(() => bot.off("respawn", respawn));
     bot._client.on("spawn_entity", shot);
     this.#listeners.defer(() => bot._client.off("spawn_entity", shot));
+    const hit = (packet: unknown) => this.recordProjectileHit(packet);
+    bot._client.on("damage_event", hit);
+    this.#listeners.defer(() => bot._client.off("damage_event", hit));
     this.#listeners.use(trackArrowFlights(bot));
     this.#listeners.use(trackBowDraws(bot));
     const health = (packet: { health: number }) => this.#hits.recordHealth(packet.health);
     bot._client.on("update_health", health);
     this.#listeners.defer(() => bot._client.off("update_health", health));
+  }
+
+  /** Keep confirmed shot evidence after the projectile disappears on impact. */
+  private recordProjectileHit(packet: unknown): void {
+    const shooter = readProjectileHit(this.bot, packet);
+    if (shooter === null) return;
+    this.#lastShot.set(shooter, this.#tick);
+    this.#snapshot = null;
+    this.#incoming = null;
   }
 
   /** The measured cost of this entity's hits to this bot, forgotten with the body or life. */

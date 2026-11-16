@@ -4,7 +4,10 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
-import { attackedIds, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
+import { attackedIds, combatTestContext, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
+import { MemoryWorld } from "../../navigation/world/memory-world.js";
+import { recoverCombatHealth } from "../control/combat/recovery.js";
+import { secureCombatHandoff } from "../control/combat/handoff.js";
 import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { CombatPerception } from "../perception/combat/observations.js";
@@ -17,6 +20,39 @@ import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { observeCombatDecision } from "../control/combat/observation.js";
 import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
+
+for (const recovery of [true, false]) test(recovery
+  ? "recovery's evade that separates in its start cell is no new recovery cell"
+  : "the handoff still requires physical safety after an early separation", async () => {
+  const { bot, clock } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    groundY: 63, position: new Vec3(0.5, 64, 0.5),
+    entities: { 7: { name: "zombie", position: new Vec3(17.5, 64, 0.5) } } });
+  using _installed = clock.install();
+  bot.health = 6;
+  using perception = new CombatPerception(bot);
+  const context = { ...combatTestContext(bot), perception, attackerIds: new Set([7]) };
+  const policy = { ...context.policy, hide: "never" as const };
+  const world = new MemoryWorld();
+  for (let y = 63; y <= 65; y++) world.load({ x: 0, y, z: 0 }, { stateId: y === 63 ? 1 : 0 });
+  let routes = 0;
+  const navigation = { world, navigate: async () => {
+    routes++;
+    await clock.sleep(2_000);
+    return { status: "stopped" as const, reason: "navigation timeout", elapsedMs: 2_000 };
+  } } as unknown as NavigationRuntime;
+  if (!recovery) Reflect.set(bot.entity.metadata, 0, 1); // entity flags: burning, as entities.js reads them
+  const pending = (recovery ? recoverCombatHealth : secureCombatHandoff)(
+    bot, navigation, { ...context, policy }, new AbortController().signal, () => {});
+  const result = await clock.settle<Awaited<ReturnType<typeof recoverCombatHealth | typeof secureCombatHandoff>>>(pending, 4_000);
+  assert.equal(routes, 1, "the evade must actually run before its caller judges the new basis");
+  assert.equal(result.kind, recovery ? "blocked" : "unsafe");
+  if (recovery) {
+    assert.ok(context.survival.answered.snapshot().some((entry) => entry.failure.kind === "escape_failed"));
+    assert.match("observation" in result ? result.observation : "", /different recovery cell/);
+  } else if (result.kind === "unsafe") {
+    assert.ok(result.reason.includes("Withdrawal: separated"));
+  }
+});
 
 test("a hurt boat rider beside a beach keeps hide available in the sensed decision", async () => {
   for (const moving of [false, true]) {
@@ -156,6 +192,13 @@ for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
     if (kind === "evade" || kind === "hide") {
       assert.deepEqual(attackedIds(server), [], "evade and hide row only, even with a mob in reach");
       assert.ok(vehicleMoves(fixture).length > 0);
+      assert.equal(settlement.physical?.response, "evade");
+      if (settlement.physical?.response === "evade") {
+        assert.equal(settlement.physical.goalRefreshes, 0);
+        assert.ok(settlement.physical.elapsedMs > 0);
+        assert.ok(Number.isFinite(settlement.physical.startPosition.x));
+        assert.equal(settlement.physical.ends[0]?.basis, "dead");
+      }
     }
     assert.equal(scene.activeResponse, null);
   });

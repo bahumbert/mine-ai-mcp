@@ -4,6 +4,7 @@ import type { HostileResponse, HostileThreat } from "../../policy/combat/respons
 import type { deflectFireball } from "../../responses/deflect.js";
 import type { HideResult } from "../../responses/hide.js";
 import type { CombatOutcome, CombatStyle } from "./contract.js";
+import type { ReachBasis } from "../../responses/evade-reach.js";
 export interface EncounterEvidence {
   readonly reason: string;
   readonly threats: readonly HostileThreat[];
@@ -27,8 +28,22 @@ export type FightResponseResult = EncounterEvidence & {
   readonly response: "fight";
   readonly result: CombatOutcome | { readonly kind: "contact_ended" };
 };
+export interface EvadeThreatEnd {
+  readonly id: number;
+  readonly name: string;
+  readonly firstDistance: number;
+  readonly firstSeen: "decision" | "joined";
+  readonly distance: number;
+  readonly gained: number;
+  readonly basis: ReachBasis | null;
+  readonly advancing: boolean | null;
+}
 export type EvadeResponseResult = EncounterEvidence & {
   readonly response: "evade";
+  readonly elapsedMs: number;
+  readonly startPosition: Position3;
+  readonly goalRefreshes: number;
+  readonly ends: readonly EvadeThreatEnd[];
   readonly result: { readonly kind: "separated" } | { readonly kind: "exhausted" | "failed"; readonly reason: string };
 };
 export type HideResponseResult = EncounterEvidence & { readonly response: "hide"; readonly result: HideResult };

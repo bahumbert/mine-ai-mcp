@@ -74,5 +74,6 @@ export function formatSurvivalOutcome(receipt: SurvivalReceipt): string {
   if (evidence.cancelled === true && result !== "cancelled") parts.push("cancelled");
   const error = outcome.error ?? evidence.why;
   if (typeof error === "string") parts.push(error);
+  if (typeof outcome.detail === "string") parts.push(outcome.detail);
   return parts.join("; ");
 }

@@ -759,15 +759,18 @@ test("a protected enderman leaving observation releases the hunt to select anoth
 
 test("cancelling a roof lure releases its listeners promptly", async () => {
   const fixture = protectedEndermanFixture();
+  const controller = createCombatController(fixture.bot, fixture.navigation);
+  const connectionListeners = fixture.bot._client.listenerCount("damage_event");
   const stop = new AbortController();
   fixture.script.onWait = () => {
     if (fixture.clock.tick === 40) stop.abort("operator cancelled");
   };
-  const outcome = await createCombatController(fixture.bot, fixture.navigation).engage(7, stop.signal, "pursue");
+  const outcome = await controller.engage(7, stop.signal, "pursue");
   assert.equal(outcome.kind, "cancelled");
   assert.ok(fixture.clock.tick < 50);
-  assert.equal(fixture.bot._client.listenerCount("damage_event"), 0);
+  assert.equal(fixture.bot._client.listenerCount("damage_event"), connectionListeners);
   disposeCombatTestResources();
+  assert.equal(fixture.bot._client.listenerCount("damage_event"), 0);
   assert.equal(fixture.bot.listenerCount("physicsTick"), 0);
 });
 

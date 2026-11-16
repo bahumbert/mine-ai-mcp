@@ -16,6 +16,7 @@ import { SurvivalObserver } from "../evidence/status.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
+import { MineflayerWorldView } from "../../navigation/mineflayer/world.js";
 import { observeHostileResponse } from "../control/combat/observation.js";
 import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
@@ -278,6 +279,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   });
   const runner = new ActionRunner({ clock, ...options.runner });
   const navigation = {
+    world: new MineflayerWorldView(bot),
     onEvent: () => () => {},
     active: false,
     cancel: () => undefined,
@@ -580,6 +582,7 @@ test("an admitted low-health escape is not stopped for a stationary guard it can
     async ({ stopSignal }) => {
       assert.equal(stopSignal?.aborted, false);
       fixture.bot.entity.position.x = -40;
+      fixture.entities.remove(8);
       return { status: "completed", elapsedMs: 0 };
     },
     { entities: { 7: hostile("blaze", 3) } },
@@ -906,14 +909,14 @@ test("one evade retains its first threat and records a new contact encountered a
         ({ entities: new Map(Object.values(fixture.bot.entities).map((entity) => [entity.id, entity])) }) as never;
       const initial = goal.resolve(snapshot());
       assert.equal(initial.kind, "active");
-      if (initial.kind === "active" && attempts++ === 0) assert.doesNotMatch(initial.revision, /entity:8:/);
+      if (initial.kind === "active" && attempts++ === 0) assert.doesNotMatch(initial.revision, /8@/);
       fixture.bot.entity.position = new Vec3(-12, 64, 0);
       fixture.tick();
       const revised = goal.resolve(snapshot());
       assert.equal(revised.kind, "active");
       if (revised.kind === "active") {
-        assert.match(revised.revision, /entity:7:/);
-        assert.match(revised.revision, /entity:8:/);
+        assert.match(revised.revision, /7@/);
+        assert.match(revised.revision, /8@/);
       }
       // Away from the first threat alone is not enough to report safe separation.
       fixture.bot.entity.position = new Vec3(-40, 64, 0);
