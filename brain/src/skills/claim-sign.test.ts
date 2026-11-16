@@ -68,6 +68,7 @@ for (const entry of [
   { name: "one read, one fill, filled", observed: reading(), want: "filled", actions: 2, fillFails: false },
   { name: "the fill fails too: blank, no third action", observed: reading(), want: "blank", actions: 2, fillFails: true },
   { name: "text there now: taken", observed: reading(["Steve", "", "", ""]), want: "taken", actions: 1, fillFails: false },
+  { name: "the owner's line stands on the re-read: placed, the sign remembered", observed: reading(["Ayla", "Welcome", "", ""]), want: "placed", actions: 1, fillFails: false },
   { name: "text remains unknown: unknown", observed: reading(EMPTY, EMPTY, false), want: "unknown", actions: 1, fillFails: false },
 ]) test(`a fresh placement left unconfirmed: ${entry.name}`, async () => {
   const { runtime, context } = setup();
@@ -358,6 +359,17 @@ for (const craft of [false, true]) test(`a non-sign block is taken before suppli
   const result = await ensureClaimSign(context, CLAIM, { ...OPTIONS, craft });
   assert.equal(result.status, "taken");
   assert.equal(runtime.submitted.length, 0);
+});
+
+// The cell tag rule of `place_sign` (`isReplaceableForPlacement`): the game's `replaceable` tag goes on to placement
+// (short_grass is in it, `src/world/data/block-tags/1.21.4.json`); a solid block with no such tag stays `taken` in the stone case above.
+test("the claim cell: a replaceable-tagged block goes on to placement", async () => {
+  const { runtime, context } = setup();
+  runtime.world.set("1,64,-1", "short_grass");
+  runtime.blockTags = { ...runtime.blockTags, short_grass: ["replaceable"] };
+  const result = await ensureClaimSign(context, CLAIM, OPTIONS);
+  assert.equal(result.status, "placed");
+  assert.deepEqual(runtime.submitted.map(({ tool }) => tool), ["place_sign"]);
 });
 
 for (const missing of ["loaded cell", "block kind"]) test(`missing ${missing} knowledge cannot authorize a placement`, async () => {

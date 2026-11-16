@@ -146,7 +146,9 @@ async function recoverBlank(run: ClaimRun, lines: readonly string[], attach: Att
   rememberSign(run, attach);
   const state = signState(observed, run.house.owner);
   if (state === "blank") return fillSign(run, lines, attach);
-  return result(run, state === "standing" ? "taken" : state, "The sign was re-read; keep its text and inspect it on the next visit.");
+  // Our own placement, re-read with the owner on line 0: it stands and is ours.
+  if (state === "standing") return result(run, "placed", "The claim sign stands with the owner's line; keep its text.");
+  return result(run, state, "The sign was re-read; keep its text and inspect it on the next visit.");
 }
 
 /** Retry ground placement as a wall sign only when game geometry supplies a solid wall. */
@@ -190,7 +192,10 @@ async function supplySign(run: ClaimRun, options: ClaimOptions): Promise<Supplie
   return await craftSign(run, ready.sign, options.reserved) ?? ready.sign;
 }
 
-/** No sign reading does not mean empty: preserve every observed non-air block. */
+/** The game's block tags `place_sign` accepts as a free cell (`isReplaceableForPlacement`); it judges the rest of the cell. */
+const PLACEMENT_CELL_TAGS: readonly string[] = ["air", "replaceable"];
+
+/** No sign reading does not mean empty: preserve every observed block that placement would not overwrite. */
 async function checkClaimCell(run: ClaimRun): Promise<ClaimResult | null> {
   const [cell] = await run.context.runtime.cellsAt([run.house.spot.position]);
   if (run.context.signal.aborted) return result(run, "stopped", "Claim stopped while checking its cell.");
@@ -199,7 +204,7 @@ async function checkClaimCell(run: ClaimRun): Promise<ClaimResult | null> {
   if (run.context.signal.aborted) return result(run, "stopped", "Claim stopped while checking its cell.");
   const tags = kinds[cell.name]?.tags;
   if (tags === undefined) return result(run, "unknown", "The claim cell's kind is unknown; inspect it before claiming.");
-  return tags.includes("air") ? null : result(run, "taken", `The claim cell holds ${cell.name}; keep it and choose another claim spot.`);
+  return PLACEMENT_CELL_TAGS.some((tag) => tags.includes(tag)) ? null : result(run, "taken", `The claim cell holds ${cell.name}; keep it and choose another claim spot.`);
 }
 
 /** Continue from the initial observation without touching signs that already have text. */
