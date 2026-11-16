@@ -95,7 +95,7 @@ function sameCoverKey(a: CoverKey, b: CoverKey): boolean {
 }
 
 /** Cause coordinates follow the runtime's block convention, including negative positions. */
-function coordinates(at: Position): string {
+export function coordinates(at: Position): string {
   return `${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}`;
 }
 

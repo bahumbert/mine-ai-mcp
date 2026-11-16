@@ -1,6 +1,6 @@
 // The bounded condition line shared by every prompt with a Situation block.
 import type { KnownPlace } from "./mind.ts";
-import type { BotSnapshot } from "./runtime-client.ts";
+import type { BotSnapshot, Position } from "./runtime-client.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { cut } from "./prompt-budget.ts";
 import { distanceBetween } from "./skills/positions.ts";
@@ -10,13 +10,24 @@ export function oneLine(text: string): string {
   return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/gu, " ").trim();
 }
 
+/** The own house nearest the bot, among the places with a house record; null when none has one. */
+export function nearestOwnHome(places: readonly KnownPlace[], snapshot: BotSnapshot): { readonly name: string; readonly door: Position; readonly distance: number } | null {
+  let nearest: { readonly name: string; readonly door: Position; readonly distance: number } | null = null;
+  for (const place of places) {
+    if (place.own !== true || place.house === undefined) continue;
+    const distance = distanceBetween(snapshot.position, place.house.door);
+    if (nearest === null || distance < nearest.distance) nearest = { name: place.name, door: place.house.door, distance };
+  }
+  return nearest;
+}
+
 /** The bot's own home, if any. */
 export function homeOf(places: readonly KnownPlace[], snapshot: BotSnapshot): string {
   const own = places.filter((place) => place.own === true);
   if (own.length === 0) return "no home";
   if (!sameDimension(snapshot.dimension, "overworld")) return "home in the overworld";
-  const distances = own.flatMap((place) => place.house === undefined ? [] : [distanceBetween(snapshot.position, place.house.door)]);
-  return distances.length === 0 ? `home: ${JSON.stringify(oneLine(own[0]!.name))}` : `home ${Math.round(Math.min(...distances))} blocks away`;
+  const nearest = nearestOwnHome(places, snapshot);
+  return nearest === null ? `home: ${JSON.stringify(oneLine(own[0]!.name))}` : `home ${Math.round(nearest.distance)} blocks away`;
 }
 
 /** One decimal at most, keeping a living bot's fractional health. */
