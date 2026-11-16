@@ -485,7 +485,7 @@ test("a covered close blaze retains its failed approach when it moves into dista
   const survival = survivalResources();
   survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 7),
     { kind: "unreachable", why: "No route reached the target." },
-    { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+    { premise: "unreachable", ticks: 600, why: "Earlier approach stopped." });
   const seen = { ...context({ attackers: [7] }), survival };
   assert.notEqual(observeHostileResponse(bot, seen).kind, "fight");
   assert.equal(survival.answered.snapshot().length, 1);

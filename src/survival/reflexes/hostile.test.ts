@@ -25,10 +25,13 @@ import { CombatPerception } from "../perception/combat/observations.js";
 import { responseScope } from "../control/combat/scopes/response.js";
 import { attachHostileReflex } from "./hostile.js";
 
-test("an unreachable fight is not chosen again for 30 s when bot and target step a block", async () => {
+// The unreachable premise counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 600 ticks from the age cached when the
+// failure was remembered plus one packet, the packet of age A + 620 (31 s in at 20 tps, 62 s at 10 tps; old code: 30 s after it).
+for (const ticksPerSecond of [20, 10])
+test(`an unreachable fight is not chosen again until the packet of age A + 620 when bot and target step a block (${ticksPerSecond} tps)`, async () => {
   const fixture = reflexFixture(async (id) => ({ ...died(id), kind: "unreachable", observation: "No route onto the pillar." }),
     async () => ({ status: "stopped", reason: "no path", elapsedMs: 0 }),
-    { entities: { 7: { ...hostile("skeleton", 6), position: new Vec3(6, 68, 0) } }, cells: { "6,67,0": "obsidian" } });
+    { entities: { 7: { ...hostile("skeleton", 6), position: new Vec3(6, 68, 0) } }, cells: { "6,67,0": "obsidian" }, server: { ticksPerSecond } });
   try {
     await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
       changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise the fight retry without a cornered hide." });
@@ -44,10 +47,17 @@ test("an unreachable fight is not chosen again for 30 s when bot and target step
     fixture.tick();
     assert.ok(await until(() => fixture.recorded().length === 2));
     assert.deepEqual(fixture.recorded(), ["fight -> target_unreachable", "evade -> capability_limit"]);
-    await fixture.clock.advance(29_950);
-    assert.equal(fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length, 1);
+    const readAge = fixture.bot.time.age; // the pause was remembered a few ticks ago, at this cached age or the packet before
+    const fights = () => fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length;
+    while (fixture.bot.time.age < readAge + 600) {
+      assert.equal(fights(), 1, `age ${fixture.bot.time.age}, short of A + 600`);
+      await fixture.clock.advance(50);
+    }
     await fixture.clock.advance(50);
-    assert.equal(fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length, 2,
+    assert.equal(fights(), 1, `age ${fixture.bot.time.age}: the packet of A + 620 has not come yet`);
+    while (fixture.bot.time.age < readAge + 620) await fixture.clock.advance(50);
+    await fixture.clock.advance(50);
+    assert.equal(fights(), 2,
       JSON.stringify({ records: fixture.recorded(), snapshots: fixture.driver.snapshot(), answered: fixture.driver.answered.snapshot() }));
   } finally {
     await fixture.observer.close();
@@ -65,7 +75,7 @@ for (const { description, targetId, distance } of [
     try {
       fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "fight", 7),
         { kind: "unreachable", why: "Earlier approach stopped." },
-        { premise: "unreachable", durationMs: 30_000, why: "Earlier approach stopped." });
+        { premise: "unreachable", ticks: 600, why: "Earlier approach stopped." });
       fixture.tick();
       await fixture.clock.advance(50);
       assert.deepEqual(fixture.recorded(), ["fight -> target_died"]);
@@ -229,7 +239,7 @@ test("an automatic target disappearing resumes the original request without clai
 });
 
 /** What a test sets on the fake bot at the start, and how its runner is configured (its clock is the fake bot's). */
-interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food"> {
+interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food" | "server"> {
   readonly runner?: Omit<ActionRunnerOptions, "clock">;
 }
 
@@ -248,6 +258,7 @@ function recordedEncounters(data: SqlBotData): string[] {
 function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
   const { bot, clock, combat, world, inventory, entities, server } = createFakeBot({
     clock: options.clock,
+    server: options.server,
     username: "ReflexBot",
     position: new Vec3(0, 64, 0),
     // Open air without building material: hiding cannot dig or place here.
@@ -1477,6 +1488,11 @@ for (const inUse of [false, true]) {
 
 /** A fight neither side can win: the engage waits for its abort, then reports itself cancelled. Time is the fake bot's clock. */
 function standoffScene(...zombies: number[]) {
+  return standoffSceneOn(undefined, ...zombies);
+}
+
+/** The same standoff on a server at `server.ticksPerSecond` (20 by default). */
+function standoffSceneOn(server: FakeBotOptions["server"], ...zombies: number[]) {
   const clock = createFakeClock({ mode: "mocked" });
   const installed = clock.install();
   const engaged: number[] = [];
@@ -1490,6 +1506,7 @@ function standoffScene(...zombies: number[]) {
     {
       runner: { cancelGraceMs: 500 },
       clock,
+      server,
       entities: Object.fromEntries(zombies.map((id, index) => [id, hostile("zombie", 3 + index)])),
     },
   );
@@ -1568,22 +1585,32 @@ test("the probes of a limited fight are off after it: no listener is left on the
   }
 });
 
-test("a second no_progress limit against the same target stands down 20 s, a third 40 s, capped at 5 min", async () => {
-  const scene = standoffScene(7);
+// The stand-down counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 200 ticks, doubled by each further limit against the
+// target, capped at 6 000 (the sixth would be 6 400); each ends at the packet of age R + ticks + 20, R the age read at its limit.
+for (const { ticksPerSecond, msPerTick } of [{ ticksPerSecond: 20, msPerTick: 50 }, { ticksPerSecond: 10, msPerTick: 100 }])
+test(`a second no_progress limit against the same target stands down 400 ticks, a third 800, capped at 6 000 (${ticksPerSecond} tps)`, async () => {
+  const scene = standoffSceneOn({ ticksPerSecond }, 7);
+  /** The clock moves in whole seconds (a packet every 1 or 2 s) with the body's physics off, to age `age`. */
+  const waitUntilAge = async (age: number) => {
+    scene.bot.physicsEnabled = false;
+    while (scene.bot.time.age < age) await scene.clock.advance(1_000, 1_000);
+    scene.bot.physicsEnabled = true;
+  };
   try {
     await scene.pass(50);
-    await scene.pass(28_950);
-    assert.ok(scene.active(), "29 s: the window is open");
-    for (const duration of [10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]) {
-      for (let ms = 0; scene.active() && ms <= 32_000; ms += 50) await scene.pass(50); // 31 s: 600 world ticks and one packet
+    await scene.pass(600 * msPerTick - 1_050);
+    assert.ok(scene.active(), "the 600-tick window is open a second short of it (old code: its 30 s wall ended it)");
+    for (const ticks of [200, 400, 800, 1_600, 3_200, 6_000, 6_000]) {
+      for (let ms = 0; scene.active() && ms <= 640 * msPerTick; ms += 50) await scene.pass(50); // 600 world ticks and one packet
       assert.equal(scene.active(), false);
       const claims = scene.engaged.length;
-      scene.bot.physicsEnabled = false;
-      await scene.clock.advance(duration - 50, duration - 50);
-      assert.equal(scene.engaged.length, claims, `no claim before ${duration} ms`);
-      scene.bot.physicsEnabled = true;
+      const readAge = scene.bot.time.age;
+      await waitUntilAge(readAge + ticks);
       await scene.pass(50);
-      assert.equal(scene.engaged.length, claims + 1);
+      assert.equal(scene.engaged.length, claims, `no claim at age R + ${ticks}: one packet of margin`);
+      await waitUntilAge(readAge + ticks + 20);
+      await scene.pass(50);
+      assert.equal(scene.engaged.length, claims + 1, `claims at the packet of age R + ${ticks + 20}`);
     }
   } finally { await scene.close(); }
 });

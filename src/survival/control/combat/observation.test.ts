@@ -43,7 +43,7 @@ test("an answered fight for a contact is still found", () => {
   const survival = survivalResources();
   const entry = survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 2),
     { kind: "unreachable", why: "No route reached this target." },
-    { premise: "unreachable", durationMs: 30_000, why: "The previous approach failed." });
+    { premise: "unreachable", ticks: 600, why: "The previous approach failed." });
   const facts = observeCombatDecision(bot, { survival, resolvedIds: new Set(), attackerIds: new Set() });
   assert.ok(facts.contacts.some(contact => contact.id === 2));
   assert.equal(facts.answeredFights.get(2), entry.id);

@@ -15,6 +15,9 @@ import type {
 } from "./contract.js";
 import { observeBodyProgress, ReflexProgress } from "./reflex-progress.js";
 
+/** The longest a stand-down grows to by escalation: 6 000 world ticks (the 300 000 ms it was in wall time at 20 tps). */
+const STAND_DOWN_CAP_TICKS = 6_000;
+
 /** What a registered reflex needs from its driver: the shared runner, answers and the driver's world revision. */
 export interface RegistrationHost {
   readonly bot: Bot;
@@ -174,11 +177,11 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     this.#changeDecision(null);
   }
 
-  /** The remembered failure of a reflex that retries: it expires after `retryAfterFailureMs`, the facts may reopen it sooner. */
+  /** The remembered failure of a reflex that retries: it expires after `retryAfterFailureTicks` world ticks, the facts may reopen it sooner. */
   #retryTemporal(why: string): TemporalPremise | null {
-    const { retryAfterFailureMs } = this.definition;
-    if (retryAfterFailureMs === undefined) return null;
-    return { premise: "retry_after_failure", durationMs: retryAfterFailureMs, why };
+    const { retryAfterFailureTicks } = this.definition;
+    if (retryAfterFailureTicks === undefined) return null;
+    return { premise: "retry_after_failure", ticks: retryAfterFailureTicks, why };
   }
 
   /** Decide for an observed danger; claim the body unless the decision is not a response or the scope is answered. */
@@ -410,7 +413,8 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     host.answered.remember(
       { ...scope, facts: () => null },
       { kind: "reflex_limit", why },
-      { premise: "reflex_limit", durationMs: Math.min(run.limits.standDownMs * 2 ** (count - 1), 300_000), why },
+      // The limits are still written in ms: converted here until T4a/T4b of plan 2026-11-16-reflex-limits-ticks.
+      { premise: "reflex_limit", ticks: Math.min(ticksOnTime(run.limits.standDownMs) * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
     );
   }
 }

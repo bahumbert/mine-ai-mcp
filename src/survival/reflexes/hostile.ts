@@ -19,6 +19,7 @@ import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
 import { decideHostile, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
+import { ticksOnTime } from "../../world/world-age.js";
 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
@@ -73,7 +74,7 @@ function watchHostilePolicy(scene: HostileScene): () => void {
 function hostileFailureTemporal(outcome: HostileSettlement | ShieldPrepared) {
   if (outcome.kind === "shield_prepared" || (outcome.response !== "fight" && outcome.response !== "deflect")) return null;
   const failure = responseFailure(outcome);
-  return failure ? { premise: "unreachable", durationMs: COMBAT_LIMITS.noProgressMs, why: failure.why } : null;
+  return failure ? { premise: "unreachable", ticks: ticksOnTime(COMBAT_LIMITS.noProgressMs), why: failure.why } : null;
 }
 
 /** Keep response permissions live while sharing perception and the driver's retained answers. */

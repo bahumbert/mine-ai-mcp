@@ -113,12 +113,12 @@ for (const cause of ["policy", "death"] as const)
     assert.equal(driver.snapshot()[0]?.stale, cause === "death");
   });
 
-/** A fire reflex whose escape throws on every attempt, counted; `retryAfterFailureMs` is the rule under test. */
-function throwingEscape(retryAfterFailureMs: number | undefined) {
+/** A fire reflex whose escape throws on every attempt, counted; `retryAfterFailureTicks` is the rule under test. */
+function throwingEscape(retryAfterFailureTicks: number | undefined) {
   const attempts = { count: 0 };
   const definition = {
     name: "fire_reflex" as const,
-    retryAfterFailureMs,
+    retryAfterFailureTicks,
     sense: () => ({ kind: "observed" as const, danger: true, evidence: { burning: true } }),
     decide: () => ({ kind: "respond" as const, response: true, name: "escape", reason: "Burning in place." }),
     facts: () => ({ capability: "fire", response: "escape", scope: "cell:A", facts: () => null, permissions: () => null }),
@@ -134,27 +134,63 @@ function throwingEscape(retryAfterFailureMs: number | undefined) {
   return { attempts, definition };
 }
 
-test("an execution exception of a reflex with retryAfterFailureMs is retried after it", async () => {
-  const bot = idleBot();
-  let clock = 0;
-  await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => clock });
-  const { attempts, definition } = throwingEscape(2_000);
+// A retry pause counts world ticks (plan 2026-11-16-reflex-limits-ticks T3). The fake server's first packet, of age `A`, is
+// at 0 ms and one comes per 20 ticks; the first attempt fails ~50 ms in, so its pause (40 ticks) is remembered at the cached
+// age A and ends at the packet of age A + 60: 3 000 ms in at 20 tps, 6 000 ms in at 10 tps (old code: 2 000 ms after the failure).
+const START_AGE = 1_000;
+const RATES = [
+  { ticksPerSecond: 20, msPerTick: 50 },
+  { ticksPerSecond: 10, msPerTick: 100 },
+] as const;
+
+/** A driver on the fake bot's own clock and server, as the production driver is wired (`now` the clock, the age the bot's). */
+function retryScene(ticksPerSecond: number, retryAfterFailureTicks: number | undefined) {
+  const clock = createFakeClock({ mode: "manual" });
+  const { bot, server } = createFakeBot({ clock, server: { startAge: START_AGE, ticksPerSecond } });
+  const driver = new ReflexDriver(bot, new ActionRunner({ clock }), { now: clock.now });
+  const { attempts, definition } = throwingEscape(retryAfterFailureTicks);
   driver.register(definition);
-  bot.emit("physicsTick");
-  await settled();
-  assert.equal(attempts.count, 1);
-  clock = 1_999;
-  bot.emit("physicsTick");
-  await settled();
-  assert.equal(attempts.count, 1, "still answered 1 ms before the retry time");
-  clock = 2_001;
-  bot.emit("physicsTick");
-  await settled();
-  assert.equal(attempts.count, 2);
-  assert.equal(driver.answered.snapshot()[0]?.temporal?.premise, "retry_after_failure");
+  return { bot, server, clock, driver, attempts, age: () => bot.time.age };
+}
+
+for (const { ticksPerSecond, msPerTick } of RATES) {
+  test(`an execution exception of a reflex with retryAfterFailureTicks is retried after the packet of age A + 60, not A + 40 (${ticksPerSecond} tps)`, async () => {
+    const { clock, driver, attempts, age } = retryScene(ticksPerSecond, 40);
+    try {
+      await clock.advance(100);
+      assert.equal(attempts.count, 1);
+      await clock.advance(40 * msPerTick + 100 - clock.now());
+      assert.equal(age(), START_AGE + 40, `${clock.now()} ms in: the old code (2 000 ms) retried here`);
+      assert.equal(attempts.count, 1, "A + 40: still answered, one packet of margin");
+      await clock.advance(20 * msPerTick - 100 - 50);
+      assert.equal(age(), START_AGE + 40, "a physics tick before the packet of age A + 60");
+      assert.equal(attempts.count, 1);
+      await clock.advance(100);
+      assert.equal(age(), START_AGE + 60);
+      assert.equal(attempts.count, 2, "retried at the first physics tick after that packet");
+      assert.equal(driver.answered.snapshot()[0]?.temporal?.premise, "retry_after_failure");
+    } finally {
+      await driver[Symbol.asyncDispose]();
+    }
+  });
+}
+
+test("an execution exception on a stopped server is retried on the pause's 9 000 ms wall, not before", async () => {
+  const { clock, server, driver, attempts } = retryScene(20, 40);
+  try {
+    await clock.advance(100);
+    assert.equal(attempts.count, 1);
+    server.stop();
+    await clock.advance(8_900 - 100);
+    assert.equal(attempts.count, 1, "8 900 ms in: the age stands still, 8 850 ms after the failure");
+    await clock.advance(200);
+    assert.equal(attempts.count, 2, "9 100 ms in: 9 000 ms after the failure");
+  } finally {
+    await driver[Symbol.asyncDispose]();
+  }
 });
 
-/** Attempts of a reflex with a 2 s retry delay, driven as production builds it (no `now`) on a mocked clock whose wall clock steps after the first failure. */
+/** Attempts of a reflex with a 40-tick retry pause, driven as production builds it (no `now`) on a mocked clock whose wall clock steps after the first failure. */
 async function attemptsAfterWallStep(wallStepMs: number, advanceAfterStepMs: number) {
   const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
   using _installed = clock.install();
@@ -162,7 +198,7 @@ async function attemptsAfterWallStep(wallStepMs: number, advanceAfterStepMs: num
   clock.stepWallClock(5_000);
   const { bot } = createFakeBot({ clock });
   await using driver = new ReflexDriver(bot, new ActionRunner({ clock }));
-  const { attempts, definition } = throwingEscape(2_000);
+  const { attempts, definition } = throwingEscape(40);
   driver.register(definition);
   await clock.advance(100); // the first attempt fails and is answered at ~50 ms
   assert.equal(attempts.count, 1);
@@ -171,22 +207,23 @@ async function attemptsAfterWallStep(wallStepMs: number, advanceAfterStepMs: num
   return attempts.count;
 }
 
-// The first attempt fails ~50 ms in; the helper passes 100 ms before the wall clock steps.
+// The first attempt fails ~50 ms in, at the cached age A; the pause ends at the packet of age A + 60, 3 s in at 20 tps (the
+// wall clock does not move the age, and the monotonic backstop is 9 s); the helper passes 100 ms before the wall clock steps.
 const RETRY_DELAY_ROWS: ReadonlyArray<readonly [wallStepMs: number, advanceAfterStepMs: number, attempts: number, why: string]> = [
-  [-800, 1_800, 1, "1.9 s in: still answered"],
-  [-800, 2_200, 2, "2.3 s in: retried, the 0.8 s do not stretch the delay to 2.8 s"],
-  [1_200, 1_000, 1, "1.1 s in: the wall clock alone would call it over"],
-  [1_200, 2_200, 2, "2.3 s in: retried"],
+  [-800, 2_700, 1, "2.8 s in: still answered, the packet of age A + 60 is at 3 s"],
+  [-800, 3_000, 2, "3.1 s in: retried, the 0.8 s do not stretch the pause"],
+  [1_200, 1_000, 1, "1.1 s in: the wall clock alone would call a 2 s pause over"],
+  [1_200, 3_000, 2, "3.1 s in: retried"],
 ];
 for (const [wallStepMs, advanceAfterStepMs, attempts, why] of RETRY_DELAY_ROWS)
-  test(`a 2 s retry delay counts monotonic time: wall step ${wallStepMs} ms, ${advanceAfterStepMs} ms later it has made ${attempts} attempt(s) (${why})`, async () => {
+  test(`a 40-tick retry pause ignores the wall clock: wall step ${wallStepMs} ms, ${advanceAfterStepMs} ms later it has made ${attempts} attempt(s) (${why})`, async () => {
     assert.equal(await attemptsAfterWallStep(wallStepMs, advanceAfterStepMs), attempts);
   });
 
 test("a death during the retry delay lets the reflex claim again at once after respawn", async () => {
   const bot = idleBot();
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => 0 });
-  const { attempts, definition } = throwingEscape(2_000);
+  const { attempts, definition } = throwingEscape(40);
   driver.register(definition);
   bot.emit("physicsTick");
   await settled();
@@ -213,13 +250,13 @@ test("a failure the definition does not retry stays answered while its facts hol
 
 test("a definition's own temporal wins over the retry delay", async () => {
   const bot = idleBot();
-  const { definition } = throwingEscape(2_000);
+  const { definition } = throwingEscape(40);
   await using driver = new ReflexDriver(bot, new ActionRunner(), { now: () => 0 });
   driver.register({
     ...definition,
     act: async () => "failed",
     failure: () => ({ kind: "failed", why: "No way out." }),
-    temporal: () => ({ premise: "own_premise", durationMs: 5_000, why: "own" }),
+    temporal: () => ({ premise: "own_premise", ticks: 100, why: "own" }),
   });
   bot.emit("physicsTick");
   await settled();

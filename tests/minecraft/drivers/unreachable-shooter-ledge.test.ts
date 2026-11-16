@@ -22,7 +22,7 @@ function driverTrace(observeMs: number, minimumRetryMs: number, trace: readonly 
   const survival = survivalResources();
   survival.answered.remember(responseScope(bot, () => DEFAULT_SURVIVAL_POLICY, "fight", 7),
     { kind: "unreachable", why: "No route reached the pillar." },
-    { premise: "unreachable", durationMs: 30_000, why: "No route reached the pillar." });
+    { premise: "unreachable", ticks: 600, why: "No route reached the pillar." });
   const status = { summary: "safe", request: null, owner: { current: null, reserved: null, connected: true, transfer: null },
     dangers: [], response: null, decisions: [], budgets: [], answered: survival.answered.snapshot(),
     observations: { missing: [], stale: [] }, policy, vitals: { health: 20, food: 20, air: null, inWater: false },

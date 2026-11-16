@@ -62,7 +62,7 @@ export class ReflexDriver implements AsyncDisposable {
     readonly runner: ActionRunner,
     options: ReflexDriverOptions = {},
   ) {
-    this.answered = new Answered(options.now);
+    this.answered = new Answered(options.now, Date.now, () => bot.time?.age ?? null);
     if (options.lifeSaving) setLifeSavingRemovalContext(bot, options.lifeSaving);
     this.#dimension = bot.game?.dimension;
     bot.on("death", this.#death);

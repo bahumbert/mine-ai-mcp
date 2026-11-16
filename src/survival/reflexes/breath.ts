@@ -1,5 +1,5 @@
 import type { Bot } from "mineflayer";
-import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
+import { LETHAL_REFLEX_RETRY_TICKS, type ReflexLimits } from "../control/contract.js";
 import { climbsBy, risesOver, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { airSupplyPoints, isInWater } from "../perception/body.js";
@@ -49,7 +49,7 @@ export function attachBreathReflex(bot: Bot, driver: ReflexDriver, diveBackstop:
   return driver.register({
     name: BREATH_REFLEX,
     // Still water never changes the cells the answer reads, while the air runs out: try the surfacing again.
-    retryAfterFailureMs: LETHAL_REFLEX_RETRY_MS,
+    retryAfterFailureTicks: LETHAL_REFLEX_RETRY_TICKS,
     intervalTicks: CHECK_INTERVAL_TICKS,
     sense: () => {
       const air = airSupplyPoints(bot);

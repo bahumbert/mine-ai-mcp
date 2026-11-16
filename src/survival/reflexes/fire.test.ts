@@ -571,28 +571,33 @@ test("an endangered body during the wait returns the action with the danger mess
   assert.match((finished.interruptions ?? []).join("|"), /in danger again/);
 });
 
-test("no escape in static lava is tried again 2 s later", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _timers = clock.install();
-  const { bot } = createFakeBot({ clock });
-  Object.assign(bot.entity, { isInLava: true, onGround: false });
-  const runner = stillRunner();
-  await using resources = new AsyncDisposableStack();
-  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
-  resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
-  // The answer is made in the slice the loop stops at: `answeredAt` is the clock's reading the 2 s are counted from.
-  while (driver.answered.snapshot().length === 0) await clock.advance(50);
-  const answeredAt = clock.now();
-  const first = driver.answered.snapshot()[0];
-  assert.equal(first?.failure.kind, "no_escape");
-  await clock.advance(answeredAt + 1_999 - clock.now());
-  assert.equal(driver.answered.snapshot()[0]?.id, first?.id, "the same lava within 2 s: still answered");
-  await clock.advance(answeredAt + 2_001 - clock.now());
-  assert.equal(runner.status().activeAction?.action, "fire_reflex", "still burning in the same cells: tried again");
-  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
-  assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "and the second try is answered in its turn");
-  assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
-});
+// The retry pause counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 40 ticks from the age cached when the failure
+// was answered, plus one packet: the packet of age A + 60. Old code: 2 000 ms after the answer (20 ticks at 10 tps).
+for (const ticksPerSecond of [20, 10])
+  test(`no escape in static lava is tried again after the packet of age A + 60, not 2 s later (${ticksPerSecond} tps)`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot } = createFakeBot({ clock, server: { ticksPerSecond } });
+    Object.assign(bot.entity, { isInLava: true, onGround: false });
+    const runner = stillRunner(); // its claim watch is inert on purpose (see stillRunner): the retry pause is the subject, the limits are tested in driver-limits
+    await using resources = new AsyncDisposableStack();
+    const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+    resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
+    // The answer is made in the slice the loop stops at: `answeredAge` is the age cached when it was remembered.
+    while (driver.answered.snapshot().length === 0) await clock.advance(50);
+    const answeredAge = bot.time.age;
+    const first = driver.answered.snapshot()[0];
+    assert.equal(first?.failure.kind, "no_escape");
+    while (bot.time.age < answeredAge + 60) {
+      assert.equal(driver.answered.snapshot()[0]?.id, first?.id, `the same lava at age ${bot.time.age}, short of A + 60: still answered`);
+      await clock.advance(50);
+    }
+    await clock.advance(100);
+    assert.equal(runner.status().activeAction?.action, "fire_reflex", "still burning in the same cells: tried again");
+    await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+    assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "and the second try is answered in its turn");
+    assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
+  });
 
 test("a throwing blockUpdate handler does not throw out of the emit", async () => {
   const { bot, clock } = createFakeBot();

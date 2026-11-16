@@ -4,7 +4,7 @@ import { LIFE_SAVING_REMOVAL_MS, pendingLifeSavingPlacements, removeLifeSavingPl
 import { describeProtectedRegion } from "../../world/protected-regions.js";
 import { bucketAvailable, waterLandingSupply, type WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
-import { LETHAL_REFLEX_RETRY_MS, type ReflexLimits } from "../control/contract.js";
+import { LETHAL_REFLEX_RETRY_TICKS, type ReflexLimits } from "../control/contract.js";
 import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
 import { isBurning, isInFire, isInLava, isInWater } from "../perception/body.js";
@@ -188,7 +188,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
   const registration = driver.register({
     name: "fire_reflex",
     // Static lava never changes the cells the answer reads, while the body burns: try the escape again.
-    retryAfterFailureMs: LETHAL_REFLEX_RETRY_MS,
+    retryAfterFailureTicks: LETHAL_REFLEX_RETRY_TICKS,
     sense: () => senseFire(bot, lava, escapeAvailable),
     decide: decideFireResponse,
     limits: () => FIRE_LIMITS,
