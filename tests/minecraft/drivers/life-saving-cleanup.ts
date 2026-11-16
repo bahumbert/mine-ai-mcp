@@ -7,18 +7,24 @@ import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement } from "../../../src/world/life-saving-placements.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { SERVER_ANSWER_TICKS, serverTickDeadline } from "../../../src/world/world-age.ts";
 import { burnStartNow, waitUntilBodyFree } from "./wait-until-body-free.ts";
 import { waitServerTicks } from "./server-ticks.ts";
 
+// Twice the measured 220-tick worst span at 20/10 tps, rounded to a time packet (step D T2d, 2026-11-16).
+const CLEANUP_OBSERVE_TICKS = 440;
+
 /** Hold the arranged body until the fire packet arrives, so a delayed command cannot light the route behind it. */
-async function injectFire(context: ScenarioContext, sleep: (ms: number) => Promise<void>): Promise<boolean> {
+async function injectFire(context: ScenarioContext, sleep: (ms: number) => Promise<void>): Promise<string | null> {
   context.physics.pause();
   const cell = context.bot.entity.position.floored();
   try {
     context.bot.chat(`/setblock ${cell.x} ${cell.y} ${cell.z} fire`);
-    const deadline = monotonicNow() + 2_000;
-    while (context.bot.blockAt(cell)?.name !== "fire" && monotonicNow() < deadline) await sleep(20);
-    return context.bot.blockAt(cell)?.name === "fire";
+    const waited = await waitServerTicks(context.bot, SERVER_ANSWER_TICKS, {
+      until: () => context.bot.blockAt(cell)?.name === "fire", sleep,
+    });
+    if (waited === "stalled") return "the server's clock stood still while waiting for the fire block";
+    return context.bot.blockAt(cell)?.name === "fire" ? null : "the server did not confirm the fire block within its answer tick budget";
   } finally {
     context.physics.resume();
   }
@@ -41,13 +47,15 @@ export async function run(context: ScenarioContext, sleep: (ms: number) => Promi
   let fireOwned = false;
   let retainedDuringFire = false;
   let firedAt = burnStartNow(bot);
-  const deadline = monotonicNow() + 25_000;
-  while (monotonicNow() < deadline && bot.health > 0) {
+  const deadline = serverTickDeadline(() => bot.time?.age, CLEANUP_OBSERVE_TICKS, monotonicNow());
+  while (!deadline.passed(monotonicNow()) && bot.health > 0) {
     const status = await context.call("view_status", {});
     const owner = status.survival?.owner.current;
     if (owner === "remove_life_saving_placements") cleanupSeen = true;
     if (cleanupSeen && !injected && bot.entity.position.distanceTo(start) > 0.1) {
-      injected = await injectFire(context, sleep);
+      const fireFailure = await injectFire(context, sleep);
+      if (fireFailure !== null) return { status: "failed", detail: fireFailure };
+      injected = true;
       firedAt = burnStartNow(bot);
     }
     if (owner === "fire_reflex") {
@@ -57,6 +65,9 @@ export async function run(context: ScenarioContext, sleep: (ms: number) => Promi
     if (fireOwned && pendingLifeSavingPlacements(bot).length === 0) break;
     await sleep(20);
   }
+  if (deadline.passed(monotonicNow())) return { status: "failed", detail: (deadline.elapsed(monotonicNow()).ticks ?? 0) >= CLEANUP_OBSERVE_TICKS
+    ? `cleanup observation exhausted its ${CLEANUP_OBSERVE_TICKS}-tick budget`
+    : "the server's clock stood still while observing cleanup" };
   if (!cleanupSeen || !injected || !fireOwned || !retainedDuringFire || pendingLifeSavingPlacements(bot).length > 0 || bot.blockAt(target)?.type !== 0)
     return { status: "failed", detail: JSON.stringify({ cleanupSeen, injected, fireOwned, retainedDuringFire, pending: pendingLifeSavingPlacements(bot), block: bot.blockAt(target)?.name, health: bot.health }) };
   let serverAir = false;
