@@ -12,12 +12,12 @@ function swapBucket(scene: FakeHarness, from: string, to: string): void {
   setCarriedCount(scene.inventory, scene.bot.registry, scene.bot.registry.itemsByName[to]!.id, 1);
 }
 
-for (const touching of [false, true]) {
-  test(`a stopped-clock ${touching ? "touching-source" : "pool"} cast retries without sealing or losing its stance`, async () => {
+for (const rate of [5, 10]) for (const touching of [false, true]) {
+  test(`a stopped-clock ${touching ? "touching-source" : "pool"} cast at ${rate} tps retries without sealing or losing its stance`, async () => {
     const clock = createFakeClock({ mode: "mocked" });
     using _timers = clock.install();
     const scene = createFakeBot({
-      clock, groundY: null, server: { ticksPerSecond: 5 }, carried: { water_bucket: 1 },
+      clock, groundY: null, server: { ticksPerSecond: rate }, carried: { water_bucket: 1 },
       position: new Vec3(0.5, touching ? 64 : 65, 0.5),
       cells: {
         "0,63,0": "dirt", "0,64,0": touching ? "air" : "dirt",
@@ -29,6 +29,7 @@ for (const touching of [false, true]) {
     const stances: Vec3[] = [];
     let landing: Vec3 | null = null;
     let broken = 0;
+    let stoppedAge = 0;
     const request: MineRequest = {
       matches: (block) => block.name === "obsidian",
       matchingStateIds: new Set([scene.bot.registry.blocksByName.obsidian!.defaultState!]),
@@ -44,13 +45,15 @@ for (const touching of [false, true]) {
             landing = new Vec3(cell.position.x, cell.position.y, cell.position.z);
             scene.world.setCell(landing, "water");
           }
-          if (stances.length === 1) scene.server.stop();
+          if (stances.length === 1) { stoppedAge = scene.bot.time.age; scene.server.stop(); }
           else {
             scene.world.setCell(new Vec3(1, 64, 0), "obsidian");
             scene.world.setCell(new Vec3(2, 64, 0), "obsidian");
           }
         } else {
           // The server resumes after the unanswered count, before handling the scoop.
+          if (stances.length === 1) assert.equal(scene.bot.time.age, stoppedAge);
+          else assert.equal(scene.bot.time.age, stoppedAge + 40);
           scene.server.resume();
           swapBucket(scene, "bucket", "water_bucket");
           if (landing) scene.world.setCell(landing, "air");

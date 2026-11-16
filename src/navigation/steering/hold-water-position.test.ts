@@ -149,46 +149,54 @@ test("landing is not waited for on dry ground or when the stance has no floor", 
   assert.equal(await landOnStanceFloor(bot, { stance: { x: 0, y: -60, z: 0 }, read }, signal), false, "dry: no wait");
 });
 
-for (const { stopped, lands, endMs } of [
-  { stopped: false, lands: true, endMs: 7_950 },
-  { stopped: false, lands: false, endMs: 8_000 },
-  { stopped: true, lands: false, endMs: 20_000 },
-]) test(`landing waits for 40 server ticks at 5 tps or 20 s of a stopped clock (${stopped}, landed ${lands})`, async () => {
+for (const { rate, stopped, lands, endMs } of [
+  { rate: 5, stopped: false, lands: true, endMs: 7_950 },
+  { rate: 5, stopped: false, lands: false, endMs: 8_000 },
+  { rate: 10, stopped: false, lands: false, endMs: 4_000 },
+  { rate: 5, stopped: true, lands: false, endMs: 20_000 },
+]) test(`landing waits for 40 server ticks at ${rate} tps or 20 s of a stopped clock (${stopped}, landed ${lands})`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: 5 }, cells: { "0,64,0": "water" } });
+  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: rate }, cells: { "0,64,0": "water" } });
   const read = liveBlockReader(bot);
   Object.assign(bot.entity, { isInWater: true, onGround: false });
   bot.physicsEnabled = false;
   if (stopped) server.stop();
+  const age = bot.time.age;
   if (lands) clock.after(endMs, () => Object.assign(bot.entity, { onGround: true }));
   let settled: boolean | null = null;
   void landOnStanceFloor(bot, { stance: { x: 0, y: 64, z: 0 }, read }, new AbortController().signal).then((landed) => (settled = landed));
   await clock.advance(endMs - 50);
   assert.equal(settled, null, "still waiting while the world age has budget");
+  assert.equal(bot.time.age - age, stopped ? 0 : 20);
   await clock.advance(50);
   assert.equal(settled, lands);
+  assert.equal(bot.time.age - age, stopped || lands ? (stopped ? 0 : 20) : 40);
 });
 
-for (const { stopped, floor, lands, endMs } of [
-  { stopped: false, floor: true, lands: true, endMs: 11_950 },
-  { stopped: false, floor: true, lands: false, endMs: 12_000 },
-  { stopped: true, floor: true, lands: false, endMs: 20_000 },
-  { stopped: true, floor: false, lands: false, endMs: 3_000 },
-]) test(`submerged eyes keep 60 ${floor ? "server" : "client"} ticks (stopped ${stopped}, floor ${floor}, landed ${lands})`, async () => {
+for (const { rate, stopped, floor, lands, endMs } of [
+  { rate: 5, stopped: false, floor: true, lands: true, endMs: 11_950 },
+  { rate: 5, stopped: false, floor: true, lands: false, endMs: 12_000 },
+  { rate: 10, stopped: false, floor: true, lands: false, endMs: 6_000 },
+  { rate: 5, stopped: true, floor: true, lands: false, endMs: 20_000 },
+  { rate: 5, stopped: true, floor: false, lands: false, endMs: 3_000 },
+]) test(`submerged eyes keep 60 ${floor ? "server" : "client"} ticks at ${rate} tps (stopped ${stopped}, floor ${floor}, landed ${lands})`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: 5 }, groundY: floor ? 63 : null, cells: { "0,64,0": "water" } });
+  const { bot, server } = createFakeBot({ clock, server: { ticksPerSecond: rate }, groundY: floor ? 63 : null, cells: { "0,64,0": "water" } });
   Object.assign(bot.entity, { isInWater: true, onGround: false });
   bot.physicsEnabled = !floor;
   if (stopped) server.stop();
+  const age = bot.time.age;
   if (lands) clock.after(endMs, () => Object.assign(bot.entity, { onGround: true }));
   let settled: boolean | null = null;
   const waiting = settleInWaterForDig(bot, liveBlockReader(bot), { x: 0, y: 64, z: 0 }, true).then((value) => (settled = value));
   await clock.advance(endMs - 50);
   assert.equal(settled, null);
+  assert.equal(bot.time.age - age, stopped ? 0 : 40);
   await clock.advance(50);
   assert.equal(settled, lands);
+  assert.equal(bot.time.age - age, stopped || lands ? (stopped ? 0 : 40) : 60);
   await waiting;
   assert.equal(waterStancesHeld(bot), 0);
   assert.equal(bot.controlState.jump, false);

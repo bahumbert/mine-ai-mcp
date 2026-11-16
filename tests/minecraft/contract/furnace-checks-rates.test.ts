@@ -6,7 +6,7 @@ import { furnaceTakeCorrected } from "./checks/furnace-take-corrected.ts";
 import { fakeHarnessFor } from "./fake-harness.ts";
 import { fakeContractSubject } from "./subject.ts";
 
-for (const ticksPerSecond of [20, 5]) {
+for (const ticksPerSecond of [20, 10, 5]) {
   for (const check of [furnaceOutputTake, furnaceTakeCorrected]) {
     test(`${check.name} matches the server at ${ticksPerSecond} tps`, async () => {
       const frame = arenaFrame(ZERO_ARENA);

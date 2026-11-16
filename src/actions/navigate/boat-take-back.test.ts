@@ -5,6 +5,7 @@ import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
+import { watch } from "../../test-support/pending.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
 import { boatsCarried, makeHitsMiss, settled, shoreSea, stallServerAtFirstHit } from "./boat-fixtures.test.js";
 import { TAKE_BACK_WALL_MS, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
@@ -82,13 +83,19 @@ const BOUND_TICKS = TAKE_BACK_WALL_MS / 50;
 const PACKET_TICKS = 20;
 
 /** Ticks a second, and the wall time 200 ticks take there: the hits end at the same world age at any rate. */
-const RATES: readonly (readonly [ticksPerSecond: number, wallMs: number])[] = [[5, TAKE_BACK_WALL_MS * 4], [20, TAKE_BACK_WALL_MS]];
+const RATES: readonly (readonly [ticksPerSecond: number, wallMs: number])[] = [[5, TAKE_BACK_WALL_MS * 4], [10, TAKE_BACK_WALL_MS * 2], [20, TAKE_BACK_WALL_MS]];
 for (const [ticksPerSecond, wallMs] of RATES) {
   test(`at ${ticksPerSecond} ticks a second the hits go on until 200 ticks of world age passed (${wallMs / 1000} s of wall)`, async () => {
     const world = boatOutOfReachOnServerAt(ticksPerSecond);
     using _timers = world.clock.install();
-    const report = await settled(world, takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 }));
-    assert.ok(report.elapsedTicks >= BOUND_TICKS && report.elapsedTicks <= BOUND_TICKS + PACKET_TICKS, `${report.elapsedTicks} ticks`);
+    const startAge = world.bot.time.age;
+    const pending = takeBoatBackReport(world.bot, world.bot.entities[7]!, undefined, { settleMs: 0 });
+    const state = watch(pending);
+    await world.clock.advance(wallMs * 0.9 + 300);
+    assert.equal(world.bot.time.age - startAge, 180);
+    assert.equal(state.over, false, "still hitting below the tick bound");
+    const report = await settled(world, pending);
+    assert.equal(report.elapsedTicks, BOUND_TICKS);
     assert.ok(Math.abs(report.elapsedMs - wallMs) <= 1_400 + PACKET_TICKS * 1000 / ticksPerSecond, `${report.elapsedMs} ms`);
   });
 }

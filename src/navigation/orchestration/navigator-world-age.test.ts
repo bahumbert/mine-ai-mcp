@@ -13,12 +13,12 @@ import { createNavigator } from "./navigator.js";
 
 class SlowAnswerBot extends FakeNavigationBot {
   answer = true;
-  constructor(readonly world: MemoryWorld, readonly fake: FakeHarness) { super(); }
+  constructor(readonly world: MemoryWorld, readonly fake: FakeHarness, readonly rate: number) { super(); }
   worldAge() { return this.fake.bot.time.age; }
   override startEffect(operation: Exclude<PlannedOperation, { kind: "move" }>): EffectHandle {
     let finish!: (result: { kind: "accepted" } | { kind: "failed"; observation: string }) => void;
     const completion = new Promise<Parameters<typeof finish>[0]>(resolve => { finish = resolve; });
-    const clear = this.fake.clock.after(12_000, () => {
+    const clear = this.fake.clock.after(60_000 / this.rate, () => {
       if (!this.answer) return;
       if (operation.kind === "break") this.world.load(operation.position, { stateId: 0 });
       this.current = { ...this.current, worldRevision: this.world.revision };
@@ -28,13 +28,13 @@ class SlowAnswerBot extends FakeNavigationBot {
   }
 }
 
-function startNavigation() {
+function startNavigation(rate: number) {
   const clock = createFakeClock({ mode: "mocked" });
-  const fake = createFakeBot({ clock, server: { ticksPerSecond: 5 } });
+  const fake = createFakeBot({ clock, server: { ticksPerSecond: rate } });
   const world = flatWorld();
   for (let z = -5; z <= 5; z++)
     for (const y of [63, 64, 65]) world.load({ x: 1, y, z }, { stateId: 1, traits: { empty: false, safeToBreak: true } });
-  const bot = new SlowAnswerBot(world, fake);
+  const bot = new SlowAnswerBot(world, fake, rate);
   fake.server.stop();
   bot.answer = false;
   const events: NavigationEvent[] = [];
@@ -45,13 +45,15 @@ function startNavigation() {
   return { clock, fake, world, bot, navigator, request, events };
 }
 
-test("after stopped-clock confirmation expiry the resumed bot completes its next navigation", async () => {
-  const { clock, fake, world, bot, navigator, request, events } = startNavigation();
+for (const rate of [5, 10]) test(`after stopped-clock confirmation expiry the resumed bot completes its next navigation at ${rate} tps`, async () => {
+  const { clock, fake, world, bot, navigator, request, events } = startNavigation(rate);
   using _timers = clock.install();
   const first = navigator.startRun(request);
   if (first.kind !== "started") assert.fail("busy");
   await flush();
+  const stoppedAge = fake.bot.time.age;
   await clock.advance(20_050, 25);
+  assert.equal(fake.bot.time.age, stoppedAge);
   assert.ok(events.some(event => event.kind === "step_failed" && JSON.stringify(event).includes("Server confirmation deadline elapsed")),
     "the stopped clock expired a confirmation before cancellation ends the retry");
   first.handle.cancel();
@@ -66,6 +68,7 @@ test("after stopped-clock confirmation expiry the resumed bot completes its next
   if (next.kind !== "started") assert.fail("busy after expiry");
   try {
     assert.equal((await clock.settle(next.handle.outcome, 60_000)).kind, "completed");
+    assert.ok(fake.bot.time.age - stoppedAge >= 60);
     assert.equal(bot.current.position.x, 2.5);
     assert.equal(navigator.active, null);
   } finally { next.handle.cancel(); await next.handle.outcome; }

@@ -308,18 +308,20 @@ test("a block that appears after mineflayer's timeout but before the world age m
   assert.equal(result.kind, "placed");
 });
 
-test("placement answered at 7 s at 5 tps is placed", async () => {
+for (const [rate, delayMs] of [[5, 7_000], [10, 3_500]] as const) test(`placement answered at ${delayMs} ms at ${rate} tps is placed`, async () => {
   const target = new Vec3(0, 64, 0);
   const { bot, clock, world, item } = placer("cobblestone", {
-    server: { ticksPerSecond: 5 },
+    server: { ticksPerSecond: rate },
     overrides: { _placeBlockWithOptions: async () => {} },
   });
   using _timers = clock.install();
-  clock.after(7_000, () => world.setCell(target, "cobblestone"));
+  const age = bot.time.age;
+  clock.after(delayMs, () => world.setCell(target, "cobblestone"));
 
-  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), 7_000);
+  const result = await clock.settle(placeBlock(bot, placementAt(bot, item, target)), delayMs);
 
   assert.equal(result.kind, "placed");
+  assert.equal(bot.time.age - age, 20);
 });
 
 for (const stopped of [false, true]) {

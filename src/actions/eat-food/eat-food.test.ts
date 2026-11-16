@@ -89,6 +89,7 @@ test("equips and consumes one named food while reporting observed changes", asyn
 for (const { delayMs, ticksPerSecond, ageDelta } of [
   { delayMs: 350, ticksPerSecond: 20, ageDelta: 0 },
   { delayMs: 2_000, ticksPerSecond: 20, ageDelta: 40 },
+  { delayMs: 4_000, ticksPerSecond: 10, ageDelta: 40 },
   { delayMs: 8_000, ticksPerSecond: 5, ageDelta: 40 },
 ]) {
   test(`confirms consumption at ${delayMs} ms, world age +${ageDelta}, at ${ticksPerSecond} tps`, async () => {
@@ -121,12 +122,16 @@ for (const { delayMs, ticksPerSecond, ageDelta } of [
 test("cancellation rejects after consume resolves while inventory confirmation is pending", async () => {
   const clock = mockedClock();
   using _installed = clock.install();
-  const { bot, carried } = hungryBot("cooked_beef", 2, clock, 5);
+  const { bot, carried, harness } = hungryBot("cooked_beef", 2, clock, 5);
+  let deactivations = 0;
+  const deactivate = bot.deactivateItem.bind(bot);
+  bot.deactivateItem = () => { deactivations += 1; deactivate(); };
   const slotListeners = bot.inventory.listenerCount("updateSlot");
   const controller = new AbortController();
   const pending = eatFood(bot, { foodName: "cooked_beef" }, { signal: controller.signal }, {
     equip: async () => {},
-    consume: async () => {},
+    // Unverified defensive dependency state; native consume resolving with this flag set needs a contract measurement.
+    consume: async () => { bot.usingHeldItem = true; },
   });
   const clearTimer = mock.method(globalThis, "clearTimeout");
   // Abort between polls, while the 25 ms sleep still owns a timer.
@@ -138,6 +143,8 @@ test("cancellation rejects after consume resolves while inventory confirmation i
     clearTimer.mock.restore();
   }
   assert.equal(carried.count, 2);
+  assert.equal(deactivations, 1);
+  assert.equal(harness.server.packets.filter((packet) => packet.name === "block_dig" && (packet.data as { status: number }).status === 5).length, 1);
   assert.equal(bot.usingHeldItem, false);
   // The harness's window keeps its own slot listeners: the bite leaves none of its own behind.
   assert.equal(bot.inventory.listenerCount("updateSlot"), slotListeners);

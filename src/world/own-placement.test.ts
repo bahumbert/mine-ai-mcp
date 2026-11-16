@@ -64,15 +64,17 @@ test("the wait counts from the send: 40 ticks already past is answered at once",
   assert.deepEqual(await clock.settle(awaitOwnPlacement(bot, own, isCobble), 0), { kind: "not_landed" });
 });
 
-for (const { delayMs, ticksPerSecond } of [{ delayMs: 150, ticksPerSecond: 20 }, { delayMs: 7_000, ticksPerSecond: 5 }]) {
+for (const { delayMs, ticksPerSecond } of [{ delayMs: 150, ticksPerSecond: 20 }, { delayMs: 3_500, ticksPerSecond: 10 }, { delayMs: 7_000, ticksPerSecond: 5 }]) {
   test(`own placement answered at ${delayMs} ms at ${ticksPerSecond} tps is landed`, async () => {
     const { bot, clock, world } = worldBot({}, ticksPerSecond);
     using _timers = clock.install();
     const own = startOwnPlacement();
+    const age = bot.time.age;
     recordPlacementSent(own, [cell], bot.time.age);
     clock.after(delayMs, () => world.setCell(cell, "cobblestone"));
 
     assert.equal((await clock.settle(awaitOwnPlacement(bot, own, isCobble), delayMs + 50)).kind, "landed");
+    assert.equal(bot.time.age - age, delayMs === 150 ? 0 : 20);
   });
 }
 

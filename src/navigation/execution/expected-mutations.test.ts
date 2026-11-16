@@ -9,11 +9,11 @@ import { blockKey, type BlockObservation, type BlockPosition } from "../world/wo
 
 const TOKEN = { runId: "r", planId: "p", stepId: "s", attempt: 1 };
 
-for (const stopped of [false, true]) {
-  test(`an issued detached receipt ${stopped ? "expires across an unobserved stopped clock" : "confirms a late 5 tps answer"}`, async () => {
+for (const rate of [5, 10]) for (const stopped of [false, true]) {
+  test(`an issued detached receipt at ${rate} tps ${stopped ? "expires across an unobserved stopped clock" : "confirms a late answer"}`, async () => {
     const clock = createFakeClock({ mode: "mocked" });
     using _timers = clock.install();
-    const fake = createFakeBot({ clock, server: { ticksPerSecond: 5 } });
+    const fake = createFakeBot({ clock, server: { ticksPerSecond: rate } });
     const world = flatWorld();
     const ledger = new ExpectedMutationLedger();
     const position = { x: 1, y: 63, z: 0 };
@@ -25,8 +25,10 @@ for (const stopped of [false, true]) {
     });
     receipt.markIssued();
     receipt.detach();
+    const age = fake.bot.time.age;
     if (stopped) fake.server.stop();
-    await clock.advance(stopped ? 30_000 : 15_000);
+    await clock.advance(stopped ? 30_000 : 75_000 / rate);
+    assert.equal(fake.bot.time.age - age, stopped ? 0 : 60);
     if (stopped) { fake.server.resume(); await clock.advance(4_000); }
     world.load(position, { stateId: 0 });
     assert.equal(ledger.classify({ position, before, after: world.blockAt(position.x, position.y, position.z), worldRevision: world.revision },

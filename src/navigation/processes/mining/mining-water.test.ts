@@ -74,12 +74,14 @@ test("water over the target and beside the cell over it is isolated with one blo
 
 for (const { rate, stopped, endMs } of [
   { rate: 20, stopped: false, endMs: 2_000 },
+  { rate: 10, stopped: false, endMs: 4_000 },
   { rate: 5, stopped: false, endMs: 8_000 },
   { rate: 5, stopped: true, endMs: 20_000 },
 ]) test(`removed water waits for 40 server ticks at ${rate} tps or 20 s of a stopped clock (${stopped})`, async () => {
   const { bot, world, clock, server } = wetSite({ "2,64,0": "water", "1,64,1": "water@3" }, rate);
   using _timers = clock.install();
   if (stopped) server.stop();
+  const placedAt = bot.time.age;
   bot.physicsEnabled = false; // no client tick comes: only the server's time packets move on
   let result: string | null | undefined;
   const clearing = clearMiningWater(bot, new Vec3(1, 64, 0), async (_bot, position) => {
@@ -93,7 +95,9 @@ for (const { rate, stopped, endMs } of [
   assert.equal(result, undefined, "still waiting for the second time packet");
   assert.equal(bot.blockAt(new Vec3(1, 64, 1))?.name, "water", "flow is given time to drain before plugging it");
   await clock.advance(50);
+  assert.equal(result, null, "the drain completes at its tick bound");
   await clearing;
+  assert.equal(bot.time.age, placedAt + (stopped ? 0 : 40));
   assert.equal(result, null);
   assert.equal(bot.blockAt(new Vec3(1, 64, 1))?.name, "cobblestone");
   assert.equal(bot.blockAt(new Vec3(2, 64, 0))?.name, "cobblestone");

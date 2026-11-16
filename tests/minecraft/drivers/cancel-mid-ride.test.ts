@@ -85,6 +85,41 @@ test("leaving the boat short of the far bank is read in the lane's frame", async
   assert.match(completion.detail ?? "", /the bot left the boat before the far bank/);
 });
 
+for (const stallAfterFirstWait of [false, true]) {
+  test(`a server stopped ${stallAfterFirstWait ? "after" : "before"} the first boat wait fails without a second ride`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const harness = createFakeBot({ clock, position: new Vec3(95, -60, 512.5),
+      entities: { [BOAT_ID]: { name: "oak_boat", position: new Vec3(95, -60, 512.5) } } });
+    const { bot, server } = harness;
+    bot.entity.vehicle = bot.entities[BOAT_ID]!;
+    let finishRide!: () => void;
+    let rides = 0;
+    const context = scenarioTestContext({
+      scenario: scenarioDefinitionSchema.parse({ params: PARAMS, goal: { kind: "completion" } }), arena: FRAME, bot,
+      call: async (action) => {
+        if (action === "cancel_foreground_action") {
+          finishRide();
+          if (stallAfterFirstWait) {
+            const initialAge = bot.time.age;
+            server.onTimePacket(() => { if (bot.time.age >= initialAge + 60) server.stop(); });
+          } else server.stop();
+          return { action, durationMs: 0, result: { status: "succeeded" }, summary: action };
+        }
+        rides += 1;
+        await new Promise<void>((resolve) => { finishRide = resolve; });
+        return { action, durationMs: 0, result: { status: "cancelled", error: "cancelled" }, summary: action };
+      },
+    });
+    const result = await clock.settle(run(context), 35_000);
+    assert.equal(result.status, "failed");
+    assert.match(result.detail ?? "", /the server's clock stood still/);
+    assert.equal(rides, 1);
+    assert.equal(bot.time.age, 24_000 + (stallAfterFirstWait ? 60 : 0));
+    assert.equal(clock.now(), stallAfterFirstWait ? 33_000 : 30_000);
+  });
+}
+
 test("the boat-ride scenario's own params are the ones the driver reads, and its first call is the navigate to the far land", async () => {
   const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../scenarios/pathfinder/boat-ride-cancelled-then-navigate.yaml");
   const { client: _launch, ...scenario } = await loadScenario(file);

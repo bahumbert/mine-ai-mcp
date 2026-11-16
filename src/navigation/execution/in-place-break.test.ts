@@ -119,9 +119,9 @@ test("cancelling an in-place dig stops the physical effect before releasing the 
   await rejected;
 });
 
-test("in-place column landing with a stopped clock fails; after resume the next in-place break clears it", async () => {
+for (const rate of [5, 10]) test(`in-place column landing with a stopped clock fails; after resume at ${rate} tps the next in-place break clears it`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
-  const fake = createFakeBot({ clock, server: { ticksPerSecond: 5 }, cells: {
+  const fake = createFakeBot({ clock, server: { ticksPerSecond: rate }, cells: {
     "0,66,0": "bedrock", "1,66,0": "bedrock",
     "2,65,0": "sand", "2,66,0": "sand", "2,67,0": "sand",
   } });
@@ -134,9 +134,11 @@ test("in-place column landing with a stopped clock fails; after resume the next 
     fake.world.setCell(cell, state);
     fake.bot._client.emit("block_change", { location: cell, type: fake.world.blockAt(cell)!.stateId });
   };
-  clock.after(1_000, () => { packet("air"); fake.server.stop(); });
+  let stoppedAge = 0;
+  clock.after(1_000, () => { packet("air"); stoppedAge = fake.bot.time.age; fake.server.stop(); });
   try {
     const first = await clock.settle(breakBlockInPlace({ bot, world }, options), 21_100, 25);
+    assert.equal(fake.bot.time.age, stoppedAge);
     assert.equal(first.status, "failed");
     assert.match(first.status === "failed" ? first.reason : "", /server clock stood still.*column/);
     fake.server.resume();

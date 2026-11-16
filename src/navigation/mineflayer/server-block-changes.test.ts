@@ -99,7 +99,7 @@ test("a 2 tps server behind schedule answers after two packets 10 500 ms apart",
   }
 });
 
-for (const { ticksPerSecond, boundMs } of [{ ticksPerSecond: 20, boundMs: 2_000 }, { ticksPerSecond: 2, boundMs: 20_000 }]) {
+for (const { ticksPerSecond, boundMs } of [{ ticksPerSecond: 20, boundMs: 2_000 }, { ticksPerSecond: 10, boundMs: 4_000 }, { ticksPerSecond: 2, boundMs: 20_000 }]) {
   test(`40 ticks with no answer at ${ticksPerSecond} tps gives up at the second jump, ignoring another cell`, async () => {
     const { bot, client, clock } = wire({ ticksPerSecond });
     const watch = watchServerChange(bot, CELL);

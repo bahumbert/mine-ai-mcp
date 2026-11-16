@@ -10,6 +10,7 @@ import { run } from "./ghost-air-resync.ts";
 test("the hold spans server ticks at 20 and 5 tps, judging airborne on samples and keeping the height check", async () => {
   for (const { rate, airborne, fall, status, samples } of [
     { rate: 20, airborne: Infinity, fall: 0, status: "succeeded", samples: 40 },
+    { rate: 10, airborne: Infinity, fall: 0, status: "succeeded", samples: 80 },
     { rate: 5, airborne: Infinity, fall: 0, status: "succeeded", samples: 160 },
     { rate: 5, airborne: 20, fall: 0, status: "failed", samples: 160 },
     { rate: 5, airborne: 80, fall: 0, status: "succeeded", samples: 160 },
@@ -18,6 +19,7 @@ test("the hold spans server ticks at 20 and 5 tps, judging airborne on samples a
     const clock = createFakeClock({ mode: "mocked" });
     using _timers = clock.install();
     const { bot } = createFakeBot({ clock, server: { ticksPerSecond: rate } });
+    const age = bot.time.age;
     let sampled = 0;
     let navigated = false;
     bot.on("physicsTick", () => { sampled += 1; });
@@ -36,6 +38,7 @@ test("the hold spans server ticks at 20 and 5 tps, judging airborne on samples a
     const result = await clock.settle(run(context), 8_100);
     assert.equal(result.status, status, JSON.stringify({ rate, airborne, fall, result }));
     assert.equal(sampled, samples, `sample count at ${rate} tps`);
+    assert.equal(bot.time.age - age, 40);
     assert.equal(navigated, status === "succeeded");
   }
 });

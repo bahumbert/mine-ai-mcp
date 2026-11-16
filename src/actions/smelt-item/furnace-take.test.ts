@@ -22,7 +22,7 @@ async function furnace(ticksPerSecond = 20, options: Parameters<typeof createFak
   return { ...harness, window };
 }
 
-for (const rate of [20, 5]) {
+for (const rate of [20, 10, 5]) {
   test(`accepted takes at ${rate} tps wait for 40 world ticks each, then release every witness listener`, async () => {
     const { bot, clock, window, server } = await furnace(rate, { carried: { iron_ingot: 3 } });
     using _installed = clock.install();
@@ -43,10 +43,10 @@ for (const rate of [20, 5]) {
         ages.push(take.sentAtAge!);
         let settled = false;
         const pending = answerTakes(bot, window, [take], answers).then((value) => { settled = true; return value; });
-        const minimum = rate === 5 ? 3_950 : 950;
+        const minimum = 20_000 / rate - 50;
         await clock.advance(minimum);
         assert.equal(settled, false, `${source} is still predicted at the low end minus 50 ms`);
-        const result = await clock.settle(pending, (rate === 5 ? 8_050 : 2_050) - minimum, 25);
+        const result = await clock.settle(pending, 40_000 / rate + 50 - minimum, 25);
         assert.ok(bot.time.age - take.sentAtAge! >= 40);
         assert.deepEqual([result.answer, result.errors, answers.corrected()], ["answered", [], false]);
         counts.push(result.counts[0]!);

@@ -21,10 +21,10 @@ import { createFakeBot, createFakeClock, flush } from "../../test-support/fake-b
 const LEAF = { x: 0, y: 64, z: 0 };
 const LEAF_SHAPE = [{ minX: 0, minY: 0.6875, minZ: 0, maxX: 1, maxY: 0.9375, maxZ: 1 }];
 
-test("a ten-tick ceiling break gets 300 server ticks for pin release", async () => {
+for (const rate of [5, 10]) test(`a ten-tick ceiling break gets 300 server ticks for pin release at ${rate} tps`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const fake = createFakeBot({ clock, server: { ticksPerSecond: 5 } });
+  const fake = createFakeBot({ clock, server: { ticksPerSecond: rate } });
   const world = heldWorld();
   const bot = Object.assign(new HeldBot(world), { worldAge: () => fake.bot.time.age });
   let finish!: () => void;
@@ -41,9 +41,13 @@ test("a ten-tick ceiling break gets 300 server ticks for pin release", async () 
   void run.handle.outcome.then(() => { settled = true; });
   try {
     await flush();
-    await clock.advance(59_975, 25);
+    const age = fake.bot.time.age;
+    await clock.advance(300_000 / rate - 25, 25);
     assert.equal(settled, false, "age +280 is within the pin-release budget");
+    assert.equal(fake.bot.time.age - age, 280);
     await clock.advance(50, 25);
+    assert.equal(fake.bot.time.age - age, 300);
+    assert.equal(settled, true, "pin release expires at the tick bound");
     const outcome = await run.handle.outcome;
     assert.equal(outcome.kind, "failed");
     assert.match(JSON.stringify(outcome), /expired/iu);

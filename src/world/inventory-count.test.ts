@@ -49,6 +49,7 @@ test("returns at once when the count is already the expected one", async () => {
 for (const { delayMs, ticksPerSecond } of [
   { delayMs: 100, ticksPerSecond: 20 },
   { delayMs: 600, ticksPerSecond: 20 },
+  { delayMs: 3_500, ticksPerSecond: 10 },
   { delayMs: 7_000, ticksPerSecond: 5 },
 ]) {
   test(`inventory answered at ${delayMs} ms at ${ticksPerSecond} tps is confirmed`, async () => {
@@ -60,7 +61,7 @@ for (const { delayMs, ticksPerSecond } of [
     const settled = await clock.settle(settleInventoryCount(bot, "cooked_beef", 1), delayMs + 50);
 
     assert.deepEqual(settled, { count: 1, confirmed: true });
-    if (delayMs < 1_000) assert.equal(bot.time.age, age, "only the answer ended the wait");
+    assert.equal(bot.time.age - age, delayMs < 1_000 ? 0 : 20);
   });
 }
 

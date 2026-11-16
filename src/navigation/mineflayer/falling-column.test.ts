@@ -84,7 +84,7 @@ test("removal and landing packets between looks are retained separately", async 
   assert.equal(run.world.blockAt(CELL)?.stateId, 0);
 });
 
-for (const ticksPerSecond of [5, 20]) {
+for (const ticksPerSecond of [5, 10, 20]) {
   test(`no landing waits 40 world ticks at ${ticksPerSecond} tps`, async () => {
     const run = column(ticksPerSecond, 1);
     using _clock = run.clock.install();

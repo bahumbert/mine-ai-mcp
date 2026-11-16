@@ -143,6 +143,7 @@ for (const [index, scenario] of [
   { rate: 5, changes: [3, 5], stop: null, ms: 8_000, age: 24_040, ended: "quiet" },
   { rate: 5, changes: [30], stop: null, ms: 12_000, age: 24_060, ended: "quiet" },
   { rate: 20, changes: [3, 5], stop: null, ms: 2_000, age: 24_040, ended: "quiet" },
+  { rate: 10, changes: [39, 60], stop: null, ms: 10_000, age: 24_100, ended: "timeout" },
   { rate: 5, changes: [3, 5], stop: 2_000, ms: 21_000, age: 24_000, ended: "stalled" },
   { rate: 5, changes: [3, 5], stop: 5_000, ms: 24_000, age: 24_020, ended: "stalled" },
 ].entries()) {
@@ -174,10 +175,10 @@ for (const [index, scenario] of [
   });
 }
 
-test("formations changing every server tick time out at age +100 (20 s at five tps)", async () => {
+for (const rate of [5, 10]) test(`formations changing every server tick time out at age +100 at ${rate} tps`, async () => {
   const cells: Record<string, string> = {};
   for (let x = -5; x < 5; x += 1) for (let z = -5; z < 5; z += 1) cells[`${x},0,${z}`] = "lava";
-  const { bot, world, clock, server } = createFakeBot({ cells, groundY: null, server: { ticksPerSecond: 5 } });
+  const { bot, world, clock, server } = createFakeBot({ cells, groundY: null, server: { ticksPerSecond: rate } });
   const watch = watchFormations(bot, cell(0, 0, 0));
   const wet = watch.cells.filter((position) => bot.blockAt(position)?.name === "lava");
   let tick = 0;
@@ -185,9 +186,9 @@ test("formations changing every server tick time out at age +100 (20 s at five t
     const position = wet[tick++];
     if (position) world.setCell(position, "obsidian");
   });
-  const result = await clock.settle(settleFormations(bot, watch, undefined, clock), 21_000);
+  const result = await clock.settle(settleFormations(bot, watch, undefined, clock), 100_000 / rate + 1_000);
   assert.deepEqual(result, { formed: { obsidian: 100 }, ended: "timeout" });
-  assert.equal(clock.now(), 20_000);
+  assert.equal(clock.now(), 100_000 / rate);
   assert.equal(bot.time.age, 24_100);
 });
 

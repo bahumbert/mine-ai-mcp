@@ -26,6 +26,7 @@ function deadlineOnServer(ticks: number, options: FakeBotOptions = {}) {
 test("a server-tick deadline follows the packet's world age at slow and on-time rates", async () => {
   for (const { ticks, server, beforeMs, passedMs, elapsedTicks } of [
     { ticks: 100, server: { ticksPerSecond: 5 }, beforeMs: 16_000, passedMs: 20_000, elapsedTicks: 100 },
+    { ticks: 100, server: { ticksPerSecond: 10 }, beforeMs: 8_000, passedMs: 10_000, elapsedTicks: 100 },
     { ticks: 100, server: {}, beforeMs: 4_900, passedMs: 5_000, elapsedTicks: 100 },
     { ticks: 100, server: { phaseMs: 900 }, beforeMs: 4_050, passedMs: 4_900, elapsedTicks: 100 },
     { ticks: 110, server: {}, beforeMs: 5_999, passedMs: 6_000, elapsedTicks: 120 },
