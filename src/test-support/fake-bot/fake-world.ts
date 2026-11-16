@@ -1,6 +1,7 @@
 /** The fake bot's world: named cells as real Prismarine blocks of one version, so shapes and states are the game's. */
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
+import type { NBT } from "prismarine-nbt";
 import { Vec3 } from "vec3";
 import { blockClass, type MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { DEFAULT_MINECRAFT_VERSION } from "../../server/config.js";
@@ -10,6 +11,7 @@ import {
   type ChunkCoords,
   type DimensionRange,
   type FakeColumn,
+  type FakeColumns,
   type ListedColumn,
   VOID,
   assertWithinRange,
@@ -26,7 +28,7 @@ import { createFakeWorldLight, giveBlockItsLight } from "./fake-world-light.js";
 export type FakeCell =
   | string
   | number
-  | { readonly name: string; readonly properties: Readonly<Record<string, string | number | boolean>> };
+  | { readonly name: string; readonly properties: Readonly<Record<string, string | number | boolean>>; readonly entity?: NBT };
 
 export interface FakeWorldOptions {
   /** `"x,y,z"` to the block there; every other cell is air, or stone at and below `groundY`. */
@@ -132,6 +134,26 @@ function registryOf(version: string): Bot["registry"] {
 // before it, and this read (0.45-0.53 s unloaded) is 8 s in a first test at load average 28 (quiet-machine plan Q7).
 chunkClassOf(registryOf(DEFAULT_MINECRAFT_VERSION));
 
+/** The entities supplied with the initially loaded cells. */
+function initialEntities(cells: Readonly<Record<string, FakeCell>>): Map<string, NBT> {
+  const entities = new Map<string, NBT>();
+  for (const [key, cell] of Object.entries(cells)) if (typeof cell === "object" && cell.entity) entities.set(key, cell.entity);
+  return entities;
+}
+
+/** Replace the entity along with its cell's block. */
+function setCellEntity(entities: Map<string, NBT>, columns: FakeColumns, cell: Vec3, block: FakeCell): void {
+  if (typeof block === "object" && block.entity) entities.set(cellKey(cell), block.entity);
+  else entities.delete(cellKey(cell));
+  columns.setEntity(cell, typeof block === "object" ? block.entity : undefined);
+}
+
+/** Read the column's authoritative entity once built, otherwise the staged entity. */
+function cellEntity(entities: Map<string, NBT>, columns: FakeColumns, cell: Vec3): NBT | null {
+  const entity = columns.entityAt(cell);
+  return entity === undefined ? entities.get(cellKey(cell)) ?? null : entity;
+}
+
 export function createFakeWorld(version: string, options: FakeWorldOptions = {}): FakeWorld {
   const registry = registryOf(version);
   const Block = blockClass({ registry } as Parameters<typeof blockClass>[0]);
@@ -139,11 +161,12 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
   const stone = registry.blocksByName.stone!.defaultState!;
   const air = registry.blocksByName.air!.defaultState!;
   const cells = createChunkedCells();
+  const entities = initialEntities(options.cells ?? {});
   for (const [key, cell] of Object.entries(options.cells ?? {})) cells.set(key, stateIdOf(registry, Block, cell));
   const sinks = new Set<BlockUpdateSink>();
   const range = lazyRange(registry, options.heights, cells);
   const loaded = createLoadedChunks({ feet: options.feet ?? { x: 0, z: 0 }, loadedColumns: options.loadedColumns, namedChunks: cells.chunksOfBlocks() });
-  const columns = createFakeColumns(registry, loaded, { range, groundY, groundStateId: stone, namedCells: cells.inChunk });
+  const columns = createFakeColumns(registry, loaded, { range, groundY, groundStateId: stone, namedCells: cells.inChunk, entityAt: (x, y, z) => entities.get(`${x},${y},${z}`) });
 
   // Where the server sent no chunk the cell is VOID; past the dimension's floor and height the game keeps nothing: air.
   const stateAtXYZ = (x: number, y: number, z: number): CellState => {
@@ -158,6 +181,7 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
   const placed = (stateId: number, cell: Vec3) => {
     const block = Block.fromStateId(stateId, 0);
     block.position = cell.floored();
+    block.entity = cellEntity(entities, columns, cell);
     giveBlockItsLight(block, stateId, worldLight);
     return block;
   };
@@ -184,6 +208,7 @@ export function createFakeWorld(version: string, options: FakeWorldOptions = {})
       const state = stateIdOf(registry, Block, block);
       assertWithinRange(range(), cellKey(cell));
       cells.set(cellKey(cell), state);
+      setCellEntity(entities, columns, cell, block);
       worldLight.cellChanged();
       // The server had not sent this chunk; a test that sets a block in it is staging a chunk it did send, with its event
       // (`worldsync.js` `setColumn` emits `chunkColumnLoad` at the column's corner, which Mineflayer forwards to the bot).

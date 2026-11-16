@@ -4,6 +4,7 @@ import test from "node:test";
 import minecraftData from "minecraft-data";
 import { Vec3 } from "vec3";
 import { createFakeWorld } from "./fake-world.js";
+import { createFakeBot } from "./fake-bot.js";
 
 const VERSION = "1.21.4";
 const registry = minecraftData(VERSION);
@@ -17,6 +18,41 @@ function registryShapes(name: string, stateId: number): number[][] {
 }
 
 const at = (x: number, y: number, z: number) => new Vec3(x, y, z);
+
+test("a block entity reads through getSignText and replacing the cell clears it", () => {
+  const cell = at(0, 64, 0);
+  const { bot, world } = createFakeBot({ cells: { "0,64,0": "oak_sign" } });
+  const sign = bot.blockAt(cell)!;
+  sign.setSignText("front\ntwo\n\n", "back\n\n\n");
+  world.setCell(cell, { name: "oak_sign", properties: {}, entity: sign.entity! });
+  assert.deepEqual(bot.blockAt(cell)!.getSignText(), ["front\ntwo\n\n", "back\n\n\n"]);
+  world.setCell(cell, "stone");
+  world.setCell(cell, "oak_sign");
+  assert.equal(bot.blockAt(cell)!.entity, null);
+});
+
+test("initial and updated sign entities share the chunk column, including negative chunks", () => {
+  const seed = createFakeBot({ cells: { "0,64,0": "oak_sign" } });
+  const sign = seed.bot.blockAt(at(0, 64, 0))!;
+  sign.setSignText("front\n\n\n", "back\n\n\n");
+  const fixture = { name: "oak_sign", properties: {}, entity: sign.entity! };
+  for (const x of [0, -17]) {
+    const cell = at(x, 64, 0);
+    for (const initial of [true, false]) {
+      const { bot, world } = createFakeBot({ cells: { [`${x},64,0`]: initial ? fixture : "oak_sign" } });
+      const column = world.getColumn(x >> 4, 0)!;
+      if (!initial) world.setCell(cell, fixture);
+      const local = at(x & 15, 64, 0);
+      assert.deepEqual(column.getBlock(local).getSignText(), bot.blockAt(cell)!.getSignText());
+      const revised = column.getBlock(local);
+      revised.setSignText("revised\n\n\n", "back\n\n\n");
+      column.setBlockEntity(local, revised.entity!);
+      assert.equal(bot.blockAt(cell)!.getSignText()[0], "revised\n\n\n");
+      world.setCell(cell, "stone");
+      assert.equal(column.getBlock(local).entity ?? null, null);
+    }
+  }
+});
 
 test("thin blocks have the game's shapes: carpet, single snow layer, fence and slab", () => {
   const world = createFakeWorld(VERSION, {

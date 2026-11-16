@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { type MineflayerBlock, blockClass } from "../../navigation/mineflayer/world.js";
+import { hasItemFamily, signBlockFor } from "../../world/item-families.js";
 import type { FakeBot } from "./fake-bot.js";
 import { FACE_VECTORS } from "./fake-bot-look.js";
 import type { FakeClock } from "./fake-clock.js";
@@ -200,6 +201,15 @@ function blockWith(bot: FakeBot, name: string, states: Record<string, string>): 
 
 /** The cells a held block item fills at `destination`: a slab or stair in the half the click was in, a bed whole, any other block in its default state. */
 function placedCells(bot: FakeBot, name: string, destination: Vec3, face: Vec3, cursorY: number): PlacedCell[] {
+  if (hasItemFamily(bot, name, "sign")) {
+    // Underside refusal is unmeasured; T1 measured top and side only (2026-11-15).
+    if (face.y < 0) return [];
+    const block = signBlockFor(bot, name, face.y > 0 ? "ground" : "wall");
+    if (block === null) return [];
+    const facing = face.x > 0 ? "east" : face.x < 0 ? "west" : face.z > 0 ? "south" : "north";
+    const rotation = String(((Math.round(-bot.entity.yaw * 8 / Math.PI) % 16) + 16) % 16);
+    return [{ cell: destination, block: blockWith(bot, block, face.y > 0 ? { rotation } : { facing }) }];
+  }
   if (name.endsWith("_slab")) return [{ cell: destination, block: blockWith(bot, name, { type: halfClicked(face, cursorY) }) }];
   if (name.endsWith("_stairs")) return [{ cell: destination, block: blockWith(bot, name, { half: halfClicked(face, cursorY) }) }];
   if (name.endsWith("_bed")) {

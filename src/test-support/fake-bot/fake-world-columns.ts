@@ -4,6 +4,8 @@
  */
 import { createRequire } from "node:module";
 import type { Bot } from "mineflayer";
+import type { NBT } from "prismarine-nbt";
+import type { MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import { Vec3 } from "vec3";
 
 const require = createRequire(import.meta.url);
@@ -34,6 +36,10 @@ export interface FakeColumn {
   readonly maxBitsPerBlock: number;
   getBlockStateId(position: Vec3): number;
   setBlockStateId(position: Vec3, stateId: number): void;
+  getBlock(position: Vec3): MineflayerBlock;
+  getBlockEntity(position: Vec3): NBT | null;
+  setBlockEntity(position: Vec3, entity: NBT): void;
+  removeBlockEntity(position: Vec3): void;
 }
 
 /** A column as `WorldSync.getColumns` lists it: `Object.entries` of the column map, so the coordinates are strings. */
@@ -104,6 +110,7 @@ export interface ColumnContent {
   readonly groundY: number | null;
   readonly groundStateId: number;
   namedCells(chunkX: number, chunkZ: number): Iterable<ColumnCell>;
+  entityAt(x: number, y: number, z: number): NBT | undefined;
 }
 
 /** The fake's columns, built on first use and then changed in place by `setCell`, as `WorldSync` changes the column it stores. */
@@ -112,6 +119,8 @@ export interface FakeColumns {
   getColumns(): ListedColumn[];
   /** A cell changed: the built column of its chunk, if any, holds the new state (a `VOID` cell as air). */
   setBlockStateId(x: number, y: number, z: number, stateId: number): void;
+  entityAt(cell: Vec3): NBT | null | undefined;
+  setEntity(cell: Vec3, entity: NBT | undefined): void;
 }
 
 const SECTION_HEIGHT = 16;
@@ -149,6 +158,8 @@ function buildColumn(Chunk: ChunkClass, content: ColumnContent, chunkX: number, 
   const cursor = new Vec3(0, 0, 0);
   for (const [x, y, z, stateId] of content.namedCells(chunkX, chunkZ)) {
     column.setBlockStateId(cursor.set(x & 15, y, z & 15), stateId);
+    const entity = content.entityAt(x, y, z);
+    if (entity) column.setBlockEntity(cursor, entity);
   }
   return column;
 }
@@ -183,6 +194,16 @@ export function createFakeColumns(registry: Bot["registry"], loaded: LoadedChunk
     getColumns: () => loaded.list().map(([chunkX, chunkZ]) => ({ chunkX: String(chunkX), chunkZ: String(chunkZ), column: getColumn(chunkX, chunkZ)! })),
     setBlockStateId(x, y, z, stateId) {
       built.get(chunkKeyOf(chunkIndexOf(x), chunkIndexOf(z)))?.setBlockStateId(new Vec3(x & 15, y, z & 15), stateId);
+    },
+    entityAt(cell) {
+      const column = built.get(chunkKeyOf(chunkIndexOf(cell.x), chunkIndexOf(cell.z)));
+      return column === undefined ? undefined : column.getBlockEntity(new Vec3(Math.floor(cell.x) & 15, Math.floor(cell.y), Math.floor(cell.z) & 15)) ?? null;
+    },
+    setEntity(cell, entity) {
+      const column = built.get(chunkKeyOf(chunkIndexOf(cell.x), chunkIndexOf(cell.z)));
+      const local = new Vec3(Math.floor(cell.x) & 15, Math.floor(cell.y), Math.floor(cell.z) & 15);
+      if (entity) column?.setBlockEntity(local, entity);
+      else column?.removeBlockEntity(local);
     },
   };
 }
