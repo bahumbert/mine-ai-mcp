@@ -130,8 +130,11 @@ interface TendState {
   readonly seedFor: Map<string, string>;
   /** Items the server refused at two different cells with no planting of them between: not tried again this request. */
   readonly unplantable: Set<string>;
-  /** Per item, the cells (by "x,z") where the server answered "nothing grew" since the item last planted: a set, so a cell refused again in a resumed attempt counts once. */
-  readonly refusedAt: Map<string, Set<string>>;
+  /** Per item and cell (by "x,z"), the last refusal's attempt sequence: one place still counts once across resumes. */
+  readonly refusedAt: Map<string, Map<string, number>>;
+  plantSeq: number;
+  /** Unanswered plantings kept across attempts, until a crop is seen or the empty cell is tried again. */
+  readonly pendingPlants: Map<string, { item: string; seq: number; cell: TendCell }>;
   skipped: Record<string, TendCell[]>;
   settled: Set<string>;
   dropsLeft: readonly string[];
@@ -203,6 +206,8 @@ export function beginTendPlot(
     seedFor: new Map(),
     unplantable: new Set(),
     refusedAt: new Map(),
+    plantSeq: 0,
+    pendingPlants: new Map(),
     skipped: {},
     settled: new Set(),
     dropsLeft: [],
@@ -315,23 +320,33 @@ async function plantingPass(a: TendAttempt): Promise<string | null> {
   try {
     return await plantCells(a);
   } finally {
-    countLatePlants(a);
+    reconcilePending(a);
   }
 }
 
-/** A seed whose answer came after the wait still grew: each cell skipped as not confirmed is read again, and a crop standing there counts as planted. */
-function countLatePlants(a: TendAttempt): void {
+/** Count an observed planting and discard only the refusals older than that use, even when its answer arrived late. */
+function plantSucceeded(state: TendState, item: string, seq: number): void {
+  state.counts.planted += 1;
+  const refusals = state.refusedAt.get(item);
+  if (refusals !== undefined) {
+    for (const [key, refusedSeq] of refusals) if (refusedSeq < seq) refusals.delete(key);
+  }
+  if ((refusals?.size ?? 0) < REFUSALS_TO_SWITCH_OFF) state.unplantable.delete(item);
+  report(state);
+}
+
+/** A pending use whose crop now stands counts once, and no longer leaves the cell skipped as not confirmed. */
+function reconcilePending(a: TendAttempt): void {
   const { state, body } = a;
-  const unconfirmed = state.skipped[PLANT_NOT_CONFIRMED];
-  if (unconfirmed === undefined) return;
-  const stillEmpty = unconfirmed.filter((cell) => {
+  for (const [key, { item, seq, cell }] of state.pendingPlants) {
     const above = body.read(cell.x, state.request.y + 1, cell.z);
-    return above === null || state.facts.isRipe(above) === null;
-  });
-  state.counts.planted += unconfirmed.length - stillEmpty.length;
-  if (stillEmpty.length === 0) delete state.skipped[PLANT_NOT_CONFIRMED];
-  else state.skipped[PLANT_NOT_CONFIRMED] = stillEmpty;
-  if (stillEmpty.length < unconfirmed.length) report(state);
+    if (above === null || state.facts.isRipe(above) === null) continue;
+    plantSucceeded(state, item, seq);
+    state.pendingPlants.delete(key);
+    const stillEmpty = state.skipped[PLANT_NOT_CONFIRMED]?.filter((skipped) => cellKey(skipped) !== key);
+    if (stillEmpty?.length) state.skipped[PLANT_NOT_CONFIRMED] = stillEmpty;
+    else delete state.skipped[PLANT_NOT_CONFIRMED];
+  }
 }
 
 async function plantCells(a: TendAttempt): Promise<string | null> {
@@ -410,18 +425,18 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
       why = `no ${item} left`;
       continue;
     }
+    const seq = ++state.plantSeq;
+    state.pendingPlants.delete(cellKey(cell));
     let failed: PlantFailure | null;
     try {
       failed = await body.plant(soilOf(state, cell), item);
     } catch (error) {
       const above = body.read(cell.x, state.request.y + 1, cell.z);
-      if (above !== null && state.facts.isRipe(above) !== null) state.counts.planted += 1;
+      if (above !== null && state.facts.isRipe(above) !== null) plantSucceeded(state, item, seq);
       throw error;
     }
     if (failed === null) {
-      state.refusedAt.delete(item);
-      state.counts.planted += 1;
-      report(state);
+      plantSucceeded(state, item, seq);
       return null;
     }
     if (failed.kind === "none carried") {
@@ -430,17 +445,22 @@ async function plantOne(a: TendAttempt, cell: TendCell): Promise<string | null> 
     }
     // An error or an unanswered use teaches nothing and tries no other item on this cell: only the server's answer does.
     if (failed.kind === "error") return `plant failed: ${failed.error}`;
-    if (failed.kind === "unconfirmed") return PLANT_NOT_CONFIRMED;
-    why = noteRefusal(state, item, cell);
+    if (failed.kind === "unconfirmed") {
+      state.pendingPlants.set(cellKey(cell), { item, seq, cell });
+      return PLANT_NOT_CONFIRMED;
+    }
+    why = noteRefusal(a, item, cell, seq);
   }
   // Every item is off (a till cell was tilled before this): the cell is reported, never left with no reason.
   return why ?? (state.request.plant === null ? null : `${state.request.plant} cannot be planted`);
 }
 
 /** The server answered that `item` grew nothing at `cell`: at two different cells the item is off for the request. Returns the skip reason. */
-function noteRefusal(state: TendState, item: string, cell: TendCell): string {
-  const cells = state.refusedAt.get(item) ?? new Set<string>();
-  state.refusedAt.set(item, cells.add(cellKey(cell)));
+function noteRefusal(a: TendAttempt, item: string, cell: TendCell, seq: number): string {
+  reconcilePending(a);
+  const { state } = a;
+  const cells = state.refusedAt.get(item) ?? new Map<string, number>();
+  state.refusedAt.set(item, cells.set(cellKey(cell), seq));
   if (cells.size < REFUSALS_TO_SWITCH_OFF) return DID_NOT_TAKE(item);
   state.unplantable.add(item);
   return `${item} cannot be planted`;

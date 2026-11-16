@@ -323,6 +323,79 @@ test("a planted cell between two refusals clears the record", async () => {
   assert.deepEqual(evidence.skipped, { "wheat_seeds did not take": [{ x: 0, z: 0 }, { x: 2, z: 0 }] });
 });
 
+test("a late planting between two refusals clears the record before the second refusal", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 4);
+  farm.plantRefusedAt = new Set(["0,0", "2,0"]);
+  farm.plantUnconfirmed = new Set(["1,0"]);
+  const { evidence } = await tendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+  assert.equal(evidence.planted, 2, "late success must clear refusal history");
+  assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0", "plant wheat_seeds 2,0", "plant wheat_seeds 3,0"]);
+  assert.deepEqual(evidence.skipped, { "wheat_seeds did not take": [{ x: 0, z: 0 }, { x: 2, z: 0 }] });
+});
+
+test("a planting seen after a throw or late across a cut clears older refusals and counts once on resume", async () => {
+  for (const late of [false, true]) {
+    const row = late ? "late planting crossing a cut" : "planting seen when plant threw";
+    const farm = new FakeFarm();
+    for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+    farm.inventory.set("wheat_seeds", 5);
+    farm.plantRefusedAt = new Set(["0,0", "2,0"]);
+    if (late) {
+      farm.plantUnconfirmed = new Set(["1,0"]);
+      cutBefore(farm, "reach", 3);
+    } else cutAfter(farm, "plant", 2);
+    const run = beginTendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+    await assert.rejects(run.attempt(farm), /HUNGER/, row);
+    const { evidence } = await run.attempt(farm);
+    assert.equal(evidence.planted, 1, `${row}: the planting at x=1 is counted once`);
+    assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0", "plant wheat_seeds 0,0", "plant wheat_seeds 2,0"], row);
+    assert.deepEqual(evidence.skipped, {
+      "wheat_seeds did not take": [{ x: 0, z: 0 }],
+      growing: [{ x: 1, z: 0 }],
+      "wheat_seeds cannot be planted": [{ x: 2, z: 0 }, { x: 3, z: 0 }],
+    }, row);
+  }
+});
+
+test("a refusal after a planting is kept", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 4);
+  farm.plantRefusedAt = new Set(["1,0", "2,0"]);
+  const { evidence } = await tendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+  assert.equal(evidence.planted, 1);
+  assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0", "plant wheat_seeds 2,0"]);
+  assert.deepEqual(evidence.skipped, {
+    "wheat_seeds did not take": [{ x: 1, z: 0 }],
+    "wheat_seeds cannot be planted": [{ x: 2, z: 0 }, { x: 3, z: 0 }],
+  });
+});
+
+test("a late planting preserves refusals newer than its use across resume", async () => {
+  const farm = new FakeFarm();
+  for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
+  farm.inventory.set("wheat_seeds", 5);
+  // Artificial unanswered/refused outcomes remain the N02 unmeasured stopgaps (step D review, 2026-11-16).
+  farm.plantSilent.add("0,0");
+  farm.plantRefusedAt = new Set(["1,0", "2,0"]);
+  cutBefore(farm, "reach", 3);
+  const run = beginTendPlot(plot({ x2: 3, plant: "wheat_seeds" }), farm, PLOT_FACTS);
+  await assert.rejects(run.attempt(farm), /HUNGER/);
+  farm.set(0, 0, "farmland", "wheat", 0);
+  farm.inventory.set("wheat_seeds", 4);
+  farm.unreachable.add("1,0");
+  const { evidence } = await run.attempt(farm);
+  assert.equal(evidence.planted, 1, "late confirmation must keep newer refusals");
+  assert.deepEqual(plantCalls(farm), ["plant wheat_seeds 0,0", "plant wheat_seeds 1,0", "plant wheat_seeds 2,0"]);
+  assert.deepEqual(evidence.skipped, {
+    growing: [{ x: 0, z: 0 }],
+    "unreachable: no route": [{ x: 1, z: 0 }],
+    "wheat_seeds cannot be planted": [{ x: 2, z: 0 }, { x: 3, z: 0 }],
+  });
+});
+
 test("a seed refused at two cells in a row is not tried again", async () => {
   const farm = new FakeFarm();
   for (const x of [0, 1, 2, 3]) farm.set(x, 0, "farmland");
