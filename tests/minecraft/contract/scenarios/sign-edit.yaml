@@ -28,6 +28,9 @@ players:
 goal:
   kind: all
   timeout: 240
+  # Six passing 10/20-tps trials: longest stationary span 2009 ticks; twice,
+  # rounded up to 20, for this stationary check.
+  stillTicks: 4020
   goals:
     - kind: completion
       who: Actor

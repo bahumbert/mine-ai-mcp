@@ -17,6 +17,7 @@ import { type FakeEntities, attachFakeItems, createFakeEntities } from "./fake-b
 import { attachFakeLavaFlow } from "./fake-bot-lava-flow.js";
 import { attachFakePhysics } from "./fake-bot-physics.js";
 import { type PlaceBlockWithOptions, attachFakePlacement } from "./fake-bot-placement.js";
+import { type FakeSignsOptions, attachFakeSigns } from "./fake-bot-signs.js";
 import { attachFakePlugins, offlineUuidOf } from "./fake-bot-plugins.js";
 import { type FakePlayerSpec, attachFakeSleep, playersOf } from "./fake-bot-sleep.js";
 import { attachFakeUse } from "./fake-bot-use.js";
@@ -89,6 +90,8 @@ export interface FakeBotOptions {
   readonly server?: Omit<FakeServerOptions, "lagMs">;
   /** How the server answers a whisper (`fake-bot-chat.ts`). */
   readonly chat?: FakeChatOptions;
+  /** Control the fake sign editor's answer. */
+  readonly signs?: FakeSignsOptions;
   /** Move the body by Mineflayer's own physics engine each tick (gravity, water, jumping); off by default. */
   readonly simulatePhysics?: boolean;
   /** Methods a test replaces (a scripted `tossStack` failure). */
@@ -230,7 +233,8 @@ export function createFakeBot(options: FakeBotOptions = {}): FakeHarness {
   const windows = attachFakeWindows(bot, { server, world, inventory, containers: options.containers ?? {}, spawn: serverEntities.spawn });
   attachFakeUse(bot, { server, world, inventory, entities });
   attachFakeItems(bot, { server, world, inventory, spawn: serverEntities.spawn });
-  attachFakePlacement(bot, { clock, server, world, inventory, windows });
+  const signs = attachFakeSigns(bot, server, world, options.signs);
+  attachFakePlacement(bot, { clock, server, world, inventory, windows, signs });
   const combat = attachFakeCombat(bot, { server, inventory, entities: serverEntities, swing });
   attachFakeLavaFlow({ server, world });
   attachFakeFire(bot, server);

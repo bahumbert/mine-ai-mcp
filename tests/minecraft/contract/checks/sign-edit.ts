@@ -132,7 +132,6 @@ export const signEdit: ContractCheck = {
   name: "sign-edit",
   fixture: { cells: { "2,-60,0": "stone", "2,-59,0": "stone" }, carried: { oak_sign: 4 }, position: [0.5, -60, 0.5] },
   withoutRuntime: true,
-  waitsForFake: "T2b: the fake has no sign editor yet",
   async run(subject) {
     const { bot } = subject;
     const north = subject.world([0, -60, -2]);
@@ -165,6 +164,11 @@ export const signEdit: ContractCheck = {
     log.push(`blank empty click: ${await measure(subject, () => emptyClick(subject, wall))}`);
     log.push(`blank empty write: ${await measure(subject, () => bot.updateSign(bot.blockAt(wall)!, "empty blank"))}; ${signAt(subject, wall)}`);
     log.push(`reload: ${await reload(subject, north)}`);
+    // Real 1.21.4 server, 2026-11-16: 3/3 at both 10 and 20 tps. Placement
+    // opens the front editor before slot 36; clicks reopen it, writes update the
+    // entity, and a second write without reopening is silent (40-tick gap at
+    // 10 tps). Raw 45/46-character lines survived; reload first lacked the
+    // entity, then delivered the saved front text. The server maximum is unknown.
     const placement = ["block_change", "open_sign_entity front=true", "block_change", "block_change", "block_change", "tile_entity_data", "set_slot slot=36", "acknowledge_player_digging"];
     const clickAnswer = ["block_change", "open_sign_entity front=true", "block_change", "block_change", "acknowledge_player_digging"];
     const editAnswer = ["block_change", "tile_entity_data"];
