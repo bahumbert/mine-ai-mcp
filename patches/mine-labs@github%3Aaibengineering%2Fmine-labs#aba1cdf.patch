@@ -606,6 +606,27 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
 +function snbtString(text: string): string {
 +  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 +}
+diff --git a/src/scenario/goal-schema.ts b/src/scenario/goal-schema.ts
+index 1d07d4d379277d1e78b0806753744dccf6c46826..88c751e7eb61dda32eb930ab97c7d123a66be715 100644
+--- a/src/scenario/goal-schema.ts
++++ b/src/scenario/goal-schema.ts
+@@ -8,7 +8,7 @@
+  * types keep coming straight from their own schemas instead of being manually
+  * restated.
+  *
+- * One asymmetry is deliberate: `timeout` exists only on the root goal. A nested
++ * One asymmetry is deliberate: `timeout` and `stillTicks` exist only on the root goal. A nested
+  * condition with its own deadline would make the trial's overall time
+  * ambiguous, so nesting decides *what* is measured and only the root decides
+  * how long it is allowed to take.
+@@ -140,6 +140,7 @@ const goalConditionSchema: z.ZodType<GoalCondition> = z.discriminatedUnion("kind
+ 
+ const rootGoalFields = {
+   timeout: z.number().positive().optional(),
++  stillTicks: z.number().int().positive().optional(),
+ };
+ 
+ /** A recursive goal condition plus the runner timeout for settling the whole trial. */
 diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
 index d7a0ad6fef9ea04eb8c4d3b7b74e33a33e653b5f..5cc33fe331c32b3a99d1c2b808db9561f0bdfa76 100644
 --- a/src/scenario/schema.ts
@@ -1027,7 +1048,7 @@ index 1972e636589472673c03c9c035b25b3f8b235fc7..7bc46aeb2fc86c598df952304abd5739
    const server = {
      worldDir: join(root, "world"), host: "127.0.0.1", operatorNames: [], gamePort: 12345,
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5bcff5b43b 100644
+index 2465cf9c9b2f22c55e754543ec34d44f60b11202..66f5d9c06e6db7aa101c0174fe33de0f60d87b1f 100644
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
 @@ -31,16 +31,16 @@ import {
@@ -1209,7 +1230,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
      });
      await server.rcon.preparePlayerMetrics(player.name);
      if (player.pos) await delay(300);
-@@ -349,77 +398,222 @@ interface GoalSettlement {
+@@ -349,77 +398,234 @@ interface GoalSettlement {
    log: string;
  }
  
@@ -1248,7 +1269,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
 +  }
 +}
 +
-+/** Observe progress without changing the verdict or stopping a still goal; sample positions once per game second. */
++/** Observe goal and block-position changes; sample positions once per game second. */
 +async function recordGoalProgress(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): Promise<void> {
 +  if (clock.tick === undefined || options.signal?.aborted) return;
 +  if (progress.sampledAt === undefined || clock.tick - progress.sampledAt >= 20) {
@@ -1266,6 +1287,16 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
 +
 +// Two server time packets cover an answer after a send: src/world/world-age.ts:73-74 (scenario-ticks T4, 2026-11-15).
 +const COMPLETION_SETTLE_TICKS = 40;
++
++// Twice Task 7's longest passing span without an override (258 ticks), rounded up to 20 (2026-11-16).
++const STILL_TICKS_DEFAULT = 520;
++
++/** Fail a pending goal only after a full window of observed game time without progress. */
++function stillGoal(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): GoalSettlement | null {
++  const stillTicks = options.scenario.goal.stillTicks ?? STILL_TICKS_DEFAULT;
++  if (clock.tick === undefined || progress.changedAt === undefined || clock.tick - progress.changedAt < stillTicks) return null;
++  return { outcome: "fail", goal, log: `no progress for ${stillTicks} game ticks: ${goal.detail}` };
++}
 +
 +/** Cancellation takes priority even when it arrives during an RCON read. */
 +function cancelledGoal(signal: AbortSignal | undefined): GoalSettlement | null {
@@ -1465,13 +1496,15 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
 -        goal: settled,
 -        log: `goal not satisfied on client completion: ${settled.detail}`,
 -      };
--    }
--    if (Date.now() > deadline) {
--      return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s: ${goal.detail}` };
 +      const stopped = stoppedGoalClock(clock, now(), stallMs, goal);
 +      if (stopped) return stopped;
++      const still = stillGoal(options, progress, clock, goal);
++      if (still) return still;
 +      await sleep(GOAL_POLL_MS);
      }
+-    if (Date.now() > deadline) {
+-      return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s: ${goal.detail}` };
+-    }
 -    await delay(GOAL_POLL_MS);
 +  } finally {
 +    const tick = clock.tick ?? 0;
@@ -1480,7 +1513,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
    }
  }
  
-@@ -443,9 +637,10 @@ async function snapshotArena(
+@@ -443,9 +649,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -1492,7 +1525,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +650,7 @@ async function snapshotArena(
+@@ -455,7 +662,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -1501,7 +1534,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
    }
  }
  
-@@ -465,15 +660,22 @@ async function clearScenario(
+@@ -465,15 +672,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -1529,7 +1562,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +687,8 @@ async function clearScenario(
+@@ -485,7 +699,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -1539,7 +1572,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -496,40 +699,100 @@ async function clearScenario(
+@@ -496,40 +711,100 @@ async function clearScenario(
   * far-off arena — the Nether, say — then lands in chunks that are already
   * loaded, rather than in ones the server is still generating around it.
   */
@@ -1650,7 +1683,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..df4a0f1365745dc715021398a2bf3c5b
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +849,8 @@ async function pinRegions(
+@@ -586,8 +861,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */

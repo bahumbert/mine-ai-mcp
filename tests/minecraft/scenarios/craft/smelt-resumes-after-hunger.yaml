@@ -56,6 +56,7 @@ tick:
   - "execute as @a[name=Smelter,tag=!hungry,x=25.5,y=-60,z=0.5,distance=..5] run tag @s add hungry"
 
 goal:
+  stillTicks: 1260 # Task 7: longest passing still span 628 ticks; 2x rounded up to 20.
   kind: all
   timeout: 240
   goals:

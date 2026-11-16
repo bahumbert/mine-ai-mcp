@@ -7,7 +7,7 @@ import * as mineLabs from "mine-labs";
 import * as goalRunner from "../../../node_modules/mine-labs/src/trial/run.ts";
 import * as goals from "../../../node_modules/mine-labs/src/trial/goals.ts";
 import { preparePlayerForTrial } from "../../../node_modules/mine-labs/src/player/prepare.ts";
-import { createFakeClock } from "../../../src/test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.js";
 
 const NO_OP_REFUSAL = "Could not set the block";
 
@@ -151,8 +151,10 @@ async function runLaneTrial(
 
 test("a lane whose arrangement fails ends in an error result, its tick blocks gone before the restore, never touching a neighbour", async () => {
   const rcon = new RecordingRcon(["bogus"]);
-  const result = await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["bogus"]) });
+  let calls = 0;
+  const result = await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["bogus"]), onArranged: () => { calls += 1; } });
 
+  assert.equal(calls, 0, "failed arrangement never calls onArranged");
   assert.equal(result.outcome, "error");
   assert.match(result.error ?? "", /bogus/u, "the error is the setup command's, not a cleanup failure");
   const installAt = rcon.sent.indexOf(TICK_TAIL);
@@ -216,15 +218,6 @@ test("onArranged is called once the setup commands all succeeded, after the snap
   assert.ok(before.some((command) => command.startsWith("clone ")), "the snapshot is taken before");
   assert.equal(before.at(-1), "setblock 1281 -59 1281 minecraft:stone", "every setup command ran before, and it is the last command sent");
   assert.equal(before.includes("forceload remove -496 1296 -495 1296"), false, "the arena pins are released after the call, the clients' join is what follows");
-});
-
-test("onArranged is not called when the arrangement throws", async () => {
-  const rcon = new RecordingRcon(["bogus"]);
-  let calls = 0;
-  const result = await runLaneTrial(rcon, { arena: ARENA, scenario: scenario(["bogus"]), onArranged: () => { calls += 1; } });
-
-  assert.equal(calls, 0);
-  assert.equal(result.outcome, "error");
 });
 
 test("an onArranged that throws ends the trial as an error, the tick blocks stop and the restore runs", async () => {
@@ -551,4 +544,71 @@ test("goal progress logs block moves at most once per 20 game ticks and includes
   assert.deepEqual(logs.filter(line => line.startsWith("goal progress")), ["goal progress at tick 100", "goal progress at tick 140"]);
   assert.equal(logs.at(-1), "goal still spans: longest 40 ticks at tick 180");
   assert.equal(rcon.sent.filter(command => command.endsWith(" Pos")).length, 5);
+});
+
+/** RCON time and Pos use the measured wording cited by GameTimeRcon and the progress test above. */
+async function settleStillGoal(options: { rate: number; stillTicks?: number; moveAt?: number; stopped?: boolean }) {
+  const clock = createFakeClock({ mode: "manual" });
+  const harness = createFakeBot({ clock, server: { startAge: 0, ticksPerSecond: options.rate } });
+  if (options.stopped) harness.server.stop();
+  const abort = new AbortController();
+  const rcon = new RecordingRcon();
+  rcon.command = async command => command === "time query gametime"
+    ? `The time is ${harness.server.gameTime}`
+    : `Actor has the following entity data: [${harness.server.gameTime >= (options.moveAt ?? Infinity) ? 1.5 : 0.5}d, -60.0d, 0.5d]`;
+  const logs: string[] = [];
+  const pendingTicks: number[] = [];
+  const result = await clock.settle(goalRunner.awaitScenarioGoal({
+    scenario: mineLabs.scenarioSchema.parse({
+      client: { command: "true" }, players: [{ name: "Actor" }],
+      goal: { kind: "completion", timeout: 120, ...(options.stillTicks === undefined ? {} : { stillTicks: options.stillTicks }) },
+    }),
+    server: neverStartedServer("unused", rcon),
+    clients: { processes: new Map(), chat: new Map(), completions: new Map() },
+    now: clock.now, sleep: ms => clock.sleep(ms), signal: abort.signal,
+    onGoalProgress: () => pendingTicks.push(harness.server.gameTime), log: line => logs.push(line),
+  }), options.stopped ? 31_000 : 250_000, 250);
+  const endedAt = harness.server.gameTime;
+  const wall = clock.now();
+  const logsAtEnd = [...logs];
+  await clock.advance(31_000);
+  assert.deepEqual(logs, logsAtEnd, "no work remains after settlement");
+  assert.equal(clock.pendingTimers(), 0);
+  return { ...result, tick: endedAt, wall, pendingTicks, logs };
+}
+
+test("a still goal uses the default or root override at both rates; a stopped server remains a timeout", async () => {
+  for (const rate of [20, 10]) {
+    for (const [stillTicks, expected] of [[undefined, 520], [40, 40], [600, 600]] as const) {
+      const result = await settleStillGoal({ rate, stillTicks });
+      assert.equal(result.outcome, "fail");
+      assert.equal(result.tick, expected);
+      assert.match(result.log, new RegExp(`no progress for ${expected} game ticks: Actor has not reported completion`));
+      if (stillTicks !== undefined) continue;
+      assert.equal(result.wall, rate === 20 ? 26_000 : 52_000);
+      assert.ok(result.pendingTicks.includes(rate === 20 ? 515 : 517), "one poll before the boundary stays pending");
+    }
+    const stopped = await settleStillGoal({ rate, stopped: true });
+    assert.equal(stopped.outcome, "timeout");
+    assert.match(stopped.log, /game time stood still for 30000 ms/u);
+    assert.equal(stopped.wall, 30_000);
+    assert.equal(stopped.tick, 0);
+  }
+});
+
+test("a block move twenty ticks before the still boundary resets the deadline", async () => {
+  for (const rate of [20, 10]) {
+    const result = await settleStillGoal({ rate, moveAt: 500 });
+    assert.equal(result.outcome, "fail");
+    assert.equal(result.tick, 1_020);
+    assert.match(result.log, /no progress for 520 game ticks/u);
+    assert.deepEqual(result.logs.filter(line => line.startsWith("goal progress")), ["goal progress at tick 0", "goal progress at tick 500"]);
+  }
+});
+
+test("stillTicks accepts positive root integers only", () => {
+  const parse = (goal: unknown) => mineLabs.scenarioSchema.safeParse({ client: { command: "true" }, goal });
+  for (const stillTicks of [1, 520]) assert.equal(parse({ kind: "completion", stillTicks }).success, true);
+  for (const stillTicks of [0, -1, 1.5]) assert.equal(parse({ kind: "completion", stillTicks }).success, false);
+  assert.equal(parse({ kind: "all", goals: [{ kind: "completion", stillTicks: 1 }] }).success, false);
 });
