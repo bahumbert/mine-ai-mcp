@@ -16,6 +16,8 @@ const BOX = `x=${LANE.cell.minX},y=-64,z=${LANE.cell.minZ},dx=${LANE.cell.maxX -
 const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   // A server-tick scoreboard paces this target every twenty ticks.
   ["scenarios/combat/pacing-target.yaml", /exclusive/u],
+  // Its ten-tick-per-second sibling: the same scoreboard pacing, on a server whose rate it sets itself.
+  ["scenarios/combat/pacing-target-slow-server.yaml", /exclusive/u],
   // Passenger-gated hurts use execute on; the lane grammar cannot translate entity relations.
   ["scenarios/boat/hostile-at-sea-seated.yaml", /execute on/u],
   ["scenarios/boat/hostile-near-shore-take-back.yaml", /execute on/u],

@@ -49,3 +49,8 @@ goal:
   # First ten corrected-fixture driver durations, ms (2026-11-09): 91597, 91750, 91417, 91641, 91554,
   # 91659, 91646, 91600, 91563, 91588. Maximum 91751 rounded upward + 50% = 137627 ms; ceiling 138 s.
   timeout: 138
+  # The Actor never moves a block by design (it fights a pacing zombie from its cell), so the still guard sees no progress for the
+  # whole run. Longest still spans, ticks (2026-11-16, --repeat 3 --lock --lanes 1 at each rate; this file's twin is the 10 tps run):
+  # 20 tps 1832, 1836, 1832; 10 tps 929, 927, 929 (the product's fight limits are wall time, so 10 tps has half the ticks).
+  # 2 x 1836 = 3672, rounded up to 20 = 3680, above the 2760-tick timeout: the timeout governs this fixture.
+  stillTicks: 3680

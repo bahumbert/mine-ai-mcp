@@ -784,15 +784,20 @@ test("goal progress logs block moves at most once per 20 game ticks and includes
 });
 
 /** RCON time and Pos use the measured wording cited by GameTimeRcon and the progress test above. */
-async function settleStillGoal(options: { rate: number; stillTicks?: number; moveAt?: number; stopped?: boolean }) {
+async function settleStillGoal(options: { rate: number; stillTicks?: number; moveAt?: number; completeAt?: number; stopped?: boolean }) {
   const clock = createFakeClock({ mode: "manual" });
   const harness = createFakeBot({ clock, server: { startAge: 0, ticksPerSecond: options.rate } });
   if (options.stopped) harness.server.stop();
   const abort = new AbortController();
   const rcon = new RecordingRcon();
-  rcon.command = async command => command === "time query gametime"
-    ? `The time is ${harness.server.gameTime}`
-    : `Actor has the following entity data: [${harness.server.gameTime >= (options.moveAt ?? Infinity) ? 1.5 : 0.5}d, -60.0d, 0.5d]`;
+  const completions: Parameters<typeof goalRunner.awaitScenarioGoal>[0]["clients"]["completions"] = new Map();
+  rcon.command = async command => {
+    // The fake client reports completion at the first read at or after `completeAt` (the server's answer, not a timer).
+    if (harness.server.gameTime >= (options.completeAt ?? Infinity)) completions.set("Actor", { status: "succeeded" });
+    return command === "time query gametime"
+      ? `The time is ${harness.server.gameTime}`
+      : `Actor has the following entity data: [${harness.server.gameTime >= (options.moveAt ?? Infinity) ? 1.5 : 0.5}d, -60.0d, 0.5d]`;
+  };
   const logs: string[] = [];
   const pendingTicks: number[] = [];
   const result = await clock.settle(goalRunner.awaitScenarioGoal({
@@ -801,7 +806,7 @@ async function settleStillGoal(options: { rate: number; stillTicks?: number; mov
       goal: { kind: "completion", timeout: 120, ...(options.stillTicks === undefined ? {} : { stillTicks: options.stillTicks }) },
     }),
     server: neverStartedServer("unused", rcon),
-    clients: { processes: new Map(), chat: new Map(), completions: new Map() },
+    clients: { processes: new Map(), chat: new Map(), completions },
     now: clock.now, sleep: ms => clock.sleep(ms), signal: abort.signal,
     onGoalProgress: () => pendingTicks.push(harness.server.gameTime), log: line => logs.push(line),
   }), options.stopped ? 31_000 : 250_000, 250);
@@ -814,15 +819,38 @@ async function settleStillGoal(options: { rate: number; stillTicks?: number; mov
   return { ...result, tick: endedAt, wall, pendingTicks, logs };
 }
 
+/** The pacing fixture's own root override and its longest passing span (plan 2026-11-16-p1-reds T2: 1836 ticks at 20 tps, measured in `pacing-target.yaml`'s comment). */
+const PACING_YAML = join(import.meta.dirname, "../scenarios/combat/pacing-target.yaml");
+const PACING_LONGEST_SPAN = 1836;
+
 test("a still goal uses the default or root override at both rates; a stopped server remains a timeout", async () => {
+  const pacingStill = (await mineLabs.loadScenario(PACING_YAML)).goal.stillTicks;
+  assert.ok(pacingStill !== undefined && pacingStill >= 2 * PACING_LONGEST_SPAN, `pacing-target.yaml sets stillTicks ${pacingStill}`);
   for (const rate of [20, 10]) {
-    for (const [stillTicks, expected] of [[undefined, 520], [40, 40], [600, 600]] as const) {
-      const result = await settleStillGoal({ rate, stillTicks });
-      assert.equal(result.outcome, "fail");
-      assert.equal(result.tick, expected);
-      assert.match(result.log, new RegExp(`no progress for ${expected} game ticks: Actor has not reported completion`));
-      if (stillTicks !== undefined) continue;
-      assert.equal(result.wall, rate === 20 ? 26_000 : 52_000);
+    // Each row: the root override, the server tick at which the fake client reports completion (none: never), and the end the goal gets.
+    for (const { stillTicks, completeAt, outcome, tick } of [
+      { stillTicks: undefined, outcome: "fail", tick: 520 },
+      { stillTicks: 40, outcome: "fail", tick: 40 },
+      { stillTicks: 600, outcome: "fail", tick: 600 },
+      { stillTicks: 600, completeAt: 580, outcome: "pass", tick: 580 },
+      { stillTicks: 600, completeAt: 620, outcome: "fail", tick: 600 },
+      // The pacing fixture: its override lets the longest measured span (1836 ticks) pass; the default 520 ended it (0/10 at 20 tps, 2026-11-16).
+      { stillTicks: pacingStill, completeAt: PACING_LONGEST_SPAN, outcome: "pass", tick: PACING_LONGEST_SPAN },
+      { stillTicks: undefined, completeAt: PACING_LONGEST_SPAN, outcome: "fail", tick: 520 },
+    ] as const) {
+      const label = `${rate} tps, stillTicks ${stillTicks}, completion at ${completeAt}`;
+      const result = await settleStillGoal({ rate, stillTicks, completeAt });
+      assert.equal(result.outcome, outcome, label);
+      if (outcome === "pass") {
+        // The goal reads the client's report at its next poll (250 ms of clock): within 20 ticks after the completion tick.
+        assert.ok(result.tick >= tick && result.tick < tick + 20, `${label}: passes at tick ${result.tick}, fake time ${result.wall} ms`);
+        assert.ok(result.wall >= tick * 1000 / rate, `${label}: passes at fake time ${result.wall} ms`);
+      } else {
+        assert.equal(result.tick, tick, label);
+        assert.equal(result.wall, tick * 1000 / rate, `${label}: ends at fake time ${tick * 1000 / rate} ms`);
+        assert.match(result.log, new RegExp(`no progress for ${tick} game ticks: Actor has not reported completion`), label);
+      }
+      if (stillTicks !== undefined || completeAt !== undefined) continue;
       assert.ok(result.pendingTicks.includes(rate === 20 ? 515 : 517), "one poll before the boundary stays pending");
     }
     const stopped = await settleStillGoal({ rate, stopped: true });
