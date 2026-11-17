@@ -13,7 +13,10 @@ import {
   createFakeBot,
   createFakeClock,
   flush,
+  listenersAddedSince,
 } from "../../test-support/fake-bot/index.js";
+import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { attachFootingReflex } from "./footing.js";
 import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
 import { attachFireReflex, fireEscapeFacts } from "./fire.js";
@@ -23,6 +26,333 @@ import { setCarriedCount } from "../../test-support/carried-counts.js";
 import { confirmFakeDigs } from "../../test-support/life-saving-placements.js";
 import { pendingLifeSavingPlacements, recordLifeSavingPlacement, setLifeSavingRemovalContext } from "../../world/life-saving-placements.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
+import { placeSolidBlockInto } from "../../world/placement.js";
+import { FootingRecovery } from "../responses/footing.js";
+
+interface LandingOptions { held?: boolean; slowRelease?: boolean; noFooting?: boolean; stoppedPlacement?: boolean; fightRecovery?: (signal: AbortSignal) => Promise<unknown> }
+
+/** Script only the dependency result; the optional placement uses the shared server's real answer seam. */
+function createLandingRecovery(bot: FakeBot, options: LandingOptions) {
+  let calls = 0;
+  let finishLanding = false;
+  let released = 0;
+  let landingSignal: AbortSignal | undefined;
+  const footing = {
+    needed: !options.noFooting,
+    async recover(signal: AbortSignal): Promise<"landed"> {
+      calls++;
+      landingSignal = signal;
+      try {
+        if (options.stoppedPlacement)
+          await placeSolidBlockInto(bot, new Vec3(1, 64, 0), bot.inventory.items()[0]!, { signal, lifeSaving: true });
+        while (!finishLanding) await waitForPhysicsTicks(bot, 1, signal);
+        bot.entity.onGround = true;
+        footing.needed = false;
+        return "landed";
+      } finally { released++; bot.clearControlStates(); }
+    },
+  };
+  return {
+    footing, get calls() { return calls; }, get released() { return released; }, get landingSignal() { return landingSignal; },
+    land() { finishLanding = true; bot.entity.onGround = true; setBurning(bot, false); },
+  };
+}
+
+/** A resumable walk suspended by a fight, optionally still releasing or held by its owner. */
+async function startLandingWalk(bot: FakeBot, runner: ActionRunner, options: LandingOptions) {
+  let attempts = 0;
+  let settlements = 0;
+  let finishFight = !options.slowRelease;
+  const action = defineAction({
+    name: "walk_after_fire", description: "Finish the walk's next step after the landing.",
+    inputSchema: z.object({}), resultSchema: actionResultSchema({}), formatResult: result => result.status,
+    execution: { kind: "resumable_task" }, parse: () => ({}),
+    begin: () => async context => {
+      if (++attempts > 1) return { status: "succeeded" as const };
+      await waitForPhysicsTicks(bot, 1_000, context.signal!);
+      return { status: "succeeded" as const };
+    },
+  });
+  const caller = new AbortController();
+  const output = runner.run(action, {}, caller.signal, undefined, "fire-walk");
+  void output.then(() => { settlements++; });
+  await flush();
+  const fight = runner.claim("hostile_reflex", "Fixture fight interrupts the walk", async signal => {
+    if (!options.held) {
+      try {
+        if (options.fightRecovery) await options.fightRecovery(signal);
+        else await waitForPhysicsTicks(bot, 1_000, signal);
+      } catch { /* Physical release follows its abort. */ }
+      while (!finishFight) await waitForPhysicsTicks(bot, 1, new AbortController().signal);
+    }
+    return { value: null, continuation: options.held
+      ? { kind: "hold" as const, owner: "hostile_reflex", backstopTicks: 600, reason: "The threat is still observed." }
+      : { kind: "resume" as const } };
+  });
+  assert.equal(fight.kind, "claimed");
+  await flush();
+  return {
+    action, caller, output, get attempts() { return attempts; }, get settlements() { return settlements; },
+    releaseFight() { finishFight = true; },
+  };
+}
+
+/** A walk and fight on a dry floor; fire claims while the impulse still carries the scripted body. */
+async function fireLandingScene(resources: AsyncDisposableStack, rate: number, options: LandingOptions = {}) {
+  const clock = createFakeClock({ mode: "mocked" });
+  resources.use(clock.install());
+  const h = createFakeBot({ clock, server: { ticksPerSecond: rate }, carried: options.stoppedPlacement ? { cobblestone: 1 } : {} });
+  const { bot } = h;
+  const world = new MemoryWorld();
+  for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) for (let y = 62; y <= 68; y++) {
+    const at = new Vec3(x, y, z);
+    world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
+  }
+  const runner = new ActionRunner({ clock, worldAge: () => bot.time.age });
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+  let writes = 0;
+  let clears = 0;
+  const control = bot.setControlState.bind(bot);
+  bot.setControlState = (key, state) => { writes++; control(key, state); };
+  const clear = bot.clearControlStates.bind(bot);
+  bot.clearControlStates = () => { clears++; clear(); };
+  const placementRequest = new Promise<void>(resolve => h.server.onPacket("block_place", () => {
+    if (options.stoppedPlacement) { h.server.stop(); resolve(); }
+  }));
+  const landing = createLandingRecovery(bot, options);
+  const fire = resources.use(attachFireReflex(bot, driver, world, landing.footing));
+  // Burn attribution keeps one bot-lifetime death listener, outside each escape's resource scope.
+  recordFireContact(bot, "fire", bot.time.age);
+  const added = listenersAddedSince(bot);
+  const walk = await startLandingWalk(bot, runner, options);
+  const outcomes: Record<string, unknown>[] = [];
+  driver.onTransition(t => {
+    if (t.reflex !== "fire_reflex") return;
+    if (t.kind === "claim") {
+      // The impulse carried the body out of its fire cell before the new owner starts.
+      bot.entity.position.y = 66;
+      bot.entity.onGround = false;
+      h.world.setCell(new Vec3(0, 64, 0), "air");
+      world.load(new Vec3(0, 64, 0), observeMineflayerBlock(bot.blockAt(new Vec3(0, 64, 0))!));
+    }
+    if (t.kind === "outcome") outcomes.push(t.evidence as Record<string, unknown>);
+  });
+  setBurning(bot, true);
+  h.world.setCell(new Vec3(0, 64, 0), "fire");
+  world.load(new Vec3(0, 64, 0), observeMineflayerBlock(bot.blockAt(new Vec3(0, 64, 0))!));
+  await clock.advance(50);
+  resources.defer(async () => {
+    walk.releaseFight();
+    landing.land();
+    setBurning(bot, false);
+    await clock.advance(100);
+  });
+  return {
+    ...h, runner, driver, footing: landing.footing, caller: walk.caller, output: walk.output, fire, action: walk.action, outcomes, placementRequest,
+    get calls() { return landing.calls; }, get released() { return landing.released; }, get attempts() { return walk.attempts; },
+    get landingSignal() { return landing.landingSignal; }, land: landing.land, releaseFight: walk.releaseFight,
+    async assertReleased() {
+      assert.equal(landing.released, landing.calls, "every recovery scope released once");
+      assert.equal(walk.settlements, 1);
+      for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+      setBurning(bot, false);
+      bot.entity.onGround = true;
+      const before = { writes, clears, outcomes: outcomes.length };
+      await clock.advance(16_000);
+      assert.deepEqual({ writes, clears, outcomes: outcomes.length }, before, "retired deadline makes no control writes or second verdict");
+      assert.equal(Object.values(bot.controlState).some(Boolean), false);
+      for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+    },
+  };
+}
+
+/** Await an observed recovery phase on the same fake clock, including while the server is stopped. */
+async function advanceUntil(clock: FakeClock, observed: () => boolean, maximumMs = 2_000): Promise<void> {
+  for (let waited = 0; !observed() && waited < maximumMs; waited += 50) await clock.advance(50);
+  assert.equal(observed(), true, "the required recovery phase was observed within the bound");
+}
+
+/** Real D14 handoff: a fight owns recovery until fire reserves its body, then the same instance must land it. */
+async function realFireLandingScene(resources: AsyncDisposableStack, rate: number, placing: boolean) {
+  const clock = createFakeClock({ mode: "mocked" });
+  resources.use(clock.install());
+  const h = createFakeBot({ clock, position: new Vec3(0.8, 64, 0.5), groundY: null, cells: { "0,63,0": "stone" },
+    carried: { cobblestone: 4 }, server: { ticksPerSecond: rate } });
+  const { bot } = h;
+  const world = new MemoryWorld();
+  for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) for (let y = 62; y <= 68; y++) {
+    const at = new Vec3(x, y, z);
+    world.load(at, observeMineflayerBlock(bot.blockAt(at)!));
+  }
+  bot.on("blockUpdate", (_before, after) => { if (after) world.load(after.position, observeMineflayerBlock(after)); });
+  const recovery = resources.use(new FootingRecovery(bot, world));
+  const runner = new ActionRunner({ clock, worldAge: () => bot.time.age });
+  const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+  resources.use(attachFireReflex(bot, driver, world, recovery));
+  recordFireContact(bot, "fire", bot.time.age);
+  const added = listenersAddedSince(bot);
+  bot._client.emit("entity_velocity", { entityId: bot.entity.id, velocity: { x: 2400, y: 3200, z: 0 } });
+  assert.equal(recovery.needed, true);
+  bot.entity.onGround = false;
+  bot.entity.position.y = placing ? 64.5 : 65.5;
+  bot.entity.velocity.set(0.3, 0, 0);
+  let preempted: string | undefined;
+  if (placing) h.server.onPacket("block_place", () => h.server.stop());
+  const walk = await startLandingWalk(bot, runner, { fightRecovery: async signal => {
+    try { return await recovery.recover(signal); }
+    finally { if (signal.aborted) preempted = recovery.snapshot()?.phase; }
+  } });
+  await advanceUntil(clock, () => recovery.snapshot()?.phase === (placing ? "placing" : "steering"));
+  if (placing) assert.equal(h.server.isRunning, false, "the placement answer is outstanding at takeover");
+  const outcomes: Record<string, unknown>[] = [];
+  driver.onTransition(t => {
+    if (t.reflex !== "fire_reflex") return;
+    if (t.kind === "claim") { bot.entity.position.set(0.5, 65.5, 0.5); }
+    if (t.kind === "outcome") outcomes.push(t.evidence as Record<string, unknown>);
+  });
+  setBurning(bot, true);
+  h.world.setCell(new Vec3(1, placing ? 64 : 65, 0), "fire");
+  await advanceUntil(clock, () => preempted !== undefined);
+  assert.equal(preempted, "pending", "D14 carries the interrupted flight to the fire owner");
+  h.server.resume();
+  await advanceUntil(clock, () => runner.status().activeAction?.action === "fire_reflex" && recovery.active);
+  resources.defer(async () => {
+    bot.entity.position.set(0.5, 64, 0.5); bot.entity.velocity.set(0, 0, 0); bot.entity.onGround = true;
+    setBurning(bot, false);
+    await clock.advance(100);
+  });
+  return { ...h, recovery, runner, driver, walk, outcomes, added };
+}
+
+for (const rate of [20, 10]) for (const phase of ["steering", "placing", "burning landing"] as const)
+  test(`real recovery preempted during ${phase} is landed by fire (${rate} tps)`, async () => {
+    await using resources = new AsyncDisposableStack();
+    const s = await realFireLandingScene(resources, rate, phase === "placing");
+    const started = s.clock.now();
+    if (phase === "burning landing") {
+      for (const [x, z] of [[-1, 0], [1, 0], [0, -1], [0, 1]])
+        for (let y = 64; y <= 67; y++) s.world.setCell(new Vec3(x!, y, z!), "stone");
+      s.world.setCell(new Vec3(0, 64, 0), "fire");
+    }
+    s.bot.entity.position.set(0.5, 64, 0.5);
+    s.bot.entity.velocity.set(0, 0, 0);
+    s.bot.entity.onGround = true;
+    assert.equal((await s.clock.settle(s.walk.output, 15_000)).result.status, "succeeded");
+    assert.equal(s.walk.attempts, 2);
+    assert.ok(s.clock.now() - started < 15_000);
+    if (phase === "burning landing") assert.equal(s.bot.blockAt(new Vec3(0, 64, 0))?.name, "air");
+    else assert.equal(s.recovery.snapshot()?.phase, "landed");
+    const outcome = s.outcomes[0]?.outcome as { kind: string; footing: { recovered: number; last: string } };
+    assert.equal(outcome.kind, "dry_footing");
+    assert.ok(outcome.footing.recovered >= 1);
+    if (phase === "burning landing") assert.equal(outcome.footing.last, "interrupted", "renewed contact cut the real landing");
+    assert.equal(s.recovery.active, false);
+    for (const event of ["physicsTick", "death", "respawn"]) assert.equal(s.added(event), 0, event);
+    setBurning(s.bot, false);
+    const cleared = Object.values(s.bot.controlState);
+    await s.clock.advance(16_000);
+    assert.deepEqual(Object.values(s.bot.controlState), cleared);
+    assert.equal((await s.runner.run(s.walk.action, {})).result.status, "succeeded");
+  });
+
+for (const rate of [20, 10]) {
+  test(`a fire claim over a fight lands its obligation and resumes the walk (${rate} tps)`, async () => {
+    await using resources = new AsyncDisposableStack();
+    const s = await fireLandingScene(resources, rate);
+    assert.equal(s.calls, 1, "fire lands before returning a verdict");
+    const refused = s.runner.claim("recover_footing", "same obligation", async () => {
+      assert.fail("a lower footing claim cannot drive fire's body");
+    });
+    assert.equal(refused.kind, "busy");
+    resources.use(attachFootingReflex(s.driver, { activeEngagement: () => null }, s.footing, () => {}));
+    s.land();
+    assert.equal((await s.clock.settle(s.output, 1_000)).result.status, "succeeded");
+    assert.equal(s.attempts, 2);
+    await s.clock.advance(100);
+    assert.equal(s.calls, 1, "a discharged obligation starts no footing claim");
+    assert.deepEqual(s.outcomes[0]?.outcome && Reflect.get(s.outcomes[0].outcome as object, "footing"), { recovered: 1, last: "landed" });
+    await s.assertReleased();
+  });
+
+  for (const exit of ["request", "caller", "death", "close", "handoff"] as const)
+    test(`${exit} cancellation during fire landing preserves physical ownership (${rate} tps)`, async () => {
+      await using resources = new AsyncDisposableStack();
+      const s = await fireLandingScene(resources, rate, { slowRelease: exit === "handoff" });
+      assert.equal(s.runner.status().activeAction?.action, "fire_reflex");
+      if (exit === "request" || exit === "handoff") s.runner.cancelRequest("fire-walk", "Cancel the suspended walk");
+      if (exit === "caller") s.caller.abort(new Error("Caller left"));
+      if (exit === "death") s.runner.cancelActive("The bot died", { kind: "death" });
+      if (exit === "close") await s.fire[Symbol.asyncDispose]();
+      assert.equal(s.attempts, 1);
+      if (exit === "request" || exit === "caller" || exit === "handoff") {
+        let settled = false;
+        void s.output.then(() => { settled = true; });
+        await s.clock.advance(500);
+        assert.equal(settled, false, "the runner's existing contract awaits the physical verdict before returning cancellation");
+        assert.equal(s.landingSignal?.aborted ?? false, false, "objective cancel does not cancel the physical rescue");
+        assert.equal(s.runner.status().activeAction?.action, "fire_reflex");
+        s.releaseFight();
+        await s.clock.advance(50);
+        assert.equal(s.calls, 1);
+        s.land();
+        await s.clock.advance(100);
+      } else {
+        assert.equal(s.landingSignal?.aborted, true);
+      }
+      const finished = await s.clock.settle(s.output, 500);
+      assert.equal(finished.result.status, "cancelled");
+      assert.equal(s.released, 1);
+      assert.equal(s.attempts, 1, "a later fire verdict cannot revive the cancelled objective");
+      await s.assertReleased();
+      setBurning(s.bot, false);
+      s.bot.entity.onGround = true;
+      assert.equal((await s.runner.run(s.action, {})).result.status, "succeeded", "the next action is admitted after physical release");
+    });
+
+  test(`a stopped server bounds landing without advancing world age (${rate} tps)`, async () => {
+    await using resources = new AsyncDisposableStack();
+    const s = await fireLandingScene(resources, rate, { stoppedPlacement: true });
+    await s.clock.settle(s.placementRequest, 1_000);
+    assert.equal(s.calls, 1);
+    assert.equal(s.server.isRunning, false, "server stopped with the actual placement packet unanswered");
+    assert.equal(s.bot.blockAt(new Vec3(1, 64, 0))?.name, "air");
+    const age = s.bot.time.age;
+    const gameTime = s.server.gameTime;
+    let clientTicks = 0;
+    const tick = () => { clientTicks++; };
+    s.bot.on("physicsTick", tick);
+    await s.clock.advance(15_001);
+    s.bot.off("physicsTick", tick);
+    const finished = await s.output;
+    assert.equal(s.bot.time.age, age);
+    assert.equal(s.server.gameTime, gameTime);
+    assert.ok(clientTicks > 0, "client physics cannot answer the placement");
+    assert.equal(finished.result.status, "cancelled");
+    assert.match(finished.result.error ?? "", /Fire escape did not establish safe footing/);
+    assert.equal(Reflect.get(s.outcomes[0]?.outcome as object, "kind"), "escape_timed_out");
+    assert.equal(s.released, 1);
+    assert.equal(s.landingSignal?.aborted, true);
+    await s.assertReleased();
+    assert.equal((await s.runner.run(s.action, {})).result.status, "succeeded");
+  });
+
+  test(`a held walk survives an idle fire claim with an airborne hop (${rate} tps)`, async () => {
+    await using resources = new AsyncDisposableStack();
+    const s = await fireLandingScene(resources, rate, { held: true, noFooting: true });
+    await s.clock.advance(200);
+    assert.equal(s.runner.status().activeAction?.action, "fire_reflex");
+    assert.equal(s.calls, 0);
+    s.land();
+    await s.clock.advance(50);
+    assert.equal(s.attempts, 1, "fire's resume returns the hold to its original owner");
+    assert.equal(Reflect.get(s.outcomes[0]?.outcome as object, "kind"), "dry_footing");
+    assert.ok(Number(Reflect.get(s.outcomes[0]?.outcome as object, "airborneTicks")) >= 1);
+    assert.equal(s.runner.releaseHold("hostile_reflex", "none_observed", "The threat ended."), true);
+    assert.equal((await s.clock.settle(s.output, 500)).result.status, "succeeded");
+    assert.equal(s.attempts, 2);
+    await s.assertReleased();
+  });
+}
 
 test("health at or under the burn left is lethal", async () => {
   const { bot, clock, world } = burningBesidePit(true, { startAge: 1100 });
@@ -510,12 +840,19 @@ test("an escape from spreading lava resumes the action only after the lava settl
 });
 
 test("lava still spreading after 10 s returns the action with the spreading message", async () => {
+ for (const reescape of [false, true]) {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   await using resources = new AsyncDisposableStack();
   const scene = lavaWaitScene(resources, clock);
   const { output } = await scene.startInterrupted();
-  await leavePitWhileLavaSpreads(scene);
+  if (reescape) {
+    scene.lavaChanges();
+    await scene.leavePit();
+    scene.lavaSpreadsBesideTheBody();
+    await scene.tickTo(scene.server.age + 20);
+    assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "walking away from the lava");
+  } else await leavePitWhileLavaSpreads(scene);
   assert.equal(scene.attempts.count, 1);
   await scene.jump(10_000);
   const finished = await output;
@@ -535,27 +872,20 @@ test("lava still spreading after 10 s returns the action with the spreading mess
   });
   assert.equal((await scene.runner.run(next, {})).result.status, "succeeded");
   assert.ok(!scene.runner.status().activeAction, "the next action releases the body again");
+ }
 });
 
-test("static lava resumes at once", async () => {
+test("static lava or changes older than two flow steps resume at once", async () => {
+ for (const oldChange of [false, true]) {
   await using resources = new AsyncDisposableStack();
   const scene = lavaWaitScene(resources);
   const { output } = await scene.startInterrupted();
+  if (oldChange) { scene.lavaChanges(); await scene.tickTo(1100); }
   await scene.leavePit();
   const finished = await output;
-  assert.equal(scene.attempts.count, 2, "no lava changed in the volume: no wait");
+  assert.equal(scene.attempts.count, 2, "no recent change: the change at 1000 is 120 ticks old, or absent");
   assert.equal(finished.result.status, "succeeded");
-});
-
-test("lava changes before the last two flow steps do not delay the resume", async () => {
-  await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources);
-  const { output } = await scene.startInterrupted();
-  scene.lavaChanges();
-  await scene.tickTo(1100);
-  await scene.leavePit();
-  assert.equal((await output).result.status, "succeeded", "the change at 1000 is 120 ticks old");
-  assert.equal(scene.attempts.count, 2);
+ }
 });
 
 test("an endangered body during the wait returns the action with the danger message", async () => {
@@ -624,25 +954,6 @@ test("lava spreading toward the body during the wait runs the escape again befor
   await scene.tickTo(scene.server.age + 80);
   assert.equal((await output).result.status, "succeeded", "resumed once two flow steps passed with no change");
   assert.equal(scene.attempts.count, 2);
-});
-
-test("lava that keeps advancing past the 10 s clock returns the action with the spreading message", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _timers = clock.install();
-  await using resources = new AsyncDisposableStack();
-  const scene = lavaWaitScene(resources, clock);
-  const { output } = await scene.startInterrupted();
-  scene.lavaChanges();
-  await scene.leavePit();
-  scene.lavaSpreadsBesideTheBody();
-  await scene.tickTo(scene.server.age + 20);
-  assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "walking away from the lava");
-  await scene.jump(10_000);
-  const finished = await output;
-  assert.equal(scene.attempts.count, 1, "the action was not resumed");
-  assert.equal(finished.result.status, "cancelled");
-  assert.match((finished.interruptions ?? []).join("|"), /still spreading/);
-  assert.deepEqual(scene.driver.answered.snapshot(), [], "spreading is not a failed escape");
 });
 
 /**

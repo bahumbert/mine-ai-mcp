@@ -18,7 +18,7 @@ import {
   nearbyFireEscape,
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
-import { FIRE_ESCAPE_MAXIMUM_MS, type FireEscapeOutcome } from "../responses/fire.js";
+import { FIRE_ESCAPE_MAXIMUM_MS, type FireEscapeOutcome, type FireEscapeOptions, type FireEscapeRecord } from "../responses/fire.js";
 import { escapeThenSettle, LAVA_SETTLE_MAXIMUM_MS, type EscapeAndSettle } from "../responses/lava-settle.js";
 
 /**
@@ -154,9 +154,10 @@ function senseFire(bot: Bot, lava: LavaWatch, available: ReturnType<typeof escap
 }
 
 /** Escape and settle first; cleanup retains the same body hold and stops when fire danger returns. */
-async function escapeAndRemove(bot: Bot, world: WorldView, signal: AbortSignal, reason: FireEscapeReason, lastChange: () => number | null) {
+async function escapeAndRemove(bot: Bot, world: WorldView, signal: AbortSignal, reason: FireEscapeReason, lastChange: () => number | null, footing: FireEscapeOptions["footing"]) {
   const healthBefore = bot.health;
-  const { escape, settle } = await escapeThenSettle(bot, world, signal, reason, lastChange);
+  const record: FireEscapeRecord = { recovered: 0, last: null, airborneTicks: 0 };
+  const { escape, settle } = await escapeThenSettle(bot, world, signal, reason, lastChange, { footing, record });
   let kind = settle ? lavaWaitOutcomeKind(settle) : reflexOutcomeKind(escape);
   if (kind === "dry_footing") {
     await removeLifeSavingPlacements(bot, signal, undefined, () => hasFireDanger(bot));
@@ -167,6 +168,7 @@ async function escapeAndRemove(bot: Bot, world: WorldView, signal: AbortSignal, 
     .map(({ cell: { x, y, z }, region }) => ({ x, y, z, region: describeProtectedRegion(region) }));
   return {
     kind, healthBefore, healthAfter: bot.health,
+    footing: { recovered: record.recovered, last: record.last }, airborneTicks: record.airborneTicks,
     burning: isBurning(bot), inFire: isInFire(bot), inLava: isInLava(bot),
     position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
     leftInRegion,
@@ -179,7 +181,7 @@ function placementsLeftReason(left: Awaited<ReturnType<typeof escapeAndRemove>>[
 }
 
 /** Fire owns its environmental authority; combat policy cannot prohibit escape. */
-export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView): AsyncDisposable {
+export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldView, footing?: FireEscapeOptions["footing"]): AsyncDisposable {
   setLifeSavingWaterHook(bot, (cell, signal) => pickUpPlacedWater(bot, cell, signal));
   const lava: LavaWatch = { advancing: false, lastChangeAge: null };
   const escapeAvailable = escapeAvailability(bot, world);
@@ -204,7 +206,7 @@ export function attachFireReflex(bot: Bot, driver: ReflexDriver, world: WorldVie
         facts: () => fireEscapeFacts(bot),
       };
     },
-    act: (reason, signal) => escapeAndRemove(bot, world, signal, reason, () => lava.lastChangeAge),
+    act: (reason, signal) => escapeAndRemove(bot, world, signal, reason, () => lava.lastChangeAge, footing),
     // Resumable requests re-observe their checkpoint after the old physical
     // execution releases. A successful escape must not abandon their goal.
     continuation: (outcome) =>

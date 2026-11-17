@@ -5,7 +5,7 @@ import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt, lavaFlowDelayTicks } from "../../world/lava-flow.js";
 import { airSupplyPoints, isBurning, isInFire, isInLava } from "../perception/body.js";
 import type { FireEscapeReason } from "../positioning/fire-escape.js";
-import { escapeFire, type FireEscapeOutcome } from "./fire.js";
+import { escapeFire, type FireEscapeOptions, type FireEscapeOutcome } from "./fire.js";
 
 /** Lava that has not changed for this many flow steps of world age is not spreading any more. */
 export const LAVA_SETTLE_FLOW_STEPS = 2;
@@ -122,9 +122,9 @@ export async function escapeThenSettle(
   signal: AbortSignal,
   reason: FireEscapeReason,
   lastLavaChangeAge: () => number | null,
-  { maximumMs = LAVA_SETTLE_MAXIMUM_MS }: { maximumMs?: number } = {},
+  { maximumMs = LAVA_SETTLE_MAXIMUM_MS, footing, record }: FireEscapeOptions = {},
 ): Promise<EscapeAndSettle> {
-  let escape = await escapeFire(bot, world, signal, reason);
+  let escape = await escapeFire(bot, world, signal, reason, { footing, record });
   const deadline = performance.now() + maximumMs;
   for (;;) {
     if (escape !== "escaped") return { escape, settle: null };
@@ -136,6 +136,7 @@ export async function escapeThenSettle(
     if (leftToEscape <= 0) return { escape, settle: "spreading" };
     escape = await escapeFire(bot, world, signal, rerunFireReason(bot), {
       maximumMs: leftToEscape,
+      footing, record,
     });
     // This escape owns only the remaining settle budget; native timers may truncate its fractional milliseconds.
     if (escape === "timed_out" && !isInLava(bot) && !isInFire(bot))

@@ -3,7 +3,8 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { observeMineflayerBlock } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
-import { type FakeCell, type FakeClock, type FakeEntitySpec, createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { type FakeCell, type FakeClock, type FakeEntitySpec, createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { isInLava } from "../perception/body.js";
 import { escapeFire, lavaStepCells, type FireEscapeOutcome } from "./fire.js";
 import { buildLavaEscapeStep } from "./fire.js";
@@ -45,6 +46,7 @@ function burningScene(
     clock?: FakeClock;
     carried?: Record<string, number>;
     simulatePhysics?: boolean;
+    ticksPerSecond?: number;
   } = {},
 ) {
   const harness = createFakeBot({
@@ -55,6 +57,7 @@ function burningScene(
     clock: options.clock,
     carried: options.carried,
     simulatePhysics: options.simulatePhysics,
+    server: { ticksPerSecond: options.ticksPerSecond ?? 20 },
   });
   const { bot } = harness;
   const controls = bot.controlState;
@@ -100,19 +103,264 @@ function watch(promise: Promise<FireEscapeOutcome>) {
 const anyMoveControl = (controls: Readonly<Record<"forward" | "back" | "left" | "right", boolean>>) =>
   (["forward", "back", "left", "right"] as const).some((control) => controls[control]);
 
-test("a burning bot on the bank keeps going while water is reachable", async () => {
-  const { bot, world, controls, physicsTicks } = burningOnTheBank();
-  const escape = new AbortController();
-  const seen = watch(escapeFire(bot, world, escape.signal));
-  await physicsTicks(5);
-  assert.equal(seen.outcome, null, "burning with water in reach is not settled");
-  assert.equal(anyMoveControl(controls), true, "a move control is set toward the first cell of the way round");
-  Object.assign(bot.entity, { isInWater: true });
-  bot.entity.position.set(2.5, 64, 0.5);
-  setBurning(bot, false);
-  await physicsTicks(1);
-  assert.equal(seen.outcome, "escaped");
-});
+/** A scripted body, not simulated flight: the recorded incident supplies its physics positions. */
+function landingScene(ticksPerSecond: number, carried?: Record<string, number>) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const scene = burningScene({ clock, ticksPerSecond, cells: {}, carried });
+  Object.assign(scene.bot.entity, { onGround: false });
+  scene.bot.entity.position.y = 66;
+  const record = { recovered: 0, last: null as "landed" | "failed" | "interrupted" | null, airborneTicks: 0 };
+  return { ...scene, record };
+}
+
+/** Inspect the escape scope before whole-scene teardown can hide a leaked listener or timer. */
+function observeLandingRelease(s: ReturnType<typeof landingScene>) {
+  const added = listenersAddedSince(s.bot);
+  let writes = 0;
+  const control = s.bot.setControlState.bind(s.bot);
+  s.bot.setControlState = (key, state) => { writes++; control(key, state); };
+  return async () => {
+    for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+    const before = { writes, cleared: s.cleared.count };
+    await s.clock.advance(16_000);
+    assert.deepEqual({ writes, cleared: s.cleared.count }, before, "retired escape cannot write controls");
+    assert.equal(Object.values(s.controls).some(Boolean), false);
+    for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+  };
+}
+
+for (const rate of [20, 10]) {
+  for (const grounded of [false, true])
+    test(`an open footing obligation lands before escape (${grounded ? "edge" : "airborne"}, ${rate} tps)`, async () => {
+      const s = landingScene(rate);
+      using _timers = s.clock.install();
+      s.bot.entity.onGround = grounded;
+      let calls = 0;
+      let tick = 0;
+      s.bot.on("physicsTick", () => { tick++; });
+      const footing = {
+        needed: true,
+        async recover(signal: AbortSignal): Promise<"landed"> {
+          calls++;
+          assert.equal(anyMoveControl(s.controls), false, "escape has not steered over recovery");
+          await waitForPhysicsTicks(s.bot, 2, signal);
+          s.bot.entity.onGround = true;
+          footing.needed = false;
+          return "landed";
+        },
+      };
+      const released = observeLandingRelease(s);
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { footing, record: s.record });
+      assert.equal(await s.clock.settle(pending, 1_000), "escaped");
+      assert.equal(calls, 1, "the open obligation must be landed even on an edge");
+      assert.equal(tick, 2);
+      assert.deepEqual(s.record, { recovered: 1, last: "landed", airborneTicks: 0 });
+      assert.equal(s.cleared.count, 2, "entry and final scope each cleared once");
+      await released();
+    });
+
+  test(`fire contact cuts landing on that physics tick and lands again after extinguishing (${rate} tps)`, async () => {
+    const s = landingScene(rate);
+    using _timers = s.clock.install();
+    let tick = 0;
+    let abortedAt = -1;
+    let calls = 0;
+    s.bot.on("physicsTick", () => {
+      if (++tick === 2) s.setCell(-1, 66, 0, "fire");
+    });
+    for (const [x, z] of [[-2, 0], [0, 0], [-1, -1], [-1, 1]])
+      for (let y = 65; y <= 68; y++) s.setCell(x!, y, z!, "stone");
+    const footing = {
+      needed: true,
+      async recover(signal: AbortSignal): Promise<"landed"> {
+        if (++calls === 1) {
+          signal.addEventListener("abort", () => { abortedAt = tick; }, { once: true });
+          await waitForPhysicsTicks(s.bot, 10, signal);
+        }
+        await waitForPhysicsTicks(s.bot, 2, signal);
+        s.bot.entity.onGround = true;
+        s.bot.entity.position.y = 65;
+        footing.needed = false;
+        return "landed";
+      },
+    };
+    const released = observeLandingRelease(s);
+    const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { footing, record: s.record });
+    assert.equal(await s.clock.settle(pending, 2_000), "escaped");
+    assert.equal(abortedAt, 2);
+    assert.equal(s.bot.blockAt(new Vec3(-1, 66, 0))?.name, "air", "contact was extinguished before landing again");
+    assert.equal(calls, 2);
+    assert.deepEqual(s.record, { recovered: 2, last: "landed", airborneTicks: 0 });
+    assert.equal(s.cleared.count, 2);
+    await released();
+  });
+
+  for (const exit of ["recover throws", "cleanup throws"])
+    test(`landing releases the escape when ${exit} (${rate} tps)`, async () => {
+      const s = landingScene(rate);
+      using _timers = s.clock.install();
+      const released = observeLandingRelease(s);
+      let releases = 0;
+      const failure = new Error(exit);
+      const footing = {
+        needed: true,
+        async recover(signal: AbortSignal): Promise<"landed"> {
+          try {
+            if (exit === "recover throws") throw failure;
+            await waitForPhysicsTicks(s.bot, 1, signal);
+            return "landed";
+          } finally {
+            releases++;
+            s.bot.clearControlStates();
+            if (exit === "cleanup throws") throw failure;
+          }
+        },
+      };
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { footing, record: s.record });
+      await s.clock.settle(assert.rejects(pending, failure), 1_000);
+      assert.equal(releases, 1);
+      assert.equal(s.cleared.count, 3, "entry, recovery release and final scope");
+      assert.equal(s.record.last, "interrupted");
+      await released();
+    });
+
+  test(`the escape clock aborts landing and releases each scope once (${rate} tps)`, async () => {
+    const s = landingScene(rate);
+    using _timers = s.clock.install();
+    const added = listenersAddedSince(s.bot);
+    let release = 0;
+    let abortedAt = -1;
+    const footing = {
+      needed: true,
+      async recover(signal: AbortSignal): Promise<"landed"> {
+        try { await waitForPhysicsTicks(s.bot, 1_000, signal); return "landed"; }
+        finally { release++; abortedAt = s.clock.now(); s.bot.clearControlStates(); }
+      },
+    };
+    const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { footing, record: s.record });
+    assert.equal(await s.clock.settle(pending, 15_001), "timed_out");
+    assert.equal(abortedAt, 15_000);
+    assert.equal(release, 1);
+    assert.equal(s.cleared.count, 3, "entry, recovery release, escape finally");
+    for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+    await s.clock.advance(16_000);
+    assert.equal(s.cleared.count, 3);
+    assert.equal(anyMoveControl(s.controls), false);
+  });
+
+  test(`lethal burn lands the obligation before sending a pour (${rate} tps)`, async () => {
+    const s = landingScene(rate, { water_bucket: 1 });
+    using _timers = s.clock.install();
+    let landed = false;
+    const pours = () => s.server.packets.filter(p => p.name === "use_item");
+    s.server.onPacket("use_item", () => assert.equal(landed, true, "the actual pour packet follows landing"));
+    const footing = {
+      needed: true,
+      async recover(signal: AbortSignal): Promise<"landed"> {
+        assert.equal(pours().length, 0);
+        await waitForPhysicsTicks(s.bot, 2, signal);
+        s.bot.entity.position.y = 65;
+        s.bot.entity.onGround = true;
+        footing.needed = false;
+        landed = true;
+        return "landed";
+      },
+    };
+    const released = observeLandingRelease(s);
+    const pending = escapeFire(s.bot, s.world, new AbortController().signal, "lethal_burn", { footing, record: s.record });
+    assert.equal(await s.clock.settle(pending, 1_000), "escaped");
+    assert.equal(pours().length, 1, "the refuge is chosen on the landed body's floor");
+    assert.equal(s.bot.blockAt(s.bot.entity.position)?.name, "water");
+    assert.equal(s.bot.inventory.items().find(item => item.name === "bucket")?.count, 1);
+    await released();
+  });
+
+  test(`an airborne body with no route waits four ticks for dry landing (${rate} tps)`, async () => {
+    const s = landingScene(rate);
+    using _timers = s.clock.install();
+    let tick = 0;
+    s.bot.on("physicsTick", () => {
+      if (++tick === 4) { s.bot.entity.onGround = true; s.bot.entity.position.y = 65; }
+    });
+    const released = observeLandingRelease(s);
+    const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { record: s.record });
+    assert.equal(await s.clock.settle(pending, 1_000), "escaped");
+    assert.equal(tick, 4);
+    assert.equal(s.record.airborneTicks, 4);
+    assert.equal(s.record.recovered, 0);
+    await released();
+  });
+
+  for (const failedLanding of [false, true])
+    test(`${failedLanding ? "a failed recovery" : "an airborne fall"} enters the lava path (${rate} tps)`, async () => {
+      const s = landingScene(rate);
+      using _timers = s.clock.install();
+      let tick = 0;
+      s.bot.on("physicsTick", () => {
+        if (++tick === 2) Object.assign(s.bot.entity, { isInLava: true });
+      });
+      const footing = failedLanding ? {
+        needed: true,
+        async recover(signal: AbortSignal): Promise<"failed"> {
+          await waitForPhysicsTicks(s.bot, 1, signal);
+          footing!.needed = false;
+          Object.assign(s.bot.entity, { isInLava: true });
+          return "failed";
+        },
+      } : undefined;
+      const released = observeLandingRelease(s);
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumMs: 300, footing, record: s.record });
+      await s.clock.advance(150);
+      assert.equal(s.controls.jump, true, "lava swims up instead of declaring the airborne body blocked");
+      assert.equal(await s.clock.settle(pending, 500), "timed_out");
+      if (failedLanding) assert.equal(s.record.last, "failed");
+      await released();
+    });
+
+  for (const contact of ["fire", "lava"] as const)
+    test(`no landing starts in ${contact} (${rate} tps)`, async () => {
+      const s = landingScene(rate);
+      using _timers = s.clock.install();
+      s.bot.entity.position.y = 65;
+      s.bot.entity.onGround = true;
+      let calls = 0;
+      if (contact === "fire") s.setCell(-1, 65, 0, "fire");
+      else Object.assign(s.bot.entity, { isInLava: true });
+      const footing = {
+        needed: true,
+        async recover(): Promise<"landed"> { calls++; footing.needed = false; return "landed"; },
+      };
+      if (contact === "fire") {
+        for (const [x, z] of [[-2, 0], [0, 0], [-1, -1], [-1, 1]])
+          for (let y = 65; y <= 68; y++) s.setCell(x!, y, z!, "stone");
+      }
+      const released = observeLandingRelease(s);
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumMs: contact === "fire" ? 15_000 : 200, footing, record: s.record });
+      if (contact === "fire") {
+        assert.equal(await s.clock.settle(pending, 500), "escaped");
+        assert.equal(s.bot.blockAt(new Vec3(-1, 65, 0))?.name, "air");
+      } else {
+        await s.clock.advance(50);
+        assert.equal(s.controls.jump, true);
+        assert.equal(await s.clock.settle(pending, 500), "timed_out");
+      }
+      // Fire contact may reopen dry landing only after its authoritative removal.
+      assert.equal(calls, contact === "fire" ? 1 : 0);
+      await released();
+    });
+
+  for (const body of ["grounded", "water", "airborne"] as const)
+    test(`no-route ${body} boundary (${rate} tps)`, async () => {
+      const s = landingScene(rate);
+      using _timers = s.clock.install();
+      s.bot.entity.onGround = body === "grounded";
+      if (body === "water") { Object.assign(s.bot.entity, { isInWater: true }); setBurning(s.bot, false); }
+      const released = observeLandingRelease(s);
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "lethal_burn", { maximumMs: 200, record: s.record });
+      assert.equal(await s.clock.settle(pending, 500), body === "grounded" ? "blocked" : body === "water" ? "escaped" : "timed_out");
+      await released();
+    });
+}
 
 test("a lethal burn walks to water seven blocks away", async () => {
   const { bot, world, controls, physicsTicks } = burningScene({ position: new Vec3(0.5, 65, 0.5), cells: { "7,65,0": "water" } });
@@ -218,37 +466,36 @@ test("a cancel mid-route stops at once", async () => {
   assert.equal(bot.listenerCount("physicsTick"), 0, "no physics listener is left");
 });
 
-test("no physics ticks: the wall clock ends the escape", async () => {
-  const { bot, world, clock } = burningScene({ clock: createFakeClock({ mode: "mocked" }) });
+test("a stopped route or lava swim ends on the wall clock and releases its scopes", async () => {
+ for (const swimming of [false, true]) {
+  const { bot, world, clock, controls } = burningScene({ clock: createFakeClock({ mode: "mocked" }),
+    ...(swimming ? { cells: walledTwoCellPit(), position: IN_THE_PIT } : {}) });
   using _installed = clock.install();
-  bot.physicsEnabled = false; // the client runs no tick: physics stopped
-  const started = performance.now();
+  const added = listenersAddedSince(bot);
+  bot.physicsEnabled = false;
   const escaping = escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 50 });
   await clock.advance(50);
   const outcome = await escaping;
   assert.equal(outcome, "timed_out", "the clock ended it: not the same as a walk with nowhere to go");
-  assert.ok(performance.now() - started < 500, "returned within 500 ms without one physics tick");
-  assert.equal(bot.listenerCount("physicsTick"), 0);
+  assert.equal(Object.values(controls).some(Boolean), false);
+  for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+ }
 });
 
-test("a death mid-route ends the escape as died", async () => {
-  const { bot, world, physicsTicks } = burningOnTheBank();
-  // The client's own listeners (Mineflayer's physics stops on a death and restarts on a respawn).
-  const atRest = { death: bot.listenerCount("death"), respawn: bot.listenerCount("respawn") };
+test("a death mid-route or lava swim ends died and releases its scopes", async () => {
+ for (const swimming of [false, true]) {
+  const { bot, world, physicsTicks, controls } = burningScene(swimming ? { cells: walledTwoCellPit(), position: IN_THE_PIT } : {});
+  const added = listenersAddedSince(bot);
   const seen = watch(escapeFire(bot, world, new AbortController().signal));
-  await physicsTicks(2);
+  await physicsTicks(5);
+  if (swimming) assert.equal(bot.getControlState("jump"), true, "swimming up with no bank, no step");
   bot.health = 0;
   bot.emit("death");
   await physicsTicks(1);
   assert.equal(seen.outcome, "died");
-  assert.equal(bot.listenerCount("death"), atRest.death, "the death listener is removed");
-  assert.equal(bot.listenerCount("respawn"), atRest.respawn, "the respawn listener is removed");
-});
-
-test("no water in reach: escaped on dry ground as today", async () => {
-  const { bot, world } = burningOnTheBank(new Vec3(-4.5, 65, 5.5));
-  const outcome = await escapeFire(bot, world, new AbortController().signal);
-  assert.equal(outcome, "escaped");
+  assert.equal(Object.values(controls).some(Boolean), false);
+  for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+ }
 });
 
 test("a burning bot goes on from cell to cell of the way round the lava", async () => {
@@ -257,6 +504,7 @@ test("a burning bot goes on from cell to cell of the way round the lava", async 
   for (const [x, z] of [[-0.5, 1.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]] as const) {
     await physicsTicks(2);
     assert.equal(seen.outcome, null, `still walking before (${x}, ${z})`);
+    assert.equal(anyMoveControl(controls), true, "water is reachable and the walk keeps steering");
     bot.entity.position.set(x, 65, z);
   }
   await physicsTicks(2);
@@ -435,31 +683,4 @@ test("a lava step whose placement gets no answer is not retried from the same ce
   await clock.advance(4_000);
   assert.equal(seen.outcome, "timed_out", "only the 15 s wall clock ends it");
   assert.equal(bot.getControlState("jump"), false, "controls cleared");
-});
-
-test("a swim up whose physics stops ends on the wall clock", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _installed = clock.install();
-  const { bot, world } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT, clock });
-  bot.physicsEnabled = false;
-  const started = performance.now();
-  const escaping = escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 300 });
-  await clock.advance(300);
-  assert.equal(await escaping, "timed_out");
-  assert.ok(performance.now() - started < 1_000, "returned within 1 s of wall time without one physics tick");
-  assert.equal(bot.getControlState("jump"), false, "controls cleared");
-  assert.equal(bot.listenerCount("physicsTick"), 0);
-});
-
-test("death mid-swim ends died with the controls cleared", async () => {
-  const { bot, world, controls, physicsTicks } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT });
-  const seen = watch(escapeFire(bot, world, new AbortController().signal));
-  await physicsTicks(5);
-  assert.equal(bot.getControlState("jump"), true, "swimming up with no bank, no step");
-  bot.health = 0;
-  bot.emit("death");
-  await physicsTicks(1);
-  assert.equal(seen.outcome, "died");
-  assert.equal(bot.getControlState("jump"), false);
-  assert.equal(anyMoveControl(controls), false);
 });
