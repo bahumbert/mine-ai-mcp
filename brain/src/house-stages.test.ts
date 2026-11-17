@@ -579,6 +579,137 @@ test("craft_item's walk to a table keeps the house's blocks", async () => {
   assert.deepEqual(walk!.reserve_items, [...billStillWrong(), ...ROOF_RESERVE]);
 });
 
+// Plan 2026-11-14-house-build-fixes-2 Task 11 (live 2026-11-17, Bruno): a fetch that makes the means of the work in hand (a lost
+// tool, the table of a craft, the levelling's tools and fill) keeps no bill, but its walks keep the unfinished house's whole scaffold.
+const MEANS_RECIPES = {
+  oak_planks: { makes: 4, needs: [{ item: "oak_log", count: 1 }] },
+  stick: { makes: 4, needs: [{ item: "oak_planks", count: 2 }] },
+  crafting_table: { makes: 1, needs: [{ item: "oak_planks", count: 4 }] },
+  wooden_pickaxe: { makes: 1, needs: [{ item: "oak_planks", count: 3 }, { item: "stick", count: 2 }] },
+  wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] },
+  oak_door: { makes: 3, needs: [{ item: "oak_planks", count: 6 }] },
+};
+const TABLE_AT = { x: 6, z: 3 };
+const PICKAXE_LOST = { error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains." };
+const navigatesOf = (runtime: FakeRuntime) => runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input);
+const walksToTable = (runtime: FakeRuntime) => navigatesOf(runtime).filter((walk) => walk.x === TABLE_AT.x && walk.z === TABLE_AT.z);
+
+/** The small medieval house with a pickaxe lost at the call `lostAt` says (the first one it sees), a spare 10 planks and 10 logs and a table 6 blocks off: the refetch makes the pickaxe at the table. */
+async function pickaxeLostWhile(lostAt: (blocks: readonly { x: number; y: number; z: number }[]) => boolean) {
+  const runtime = new FakeRuntime();
+  runtime.recipes = MEANS_RECIPES;
+  runtime.simulateInventory = true;
+  standingWithPolicy(runtime, [...SMALL_MEDIEVAL.map((stack) => (stack.name === "oak_planks" || stack.name === "oak_log" ? { ...stack, count: stack.count + 10 } : stack)), { name: "dirt", count: ROOF_DIRT }]);
+  runtime.world.set(`${TABLE_AT.x},64,${TABLE_AT.z}`, "crafting_table");
+  let lost = false;
+  const submit = runtime.submit.bind(runtime);
+  runtime.submit = async (tool, input, ...rest) => {
+    if (tool === "build_structure" && !lost && lostAt((input as BuildCall).blocks)) {
+      lost = true;
+      runtime.failNext.build_structure = PICKAXE_LOST;
+    }
+    return submit(tool, input, ...rest);
+  };
+  const result = await runStep(medievalStep(), contextFor(runtime, { building: { unfinished: null } }));
+  return { runtime, result };
+}
+
+test("a tool lost in the floor stage is remade with the roof's scaffold kept by the refetch's walks", async () => {
+  const { runtime, result } = await pickaxeLostWhile(() => true);
+  assert.match(detailOf(result), /^built a small medieval house/u);
+  const walks = walksToTable(runtime);
+  assert.ok(walks.length > 0, "the refetch walked to the table");
+  for (const walk of walks) assert.deepEqual(walk.reserve_items, ROOF_RESERVE, "the roof's dirt by count, though the floor needs none");
+});
+
+test("a tool lost in the roof stage keeps the roof's own remaining count", async () => {
+  const roofKeys = new Set(roofOf().cells.map((cell) => `${cell.x},${cell.y},${cell.z}`));
+  const { runtime, result } = await pickaxeLostWhile((blocks) => blocks.some((block) => roofKeys.has(`${block.x},${block.y},${block.z}`)));
+  assert.match(detailOf(result), /^built a small medieval house/u);
+  const walks = walksToTable(runtime);
+  assert.ok(walks.length > 0, "the refetch walked to the table");
+  for (const walk of walks) assert.deepEqual(walk.reserve_items, ROOF_RESERVE, "the roof's dirt by count (unchanged)");
+});
+
+/** The log fetch of a means fetch with nothing to make it from carried: out 150 blocks to a seen place and back (`gravelFetchedFar`'s walks). `house`: an unfinished house at its roof, else none. */
+async function bareBotFar(runtime: FakeRuntime, house: boolean): Promise<SkillContext> {
+  const context = house ? (await roofStoppedFar(runtime, 5)).context : contextFor(runtime, { building: { unfinished: null } });
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 30.5, y: 64, z: 0.5 }, inventory: [{ name: "dirt", count: 5 }], policy: DEFAULT_POLICY };
+  runtime.recipes = MEANS_RECIPES;
+  runtime.simulateInventory = true;
+  runtime.walkOnNavigate = true;
+  runtime.seen = { oak_log: { dimension: "overworld", x: 150, z: 8 }, dirt: { dimension: "overworld", x: 150, z: 8 } };
+  return { ...context, areas: [] };
+}
+const noneNear = (block: string) => ({ error: `[NO_TARGET_IN_RANGE] No ${block} block left within 64 blocks of where the run started; none is loaded farther either.` });
+
+/** The walks of the table fetch of a craft whose table is not carried. */
+async function tableFetchWalks(house: boolean) {
+  const runtime = new FakeRuntime();
+  const context = await bareBotFar(runtime, house);
+  runtime.failNext.craft_item = { error: "[WORKSTATION_NOT_CARRIED] crafting_table is not carried" };
+  runtime.failNext.collect_block = noneNear("oak_log");
+  const result = await runStep({ skill: "craft_item", item: "oak_door", count: 3 }, context);
+  assert.equal(result.status, "done", detailOf(result));
+  return navigatesOf(runtime);
+}
+
+/** The walks of the levelling a bot makes 30 blocks from its house: `tools` (a shovel to make, for a grass block to dig) or `fill` (a hole to fill, the fill fetched). */
+async function levelingFetchWalks(house: boolean, fetch: "tools" | "fill") {
+  const runtime = new FakeRuntime();
+  const context = await bareBotFar(runtime, house);
+  runtime.world.set("20,64,20", "gold_block");
+  runtime.world.set("24,64,23", "gold_block");
+  if (fetch === "tools") runtime.world.set("22,64,21", "grass_block");
+  else runtime.world.set("22,63,21", "air");
+  runtime.snapshot = { ...runtime.snapshot, inventory: [] };
+  runtime.failNext.collect_block = noneNear(fetch === "tools" ? "oak_log" : "dirt");
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), context);
+  assert.equal(result.status, "done", detailOf(result));
+  return navigatesOf(runtime);
+}
+
+/** The walk to a table of the levelling's tool refetch: a shovel lost on the way, a table 3 blocks from where the bot stands. */
+async function levelingToolLossWalks(house: boolean) {
+  const runtime = new FakeRuntime();
+  const context = await bareBotFar(runtime, house);
+  runtime.world.set("20,64,20", "gold_block");
+  runtime.world.set("24,64,23", "gold_block");
+  runtime.world.set("22,64,21", "grass_block");
+  runtime.world.set("33,64,3", "crafting_table");
+  runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_planks", count: 8 }] };
+  runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 22,64,21; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
+  const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), context);
+  assert.equal(result.status, "done", detailOf(result));
+  return navigatesOf(runtime).filter((walk) => walk.x === 33 && walk.z === 3);
+}
+
+test("craft_item's table fetch keeps the unfinished house's scaffold on its walks, and no bill", async () => {
+  const walks = await tableFetchWalks(true);
+  assert.ok(walks.length >= 2, "out to the seen log and back");
+  for (const walk of walks) assert.deepEqual(walk.reserve_items, ROOF_RESERVE, "the roof's dirt by count; the means fetch keeps no bill");
+});
+
+test("a levelling fetch (its tools, its hole fill) keeps the unfinished house's scaffold on its walks", async () => {
+  // The house is on record from its first dig (skills.ts: `leaveUnfinished(0, false)` before `prepareSite`), so a build's own levelling is in this case too.
+  for (const fetch of ["tools", "fill"] as const) {
+    const walks = await levelingFetchWalks(true, fetch);
+    assert.ok(walks.length >= 2, `${fetch}: out to the seen block and back`);
+    for (const walk of walks) assert.deepEqual(walk.reserve_items, ROOF_RESERVE, `${fetch}: the roof's dirt by count`);
+  }
+  // The tool lost while levelling is made again by the same kind of fetch.
+  const toTable = await levelingToolLossWalks(true);
+  assert.ok(toTable.length > 0, "tool loss: the refetch walked to the table");
+  for (const walk of toTable) assert.deepEqual(walk.reserve_items, ROOF_RESERVE, "tool loss: the roof's dirt by count");
+});
+
+test("with no unfinished house the means fetches send no reserve_items", async () => {
+  for (const walks of [await tableFetchWalks(false), await levelingFetchWalks(false, "tools"), await levelingFetchWalks(false, "fill"), await levelingToolLossWalks(false)]) {
+    assert.ok(walks.length >= 1, "walked");
+    for (const walk of walks) assert.equal(walk.reserve_items, undefined);
+  }
+});
+
 test("a resumed roof already standing keeps no scaffold: only the bill", async () => {
   const runtime = new FakeRuntime();
   const { context, step, stand } = await roofStoppedFar(runtime, 0);

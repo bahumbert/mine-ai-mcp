@@ -40,9 +40,13 @@ export async function scaffoldReserveBetween(context: Pick<SkillContext, "runtim
   return scaffoldReserve(callWorks(plan, range, cells), plan.site.door.y, status.policy?.scaffoldBlocks, kept);
 }
 
-/** The blocks the cells of the stage holding `part`, from that part on, need carried to stand on, by count: what a tool-loss refetch's walks must not lay below it. */
-export const stageScaffoldReserve = (context: Pick<SkillContext, "runtime">, plan: HousePlan, part: number, kept: readonly MaterialCount[]) =>
-  scaffoldReserveBetween(context, plan, { first: part, last: plan.stages[stageAt(plan, part)]!.last }, kept.map((entry) => entry.item), true);
+/**
+ * The blocks the cells of the whole house still to place from `part` on (this stage's rest and every later stage) need carried to
+ * stand on, by count: what a tool-loss refetch's walks must not lay below it (live 2026-11-17: the floor's own count was none, the
+ * roof's 11 were laid on the way to a table).
+ */
+export const houseScaffoldReserveFrom = (context: Pick<SkillContext, "runtime">, plan: HousePlan, part: number, kept: readonly MaterialCount[]) =>
+  scaffoldReserveBetween(context, plan, { first: part, last: plan.stages.at(-1)!.last }, kept.map((entry) => entry.item), true);
 
 /** What an unfinished house still takes: `bill` the blocks of the cells still wrong from the record's part on, `keep` what a walk carrying them must not spend. */
 export interface HouseReserve {
@@ -71,6 +75,15 @@ export async function houseReserve(context: Pick<SkillContext, "runtime" | "buil
   const status = await context.runtime.status();
   const scaffold = scaffoldReserve(callWorks(plan, { first: first.first, last: plan.stages.at(-1)!.last }, cells), plan.site.door.y, status.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
   return { keep: { items: [], reserve: bill, scaffold }, bill };
+}
+
+/**
+ * What the walks of a means fetch (a lost tool, a craft's table, the levelling's tools and fill) keep of the unfinished house: its
+ * whole scaffold by count and nothing else, since a means fetch keeps no bill (`GatherContext.means`) but its walks must not lay
+ * the blocks the later stages stand on. Nothing with no unfinished house.
+ */
+export async function houseScaffoldKeep(context: Pick<SkillContext, "runtime" | "building" | "templates">): Promise<WalkKeep> {
+  return { ...NO_KEEP, scaffold: (await houseReserve(context)).keep.scaffold };
 }
 
 /** Whether a fetch that ended at `here` is more than {@link RETURN_RANGE} (3D) from where it started. */

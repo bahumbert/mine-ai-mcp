@@ -13,7 +13,7 @@ import { builderStand, catalogueLine, chooseSite, planTemplate, siteAt, type Hou
 import { billFrom, buildAgain, callWorks, describeShortfall, fetchClause, inPlaceWorks, missingForStage, scaffoldNeed, scaffoldReserve, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
 import { classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
 import type { ActOutcome, Body } from "./body.ts";
-import { awayFrom, backStep, failedFetchNote, houseReserve, navigateInput, scaffoldReserveBetween, stageScaffoldReserve, walkKeeping } from "./walks.ts";
+import { awayFrom, backStep, failedFetchNote, houseReserve, houseScaffoldKeep, houseScaffoldReserveFrom, navigateInput, scaffoldReserveBetween, walkKeeping } from "./walks.ts";
 import { isNoPath, mergedKeep, NO_KEEP, walkKeepInput, walkRelaxing, type WalkKeep } from "./walk-keep.ts";
 import { LEVEL_BLOCK_BUDGET, LEVEL_LIMITS, SUPPORT_REACH, levelBox, levelPlan, type LevelOptions, type TerrainCell, type Zone } from "./building/terrain.ts";
 import { describeWay, dropSourcesNote, FETCH_RANGE, gatherMaterials, knownPlaces, notNear, obtainedBy, walkToStation, withMaterialsKept } from "./gathering.ts";
@@ -509,7 +509,7 @@ export async function giveTo(context: SkillContext, player: string, item: string
  * basic function; when and what to fetch is the model's choice (ADR-011).
  */
 async function getItems(context: SkillContext, items: readonly { readonly item: string; readonly count: number }[], options: { readonly purpose?: string; readonly walkKeep?: WalkKeep; readonly reserve?: readonly ItemCount[]; readonly means?: true } = {}): Promise<SkillResult> {
-  const { purpose = `getting ${describeMaterials(items)}`, walkKeep = NO_KEEP, reserve, means } = options;
+  const { purpose = `getting ${describeMaterials(items)}`, reserve, means, walkKeep = means === true ? await houseScaffoldKeep(context) : NO_KEEP } = options; // a means fetch keeps no bill; its walks keep the house's scaffold
   const { position: start, inventory, dimension: startDimension } = await context.runtime.status();
   const targets = items.map(({ item, count }) => ({ item, count: carriedOf(inventory, item) + count }));
   // What it carried stays carried: crafting the new items must not quietly use up the others (the planks for the walls).
@@ -939,7 +939,7 @@ async function buildParts(context: SkillContext, plan: HousePlan, what: string, 
       return { status: "stopped" };
     }
     if (outcome.status !== "succeeded") {
-      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: async (items, purpose) => getItems(context, items, { purpose, walkKeep: { ...NO_KEEP, scaffold: await stageScaffoldReserve(context, plan, partIndex, options.reserved) }, means: true }) }));
+      const lost = await recordingThrows(index, () => toolLosses.handle(outcome.error, { reserved: options.reserved, ...(context.owed !== undefined && { owed: context.owed }), inventory: async () => (await context.runtime.status()).inventory, getItems: async (items, purpose) => getItems(context, items, { purpose, walkKeep: { ...NO_KEEP, scaffold: await houseScaffoldReserveFrom(context, plan, partIndex, options.reserved) }, means: true }) }));
       if (lost.status === "remade" && lost.note !== undefined) options.remadeNotes.push({ item: lost.item, note: lost.note });
       if (lost.status === "remade") {
         index -= 1;
