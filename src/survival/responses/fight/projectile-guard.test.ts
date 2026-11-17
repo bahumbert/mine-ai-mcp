@@ -7,6 +7,108 @@ import { FightWeapons } from "./weapons.js";
 import type { FightScene } from "./scene.js";
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { trackArrowFlights } from "../../perception/combat/arrow-flight.js";
+import { confirmShieldBlock, observeProjectileDefence } from "../../weapons/shield-facing.js";
+import { listenersAddedSince } from "../../../test-support/fake-bot/index.js";
+
+for (const rate of [20, 10]) for (const exit of ["clear", "abort", "death", "gone"])
+for (const stage of exit === "clear" ? ["guard"] : ["guard", "draw"])
+test(`late-hit replay keeps protection then permits the next draw: ${rate} tps ${exit} during ${stage}`, async () => {
+  const { bot, clock, server, entities } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    groundY: null, position: new Vec3(0, 64, 0), carried: { bow: 1, arrow: 4 }, slots: { 45: { name: "shield" } },
+    entities: { 7: { name: "zombie", position: new Vec3(0, 64, 12) }, 8: { name: "arrow", position: new Vec3(0, 65, 10), velocity: new Vec3(0, 0, -1.7) } } });
+  using _timers = clock.install();
+  const added = listenersAddedSince(bot), packets = listenersAddedSince(bot._client);
+  const pace = serverTickPace(bot);
+  await clock.advance(4_000);
+  const tracker = trackArrowFlights(bot);
+  bot._client.emit("spawn_entity", { entityId: 8 });
+  const stop = new AbortController();
+  const scene = { bot, target: bot.entities[7]!, perception: { read: () => [] }, signal: stop.signal,
+    dead: new Set<number>(), attacks: 0, projectileGuards: 0, footingRecovery: { needed: false },
+    settled: () => bot.health <= 0 || !scene.target.isValid,
+    policy: { combat: { shield: true, volley_wait_ticks: 100 } }, reportDecision: () => {},
+    execution: { run: async (_phase: string, effect: () => Promise<unknown>) => effect(), progress: { volleyFinished: () => {} } },
+  } as unknown as FightScene;
+  const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
+  const shield = bot.inventory.slots[45]!;
+  Object.assign(weapons, { currentLoadout: () => ({ shield }), hasClearShot: () => true, aimBow: async () => true });
+  weapons.itemUse.activateShield();
+  const gameTime = server.gameTime, age = bot.time.age;
+  const pending = (async () => {
+    const guarded = await weapons.guardRangedAttack();
+    return guarded === "volley_finished" ? weapons.shoot(shield) : guarded;
+  })();
+  const outcome = pending.then(value => ({ value }), error => ({ error }));
+  await clock.advance(6_000 / rate);
+  assert.equal(server.gameTime - gameTime, 6);
+  assert.equal(bot.time.age, age);
+  assert.equal(weapons.itemUse.shieldRaised, true);
+  assert.equal(weapons.itemUse.drawingBow, false, "guard cannot drop before the scripted late impact");
+  assert.equal(weapons.bowWindow(20).safe, false, "missing position packets cannot manufacture clearance");
+  if (stage === "draw") {
+    entities.remove(8); confirmShieldBlock(bot);
+    await clock.advance(200);
+    assert.equal(weapons.itemUse.drawingBow, true);
+  }
+  if (exit === "abort") stop.abort(new Error("guard aborted"));
+  if (exit === "death") bot.health = 0;
+  if (exit === "gone") entities.remove(7);
+  if (stage === "guard") entities.remove(8);
+  confirmShieldBlock(bot); // Scripted authoritative clearance input, not simulated arrow damage.
+  const result = await clock.settle(outcome, 6_000);
+  if (exit === "abort") assert.match(String("error" in result ? result.error : ""), /guard aborted/);
+  else assert.equal("value" in result ? result.value : null, exit === "clear" ? "shot" : "fight_ended");
+  if (exit !== "clear") {
+    bot.health = 20;
+    if (exit !== "gone") entities.remove(7);
+    Object.assign(scene, { signal: new AbortController().signal, target: entities.spawn({ id: 7, name: "zombie", position: new Vec3(0, 64, 12) }) });
+    assert.equal(await clock.settle(weapons.shoot(shield), 6_000), "shot", "the next clear draw releases normally");
+  }
+  assert.equal(scene.attacks, 1);
+  weapons.itemUse.lowerShield(); tracker[Symbol.dispose](); pace[Symbol.dispose](); weapons.readiness[Symbol.dispose]();
+  const attacks = scene.attacks;
+  const releases = server.packets.filter(packet => packet.name === "block_dig" && (packet.data as { status: number }).status === 5).length;
+  await clock.advance(10_000);
+  assert.equal(scene.attacks, attacks);
+  assert.equal(server.packets.filter(packet => packet.name === "block_dig" && (packet.data as { status: number }).status === 5).length, releases);
+  assert.equal(weapons.itemUse.drawingBow, false);
+  for (const event of ["time", "physicsTick", "entitySpawn", "respawn", "heldItemChanged", "mount", "dismount", "death", "end"]) assert.equal(added(event), 0, event);
+  for (const event of ["spawn_entity", "entity_velocity", "rel_entity_move", "entity_move_look", "entity_teleport", "sync_entity_position", "entity_destroy"]) assert.equal(packets(event), 0, event);
+});
+
+for (const [from, to] of [[20, 10], [10, 20]]) test(`cadence ${from}->${to} never opens across possible contact`, async () => {
+  const { bot, clock, server, entities } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: from },
+    groundY: null, position: new Vec3(0, 64, 0) });
+  using _timers = clock.install();
+  const added = listenersAddedSince(bot), packets = listenersAddedSince(bot._client);
+  const pace = serverTickPace(bot);
+  await clock.advance(4_000);
+  const flights = trackArrowFlights(bot);
+  const arrow = entities.spawn({ id: 8, name: "arrow", position: new Vec3(0, 65, 10), velocity: new Vec3(0, 0, -1.7) });
+  bot._client.emit("spawn_entity", { entityId: 8 });
+  server.setTickRate(to);
+  const scene = { bot, target: { id: 7 }, perception: { read: () => [] } } as unknown as FightScene;
+  const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
+  for (const ms of [350, 2_000]) {
+    await clock.advance(ms);
+    assert.equal(weapons.bowWindow(20).safe, false, `at clock ${clock.now()}, world ${server.gameTime}, cached ${bot.time.age}`);
+  }
+  server.stop();
+  const age = bot.time.age, gameTime = server.gameTime;
+  await clock.advance(6_000);
+  assert.equal(server.gameTime, gameTime); assert.equal(bot.time.age, age);
+  assert.equal(weapons.bowWindow(20).safe, false);
+  arrow.position.set(20, 65, 20); arrow.velocity.set(1, 0, 0);
+  bot._client.emit("sync_entity_position", { entityId: 8 }); confirmShieldBlock(bot);
+  assert.equal(observeProjectileDefence(bot), null, "a confirmed correction proves clearance");
+  flights[Symbol.dispose](); pace[Symbol.dispose](); weapons.readiness[Symbol.dispose]();
+  await clock.advance(10_000);
+  assert.equal(observeProjectileDefence(bot), null, "cleanup cannot revive a held contact");
+  serverTickPace(bot)[Symbol.dispose](); // The inspection above lazily owns a new pace observer.
+  for (const event of ["time", "physicsTick", "entitySpawn", "respawn", "heldItemChanged", "mount", "dismount", "death", "end"]) assert.equal(added(event), 0, event);
+  for (const event of ["spawn_entity", "entity_velocity", "rel_entity_move", "entity_move_look", "entity_teleport", "sync_entity_position", "entity_destroy"]) assert.equal(packets(event), 0, event);
+});
 
 /** Run `action` while the clock turns one physics tick at a time, until it settles; its outcome is returned as it came. */
 async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {

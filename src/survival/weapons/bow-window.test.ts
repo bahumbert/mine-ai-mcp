@@ -9,10 +9,14 @@ function forecast(ticks: number | null, name = "arrow", id = 7) {
 }
 
 test("a shooting window includes shield readiness, turning and margin after release", () => {
-  assert.equal(assessBowWindow(forecast(30), 20).safe, false);
-  assert.equal(assessBowWindow(forecast(31), 20).safe, true);
-  assert.equal(assessBowWindow(forecast(10), 0).safe, false);
-  assert.equal(assessBowWindow(forecast(11), 0).safe, true);
+  for (const [impact, remaining, uncertain, safe] of [
+    [30, 20, false, false], [31, 20, false, true],
+    [10, 0, false, false], [11, 0, false, true], [31, 20, true, false],
+  ] as const) {
+    const window = assessBowWindow({ ...forecast(impact), timingUncertain: uncertain }, remaining);
+    assert.equal(window.safe, safe, `impact ${impact}, draw ${remaining}, uncertain ${uncertain}`);
+    if (uncertain) assert.equal(window.reason, "uncertain_timing");
+  }
 });
 
 test("bow vetoes retain the responsible timing and threat through mixed contacts and disappearance", () => {

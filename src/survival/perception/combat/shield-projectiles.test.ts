@@ -13,6 +13,51 @@ import { guardRetreatProjectiles } from "../../weapons/projectile-guard.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
 import { serverTickPace } from "../../../world/server-tick-pace.js";
 
+for (const rate of [20, 10]) for (const warmth of ["warm", "cold", "no-age"]) for (const stopped of [false, true])
+test(`impact three plus grace two hold: ${rate} tps ${warmth} ${stopped ? "stopped" : "running"}`, async () => {
+  const { bot, clock, server } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate, timePacketYet: warmth !== "no-age" },
+    groundY: null, position: new Vec3(0, 64, 0), entities: { 8: { name: "arrow", position: new Vec3(0, 65, 3), velocity: new Vec3(0, 0, -1) } } });
+  using _timers = clock.install();
+  const added = listenersAddedSince(bot), packets = listenersAddedSince(bot._client);
+  const pace = serverTickPace(bot);
+  if (warmth === "warm") await clock.advance(4_000);
+  assert.equal(arrowImpact(bot, bot.entities[8]!)!.ticks, 3);
+  const initial = observeProjectileDefence(bot)!;
+  assert.equal(initial.holdRemainingTicks, 5);
+  bot.entities[8]!.velocity.set(0, 0, 0); // No more forecasts; entity remains valid, no block confirmation.
+  if (stopped) server.stop();
+  const age = bot.time.age, gameTime = server.gameTime;
+  const bound = warmth === "warm" ? 5_000 / rate : warmth === "cold" && !stopped && rate === 20 ? 2_000 : 3_750;
+  await clock.advance(bound - 1);
+  assert.ok(observeProjectileDefence(bot)!.holdRemainingTicks > 0);
+  await clock.advance(1);
+  assert.equal(observeProjectileDefence(bot), null);
+  if (stopped) { assert.equal(server.gameTime, gameTime); assert.equal(bot.time.age, age); }
+  confirmShieldBlock(bot);
+  pace[Symbol.dispose]();
+  await clock.advance(6_000);
+  assert.equal(observeProjectileDefence(bot), null, "cleanup cannot revive a held contact");
+  serverTickPace(bot)[Symbol.dispose](); // Dispose the inspection's lazy pace observer too.
+  for (const event of ["time", "physicsTick", "entitySpawn", "respawn", "heldItemChanged", "mount", "dismount", "death", "end"]) assert.equal(added(event), 0, event);
+  for (const event of ["spawn_entity", "entity_velocity", "rel_entity_move", "entity_move_look", "entity_teleport", "sync_entity_position", "entity_destroy"]) assert.equal(packets(event), 0, event);
+});
+
+for (const rate of [20, 10]) for (const earlier of [true, false])
+test(`a distinct impact respects the one-tick supersession margin: ${rate} tps ${earlier}`, async () => {
+  const { bot, clock, entities } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    groundY: null, position: new Vec3(0, 64, 0), entities: { 8: { name: "arrow", position: new Vec3(0, 65, 3), velocity: new Vec3(0, 0, -1) } } });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  await clock.advance(4_000);
+  assert.equal(observeProjectileDefence(bot)!.heldProjectileId, 8);
+  const second = entities.spawn({ id: 9, name: "arrow", position: new Vec3(earlier ? -1 : -2, 65, 0), velocity: new Vec3(1, 0, 0) });
+  assert.equal(arrowImpact(bot, second)!.ticks, earlier ? 1 : 2);
+  assert.equal(observeProjectileDefence(bot)!.heldProjectileId, earlier ? 9 : 8);
+  bot.entities[8]!.velocity.set(0, 0, 0); second.velocity.set(0, 0, 0);
+  confirmShieldBlock(bot);
+  assert.equal(observeProjectileDefence(bot), null, "a confirmed block clears the held contact");
+});
+
 /**
  * A bot in open air with arrow #8 flying at it; `later` arrows exist but the bot has not seen them yet: `arrive(id)`
  * announces one, at its position and velocity.
@@ -380,8 +425,13 @@ test("contacts two ticks apart share a protective heading, including a newly obs
   }
 });
 
-test("grazing arrow guard uses the collision bearing and retains it through estimated contact", () => {
-  const { bot, arrow } = fixture();
+test("grazing arrow guard uses the collision bearing and retains it through estimated contact", async () => {
+  const { bot, clock } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: null,
+    entities: { 8: { name: "arrow", position: new Vec3(0, 65, 8), velocity: new Vec3(0, 0, -1) } } });
+  const arrow = bot.entities[8]!;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  await clock.advance(4_000);
   // Server probe attempt 15: the arrow crossed the bot's front during its
   // last movement segment. Facing its earlier position exposed the contact.
   bot.entity.position.set(2.7194334786, -60, -4.6995768174);
@@ -390,13 +440,15 @@ test("grazing arrow guard uses the collision bearing and retains it through esti
   const impact = arrowImpact(bot, arrow)!;
   assert.equal(impact.ticks, 1);
   assert.ok(impact.position.x < bot.entity.position.x, "collision is on the opposite side from the old arrow position");
-  const defence = observeProjectileDefence(bot, 0, 1000)!;
+  const defence = observeProjectileDefence(bot)!;
   const heading = defence.facing.minus(bot.entity.position.offset(0, 1.62, 0));
   assert.ok(heading.x < 0 && heading.z > 0);
   assert.equal(defence.heldProjectileId, arrow.id);
   arrow.position.set(1, -60, -5); // locally predicted past the body, before confirmation
-  assert.deepEqual(observeProjectileDefence(bot, 0, 1050)!.facing, defence.facing);
-  assert.equal(observeProjectileDefence(bot, 0, 1200), null, "the impact window is bounded");
+  await clock.advance(50);
+  assert.deepEqual(observeProjectileDefence(bot)!.facing, defence.facing);
+  await clock.advance(150);
+  assert.equal(observeProjectileDefence(bot), null, "the impact window is bounded");
 });
 
 test("a new incoming arrow can replace the grace window of a shot that has passed", () => {

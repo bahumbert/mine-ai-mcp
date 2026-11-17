@@ -3,22 +3,39 @@ import { Vec3 } from "vec3";
 import { observedEyeHeight, STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 import { clearCombatRay } from "../../world/entity-geometry.js";
 import { hasExposedBody } from "../../world/entity-visibility.js";
-import { assessIncomingShieldProjectiles, compareImpactTimes } from "../perception/combat/shield-projectiles.js";
+import { arrowImpact, assessIncomingShieldProjectiles, compareImpactTimes } from "../perception/combat/shield-projectiles.js";
 import { isWindingUpAtBot } from "../perception/combat/observations.js";
 import { canBeBystander, isHostile } from "../perception/combat/threats.js";
-import { MELEE_RANGE } from "./equipment.js";
-import { isArrowEntity } from "../perception/combat/arrow-flight.js";
-import { bowReleaseInTicks } from "../perception/combat/bow-timing.js";
+import { combatReadout, MELEE_RANGE } from "./equipment.js";
+import { arrowFlight, isArrowEntity } from "../perception/combat/arrow-flight.js";
+import { bowReleaseInTicks, earliestBowRelease } from "../perception/combat/bow-timing.js";
 import { meleeDistance } from "./melee.js";
+import { serverTickPace, type TickMark } from "../../world/server-tick-pace.js";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs } from "../../world/world-age.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 const GUARD_COSINE = Math.cos((70 * Math.PI) / 180);
 // Allow a movement-packet send and the server's separate head update before contact.
 export const HEAD_TURN_LEAD_TICKS = 3;
 const IMPACT_GRACE_TICKS = 2;
-type HeldImpact = { entity: Entity; heading: Vec3; until: number; impactAt: number };
+type HeldImpact = { entity: Entity; heading: Vec3; mark: TickMark; impactTicks: number; totalTicks: number };
 type ProjectileForecast = ReturnType<typeof assessIncomingShieldProjectiles>[number];
 const heldImpacts = new WeakMap<Bot, HeldImpact>();
+
+/** Keep possible past contacts unsafe until a packet corrects their anchor or clears the projectile. */
+function earliestArrowContact(bot: Bot, entity: Entity, allowance: number, now: number) {
+  const flight = arrowFlight(bot, entity, now);
+  if (!flight.positionMark || flight.ownLaunch || entity.velocity.norm() === 0) return null;
+  if (flight.anchorLaunch && combatReadout(bot).arrows < flight.anchorLaunch.arrows) return null;
+  const anchored: Entity = Object.create(entity);
+  Object.defineProperties(anchored, { position: { value: flight.anchorPosition }, velocity: { value: flight.anchorVelocity } });
+  const contact = arrowImpact(bot, anchored, allowance);
+  if (!contact) return null;
+  const ticks = contact.ticks - Math.max(0, now - flight.positionMark.ms) / MS_PER_ON_TIME_TICK;
+  const pace = serverTickPace(bot), elapsed = Math.max(0, now - flight.positionMark.ms);
+  return { ...contact, ticks: Math.max(0, ticks), uncertain: ticks <= 0 || flight.positionMark.age === null ||
+    pace.creditedSince(flight.positionMark, now) + 1e-6 < elapsed / pace.msPerTick() };
+}
 
 /** A confirmed block ends the estimated contact grace, but does not identify an arrow. */
 export function confirmShieldBlock(bot: Bot): void {
@@ -52,8 +69,25 @@ export function projectileShieldFacing(bot: Bot, movementAllowance = 0): Vec3 | 
   return observeProjectileDefence(bot, movementAllowance)?.facing ?? null;
 }
 
+/** Build paced geometry and conservative admission deadlines from the same observations. */
+function forecastProjectileContacts(bot: Bot, movementAllowance: number, now: number) {
+  // A crossing shot can warn movement to stop without threatening the settled
+  // body. Such a near miss must never take aim priority over an actual hit.
+  const hits = assessIncomingShieldProjectiles(bot);
+  const projectiles = hits.length ? hits : assessIncomingShieldProjectiles(bot, movementAllowance);
+  const earliest = new Map(Object.values(bot.entities).filter(entity => entity.isValid && isArrowEntity(bot, entity))
+    .map(entity => [entity, earliestArrowContact(bot, entity, hits.length ? 0 : movementAllowance, now)] as const));
+  const forecasts = projectiles.map(shot => ({ ...shot,
+    earliestImpactInTicks: earliest.get(shot.entity)?.ticks ?? shot.impactInTicks }));
+  for (const [entity, contact] of earliest) if (contact && !forecasts.some(shot => shot.entity === entity)) {
+    forecasts.push({ entity, impactInTicks: null, earliestImpactInTicks: contact.ticks, contact: contact.position });
+  }
+  return { hits, forecasts: forecasts.sort(compareImpactTimes),
+    timingUncertain: [...earliest.values()].some(contact => contact?.uncertain) };
+}
+
 /** Before release, only a measured bow draw can supply an impact forecast. */
-function forecastWindups(bot: Bot) {
+function forecastWindups(bot: Bot, now: number) {
   return Object.values(bot.entities).filter((entity) =>
     isHostile(entity) && !canBeBystander(bot, entity) &&
     isWindingUpAtBot(bot, entity) && clearCombatRay(bot.world,
@@ -62,7 +96,10 @@ function forecastWindups(bot: Bot) {
     .map((entity) => {
       const releaseInTicks = bowReleaseInTicks(bot, entity);
       // Vanilla skeleton launch speed is an estimate until the observed arrow replaces it.
-      return { entity, releaseInTicks, impactInTicks: releaseInTicks === null ? null
+      return { entity, releaseInTicks,
+        earliestImpactInTicks: releaseInTicks === null ? null
+          : earliestBowRelease(bot, entity, now).ticks + entity.position.distanceTo(bot.entity.position) / 1.6,
+        impactInTicks: releaseInTicks === null ? null
         : releaseInTicks + entity.position.distanceTo(bot.entity.position) / 1.6 };
     }).sort(compareImpactTimes);
 }
@@ -75,8 +112,10 @@ function contactsDuringTurn(forecasts: ProjectileForecast[], committed: Projecti
 
 /** Retain only an arrow's bounded commitment; future wind-ups cannot steal its heading. */
 function retainImpactHeading(bot: Bot, forecasts: ProjectileForecast[], hits: ProjectileForecast[], now: number) {
+  const pace = serverTickPace(bot);
   let held = heldImpacts.get(bot);
-  if (held && (now >= held.until || !held.entity.isValid)) {
+  const spent = held ? pace.creditedSince(held.mark, now) : 0;
+  if (held && (spent >= held.totalTicks || now - held.mark.ms >= serverPacedWallMs(held.totalTicks) || !held.entity.isValid)) {
     heldImpacts.delete(bot);
     held = undefined;
   }
@@ -85,7 +124,7 @@ function retainImpactHeading(bot: Bot, forecasts: ProjectileForecast[], hits: Pr
   // draw cannot steal the heading during an already committed impact window.
   if (held && urgent && urgent.entity !== held.entity &&
       (!hits.some(({ entity }) => entity === held!.entity) ||
-        (urgent.impactInTicks !== null && now + urgent.impactInTicks * 50 < held.impactAt - 50))) {
+        (urgent.impactInTicks !== null && urgent.impactInTicks < held.impactTicks - spent - 1))) {
     heldImpacts.delete(bot);
     held = undefined;
   }
@@ -95,8 +134,8 @@ function retainImpactHeading(bot: Bot, forecasts: ProjectileForecast[], hits: Pr
     // Cover imminent contacts without sacrificing their margin to a distant
     // shooter. Keep that heading while the server completes this impact.
     const { heading } = shieldCoverage(bot.entity.position, contactsDuringTurn(forecasts, urgent, urgent.impactInTicks));
-    held = { entity: urgent.entity, heading, impactAt: now + urgent.impactInTicks * 50,
-      until: now + (urgent.impactInTicks + IMPACT_GRACE_TICKS) * 50 };
+    held = { entity: urgent.entity, heading, mark: { ...pace.mark(), ms: now }, impactTicks: urgent.impactInTicks,
+      totalTicks: urgent.impactInTicks + IMPACT_GRACE_TICKS };
     heldImpacts.set(bot, held);
   }
   if (held) {
@@ -114,10 +153,9 @@ function retainImpactHeading(bot: Bot, forecasts: ProjectileForecast[], hits: Pr
 
 /** One assessment for movement admission, shield aim and guard release. */
 export function observeProjectileDefence(bot: Bot, movementAllowance = 0, now = performance.now()) {
-  // A movement warning must never take aim priority over an actual stationary hit.
-  const hits = assessIncomingShieldProjectiles(bot);
-  const forecasts = hits.length ? hits : assessIncomingShieldProjectiles(bot, movementAllowance);
-  const windupForecasts = forecastWindups(bot);
+  const pace = serverTickPace(bot);
+  const { hits, forecasts, timingUncertain } = forecastProjectileContacts(bot, movementAllowance, now);
+  const windupForecasts = forecastWindups(bot, now);
   const held = retainImpactHeading(bot, forecasts, hits, now);
   if (forecasts.length === 0 && windupForecasts.length === 0 && !held) return null;
   // Observed contacts precede future releases, even when their timing is unknown (a6 T10, t00365).
@@ -137,7 +175,8 @@ export function observeProjectileDefence(bot: Bot, movementAllowance = 0, now = 
     windingUp: windupForecasts.map(({ entity }) => entity),
     windupForecasts,
     heldProjectileId: held?.entity.id ?? null,
-    holdRemainingTicks: held ? Math.max(0, (held.until - now) / 50) : 0,
+    holdRemainingTicks: held ? Math.max(0, held.totalTicks - pace.creditedSince(held.mark, now)) : 0,
+    timingUncertain: timingUncertain || windupForecasts.some(({ entity }) => earliestBowRelease(bot, entity, now).uncertain),
     facing: bot.entity.position.offset(0, STANDING_EYE_HEIGHT, 0).plus(heading),
     coversAll: covered(heading) === unitDirections.length,
     // Opposing shooters cannot all fit. Once the urgent shot and the best
