@@ -268,7 +268,7 @@ function createHurts(bot: FakeBot, parts: CombatParts, sender: Sender, knock: Mo
 export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   const sender = createSender(bot, parts);
   const { swing } = parts;
-  attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender });
+  attachFakeHeldUse(bot, { server: parts.server, inventory: parts.inventory, entities: parts.entities, ...sender, ticks: () => parts.server.gameTime });
   const knock = attachMobKnockback(bot, sender);
   const { creatureOf, hurtCreature, hurtTheBot, pushBot, die } = createHurts(bot, parts, sender, knock, sender.beforeBotHurt);
   parts.server.onPacket("client_command", (data) => {

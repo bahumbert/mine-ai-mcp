@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import type { Entity } from "prismarine-entity";
 import type { ContractCheck } from "../checks.ts";
-import { ANSWER_WALL_MS, afterClientTicks, answerArrives, answerArrivesWhileMoving, serverQuiet } from "../server-answer.ts";
-import { holdsWhileMoving, holdsWithin } from "../subject.ts";
+import { ANSWER_WALL_MS, afterClientTicks, answerArrivesWhileMoving, serverQuiet } from "../server-answer.ts";
+import { holdsWhileMoving } from "../subject.ts";
 import { finishWithin, holdInHand, useFlagsOf } from "./combat-scene.ts";
 import { READING_TICKS, markNow, restTicksSince, tickOf } from "./server-tick-marks.ts";
 
@@ -50,13 +50,20 @@ function launchSpeed(ticks: number): number {
 /** The largest gap (blocks a tick) allowed between a measured launch speed and `launchSpeed`: above the widest measured gap (0.035, a full draw). */
 const SPEED_TOLERANCE = 0.05;
 
+/** Whether a speed fits the measured rule within the tick reader's uncertainty. */
+export function matchesLaunchSpeed(speed: number, ticks: number): boolean {
+  return Array.from({ length: 2 * READING_TICKS + 1 }, (_, offset) => launchSpeed(Math.max(0, ticks + offset - READING_TICKS)))
+    .some((candidate) => Math.abs(speed - candidate) <= SPEED_TOLERANCE);
+}
+
 /** Both velocities of a flight (the spawn packet's and the first after it) match the launch speed of its draw. */
-function assertLaunchSpeed(flight: Flight, ticks: number, draw: string): void {
+export function assertLaunchSpeed(flight: Pick<Flight, "spawnVelocity" | "firstVelocity">, ticks: number, draw: string): void {
   const expected = launchSpeed(ticks);
   const velocities = [["spawn", flight.spawnVelocity], ["first", flight.firstVelocity]] as const;
   for (const [packet, velocity] of velocities) {
     const speed = velocity?.norm();
-    assert.ok(speed !== undefined && Math.abs(speed - expected) <= SPEED_TOLERANCE, `the ${draw} arrow flew ${speed?.toFixed(3) ?? "no"} blocks a tick at its ${packet} velocity, not ${expected.toFixed(3)} for ${ticks} ticks of draw`);
+    const matchesReading = speed !== undefined && matchesLaunchSpeed(speed, ticks);
+    assert.ok(matchesReading, `the ${draw} arrow flew ${speed?.toFixed(3) ?? "no"} blocks a tick at its ${packet} velocity, not ${expected.toFixed(3)} for ${ticks} ticks of draw (reading error ±${READING_TICKS})`);
   }
 }
 
@@ -100,8 +107,8 @@ export const bowDrawAndRelease: ContractCheck = {
       bot.activateItem();
       await restTicksSince(subject, markNow(subject), SHOT_DRAW_TICKS, "the shot draw");
       bot.deactivateItem();
-      await answerArrives(subject, () => arrows.length === 1, `a draw of ${SHOT_DRAW_TICKS} server ticks shot no arrow`);
-      assert.ok(await holdsWithin(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 1, ANSWER_WALL_MS), `the shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
+      await answerArrivesWhileMoving(subject, () => arrows.length === 1, () => bot.time.age, `a draw of ${SHOT_DRAW_TICKS} server ticks shot no arrow`);
+      assert.ok(await holdsWhileMoving(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 1, () => bot.time.age, ANSWER_WALL_MS), `the shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
 
       const fullStart = markNow(subject);
       bot.activateItem();
@@ -110,9 +117,9 @@ export const bowDrawAndRelease: ContractCheck = {
       assert.equal(bot.usingHeldItem, true);
       const fullEnd = markNow(subject);
       bot.deactivateItem();
-      await answerArrives(subject, () => arrows.length === 2, `a draw of ${FULL_DRAW_TICKS} server ticks shot no arrow`);
-      assert.ok(await holdsWithin(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 2, ANSWER_WALL_MS), `the second shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
-      await answerArrives(subject, () => (useFlagsOf(bot) & USING_HAND) === 0, "the shot did not clear the hand-in-use bit");
+      await answerArrivesWhileMoving(subject, () => arrows.length === 2, () => bot.time.age, `a draw of ${FULL_DRAW_TICKS} server ticks shot no arrow`);
+      assert.ok(await holdsWhileMoving(subject, () => bot.inventory.count(arrowType, null) === ARROWS - 2, () => bot.time.age, ANSWER_WALL_MS), `the second shot did not spend an arrow (${bot.inventory.count(arrowType, null)} of ${ARROWS} left)`);
+      await answerArrivesWhileMoving(subject, () => (useFlagsOf(bot) & USING_HAND) === 0, () => bot.time.age, "the shot did not clear the hand-in-use bit");
       assert.equal(bot.usingHeldItem, false);
       ticks.full = (await tickOf(subject, fullEnd)) - (await tickOf(subject, fullStart));
 
@@ -129,14 +136,11 @@ export const bowDrawAndRelease: ContractCheck = {
         const below = eye.y - at.y;
         assert.ok(Math.hypot(at.x - eye.x, at.z - eye.z) < 1 && below >= SPAWN_FROM_EYE.min && below <= SPAWN_FROM_EYE.max, `an arrow spawned at ${at}, not ${SPAWN_FROM_EYE.min} to ${SPAWN_FROM_EYE.max} below the eye ${eye}`);
       }
-      // Stopgap: the shared fake sends no arrow velocity yet (it waits for T1b, `fake-bot-held-use.ts` release); its subject is the one not simulating chunk packets.
-      if (subject.chunkPackets === "server") {
-        const [, full, half] = arrows;
-        assert.ok(full && half, "the full and the half draw each shot an arrow");
-        await answerArrivesWhileMoving(subject, () => full.firstVelocity !== undefined && half.firstVelocity !== undefined, () => bot.time.age, "the full or the half arrow sent no velocity or move packet after its spawn");
-        assertLaunchSpeed(full, ticks.full, "full");
-        assertLaunchSpeed(half, ticks.half, "half");
-      }
+      const [, full, half] = arrows;
+      assert.ok(full && half, "the full and the half draw each shot an arrow");
+      await answerArrivesWhileMoving(subject, () => full.firstVelocity !== undefined && half.firstVelocity !== undefined, () => bot.time.age, "the full or the half arrow sent no velocity or move packet after its spawn");
+      assertLaunchSpeed(full, ticks.full, "full");
+      assertLaunchSpeed(half, ticks.half, "half");
     } finally {
       bot.off("entitySpawn", onSpawn);
       bot.off("entityMoved", onVelocity);

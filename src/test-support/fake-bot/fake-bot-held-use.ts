@@ -5,11 +5,13 @@
  * ticks shoots an arrow from the eye (0.1 below it) and spends one, and food bitten for 32 ticks is eaten: `entity_status` 9
  * ends the use first, then (`AFTER_BITE_TICKS` later) the stack loses one, the effects come and `update_health` follows when
  * the food changed (`AFTER_BITE_TICKS` says what is measured). Bread at food 20 is not taken. Also `unequip`, as `simple_inventory.js:43-79` has it.
- * Not modelled: a crossbow, a trident, potions, the other foods' eating times and effects, the bow's power and the arrow's
+ * Not modelled: a crossbow, a trident, potions, the other foods' eating times and effects, the arrow's
  * flight, the item's damage, a creative bot keeps its stacks (modelled) but is never refused food (vanilla: it is not refused).
  */
 import type { Item } from "prismarine-item";
+import { Vec3 } from "vec3";
 import type { FakeBot } from "./fake-bot.js";
+import { notchVelocity } from "./fake-bot-combat-rules.js";
 import type { ServerEntities } from "./fake-bot-entities.js";
 import { eyeOnServer } from "./fake-bot-entity-reach.js";
 import { EQUIPMENT_SLOTS, type FakeInventory, itemOf } from "./fake-inventory.js";
@@ -22,6 +24,8 @@ const OFF_HAND_BIT = 2;
 const OFF_HAND = 1;
 /** A bow drawn fewer ticks than this shoots nothing (2 ticks: none, 4 ticks: an arrow). */
 const MIN_DRAW_TICKS = 3;
+/** Full draw and launch power measured by contract check `bow-draw-and-release` (2026-11-17). */
+const FULL_DRAW_TICKS = 20;
 /** The arrow starts 0.1 below the eye (y -58.48 for an eye at -58.38). */
 const ARROW_BELOW_EYE = 0.1;
 /** The bite of any food (1.6 s: 1558 to 1576 ms measured for a golden apple). */
@@ -95,6 +99,20 @@ async function unequip(bot: FakeBot, destination: Parameters<FakeBot["unequip"]>
   if (bot.inventory.selectedItem) await bot.clickWindow(-999, 0, 0);
 }
 
+/** Spawn a bow's measured launch and spend its projectile. */
+function shoot(bot: FakeBot, parts: HeldUseParts, use: Use): void {
+  const slot = arrowSlot(bot);
+  const drawTicks = parts.ticks() - use.startedTick;
+  if (drawTicks < MIN_DRAW_TICKS || (slot === null && bot.game.gameMode !== "creative")) return;
+  const pull = Math.min(1, drawTicks / FULL_DRAW_TICKS);
+  const speed = pull * pull + 2 * pull;
+  const { yaw, pitch } = bot.entity;
+  const velocity = new Vec3(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)).scaled(speed);
+  const arrow = parts.entities.spawn({ name: "arrow", position: eyeOnServer(bot, parts.server).offset(0, -ARROW_BELOW_EYE, 0), velocity });
+  parts.afterTicks(1, () => parts.hear("entity_velocity", { entityId: arrow.id, velocity: notchVelocity(velocity) }));
+  if (slot !== null) spendOne(bot, parts, slot);
+}
+
 /** Give `bot` its use of items, `unequip`, and the server's answers to `use_item` and the release. */
 export function attachFakeHeldUse(bot: FakeBot, parts: HeldUseParts): void {
   const flagsKey = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("living_entity_flags");
@@ -137,13 +155,6 @@ export function attachFakeHeldUse(bot: FakeBot, parts: HeldUseParts): void {
     return bot.registry.foodsByName[item.name] !== undefined && (bot.food < FOOD_FULL || ALWAYS_EDIBLE.has(item.name));
   };
 
-  const shoot = (use: Use) => {
-    const slot = arrowSlot(bot);
-    if (parts.ticks() - use.startedTick < MIN_DRAW_TICKS || (slot === null && bot.game.gameMode !== "creative")) return;
-    parts.entities.spawn({ name: "arrow", position: eyeOnServer(bot, parts.server).offset(0, -ARROW_BELOW_EYE, 0) });
-    if (slot !== null) spendOne(bot, parts, slot);
-  };
-
   parts.server.onPacket("use_item", (data) => {
     const { hand } = data as { hand: number };
     parts.server.answer(() => {
@@ -161,7 +172,7 @@ export function attachFakeHeldUse(bot: FakeBot, parts: HeldUseParts): void {
     parts.server.answer(() => {
       const use = using;
       if (use === null) return;
-      if (use.item.name === "bow") shoot(use);
+      if (use.item.name === "bow") shoot(bot, parts, use);
       stopUsing();
     });
   });
