@@ -337,8 +337,7 @@ export class CombatPosition {
     const rays = positionWorld(this.navigation.world);
     const body = standingBody(plan.protected);
     return (
-      standingCell(this.navigation.world, plan.protected) &&
-      [plan.corner, plan.entrance, plan.fighting].every((cell) => {
+      [plan.protected, plan.corner, plan.entrance, plan.fighting].every((cell) => {
         const world = this.navigation.world;
         // Fire obstructs travel until extinguished; it does not remove the
         // walls protecting a safe refuge. Solid obstructions still invalidate it.
