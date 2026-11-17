@@ -109,7 +109,7 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
   build.ate = recovery.ate;
   switch (recovery.kind) {
     case "exposed":
-      return { kind: "failed", error: "The shelter became exposed or unsafe during recovery." };
+      return { kind: "failed", error: `The shelter became exposed or unsafe during recovery (${recovery.cause}).` };
     case "held":
       return { kind: "held", error: recovery.reason };
     case "recovered":

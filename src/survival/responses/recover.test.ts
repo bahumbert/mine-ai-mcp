@@ -70,19 +70,20 @@ test("healthy but still threatened cover cannot report recovered when its hold e
   assert.match(result.kind === "held" ? result.reason : "", /threat still prevents leaving cover/);
 });
 
-test("an incoming arrow invalidates recovery even while the shelter callback still says protected", async () => {
+// The arrow takes the trajectory solver; the small fireball the family-based directional path (both are projectiles).
+for (const name of ["arrow", "small_fireball"] as const) test(`an incoming ${name} invalidates recovery even while the shelter callback still says protected`, async () => {
   const { bot } = createFakeBot({ health: 8, food: 20,
-    entities: { 8: { name: "arrow", position: new Vec3(0.5, 65, 8.5), velocity: new Vec3(0, 0, -1.5), metadata: [] } } });
+    entities: { 8: { name, position: new Vec3(0.5, 65, 8.5), velocity: new Vec3(0, 0, -1.5), metadata: [] } } });
   bot.world.raycast = () => null;
   const result = await recoverUnderCover(bot, {
     signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
     isProtected: () => true,
     defendIntruder: async () => {},
     releaseItemUse: () => assert.fail("Do not lower the guard for exposed recovery"),
-    wait: async () => assert.fail("Do not wait under an incoming arrow"),
+    wait: async () => assert.fail("Do not wait under an incoming projectile"),
     survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
   });
-  assert.equal(result.kind, "exposed");
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "projectile" });
 });
 
 test("a closed shelter containing soul fire is not a recovery position", async () => {
@@ -99,7 +100,7 @@ test("a closed shelter containing soul fire is not a recovery position", async (
     survival,
     policy: () => DEFAULT_SURVIVAL_POLICY,
   });
-  assert.deepEqual(result, { kind: "exposed", ate: null });
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "fire" });
   assert.deepEqual(survival.answered.snapshot(), [], "environmental exposure does not answer recovery futility");
 });
 
@@ -189,7 +190,7 @@ test("losing cover during a bite returns exposure without answering recovery", a
   });
   await clock.advance(1_000);
   const result = await recovery;
-  assert.deepEqual(result, { kind: "exposed", ate: null });
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "open" });
   // The fake's deactivateItem tells the server the use is released (`block_dig` status 5) and clears usingHeldItem.
   const releases = server.packets.filter(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 5);
   assert.equal(releases.length, 1);
@@ -343,7 +344,7 @@ test("a fire outside a protected shell is not dug: the recovery is exposed and n
     wait: async () => assert.fail("An open position does not wait"),
     survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
   }), 90_000);
-  assert.deepEqual(result, { kind: "exposed", ate: null });
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "open" });
   assert.equal(asked, 0);
   assert.equal(bot.blockAt(FEET)?.name, "fire");
 });
@@ -500,8 +501,38 @@ test("a fire dig on a stopped server ends the recovery as exposed within the sta
     wait: async () => assert.fail("An exposed position does not wait"),
     survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
   }), SERVER_CLOCK_STOPPED_MS * 4);
-  assert.deepEqual(result, { kind: "exposed", ate: null });
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "fire" });
   assert.equal(bot.blockAt(FEET)?.name, "fire", "the server never confirmed the dig");
+});
+
+test("a fire the shell's owner may not dig is the exposure's cause, and the dig is asked once", async () => {
+  const { bot, clock } = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: FEET_FIRE, health: 8, food: 20 });
+  let asked = 0;
+  const result = await clock.settle(recoverUnderCover(bot, {
+    signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
+    isProtected: () => true,
+    extinguish: async () => { asked++; return "blocked"; },
+    defendIntruder: async () => {}, releaseItemUse: () => {},
+    wait: async () => assert.fail("An exposed position does not wait"),
+    survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
+  }), 90_000);
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "fire" });
+  assert.equal(asked, 1);
+});
+
+test("lava in a protected body is the exposure's cause, and no fire is dug for it", async () => {
+  const { bot, clock } = createFakeBot({ position: new Vec3(0.5, 64, 0.5), cells: { "0,64,0": "lava" }, health: 8, food: 20 });
+  let asked = 0;
+  const result = await clock.settle(recoverUnderCover(bot, {
+    signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
+    isProtected: () => true,
+    extinguish: async () => { asked++; return "clear"; },
+    defendIntruder: async () => {}, releaseItemUse: () => {},
+    wait: async () => assert.fail("A body in lava does not wait"),
+    survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
+  }), 90_000);
+  assert.deepEqual(result, { kind: "exposed", ate: null, cause: "lava" });
+  assert.equal(asked, 0);
 });
 
 test("a bot that dies while a fire is dug out after an interrupted bite ends as death, without a wait", async () => {

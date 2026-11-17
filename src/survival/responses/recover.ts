@@ -13,11 +13,12 @@ import { type SurvivalResources } from "../state/resources.js";
 import type { Vec3 } from "vec3";
 
 /** The first term that makes the recovery position unusable, in the order the hold checks them. */
-type Hazard = "open" | "burning" | "molten" | "projectile";
+export type Hazard = "open" | "fire" | "lava" | "projectile";
 
 export type CoveredRecovery =
   | { readonly kind: "recovered"; readonly ate: string | null }
-  | { readonly kind: "exposed"; readonly ate: string | null }
+  /** The position became unusable; `cause` is the hazard that holds, so the caller can name it. */
+  | { readonly kind: "exposed"; readonly ate: string | null; readonly cause: Hazard }
   /** Health is still short, and the hold has said why it stopped waiting. */
   | {
       readonly kind: "held";
@@ -103,7 +104,8 @@ async function eatInHold(
   }
   if (!exposed.signal.aborted) return { ate: meal, end: null };
   // A bite stopped by a fire is resumed once the fire is out; any other hazard ends the hold here.
-  return (await unlessCleared()) ? { ate: meal, end: { kind: "exposed", ate: meal } } : { ate: meal, end: null };
+  const cause = await unlessCleared();
+  return cause ? { ate: meal, end: { kind: "exposed", ate: meal, cause } } : { ate: meal, end: null };
 }
 
 /**
@@ -121,8 +123,8 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
   let ate: string | null = null;
   const hazardNow = (): Hazard | null => {
     if (!options.isProtected()) return "open";
-    if (isInFire(bot)) return "burning";
-    if (isInLava(bot)) return "molten";
+    if (isInFire(bot)) return "fire";
+    if (isInLava(bot)) return "lava";
     return incomingShieldProjectiles(bot).length > 0 ? "projectile" : null;
   };
   /**
@@ -132,14 +134,15 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
   const unlessCleared = async (): Promise<Hazard | null> => {
     if (bot.health <= 0) return null;
     const hazard = hazardNow();
-    if (hazard !== "burning" || !options.extinguish) return hazard;
+    if (hazard !== "fire" || !options.extinguish) return hazard;
     for (const cell of fireContactCells(bot)) {
       if ((await options.extinguish(cell)) === "blocked") break;
     }
     return bot.health > 0 ? hazardNow() : null;
   };
   options.signal.throwIfAborted();
-  if (await unlessCleared()) return { kind: "exposed", ate };
+  const openingCause = await unlessCleared();
+  if (openingCause) return { kind: "exposed", ate, cause: openingCause };
   const survival = options.survival;
   const policy = options.policy;
   const scope = recoveryScope(bot, policy, options.recoverTo);
@@ -164,7 +167,8 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
   while ((bot.health < options.recoverTo || (policy().combat.recover !== "never" && bot.food < REGENERATION_HUNGER) || options.holdWhile?.()) && bot.health > 0 && !budget.exhausted) {
     options.signal.throwIfAborted();
     await options.defendIntruder();
-    if (await unlessCleared()) return { kind: "exposed", ate };
+    const cause = await unlessCleared();
+    if (cause) return { kind: "exposed", ate, cause };
     if (bot.health <= 0) break;
     // Defensive cover can finish without healing. Keep the shell closed
     // through the attack, then hand back only if the caller's health floor is
@@ -185,7 +189,8 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
     }
     await options.wait(1);
   }
-  if (await unlessCleared()) return { kind: "exposed", ate };
+  const endCause = await unlessCleared();
+  if (endCause) return { kind: "exposed", ate, cause: endCause };
   return bot.health >= options.recoverTo && !options.holdWhile?.()
     ? { kind: "recovered", ate }
     : held(

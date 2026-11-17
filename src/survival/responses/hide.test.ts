@@ -510,7 +510,7 @@ test("a shell around a fire that cannot be dug fails as exposed, and digs nothin
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "failed");
-  assert.match(result.error ?? "", /exposed or unsafe during recovery/);
+  assert.equal(result.error, "The shelter became exposed or unsafe during recovery (fire).");
   assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "fire");
   // Status 0 starts a dig; the hide's own item release is status 5.
   assert.equal(server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0), false, "no dig was started");
