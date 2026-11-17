@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { monotonicNow } from "../../utils/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { recoverUnderCover, type CoveredRecovery } from "./recover.js";
 import {
@@ -95,6 +96,8 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
     policy: () => ({ combat: threatContext.policy, food: threatContext.food }),
     isProtected: () => enclosedInPlace(bot, options.blockNames) && shelterHazard(build) === null,
     holdWhile: options.holdWhile,
+    // The shelter is closed around the bot, so a fire in its cell is dug out here (the sealed-refuge rule of `fire.ts`).
+    extinguish: (cell) => extinguishFireAt(bot, cell, options.signal, true),
     defendIntruder: async () => {
       const intruder = shelterIntruder(bot, threatContext);
       if (intruder) await repelShelterIntruder(build, intruder);

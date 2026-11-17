@@ -5,11 +5,15 @@ import { monotonicNow } from "../../utils/index.js";
 import { REGENERATION_HUNGER } from "../../world/food.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
-import { isInFire, isInLava } from "../perception/body.js";
+import { fireContactCells, isInFire, isInLava } from "../perception/body.js";
 import { selectPolicyFood } from "../perception/food.js";
 import { hasRegeneration } from "../perception/combat/recovery.js";
 import type { SurvivalPolicy } from "../policy/contract.js";
 import { type SurvivalResources } from "../state/resources.js";
+import type { Vec3 } from "vec3";
+
+/** The first term that makes the recovery position unusable, in the order the hold checks them. */
+type Hazard = "open" | "burning" | "molten" | "projectile";
 
 export type CoveredRecovery =
   | { readonly kind: "recovered"; readonly ate: string | null }
@@ -22,6 +26,86 @@ export type CoveredRecovery =
       readonly reason: string;
     };
 
+export interface CoveredRecoveryOptions {
+  readonly signal: AbortSignal;
+  readonly recoverTo: number;
+  readonly maximumMs: number;
+  readonly isProtected: () => boolean;
+  /** A shelter can contain knockback without making it safe to open yet. */
+  readonly holdWhile?: () => boolean;
+  /**
+   * Digs a fire out of a cell of the bot's own shell. Given only by a caller that may dig there: `blocked` leaves the
+   * fire, and the recovery is exposed. Without it a fire is a hazard like lava.
+   */
+  readonly extinguish?: (cell: Vec3) => Promise<"clear" | "blocked">;
+  readonly defendIntruder: () => Promise<void>;
+  /** Intruder defence may have raised a shield since this hold began. */
+  readonly releaseItemUse: () => void;
+  readonly wait: (ticks: number) => Promise<void>;
+  readonly survival: SurvivalResources;
+  readonly policy: () => Readonly<Pick<SurvivalPolicy, "combat" | "food">>;
+}
+
+/**
+ * One pass of the hold's meal: the food the policy allows, one bite of it, and how the pass ends. `end` is null when the
+ * hold goes on to its wait, `"leave"` when there is nothing left to wait for, and otherwise the hold's result.
+ */
+async function eatInHold(
+  bot: Bot,
+  options: CoveredRecoveryOptions,
+  ate: string | null,
+  hazardNow: () => Hazard | null,
+  unlessCleared: () => Promise<Hazard | null>,
+  held: (stop: "unavailable" | "eating_failed", reason: string) => CoveredRecovery,
+): Promise<{ readonly ate: string | null; readonly end: CoveredRecovery | "leave" | null }> {
+  const selection = selectPolicyFood(bot, options.policy().food);
+  const food = selection.food;
+  if (!food) {
+    if (bot.health < options.recoverTo)
+      return {
+        ate,
+        end: held(
+          "unavailable",
+          selection.withheld
+            ? `nothing carried may be eaten: only uncooked ${selection.withheld.name} is carried and ${selection.verdict.reason}`
+            : `nothing carried can restore it: no food, and hunger ${bot.food} is below the regeneration bar`,
+        ),
+      };
+    return { ate, end: options.holdWhile?.() ? null : "leave" };
+  }
+  let meal = ate;
+  const exposed = new AbortController();
+  const beforeEating = carriedCount(bot, food.name);
+  const observe = () => {
+    if (hazardNow() !== null && !exposed.signal.aborted) {
+      exposed.abort("Recovery position became unsafe while eating.");
+      // This owner must stop the bite before returning to shield or contact defence.
+      if (bot.usingHeldItem) bot.deactivateItem();
+    }
+  };
+  bot.on("physicsTick", observe);
+  try {
+    options.releaseItemUse();
+    const eaten = await eatFood(
+      bot,
+      { foodName: food.name },
+      { signal: AbortSignal.any([options.signal, exposed.signal]) },
+    );
+    if (eaten.status === "succeeded") meal = food.name;
+    else if (!exposed.signal.aborted) return { ate: meal, end: held("eating_failed", `eating ${food.name} failed: ${eaten.error}`) };
+  } catch (cause) {
+    options.signal.throwIfAborted();
+    if (!exposed.signal.aborted) throw cause;
+    // Consumption can be observed in the same packet turn as lost cover.
+    if (carriedCount(bot, food.name) < beforeEating) meal = food.name;
+  } finally {
+    bot.off("physicsTick", observe);
+  }
+  if (!exposed.signal.aborted) return { ate: meal, end: null };
+  // A bite stopped by a fire is resumed once the fire is out; any other hazard ends the hold here.
+  return (await unlessCleared()) ? { ate: meal, end: { kind: "exposed", ate: meal } } : { ate: meal, end: null };
+}
+
 /**
  * Eat and recover only while the owning position remains usable. Construction
  * and weapons belong to callers.
@@ -33,27 +117,29 @@ export type CoveredRecovery =
  * could do nothing. Saying so at once hands the body back sealed in, which is
  * the only thing the hold had left to offer.
  */
-export async function recoverUnderCover(
-  bot: Bot,
-  options: {
-    readonly signal: AbortSignal;
-    readonly recoverTo: number;
-    readonly maximumMs: number;
-    readonly isProtected: () => boolean;
-    /** A shelter can contain knockback without making it safe to open yet. */
-    readonly holdWhile?: () => boolean;
-    readonly defendIntruder: () => Promise<void>;
-    /** Intruder defence may have raised a shield since this hold began. */
-    readonly releaseItemUse: () => void;
-    readonly wait: (ticks: number) => Promise<void>;
-    readonly survival: SurvivalResources;
-    readonly policy: () => Readonly<Pick<SurvivalPolicy, "combat" | "food">>;
-  },
-): Promise<CoveredRecovery> {
+export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOptions): Promise<CoveredRecovery> {
   let ate: string | null = null;
-  const usable = () => options.isProtected() && !isInFire(bot) && !isInLava(bot) && incomingShieldProjectiles(bot).length === 0;
+  const hazardNow = (): Hazard | null => {
+    if (!options.isProtected()) return "open";
+    if (isInFire(bot)) return "burning";
+    if (isInLava(bot)) return "molten";
+    return incomingShieldProjectiles(bot).length > 0 ? "projectile" : null;
+  };
+  /**
+   * The hazard that still holds once a fire in the shell is dug out, or null when the position is usable. A dead bot
+   * is null too: its exits below decide. A fire the shell's owner may not dig stays and is the hazard.
+   */
+  const unlessCleared = async (): Promise<Hazard | null> => {
+    if (bot.health <= 0) return null;
+    const hazard = hazardNow();
+    if (hazard !== "burning" || !options.extinguish) return hazard;
+    for (const cell of fireContactCells(bot)) {
+      if ((await options.extinguish(cell)) === "blocked") break;
+    }
+    return bot.health > 0 ? hazardNow() : null;
+  };
   options.signal.throwIfAborted();
-  if (bot.health > 0 && !usable()) return { kind: "exposed", ate };
+  if (await unlessCleared()) return { kind: "exposed", ate };
   const survival = options.survival;
   const policy = options.policy;
   const scope = recoveryScope(bot, policy, options.recoverTo);
@@ -78,7 +164,8 @@ export async function recoverUnderCover(
   while ((bot.health < options.recoverTo || (policy().combat.recover !== "never" && bot.food < REGENERATION_HUNGER) || options.holdWhile?.()) && bot.health > 0 && !budget.exhausted) {
     options.signal.throwIfAborted();
     await options.defendIntruder();
-    if (!usable()) return { kind: "exposed", ate };
+    if (await unlessCleared()) return { kind: "exposed", ate };
+    if (bot.health <= 0) break;
     // Defensive cover can finish without healing. Keep the shell closed
     // through the attack, then hand back only if the caller's health floor is
     // met; never eat or wait for regeneration against an explicit prohibition.
@@ -89,53 +176,16 @@ export async function recoverUnderCover(
         : { kind: "held", stop: "prohibited", ate, reason: `Defence ended at health ${bot.health}; required ${options.recoverTo}, but recovery is prohibited.` };
     }
     if (bot.food < REGENERATION_HUNGER && !hasRegeneration(bot)) {
-      const selection = selectPolicyFood(bot, policy().food);
-      const food = selection.food;
-      if (!food) {
-        if (bot.health >= options.recoverTo) {
-          if (!options.holdWhile?.()) break;
-          await options.wait(1);
-          continue;
-        }
-        return held(
-          "unavailable",
-          selection.withheld
-            ? `nothing carried may be eaten: only uncooked ${selection.withheld.name} is carried and ${selection.verdict.reason}`
-            : `nothing carried can restore it: no food, and hunger ${bot.food} is below the regeneration bar`,
-        );
-      }
-      const exposed = new AbortController();
-      const beforeEating = carriedCount(bot, food.name);
-      const observe = () => {
-        if (!usable() && !exposed.signal.aborted) {
-          exposed.abort("Recovery position became unsafe while eating.");
-          // This owner must stop the bite before returning to shield or contact defence.
-          if (bot.usingHeldItem) bot.deactivateItem();
-        }
-      };
-      bot.on("physicsTick", observe);
-      try {
-        options.releaseItemUse();
-        const eaten = await eatFood(
-          bot,
-          { foodName: food.name },
-          { signal: AbortSignal.any([options.signal, exposed.signal]) },
-        );
-        if (eaten.status === "succeeded") ate = food.name;
-        else if (!exposed.signal.aborted) return held("eating_failed", `eating ${food.name} failed: ${eaten.error}`);
-      } catch (cause) {
-        options.signal.throwIfAborted();
-        if (!exposed.signal.aborted) throw cause;
-        // Consumption can be observed in the same packet turn as lost cover.
-        if (carriedCount(bot, food.name) < beforeEating) ate = food.name;
-      } finally {
-        bot.off("physicsTick", observe);
-      }
-      if (exposed.signal.aborted) return { kind: "exposed", ate };
+      const meal = await eatInHold(bot, options, ate, hazardNow, unlessCleared, held);
+      ate = meal.ate;
+      if (meal.end === "leave") break;
+      if (meal.end) return meal.end;
+      // A bite can end with the bot dead (a fire dug out after it): its exits decide, never a wait.
+      if (bot.health <= 0) break;
     }
     await options.wait(1);
   }
-  if (bot.health > 0 && !usable()) return { kind: "exposed", ate };
+  if (await unlessCleared()) return { kind: "exposed", ate };
   return bot.health >= options.recoverTo && !options.holdWhile?.()
     ? { kind: "recovered", ate }
     : held(

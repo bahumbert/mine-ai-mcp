@@ -490,6 +490,32 @@ test("a sealed-in bot with nothing to eat and hunger below the regeneration bar 
   assert.match(result.error ?? "", /no food, and hunger 13 is below the regeneration bar/);
 });
 
+// The probe's state (fortress-crossfire-cover, 1 red in 24 at 20 tps): a fire lit in the feet cell while the shell closed around it.
+const BURNING_SHELL: Record<string, FakeCell> = { ...SEALED_BOX, "0,64,0": "fire" };
+
+for (const ticksPerSecond of [20, 10]) test(`a shell closed around a fire in the feet cell digs the fire out and recovers at ${ticksPerSecond} tps`, async () => {
+  // Health already at the floor (the fake does not regenerate here): the fire is what the hold must clear first.
+  // Stopgap (unverified on the real server): this scene's dig is the fake's client prediction, not the server clock; the
+  // server-clock dig at 20 and 10 tps, and a stopped server, are in recover.test.ts.
+  const { bot, clock } = scene({ health: 18, food: 20, server: { ticksPerSecond }, cells: BURNING_SHELL });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+
+  assert.equal(result.kind, "recovered");
+  assert.equal(result.enclosed, true, "the shell was closed before the fire was seen");
+  assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "air", "the fire in the feet cell is gone");
+});
+
+test("a shell around a fire that cannot be dug fails as exposed, and digs nothing", async () => {
+  const { bot, clock, server } = scene({ health: 18, food: 20, cells: BURNING_SHELL, overrides: { canDigBlock: () => false } });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /exposed or unsafe during recovery/);
+  assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "fire");
+  // Status 0 starts a dig; the hide's own item release is status 5.
+  assert.equal(server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0), false, "no dig was started");
+});
+
 const LIQUID_BODIES = [
   ["water", "isInWater"],
   ["lava", "isInLava"],

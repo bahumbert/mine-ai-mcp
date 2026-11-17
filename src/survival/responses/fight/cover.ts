@@ -291,6 +291,7 @@ export class CoverFight {
             survival: this.scene.survival,
             policy: () => this.scene.policy.effective,
             isProtected: () => !this.scene.settled() && this.scene.position.protected(),
+            extinguish: (cell) => this.scene.position.extinguishFireAt(cell, signal),
             defendIntruder: async () => {
               await this.weapons.defendContact();
             },
