@@ -4,6 +4,8 @@ import { Vec3 } from "vec3";
 import { createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { isWindingUp } from "../perception/combat/observations.js";
 import { observeProjectileDefence } from "./shield-facing.js";
+import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
+import { createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 
 // Metadata is indexed exactly as the shared 1.21.4 registry indexes it: a
 // fixture must never write to that registry, which every fake bot shares.
@@ -49,3 +51,47 @@ test("a charging blaze raises the same projectile defence a drawing skeleton doe
     "a drawn bow does raise the defence",
   );
 });
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`an observed fireball keeps priority over opposite uncertain charges (${ticksPerSecond} tps)`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    // t00699 client.log, ages 279/299: native fireball #7's packet observations.
+    // Opposing charge flags replay t00365:1779/1789; no acceleration is simulated.
+    const { bot, entities } = createFakeBot({ clock, server: { ticksPerSecond }, groundY: null,
+      position: new Vec3(-7.524897961090669, -60, 4.500157425151781),
+      entities: {
+        3: { name: "blaze", position: new Vec3(5.903960617580779, -60, 1.9367159803515928), yaw: Math.PI / 2, headYaw: Math.PI / 2, metadata: charging() },
+        4: { name: "blaze", position: new Vec3(-28.362060546875, -60, 2.38818359375),
+          yaw: -Math.PI / 2, headYaw: -Math.PI / 2, metadata: charging() },
+      } });
+    const added = listenersAddedSince(bot);
+    const shot = entities.spawn({ name: "small_fireball",
+      position: new Vec3(-28.362015862629868, -58.60000002384186, 2.3882521086609043),
+      velocity: new Vec3(0.09925, 0, 0.0115) });
+    const defence = observeProjectileDefence(bot)!;
+    const direction = shot.position.minus(bot.entity.position); direction.y = 0;
+    const aim = defence.facing.minus(bot.entity.position); aim.y = 0;
+    assert.ok(aim.normalize().dot(direction.normalize()) >= Math.cos(70 * Math.PI / 180),
+      "the incoming fireball stays inside the guard cone instead of the opposing charge");
+    assert.deepEqual(incomingShieldProjectiles(bot), [shot], "admission keeps the observed shot");
+    assert.equal(defence.projectiles[0]!.impactInTicks, null, "direction alone gives no acceleration-aware deadline");
+    assert.ok(defence.windupForecasts.every(({ releaseInTicks, impactInTicks }) =>
+      releaseInTicks === null && impactInTicks === null), "a blaze charge has no fabricated bow-flight ETA");
+    await bot.lookAt(defence.facing, true);
+    assert.equal(observeProjectileDefence(bot)!.aligned, true);
+    assert.equal(observeProjectileDefence(bot)!.imminent, true);
+    shot.position.set(-27.899613518879868, -58.60000002384186, 2.4422071867859043);
+    shot.velocity.set(0.273625, 0, 0.03175);
+    const updated = observeProjectileDefence(bot)!;
+    assert.equal(updated.projectiles[0]!.impactInTicks, null);
+    assert.ok(updated.facing.x < bot.entity.position.x, "the next measured velocity keeps the incoming side covered");
+    entities.remove(shot.id);
+    for (const id of [3, 4]) entities.remove(id);
+    assert.equal(observeProjectileDefence(bot), null, "departure releases aim with no held non-arrow heading");
+    await clock.advance(60_000);
+    assert.equal(observeProjectileDefence(bot), null);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(clock.pendingTimers(), 0);
+  });
+}

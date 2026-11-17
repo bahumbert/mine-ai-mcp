@@ -2,7 +2,8 @@ import type { EntityBody } from "../../../world/entity-geometry.js";
 import type { Bot } from "mineflayer";
 import { PROJECTILE_HIT_MARGIN, projectileContact } from "../../positioning/combat/exposure.js";
 import { arrowFlight, isArrowEntity } from "./arrow-flight.js";
-import { isIncomingDirectionalProjectile } from "./directional-projectiles.js";
+import { directionalProjectileContact } from "./directional-projectiles.js";
+import type { Vec3 } from "vec3";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -65,14 +66,34 @@ export function isIncomingArrow(bot: Bot, arrow: Entity, movementAllowance = 0, 
 
 /** Shield-facing and retreat admission must consider the same set of blockable shots. */
 export function incomingShieldProjectiles(bot: Bot, movementAllowance = 0): Entity[] {
-  const travelTime = (entity: Entity) => {
-    const state = arrowFlight(bot, entity);
-    return state.position.distanceTo(bot.entity.position) / state.velocity.norm();
-  };
-  return Object.values(bot.entities)
-    .filter(
-      (entity) =>
-        isIncomingDirectionalProjectile(bot, entity, { ...bot.entity, width: bot.entity.width + movementAllowance * 2 }) || isIncomingArrow(bot, entity, movementAllowance),
-    )
-    .sort((a, b) => travelTime(a) - travelTime(b));
+  return assessIncomingShieldProjectiles(bot, movementAllowance).map(({ entity }) => entity);
+}
+
+/** Known collision times order each threat class; unknown observations remain in the assessment. */
+export function compareImpactTimes(a: { impactInTicks: number | null }, b: { impactInTicks: number | null }): number {
+  if (a.impactInTicks === null) return b.impactInTicks === null ? 0 : 1;
+  if (b.impactInTicks === null) return -1;
+  return a.impactInTicks - b.impactInTicks;
+}
+
+/** One contact assessment for shield admission and facing, with ballistic timing only for arrows. */
+export function assessIncomingShieldProjectiles(bot: Bot, movementAllowance = 0) {
+  const forecasts: { entity: Entity; impactInTicks: number | null; contact: Vec3 }[] = [];
+  const body = { ...bot.entity, width: bot.entity.width + movementAllowance * 2 };
+  for (const entity of Object.values(bot.entities)) {
+    if (isArrowEntity(bot, entity)) {
+      const impact = arrowImpact(bot, entity, movementAllowance);
+      if (impact) forecasts.push({ entity, impactInTicks: impact.ticks, contact: impact.position });
+    } else {
+      const contact = directionalProjectileContact(bot, entity, body);
+      // The observed bearing is where the shield must face; an offset ray's entry
+      // into our expanded body can lie on a different side (EyesBot crossfire).
+      if (contact) forecasts.push({ entity, impactInTicks: null, contact: entity.position.clone() });
+    }
+  }
+  return forecasts.sort((a, b) => compareImpactTimes(a, b) ||
+    (a.impactInTicks === null && b.impactInTicks === null
+      // Order unknown shots by observed motion, then proximity, without claiming an arrival time.
+      ? b.entity.velocity.norm() - a.entity.velocity.norm() ||
+        a.entity.position.distanceTo(bot.entity.position) - b.entity.position.distanceTo(bot.entity.position) : 0));
 }

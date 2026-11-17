@@ -52,7 +52,7 @@ export class CombatTactics {
       // opens a fight is often from the one the bot did not pick.
       meleeImminent: perception.read().some((threat) => threat.meleeImminent),
       projectile: projectile ? { imminent: projectile.imminent, aligned: projectile.aligned, coversAll: projectile.coversAll,
-        impactInTicks: projectile.projectiles[0]?.impactInTicks ?? projectile.windupForecasts[0]?.impactInTicks ?? null } : null,
+        impactInTicks: (projectile.projectiles[0] ?? projectile.windupForecasts[0])?.impactInTicks ?? null } : null,
     };
     const decision = decideCombatTactic(facts);
     if (decision.kind === "escape") perception.creeperClearance.require(creepers.filter(threat => decision.threatIds.includes(threat.id)));

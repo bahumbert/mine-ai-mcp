@@ -8,6 +8,10 @@ import { confirmShieldBlock, observeProjectileDefence, projectileShieldFacing } 
 import { CombatPerception } from "./observations.js";
 import { arrowFlight, trackArrowFlights } from "./arrow-flight.js";
 import { arrowImpact, arrowImpactInTicks, incomingShieldProjectiles, isIncomingArrow } from "./shield-projectiles.js";
+import { createNavigationRuntime, createMovements, exactBlockGoal } from "../../../navigation/index.js";
+import { guardRetreatProjectiles } from "../../weapons/projectile-guard.js";
+import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
 
 /**
  * A bot in open air with arrow #8 flying at it; `later` arrows exist but the bot has not seen them yet: `arrive(id)`
@@ -37,6 +41,76 @@ function fixture(later: Record<number, { position: Vec3; velocity: Vec3 }> = {})
 /** Stone across x -1..1 at `z`, `ys` high: what the line from the bot to something beyond it now meets. */
 function wallAt(world: FakeWorld, z: number, ys: readonly number[], block = "stone"): void {
   for (const x of [-1, 0, 1]) for (const y of ys) world.setCell(new Vec3(x, y, z), block);
+}
+
+test("non-arrow contact admission and aim agree through misses, blocked rays and departure", () => {
+  const { bot, entities, world } = createFakeBot({ position: new Vec3(0, 64, 0), groundY: null });
+  const shot = entities.spawn({ name: "small_fireball", position: new Vec3(0, 65, 8), velocity: new Vec3(0, 0, -0.1) });
+  const crossing = entities.spawn({ name: "small_fireball", position: new Vec3(2, 65, -4), velocity: new Vec3(0, 0, 0.5) });
+  assert.deepEqual(incomingShieldProjectiles(bot, 2), [crossing, shot]);
+  const actual = observeProjectileDefence(bot, 2)!;
+  assert.deepEqual(actual.projectiles.map(({ entity }) => entity.id), [shot.id], "an actual hit wins over a movement warning");
+  assert.equal(actual.projectiles[0]!.impactInTicks, null, "long current-speed ETA remains unknown");
+  assert.ok(actual.facing.z > 0);
+  entities.remove(crossing.id);
+  const side = entities.spawn({ name: "small_fireball", position: new Vec3(8, 65, 0), velocity: new Vec3(-0.1, 0, 0) });
+  const shared = observeProjectileDefence(bot)!;
+  assert.equal(shared.coversAll, true);
+  assert.ok(shared.facing.x > 0 && shared.facing.z > 0, "two unknown observed bearings share the cone");
+  entities.remove(side.id);
+  for (const state of ["zero", "outgoing", "passed", "invalid", "blocked"] as const) {
+    shot.position.set(0, 65, state === "passed" ? -0.1 : 8);
+    shot.velocity.set(0, 0, state === "zero" ? 0 : state === "outgoing" ? 0.1 : -0.1);
+    shot.isValid = state !== "invalid";
+    if (state === "blocked") wallAt(world, 4, [64, 65, 66]);
+    assert.deepEqual(incomingShieldProjectiles(bot), [], state);
+    assert.equal(observeProjectileDefence(bot), null, `${state} releases guard`);
+  }
+  entities.remove(shot.id);
+  assert.equal(observeProjectileDefence(bot), null);
+});
+
+test("an imminent arrow shares its held cone with an unknown-time observed shot", () => {
+  const { bot, entities } = createFakeBot({ position: new Vec3(0, 64, 0), groundY: null });
+  entities.spawn({ name: "arrow", position: new Vec3(0, 65, 1.5), velocity: new Vec3(0, 0, -1.5) });
+  const shot = entities.spawn({ name: "small_fireball", position: new Vec3(8, 65, 0), velocity: new Vec3(-0.1, 0, 0) });
+  const defence = observeProjectileDefence(bot, 0, 1000)!;
+  assert.equal(defence.projectiles.length, 2, "unknown timing never drops observed evidence");
+  assert.equal(defence.projectiles.find(({ entity }) => entity === shot)!.impactInTicks, null);
+  assert.equal(defence.coversAll, true, "the known arrow's commitment keeps the compatible unknown hit protected");
+});
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a departed fireball releases guard and the next navigate completes (${ticksPerSecond} tps)`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot, entities } = createFakeBot({ clock, simulatePhysics: true, server: { ticksPerSecond },
+      position: new Vec3(0.5, 64, 0.5), slots: { 45: { name: "shield" } } });
+    using _pace = serverTickPace(bot);
+    const added = listenersAddedSince(bot);
+    const navigation = createNavigationRuntime(bot);
+    const shot = entities.spawn({ name: "small_fireball", position: new Vec3(0.5, 65, 8.5), velocity: new Vec3(0, 0, -0.1) });
+    const abort = new AbortController();
+    try {
+      const raised = new Promise<void>((resolve) => bot.once("entityUpdate", () => resolve()));
+      const guarded = guardRetreatProjectiles(bot, navigation, abort.signal, performance.now() + 10_000, DEFAULT_COMBAT_POLICY);
+      await clock.settle(raised, 2_000);
+      assert.equal(bot.usingHeldItem, true, "the incoming shot raised the guard before departure");
+      entities.remove(shot.id);
+      assert.equal((await clock.settle(guarded, 5_000)).kind, "finished");
+      assert.equal(observeProjectileDefence(bot), null);
+      const next = await clock.settle(navigation.navigate({ movements: createMovements(bot),
+        goal: exactBlockGoal({ x: 2, y: 64, z: 0 }) }), 10_000);
+      assert.equal(next.status, "completed", JSON.stringify(next));
+    } finally {
+      abort.abort();
+      await clock.settle(navigation.close(), 5_000);
+    }
+    await clock.advance(60_000);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(added("time"), 0);
+    assert.equal(clock.pendingTimers(), 0);
+  });
 }
 
 /** Let the shared server start the draw, then draw a full twenty server ticks. */
