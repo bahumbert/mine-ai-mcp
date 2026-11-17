@@ -9,6 +9,7 @@ import { createCheckpointRunner, startWalCheckpointer, WAL_CHECKPOINT_INTERVAL_M
 
 const BOUND_MS = 5_000;
 const MEGABYTE = 1024 * 1024;
+const CHECKPOINT_INTERVAL_MS = 100;
 /** A test that polls `until` up to twice outlives the runner's 5 s default; its own bounds end it first (flaky under load, 2026-11-03). */
 const POLLING_TEST = { timeout: 3 * BOUND_MS };
 
@@ -81,15 +82,21 @@ test("the WAL file is truncated to the size limit once it resets", POLLING_TEST,
   const file = tempDatabaseFile(t);
   const writer = writerOn(t, file);
   writer.exec(`PRAGMA journal_size_limit = ${MEGABYTE}`);
-  using _checkpointer = startWalCheckpointer(file, { intervalMs: 100, fellBack: (cause) => assert.fail(cause) });
+  using _checkpointer = startWalCheckpointer(file, { intervalMs: CHECKPOINT_INTERVAL_MS, fellBack: (cause) => assert.fail(cause) });
   writeMegabytes(writer, 8);
   assert.ok(await until(() => mainFileBytes(file) >= 8 * MEGABYTE), "every frame is in the main file");
-  // The log restarts, and is cut back, at the first write after a complete checkpoint.
+  // The log restarts, and is cut back, at the first write that begins after a complete checkpoint. A write made while the
+  // worker's checkpoint is running (its fsyncs took up to 105 ms under disk load) leaves a frame unbackfilled, so writes
+  // every 20 ms never let the log restart. Each write follows a silence of five intervals: the next interval's checkpoint
+  // (at most 100 ms away, then twice the measured window) has copied the last frame by then.
   const small = new Uint8Array(100);
-  const reset = await until(() => {
+  const deadline = Date.now() + BOUND_MS;
+  let reset = false;
+  while (!reset && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5 * CHECKPOINT_INTERVAL_MS));
     writer.prepare("INSERT INTO replies (body) VALUES (?)").run(small);
-    return walFileBytes(file) <= 2 * MEGABYTE;
-  });
+    reset = walFileBytes(file) <= 2 * MEGABYTE;
+  }
   assert.ok(reset, `WAL is ${walFileBytes(file)} bytes`);
 });
 
