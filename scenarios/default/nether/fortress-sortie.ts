@@ -4,6 +4,8 @@ import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
+import { observeIdleWindow } from "../../flat/combat/idle-reflex-window.ts";
+import { judgeWithdrawal } from "./withdrawal-judge.ts";
 
 export const run: MineAiScenario = async (context) => {
   const params = fortressParamsSchema.parse(context.scenario.params);
@@ -21,19 +23,17 @@ export const run: MineAiScenario = async (context) => {
       if (evidence.snapshot().deaths > 0) return { status: "failed", detail: JSON.stringify(evidence.snapshot()) };
       const [x, y, z] = params.exit;
       const returned = await runtime.run(navigate, { x, y, z, range: 1 }, context.signal);
+      const positionAtWalkEnd = context.bot.entity.position.clone();
       context.log(`RETURN ${JSON.stringify(returned.result)}`);
-      // Five seconds keeps the runtime active for delayed fireballs/contact.
-      for (let tick = 0; tick < 100 && evidence.snapshot().deaths === 0; tick++) {
-        context.signal.throwIfAborted();
-        await context.bot.waitForTicks(1);
-      }
+      // Five seconds of server ticks keeps the runtime active for delayed fireballs/contact.
+      await observeIdleWindow(context.bot, 100, () => evidence.snapshot().deaths > 0, context.signal);
       const final = evidence.snapshot();
-      const atExit = context.bot.entity.position.distanceTo(new Vec3(x + 0.5, y, z + 0.5)) <= 2;
+      const { atExit, passed } = judgeWithdrawal({
+        positionAtWalkEnd, positionAfterWindow: context.bot.entity.position.clone(),
+        exit: new Vec3(x + 0.5, y, z + 0.5), final, returned,
+      });
       return {
-        status:
-          final.deaths === 0 && final.health > 0 && final.dimension === "the_nether" && final.rods >= 1 && atExit
-            ? "succeeded"
-            : "failed",
+        status: passed && final.rods >= 1 ? "succeeded" : "failed",
         detail: JSON.stringify({
           ...final,
           atExit,
