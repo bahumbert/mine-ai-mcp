@@ -3,10 +3,23 @@ import { sameDimension } from "../bot-data-sql.ts";
 import { nearestOwnHome, oneLine } from "../condition.ts";
 import type { SkillName } from "../actions.ts";
 import type { KnownPlace, Objective } from "../mind.ts";
-import type { Boldness } from "../persona.ts";
+import { BOLDNESS, type Boldness } from "../persona.ts";
+import { WALK_BLOCKS_PER_SECOND } from "../shelter/spot.ts";
 import { cut } from "../prompt-budget.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { BEDTIME_START_TICK, RECOVERY_MINUTES, TICKS_PER_MINUTE, coordinates, type SituationInfo } from "./situations.ts";
+
+// The measured median shelter time rounded up to five seconds (plan 2026-11-17-p4-18-night-options-a4).
+export const HOME_CLOSE_WALK_SECONDS = 15;
+export const HOME_CLOSE_BLOCKS = HOME_CLOSE_WALK_SECONDS * WALK_BLOCKS_PER_SECOND;
+// Owner's high and somewhat-enough boldness, and high gear score (plan 2026-11-17-p4-18-night-options-a4).
+export const FAR_HOME_BOLDNESS: Boldness = "bold";
+export const NO_DIG_BOLDNESS: Boldness = "steady";
+export const NO_DIG_SCORE = 1.2;
+
+const round2 = (value: number): number => Math.round(value * 100) / 100;
+export const boldnessLevel = (boldness: Boldness): number => BOLDNESS.indexOf(boldness) + 1;
+export const nightScore = (boldness: Boldness, snapshot: BotSnapshot): number => round2(boldnessLevel(boldness) * (1 - (snapshot.combat?.exposure ?? 1)));
 
 export interface SituationOption {
   readonly label: string;
@@ -19,6 +32,8 @@ export interface SituationView {
   /** Exactly three: boldness, gear, whose work. */
   readonly weigh: readonly string[];
   readonly options: readonly SituationOption[];
+  /** Explanations for the journal and monitor only, never the prompt. */
+  readonly hidden: readonly string[];
 }
 
 export interface SituationViewInput {
@@ -135,22 +150,34 @@ function carryOnOption(input: SituationViewInput, hearing: string): SituationOpt
   return { label: `${label}${hearing}`, form: step({ done: "carry on" }) };
 }
 
-function options(input: SituationViewInput, hearing: string): SituationOption[] {
+function options(input: SituationViewInput, hearing: string): { options: SituationOption[]; hidden: string[] } {
   const { info, snapshot, places, skills, night, timeOfDay } = input;
   const has = (skill: SkillName): boolean => skills.includes(skill);
   const result: SituationOption[] = [carryOnOption(input, hearing)];
+  const hidden: string[] = [];
   const home = nearestOwnHome(places, snapshot);
-  if (home !== null && has("go_to") && sameDimension(snapshot.dimension, "overworld")) result.push({ label: "go home", form: goTo(home.door) });
   const nightEvent = night && info.kind !== "low_health";
+  const availableHome = home !== null && has("go_to") && sameDimension(snapshot.dimension, "overworld") ? home : null;
+  const distance = availableHome === null ? null : Math.round(availableHome.distance);
+  const close = distance !== null && distance <= HOME_CLOSE_BLOCKS;
+  if (availableHome !== null) {
+    if (nightEvent && !close && boldnessLevel(input.boldness) < boldnessLevel(FAR_HOME_BOLDNESS)) hidden.push(`go home: home ${distance} blocks away (over ${HOME_CLOSE_BLOCKS}) and boldness ${input.boldness} (${FAR_HOME_BOLDNESS} needed)`);
+    else result.push({ label: "go home", form: goTo(availableHome.door) });
+  }
   if (nightEvent && timeOfDay !== null && timeOfDay >= BEDTIME_START_TICK && hasBed(snapshot) && has("sleep")) result.push({ label: "sleep", form: step({ skill: "sleep" }) });
-  if (nightEvent && has("dig_shelter")) result.push({ label: "dig an emergency shelter here", form: step({ skill: "dig_shelter" }) });
+  if (nightEvent && has("dig_shelter")) {
+    const score = nightScore(input.boldness, snapshot);
+    if (close) hidden.push(`dig an emergency shelter here: home ${distance} blocks away (close: ${HOME_CLOSE_BLOCKS} or less)`);
+    else if (boldnessLevel(input.boldness) >= boldnessLevel(NO_DIG_BOLDNESS) && score >= NO_DIG_SCORE) hidden.push(`dig an emergency shelter here: boldness ${input.boldness} x gear ${round2(1 - (snapshot.combat?.exposure ?? 1))} = ${score} (${NO_DIG_SCORE} or more)`);
+    else result.push({ label: "dig an emergency shelter here", form: step({ skill: "dig_shelter" }) });
+  }
   const died = snapshot.lastDeath;
   if (info.kind === "respawn" && died != null && has("go_to") && sameDimension(died.dimension, snapshot.dimension) && died.minutesAgo < RECOVERY_MINUTES) {
     result.push({ label: "go back for your things", form: goTo(died.position) });
   }
   const food = info.kind === "low_health" && snapshot.food < 20 && has("eat") ? mostFilling(snapshot) : null;
   if (food !== null) result.push({ label: "eat", form: step({ skill: "eat", food: food.name }) });
-  return result;
+  return { options: result, hidden };
 }
 
 /** The facts, the Weigh line and the options of one event, as the work tier's prompt part shows them (spec D5). */
@@ -165,5 +192,5 @@ export function situationView(input: SituationViewInput): SituationView {
   ];
   const weigh = [`boldness ${input.boldness} (cautious, steady or bold)`, gearFact(snapshot), whoseWork(input.ordinary)];
   const hearing = input.ordinary?.requester ? ` (${input.ordinary.requester} hears what you decide)` : "";
-  return { facts, weigh, options: options(input, hearing) };
+  return { facts, weigh, ...options(input, hearing) };
 }

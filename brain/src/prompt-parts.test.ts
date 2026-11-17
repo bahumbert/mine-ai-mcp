@@ -7,7 +7,7 @@ import { ACTIVITIES } from "./activities.ts";
 import type { ChatInput, GoalInput, KnownPlace, Objective, WorkInput } from "./mind.ts";
 import { HINTS, PROMPT_BUDGET, fitPrompt, reservedTokens, type PromptPart } from "./prompt-budget.ts";
 import { goalParts, narrateParts, SHRINK_ORDER, situationEventPart, workParts } from "./prompt-parts.ts";
-import { area, chatP50, chatWorst, goalP50, goalWorst, hints, narrateWorst, players, snapshotWith, workLarge, workP50, workWorst } from "./prompt-fixtures.ts";
+import { area, chatP50, chatWorst, goalP50, goalWorst, hints, narrateWorst, players, situationWorst, snapshotWith, workLarge, workP50, workWorst } from "./prompt-fixtures.ts";
 import { SKILL_NAMES } from "./actions.ts";
 import { situationView } from "./agent/situation-options.ts";
 import type { SituationInfo } from "./agent/situations.ts";
@@ -207,7 +207,7 @@ const hillcrest: KnownPlace = { name: "Hillcrest", detail: "", own: true, house:
 const gather: Objective = { text: "gather the iron", requester: null, purpose: null };
 
 /** A night event of a bot with a carried bed at 14000, its house 3 blocks east; `get_items` running unless told. */
-function nightSituation(overrides: { readonly objective?: Objective | null; readonly ordinary?: Objective | null; readonly running?: string | null; readonly deciding?: boolean } = {}): NonNullable<WorkInput["situation"]> {
+function nightSituation(overrides: { readonly objective?: Objective | null; readonly ordinary?: Objective | null; readonly running?: string | null; readonly deciding?: boolean; readonly noHome?: boolean } = {}): NonNullable<WorkInput["situation"]> {
   const objective = overrides.objective === undefined ? gather : overrides.objective;
   const deciding = overrides.deciding ?? true;
   const info: SituationInfo = { kind: "night", cause: "Night has just fallen (day comes in 2.0 min)", raisedAt: 0 };
@@ -218,11 +218,25 @@ function nightSituation(overrides: { readonly objective?: Objective | null; read
     clock: { phase: "night", minutesUntilChange: 2, timeOfDay: 14_000 },
   };
   const view = situationView({
-    info, snapshot, places: [hillcrest], objective, pushed: !deciding, skills: SKILL_NAMES, boldness: "steady",
+    info, snapshot, places: overrides.noHome ? [] : [hillcrest], objective, pushed: !deciding, skills: SKILL_NAMES, boldness: "steady",
     ordinary: overrides.ordinary === undefined ? gather : overrides.ordinary, deaths: { total: 0, atNight: 0 }, night: true, timeOfDay: 14_000,
   });
   return { info, view, objective, running: overrides.running === undefined ? "get_items" : overrides.running, deciding };
 }
+
+test("hidden reasons stay out of prompts and digging renders without a home", () => {
+  for (const level of [0, 1]) {
+    const close = situationEventPart(nightSituation()).render(level);
+    assert.doesNotMatch(close, /close: 64\.5 or less|1\.2 or more|bold needed/u);
+    assert.match(situationEventPart(nightSituation({ noHome: true })).render(level), /dig an emergency shelter here: \{"skill":"dig_shelter"\}/u);
+  }
+});
+
+test("worst situation keeps all four options for the budget ledger", () => {
+  const options = situationWorst().view.options;
+  assert.equal(options[0]?.form, '{"done":"carry on"}');
+  assert.deepEqual(options.slice(1).map((o) => o.label), ["go home", "dig an emergency shelter here", "go back for your things"]);
+});
 
 test("the situation part lists facts, weigh, then options in order", () => {
   const text = situationEventPart(nightSituation()).render(0);
@@ -230,7 +244,7 @@ test("the situation part lists facts, weigh, then options in order", () => {
     '- Event: Night has just fallen (day comes in 2.0 min). Running now: get_items for "gather the iron".',
     '- Facts: your home "Hillcrest" is 3 blocks away (door at 3 64 0)',
     "- Weigh: boldness steady (cautious, steady or bold); gear: armour 0 points, bare hands; your own goal",
-    '- What you can do now (your choice): carry on with "gather the iron": {"done":"carry on"}; go home: {"skill":"go_to","x":3,"y":64,"z":0}; sleep: {"skill":"sleep"}; dig an emergency shelter here: {"skill":"dig_shelter"}. Any other answer stops the running step at a safe place first.',
+    '- What you can do now (your choice): carry on with "gather the iron": {"done":"carry on"}; go home: {"skill":"go_to","x":3,"y":64,"z":0}; sleep: {"skill":"sleep"}. Any other answer stops the running step at a safe place first.',
   ].join("\n"));
 });
 
@@ -254,7 +268,7 @@ test("without a running step there is no Running now clause and no stop sentence
     const lines = text.split("\n");
     assert.equal(lines[0], first, name);
     assert.doesNotMatch(text, absent, name);
-    assert.ok(lines[3]!.endsWith('{"skill":"dig_shelter"}.'), name);
+    assert.ok(lines[3]!.endsWith('{"skill":"sleep"}.'), name);
   }
   assert.ok(situationEventPart(cases[0].situation).render(0).includes('leave this event: {"done":"carry on"}'));
 });

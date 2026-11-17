@@ -13,7 +13,7 @@ const MAX_DIG_SECONDS = 60;
 // Game knowledge, unmeasured here: the walking speed in blocks a second, and the bare-hand breaking rule (seconds =
 // hardness x 1.5 when the block needs no tool, hardness x 5 when it needs one she lacks; Minecraft wiki "Breaking").
 // The shelter equips no tool, so by hand is the case unless the runtime's dig equips one.
-const WALK_BLOCKS_PER_SECOND = 4.3;
+export const WALK_BLOCKS_PER_SECOND = 4.3;
 const HAND_SECONDS_PER_HARDNESS = 1.5;
 const WRONG_TOOL_SECONDS_PER_HARDNESS = 5;
 /** A runtime that reports no hardness (older): the block counts as diggable at this hardness. */

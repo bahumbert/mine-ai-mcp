@@ -121,6 +121,10 @@ export class SituationDecisions implements SituationHost {
     const ordinary = topWork(this.host.stack);
     const order = ordinary?.objective.requester != null ? ordinary : null;
     const view = this.view(info, snapshot, running, ordinary, false);
+    if (info.kind !== "low_health" && this.watch.nightActive() && view.options.length === 1) {
+      this.host.journal({ kind: "situation", event: "skipped", situation: info.kind, text: info.cause, reason: "one option", hidden: view.hidden });
+      return;
+    }
     const label = runningStep === null ? null : describeStep(runningStep.step);
     const input: WorkInput = {
       persona: this.persona, objective: { text: objectiveText(info), requester: null, purpose: null }, snapshot,
@@ -128,7 +132,7 @@ export class SituationDecisions implements SituationHost {
       situation: { info, view, objective: running?.objective ?? null, running: label, deciding: true },
     };
     this.queue.push({ generation: ++this.generation, info, running, runningStep, ordinary, order, input, controller: new AbortController(), told: false });
-    this.host.journal({ kind: "situation", event: "raised", situation: info.kind, text: info.cause, options: view.options.map(({ label }) => label), weigh: view.weigh, running: label, setAside: running === undefined ? null : { text: running.objective.text, requester: running.objective.requester } });
+    this.host.journal({ kind: "situation", event: "raised", situation: info.kind, text: info.cause, options: view.options.map(({ label }) => label), ...(view.hidden.length > 0 ? { hidden: view.hidden } : {}), weigh: view.weigh, running: label, setAside: running === undefined ? null : { text: running.objective.text, requester: running.objective.requester } });
     this.startNext();
   }
 

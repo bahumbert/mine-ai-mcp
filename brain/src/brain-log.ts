@@ -58,7 +58,7 @@ export interface StackEntry {
 
 export type BrainEvent =
   | ({ readonly kind: "model" } & ModelCall)
-  | { readonly kind: "situation"; readonly event: "raised" | "decided" | "ended"; readonly situation: SituationKind; readonly text: string; readonly options?: readonly string[]; readonly weigh?: readonly string[]; readonly running?: string | null; readonly setAside?: StackEntry | null; readonly answer?: string; readonly detail?: string; readonly latencyMs?: number }
+  | { readonly kind: "situation"; readonly event: "raised" | "decided" | "ended" | "skipped"; readonly situation: SituationKind; readonly text: string; readonly options?: readonly string[]; readonly hidden?: readonly string[]; readonly reason?: string; readonly weigh?: readonly string[]; readonly running?: string | null; readonly setAside?: StackEntry | null; readonly answer?: string; readonly detail?: string; readonly latencyMs?: number }
   | {
     readonly kind: "objective";
     /** taken: on top now; queued: after the current one; own: from its own goal; finished: done or failed. */

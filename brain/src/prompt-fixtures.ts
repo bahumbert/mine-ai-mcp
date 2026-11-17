@@ -188,20 +188,20 @@ function crowdedSnapshotAndAreas() {
 }
 
 /**
- * A night respawn's event at its longest (spec D5): a home 40 characters long, five facts (home, deaths, the Nether, the
- * things out of reach, beds), the gear at its longest, an order of 300 characters with commas and quotes, requested by
+ * A night respawn's four-option event (spec D5): a home 40 characters long, home, deaths and bed facts,
+ * the gear at its longest, an order of 300 characters with commas and quotes, requested by
  * a 16-character name, that the running step works on (the order is on top, so the carry-on option names it and the
  * requester hears the answer).
  */
 export function situationWorst(): NonNullable<WorkInput["situation"]> {
   const order: Objective = { text: `bring "the iron", the coal and the bread to the farm, ${filler(280, "order")}`, requester: "Requester".padEnd(16, "x"), purpose: null };
-  const home: KnownPlace = { name: filler(40, "home"), detail: "", own: true, house: { size: "small", style: "medieval", door: { x: 3, y: 64, z: 0 }, facing: "north", materials: {} } };
+  const home: KnownPlace = { name: filler(40, "home"), detail: "", own: true, house: { size: "small", style: "medieval", door: { x: 400, y: 64, z: 0 }, facing: "north", materials: {} } };
   // The longest gear of spec D5: melee, bow and shield ids of 30 characters; exposure 1 gives the longest risk suffix (100%).
   const item30 = (index: number) => `long_gear_item_${index}`.padEnd(30, "x");
-  const snapshot: BotSnapshot = { ...crowdedSnapshotAndAreas().snapshot, combat: { melee: item30(0), bow: item30(1), arrows: 128, shield: item30(2), exposure: 1 } };
-  const info: SituationInfo = { kind: "respawn", cause: "It is night (day comes in 7.9 min). You died 12 min ago at -645 53 -27 (Zombie) and respawned at 912 64 0", raisedAt: 0 };
+  const snapshot: BotSnapshot = { ...crowdedSnapshotAndAreas().snapshot, lastDeath: { dimension: "overworld", position: { x: -645, y: 53, z: -27 }, observedAt: "2026-11-07T10:00:00Z", minutesAgo: 1, cause: filler(120, "death") }, combat: { melee: item30(0), bow: item30(1), arrows: 128, shield: item30(2), exposure: 1 } };
+  const info: SituationInfo = { kind: "respawn", cause: "It is night (day comes in 7.9 min). You died 1 min ago at -645 53 -27 (Zombie) and respawned at 912 64 0", raisedAt: 0 };
   const view = situationView({
-    info, snapshot, places: [home], objective: order, pushed: false, skills: SKILL_NAMES, boldness: "cautious", ordinary: order,
+    info, snapshot, places: [home], objective: order, pushed: false, skills: SKILL_NAMES, boldness: "bold", ordinary: order,
     deaths: { total: 2, atNight: 1 }, night: true, timeOfDay: 12_100,
   });
   return { info, view, objective: order, running: "get_items", deciding: true };

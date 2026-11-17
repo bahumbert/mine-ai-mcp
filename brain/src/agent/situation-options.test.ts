@@ -59,6 +59,65 @@ const option = (v: ReturnType<typeof view>, label: string) => v.options.find((en
 const hasOption = (v: ReturnType<typeof view>, label: string): boolean => option(v, label) !== undefined;
 const fact = (v: ReturnType<typeof view>, text: string): boolean => v.facts.includes(text);
 
+test("night menu filters home and digging at the distance and gear bounds", () => {
+  const geared = (exposure: number) => snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } });
+  for (const x of [64, 64.4]) {
+    const v = view({ places: [house("Home", x)], boldness: "cautious", snapshot: geared(1) });
+    assert.deepEqual(v.options.map((o) => o.label), ["go back to your own goals", "go home"]);
+    assert.deepEqual(v.hidden, ["dig an emergency shelter here: home 64 blocks away (close: 64.5 or less)"]);
+  }
+  const far = view({ places: [house("Home", 64.5)], boldness: "cautious", snapshot: geared(1) });
+  assert.deepEqual(far.options.map((o) => o.label), ["go back to your own goals", "dig an emergency shelter here"]);
+  assert.deepEqual(far.hidden, ["go home: home 65 blocks away (over 64.5) and boldness cautious (bold needed)"]);
+  for (const [boldness, exposure, shown] of [["steady", 0.4, false], ["steady", 0.41, true], ["bold", 0.6, false], ["bold", 0.61, true], ["cautious", 0.15, true]] as const) {
+    assert.equal(hasOption(view({ boldness, snapshot: geared(exposure) }), "dig an emergency shelter here"), shown);
+  }
+});
+
+test("night menu and hidden reasons across boldness, gear and home", () => {
+  const rows = [
+    ["cautious", 1, true, ""], ["cautious", 0.53, true, ""], ["cautious", 0.24, true, ""],
+    ["steady", 1, true, ""], ["steady", 0.53, true, ""], ["steady", 0.24, false, "boldness steady x gear 0.76 = 1.52"],
+    ["bold", 1, true, ""], ["bold", 0.53, false, "boldness bold x gear 0.47 = 1.41"], ["bold", 0.24, false, "boldness bold x gear 0.76 = 2.28"],
+  ] as const;
+  for (const [boldness, exposure, dig, score] of rows) for (const home of [0, 25, 400]) {
+    const v = view({ boldness, snapshot: snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } }), places: home === 0 ? [] : [house("Home", home)] });
+    const labels = ["go back to your own goals"];
+    const hidden: string[] = [];
+    if (home === 25 || (home === 400 && boldness === "bold")) labels.push("go home");
+    if (home === 400 && boldness !== "bold") hidden.push(`go home: home 400 blocks away (over 64.5) and boldness ${boldness} (bold needed)`);
+    if (home === 25) hidden.push("dig an emergency shelter here: home 25 blocks away (close: 64.5 or less)");
+    else if (dig) labels.push("dig an emergency shelter here");
+    else hidden.push(`dig an emergency shelter here: ${score} (1.2 or more)`);
+    assert.deepEqual(v.options.map((o) => o.label), labels, `${boldness}/${exposure}/${home}`);
+    assert.deepEqual(v.hidden, hidden, `${boldness}/${exposure}/${home}`);
+  }
+});
+
+test("unavailable home and non-night events retain their choices", () => {
+  const noGo = view({ skills: SKILL_NAMES.filter((s) => s !== "go_to"), places: [house("Home", 25)] });
+  assert.equal(hasOption(noGo, "dig an emergency shelter here"), true);
+  assert.deepEqual(noGo.hidden, []);
+  const older = view({ boldness: "bold" });
+  assert.equal(hasOption(older, "dig an emergency shelter here"), true);
+  assert.deepEqual(older.hidden, []);
+  for (const input of [{ info: lowHealthInfo }, { info: respawnInfo, night: false }]) {
+    const v = view({ ...input, boldness: "cautious", places: [house("Home", 400)] });
+    assert.equal(hasOption(v, "go home"), true);
+    assert.equal(hasOption(v, "dig an emergency shelter here"), false);
+    assert.deepEqual(v.hidden, []);
+  }
+});
+
+test("night respawn retains recovery and close home retains sleep", () => {
+  const geared = snapshot({ lastDeath: death(), combat: { melee: null, bow: null, arrows: 0, shield: null, exposure: 0.24 } });
+  const respawn = view({ info: respawnInfo, boldness: "bold", snapshot: geared, places: [house("Home", 400)] });
+  assert.deepEqual(respawn.options.map((o) => o.label), ["go back to your own goals", "go home", "go back for your things"]);
+  assert.deepEqual(respawn.hidden, ["dig an emergency shelter here: boldness bold x gear 0.76 = 2.28 (1.2 or more)"]);
+  const sleep = view({ boldness: "bold", snapshot: { ...geared, inventory: bed }, places: [house("Home", 25)] });
+  assert.deepEqual(sleep.options.map((o) => o.label), ["go back to your own goals", "go home", "sleep"]);
+});
+
 test("nothing set aside: go back to your own goals, and weighed as no work", () => {
   const v = view();
   assert.deepEqual(v.options[0], { label: "go back to your own goals", form: '{"done":"carry on"}' });
@@ -137,14 +196,10 @@ test("no bed: no sleep", () => {
   assert.equal(hasOption(v, "sleep"), false);
 });
 
-test("low health never offers dig_shelter", () => {
-  const v = view({ info: lowHealthInfo, snapshot: snapshot({ health: 6, inventory: bed }) });
-  assert.equal(hasOption(v, "dig an emergency shelter here"), false);
-});
-
 test("low health at night is not a night event: no sleep and no beds fact, even with a bed carried", () => {
   const v = view({ info: lowHealthInfo, snapshot: snapshot({ health: 6, inventory: bed, clock: { phase: "night", minutesUntilChange: 1, timeOfDay: 13_000 } }) });
   assert.equal(hasOption(v, "sleep"), false);
+  assert.equal(hasOption(v, "dig an emergency shelter here"), false);
   const early = view({ info: lowHealthInfo, snapshot: snapshot({ health: 6, inventory: bed, clock: { phase: "day", minutesUntilChange: 6, timeOfDay: 12_100 } }) });
   assert.equal(early.facts.some((text) => text.startsWith("beds work")), false);
 });
@@ -172,13 +227,14 @@ test("a daytime respawn has no night options", () => {
 
 test("a Nether respawn offers go back but no overworld-night options, and no home trip", () => {
   const v = view({
-    info: respawnInfo, night: false, places: [house("Hillcrest", 3)],
-    snapshot: snapshot({ dimension: "the_nether", clock: { phase: null, minutesUntilChange: null }, inventory: bed, respawn: bedRespawn, lastDeath: death({ dimension: "the_nether", minutesAgo: 3 }) }),
+    info: respawnInfo, night: false, boldness: "bold", places: [house("Hillcrest", 3)],
+    snapshot: snapshot({ dimension: "the_nether", clock: { phase: null, minutesUntilChange: null }, inventory: bed, respawn: bedRespawn, lastDeath: death({ dimension: "the_nether", minutesAgo: 3 }), combat: { melee: null, bow: null, arrows: 0, shield: null, exposure: 0.24 } }),
   });
   assert.ok(hasOption(v, "go back for your things"));
   assert.equal(hasOption(v, "sleep"), false);
   assert.equal(hasOption(v, "dig an emergency shelter here"), false);
   assert.equal(hasOption(v, "go home"), false);
+  assert.deepEqual(v.hidden, []);
   assert.ok(fact(v, "your home is in the overworld"));
 });
 

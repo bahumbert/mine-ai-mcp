@@ -8,6 +8,47 @@ import { say } from "./agent-fixtures.test.ts";
 import { CARRY, FETCH, HOME, ordinary, reaches, setup } from "./situation-fixtures.test.ts";
 import { newWork } from "./work.ts";
 
+test("a one-option night leaves work running and the next night can raise a decision", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock, { persona: { ...testPersona(), boldness: "bold" } });
+  h.runtime.snapshot = { ...h.runtime.snapshot, combat: { melee: null, bow: null, arrows: 0, shield: null, exposure: 0.24 } };
+  const work = ordinary(h);
+  h.action.reply(FETCH, CARRY);
+  try {
+    await h.start();
+    await reaches(clock, () => work.running !== null);
+    const running = work.running;
+    await h.night();
+    assert.equal(h.action.requests.length, 1);
+    assert.equal(work.running, running);
+    assert.equal(running?.controller.signal.aborted, false);
+    assert.deepEqual(h.situations().at(-1), { kind: "situation", event: "skipped", situation: "night", text: h.situations().at(-1)?.text, reason: "one option", hidden: ["dig an emergency shelter here: boldness bold x gear 0.76 = 2.28 (1.2 or more)"] });
+    await h.sample({ clock: { timeOfDay: 2_000, phase: "day", minutesUntilChange: 10, sleeping: false }, combat: { melee: null, bow: null, arrows: 0, shield: null, exposure: 1 } });
+    await h.night();
+    assert.equal(h.situations().some((event) => event.event === "raised" && event.situation === "night"), true);
+  } finally { await h.stop(); }
+});
+
+test("night respawn with recoverable things is raised despite high gear", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = setup(clock, { persona: { ...testPersona(), boldness: "bold" } });
+  h.runtime.snapshot = { ...h.runtime.snapshot, combat: { melee: null, bow: null, arrows: 0, shield: null, exposure: 0.24 } };
+  ordinary(h);
+  h.action.reply(FETCH, CARRY, CARRY);
+  try {
+    await h.start();
+    await reaches(clock, () => h.runtime.submitted.some((call) => call.tool === "collect_block"));
+    await h.night();
+    h.runtime.snapshot = { ...h.runtime.snapshot, lastDeath: { dimension: "overworld", position: { x: 10, y: 64, z: 0 }, observedAt: "2026-11-16T10:00:00Z", minutesAgo: 1, cause: "death" } };
+    h.agent["situations"].raise({ kind: "respawn", cause: "respawn", raisedAt: 0 }, h.runtime.snapshot);
+    const raised = h.situations().find((event) => event.event === "raised" && event.situation === "respawn");
+    assert.ok(raised?.options?.includes("go back for your things"));
+    assert.deepEqual(raised?.hidden, ["dig an emergency shelter here: boldness bold x gear 0.76 = 2.28 (1.2 or more)"]);
+  } finally { await h.stop(); }
+});
+
 for (const ending of ["dawn", "stop", "death"] as const) test(`${ending} drops a held decision at once and tells its captured requester once`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
@@ -890,6 +931,9 @@ for (const requester of [null, "Bob"]) for (const nested of [false, true]) test(
     assert.match(prompt, nested ? /Running now: go to 100 64 0/u : /- Event: Night has just fallen/u);
     const whose = requester === null ? "your own goal" : "order from Bob";
     assert.ok(prompt.includes(`- Weigh: boldness cautious (cautious, steady or bold); gear: armour 0 points, bare hands; ${whose}`));
-    assert.deepEqual(h.situations().find((event) => event.event === "raised")?.weigh, ["boldness cautious (cautious, steady or bold)", "gear: armour 0 points, bare hands", whose]);
+    const raised = h.situations().find((event) => event.event === "raised");
+    assert.ok(raised);
+    assert.deepEqual(raised.weigh, ["boldness cautious (cautious, steady or bold)", "gear: armour 0 points, bare hands", whose]);
+    assert.equal("hidden" in raised, false);
   } finally { await h.stop(); }
 });
