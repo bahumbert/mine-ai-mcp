@@ -8,7 +8,8 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, engagingCombat } from "../../test-support/combat.js";
-import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, flush, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { watch } from "../../test-support/pending.js";
 import { observation } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../../navigation/goals/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
@@ -150,11 +151,12 @@ for (const escapes of [true, false]) {
         lifetime: { kind: "session" },
         reason: "test",
       });
-      const output = await fixture.runner.run(action, { destination: 70 });
+      const output = await fixture.clock.settle(fixture.runner.run(action, { destination: 70 }), 1_000);
       assert.equal(output.result.status, escapes ? "succeeded" : "failed");
       assert.equal(attempts, escapes ? 2 : 1);
       assert.ok(await until(() => fixture.recorded().length > 0));
-      assert.deepEqual(fixture.recorded(), [escapes ? "evade -> safe_separation" : "evade -> capability_limit"]);
+      assert.deepEqual(fixture.recorded(), escapes ? ["evade -> safe_separation"]
+        : ["evade -> capability_limit", "hide -> capability_limit"]);
     } finally {
       await fixture.observer[Symbol.asyncDispose]();
       fixture.data.close();
@@ -280,7 +282,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     storage: { kind: "temporary" },
     identity: { worldId: "reflex-test", scope: { kind: "bot", botId: "reflex-bot" } },
   });
-  const runner = new ActionRunner({ clock, ...options.runner });
+  const runner = new ActionRunner({ clock, worldAge: () => bot.time.age, ...options.runner });
   const navigation = {
     world: new MineflayerWorldView(bot),
     onEvent: () => () => {},
@@ -332,6 +334,143 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
 }
 
 type ReflexFixture = ReturnType<typeof reflexFixture>;
+
+/** A resumable journey around real hostile decisions; only its navigation and fight results are contract stubs. */
+function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "removed" | "hide" | "hunger") {
+  let finishEvade!: () => void;
+  let reachedEvade!: () => void;
+  const entered = new Promise<void>((resolve) => { reachedEvade = resolve; });
+  const route = new Promise<void>((resolve) => { finishEvade = resolve; });
+  const fixture = reflexFixture(async (id) => {
+    if (ending === "return" || ending === "hunger")
+      return { ...died(id), kind: "capability_blocked", reason: "policy", observation: "Pursuit prohibited" };
+    fixture.entities.remove(id);
+    return died(id);
+  }, async () => { reachedEvade(); await route; return { status: "stopped", reason: "no path", elapsedMs: 0 }; },
+  { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
+    entities: { 7: hostile("zombie", 3) }, health: 11, food: ending === "hunger" ? 10 : 20 });
+  let attempts = 0;
+  const phases: { phase: string; outcome: string; worldAge: number; generation: number }[] = [];
+  fixture.driver.onTransition((event) => {
+    if (event.kind === "phase" && event.reflex === "hostile_reflex")
+      phases.push(event.evidence as typeof phases[number]);
+  });
+  const input = z.strictObject({});
+  const action = defineAction({ name: "held_journey", description: "Journey interrupted by a hostile chain",
+    inputSchema: input, resultSchema: actionResultSchema({}), parse: (value) => input.parse(value),
+    formatResult: (result) => result.status, execution: { kind: "resumable_task" }, begin: () => async ({ signal }) => {
+      if (++attempts === 1) {
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        signal!.throwIfAborted();
+      }
+      return { status: "succeeded" };
+    } });
+  return { ...fixture, action, phases, finishEvade, attempts: () => attempts, async start() {
+    await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+      changes: { combat: { hide: ending === "hide" ? "when_recovery_possible" : "never" } },
+      lifetime: { kind: "session" }, reason: "Exercise the response chain" });
+    const pending = fixture.runner.run(action, {});
+    await flush();
+    fixture.tick();
+    await fixture.clock.settle(entered, 1_000);
+    return { pending, state: watch(pending) };
+  }, async [Symbol.asyncDispose]() {
+    fixture.runner.cancelActive("End chain test");
+    finishEvade();
+    await fixture.observer.close();
+    fixture.data.close();
+  } };
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a dimension change resumes a held journey when the driver observes game before the runner (${ticksPerSecond} tps)`, async () => {
+    await using fixture = heldJourney(ticksPerSecond, "resume");
+    using _clock = fixture.clock.install();
+    const timers = fixture.clock.pendingGlobalTimers();
+    const { pending, state } = await fixture.start();
+    fixture.finishEvade();
+    await flush();
+    assert.equal(state.over, false);
+    assert.equal(fixture.phases.at(-1)?.outcome, "held");
+    const from = fixture.bot.game.dimension;
+    // Runtime installs retireWorld after the driver; Mineflayer game.js:118-121 updates the dimension before game.
+    const retireWorld = () => fixture.runner.dimensionChanged(from, fixture.bot.game.dimension);
+    fixture.bot.on("game", retireWorld);
+    try {
+      fixture.bot.game.dimension = "the_nether";
+      fixture.bot.emit("game");
+      const output = await fixture.clock.settle(pending, 1_000);
+      assert.equal(output.result.status, "succeeded");
+      assert.equal(fixture.attempts(), 2);
+      assert.equal(fixture.runner.request(), null);
+      assert.equal(fixture.clock.pendingGlobalTimers(), timers);
+      fixture.entities.remove(7);
+      const next = await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000);
+      assert.equal(next.result.status, "succeeded");
+      const phases = fixture.phases.length;
+      await fixture.clock.advance(100_000, 1_000);
+      assert.equal(fixture.clock.pendingGlobalTimers(), timers);
+      assert.equal(fixture.phases.length, phases, "the retired hold's backstop cannot publish later");
+    } finally {
+      fixture.bot.off("game", retireWorld);
+    }
+  });
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  for (const ending of ["resume", "return", "removed", "hide", "hunger"] as const) {
+    test(`an exhausted evade keeps its journey until ${ending} decides the chain (${ticksPerSecond} tps)`, async () => {
+      await using fixture = heldJourney(ticksPerSecond, ending);
+      using _clock = fixture.clock.install();
+      const { pending, state } = await fixture.start();
+      await fixture.clock.advance(20_000 / ticksPerSecond);
+      assert.equal(fixture.bot.time.age, 1_020);
+      let hungry = false;
+      if (ending === "hunger") {
+        fixture.driver.register({ name: "hunger_reflex", sense: () => fixture.bot.food < 18 && !hungry
+          ? { kind: "observed", danger: true, evidence: { food: fixture.bot.food } } : null,
+          decide: () => ({ kind: "respond", name: "eat", response: true, reason: "Hungry" }),
+          facts: () => ({ capability: "hunger", response: "eat", scope: "meal", facts: () => null, permissions: () => null }),
+          limits: () => ({ ceilingTicks: 400, noProgressTicks: 160, standDownTicks: 40 }),
+          act: async () => { hungry = true; return null; }, continuation: () => ({ kind: "resume" }),
+          failure: () => null, describe: () => null });
+        fixture.runner.onOwnershipChange(() => {
+          if (!hungry && fixture.runner.ownership().current === null && fixture.phases.at(-1)?.outcome === "held") fixture.tick();
+        });
+      }
+      fixture.finishEvade();
+      await flush();
+      assert.equal(state.over, false, "the exhausted evade must not return the journey before the next decision");
+      assert.equal(fixture.attempts(), 1, "a hunger resume cannot restart the held journey");
+      if (ending === "hunger") assert.equal(hungry, true);
+      if (ending === "removed") fixture.entities.remove(7);
+      fixture.tick();
+      const output = await fixture.clock.settle(pending, 1_000);
+      assert.equal(output.result.status, ending === "resume" ? "succeeded" : "cancelled");
+      assert.equal(fixture.attempts(), ending === "resume" ? 2 : 1);
+      const interruptions = output.interruptions ?? [];
+      assert.match(interruptions[0]!, /^\[HOSTILE_SETTLED\] evade ended with capability_limit at health 11:/);
+      if (ending === "removed") {
+        assert.match(output.result.status === "cancelled" ? output.result.error : "", /hostile_reflex chose no further response \(none_observed\)\.$/);
+        assert.equal(fixture.clock.now(), 20_000 / ticksPerSecond, "release needs no world-tick grace window");
+      } else {
+        assert.equal(interruptions.length, 3);
+        assert.match(interruptions[1]!, ending === "hide" ? /^\[HOSTILE_CONTACT\] hide response/ : /^\[HOSTILE_CONTACT\] fight response/);
+        assert.match(interruptions[2]!, ending === "resume" ? /fight ended with target_died at health 11; 2nd response to zombie#7/
+          : ending === "hide" ? /hide ended with capability_limit.*2nd response to zombie#7/ : /fight ended with capability_limit.*2nd response to zombie#7/);
+        if (output.result.status === "cancelled") {
+          const positions = interruptions.map((receipt) => output.result.status === "cancelled" ? output.result.error.indexOf(receipt) : -1);
+          assert.ok(positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1]!)));
+        }
+      }
+      assert.deepEqual(fixture.phases.map(({ phase, outcome, worldAge, generation }) => ({ phase, outcome, worldAge, generation })), [
+        { phase: "hold", outcome: "held", worldAge: 1_020, generation: 1 },
+        { phase: "hold", outcome: ending === "removed" ? "released" : "attached", worldAge: 1_020, generation: 1 },
+        ...(ending === "removed" ? [] : [{ phase: "hold", outcome: "released", worldAge: 1_020, generation: 1 }]),
+      ]);
+    });
+  }
+}
 
 /** The response a bot at 11 health runs for `directive`, settled and read as its encounter receipt. */
 async function evadeReceipt(fixture: ReflexFixture, directive: HostileResponse, signal = new AbortController().signal) {

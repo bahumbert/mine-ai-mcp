@@ -9,6 +9,15 @@ export interface HeldRequestOptions {
   readonly reason: string;
   readonly backstopTicks: number;
   readonly worldAge: () => number | null;
+  readonly onTransition?: (transition: HoldTransition) => void;
+}
+
+export interface HoldTransition {
+  readonly request: string;
+  readonly owner: string;
+  readonly outcome: "held" | "attached" | "released" | "backstop";
+  readonly generation: number;
+  readonly worldAge: number | null;
 }
 
 export interface HoldEnd {
@@ -46,6 +55,7 @@ export class HeldRequest {
     this.#clearTimer();
     this.state = "attached";
     this.reasons.push(contact);
+    this.#options.onTransition?.(this.snapshot());
     return true;
   }
 
@@ -58,6 +68,7 @@ export class HeldRequest {
       this.generation++;
       this.state = "waiting";
       this.#wait();
+      this.#options.onTransition?.(this.snapshot());
       return true;
     }
     return this.#finish("released", {
@@ -80,6 +91,13 @@ export class HeldRequest {
     if (this.state !== "waiting") return false;
     const suffix = `; no decision from ${this.owner} within ${this.#options.backstopTicks} world ticks.`;
     return this.#finish("backstop", { kind: "return", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
+  }
+
+  /** The actual first-wins state, stamped with the latest packet age for phase receipts. */
+  snapshot(): HoldTransition {
+    return { request: this.request, owner: this.owner, generation: this.generation, worldAge: this.#options.worldAge(),
+      outcome: this.state === "waiting" ? "held" : this.state === "attached" ? "attached"
+        : this.state === "backstop" ? "backstop" : "released" };
   }
 
   /** A generation owns one polled packet-origin deadline, retired before attachment or any exit. */
@@ -107,6 +125,7 @@ export class HeldRequest {
     this.suffix = suffix;
     this.#clearTimer();
     this.#resolve(end);
+    this.#options.onTransition?.(this.snapshot());
     return true;
   }
 }

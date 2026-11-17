@@ -755,6 +755,12 @@ the bot. Such a takeover returns `[HOSTILE_CONTACT]` cancellation to the caller;
 after defense releases the body, the caller may select its next action. A
 cancelled perch request does not silently start a new perch window.
 
+For resumable body requests, an exhausted automatic evade or an unreflected
+deflection keeps the request suspended through the hostile reflex's next
+decision. A further response decides resume or return; no further response
+returns the request with its last receipt. The result's `interruptions` records
+the ordered response receipts and the final chain summary, also on resume.
+
 ### `attack_dragon_perch`
 
 Select one loaded dragon with `entity_id`. Call `prepare_dragon_perch` separately

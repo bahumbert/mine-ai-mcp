@@ -221,6 +221,14 @@ id, its cell and distance at the decision, and, for evade, hide and deflect, the
 decision's reason in parentheses, so a caller can tell a
 withdrawal to accept from one to change with a policy edit or another request.
 
+A resumable request stays suspended after an exhausted evade or an unreflected
+deflection while the hostile reflex makes its next decision. A further response
+keeps the request suspended until that response decides whether to resume or
+return it. If the reflex chooses no further response, the request returns with
+the last receipt and that decision. A response by another reflex cannot resume
+the hostile-held request. `[HOSTILE_SETTLED]` receipts name the response chain,
+including when its last response permits the request to resume.
+
 A fight is kept going by progress: its target or the bot closing in by a block,
 a hit on the bot or the target, or a target dying or leaving. A target pacing
 back and forth, a shield block or the bot shuffling about does not count. A melee

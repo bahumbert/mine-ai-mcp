@@ -12,6 +12,30 @@ const HOLD = "[HOSTILE_SETTLED] evade exhausted.";
 const CONTACT = "[HOSTILE_CONTACT] fight.";
 const hold: Continuation = { kind: "hold", owner: OWNER, reason: HOLD, backstopTicks: 600 };
 
+test("held observers report only winning changes, including re-entry and the terminal backstop", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const events: unknown[] = [];
+  const record = new HeldRequest({ request: "walk", owner: OWNER, reason: HOLD, backstopTicks: 600,
+    worldAge: () => 1_000, onTransition: (event) => events.push(event) });
+  record.attach(OWNER, CONTACT);
+  record.backstop(); // An attached claim wins over the expired waiting generation.
+  record.verdict(hold, OWNER);
+  record.backstop();
+  record.attach(OWNER, "late");
+  record.release("late");
+  record.abort("late");
+  assert.deepEqual(events, [
+    { request: "walk", owner: OWNER, outcome: "attached", generation: 1, worldAge: 1_000 },
+    { request: "walk", owner: OWNER, outcome: "held", generation: 2, worldAge: 1_000 },
+    { request: "walk", owner: OWNER, outcome: "backstop", generation: 2, worldAge: 1_000 },
+  ]);
+  await record.done;
+  await clock.advance(100_000, 1_000);
+  assert.equal(events.length, 3);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+});
+
 /** A hold hears the same packet clock as the body that created it. */
 function held(worldAge: () => number | null = () => null) {
   return new HeldRequest({ request: "walk", owner: OWNER, reason: HOLD, backstopTicks: 600, worldAge });

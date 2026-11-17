@@ -3,6 +3,10 @@ import type { AnsweredEntry, AnsweredScope, Facts, TemporalPremise } from "../st
 import type { REFLEX_PRIORITY } from "./priority.js";
 export type ReflexName = (typeof REFLEX_PRIORITY)[number];
 
+/** Responders offer a hold; the admitting runner supplies its owner and the claim's progress budget. */
+export type ResponseContinuation = Exclude<Continuation, { kind: "hold" }>
+  | { readonly kind: "hold"; readonly reason: string };
+
 export type DangerObservation<Danger> =
   | { readonly kind: "observed"; readonly danger: Danger; readonly evidence: Facts }
   | { readonly kind: "unknown"; readonly missing: string }
@@ -64,7 +68,7 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
    */
   progress?(response: Response, mark: (reason: string) => void): () => void;
   act(response: Response, signal: AbortSignal): Promise<Outcome>;
-  continuation(outcome: Outcome): Continuation;
+  continuation(outcome: Outcome): ResponseContinuation;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
   /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureTicks`. */

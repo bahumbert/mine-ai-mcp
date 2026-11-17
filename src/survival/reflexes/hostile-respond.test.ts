@@ -127,9 +127,10 @@ test("a second evade on the same zombie carries its chain into the settled text"
   assert.equal(second.chain?.responses, 2);
   assert.equal(second.chain?.evades, 2);
   assert.equal(second.chain?.gained, 12, "evades use the entry observation rather than the earlier decision distance");
+  assert.equal(second.physical?.response === "evade" ? second.physical.result.kind : null, "exhausted");
   const continuation = responseContinuation(second);
-  assert.equal(continuation.kind, "return");
-  assert.match(continuation.kind === "return" ? continuation.reason ?? "" : "", /2nd response to zombie#8/);
+  assert.equal(continuation.kind, "hold");
+  assert.match(continuation.kind === "hold" ? continuation.reason : "", /2nd response to zombie#8/);
   assert.deepEqual(JSON.parse(JSON.stringify(describeResponse(second))).chain, second.chain);
 });
 

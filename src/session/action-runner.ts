@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { outranksReflex } from "../survival/control/priority.js";
+import type { ResponseContinuation } from "../survival/control/contract.js";
 import { BodyAbort, type BodyAbortCause, type Continuation, type ReflexLimitKind } from "./abort.js";
 import type { RequestEvidence, RequestSnapshot, RequestState } from "./request.js";
 import { RequestProgress, reflexStateKey, type CombatResourceObservation, type ProgressPosition, type ReflexActivityObservation, type ReflexStateIdentity } from "./progress.js";
@@ -10,7 +11,7 @@ import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 import { measured, message, outcomes, refusal } from "./runner-outcomes.js";
 import { watchBodyOwner, type BodyLimitHit, type BodyWatchOptions } from "./body-watch.js";
-import { HeldRequest, awaitHeldRequest, appendHeldReasons } from "./held-request.js";
+import { HeldRequest, awaitHeldRequest, appendHeldReasons, type HoldTransition } from "./held-request.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -117,7 +118,7 @@ export interface ClaimLimits {
 /** What a reflex reports when it releases the body. */
 export interface ClaimSettlement<Value> {
   readonly value: Value;
-  readonly continuation: Continuation;
+  readonly continuation: Continuation | ResponseContinuation;
 }
 
 interface ClaimVerdict {
@@ -230,6 +231,7 @@ export class ActionRunner {
   /** `completedAtMs` is a `monotonicNow()` reading: it never leaves this process. */
   #precedingRequest: { requestId: number; completedAtMs: number } | null = null;
   readonly #ownershipListeners = new Set<() => void>();
+  readonly #holdListeners = new Set<(transition: HoldTransition) => void>();
   #baseline: { readonly name: string; readonly release: () => void } | null = null;
 
   constructor(options: ActionRunnerOptions = {}) {
@@ -677,12 +679,12 @@ export class ActionRunner {
     const verdict = new Promise<ClaimVerdict>((resolve) => {
       settleVerdict = resolve;
     });
-    const settleContinuation = (result: Continuation) => {
+    const settleContinuation = (result: ClaimSettlement<Value>["continuation"]) => {
       // A higher reflex inherits the original request's continuation. Do not
       // await that verdict here: the higher owner first needs our physical
       // release, which the finally block below settles independently.
       if (takeover.preemption) void takeover.preemption.verdict.then(settleVerdict);
-      else settleVerdict(this.#settleClaim(takeover, result, held));
+      else settleVerdict(this.#settleClaim(takeover, result, held, limits));
     };
     if (interrupted) {
       interrupted.preemption = { reason, cause, verdict };
@@ -703,13 +705,18 @@ export class ActionRunner {
   };
 
   /** Make the hold before releasing the body: ownership listeners may synchronously claim it next. */
-  #settleClaim(takeover: ActiveAction, continuation: Continuation, held: HeldRequest | null): ClaimVerdict {
+  #settleClaim(takeover: ActiveAction, result: ClaimSettlement<unknown>["continuation"], held: HeldRequest | null, limits?: ClaimLimits): ClaimVerdict {
     const by = takeover.metadata.action;
+    const continuation: Continuation = result.kind !== "hold" || "owner" in result ? result
+      : limits ? { ...result, owner: by, backstopTicks: limits.noProgressTicks }
+        : { kind: "return", reason: result.reason };
     if (held) held.verdict(continuation, by);
     else {
       const request = this.#admittedRequest;
       if (continuation.kind === "hold" && request?.resumable && request.state.kind === "suspended" && !request.lifetime.signal.aborted) {
-        request.held = new HeldRequest({ request: request.id, ...continuation, worldAge: this.#worldAge });
+        request.held = new HeldRequest({ request: request.id, ...continuation, worldAge: this.#worldAge,
+          onTransition: (transition) => this.#publishHold(transition) });
+        this.#publishHold(request.held.snapshot());
         return { continuation: { kind: "hold", record: request.held }, by };
       }
     }
@@ -748,7 +755,7 @@ export class ActionRunner {
     takeover: ActiveAction,
     interrupted: ActiveAction | null,
     work: (signal: AbortSignal) => Promise<ClaimSettlement<Value>>,
-    settleContinuation: (result: Continuation) => void,
+    settleContinuation: (result: ClaimSettlement<Value>["continuation"]) => void,
     releaseAfterAdmission?: () => void,
     limits?: ClaimLimits,
   ): Promise<Value> {
@@ -861,6 +868,16 @@ export class ActionRunner {
     return () => {
       this.#ownershipListeners.delete(listener);
     };
+  }
+
+  /** Observe actual hold transitions, including a backstop that fires while the reflex never ticks. */
+  onHoldChange(listener: (transition: HoldTransition) => void): () => void {
+    this.#holdListeners.add(listener);
+    return () => { this.#holdListeners.delete(listener); };
+  }
+
+  #publishHold(transition: HoldTransition): void {
+    for (const listener of this.#holdListeners) listener(transition);
   }
 
   /** Idle stabilization is an owner too; admission releases it synchronously. */

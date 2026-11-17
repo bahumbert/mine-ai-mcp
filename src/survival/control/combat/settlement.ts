@@ -1,4 +1,4 @@
-import type { Continuation } from "../../../session/abort.js";
+import type { ResponseContinuation } from "../contract.js";
 import type { AnsweredEntry, Facts } from "../../state/answered.js";
 import type { HostileResponseResult, HostileSettlement } from "./response-result.js";
 import { evadeDetail } from "../../responses/evade-detail.js";
@@ -87,9 +87,17 @@ export function encounterReceipt(settlement: HostileSettlement) {
   };
 }
 
-export function responseContinuation(settlement: HostileSettlement): Continuation {
-  // A completed physical response returns the request to current-condition
-  // validation. Historical blasts do not invalidate every future route.
+/** A successful chain keeps its receipt too; only unsuccessful outcomes need the failure detail. */
+function settlementReason(settlement: HostileSettlement, resumed = false): string {
+  const receipt = encounterReceipt(settlement);
+  const detail = resumed ? "" : `: ${receipt.error ?? receipt.reason}`;
+  const chain = settlement.chain && settlement.chain.responses >= 2 ? chainSuffix(settlement.chain) : "";
+  return `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}${detail}${chain}.`;
+}
+
+export function responseContinuation(settlement: HostileSettlement): ResponseContinuation {
+  // Observed separation or a completed defence permits current-condition
+  // validation; an exhausted response leaves the reflex's next decision open (P4-29 a6).
   if (settlement.kind === "completed" && settlement.evidence.healthAfter > 0) {
     const physical = settlement.physical;
     const resume =
@@ -100,13 +108,13 @@ export function responseContinuation(settlement: HostileSettlement): Continuatio
           : physical.response === "evade"
             ? physical.result.kind === "separated"
             : physical.result.kind === "reflected";
-    if (resume) return { kind: "resume" };
+    if (resume) return settlement.chain && settlement.chain.responses >= 2
+      ? { kind: "resume", reason: settlementReason(settlement, true) } : { kind: "resume" };
+    if (physical.response === "evade" && physical.result.kind === "exhausted"
+      || physical.response === "deflect" && physical.result.kind !== "reflected")
+      return { kind: "hold", reason: settlementReason(settlement) };
   }
-  const receipt = encounterReceipt(settlement);
-  return {
-    kind: "return",
-    reason: `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}: ${receipt.error ?? receipt.reason}${settlement.chain && settlement.chain.responses >= 2 ? chainSuffix(settlement.chain) : ""}.`,
-  };
+  return { kind: "return", reason: settlementReason(settlement) };
 }
 
 export function responseFailure(settlement: HostileSettlement): AnsweredEntry["failure"] | null {
