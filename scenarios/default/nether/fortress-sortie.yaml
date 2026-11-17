@@ -45,6 +45,7 @@ goal:
   kind: all
   # Owns one hunt, return, and five seconds of continued threat observation.
   timeout: 240
+  stillTicks: 860 # a10 T6c c8ad82c7: maxima 427 (20 tps, n=3), 371 (10 tps, n=3); 2x rounded up to 20; p4-29/a10-t6c/sortie-measure-{20,10}.
   goals:
     - { kind: survive, who: FortressBot, seconds: 1 }
     - { kind: health, who: FortressBot }
