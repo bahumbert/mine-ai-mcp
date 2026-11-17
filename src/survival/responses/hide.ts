@@ -4,6 +4,7 @@ import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { recoverUnderCover, type CoveredRecovery } from "./recover.js";
 import {
+  blockedCellsText,
   holdShelterGuard,
   type HideOptions,
   repelShelterIntruder,
@@ -145,9 +146,10 @@ export async function hideInPlace(bot: Bot, options: HideOptions): Promise<HideR
     return concludeHide(build, pass);
   }
   if (!enclosedInPlace(bot, options.blockNames)) {
+    const open = blockedCellsText(build);
     return concludeHide(build, {
       kind: "failed",
-      error: `The shelter is still open${build.refusal ? `: ${build.refusal}` : ""}`,
+      error: `The shelter is still open${build.refusal ? `: ${build.refusal}` : open ? `: ${open}` : ""}`,
     });
   }
   return concludeHide(build, await recoverInShelter(build));

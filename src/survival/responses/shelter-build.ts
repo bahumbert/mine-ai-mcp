@@ -11,6 +11,7 @@ import { isInLava, isInWater } from "../perception/body.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { buildProtection, fullProtectionBlock } from "../positioning/combat/build-protection.js";
 import { countCapBlocks } from "../positioning/combat/hide-blocks.js";
+import { protectionShell } from "../positioning/combat/planner.js";
 import { occupiedCell } from "../../world/placement.js";
 import { equipCombatLoadout, permittedMeleeLoadout } from "../weapons/equipment.js";
 import type { CombatItemUse } from "../weapons/item-use.js";
@@ -74,6 +75,24 @@ export function shelterBlocks(build: ShelterBuild): number {
 
 export function shelterHazard(build: ShelterBuild): string | null {
   return build.options.unsafe?.() ?? null;
+}
+
+/**
+ * The shell cells a pass recorded as blocked and that are occupied now, `<x,y,z> (<occupant>)` joined by `; `, or "". The
+ * shell is the four sides at feet and head height and the cap, around the bot's current feet. Evaluated when a failure is
+ * written, from any pass's record: a cell its occupant has left, or one outside the shell after the bot moved, is not named.
+ */
+export function blockedCellsText(build: ShelterBuild): string {
+  const { bot } = build;
+  const feet = shelterFeet(bot);
+  const named = new Map<string, string>();
+  // The closed box `shelter-cells.ts` tests: the cap comes out twice for a one-cell passage, the map keeps one entry.
+  for (const cell of protectionShell(feet, [feet])) {
+    const key = `${cell.x},${cell.y},${cell.z}`;
+    const occupant = build.blockedCells.has(key) ? occupiedCell(bot, cell) : null;
+    if (occupant) named.set(key, `${key} (${occupant})`);
+  }
+  return [...named.values()].join("; ");
 }
 
 /** Why a hide cannot build in water or lava: it needs ground under the bot, and the model reads what to do. */

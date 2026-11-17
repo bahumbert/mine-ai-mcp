@@ -215,6 +215,63 @@ test("an intruder replacing a passive occupant in the same pass still stops cons
   if (typeof third === "object") assert.match(third.error, /still open.*1,64,0/);
 });
 
+/**
+ * The deadline failure after one construction pass that found a cow standing in the open wall cell `1,64,0`. The moves
+ * come between that pass and the failing one: the cow or the bot moves, and `laterPass` advances the pass counter so the
+ * record still carries the earlier pass.
+ */
+async function expiredPassError(moves: { readonly cowAt?: Vec3; readonly botAt?: Vec3; readonly laterPass?: boolean }): Promise<string> {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({
+    clock, health: 7, carried: { cobblestone: 32 }, cells: { "1,65,0": "stone" },
+    entities: { 2: { name: "cow", position: new Vec3(1.5, 64, 0.5) } },
+  });
+  using _installed = clock.install();
+  let build = createTestShelterBuild(bot, clock);
+  assert.equal(await clock.settle(constructShelterPass(build), 6_000), "again");
+  if (moves.cowAt) bot.entities[2]!.position = moves.cowAt;
+  if (moves.botAt) bot.entity.position = moves.botAt;
+  build = { ...build, pass: build.pass + (moves.laterPass ? 1 : 0), constructionDeadline: clock.now() };
+  const result = await clock.settle(constructShelterPass(build), 6_000);
+  if (typeof result !== "object") assert.fail(`expected the deadline failure, got ${result}`);
+  return result.error;
+}
+
+test("a deadline failure names the cow in the open cell, from any earlier pass, while it stays, and not after it leaves or the bot moves", async () => {
+  // Positive control first: the cow in the cell is named (red on the code before the change).
+  assert.match(await expiredPassError({}),
+    /not finished within 5 s; still open: 1,64,0 \(Placement cell \(1, 64, 0\) overlaps cow #2 at \(1\.5, 64, 0\.5\)\.\)$/);
+  assert.match(await expiredPassError({ laterPass: true }), /still open: 1,64,0 \(Placement cell \(1, 64, 0\) overlaps cow #2/);
+  const gone = await expiredPassError({ cowAt: new Vec3(30, 64, 30) });
+  assert.match(gone, /not finished within 5 s$/);
+  assert.doesNotMatch(gone, /still open/);
+  const moved = await expiredPassError({ botAt: new Vec3(5.5, 64, 0.5) });
+  assert.match(moved, /not finished within 5 s$/);
+  assert.doesNotMatch(moved, /1,64,0/);
+});
+
+test("an open shell that ends with no refusal names the cow still standing in its wall cell", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({
+    clock, health: 7, carried: { cobblestone: 32 }, cells: { "1,65,0": "stone" },
+    entities: { 2: { name: "cow", position: new Vec3(1.5, 64, 0.5) } },
+  });
+  using _installed = clock.install();
+  // Scripted: a hazard appears once every wall cell but the cow's is solid, so the last pass ends at its hold check, open.
+  const wallsButCow = ["-1,64,0", "-1,65,0", "0,64,-1", "0,65,-1", "0,64,1", "0,65,1", "0,66,0"];
+  const result = await clock.settle(hideInPlace(bot, {
+    threatContext: combatTestContext(bot), signal: new AbortController().signal, recoverTo: 18, maximumMs: 5_000,
+    unsafe: () => (wallsButCow.every((key) => solidAt(bot, key)) ? "a hazard appeared" : null),
+  }), 150_000);
+  assert.equal(result.kind, "failed");
+  assert.match(result.error ?? "", /^The shelter is still open: 1,64,0 \(Placement cell \(1, 64, 0\) overlaps cow #2 at \(1\.5, 64, 0\.5\)\.\)$/, result.error);
+});
+
+function solidAt(bot: FakeBot, key: string): boolean {
+  const [x, y, z] = key.split(",").map(Number) as [number, number, number];
+  return bot.blockAt(new Vec3(x, y, z))?.name === "cobblestone";
+}
+
 for (const offCenter of [false, true]) test(`three blocked passes leave a named open cell and hand recovery to withdrawal (off center ${offCenter})`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   const { bot } = createFakeBot({

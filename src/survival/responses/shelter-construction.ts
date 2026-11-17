@@ -10,6 +10,7 @@ import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
 import {
+  blockedCellsText,
   centerShelterCell,
   constructionChanged,
   repelShelterIntruder,
@@ -290,7 +291,11 @@ function constructionStopped(build: ShelterBuild): StepEnd | null {
   const liquid = shelterLiquidFailure(bot);
   if (liquid) return liquid;
   if (monotonicNow() >= build.constructionDeadline) {
-    return { kind: "failed", error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s` };
+    const open = blockedCellsText(build);
+    return {
+      kind: "failed",
+      error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s${open ? `; still open: ${open}` : ""}`,
+    };
   }
   return null;
 }
