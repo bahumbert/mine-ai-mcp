@@ -9,7 +9,7 @@ import type { Objective, KnownPlace } from "../mind.ts";
 import type { Boldness } from "../persona.ts";
 import { snapshotWith } from "../prompt-fixtures.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
-import { gearFact, situationView } from "./situation-options.ts";
+import { gearFact, homeCloseBlocks, situationView } from "./situation-options.ts";
 import type { SituationInfo } from "./situations.ts";
 
 const snapshot = (facts: Partial<BotSnapshot> = {}): BotSnapshot => ({
@@ -61,36 +61,71 @@ const fact = (v: ReturnType<typeof view>, text: string): boolean => v.facts.incl
 
 test("night menu filters home and digging at the distance and gear bounds", () => {
   const geared = (exposure: number) => snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } });
-  for (const x of [64, 64.4]) {
+  for (const x of [92.4]) {
     const v = view({ places: [house("Home", x)], boldness: "cautious", snapshot: geared(1) });
     assert.deepEqual(v.options.map((o) => o.label), ["go back to your own goals", "go home"]);
-    assert.deepEqual(v.hidden, ["dig an emergency shelter here: home 64 blocks away (close: 64.5 or less)"]);
+    assert.deepEqual(v.hidden, ["dig an emergency shelter here: home 92 blocks away (close: 92.4 or less)"]);
   }
-  const far = view({ places: [house("Home", 64.5)], boldness: "cautious", snapshot: geared(1) });
+  const far = view({ places: [house("Home", 92.5)], boldness: "cautious", snapshot: geared(1) });
   assert.deepEqual(far.options.map((o) => o.label), ["go back to your own goals", "dig an emergency shelter here"]);
-  assert.deepEqual(far.hidden, ["go home: home 65 blocks away (over 64.5) and boldness cautious (bold needed)"]);
+  assert.deepEqual(far.hidden, ["go home: home 93 blocks away (over 92.4) and boldness cautious (bold needed)"]);
   for (const [boldness, exposure, shown] of [["steady", 0.4, false], ["steady", 0.41, true], ["bold", 0.6, false], ["bold", 0.61, true], ["cautious", 0.15, true]] as const) {
     assert.equal(hasOption(view({ boldness, snapshot: geared(exposure) }), "dig an emergency shelter here"), shown);
   }
 });
 
 test("night menu and hidden reasons across boldness, gear and home", () => {
+  // [boldness, exposure, dig shown at home 400, dig reason when hidden, the close limit of the row's night score]
   const rows = [
-    ["cautious", 1, true, ""], ["cautious", 0.53, true, ""], ["cautious", 0.24, true, ""],
-    ["steady", 1, true, ""], ["steady", 0.53, true, ""], ["steady", 0.24, false, "boldness steady x gear 0.76 = 1.52"],
-    ["bold", 1, true, ""], ["bold", 0.53, false, "boldness bold x gear 0.47 = 1.41"], ["bold", 0.24, false, "boldness bold x gear 0.76 = 2.28"],
+    ["cautious", 1, true, "", "92.4"], ["cautious", 0.53, true, "", "106.9"], ["cautious", 0.24, true, "", "115.8"],
+    ["steady", 1, true, "", "92.4"], ["steady", 0.53, true, "", "121.4"], ["steady", 0.24, false, "boldness steady x gear 0.76 = 1.52", "139.2"],
+    ["bold", 1, true, "", "92.4"], ["bold", 0.53, false, "boldness bold x gear 0.47 = 1.41", "135.8"], ["bold", 0.24, false, "boldness bold x gear 0.76 = 2.28", "162.6"],
   ] as const;
-  for (const [boldness, exposure, dig, score] of rows) for (const home of [0, 25, 400]) {
+  for (const [boldness, exposure, dig, score, limit] of rows) for (const home of [0, 25, 400]) {
     const v = view({ boldness, snapshot: snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } }), places: home === 0 ? [] : [house("Home", home)] });
     const labels = ["go back to your own goals"];
     const hidden: string[] = [];
     if (home === 25 || (home === 400 && boldness === "bold")) labels.push("go home");
-    if (home === 400 && boldness !== "bold") hidden.push(`go home: home 400 blocks away (over 64.5) and boldness ${boldness} (bold needed)`);
-    if (home === 25) hidden.push("dig an emergency shelter here: home 25 blocks away (close: 64.5 or less)");
+    if (home === 400 && boldness !== "bold") hidden.push(`go home: home 400 blocks away (over ${limit}) and boldness ${boldness} (bold needed)`);
+    if (home === 25) hidden.push(`dig an emergency shelter here: home 25 blocks away (close: ${limit} or less)`);
     else if (dig) labels.push("dig an emergency shelter here");
     else hidden.push(`dig an emergency shelter here: ${score} (1.2 or more)`);
     assert.deepEqual(v.options.map((o) => o.label), labels, `${boldness}/${exposure}/${home}`);
     assert.deepEqual(v.hidden, hidden, `${boldness}/${exposure}/${home}`);
+  }
+});
+
+test("the close limit is 30 s of walk plus 10 s per night score point, capped at 60 s, at 3.08 blocks a second", () => {
+  assert.equal(homeCloseBlocks(0), 92.4);
+  assert.equal(homeCloseBlocks(1.5), 138.6);
+  assert.equal(homeCloseBlocks(2.28), 162.6);
+  assert.equal(homeCloseBlocks(2.9), 181.7);
+  assert.equal(homeCloseBlocks(3), 184.8);
+  assert.equal(homeCloseBlocks(3.1), 184.8);
+});
+
+test("a home exactly at the close limit is close, one block more is far", () => {
+  const cautiousGear = (exposure: number) => snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } });
+  const atLimit = view({ places: [house("Home", 114)], boldness: "cautious", snapshot: cautiousGear(0.3) });
+  assert.deepEqual(atLimit.options.map((o) => o.label), ["go back to your own goals", "go home"]);
+  assert.deepEqual(atLimit.hidden, ["dig an emergency shelter here: home 114 blocks away (close: 114 or less)"]);
+  const pastLimit = view({ places: [house("Home", 115)], boldness: "cautious", snapshot: cautiousGear(0.3) });
+  assert.deepEqual(pastLimit.options.map((o) => o.label), ["go back to your own goals", "dig an emergency shelter here"]);
+  assert.deepEqual(pastLimit.hidden, ["go home: home 115 blocks away (over 114) and boldness cautious (bold needed)"]);
+});
+
+test("a home 150 blocks away is close only for a bold bot with gear, so only it loses its dug shelter", () => {
+  const geared = (exposure: number) => snapshot({ combat: { melee: null, bow: null, arrows: 0, shield: null, exposure } });
+  // [boldness, exposure, offered labels, hidden reasons]: the 150-block home is close only at the bold score 2.28 (limit 162.6).
+  const cases = [
+    ["cautious", 1, ["go back to your own goals", "dig an emergency shelter here"], ["go home: home 150 blocks away (over 92.4) and boldness cautious (bold needed)"]],
+    ["steady", 0.53, ["go back to your own goals", "dig an emergency shelter here"], ["go home: home 150 blocks away (over 121.4) and boldness steady (bold needed)"]],
+    ["bold", 0.24, ["go back to your own goals", "go home"], ["dig an emergency shelter here: home 150 blocks away (close: 162.6 or less)"]],
+  ] as const;
+  for (const [boldness, exposure, labels, hidden] of cases) {
+    const v = view({ places: [house("Home", 150)], boldness, snapshot: geared(exposure) });
+    assert.deepEqual(v.options.map((o) => o.label), labels, boldness);
+    assert.deepEqual(v.hidden, hidden, boldness);
   }
 });
 

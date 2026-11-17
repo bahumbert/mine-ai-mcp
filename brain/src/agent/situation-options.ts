@@ -4,14 +4,19 @@ import { nearestOwnHome, oneLine } from "../condition.ts";
 import type { SkillName } from "../actions.ts";
 import type { KnownPlace, Objective } from "../mind.ts";
 import { BOLDNESS, type Boldness } from "../persona.ts";
-import { WALK_BLOCKS_PER_SECOND } from "../shelter/spot.ts";
 import { cut } from "../prompt-budget.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { BEDTIME_START_TICK, RECOVERY_MINUTES, TICKS_PER_MINUTE, coordinates, type SituationInfo } from "./situations.ts";
 
-// The measured median shelter time rounded up to five seconds (plan 2026-11-17-p4-18-night-options-a4).
-export const HOME_CLOSE_WALK_SECONDS = 15;
-export const HOME_CLOSE_BLOCKS = HOME_CLOSE_WALK_SECONDS * WALK_BLOCKS_PER_SECOND;
+// "Close" home: the walk home takes no longer than the walk-time budget the night score allows (plan
+// 2026-11-17-p4-18-night-options-a4 Task 6, owner 2026-11-17 ~11:40: 15 s is too close, "one minute away at most",
+// the distance depends on boldness too). The budget: 30 s at score 0, 10 s more per score point, at most 60 s.
+// The walk speed is the measured effective speed home (plan Task 0 (b): median 3.08 blocks/s over 185 `go_to` walks of
+// 50+ blocks); `WALK_BLOCKS_PER_SECOND` in shelter/spot.ts (4.3) stays for the shelter's own spot ranking.
+export const HOME_WALK_BLOCKS_PER_SECOND = 3.08;
+export const HOME_CLOSE_MIN_SECONDS = 30;
+export const HOME_CLOSE_SECONDS_PER_SCORE = 10;
+export const HOME_CLOSE_MAX_SECONDS = 60;
 // Owner's high and somewhat-enough boldness, and high gear score (plan 2026-11-17-p4-18-night-options-a4).
 export const FAR_HOME_BOLDNESS: Boldness = "bold";
 export const NO_DIG_BOLDNESS: Boldness = "steady";
@@ -20,6 +25,10 @@ export const NO_DIG_SCORE = 1.2;
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 export const boldnessLevel = (boldness: Boldness): number => BOLDNESS.indexOf(boldness) + 1;
 export const nightScore = (boldness: Boldness, snapshot: BotSnapshot): number => round2(boldnessLevel(boldness) * (1 - (snapshot.combat?.exposure ?? 1)));
+const round1 = (value: number): number => Math.round(10 * value) / 10;
+/** The farthest straight distance (blocks) that still counts as a close home at this night score (plan Task 6). */
+export const homeCloseBlocks = (score: number): number =>
+  round1(Math.min(HOME_CLOSE_MAX_SECONDS, HOME_CLOSE_MIN_SECONDS + HOME_CLOSE_SECONDS_PER_SCORE * score) * HOME_WALK_BLOCKS_PER_SECOND);
 
 export interface SituationOption {
   readonly label: string;
@@ -159,15 +168,16 @@ function options(input: SituationViewInput, hearing: string): { options: Situati
   const nightEvent = night && info.kind !== "low_health";
   const availableHome = home !== null && has("go_to") && sameDimension(snapshot.dimension, "overworld") ? home : null;
   const distance = availableHome === null ? null : Math.round(availableHome.distance);
-  const close = distance !== null && distance <= HOME_CLOSE_BLOCKS;
+  const score = nightScore(input.boldness, snapshot);
+  const limit = homeCloseBlocks(score);
+  const close = distance !== null && distance <= limit;
   if (availableHome !== null) {
-    if (nightEvent && !close && boldnessLevel(input.boldness) < boldnessLevel(FAR_HOME_BOLDNESS)) hidden.push(`go home: home ${distance} blocks away (over ${HOME_CLOSE_BLOCKS}) and boldness ${input.boldness} (${FAR_HOME_BOLDNESS} needed)`);
+    if (nightEvent && !close && boldnessLevel(input.boldness) < boldnessLevel(FAR_HOME_BOLDNESS)) hidden.push(`go home: home ${distance} blocks away (over ${limit}) and boldness ${input.boldness} (${FAR_HOME_BOLDNESS} needed)`);
     else result.push({ label: "go home", form: goTo(availableHome.door) });
   }
   if (nightEvent && timeOfDay !== null && timeOfDay >= BEDTIME_START_TICK && hasBed(snapshot) && has("sleep")) result.push({ label: "sleep", form: step({ skill: "sleep" }) });
   if (nightEvent && has("dig_shelter")) {
-    const score = nightScore(input.boldness, snapshot);
-    if (close) hidden.push(`dig an emergency shelter here: home ${distance} blocks away (close: ${HOME_CLOSE_BLOCKS} or less)`);
+    if (close) hidden.push(`dig an emergency shelter here: home ${distance} blocks away (close: ${limit} or less)`);
     else if (boldnessLevel(input.boldness) >= boldnessLevel(NO_DIG_BOLDNESS) && score >= NO_DIG_SCORE) hidden.push(`dig an emergency shelter here: boldness ${input.boldness} x gear ${round2(1 - (snapshot.combat?.exposure ?? 1))} = ${score} (${NO_DIG_SCORE} or more)`);
     else result.push({ label: "dig an emergency shelter here", form: step({ skill: "dig_shelter" }) });
   }
