@@ -136,12 +136,33 @@ test("cancelling a pin release stops the effect and waits for its cleanup withou
 test("cancelling while a second ceiling still pins the body releases the observation wait", async () => {
   const world = heldWorld();
   world.load({ x: 1, y: 64, z: 0 }, { stateId: 8, collisionShapes: LEAF_SHAPE, traits: { empty: false, safeToBreak: true } });
-  const bot = new HeldBot(world);
+  // 2026-11-17 (plan house-build-fixes-2 Task 16: 17 reds of 40 under load): the run plans in time-sliced searches, each on a fresh turn of the event loop (navigation-run.ts, the planning loop):
+  // how many turns pass before the break depends on the machine's speed, so the test waits for the run's own
+  // subscription to the physics ticks after the break, the wait it cancels, not for a count of turns.
+  let waiting!: () => void;
+  const waitStarted = new Promise<void>((resolve) => { waiting = resolve; });
+  class WatchedBot extends HeldBot {
+    override subscribePhysicsTick(listener: () => void) {
+      const release = super.subscribePhysicsTick(listener);
+      if (this.breaks.length > 0) waiting();
+      return release;
+    }
+  }
+  const bot = new WatchedBot(world);
   bot.current = { ...bot.current, position: { x: 0.9, y: 63, z: 0.5 } };
   const navigator = createNavigator({ world, bot });
   const admission = navigator.startRun({ goal: exactBlockGoal({ x: 2, y: 63, z: 0 }), policy: createMovementPolicy() });
   if (admission.kind !== "started") assert.fail("busy");
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  let bound: ReturnType<typeof setTimeout> | undefined;
+  const never = new Promise<never>((_, reject) => { bound = setTimeout(() => reject(new Error("the run never waited for the body to clear")), 5_000); });
+  try {
+    await Promise.race([waitStarted, never]);
+  } catch (error) {
+    admission.handle.cancel(); // a run that never waited must not outlive the failed test
+    throw error;
+  } finally {
+    clearTimeout(bound);
+  }
   assert.equal(bot.breaks.length, 1);
   assert.equal(bot.ticks.size, 1, "waiting for body clearance");
   admission.handle.cancel();
