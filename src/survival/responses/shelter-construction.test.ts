@@ -7,6 +7,7 @@ import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext, onAttack } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock, type FakeBot, type FakeClock } from "../../test-support/fake-bot/index.js";
 import { waitForServerTicks } from "../../world/world-age.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
 import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { hideInPlace, enclosedInPlace } from "./hide.js";
@@ -141,6 +142,8 @@ test("delayed walls keep progressing between repels of two-hit intruders at seve
       3: { name: "spider", position: new Vec3(20, 64, 20), metadata: { 9: 2 } } },
   });
   using _installed = clock.install();
+  using _pace = serverTickPace(bot);
+  await clock.advance(2_000); // Established time-packet pace before judging the construction's 5 s budget.
   const resolvedIds = new Set<number>();
   const context = { ...combatTestContext(bot), resolvedIds };
   bot.on("entityDead", (entity) => { resolvedIds.add(entity.id); });
@@ -282,6 +285,8 @@ for (const offCenter of [false, true]) test(`three blocked passes leave a named 
     entities: { 2: { name: "zombie", position: new Vec3(1.5, 64, 0.5) } },
   });
   using _installed = clock.install();
+  using _pace = serverTickPace(bot);
+  await clock.advance(2_000); // The construction limit starts after the connection learned its tick pace.
   const context = combatTestContext(bot);
   const result = await clock.settle(hideInPlace(bot, {
     signal: new AbortController().signal, threatContext: context, maximumMs: 5_000, recoverTo: 7,

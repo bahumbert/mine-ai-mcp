@@ -6,7 +6,8 @@ import { monotonicNow } from "../../utils/index.js";
 import { cellIntersectsBody } from "../../utils/geometry.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import type { ResponseContext } from "../control/combat/context.js";
-import { tickBudgetWallMs } from "../control/combat/progress.js";
+import { serverPacedWallMs } from "../../world/world-age.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
 import { isInLava, isInWater } from "../perception/body.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { buildProtection, fullProtectionBlock } from "../positioning/combat/build-protection.js";
@@ -17,6 +18,7 @@ import { equipCombatLoadout, permittedMeleeLoadout } from "../weapons/equipment.
 import type { CombatItemUse } from "../weapons/item-use.js";
 import { canMeleeTarget, combatItemsForTarget, hasSweepBystander, sweepsOnSwing } from "../weapons/melee.js";
 import { shieldFacing } from "../weapons/shield-facing.js";
+import { attackAndRestart, swingReadiness, type SwingReadiness } from "../weapons/swing-readiness.js";
 import type { CoveredRecovery } from "./recover.js";
 import { type Entity, shelterFeet, shelterIntruder, shelterIntruders } from "./shelter-cells.js";
 import { clearShelterCell } from "./shelter-clearance.js";
@@ -131,18 +133,28 @@ export async function waitForShelterTicks(build: ShelterBuild, ticks: number, bo
 }
 
 /**
- * Wait `ticks` physics ticks, turning the shield toward an intruder in the shelter shell on each. The hold ends at its wall
- * twin (`tickBudgetWallMs`), counted from its start for all its ticks: a shield is held its `SHIELD_READY_TICKS` and a swing
- * waits its cooldown even after the construction deadline, and a stopped physics stream still ends the hold.
+ * Hold the guard for a server-metered duration, or until the shared swing recovers. Keep its own wall backstop even
+ * after the construction deadline; death or a departed intruder returns control to the shelter's next pass.
  */
-export async function holdShelterGuard(build: ShelterBuild, ticks: number): Promise<void> {
+export async function holdShelterGuard(build: ShelterBuild, ticks: number, readiness?: SwingReadiness): Promise<void> {
   const { bot, options } = build;
-  const bound = { wallDeadline: monotonicNow() + tickBudgetWallMs(ticks) };
-  for (let tick = 0; tick < ticks; tick++) {
-    options.signal.throwIfAborted();
-    const intruder = shelterIntruder(bot, options.threatContext);
-    if (intruder) await bot.lookAt(shieldFacing(bot, intruder, options.threatContext.resolvedIds), true);
-    await waitForShelterTicks(build, 1, bound);
+  const pace = serverTickPace(bot), mark = pace.mark();
+  const bound = { wallDeadline: monotonicNow() + serverPacedWallMs(ticks) };
+  const initialIntruder = shelterIntruder(bot, options.threatContext);
+  let completed = false;
+  try {
+    for (let held = 0; !(readiness?.ready(ticks) ?? pace.ready(mark, ticks, held)); held++) {
+      options.signal.throwIfAborted();
+      const intruder = shelterIntruder(bot, options.threatContext);
+      if (monotonicNow() >= bound.wallDeadline || bot.health <= 0 ||
+        (initialIntruder && intruder?.id !== initialIntruder.id)) return;
+      if (intruder) await bot.lookAt(shieldFacing(bot, intruder, options.threatContext.resolvedIds), true);
+      await waitForShelterTicks(build, 1, bound);
+    }
+    completed = true;
+  } finally {
+    // A successor must finish shield startup after an interrupted hold (a11 T3b review, 2026-11-17).
+    if (!readiness && !completed) build.itemUse.invalidateShield();
   }
 }
 
@@ -251,25 +263,30 @@ export async function repelShelterIntruder(build: ShelterBuild, intruder: Entity
   signal.throwIfAborted();
   if (!policy.melee) throw new Error("[COMBAT_CONSTRAINED] Shelter contact defence requires prohibited melee.");
   const loadout = permittedMeleeLoadout(bot, combatItemsForTarget(bot, intruder), policy);
+  const readiness = swingReadiness(bot);
   const changedWeapon = bot.heldItem?.name !== loadout.weapon?.name;
   await equipCombatLoadout(bot, loadout);
   signal.throwIfAborted();
   if (changedWeapon || !bot.usingHeldItem) itemUse.invalidateShield();
   if (loadout.shield) await itemUse.raiseShield();
-  if (changedWeapon) await holdShelterGuard(build, loadout.cooldownTicks);
+  if (bot.health <= 0 || !isThreat(bot, intruder, threatContext)) return;
+  // Preserve the deliberate shield-then-full-cooldown staging (a11 D2, 2026-11-17).
+  if (changedWeapon) readiness.restart();
+  await holdShelterGuard(build, loadout.cooldownTicks, readiness);
+  if (bot.health <= 0 || !readiness.ready(loadout.cooldownTicks)) return;
   await bot.lookAt(intruder.position.offset(0, intruder.height / 2, 0), true);
   signal.throwIfAborted();
   if (
     !isThreat(bot, intruder, threatContext) ||
     shelterIntruder(bot, threatContext)?.id !== intruder.id ||
-    !canMeleeTarget(bot, intruder)
+    !canMeleeTarget(bot, intruder) ||
+    (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, intruder))
   )
-    return holdShelterGuard(build, 1);
-  if (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, intruder)) return holdShelterGuard(build, 1);
-  bot.attack(intruder);
+    return waitForShelterTicks(build, 1, { wallDeadline: monotonicNow() + serverPacedWallMs(1) });
+  attackAndRestart(bot, intruder);
   build.swings += 1;
   if (loadout.shield) itemUse.activateShield();
-  await holdShelterGuard(build, Math.max(1, loadout.cooldownTicks));
+  await holdShelterGuard(build, Math.max(1, loadout.cooldownTicks), readiness);
 }
 
 /** Whether the construction budget or grounded, centred stance changed. Contact is handled between placements. */

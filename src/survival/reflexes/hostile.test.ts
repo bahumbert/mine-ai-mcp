@@ -28,6 +28,7 @@ import { CombatPerception } from "../perception/combat/observations.js";
 import { responseScope } from "../control/combat/scopes/response.js";
 import { isIncomingArrow } from "../perception/combat/shield-projectiles.js";
 import { attachHostileReflex } from "./hostile.js";
+import { swingReadiness } from "../weapons/swing-readiness.js";
 import { heldThreatEnded, senseHostile } from "./hostile-sense.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { ThreatChains } from "../state/threat-chains.js";
@@ -307,6 +308,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     cells: options.cells,
     overrides: options.overrides,
   });
+  swingReadiness(bot); // Installed before actions by the connected runtime.
   // The fake's own `death` listener (its physics stop at a death): the count of the code under test is on top of it.
   const harnessDeathListeners = bot.listenerCount("death");
   const data = SqlBotData.create({

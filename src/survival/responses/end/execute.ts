@@ -62,6 +62,7 @@ import {
   readCombatItems,
 } from "../../weapons/equipment.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
+import { attackAndRestart } from "../../weapons/swing-readiness.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -1281,9 +1282,8 @@ export class EndCombat {
           selectedPart = null;
           observation.stage = "waiting";
           const loadout = permittedMeleeLoadout(bot, readCombatItems(bot), this.policy().combat);
-          const heldBefore = bot.heldItem?.name;
           await equipCombatLoadout(bot, loadout);
-          if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);
+          observation.requireCooldown(loadout.cooldownTicks);
           // The native final glide can overshoot and reverse its facing. Keep
           // the open low notch until the head is observed; chasing that yaw
           // sent the bot back onto the surface in front of the landing body.
@@ -1434,9 +1434,8 @@ export class EndCombat {
           continue;
         }
         const loadout = permittedMeleeLoadout(bot, combatItemsForTarget(bot, target), this.policy().combat);
-        const heldBefore = bot.heldItem?.name;
         await equipCombatLoadout(bot, loadout);
-        if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);
+        observation.requireCooldown(loadout.cooldownTicks);
         await bot.lookAt(aim, true);
         signal.throwIfAborted();
         observation.refresh();
@@ -1452,7 +1451,7 @@ export class EndCombat {
           if (!this.policy().combat.melee) return finish("stopped", "[COMBAT_CONSTRAINED] Melee is prohibited.");
           report("swinging");
           await this.phase("swing", async () => {
-            bot.attack(target);
+            attackAndRestart(bot, target);
             observation.swung(loadout.cooldownTicks);
           });
         } else report("weapon_cooldown");

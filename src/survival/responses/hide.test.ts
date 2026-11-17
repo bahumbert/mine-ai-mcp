@@ -299,12 +299,14 @@ test("shelter contact uses a ready shield and a non-sweeping tool beside a neutr
   let raisedAt: number | undefined;
   const { bot, clock, server } = scene({
     health: 20,
+    mockedClock: true,
     carried: { iron_sword: 1, iron_pickaxe: 1, shield: 1, cobblestone: 32 },
     entities: {
       2: closeMob("wither_skeleton"),
       3: { ...closeMob("enderman"), position: new Vec3(2, 64, 0.5) },
     },
   });
+  using _timers = clock.install();
   const intruder = bot.entities[2]!;
   const bystander = bot.entities[3]!;
   const resolvedIds = killableIntruder(bot, intruder.id, 3); // the pickaxe's one hit is 4 at a full swing (`weapon-damage-pickaxes`)
@@ -360,24 +362,19 @@ function heldWeaponBesideBystander(held: string, datapackSwords: readonly string
   return { ...harness, resolvedIds };
 }
 
-test("shelter contact does not swing any held vanilla sword beside a neutral Enderman", async () => {
-  for (const held of ["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]) {
-    const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander(held, []);
+test("shelter contact withholds vanilla and datapack swords beside a neutral Enderman", async () => {
+  for (const { held, datapackSwords } of [
+    ...["wooden_sword", "stone_sword", "golden_sword", "iron_sword", "diamond_sword", "netherite_sword"]
+      .map(held => ({ held, datapackSwords: [] })),
+    { held: "stick", datapackSwords: ["stick"] },
+  ]) {
+    const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander(held, datapackSwords);
     using _installed = clock.install();
     assert.equal(bot.heldItem?.name, held);
     const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
     assert.deepEqual(attackedIds(server), [], `the ${held}'s sweep would have hit the Enderman`);
     assert.equal(result.swings, 0, held);
   }
-});
-
-test("shelter contact does not swing a held item a datapack adds to swords beside a neutral Enderman", async () => {
-  const { bot, clock, server, resolvedIds } = heldWeaponBesideBystander("stick", ["stick"]);
-  using _installed = clock.install();
-  assert.equal(bot.heldItem?.name, "stick");
-  const result = await clock.settle(hide(bot, resolvedIds, SHORT_HIDE_MS), HIDE_LIMIT_MS);
-  assert.deepEqual(attackedIds(server), [], "the sweep would have hit the Enderman");
-  assert.equal(result.swings, 0);
 });
 
 test("shelter contact swings a held item outside the swords family beside a neutral Enderman", async () => {
@@ -732,8 +729,8 @@ test("a guard hold ends at its wall twin when physics stops, not at the construc
   const started = clock.now();
   await clock.settle(result(), HIDE_LIMIT_MS, GUARD_SLICE_MS);
   const tookMs = clock.now() - started;
-  // The shield hold (5 ticks) and the cooldown hold (13) each end at 2 x ticks x 50 ms: 0.5 s and 1.3 s.
-  assert.ok(tookMs >= 500 && tookMs <= 2_500, `the hide took ${tookMs} ms of clock with physics stopped`);
+  // Unknown pace waits to each server-paced backstop: (5 + 20) * 150 + (13 + 20) * 150 = 8.7 s.
+  assert.equal(tookMs, 8_700, `the hide took ${tookMs} ms of clock with physics stopped`);
 });
 
 test("an abort mid-dig stops digging", async () => {

@@ -5,6 +5,7 @@ import type { HostileContext } from "../control/combat/context.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { MELEE_RANGE, selectMeleeLoadout } from "./equipment.js";
 import { hasSweepBystander, meleeDistance, sweepsOnSwing } from "./melee.js";
+import { attackAndRestart, swingReadiness } from "./swing-readiness.js";
 
 /**
  * Strike reachable threats with the current hand while navigation owns movement.
@@ -13,8 +14,7 @@ import { hasSweepBystander, meleeDistance, sweepsOnSwing } from "./melee.js";
  * escape back into it. Mineflayer's attack targets the observed entity directly.
  */
 export function defendWhileRetreating(bot: Bot, context: HostileContext, signal: AbortSignal) {
-  let ticks = 0;
-  let nextSwing = 0;
+  const readiness = swingReadiness(bot);
   let attacks = 0;
   const weapons = new Set<string>();
   const struck = new Set<number>();
@@ -23,12 +23,10 @@ export function defendWhileRetreating(bot: Bot, context: HostileContext, signal:
     if (struck.has(entity.id)) killed.add(entity.id);
   };
   const tick = () => {
-    ticks += 1;
     if (
       context.policy?.melee === false ||
       signal.aborted ||
       bot.health <= 0 ||
-      ticks < nextSwing ||
       bot.targetDigBlock ||
       bot.usingHeldItem
     )
@@ -44,11 +42,11 @@ export function defendWhileRetreating(bot: Bot, context: HostileContext, signal:
       if (distance > 0 && bot.world.raycast(eye, toward.scaled(1 / distance), distance)) continue;
       if (sweepsOnSwing(bot, bot.heldItem) && hasSweepBystander(bot, target)) continue;
       const loadout = selectMeleeLoadout(familyIndexOf(bot), bot.heldItem ? [bot.heldItem] : []);
-      bot.attack(target);
+      if (!readiness.ready(loadout.cooldownTicks)) break;
+      attackAndRestart(bot, target);
       attacks += 1;
       struck.add(target.id);
       weapons.add(bot.heldItem?.name ?? "hand");
-      nextSwing = ticks + loadout.cooldownTicks;
       break;
     }
   };

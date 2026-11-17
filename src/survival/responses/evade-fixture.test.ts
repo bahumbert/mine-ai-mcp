@@ -13,6 +13,7 @@ import { CombatPerception } from "../perception/combat/observations.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
 import { EvadeObservation } from "./evade-observation.js";
+import { swingReadiness } from "../weapons/swing-readiness.js";
 
 export const EVADE_BUDGET_MS = 3_000;
 export const ROUTE_MS = 1_000;
@@ -39,6 +40,7 @@ export function reachFixture({ shooter = false, distance = 17, budget = 15_000, 
     server: { ticksPerSecond, timePacketYet },
     position: new Vec3(0.5, 64, 0.5), groundY: 63,
     entities: { 7: { name: shooter ? "skeleton" : "zombie", position: new Vec3(distance + 0.5, 64, 0.5) } } });
+  swingReadiness(harness.bot); // Connection-owned observers precede response listener snapshots.
   if (shooter) harness.bot.entities[7]!.equipment[0] = itemOf(harness.bot.registry, "bow", 1);
   const world = new MemoryWorld();
   for (let x = -40; x <= 80; x++) for (let z = -2; z <= 2; z++)

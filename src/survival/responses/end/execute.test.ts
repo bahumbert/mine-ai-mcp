@@ -16,17 +16,20 @@ import { enclosedInPlace } from "../hide.js";
 import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
 
 import { PerchObservation } from "../../perception/combat/perch.js";
+import { swingReadiness } from "../../weapons/swing-readiness.js";
 
 /**
  * A bot in the End on a mocked clock: the code under test reads `Date.now` and sets timers, so each test installs the
  * clock (`using _timers = clock.install()`) before it builds a `PerchObservation`.
  */
 function endScene(options: FakeBotOptions = {}) {
-  return createFakeBot({
+  const harness = createFakeBot({
     dimension: "the_end",
     clock: createFakeClock({ mode: "mocked" }),
     ...options,
   });
+  swingReadiness(harness.bot); // Installed before actions by the connected runtime.
+  return harness;
 }
 
 /** The ender dragon: metadata 9 is its health, 16 its native phase. */
