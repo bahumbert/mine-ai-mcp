@@ -10,6 +10,7 @@ import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 import { measured, message, outcomes, refusal } from "./runner-outcomes.js";
 import { watchBodyOwner, type BodyLimitHit, type BodyWatchOptions } from "./body-watch.js";
+import { HeldRequest, awaitHeldRequest, appendHeldReasons } from "./held-request.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -75,6 +76,8 @@ export interface ActionRunnerOptions {
   readonly onBodyLimit?: (owner: string, limit: ReflexLimitKind) => void;
   /** The stall watch's clock (default monotonic); tests step it by hand. */
   readonly clock?: StallClock;
+  /** Server time packets pace a held request's decision backstop. */
+  readonly worldAge?: () => number | null;
   /** Counts the failures of movement actions against a bot that does not move; unset: no watch. */
   readonly pinned?: PinnedWatch;
   /** What a pinned bot's next movement action starts with; without it a pinned bot is only watched. */
@@ -117,11 +120,16 @@ export interface ClaimSettlement<Value> {
   readonly continuation: Continuation;
 }
 
+interface ClaimVerdict {
+  readonly continuation: Continuation | { readonly kind: "hold"; readonly record: HeldRequest };
+  readonly by: string;
+}
+
 interface Preemption {
   readonly reason: string;
   readonly cause: BodyAbortCause;
   /** Resolves once the physical claim settles: resume or return its observed stop. */
-  readonly verdict: Promise<Continuation>;
+  readonly verdict: Promise<ClaimVerdict>;
 }
 
 interface ActiveAction {
@@ -152,6 +160,9 @@ interface AdmittedRequest {
   readonly action: string;
   readonly admittedAt: number;
   readonly lifetime: AbortController;
+  readonly resumable: boolean;
+  held: HeldRequest | null;
+  body: ActionRunnerStatus["activeAction"];
   objective: unknown;
   state: RequestState;
   evidence: (() => RequestEvidence) | null;
@@ -208,6 +219,7 @@ export class ActionRunner {
   readonly #onPhysicsStall: (action: string) => void;
   readonly #onBodyLimit: (owner: string, limit: ReflexLimitKind) => void;
   readonly #clock: StallClock;
+  readonly #worldAge: () => number | null;
   readonly #pinned: PinnedWatch | undefined;
   readonly #pinnedEscape: PinnedEscape | undefined;
   readonly #routes: RouteOutcomes | undefined;
@@ -231,6 +243,7 @@ export class ActionRunner {
     this.#onPhysicsStall = options.onPhysicsStall ?? (() => {});
     this.#onBodyLimit = options.onBodyLimit ?? ((owner, limit) => { if (limit === "physics_stalled") this.#onPhysicsStall(owner); });
     this.#clock = options.clock ?? MONOTONIC_CLOCK;
+    this.#worldAge = options.worldAge ?? (() => null);
     this.#pinned = options.pinned;
     this.#pinnedEscape = options.pinnedEscape;
     this.#routes = options.routes;
@@ -300,6 +313,9 @@ export class ActionRunner {
       action: definition.name,
       admittedAt: Date.now(),
       lifetime: new AbortController(),
+      resumable: definition.execution.kind === "resumable_task",
+      held: null,
+      body: null,
       objective: null,
       state: { kind: "admitted" },
       evidence: null,
@@ -324,6 +340,8 @@ export class ActionRunner {
         ? output
         : this.#finishedOutput(output, invocation);
     } finally {
+      invocation.held?.abort("Admitted request settled.");
+      invocation.held = null;
       invocation.state = { kind: "returned" };
       invocation.lifetime.abort("Admitted request settled.");
       // A takeover settles an attempt, not the admitted call. Finish its
@@ -407,65 +425,82 @@ export class ActionRunner {
     let execute: RequestExecution<Result> | null = null;
     const interruptions: string[] = [];
     let running = activeAction(definition.name);
+    invocation.body = running.metadata;
     this.#state = { kind: "foreground", action: running };
     invocation.state = { kind: "running" };
     this.#ownershipChanged();
     while (true) {
       const actionSignal = signal ? AbortSignal.any([signal, running.controller.signal]) : running.controller.signal;
-      let result: Result | RuntimeFailure;
-      try {
-        result = await this.#watchPhysics(definition.name, actionSignal, running.controller, this.#execute(
-          definition.execution,
-          (context) => this.#asEscapeWhenPinned(invocation, context.signal ?? this.#connection.signal, () => {
-            if (execute === null) {
-              if (definition.begin)
-                execute = definition.begin(request, invocation.lifetime.signal, observeProgress);
-              else {
-                const run = definition.execute;
-                execute = (attempt) => run(request, attempt);
-              }
-            }
-            return execute({ ...context, observeProgress });
-          }),
-          actionSignal,
-        ));
-      } finally {
-        if (this.#state.kind === "foreground" && this.#state.action === running) this.#state = { kind: "idle" };
-        running.settle();
-        running.released = true;
-        this.#ownershipChanged();
-      }
+      let result = await this.#runAttempt(definition, invocation, running, actionSignal, (context) => {
+        if (execute === null) {
+          if (definition.begin) execute = definition.begin(request, invocation.lifetime.signal, observeProgress);
+          else { const run = definition.execute; execute = (attempt) => run(request, attempt); }
+        }
+        return execute({ ...context, observeProgress });
+      });
       const preemption = running.preemption;
       if (!preemption || this.#connection.signal.aborted) {
         return measured(definition.name, startedAtMs, result, interruptions);
       }
-      const verdict = await preemption.verdict;
+      const decision = await this.#continuationForRequest(await preemption.verdict, invocation, signal);
+      const { verdict, reasons, held, suffix } = decision;
       if (signal?.aborted || invocation.lifetime.signal.aborted) {
         interruptions.push(preemption.reason);
         return measured(definition.name, startedAtMs, result, interruptions);
       }
-      if (!resumable) return measured(definition.name, startedAtMs, result, interruptions);
+      if (!resumable && verdict.kind !== "hold") return measured(definition.name, startedAtMs, result, interruptions);
       if (verdict.kind !== "resume") {
-        if (verdict.kind === "return" && verdict.reason) {
-          interruptions.push(verdict.reason);
-          result = result.status === "cancelled" && !result.error?.endsWith(verdict.reason)
-            ? { ...result, error: `${result.error} ${verdict.reason}` } : result;
+        if (reasons.length) {
+          interruptions.push(...reasons.slice(0, -1), `${reasons[reasons.length - 1]}${suffix ?? ""}`);
+          result = appendHeldReasons(result, reasons, suffix);
         }
         return measured(definition.name, startedAtMs, result, interruptions);
       }
       if (invocation.lifetime.signal.aborted) return measured(definition.name, startedAtMs, result, interruptions);
-      interruptions.push(preemption.reason, ...(verdict.reason ? [verdict.reason] : []));
+      interruptions.push(...(held ? reasons : [preemption.reason, ...reasons]));
       invocation.state = { kind: "resuming" };
       invocation.progress.transition("resuming");
       await this.#awaitIdle();
       if (invocation.lifetime.signal.aborted) return measured(definition.name, startedAtMs, result, interruptions);
       this.#connection.signal.throwIfAborted();
       running = activeAction(definition.name);
+      invocation.body = running.metadata;
       this.#state = { kind: "foreground", action: running };
       invocation.state = { kind: "running" };
       invocation.progress.transition("running");
       this.#ownershipChanged();
     }
+  }
+
+  /** Run one physical attempt; its release is independent of the request's continuation. */
+  async #runAttempt<Name extends string, Request, Result extends ActionResult>(
+    definition: Action<Name, Request, Result>, invocation: AdmittedRequest, running: ActiveAction,
+    signal: AbortSignal, execute: RequestExecution<Result>,
+  ): Promise<Result | RuntimeFailure> {
+    try {
+      return await this.#watchPhysics(definition.name, signal, running.controller, this.#execute(
+        definition.execution,
+        (context) => this.#asEscapeWhenPinned(invocation, context.signal ?? this.#connection.signal, () => execute(context)), signal,
+      ));
+    } finally {
+      if (this.#state.kind === "foreground" && this.#state.action === running) this.#state = { kind: "idle" };
+      running.settle();
+      running.released = true;
+      this.#ownershipChanged();
+    }
+  }
+
+  /** Resolve a request-owned record by reference, even if a release listener already attached its next claim. */
+  async #continuationForRequest(decision: ClaimVerdict, request: AdmittedRequest, signal?: AbortSignal) {
+    const continuation = decision.continuation;
+    if (continuation.kind !== "hold" || !("record" in continuation)) {
+      return { verdict: continuation, held: false, suffix: null,
+        reasons: continuation.kind !== "cancel" && continuation.reason ? [continuation.reason] : [] };
+    }
+    const record = continuation.record;
+    const end = await awaitHeldRequest(record, signal ? [signal, request.lifetime.signal] : [request.lifetime.signal]);
+    if (request.held === record) request.held = null;
+    return { verdict: end, held: true, reasons: [...record.reasons], suffix: record.suffix };
   }
 
   /** A pinned bot's movement action starts by leaving the water or boat, then routes as an escape until it settles. */
@@ -504,6 +539,11 @@ export class ActionRunner {
   ): ForegroundCancellation => {
     const abort = new BodyAbort(cause, reason);
     this.#admittedRequest?.lifetime.abort(abort);
+    if (this.#admittedRequest?.held) {
+      this.#admittedRequest.held.abort(abort);
+      const request = this.#admittedRequest;
+      return { kind: "cancellation_requested", action: request.action, startedAt: new Date(request.admittedAt).toISOString(), reason };
+    }
     const active = this.#currentAction();
     if (!active) return { kind: "idle", reason };
     const { action, startedAt } = active.metadata;
@@ -590,6 +630,7 @@ export class ActionRunner {
   /** Retire old-world reflex work while an expected portal request reconciles arrival. */
   dimensionChanged(from: string, to: string): void {
     this.#releaseBaseline();
+    this.#admittedRequest?.held?.verdict({ kind: "resume" }, this.#admittedRequest.held.owner);
     if (this.#state.kind !== "takeover" && this.#state.kind !== "yielding") return;
     const cause = new BodyAbort({ kind: "dimension_changed", from, to }, `Dimension changed from ${from} to ${to}.`);
     let owner = this.#currentAction();
@@ -630,8 +671,10 @@ export class ActionRunner {
     const takeover = activeAction(name);
     takeover.predecessor = interrupted;
     const cause: BodyAbortCause = { kind: "preempted", by: name };
-    let settleVerdict!: (verdict: Continuation) => void;
-    const verdict = new Promise<Continuation>((resolve) => {
+    const held = this.#admittedRequest?.held ?? null;
+    if (!interrupted) held?.attach(name, reason);
+    let settleVerdict!: (verdict: ClaimVerdict) => void;
+    const verdict = new Promise<ClaimVerdict>((resolve) => {
       settleVerdict = resolve;
     });
     const settleContinuation = (result: Continuation) => {
@@ -639,7 +682,7 @@ export class ActionRunner {
       // await that verdict here: the higher owner first needs our physical
       // release, which the finally block below settles independently.
       if (takeover.preemption) void takeover.preemption.verdict.then(settleVerdict);
-      else settleVerdict(result);
+      else settleVerdict(this.#settleClaim(takeover, result, held));
     };
     if (interrupted) {
       interrupted.preemption = { reason, cause, verdict };
@@ -656,8 +699,28 @@ export class ActionRunner {
     this.#ownershipChanged();
 
     const outcome = this.#runClaim(takeover, interrupted, work, settleContinuation, releaseAfterAdmission, limits);
-    return { kind: "claimed", interrupted: interrupted?.metadata ?? null, outcome };
+    return { kind: "claimed", interrupted: interrupted?.metadata ?? (held?.state === "attached" ? this.#admittedRequest?.body ?? null : null), outcome };
   };
+
+  /** Make the hold before releasing the body: ownership listeners may synchronously claim it next. */
+  #settleClaim(takeover: ActiveAction, continuation: Continuation, held: HeldRequest | null): ClaimVerdict {
+    const by = takeover.metadata.action;
+    if (held) held.verdict(continuation, by);
+    else {
+      const request = this.#admittedRequest;
+      if (continuation.kind === "hold" && request?.resumable && request.state.kind === "suspended" && !request.lifetime.signal.aborted) {
+        request.held = new HeldRequest({ request: request.id, ...continuation, worldAge: this.#worldAge });
+        return { continuation: { kind: "hold", record: request.held }, by };
+      }
+    }
+    return { continuation, by };
+  }
+
+  /** The hold's owner chose a decision that does not start another response. */
+  releaseHold(owner: string, decisionKind: string): boolean {
+    const held = this.#admittedRequest?.held;
+    return held?.owner === owner && held.release(decisionKind);
+  }
 
   /** A claim is held to the physics-stall limit and to the limits its reflex asked for; none given: no watch. */
   #claimWatch(takeover: ActiveAction, signal: AbortSignal, limits: ClaimLimits | undefined): BodyWatchOptions {

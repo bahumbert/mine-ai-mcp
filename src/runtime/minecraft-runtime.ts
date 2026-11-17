@@ -342,6 +342,7 @@ function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: M
   // The one record of how this bot's routes end: navigation notes them, the runner counts a movement failure only if one failed.
   const routes = new RouteOutcomes();
   const runner = new ActionRunner({
+    worldAge: () => bot.time?.age ?? null,
     highlighter: options.highlighter,
     pinned,
     pinnedEscape: createPinnedEscape(bot, routesAsEscape),

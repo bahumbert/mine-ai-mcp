@@ -31,5 +31,6 @@ export class BodyAbort extends Error {
 
 export type Continuation =
   | { readonly kind: "resume"; readonly reason?: string }
+  | { readonly kind: "hold"; readonly reason: string; readonly owner: string; readonly backstopTicks: number }
   | { readonly kind: "return"; readonly reason: string | null }
   | { readonly kind: "cancel"; readonly cause: BodyAbortCause };
