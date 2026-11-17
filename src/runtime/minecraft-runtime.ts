@@ -40,6 +40,7 @@ import { createPinnedEscape } from "../session/pinned-escape.js";
 import { PinnedWatch } from "../session/pinned-watch.js";
 import { attachIdleWaterControl } from "../survival/baseline/idle-water.js";
 import { monotonicNow } from "../utils/index.js";
+import { serverTickPace } from "../world/server-tick-pace.js";
 import { ReflexDriver } from "../survival/control/driver.js";
 import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import { attachSurvivalReceipts } from "../survival/evidence/receipts.js";
@@ -334,6 +335,7 @@ interface BodyIncidents {
  * back on where she is (run 14b).
  */
 function createBodyRunner(bot: Bot, routesAsEscape: () => Disposable, options: MinecraftRuntimeOptions, resources: AsyncDisposableStack, record: BodyIncidents): { readonly runner: ActionRunner; readonly routes: RouteOutcomes } {
+  resources.use(serverTickPace(bot));
   const position = () => bot.entity?.position ? {
     dimension: bot.game.dimension, x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z,
   } : null;
