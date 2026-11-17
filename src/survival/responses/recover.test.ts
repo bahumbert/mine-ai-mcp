@@ -6,6 +6,7 @@ import { type FakeHarness, createFakeBot, createFakeClock } from "../../test-sup
 import { useNativeDigging } from "../../test-support/fake-bot/native-digging.js";
 import { installNativeDigClock, nativeDigTicks } from "../../navigation/index.js";
 import { SERVER_CLOCK_STOPPED_MS } from "../../world/world-age.js";
+import { isBurning } from "../perception/body.js";
 import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../policy/contract.js";
 import { survivalResources } from "../state/resources.js";
@@ -56,6 +57,33 @@ test("covered recovery waits for both restored health and the owner's passing th
   });
   assert.equal(result.kind, "recovered");
   assert.equal(ticks, 3, "a passing hit must heal before the same action resumes");
+});
+
+/** The residual burn metadata flag (`shared_flags` bit 0), set as the server sends it. */
+function setBurning(bot: ReturnType<typeof createFakeBot>["bot"], on: boolean): void {
+  const index = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags");
+  Reflect.set(bot.entity.metadata, index, on ? 1 : 0);
+}
+
+test("covered recovery with a burn hold stays pending while the residual burn lasts and health is short, then returns at 18", async () => {
+  const { bot } = createFakeBot({ health: 20, food: 20 });
+  setBurning(bot, true);
+  let ticks = 0;
+  const result = await recoverUnderCover(bot, {
+    signal: new AbortController().signal, recoverTo: 18, maximumMs: 90_000,
+    isProtected: () => true, holdWhile: () => isBurning(bot),
+    defendIntruder: async () => {}, releaseItemUse: () => {},
+    wait: async () => {
+      ticks++;
+      if (ticks === 1) bot.health = 17;
+      if (ticks === 2) setBurning(bot, false);
+      if (ticks === 3) bot.health = 18;
+    },
+    survival: survivalResources(), policy: () => DEFAULT_SURVIVAL_POLICY,
+  });
+  assert.deepEqual(result, { kind: "recovered", ate: null });
+  assert.equal(ticks, 3, "the burn hold waits for the burn to clear and health to reach 18, not for the first of them");
+  assert.equal(isBurning(bot), false);
 });
 
 test("healthy but still threatened cover cannot report recovered when its hold expires", async () => {
