@@ -1,5 +1,4 @@
 import type { Continuation } from "../../session/abort.js";
-import { ticksOnTime } from "../../world/world-age.js";
 import type { AnsweredEntry, AnsweredScope, Facts, TemporalPremise } from "../state/answered.js";
 import type { REFLEX_PRIORITY } from "./priority.js";
 export type ReflexName = (typeof REFLEX_PRIORITY)[number];
@@ -33,32 +32,13 @@ export type ResponseDecision<Response> =
 export const LETHAL_REFLEX_RETRY_TICKS = 40;
 
 /** A reflex claim's limits and stand-down, in world ticks (the owner's values of 2026-10-19 at 20 tps). */
-export interface TickLimits {
+export interface ReflexLimits {
   /** The longest the claim may hold the body, however well it progresses. */
   readonly ceilingTicks: number;
   /** How long the claim may go without a progress mark (the base probe's or the reflex's own). */
   readonly noProgressTicks: number;
   /** After a limit the scope stays answered this many ticks, whatever the facts do (time only). */
   readonly standDownTicks: number;
-}
-
-/** The same limits in wall milliseconds: kept until every reflex is converted (plan 2026-11-16-reflex-limits-ticks T4b). */
-export interface LegacyMsLimits {
-  readonly ceilingMs: number;
-  readonly noProgressMs: number;
-  readonly standDownMs: number;
-}
-
-export type ReflexLimits = TickLimits | LegacyMsLimits;
-
-/** The tick form of any `ReflexLimits`: a millisecond value is `ceil(ms / 50)` ticks (exact at the owner's values). */
-export function limitTicks(limits: ReflexLimits): TickLimits {
-  if ("ceilingTicks" in limits) return limits;
-  return {
-    ceilingTicks: ticksOnTime(limits.ceilingMs),
-    noProgressTicks: ticksOnTime(limits.noProgressMs),
-    standDownTicks: ticksOnTime(limits.standDownMs),
-  };
 }
 
 export interface ReflexDefinition<Danger, Response, Outcome> {

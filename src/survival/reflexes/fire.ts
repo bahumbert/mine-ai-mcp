@@ -4,6 +4,7 @@ import { LIFE_SAVING_REMOVAL_MS, pendingLifeSavingPlacements, removeLifeSavingPl
 import { describeProtectedRegion } from "../../world/protected-regions.js";
 import { bucketAvailable, waterLandingSupply, type WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
+import { ticksOnTime } from "../../world/world-age.js";
 import { LETHAL_REFLEX_RETRY_TICKS, type ReflexLimits } from "../control/contract.js";
 import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
@@ -112,9 +113,9 @@ function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["bl
  * going out, or standing/swimming on safe footing ends the claim, and the reflex pauses 2 s (owner 2026-10-19).
  */
 const FIRE_LIMITS: ReflexLimits = {
-  ceilingMs: FIRE_ESCAPE_MAXIMUM_MS + LAVA_SETTLE_MAXIMUM_MS + LIFE_SAVING_REMOVAL_MS,
-  noProgressMs: 6_000,
-  standDownMs: 2_000,
+  ceilingTicks: ticksOnTime(FIRE_ESCAPE_MAXIMUM_MS + LAVA_SETTLE_MAXIMUM_MS + LIFE_SAVING_REMOVAL_MS),
+  noProgressTicks: 120,
+  standDownTicks: 40,
 };
 
 /** A rise in lava that counts as a swim up: 0.05 block over the lowest the body reached (the sinking at the start is not progress). */

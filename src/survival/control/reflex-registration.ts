@@ -5,7 +5,6 @@ import { BodyAbort, type BodyAbortCause, type Continuation } from "../../session
 import type { ActionRunner } from "../../session/action-runner.js";
 import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
 import {
-  limitTicks,
   type DangerObservation,
   type ReflexDefinition,
   type ReflexLimits,
@@ -236,7 +235,6 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     const active: ActiveClaim = { name: responseName, startedAt: Date.now(), controller, signal: null };
     this.#active = active;
     const limits = definition.limits(response);
-    const claimTicks = limitTicks(limits);
     const progress = new ReflexProgress();
     const run: ClaimRun<Response> = {
       response,
@@ -264,8 +262,8 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       },
       definition.releaseAfterAdmission,
       {
-        ceilingTicks: claimTicks.ceilingTicks,
-        noProgressTicks: claimTicks.noProgressTicks,
+        ceilingTicks: limits.ceilingTicks,
+        noProgressTicks: limits.noProgressTicks,
         progressMarks: () => progress.marks,
         worldAge: () => host.bot.time?.age ?? null,
       },
@@ -398,7 +396,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   /**
-   * After a limit the scope is answered for `standDownMs` whatever the facts do: the danger may be growing while the
+   * After a limit the scope is answered for `standDownTicks` whatever the facts do: the danger may be growing while the
    * scene stays equal, and a body held for good is worse than a pause. Only the time ends it (permissions still apply).
    */
   #standDown(run: ClaimRun<Response>, limit: ReflexLimitCause): void {
@@ -413,7 +411,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     host.answered.remember(
       { ...scope, facts: () => null },
       { kind: "reflex_limit", why },
-      { premise: "reflex_limit", ticks: Math.min(limitTicks(run.limits).standDownTicks * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
+      { premise: "reflex_limit", ticks: Math.min(run.limits.standDownTicks * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
     );
   }
 }

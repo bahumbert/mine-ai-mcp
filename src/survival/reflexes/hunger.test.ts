@@ -228,6 +228,6 @@ test("a meal that does nothing for the window is not progress, and its limits ar
   const { marks, tick, limits, detach } = mealProbe(meal);
   for (let count = 0; count < 100; count++) await tick();
   assert.deepEqual(marks, []);
-  assert.deepEqual(limits, { ceilingMs: 20_000, noProgressMs: 8_000, standDownMs: 2_000 });
+  assert.deepEqual(limits, { ceilingTicks: 400, noProgressTicks: 160, standDownTicks: 40 });
   detach();
 });

@@ -7,7 +7,7 @@ import type { CombatController } from "../control/combat/contract.js";
 import { answeredResponses } from "../control/combat/scopes/response.js";
 import type { HostileSettlement } from "../control/combat/response-result.js";
 import { describeResponse, responseContinuation, responseFailure } from "../control/combat/settlement.js";
-import type { TickLimits } from "../control/contract.js";
+import type { ReflexLimits } from "../control/contract.js";
 import { observeCombatProgress } from "../control/combat-progress.js";
 import { COMBAT_LIMITS } from "../control/combat/limits.js";
 import type { ReflexDriver } from "../control/driver.js";
@@ -24,7 +24,7 @@ import { ThreatChains } from "../state/threat-chains.js";
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
 
 /** Equipping a shield is one inventory move: 200 world ticks (10 s) at most, 100 without the off-hand changing. */
-const SHIELD_LIMITS: TickLimits = { ceilingTicks: 200, noProgressTicks: 100, standDownTicks: 200 };
+const SHIELD_LIMITS: ReflexLimits = { ceilingTicks: 200, noProgressTicks: 100, standDownTicks: 200 };
 
 export interface HostileReflex extends AsyncDisposable {
   readonly threats: ResponseContext;

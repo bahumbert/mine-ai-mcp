@@ -15,7 +15,7 @@ export const BREATH_REFLEX = "breath_reflex" as const;
  * A surfacing may hold the body 40 s (the 600-tick budget is 30 s at full speed, plus 10 s for a server 30 % behind) and
  * 5 s without the air rising, the body climbing a block or a block dug; then the reflex pauses 2 s (owner 2026-10-19).
  */
-const BREATH_LIMITS: ReflexLimits = { ceilingMs: 40_000, noProgressMs: 5_000, standDownMs: 2_000 };
+const BREATH_LIMITS: ReflexLimits = { ceilingTicks: 800, noProgressTicks: 100, standDownTicks: 40 };
 /** The body rising this far (in water too) toward air is progress. */
 const CLIMB_BLOCKS = 1;
 /** Check air every quarter second while another action or idle buoyancy owns movement. */

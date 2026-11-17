@@ -18,7 +18,7 @@ function registerIdleCleanup(driver: ReflexDriver): void {
   driver.register({
     name: "recover_footing", sense: () => null, decide: () => ({ kind: "handled", by: "safe" }),
     facts: () => ({ capability: "footing", response: "landing", scope: "cell", facts: () => null, permissions: () => null }),
-    limits: () => ({ ceilingMs: 60_000, noProgressMs: 60_000, standDownMs: 2_000 }),
+    limits: () => ({ ceilingTicks: 1_200, noProgressTicks: 1_200, standDownTicks: 40 }),
     act: async () => true, failure: () => null, continuation: () => ({ kind: "resume" }), describe: () => null,
   });
 }
@@ -44,7 +44,7 @@ test("nothing is removed during a reflex; after settlement a safe tick removes i
     sense: () => danger ? { kind: "observed", danger: true, evidence: true } : null,
     decide: () => ({ kind: "respond", response: true, name: "landing", reason: "Falling" }),
     facts: () => ({ capability: "footing", response: "landing", scope: "cell", facts: () => null, permissions: () => null }),
-    limits: () => ({ ceilingMs: 60_000, noProgressMs: 60_000, standDownMs: 2_000 }),
+    limits: () => ({ ceilingTicks: 1_200, noProgressTicks: 1_200, standDownTicks: 40 }),
     act: async () => {
       placements.recordLifeSavingPlacement(bot, new Vec3(2, 64, 0), "block");
       await new Promise<void>((resolve) => { finish = resolve; });

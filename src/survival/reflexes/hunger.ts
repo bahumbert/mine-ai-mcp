@@ -16,7 +16,7 @@ import { decideHungerResponse, needsFood } from "../policy/environment.js";
 export const HUNGER_REFLEX = "hunger_reflex" as const;
 const CHECK_INTERVAL_TICKS = 20;
 /** A meal is a few seconds; 8 s without a bite, food gained or a stack spent ends it, then a 2 s pause (owner 2026-10-19). */
-const HUNGER_LIMITS: ReflexLimits = { ceilingMs: 20_000, noProgressMs: 8_000, standDownMs: 2_000 };
+const HUNGER_LIMITS: ReflexLimits = { ceilingTicks: 400, noProgressTicks: 160, standDownTicks: 40 };
 
 /** What counts as getting somewhere during a meal: food or saturation rose, the stack shrank, a bite is in progress. */
 function mealProgress(bot: Bot, food: string, mark: (reason: string) => void): () => void {

@@ -18,13 +18,16 @@ import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { findPlacementSupport, occupiedCell, placeBlock, type BlockPlacementResult } from "../../world/placement.js";
 import { lowerImpulseLanding, projectedFooting } from "../positioning/footing.js";
-import type { LegacyMsLimits } from "../control/contract.js";
+import type { ReflexLimits } from "../control/contract.js";
 
 /**
  * A landing may take 30 s; 5 s without landing, entering water or falling on (the base probe) ends the footing reflex,
  * then a 2 s pause. The recovery keeps the 30 s as its own bound, so a recovery inside a fight ends there too.
  */
-export const FOOTING_LIMITS: LegacyMsLimits = { ceilingMs: 30_000, noProgressMs: 5_000, standDownMs: 2_000 };
+export const FOOTING_LIMITS: ReflexLimits = { ceilingTicks: 600, noProgressTicks: 100, standDownTicks: 40 };
+
+// Legacy mixed-phase bound (steering, server-confirmed placement): P4-35.
+const FOOTING_RECOVERY_WALL_MS = 30_000;
 
 const impulseSchema = z.object({
   entityId: z.number(),
@@ -165,16 +168,14 @@ export class FootingRecovery implements Disposable {
       steer();
       // The velocity packet can precede the physics tick that leaves the floor.
       await waitForTicksOrCancel(this.bot, 1, signal);
-      // The footing reflex ends at this ceiling by itself; a recovery inside a fight runs under the fight's own
-      // 10 minute ceiling, so it keeps the reflex's number as its own bound.
-      const deadline = monotonicNow() + FOOTING_LIMITS.ceilingMs;
+      const deadline = monotonicNow() + FOOTING_RECOVERY_WALL_MS;
       while (this.bot.health > 0) {
         signal.throwIfAborted();
         if (monotonicNow() >= deadline) {
           this.#state = {
             ...this.#state!,
             phase: "failed",
-            reason: `footing not recovered in ${FOOTING_LIMITS.ceilingMs / 1000} s`,
+            reason: `footing not recovered in ${FOOTING_RECOVERY_WALL_MS / 1000} s`,
           };
           return "failed";
         }

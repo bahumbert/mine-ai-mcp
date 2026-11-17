@@ -130,7 +130,7 @@ test("a claim past its ceiling is aborted with reflex_limit ceiling and onBodyLi
   assert.match((done.failed as Error).message, /\[REFLEX_LIMIT\] hostile_reflex .*10 s/);
 });
 
-test("a claim whose marks do not change for noProgressMs is aborted with no_progress; a mark resets the clock", async () => {
+test("a claim whose marks do not change for the progress window is aborted with no_progress; a mark resets the clock", async () => {
   const { runner, limits, pass } = fixture();
   let marks = 0;
   const end = watching(claimed(runner.claim("fire_reflex", "burning", deaf(), undefined, noProgress(120, () => marks))));
