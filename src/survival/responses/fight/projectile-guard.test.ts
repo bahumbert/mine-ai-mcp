@@ -5,6 +5,8 @@ import type { Item } from "prismarine-item";
 import { type FakeBot, type FakeClock, createFakeBot, createFakeClock, flush } from "../../../test-support/fake-bot/index.js";
 import { FightWeapons } from "./weapons.js";
 import type { FightScene } from "./scene.js";
+import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
 
 /** Run `action` while the clock turns one physics tick at a time, until it settles; its outcome is returned as it came. */
 async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
@@ -16,7 +18,10 @@ async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
 }
 
 for (const permitted of [true, false]) test(`broken guard ${permitted ? "equips a spare and restarts readiness" : "respects disabled shields"}`, async () => {
-  const { bot, inventory, server } = createFakeBot({ slots: { 45: { name: "shield" } }, carried: { shield: 1 } });
+  const { bot, clock, inventory, server } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), slots: { 45: { name: "shield" } }, carried: { shield: 1 } });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  await clock.advance(2_000);
   const spare = bot.inventory.items()[0]!;
   let equipped = 0, readiness = 0;
   const equip = bot.equip.bind(bot);
@@ -25,14 +30,16 @@ for (const permitted of [true, false]) test(`broken guard ${permitted ? "equips 
     await equip(item, destination); equipped++;
   };
   const scene = { bot, target: { id: 8 }, perception: { read: () => [] }, signal: new AbortController().signal,
-    policy: { combat: { shield: permitted } }, reportDecision: () => {},
+    policy: { combat: { shield: permitted } }, reportDecision: () => {}, settled: () => false,
     execution: { run: async (_phase: string, effect: () => Promise<void>) => effect() },
   } as unknown as FightScene;
   const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
-  Object.assign(weapons, { currentLoadout: () => ({ shield: spare }), holdFacing: async (ticks: number) => { readiness += ticks; } });
+  Object.assign(weapons, { currentLoadout: () => ({ shield: spare }), holdFacing: async (ticks: number) => {
+    await waitForPhysicsTicks(bot, ticks, scene.signal); readiness += ticks;
+  } });
   weapons.itemUse.activateShield();
   (inventory.updateSlot as (slot: number, item: Item | null) => void).call(inventory, 45, null);
-  await weapons.maintainGuard();
+  await clock.settle(weapons.maintainGuard(), 4_000);
   assert.equal(equipped, permitted ? 1 : 0);
   assert.equal(readiness, permitted ? 5 : 0);
   assert.equal(server.packets.filter(({ name }) => name === "use_item").length, permitted ? 2 : 1);

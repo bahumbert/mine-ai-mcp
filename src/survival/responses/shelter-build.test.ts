@@ -20,7 +20,7 @@ function shelter(rate: number) {
   const stop = new AbortController();
   const build: ShelterBuild = {
     bot, options: { signal: stop.signal, threatContext: combatTestContext(bot), recoverTo: 18, maximumMs: 1 },
-    itemUse: new CombatItemUse(bot, ticks => holdShelterGuard(build, ticks)),
+    itemUse: new CombatItemUse(bot, (ticks, wallEnd) => holdShelterGuard(build, ticks, undefined, wallEnd)),
     enclosed: false, constructionDeadline: 1, dug: 0, walled: 0, capped: false, ate: null, swings: 0,
     recovery: null, refusal: null, pass: 0, blockedCells: new Map(),
   };

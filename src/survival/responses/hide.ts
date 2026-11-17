@@ -51,7 +51,7 @@ function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
   const build: ShelterBuild = {
     bot,
     options,
-    itemUse: new CombatItemUse(bot, (ticks) => holdShelterGuard(build, ticks)),
+    itemUse: new CombatItemUse(bot, (ticks, wallEnd) => holdShelterGuard(build, ticks, undefined, wallEnd)),
     enclosed: enclosedInPlace(bot, options.blockNames),
     constructionDeadline: monotonicNow() + options.maximumMs,
     dug: 0,

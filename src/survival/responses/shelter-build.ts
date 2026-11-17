@@ -136,10 +136,10 @@ export async function waitForShelterTicks(build: ShelterBuild, ticks: number, bo
  * Hold the guard for a server-metered duration, or until the shared swing recovers. Keep its own wall backstop even
  * after the construction deadline; death or a departed intruder returns control to the shelter's next pass.
  */
-export async function holdShelterGuard(build: ShelterBuild, ticks: number, readiness?: SwingReadiness): Promise<void> {
+export async function holdShelterGuard(build: ShelterBuild, ticks: number, readiness?: SwingReadiness, wallEnd = Infinity): Promise<void> {
   const { bot, options } = build;
   const pace = serverTickPace(bot), mark = pace.mark();
-  const bound = { wallDeadline: monotonicNow() + serverPacedWallMs(ticks) };
+  const bound = { wallDeadline: Math.min(wallEnd, monotonicNow() + serverPacedWallMs(ticks)) };
   const initialIntruder = shelterIntruder(bot, options.threatContext);
   let completed = false;
   try {

@@ -784,6 +784,7 @@ test("only confirmed damage renews a roof engagement while a teleporting target 
 for (const blockedAfter of [0, 40]) {
   test(`a roof lure without another usable position stops when the eye ray is blocked after ${blockedAfter} ticks`, async () => {
     const fixture = protectedEndermanFixture();
+    await fixture.warm();
     Reflect.set(
       fixture.target.metadata,
       fixture.bot.registry.entitiesByName.enderman!.metadataKeys!.indexOf("creepy"),
@@ -2223,6 +2224,7 @@ test("ends bow combat when a windup outlasts its guard limit", async () => {
 
 test("prefers a usable bow at range and keeps a carried shield in the off hand", async () => {
   const fixture = combatFixture(["iron_sword", "shield", "bow", "arrow"], { targetDistance: 10 });
+  await fixture.warm();
 
   fixture.script.onShot = () => fixture.combat.kill(fixture.target.id);
 
@@ -2370,6 +2372,7 @@ test("shielded melee strikes a drawing skeleton before it backs out of reach", a
 
 test("rechecks for a bow draw after the melee shield readiness wait", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
+  await fixture.warm();
   const skeleton = armWithBow(fixture.target);
   let waitedTicks = 0;
   fixture.script.onWait = (ticks) => {
@@ -2571,6 +2574,7 @@ for (const tick of [1, 20]) {
 
 test("releasing an arrow is not evidence that the target died", async () => {
   const fixture = combatFixture(["bow", "arrow"], { targetDistance: 10 });
+  await fixture.warm();
   fixture.script.onWait = () => {
     if (fixture.clock.tick === 21) fixture.entities.remove(fixture.target.id);
   };
@@ -2653,6 +2657,7 @@ test("stop aborts a running engagement and resolves once it has settled", async 
 
 test("holds its ground against a flier and swings when it dives into reach", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 10, startingHeld: "iron_sword" });
+  await fixture.warm();
   fixture.target.name = "phantom";
   fixture.script.onWait = () => {
     // Each tick the phantom closes two blocks; nothing on the ground is asked for a route.
@@ -3661,6 +3666,7 @@ for (const threat of ["gap-exposed charge", "incoming fireball"] as const) {
 
 test("a guarded approach stops for a draw from outside the shield's arc, meets it facing, and walks on after", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 10 });
+  await fixture.warm();
   // Looking south along the route while the skeleton is east: outside the arc.
   fixture.bot.entity.yaw = 0;
   const skeleton = armWithBow(fixture.target);
@@ -3894,6 +3900,7 @@ for (const afterRelease of [1, 13]) {
 
 test("a guarded route hands facing to combat on entering melee reach during a volley", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 10 });
+  await fixture.warm();
   const skeleton = armWithBow(fixture.target);
   let stopped = false;
   const navigation = {
@@ -4329,6 +4336,7 @@ for (const interruptTick of [10, 20]) test(`a newly visible drawing skeleton at 
 
 test("a known late skeleton draw leaves time to release and restore protection", async () => {
   const fixture = combatFixture(["bow", "arrow", "shield"], { targetDistance: 12 });
+  await fixture.warm();
   Object.assign(fixture.bot.entity, { width: 0.6, height: 1.8 });
   const skeleton = armWithBow(fixture.entities.spawn({ id: 9, name: "skeleton", height: 1.99, width: 0.6, position: new Vec3(0, 64, 8), headYaw: 0, pitch: 0 }));
   let drawingTicks = 0;

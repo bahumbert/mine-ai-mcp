@@ -35,6 +35,8 @@ import {
 } from "../../weapons/equipment.js";
 import { assessBowWindow } from "../../weapons/bow-window.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
+import { drawUntilFull } from "../../weapons/draw-progress.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -57,7 +59,7 @@ export class FightWeapons {
     readonly interruptions: { recoverFooting(): Promise<void>; returnToCover(): boolean },
   ) {
     this.readiness = swingReadiness(scene.bot);
-    this.itemUse = new CombatItemUse(scene.bot, async (ticks) => { await this.holdFacing(ticks); },
+    this.itemUse = new CombatItemUse(scene.bot, (ticks, wallEnd) => this.holdFacing(ticks, wallEnd),
       (event) => scene.reportDecision({ kind: "response", evidence: { boundary: "item_use", ...event } }));
     this.volleyTicksRemaining =
       (scene.perception.read().find((entry) => entry.id === scene.target.id)?.windingUp ?? false)
@@ -293,7 +295,7 @@ export class FightWeapons {
     const trajectory = bowTrajectory(
       eye.offset(0, -0.1, 0),
       aimPoint(this.scene.bot, this.scene.target),
-      this.scene.targetMotion.velocity(this.scene.target.id),
+      this.scene.targetMotion.velocity(this.scene.target.id).scaled(serverTickPace(this.scene.bot).toServerTicks(1)),
     );
     return trajectory &&
       clearBowTrajectory(trajectory, (from, direction, distance) =>
@@ -325,17 +327,18 @@ export class FightWeapons {
       const admission = await guardIfUnsafe(BOW_DRAW_TICKS, "admission");
       if (admission) return admission;
       using draw = this.itemUse.drawBow();
-      for (let drawn = 0; drawn < BOW_DRAW_TICKS; drawn += 1) {
+      const drawn = await drawUntilFull<GuardOutcome | "obstructed">(this.scene.bot, draw, async remaining => {
         if (this.interruptions.returnToCover()) return "return_to_cover";
         if (this.scene.settled()) {
           // The target is gone mid-draw; the arrow would fly at nothing.
           return "fight_ended";
         }
-        const interrupted = await guardIfUnsafe(BOW_DRAW_TICKS - drawn, "drawing");
+        const interrupted = await guardIfUnsafe(remaining, "drawing");
         if (interrupted) return interrupted;
         if (!(await this.aimBow())) return "obstructed";
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
-      }
+        return "continue";
+      }, this.scene.signal);
+      if (drawn !== "full") return drawn;
       this.scene.signal.throwIfAborted();
       if (this.scene.settled()) return "fight_ended";
       // A target can disappear behind a ledge on the final draw tick. Disposal
@@ -442,7 +445,7 @@ export class FightWeapons {
         this.itemUse.invalidateShield();
       }
       this.scene.signal.throwIfAborted();
-      await this.itemUse.raiseShield();
+      await this.itemUse.raiseShield(() => this.scene.settled() || this.interruptions.returnToCover());
     });
   };
   readonly canAttackFrom = (feet: Vec3) => {

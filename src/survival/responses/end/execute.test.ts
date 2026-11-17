@@ -16,9 +16,41 @@ import { enclosedInPlace } from "../hide.js";
 import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
 
 import { PerchObservation } from "../../perception/combat/perch.js";
-import { swingReadiness } from "../../weapons/swing-readiness.js";
-import { serverTickPace } from "../../../world/server-tick-pace.js";
 import { CrystalObservation } from "../../perception/combat/crystal.js";
+import { DragonShotObservation } from "../../perception/combat/dragon-shot.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
+
+for (const rate of [20, 10]) for (const kind of ["dragon", "crystal"] as const) {
+  test(`the End's ${kind} bow draw counts twenty server ticks at ${rate} tps`, async () => {
+    const { bot, clock, server, combat } = endScene({ server: { ticksPerSecond: rate }, carried: { bow: 1, arrow: 3 },
+      entities: { 42: kind === "dragon" ? dragonAt(new Vec3(30, 84, 0), 1) : { name: "end_crystal", position: new Vec3(20, 70, 0) } } });
+    using _timers = clock.install();
+    using _pace = serverTickPace(bot);
+    await clock.advance(40_000 / rate);
+    let started = 0, releaseMs = 0, releaseTicks = 0, age = 0, speed = 0;
+    const activate = bot.activateItem.bind(bot), release = bot.deactivateItem.bind(bot);
+    bot.activateItem = offHand => { started = clock.now(); age = server.gameTime; activate(offHand); };
+    bot.deactivateItem = () => {
+      if (started && releaseMs === 0) { releaseMs = clock.now() - started; releaseTicks = server.gameTime - age; }
+      release();
+    };
+    bot.on("entitySpawn", entity => {
+      if (entity.name !== "arrow") return;
+      speed = entity.velocity.norm();
+      combat.kill(42); // Scripted finish: no arrow collision is simulated by the shared fake.
+    });
+    using observation = kind === "dragon" ? new DragonShotObservation(bot, 42) : new CrystalObservation(bot, 42, "bow");
+    const end = new EndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
+    const signal = new AbortController().signal;
+    const result = await clock.settle(observation instanceof DragonShotObservation
+      ? end.shootDragon(signal, observation) : end.crystal(42, signal, observation), 15_000);
+    assert.equal(result.attacks, 1);
+    assert.equal(releaseMs, 20_000 / rate);
+    assert.equal(releaseTicks, 20);
+    assert.ok(Math.abs(speed - 3) < 0.01);
+  });
+}
+import { swingReadiness } from "../../weapons/swing-readiness.js";
 import { planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
 import { fightSwordAfter } from "../../../test-support/swing-handoff.js";
 
