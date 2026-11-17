@@ -1,4 +1,5 @@
 import { ExecutionScope } from "../../../execution/execution-scope.js";
+import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { isHostile } from "../../perception/combat/threats.js";
 import { combatDecisionEvidence } from "../../policy/combat/decision.js";
 import type { CombatPosition } from "../../positioning/combat/position.js";
@@ -34,12 +35,34 @@ export interface MobObservation {
   policyUse(value: "fight" | "recovery"): void;
 }
 
-/** Explosion evidence spans deflections and recoveries as well as the physical fights. */
-function observeExplosions(bot: FightEnvironment["bot"]) {
-  let count = 0;
-  const onExplosion = () => { count++; };
+/** Tick and explosion evidence spans deflections, recoveries and physical fights. */
+function observeEngagementEvents(bot: FightEnvironment["bot"]) {
+  let explosions = 0, ticks = 0;
+  const onExplosion = () => { explosions++; };
+  const onTick = () => { ticks++; };
   bot._client.on("explosion", onExplosion);
-  return { get count() { return count; }, stop: () => bot._client.off("explosion", onExplosion) };
+  bot.on("physicsTick", onTick);
+  return {
+    get explosions() { return explosions; },
+    ticks: () => ticks,
+    stop: () => {
+      bot._client.off("explosion", onExplosion);
+      bot.off("physicsTick", onTick);
+    },
+  };
+}
+
+/** Read current policy and answered responses through the same context for every physical response. */
+function engagementContext({ bot, policy, perception, survival }: FightEnvironment) {
+  return {
+    resolvedIds: perception.resolvedIds,
+    attackerIds: perception.attackerIds,
+    perception,
+    survival,
+    get policy() { return policy.combat; },
+    get food() { return policy.food; },
+    get blockedResponses() { return answeredResponses(bot, () => policy.effective, survival); },
+  };
 }
 
 /** A deflect or recovery owns its own execution observation while quarry clocks are paused. */
@@ -79,28 +102,14 @@ export async function runMobEngagement(
   signal: AbortSignal,
   observe: MobObservation,
 ): Promise<CombatOutcome> {
-  const { bot, navigation, policy, perception, survival, reportDecision } = environment;
+  const { bot, navigation, policy, survival, reportDecision } = environment;
   const minimumHealth =
     movement === "pursue" && isHostile(bot.entities[targetId]) ? policy.combat.engage_min_health : 0;
   const purpose =
     movement === "pursue"
       ? ({ kind: "pursuit", targetId, minimumHealth } as const)
       : ({ kind: "contact_defence", targetId } as const);
-  const context = {
-    resolvedIds: perception.resolvedIds,
-    attackerIds: perception.attackerIds,
-    perception,
-    survival,
-    get policy() {
-      return policy.combat;
-    },
-    get food() {
-      return policy.food;
-    },
-    get blockedResponses() {
-      return answeredResponses(bot, () => policy.effective, survival);
-    },
-  };
+  const context = engagementContext(environment);
   using protectedProgress = new ProtectedAttackProgress(
     survival.budgets,
     targetId,
@@ -109,10 +118,12 @@ export async function runMobEngagement(
   using endermanProgress = new EndermanProgress(survival.budgets, policy.combat.enderman_wait_ticks);
   using quarryProgress = new QuarryProgress(survival.budgets, targetId, policy.combat.quarry_wait_ticks, () => bot.time?.age);
   // Evidence belongs to the engagement, including intervals between physical responses.
-  const explosions = observeExplosions(bot);
+  const events = observeEngagementEvents(bot);
   try {
     const result = await runEngagement(signal, {
       purpose,
+      ticks: events.ticks,
+      nextTick: () => waitForPhysicsTicks(bot, 1, signal),
       observe: () => observeCombatDecision(bot, context),
       record: (facts, response) =>
         reportDecision({ kind: "response", evidence: combatDecisionEvidence(facts, purpose, response) }),
@@ -152,8 +163,8 @@ export async function runMobEngagement(
           return result;
         }),
     });
-    return { ...result, explosions: explosions.count };
+    return { ...result, explosions: events.explosions };
   } finally {
-    explosions.stop();
+    events.stop();
   }
 }

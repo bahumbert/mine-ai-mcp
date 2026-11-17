@@ -9,6 +9,8 @@ export type EngagementRecovery =
 
 export interface EngagementOperations {
   readonly purpose: Extract<CombatPurpose, { kind: "pursuit" | "contact_defence" }>;
+  ticks(): number;
+  nextTick(): Promise<void>;
   observe(): CombatDecisionFacts;
   record(facts: CombatDecisionFacts, response: HostileDirective): void;
   fight(): Promise<FightOutcome>;
@@ -34,6 +36,7 @@ export async function runEngagement(signal: AbortSignal, operations: EngagementO
       if (facts.health <= 0) return { ...evidence, kind: "bot_died" };
       const response = decideCombatResponse(facts, operations.purpose);
       operations.record(facts, response);
+      const tickBefore = operations.ticks();
       switch (response.kind) {
         case "deflect":
           await operations.deflect(response.targetId);
@@ -71,6 +74,7 @@ export async function runEngagement(signal: AbortSignal, operations: EngagementO
         case "none":
           return { ...evidence, kind: "target_lost" };
       }
+      if (operations.ticks() === tickBefore) await operations.nextTick();
     }
   } catch (cause) {
     if (signal.aborted && cause === signal.reason) return { ...evidence, kind: "cancelled" };
