@@ -6,8 +6,13 @@ import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { bowTrajectory, clearBowTrajectory } from "../../weapons/bow-trajectory.js";
 import { standingCell } from "./geometry.js";
 
-/** Reach an actual firing line; a hovering target need not have a melee stance. */
-export function bowApproachGoal(bot: Bot, targetId: number, aim: () => Vec3): Goal {
+/**
+ * Reach an actual firing line; a hovering target need not have a melee stance.
+ * The start cell the bot stands in is judged by the turn's own shot (`shotFromHere`),
+ * so the route arrives only where the bow will really fire; other cells keep the
+ * cell-centre model.
+ */
+export function bowApproachGoal(bot: Bot, targetId: number, aim: () => Vec3, shotFromHere: () => boolean): Goal {
   return {
     resolve() {
       if (!bot.entities[targetId]?.isValid)
@@ -21,6 +26,7 @@ export function bowApproachGoal(bot: Bot, targetId: number, aim: () => Vec3): Go
         isSatisfied({ feet }, world) {
           const cell = new Vec3(feet.x, feet.y, feet.z);
           if (!standingCell(world, cell)) return false;
+          if (bot.entity.position.floored().equals(cell)) return shotFromHere();
           const trajectory = bowTrajectory(cell.offset(0.5, STANDING_EYE_HEIGHT - 0.1, 0.5), target);
           const rays = worldViewRaycaster((x, y, z) => obstaclesOf(world.blockAt(x, y, z)));
           return (

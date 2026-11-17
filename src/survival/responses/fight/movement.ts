@@ -134,7 +134,12 @@ export class FightMovement {
     if (!beganOutsideContact || !isRangedAttacker(this.scene.bot, this.scene.target) || !permittedBow) return melee;
     return anyGoal([
       melee,
-      bowApproachGoal(this.scene.bot, this.scene.target.id, () => aimPoint(this.scene.bot, this.scene.target)),
+      bowApproachGoal(
+        this.scene.bot,
+        this.scene.target.id,
+        () => aimPoint(this.scene.bot, this.scene.target),
+        () => this.weapons.hasClearShot(),
+      ),
     ]);
   };
   readonly approach = async (
