@@ -12,7 +12,8 @@ export function attachServerDigging(bot: FakeBot, server: FakeServer, world: Fak
     const { position } = pending;
     pending = undefined;
     world.setCell(position, "air");
-    bot._client.emit("block_change", { location: position, type: 0 });
+    // Protocol positions have coordinates without Vec3 methods (occupied-fire-dig, 2026-11-17).
+    bot._client.emit("block_change", { location: { x: position.x, y: position.y, z: position.z }, type: 0 });
   };
   server.onTick(answer);
   server.onPacket("block_dig", data => {

@@ -51,6 +51,7 @@ import { boatShiftWithinOneTick } from "./checks/boat-shift-within-one-tick.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
 import { nativeDigClock } from "./checks/native-dig-clock.ts";
+import { occupiedFireDig } from "./checks/occupied-fire-dig.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
 import { lavaBesideHead } from "./checks/lava-beside-head.ts";
@@ -153,6 +154,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   placementBlockUpdate,
   digTimeAndUpdate,
   nativeDigClock,
+  occupiedFireDig,
   stopDiggingBothWindows,
   boatGetOffByShift,
   boatDismountIgnored,

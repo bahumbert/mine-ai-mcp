@@ -1,7 +1,4 @@
-/**
- * What a contract check acts on: the bot, time, and the two server-side means a check needs (a block edit, the
- * server's record of a rider), on the shared fake (`createFakeBot`) or on a real server through Mine Labs.
- */
+// Contract subjects supply server edits, queries and time on the shared fake or real Minecraft through Mine Labs.
 import { setTimeout as delay } from "node:timers/promises";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -28,6 +25,8 @@ export interface ContractSubject {
   now(): number;
   /** Change a cell on the server's side (an op command on a real server); resolves once the client has the update. */
   setBlock(cell: Vec3, block: FakeCell): Promise<void>;
+  /** Whether the server's cell matches the block, independently of client prediction. */
+  blockIs(cell: Vec3, block: string): Promise<boolean>;
   /** Whether the server still has the bot riding `vehicle`, whatever the client believes. */
   seatedOnServer(vehicle: Entity): Promise<boolean>;
   /** The world's spawn the server told the client (the `spawn_position` packet, `bot.spawnPoint`): a world position, in the world and not in the lane. The fake sends no such packet and answers its respawn point, which a night in a bed moves. */
@@ -178,6 +177,37 @@ function createGameTimeQueries(bot: Bot) {
   };
 }
 
+let blockQuerySequence = 0;
+
+/** Correlate a one-shot server block query, so a late reply cannot answer another question. */
+function queryServerBlock(bot: Bot, cell: Vec3, block: string): Promise<boolean> {
+  const key = `block_${bot.username}_${++blockQuerySequence}`;
+  const prefix = `contract-${key} `;
+  return new Promise<boolean>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      bot.off("messagestr", onMessage as never);
+    };
+    const onMessage = (text: string) => {
+      if (text !== `${prefix}0` && text !== `${prefix}1`) return;
+      cleanup();
+      resolve(text === `${prefix}1`);
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`/block query: no answer after ${SERVER_EDIT_WALL_MS} ms (is the bot op? or the server stalled)`));
+    }, SERVER_EDIT_WALL_MS);
+    bot.on("messagestr", onMessage as never);
+    try {
+      bot.chat(`/execute store success storage ${GAME_TIME_STORAGE} ${key} int 1 run execute if block ${cell.x} ${cell.y} ${cell.z} ${block}`);
+      bot.chat(`/tellraw @s {"text":"${prefix}","extra":[{"nbt":"${key}","storage":"${GAME_TIME_STORAGE}"}]}`);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
 /** Steps of `settleWithin`: fine enough for a 2-tick bound, coarse enough for the real event loop. */
 const SETTLE_STEP_MS = 25;
 
@@ -267,6 +297,15 @@ function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait"
   return holdsWhileMoving(subject, () => moved() >= ticks, () => subject.bot.time.age, stallMs);
 }
 
+/** Block edits and reads share the fake's existing delayed server-answer boundary. */
+function fakeBlockActions(world: FakeHarness["world"], afterAnswer: <T>(run: () => T, what: string) => Promise<T>): Pick<ContractSubject, "setBlock" | "blockIs"> {
+  return {
+    setBlock: (cell, block) => afterAnswer(() => world.setCell(cell, block), "setBlock"),
+    // Real air/fire true and false at both rates: occupied-fire-dig (2026-11-17).
+    blockIs: (cell, block) => afterAnswer(() => world.blockAt(cell)?.name === block, "blockIs"),
+  };
+}
+
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
   const { bot, clock, combat, entities, server, world } = harness;
@@ -295,9 +334,7 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => server.resendTime());
       await clock.advance(50);
     },
-    async setBlock(cell, block) {
-      await afterAnswer(() => world.setCell(cell, block), "setBlock");
-    },
+    ...fakeBlockActions(world, afterAnswer),
     seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
     // The fake sends no `spawn_position` (no measured answer to copy): its world spawn is the point it respawns her at (`fake-harness.ts`).
     worldSpawn: () => server.respawnPoint!.clone(),
@@ -388,6 +425,15 @@ async function waitForMobPickup(bot: Bot, clock: Pick<ContractSubject, "now" | "
   }
 }
 
+/** Server block edits wait for the update; queries read the command result independently of prediction. */
+function serverBlockActions(bot: Bot): Pick<ContractSubject, "setBlock" | "blockIs"> {
+  return {
+    blockIs: (cell, block) => queryServerBlock(bot, cell, block),
+    setBlock: (cell, block) => commandUntil(bot, `setblock ${cell.x} ${cell.y} ${cell.z} ${blockArgument(block)}`, cell,
+      typeof block === "string" ? block : typeof block === "number" ? "" : block.name),
+  };
+}
+
 /** A real server's subject: wall time, and op commands sent as chat (the fixture's player is op). */
 export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubject {
   const at = (cell: Vec3) => `${cell.x} ${cell.y} ${cell.z}`;
@@ -405,14 +451,11 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
     serverGameTime: gameTimeQueries.ask,
+    ...serverBlockActions(bot),
     // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
     async resendTime() {
       // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.
       bot.chat(`/time set ${bot.time.time}`);
-    },
-    async setBlock(cell, block) {
-      const name = typeof block === "string" ? block : typeof block === "number" ? "" : block.name;
-      await commandUntil(bot, `setblock ${at(cell)} ${blockArgument(block)}`, cell, name);
     },
     worldSpawn: () => bot.spawnPoint.clone(),
     async setSpawnPoint(cell) {

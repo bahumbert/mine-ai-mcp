@@ -1,0 +1,25 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-occupied-fire-dig
+tags: [contract]
+description: Native digging removes supported fire at the occupied feet and head, confirmed by a server block query.
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/bot-contract.ts, --without-runtime]
+params:
+  check: occupied-fire-dig
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - setblock -1 -59 0 oak_planks
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

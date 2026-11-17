@@ -247,3 +247,101 @@ test("serverGameTime on a real server ignores other chat lines and rejects at th
   await answered;
   assert.equal(harness.bot.listenerCount("messagestr"), listening);
 });
+
+test("blockIs arms before sending, stores success, and correlates concurrent true/false replies", async () => {
+  const sent: string[] = [];
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), overrides: {
+    chat: (message: string) => { sent.push(message); assert.ok(harness.bot.listenerCount("messagestr") > 0); },
+  } });
+  using _timers = harness.clock.install();
+  const subject = serverContractSubject(harness.bot, arenaFrame({ x: 1024, z: 1536 }));
+  const baseline = harness.bot.listenerCount("messagestr");
+  const timers = harness.clock.pendingGlobalTimers();
+  const cell = subject.world([0, -60, 0]);
+  const first = subject.blockIs(cell, "air");
+  const second = subject.blockIs(cell, "fire");
+  const replies = sent.filter(line => line.startsWith("/tellraw")).map(line => JSON.parse(line.slice("/tellraw @s ".length)));
+  assert.equal(replies.length, 2);
+  assert.notEqual(replies[0].text, replies[1].text);
+  for (const [index, block] of ["air", "fire"].entries()) {
+    const key = replies[index].extra[0].nbt;
+    assert.ok(key.includes(harness.bot.username));
+    assert.equal(sent[index * 2], `/execute store success storage mine_ai:contract ${key} int 1 run execute if block 1024 -60 1536 ${block}`);
+  }
+  hear(harness, "unrelated ", "1");
+  hear(harness, replies[0].text, "2");
+  hear(harness, replies[1].text, "0");
+  assert.equal(await second, false);
+  hear(harness, replies[0].text, "1");
+  assert.equal(await first, true);
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+  assert.equal(harness.clock.pendingGlobalTimers(), timers);
+  await harness.clock.advance(3_100);
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+});
+
+test("blockIs cleans missing replies and ignores their late answers during the next query", async () => {
+  const sent: string[] = [];
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), overrides: { chat: (message: string) => void sent.push(message) } });
+  using _timers = harness.clock.install();
+  const subject = serverContractSubject(harness.bot, arenaFrame(ZERO_ARENA));
+  const baseline = harness.bot.listenerCount("messagestr");
+  const timers = harness.clock.pendingGlobalTimers();
+  const cell = subject.world([0, -60, 0]);
+  const missing = assert.rejects(subject.blockIs(cell, "air"), /block query: no answer after 3000 ms/);
+  await harness.clock.advance(3_000);
+  await missing;
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+  assert.equal(harness.clock.pendingGlobalTimers(), timers);
+  const next = subject.blockIs(cell, "fire");
+  const replies = sent.filter(line => line.startsWith("/tellraw")).map(line => JSON.parse(line.slice("/tellraw @s ".length)));
+  hear(harness, replies[0].text, "1");
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline + 1);
+  hear(harness, replies[1].text, "0");
+  assert.equal(await next, false);
+  assert.equal(harness.clock.pendingGlobalTimers(), timers);
+  await harness.clock.advance(3_100);
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`fake blockIs reads server world after its answer at ${ticksPerSecond} tps`, async () => {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond }, lagMs: 450 });
+  using _timers = harness.clock.install();
+  const cell = new Vec3(0, -60, 0);
+  harness.world.setCell(cell, "fire");
+  // A planted faulty client prediction, not a claimed game answer: the server still holds fire.
+  const bot = new Proxy(harness.bot, { get: (target, key) => key === "blockAt"
+    ? (position: Vec3) => harness.world.blockAt(position.equals(cell) ? cell.offset(1, 0, 0) : position)
+    : Reflect.get(target, key, target) });
+  const subject = fakeContractSubject({ ...harness, bot }, arenaFrame(ZERO_ARENA));
+  const started = subject.now();
+  assert.equal(await subject.blockIs(cell, "air"), false, "client air is not the server answer");
+  assert.ok(subject.now() - started >= 450);
+  assert.equal(await subject.blockIs(cell, "fire"), true);
+  harness.world.setCell(cell, "air");
+  assert.equal(await subject.blockIs(cell, "air"), true);
+  assert.equal(await subject.blockIs(cell, "fire"), false);
+  harness.server.stop();
+  await assert.rejects(subject.blockIs(cell, "air"), /blockIs: the fake server had not answered after 3000 ms/);
+});
+
+test("blockIs removes its listener and timer when sending throws, then a new query succeeds", async () => {
+  let throws = true;
+  let harness: ReturnType<typeof createFakeBot>;
+  harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), overrides: { chat: (message: string) => {
+    if (throws) throw new Error("transport failed");
+    if (message.startsWith("/tellraw")) hear(harness, JSON.parse(message.slice("/tellraw @s ".length)).text, "1");
+  } } });
+  using _timers = harness.clock.install();
+  const subject = serverContractSubject(harness.bot, arenaFrame(ZERO_ARENA));
+  const baseline = harness.bot.listenerCount("messagestr");
+  const timers = harness.clock.pendingGlobalTimers();
+  await assert.rejects(subject.blockIs(new Vec3(0, -60, 0), "air"), /transport failed/);
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+  assert.equal(harness.clock.pendingGlobalTimers(), timers);
+  throws = false;
+  assert.equal(await subject.blockIs(new Vec3(0, -60, 0), "air"), true);
+  await harness.clock.advance(3_100);
+  assert.equal(harness.bot.listenerCount("messagestr"), baseline);
+  assert.equal(harness.clock.pendingGlobalTimers(), timers);
+});

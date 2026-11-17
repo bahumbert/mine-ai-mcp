@@ -53,7 +53,7 @@ for (const ticksPerSecond of [20, 10]) test(`fire lit during a cover hold is cle
       2: { name: "zombie", position: new Vec3(20.5, 64, 0.5) },
     } });
   const { bot, world, clock } = harness;
-  // Stopgap: occupied-fire removal awaits a real-server native-dig contract at 20 and 10 tps.
+  // Server agreement: contract/occupied-fire-dig at 20 and 10 tps (2026-11-17).
   useNativeDigging(harness);
   installNativeDigClock(bot);
   using _timers = clock.install();
