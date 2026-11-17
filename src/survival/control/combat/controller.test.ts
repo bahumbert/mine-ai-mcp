@@ -1,4 +1,4 @@
-import type { Bot } from "mineflayer";
+import type { Bot, BotEvents } from "mineflayer";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test, { afterEach } from "node:test";
@@ -17,6 +17,7 @@ import { type CombatDecision } from "./contract.js";
 
 import { MemoryWorld } from "../../../navigation/world/memory-world.js";
 import { observation } from "../../../test-support/navigation.js";
+import { CREEPER_CLEARANCE } from "../../perception/combat/creepers.js";
 import { positionWorld } from "../../positioning/combat/geometry.js";
 import { findCombatPosition } from "../../positioning/combat/planner.js";
 import { retreatFromCreepers } from "../../responses/fight/creeper-retreat.js";
@@ -2989,30 +2990,156 @@ test("covered creepers do not suppress a reachable spider while pursuing gunpowd
   assert.equal(fixture.controls.includes("forward"), false, "no retreat from two terrain-hidden inactive creepers");
 });
 
-test("a ready creeper knockback is followed by shared clearance and a ranged finish", async () => {
-  const fixture = combatFixture(["iron_sword", "bow", "arrow"]);
-  fixture.target.name = "creeper";
-  fixture.entities.spawn({ id: 8, name: "creeper", height: 1.7, position: new Vec3(0, 64, 3) });
-  fixture.script.onWait = () => {
-    if (fixture.activeControls.has("forward")) {
-      fixture.bot.entity.position = fixture.bot.entity.position.offset(-1, 0, -1);
+// The fight is a scripted ranged finish, not a measured arrow impact: the fixture does not simulate arrow damage, so the
+// shot is followed by `combat.kill`. The observer's one melee strike is required evidence of the knockback that
+// shared clearance answers, not an incidental extra attack.
+/** One observed step of the knockback fight, stamped with the fixture clock (fake ms) and the world age. */
+interface KnockbackEvidence {
+  readonly boundary: string;
+  readonly decision?: { readonly kind: string; readonly reason?: string; readonly threatIds?: readonly number[] };
+  readonly result?: string;
+  readonly attacks?: number;
+  readonly weaponsUsed?: readonly string[];
+  readonly killedTargetIds?: readonly number[];
+}
+interface KnockbackStep {
+  readonly step: "decision" | "turn" | "attack" | "hurt" | "velocity" | "shot" | "dead";
+  readonly ms: number;
+  readonly age: number;
+  readonly targetId?: number;
+  readonly sourcedByBot?: boolean;
+  readonly horizontal?: number;
+  readonly held?: string;
+  readonly active?: readonly string[];
+  readonly distances?: { readonly quarry: number; readonly neighbour: number };
+  readonly evidence?: KnockbackEvidence;
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a ready creeper knockback is followed by shared clearance and a ranged finish (${ticksPerSecond} tps)`, async () => {
+    const fixture = combatFixture(["iron_sword", "bow", "arrow"], { ticksPerSecond });
+    const { bot } = fixture;
+    const quarry = fixture.target;
+    quarry.name = "creeper";
+    const neighbour = fixture.entities.spawn({ id: 8, name: "creeper", height: 1.7, position: new Vec3(0, 64, 3) });
+    const steps: KnockbackStep[] = [];
+    // The client's typed events list only the game's packets it decodes; `entity_velocity` is typed as a raw event here.
+    const client = bot._client as unknown as EventEmitter;
+    const observe = (step: KnockbackStep["step"], detail: Omit<KnockbackStep, "step" | "ms" | "age"> = {}): void => {
+      steps.push({ step, ms: fixture.clock.tick * 50, age: bot.time.age, ...detail });
+    };
+    const distances = () => ({
+      quarry: bot.entity.position.distanceTo(quarry.position),
+      neighbour: bot.entity.position.distanceTo(neighbour.position),
+    });
+    const turns: { before: Vec3; after: Vec3; sprint: boolean }[] = [];
+    fixture.script.onWait = () => {
+      if (!fixture.activeControls.has("forward")) return;
+      const before = bot.entity.position.clone();
+      bot.entity.position = before.offset(-1, 0, -1);
+      turns.push({ before, after: bot.entity.position.clone(), sprint: fixture.activeControls.has("sprint") });
+      observe("turn", { active: [...fixture.activeControls].sort() });
+    };
+    fixture.script.onAttack = (entity) => observe("attack", { targetId: entity.id, held: bot.heldItem?.name ?? "hand" });
+    fixture.script.onShot = () => {
+      observe("shot", { held: bot.heldItem?.name ?? "hand", distances: distances() });
+      fixture.combat.kill(quarry.id);
+    };
+    const onHurt: BotEvents["entityHurt"] = (entity, source) =>
+      observe("hurt", { targetId: entity.id, sourcedByBot: source?.id === bot.entity.id });
+    const onDead: BotEvents["entityDead"] = (entity) => observe("dead", { targetId: entity.id });
+    const onVelocity = (packet: { entityId: number; velocity: { x: number; z: number } }): void =>
+      observe("velocity", { targetId: packet.entityId, horizontal: Math.hypot(packet.velocity.x, packet.velocity.z) });
+    const controller = createCombatController(bot, navigationFixture());
+    const listenersBefore = [
+      bot.listenerCount("entityHurt"),
+      bot.listenerCount("entityDead"),
+      client.listenerCount("entity_velocity"),
+    ];
+    const removeDecisions = controller.onDecision((event) => {
+      if (event.kind !== "response") return;
+      observe("decision", {
+        evidence: event.evidence as unknown as KnockbackEvidence,
+        held: bot.heldItem?.name ?? "hand",
+        active: [...fixture.activeControls].sort(),
+        distances: distances(),
+      });
+    });
+    bot.on("entityHurt", onHurt);
+    bot.on("entityDead", onDead);
+    client.on("entity_velocity", onVelocity);
+    let outcome: Awaited<ReturnType<typeof controller.engage>>;
+    try {
+      outcome = await controller.engage(quarry.id, new AbortController().signal, "pursue");
+    } finally {
+      removeDecisions();
+      bot.off("entityHurt", onHurt);
+      bot.off("entityDead", onDead);
+      client.off("entity_velocity", onVelocity);
     }
-  };
+    assert.deepEqual(
+      [bot.listenerCount("entityHurt"), bot.listenerCount("entityDead"), client.listenerCount("entity_velocity")],
+      listenersBefore,
+      "the observers this test added are all removed",
+    );
 
-  fixture.script.onShot = () => fixture.combat.kill(fixture.target.id);
+    const diagnostics = JSON.stringify({ outcome, steps, turns });
+    assert.equal(outcome.kind, "died", diagnostics);
+    assert.equal(outcome.targetId, 7, diagnostics);
+    assert.deepEqual(outcome.stylesUsed, ["melee", "bow"], diagnostics);
+    // One retreat-observer melee and one bow release: no extra opening sword strike.
+    assert.equal(outcome.attacks, 2, diagnostics);
+    assert.equal(fixture.directAttacks.count, 1, diagnostics);
+    assert.equal(fixture.shotTicks.length, 1, diagnostics);
+    assert.equal(steps.filter((step) => step.step === "attack").length, 1, diagnostics);
 
-  const outcome = await createCombatController(fixture.bot, navigationFixture()).engage(
-    7,
-    new AbortController().signal,
-    "pursue",
-  );
+    // The order is the contract: escape selection, the observer's one strike, the knockback it causes, the observer's
+    // evidence, shared clearance finished, the bow release, then the observed death. Each step is searched after the last.
+    const next = (from: number, label: string, match: (step: KnockbackStep) => boolean): number => {
+      const index = steps.findIndex((step, i) => i >= from && match(step));
+      assert.ok(index >= 0, `${label} is missing from the ordered steps: ${diagnostics}`);
+      return index;
+    };
+    const escape = next(0, "the close-exposure escape", (step) =>
+      step.evidence?.boundary === "tactic" &&
+      step.evidence.decision?.kind === "escape" &&
+      step.evidence.decision.reason === "close_exposure" &&
+      (step.evidence.decision.threatIds ?? []).includes(7));
+    assert.equal(steps[escape]!.held, "hand", diagnostics);
+    // The escape switches its sprint on at its first movement tick, after the decision is reported.
+    const firstTurn = next(escape + 1, "the escape's first movement turn", (step) => step.step === "turn");
+    assert.ok(steps[firstTurn]!.active!.includes("forward") && steps[firstTurn]!.active!.includes("sprint"), diagnostics);
+    const strike = next(escape + 1, "the observer's strike on quarry 7", (step) => step.step === "attack" && step.targetId === 7);
+    assert.equal(steps[strike]!.held, "hand", diagnostics);
+    const hurt = next(strike + 1, "quarry 7 hurt by the bot", (step) =>
+      step.step === "hurt" && step.targetId === 7 && step.sourcedByBot === true);
+    const push = next(hurt + 1, "quarry 7's knockback velocity", (step) =>
+      step.step === "velocity" && step.targetId === 7 && (step.horizontal ?? 0) > 0);
+    const observer = next(push + 1, "creeper_retreat evidence", (step) =>
+      step.evidence?.boundary === "creeper_retreat" &&
+      step.evidence.attacks === 1 &&
+      step.evidence.weaponsUsed?.join() === "hand" &&
+      Array.isArray(step.evidence.killedTargetIds) &&
+      step.evidence.killedTargetIds.length === 0);
+    const finished = next(observer + 1, "shared clearance finished", (step) =>
+      step.evidence?.boundary === "blast_escape" && step.evidence.result === "finished");
+    const shot = next(finished + 1, "the bow release", (step) => step.step === "shot");
+    next(shot + 1, "the observed death of quarry 7", (step) => step.step === "dead" && step.targetId === 7);
+    assert.equal(steps[shot]!.held, "bow", diagnostics);
+    for (const index of [finished, shot]) {
+      assert.ok(steps[index]!.distances!.quarry > CREEPER_CLEARANCE, diagnostics);
+      assert.ok(steps[index]!.distances!.neighbour > CREEPER_CLEARANCE, diagnostics);
+    }
 
-  // The scripted death follows the shot after a knockback hit and shared clearance. A creeper is a hostile mob in
-  // Mineflayer's data (`entities.js:184`), so the sprint clear's observer also strikes it while it stays in reach.
-  assert.equal(outcome.kind, "died");
-  assert.deepEqual(outcome.stylesUsed, ["melee", "bow"]);
-  assert.equal(outcome.attacks, 3);
-});
+    // The fake models knockback as velocity, never as a position change, so only the scripted move is asserted here.
+    const sprinting = turns.filter((turn) => turn.sprint);
+    assert.ok(sprinting.length > 0, diagnostics);
+    for (const turn of sprinting) {
+      assert.ok(turn.after.distanceTo(quarry.position) > turn.before.distanceTo(quarry.position), diagnostics);
+      assert.ok(turn.after.distanceTo(neighbour.position) > turn.before.distanceTo(neighbour.position), diagnostics);
+    }
+  });
+}
 
 test("a creeper whose fuse is running is not walked toward; the bot sprints clear until it unwinds", async () => {
   const fixture = creeperFixture();
