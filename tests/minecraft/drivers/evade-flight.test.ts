@@ -6,14 +6,17 @@ import minecraftData from "minecraft-data";
 import { Vec3 } from "vec3";
 import { MemoryWorld } from "../../../src/navigation/world/memory-world.ts";
 import { DEFAULT_COMBAT_POLICY } from "../../../src/survival/policy/combat/contract.ts";
+import { SurvivalPolicyState } from "../../../src/survival/state/survival-policy.ts";
 import { createFakeBot, createFakeClock, listenersAddedSince } from "../../../src/test-support/fake-bot/index.ts";
 import { positionExposed } from "../../../src/survival/positioning/combat/exposure.ts";
 import { positionWorld } from "../../../src/survival/positioning/combat/geometry.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
+import { settingsOf } from "../arena/settings.ts";
+import { withTickRate } from "../shared/tick-rate-variant.ts";
 import type { ScenarioCall } from "../scenario.ts";
 import { flightEvidence, flightVerdict, run } from "./evade-flight.ts";
 
-// check-reads: tests/minecraft/scenarios/combat/evade-flat-skeleton-held-cover.yaml, tests/minecraft/templates/**/*.yaml
+// check-reads: tests/minecraft/scenarios/combat/evade-flat-skeleton-held-cover.yaml, tests/minecraft/scenarios/combat/evade-flat-skeleton-cover-slow-server.yaml, tests/minecraft/templates/**/*.yaml
 
 const passing = { health: 7, outcome: "safe_separation", basis: "cover", distance: 12,
   healthAfter: 3, floor: { kind: "ok" }, receipts: [], skipped: [], status: "succeeded", interruptions: ["[HOSTILE_CONTACT] skeleton"] } as const;
@@ -38,6 +41,54 @@ test("judges first separation, floor, survival and resumed order independently",
   ] as const;
   for (const [name, evidence, bases, distance, options, expected] of cases)
     assert.equal(flightVerdict(evidence, bases, distance, options), expected, name);
+});
+
+// t00381 (a6 T9a): the first evade spent its 300 server ticks as capability_limit; the resumed order then succeeded.
+// The evade budget is evadeBudgetTicks(DEFAULT_COMBAT_POLICY) = 300 server ticks (driver budgetTicks).
+const budgetSpent = { ...passing, outcome: "capability_limit", basis: null, distance: 21.7, healthAfter: 7, elapsedTicks: 300 } as const;
+
+test("chain judge proves survival, floor, interruption and resumed order, not first separation", () => {
+  const chain = { judge: "chain", budgetTicks: 300 } as const;
+  assert.equal(flightVerdict(budgetSpent, ["cover"], undefined, chain), true, "budget-spent chain");
+  assert.equal(flightVerdict(budgetSpent, ["cover"], undefined, { judge: "evade" }), false, "evade keeps its separation check");
+  assert.equal(flightVerdict(budgetSpent, ["cover"], undefined, { judge: "order" }), false, "order keeps its separation check");
+  assert.equal(flightVerdict({ ...budgetSpent, outcome: "safe_separation", basis: "cover", distance: 12 }, ["cover"], undefined, chain),
+    true, "a real separation also chains");
+  const cases = [
+    ["dead actor", { health: 0 }], ["fatal first evade", { healthAfter: 0 }], ["missing evade", { outcome: undefined }],
+    ["failed evade", { outcome: "failed" }], ["cancelled evade", { outcome: "cancelled" }],
+    ["budget one tick short", { elapsedTicks: 299 }], ["wall stop below the budget", { elapsedTicks: 225 }],
+    ["budget not measured", { elapsedTicks: null }],
+    ["below floor", { floor: { kind: "below", index: 1, y: -62 } }], ["unknown floor", { floor: { kind: "unknown", index: 0 } }],
+    ["no hostile contact", { interruptions: [] }], ["order cancelled", { status: "cancelled" }], ["order failed", { status: "failed" }],
+  ] as const;
+  for (const [name, changes] of cases)
+    assert.equal(flightVerdict({ ...budgetSpent, ...changes }, ["cover"], undefined, chain), false, name);
+  // Boundary rows: one tick of life, one tick of budget, each stays true.
+  assert.equal(flightVerdict({ ...budgetSpent, healthAfter: 1 }, ["cover"], undefined, chain), true, "healthAfter 1");
+  assert.equal(flightVerdict({ ...budgetSpent, health: 1 }, ["cover"], undefined, chain), true, "health 1");
+  assert.equal(flightVerdict({ ...budgetSpent, elapsedTicks: 301 }, ["cover"], undefined, chain), true, "budget plus one");
+  assert.equal(flightVerdict(budgetSpent, ["cover"], undefined, { judge: "chain" }), false, "no budget given: capability_limit cannot chain");
+  // The same receipt as flightEvidence reads it: a respawn at 20 health is a death, and the budget ticks are recorded.
+  const evade = { type: "survival_outcome", payload: { source: "hostile_reflex", evidence: { outcome: {
+    response: "evade", outcome: "capability_limit", healthAfter: 7, elapsedTicks: 300,
+    finalPosition: { x: 0, y: -60, z: 0 }, ends: [{ id: 1, name: "skeleton", distance: 21.7, basis: null }] } } } };
+  const alive = { startY: -60, deaths: 0, health: 7, status: "succeeded", interruptions: ["[HOSTILE_CONTACT] skeleton"] };
+  assert.equal(flightVerdict(flightEvidence([evade], alive), ["cover"], undefined, chain), true);
+  assert.equal(flightVerdict(flightEvidence([evade], { ...alive, deaths: 1, health: 20 }), ["cover"], undefined, chain), false,
+    "a respawn at 20 health is a death");
+  assert.equal(flightEvidence([evade], alive).elapsedTicks, 300);
+});
+
+test("the slow-server fixture judges the chain; its default rate is the run's, and a 10 tps variant applies after loading", async () => {
+  const scenario = await loadScenario(new URL("../scenarios/combat/evade-flat-skeleton-cover-slow-server.yaml", import.meta.url).pathname);
+  assert.equal((scenario.params as { judge?: string }).judge, "chain");
+  assert.equal(settingsOf(scenario, {}).settings.tickRate, null, "no setup tick rate: the default 20 applies");
+  const variant = withTickRate(scenario, 10);
+  assert.equal(variant.changed, true);
+  assert.deepEqual(variant.scenario.setup, ["difficulty normal", "fill 10 -60 3 10 -58 9 stone", "tick rate 10"]);
+  assert.equal(settingsOf(variant.scenario, {}).settings.tickRate, 10);
+  assert.equal(variant.scenario.tags.includes("exclusive"), false, "the fixture is not exclusive");
 });
 
 test("the held wall's lee is cover inside the disengage line", async () => {
@@ -139,27 +190,60 @@ test("judges the evade after footing cancelled its predecessor", () => {
   }
 });
 
-function timelineFixture(rate: number, status: "succeeded" | "failed" = "succeeded", driverError = false) {
+interface TimelineOptions { readonly judge?: "order" | "evade" | "chain"; readonly events?: unknown[]; readonly interruptions?: string[] }
+
+function timelineFixture(rate: number, status: "succeeded" | "failed" = "succeeded", driverError = false, options: TimelineOptions = {}) {
   const clock = createFakeClock({ mode: "mocked" });
   const harness = createFakeBot({ clock, health: 7, server: { ticksPerSecond: rate } });
   const { bot } = harness;
   const added = listenersAddedSince(bot);
   const order = Promise.withResolvers<ScenarioCall>();
+  const events = options.events ?? [];
   let listenerAtSend = -1;
   bot.chat = () => { if (driverError) throw new Error("summon failed"); };
+  const judge = options.judge;
   const context = scenarioTestContext({ bot, scenario: scenarioDefinitionSchema.parse({
-    params: { mob: "skeleton", target: [55, 64, 0], spawn: [-6, 64, 0], bases: ["cover"] }, goal: { kind: "completion" } }),
+    params: { mob: "skeleton", target: [55, 64, 0], spawn: [-6, 64, 0], bases: ["cover"], ...(judge === undefined ? {} : { judge }) },
+    goal: { kind: "completion" } }),
     call: async (action) => {
       if (action === "view_status") return { survivalPolicy: { revision: "1", effective: { combat: { hide: "never" } } } } as ScenarioCall;
       if (action === "set_survival_policy") return { result: { status: "succeeded" } } as ScenarioCall;
       if (action === "navigate") { listenerAtSend = added("time"); bot.entity.position.x += 0.25; return order.promise; }
       return { action, durationMs: 0, summary: "events", result: { status: "succeeded", source: { queryIds: ["events"] },
-        events: [], readThroughEventId: 0, remainingEventCount: 0 } } as ScenarioCall;
+        events, readThroughEventId: events.length, remainingEventCount: 0 } } as ScenarioCall;
     } });
-  const finish = () => order.resolve({ action: "navigate", durationMs: 0, summary: "order", result: status === "succeeded"
-    ? { status } : { status, error: "order failed" } });
-  return { clock, harness, added, context, finish, listenerAtSend: () => listenerAtSend };
+  const finish = () => order.resolve({ action: "navigate", durationMs: 0, summary: "order", interruptions: options.interruptions,
+    result: status === "succeeded" ? { status } : { status, error: "order failed" } } as ScenarioCall);
+  return { clock, harness, added, context, finish, events, listenerAtSend: () => listenerAtSend };
 }
+
+/** A survival_outcome row of one evade, shaped as read_recent_events returns it (the schema parses it). */
+function evadeOutcomeRow(y: number, outcome: Record<string, unknown>) {
+  const status = { summary: "safe" as const, request: null, owner: { current: null, reserved: null, connected: true, transfer: null },
+    dangers: [], response: null, decisions: [], budgets: [], answered: [], observations: { missing: [], stale: [] },
+    policy: new SurvivalPolicyState(createFakeBot().bot).snapshot(), vitals: { health: 7, food: 20, air: null, inWater: false },
+    runtime: { liveness: "observed_in_process" as const, observedAt: 0, physicsObservedAt: null } };
+  return { eventId: 1, botId: "Actor", type: "survival_outcome", observedAt: "2026-11-17T00:00:00.000Z", summary: "evade",
+    payload: { kind: "outcome", source: "hostile_reflex", evidence: { outcome: { response: "evade", finalPosition: { x: 0, y, z: 0 }, ...outcome } }, status } };
+}
+
+test("the chain judge param selects the chain verdict through the event stream; order judges the same evidence strictly", async () => {
+  for (const [judge, expected] of [["chain", "succeeded"], ["order", "failed"]] as const) {
+    const f = timelineFixture(20, "succeeded", false, { judge, interruptions: ["[HOSTILE_CONTACT] skeleton"] });
+    f.events.push(evadeOutcomeRow(f.harness.bot.entity.position.y, { outcome: "capability_limit", healthAfter: 7, elapsedTicks: 300,
+      ends: [{ id: 1, name: "skeleton", distance: 21.7, basis: null }] }));
+    using _timers = f.clock.install();
+    const pending = run(f.context);
+    await f.clock.advance(5_000);
+    f.finish();
+    const result = await f.clock.settle(pending, 1_000);
+    assert.equal(result.status, expected, `${judge} judge`);
+    const detail = JSON.parse(result.detail ?? "{}") as { chainPass?: boolean; outcome?: string; basis?: string | null;
+      elapsedTicks?: number | null; budgetTicks?: number; status?: string };
+    assert.deepEqual([detail.chainPass, detail.outcome, detail.basis, detail.elapsedTicks, detail.budgetTicks, detail.status],
+      [true, "capability_limit", null, 300, 300, "succeeded"]);
+  }
+});
 
 for (const rate of [20, 10]) {
   for (const stopped of [false, true]) {

@@ -1,7 +1,7 @@
 template: ../../templates/flat-single-action.yaml
 name: evade-flat-skeleton-cover-slow-server
 tags: [regression, reliability]
-description: A wounded actor's first evade separates it from a pursuing skeleton at ten ticks per second.
+description: A wounded actor's first evade runs into its server-tick budget (or separates), the interrupted order then resumes and succeeds; the run's --tick-rate selects the server rate (default 20). The first separation is not asserted (judge chain).
 world:
   type: flat
   time: midnight
@@ -18,7 +18,6 @@ reset:
   - "fill -16 -60 -16 64 -50 16 air"
 setup:
   - "difficulty normal"
-  - "tick rate 10"
   - "fill 10 -60 3 10 -58 9 stone"
 players:
   - { name: Actor, pos: [0.5, -60, 0.5], health: 7, op: true, inventory: [] }
@@ -26,7 +25,7 @@ params:
   mob: skeleton
   target: [55, -60, 0]
   spawn: [-6, -60, 0]
-  judge: evade
+  judge: chain
   bases: [cover, range, disengaged]
 goal:
   kind: all

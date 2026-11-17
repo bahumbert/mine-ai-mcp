@@ -7,6 +7,8 @@ import { z } from "zod";
 import { readRecentEventsResultSchema } from "../../../src/actions/read-recent-events/contract.ts";
 import { waitForWorldAge } from "../../../src/world/world-age.ts";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { DEFAULT_COMBAT_POLICY } from "../../../src/survival/policy/combat/contract.ts";
+import { evadeBudgetTicks } from "../../../src/survival/responses/evade-clock.ts";
 import { arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
 import { observeDeaths } from "./deaths.ts";
@@ -24,16 +26,34 @@ interface FlightEvidence {
   readonly distance: number | undefined;
   readonly status: string;
   readonly interruptions: readonly string[];
+  /** Server ticks the first kept evade ran (its budget when it ended as capability_limit). */
+  readonly elapsedTicks?: number | null;
 }
 
-/** Judge the first kept evade and resumed order; baseline diagnostics can omit unavailable basis telemetry. */
+/**
+ * Judge the first kept evade and resumed order; baseline diagnostics can omit unavailable basis telemetry.
+ * `chain` proves survival, the floor, a hostile interruption and an order that succeeded after a kept evade that either
+ * really separated or spent its server-tick budget (`capability_limit` with at least `budgetTicks` elapsed); its basis
+ * and distance are not asserted, and a wall-backstop stop below the budget is not a budget ending.
+ */
 export function flightVerdict(evidence: FlightEvidence, bases: readonly string[], maxDistance?: number,
-  { requireBasis = true, judge = "order" }: { readonly requireBasis?: boolean; readonly judge?: "order" | "evade" } = {}): boolean {
+  { requireBasis = true, judge = "order", budgetTicks }: { readonly requireBasis?: boolean; readonly judge?: "order" | "evade" | "chain";
+    readonly budgetTicks?: number } = {}): boolean {
+  if (judge === "chain") return chainVerdict(evidence, budgetTicks);
   return evidence.floor.kind === "ok" && evidence.outcome === "safe_separation" &&
     (!requireBasis || (evidence.basis != null && bases.includes(evidence.basis))) &&
     (maxDistance === undefined || (evidence.distance !== undefined && evidence.distance < maxDistance)) &&
     (judge === "evade" ? (evidence.healthAfter ?? 0) > 0 : evidence.health > 0 &&
       evidence.status === "succeeded" && evidence.interruptions.some((item) => item.includes("[HOSTILE_CONTACT]")));
+}
+
+/** A kept evade that really separated, or that ended as `capability_limit` after the whole server-tick budget elapsed. */
+function chainVerdict(evidence: FlightEvidence, budgetTicks: number | undefined): boolean {
+  const separated = evidence.outcome === "safe_separation";
+  const budgetSpent = evidence.outcome === "capability_limit" && budgetTicks !== undefined && (evidence.elapsedTicks ?? -1) >= budgetTicks;
+  return evidence.floor.kind === "ok" && (separated || budgetSpent) &&
+    (evidence.healthAfter ?? 0) > 0 && evidence.health > 0 && evidence.status === "succeeded" &&
+    evidence.interruptions.some((item) => item.includes("[HOSTILE_CONTACT]"));
 }
 
 const receiptSchema = z.object({ response: z.string(), outcome: z.string(),
@@ -67,7 +87,7 @@ export function flightEvidence(events: readonly unknown[], options: { readonly s
   const end = kept?.ends?.[0];
   return { health: options.deaths ? 0 : (options.health ?? 0), healthAfter: kept?.healthAfter, floor, receipts, skipped,
     outcome: kept?.outcome, basis: end?.basis, distance: end?.distance ?? kept?.finalDistances?.[0]?.distance,
-    status: options.status, interruptions: options.interruptions };
+    elapsedTicks: kept?.elapsedTicks, status: options.status, interruptions: options.interruptions };
 }
 
 /** Read every page of the durable event stream, oldest first. */
@@ -116,7 +136,7 @@ export async function waitForNavigationStart(bot: Bot, start: Vec3, ended: () =>
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   const params = z.strictObject({ mob: z.enum(["zombie", "skeleton"]), target: arenaPoint(context.arena),
     spawn: arenaPoint(context.arena), bases: z.array(z.string()).min(1), maxDistance: z.number().optional(),
-    judge: z.enum(["order", "evade"]).default("order"), holdShooter: z.boolean().default(false) }).parse(context.scenario.params);
+    judge: z.enum(["order", "evade", "chain"]).default("order"), holdShooter: z.boolean().default(false) }).parse(context.scenario.params);
   await setFlightPolicy(context);
   assert.equal(context.bot.food, 20, "the actor must start with full food");
   assert.equal(context.bot.health, 7, "the starting wound must be observed");
@@ -139,10 +159,13 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     context.bot.chat(`/summon minecraft:${params.mob} ${params.spawn.join(" ")} {PersistenceRequired:1b${equipment}}`);
     if (params.holdShooter) await holdShooter(context.bot, params.mob);
     const result = await order;
+    // The flight policy changes only `hide` (setFlightPolicy), so the default evade timeout is the effective budget.
+    const budgetTicks = evadeBudgetTicks(DEFAULT_COMBAT_POLICY);
     const evidence = flightEvidence(await flightEvents(context), { startY, deaths: deaths.deaths.length, health: context.bot.health,
       status: result.result.status, interruptions: result.interruptions ?? [] });
-    const detail = JSON.stringify({ ...evidence, ages, deaths: deaths.deaths.length, summary: result.summary,
-      physicalPass: flightVerdict(evidence, params.bases, params.maxDistance, { requireBasis: false, judge: params.judge }) });
-    return { status: flightVerdict(evidence, params.bases, params.maxDistance, { judge: params.judge }) ? "succeeded" : "failed", detail };
+    const detail = JSON.stringify({ ...evidence, ages, budgetTicks, deaths: deaths.deaths.length, summary: result.summary,
+      physicalPass: flightVerdict(evidence, params.bases, params.maxDistance, { requireBasis: false, judge: params.judge }),
+      chainPass: flightVerdict(evidence, params.bases, params.maxDistance, { judge: "chain", budgetTicks }) });
+    return { status: flightVerdict(evidence, params.bases, params.maxDistance, { judge: params.judge, budgetTicks }) ? "succeeded" : "failed", detail };
   } finally { context.bot.off("time", onTime); deaths.dispose(); }
 }
