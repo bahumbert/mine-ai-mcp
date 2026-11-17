@@ -26,7 +26,10 @@ entities:
   - { type: magma_cube, pos: [7.5, 100, 0.5], nbt: "{Size:1,NoAI:1b,PersistenceRequired:1b}" }
   - { type: magma_cube, pos: [15.5, 101, 1.5], nbt: "{Size:3,NoAI:1b,PersistenceRequired:1b}" }
   - { type: enderman, pos: [6.5, 100, 2.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
-  - { type: ghast, pos: [21.5, 106, 12.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
+  # y 101: inside vanilla 1.21.4's 4-block player acquisition band with margin (Ghast.registerGoals, a6 T4
+  # ghast-decompiled.txt:23); the bot stands at y 100 and its feet run 100 to 103.25 on the traverse. The spawn is air
+  # (basalt stops at z 5, the ghast box is x 20-23, z 11-14); its fireball line passes the x 16-24 ridge top at y 102.
+  - { type: ghast, pos: [21.5, 101, 12.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
 players:
   - name: BasaltTraveler
     pos: [0.5, 100, 0.5]
