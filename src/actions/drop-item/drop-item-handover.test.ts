@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { botFixture, EQUIPMENT_SLOTS, type FakeStack } from "../../test-support/bot.js";
+import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
 import { formatDropItemResult, dropItem, type DropItemDependencies } from "./drop-item.js";
@@ -39,6 +40,8 @@ interface DropBotOptions {
   readonly collects?: Collect | readonly Collect[];
   /** Stack count the spawned item entity reports. */
   readonly spawnedCount?: number;
+  /** The server takes this long (wall clock) to accept a toss, as a busy machine or a slow link does (unmeasured: a stopgap of this old fixture, not a game answer). */
+  readonly tossDelayMs?: number;
 }
 
 function dropBot(options: DropBotOptions) {
@@ -55,7 +58,8 @@ function dropBot(options: DropBotOptions) {
     if (stack.count === 0 && items.includes(stack)) items.splice(items.indexOf(stack), 1);
   };
   /** A toss the server accepts leaves the inventory, spawns an entity, may come back and may be announced picked up. */
-  const tossOut = (stack: FakeStack, count: number) => {
+  const tossOut = async (stack: FakeStack, count: number) => {
+    if (options.tossDelayMs) await new Promise((resolve) => setTimeout(resolve, options.tossDelayMs));
     if (stack.name === options.rejects) throw new Error("server refused");
     if (stack.name === options.swallows) return;
     const thrown = { ...stack, count };
@@ -113,11 +117,11 @@ function dropBot(options: DropBotOptions) {
       tossStack: async (stack: FakeStack) => tossOut(stack, stack.count),
       toss: async (type: number, _metadata: number | null, count: number) => {
         const stack = items.find((candidate) => candidate.type === type);
-        if (stack) tossOut(stack, count);
+        if (stack) await tossOut(stack, count);
       },
     },
   );
-  return { bot, items, lookedAt, entities, advanceAge: (ticks: number) => advanceAge(bot, ticks) };
+  return { bot, items, lookedAt, entities };
 }
 
 /** A dropped-item entity `distance` blocks from the bot, reporting a stack of `count`. */
@@ -152,6 +156,25 @@ function advanceAge(bot: ReturnType<typeof botFixture>, ticks: number): void {
     bot.emit("time");
   }
 }
+
+/** Runs `then` `afterMs` after the giver first listens for the server's `time` packets, wherever the call is by then. */
+function onceWatchingTime(bot: ReturnType<typeof botFixture>, afterMs: number, then: () => void): void {
+  const emitter = bot as unknown as EventEmitter;
+  const onListener = (event: string) => {
+    if (event !== "time") return;
+    emitter.off("newListener", onListener);
+    setTimeout(then, afterMs);
+  };
+  emitter.on("newListener", onListener);
+}
+
+/**
+ * The server's age moves `afterMs` after the giver starts listening for it, not after the call began: how long the toss
+ * and the walk before the wait take is a matter of the machine, and an age that moved before the wait read its start age
+ * would never move again for it.
+ */
+const advanceAgeOnceWatched = (bot: ReturnType<typeof botFixture>, ticks: number, afterMs: number) =>
+  onceWatchingTime(bot, afterMs, () => advanceAge(bot, ticks));
 
 function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependencies {
   return {
@@ -198,27 +221,30 @@ test("hand-over: the giver collects its toss back -> failed [DROP_PICKED_UP]", a
   assert.equal(result.drop.recipient?.collected, false);
 });
 
-test("hand-over: nobody takes it and the world age moves 100 ticks -> settled, nothing taken, before the wall bound", async () => {
-  const { bot, advanceAge } = handOver();
-  const startedAt = Date.now();
-  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
-  setTimeout(() => advanceAge(100), 30);
-  const result = await run;
-  assert.equal(result.status, "succeeded");
-  assert.equal(result.drop.recipient?.collected, false);
-  assert.equal(result.drop.recipient?.collectedCount, 0);
-  assert.equal(result.drop.recipient?.settled, true);
-  assert.ok(Date.now() - startedAt < 1_000, "the server's age ended the wait, not the wall clock");
-  assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 0 of 3/);
-});
+// A toss the server accepts late (60 ms) is the case the old wall timer lost: it moved the age 30 ms after the call began,
+// before the wait read its start age, and only the wall bound ended the wait.
+for (const tossDelayMs of [0, 60]) {
+  test(`hand-over: nobody takes it (toss accepted after ${tossDelayMs} ms) and the world age moves 100 ticks -> settled, nothing taken, before the wall bound`, async () => {
+    const { bot } = handOver({ tossDelayMs });
+    const startedAt = monotonicNow();
+    advanceAgeOnceWatched(bot, 100, 30);
+    const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.drop.recipient?.collected, false);
+    assert.equal(result.drop.recipient?.collectedCount, 0);
+    assert.equal(result.drop.recipient?.settled, true);
+    assert.ok(elapsedSince(startedAt) < 1_000, "the server's age ended the wait, not the wall clock");
+    assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 0 of 3/);
+  });
+}
 
 test("hand-over: the world age never moves -> the wall bound ends the wait unsettled", async () => {
   const { bot } = handOver();
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 200 }), createDiscardedItems());
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, false);
-  assert.ok(Date.now() - startedAt < 1_000, "the wait is bounded on the wall clock");
+  assert.ok(elapsedSince(startedAt) < 1_000, "the wait is bounded on the wall clock");
   assert.match(formatDropItemResult(result), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(0 of 3 seen taken\)/);
 });
 
@@ -230,13 +256,13 @@ test("hand-over: no world age at the toss -> only the wall bound ends the wait, 
 });
 
 test("hand-over: a server that lags keeps the wait open until the pickup packet arrives (review B1)", async () => {
-  const { bot, advanceAge } = handOver({ collects: { by: "recipient", afterMs: 500 } });
+  const { bot } = handOver({ collects: { by: "recipient", afterMs: 500 } });
   let ended = false;
+  // Time went by on the wall clock, but the server's age moved only one jump: nothing is settled.
+  advanceAgeOnceWatched(bot, 20, 100);
   const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 3_000 }), createDiscardedItems()).finally(() => {
     ended = true;
   });
-  // Time went by on the wall clock, but the server's age moved only one jump: nothing is settled.
-  setTimeout(() => advanceAge(20), 100);
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(ended, false, "still waiting for the server's answer");
   const result = await run;
@@ -245,10 +271,9 @@ test("hand-over: a server that lags keeps the wait open until the pickup packet 
 });
 
 test("hand-over: a partial pickup counts what the packet says, not the whole stack (review 6)", async () => {
-  const { bot, advanceAge } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "recipient", afterMs: 30, count: 2 } });
-  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
-  setTimeout(() => advanceAge(100), 80);
-  const result = await run;
+  const { bot } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "recipient", afterMs: 30, count: 2 } });
+  advanceAgeOnceWatched(bot, 100, 80);
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
   assert.equal(result.drop.recipient?.collectedCount, 2);
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, true);
@@ -276,23 +301,21 @@ test("hand-over: another player takes it all -> not the recipient's, and the wai
 });
 
 test("hand-over: another player takes part of it -> the recipient took nothing, settled at 100 ticks", async () => {
-  const { bot, advanceAge } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "other", afterMs: 30, count: 1 } });
-  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
-  setTimeout(() => advanceAge(100), 80);
-  const result = await run;
+  const { bot } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "other", afterMs: 30, count: 1 } });
+  advanceAgeOnceWatched(bot, 100, 80);
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
   assert.equal(result.drop.recipient?.collectedCount, 0);
   assert.equal(result.drop.recipient?.settled, true);
 });
 
 test("hand-over: the giver picking back what was not taken leaves 'took X of N' at the toss, not the net drop (review 2026-10-24, 3)", async () => {
-  const { bot, advanceAge } = handOver({
+  const { bot } = handOver({
     carried: [{ name: "oak_log", count: 4, type: 1 }],
     spawnedCount: 4,
     collects: [{ by: "recipient", afterMs: 30, count: 2 }, { by: "giver", afterMs: 60, count: 2 }],
   });
-  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
-  setTimeout(() => advanceAge(100), 120);
-  const result = await run;
+  advanceAgeOnceWatched(bot, 100, 120);
+  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
   assert.equal(result.drop.dropped[0]?.dropped, 2, "the net drop counts what came back");
   assert.equal(result.drop.recipient?.tossedCount, 4);
   assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
@@ -335,9 +358,13 @@ test("hand-over: the giver steps away after the toss", async () => {
 test("hand-over: abort during the wait removes the collect and time listeners", async () => {
   const { bot } = handOver();
   const controller = new AbortController();
-  const run = dropItem(bot, handOverRequest, { signal: controller.signal }, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
-  setTimeout(() => controller.abort(), 50);
-  await assert.rejects(run);
+  let listeningWhenAborted = 0;
+  onceWatchingTime(bot, 50, () => {
+    listeningWhenAborted = bot.listenerCount("time");
+    controller.abort();
+  });
+  await assert.rejects(dropItem(bot, handOverRequest, { signal: controller.signal }, deps({ handoverWallMs: 5_000 }), createDiscardedItems()));
+  assert.equal(listeningWhenAborted, 1, "the abort came while the wait was listening");
   assert.equal((bot as unknown as { _client: EventEmitter })._client.listenerCount("collect"), 0);
   assert.equal(bot.listenerCount("time"), 0);
 });
