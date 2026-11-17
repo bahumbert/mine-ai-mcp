@@ -3,6 +3,7 @@ import { NAVIGATE } from "@aibengineering/mine-ai-mcp";
 import assert from "node:assert/strict";
 import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
+import { observeIdleWindow } from "../../flat/combat/idle-reflex-window.ts";
 import { readEncounters, type Encounter } from "../../flat/combat/reflex.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
@@ -32,17 +33,22 @@ export const run: MineAiScenario = async (context) => {
       const [, returned] = await Promise.all([release, pending]);
       context.log(`RETURN ${JSON.stringify(returned.result)}`);
       // Keep the reflex and native mobs active for delayed contact after arrival.
-      for (let tick = 0; tick < 100 && evidence.snapshot().deaths === 0; tick++) {
-        context.signal.throwIfAborted();
-        await context.bot.waitForTicks(1);
-      }
+      const idle = await observeIdleWindow(context.bot, 100, () => evidence.snapshot().deaths > 0, context.signal);
       encounters.push(...(await readEncounters(context, runtime)));
       const final = evidence.snapshot();
       const atExit = context.bot.entity.position.distanceTo(new Vec3(x + 0.5, y, z + 0.5)) <= 2;
       return {
         status:
           final.deaths === 0 && final.health > 0 && final.dimension === "the_nether" && atExit ? "succeeded" : "failed",
-        detail: JSON.stringify({ ...final, atExit, encounters, returnStatus: returned.result.status }),
+        detail: JSON.stringify({
+          ...final,
+          atExit,
+          encounters,
+          returnStatus: returned.result.status,
+          observedTicks: idle.observedTicks,
+          interruptions: returned.interruptions ?? [],
+          returnError: "error" in returned.result ? returned.result.error : null,
+        }),
       };
     } finally {
       await runtime.close();

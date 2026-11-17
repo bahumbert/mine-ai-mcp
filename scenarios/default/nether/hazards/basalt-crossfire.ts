@@ -2,6 +2,7 @@ import { monotonicNow } from "../../../../src/utils/monotonic-clock.ts";
 import type { BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import { z } from "zod";
+import { observeIdleWindow } from "../../../flat/combat/idle-reflex-window.ts";
 import { readReflexOutcomes } from "../../../flat/combat/reflex.ts";
 import { declaredEntitiesArranged, openRuntime, standStill, wearArmor } from "../../../src/runtime.ts";
 import type { MineAiScenario } from "../../../src/scenario-client.ts";
@@ -23,6 +24,22 @@ function enclosed(bot: Parameters<MineAiScenario>[0]["bot"]): boolean {
     shell.every((p) => bot.blockAt(p)?.boundingBox === "block") &&
     [feet, feet.offset(0, 1, 0)].every((p) => bot.blockAt(p)?.boundingBox === "empty")
   );
+}
+
+/** Hold the bot for `ticks` server ticks, sampling its shelter on each body tick; the listener lives only inside the window. */
+async function observeShelter(bot: Parameters<MineAiScenario>[0]["bot"], ticks: number, signal: AbortSignal) {
+  const counts = { samples: 0, coveredSamples: 0 };
+  const onTick = () => {
+    counts.samples++;
+    if (enclosed(bot)) counts.coveredSamples++;
+  };
+  bot.on("physicsTick", onTick);
+  try {
+    const { observedTicks } = await observeIdleWindow(bot, ticks, () => false, signal);
+    return { observedTicks, ...counts };
+  } finally {
+    bot.off("physicsTick", onTick);
+  }
 }
 
 export const run: MineAiScenario = async (context) => {
@@ -112,11 +129,8 @@ export const run: MineAiScenario = async (context) => {
     const action = runtime.actions.find((a) => a.name === "navigate")!;
     const travel = await runtime.run(action, { x: 36, y: 101, z: 0, range: 1 }, signal);
     // Observe damage after arrival or handoff, and independently verify a claimed shelter.
-    let coveredTicks = 0;
-    for (let tick = 0; tick < 40; tick++) {
-      await bot.waitForTicks(1);
-      if (enclosed(bot)) coveredTicks++;
-    }
+    // The shelter is sampled on each body tick of the 40-server-tick window, not on client ticks.
+    const shelter = await observeShelter(bot, 40, signal);
     const reflex = await readReflexOutcomes(context, runtime);
     const arrived = bot.entity.position.distanceTo(new Vec3(36.5, 101, 0.5)) < 2;
     const handoff = reflex.encounters.findLast((response) => response.interrupted?.action === "navigate");
@@ -131,7 +145,8 @@ export const run: MineAiScenario = async (context) => {
       travel.result.status === "cancelled" &&
       handoff?.outcome === "hidden" &&
       handoff.healthAfter >= 18 &&
-      coveredTicks === 40;
+      shelter.samples >= 1 &&
+      shelter.coveredSamples === shelter.samples;
     const outcome =
       travel.result.status === "succeeded" && arrived
         ? "arrived"
@@ -161,7 +176,9 @@ export const run: MineAiScenario = async (context) => {
         outcome,
         sheltered,
         blastHandoff,
-        coveredTicks,
+        ...shelter,
+        interruptions: travel.interruptions ?? [],
+        returnError: "error" in travel.result ? travel.result.error : null,
         exercised,
         deaths,
         minimumHealth,
