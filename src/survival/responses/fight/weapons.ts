@@ -41,7 +41,7 @@ import {
   meleeDistance,
 } from "../../weapons/melee.js";
 import { shieldCoverage, shieldFacing } from "../../weapons/shield-facing.js";
-import { hasSelfExplosion } from "../../../world/combat-data.js";
+import { hasSelfExplosion, mobCombatData } from "../../../world/combat-data.js";
 import type { FightScene } from "./scene.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
@@ -390,6 +390,12 @@ export class FightWeapons {
       const ranged = selectRangedLoadout(index, available);
       if (ranged) return ranged;
     }
+    // The fight was admitted as a ranged one: a second explosive beside the target makes a sword approach
+    // light a fuse the bow fight cannot answer, so the bow stays in hand for it (the blast's own counter keeps melee).
+    if (this.explosiveNeighbourBeside()) {
+      const ranged = selectRangedLoadout(index, available);
+      if (ranged) return ranged;
+    }
     if (feet.equals(this.scene.bot.entity.position) && canMeleeTarget(this.scene.bot, this.scene.target))
       return selectMeleeLoadout(index, available);
     // The six-block cutoff anticipates a walking melee attacker closing
@@ -400,6 +406,16 @@ export class FightWeapons {
       if (ranged) return ranged;
     }
     return selectCombatLoadout(index, available, this.scene.target.position.minus(feet));
+  };
+  /** Another live, unresolved threat whose game data has an explosion, within twice its radius of the target. */
+  readonly explosiveNeighbourBeside = (): boolean => {
+    const { bot, perception } = this.scene;
+    return Object.values(bot.entities).some((entity) => {
+      if (entity.id === this.scene.target.id || this.scene.dead.has(entity.id)) return false;
+      if (!isThreat(bot, entity, perception) || entity.name === undefined) return false;
+      const explosion = mobCombatData(entity.name, bot.version)?.explosion;
+      return explosion != null && entity.position.distanceTo(this.scene.target.position) <= 2 * explosion.radius;
+    });
   };
   readonly currentLoadout = () => this.loadoutFrom(this.scene.bot.entity.position);
   /** A commanded guard is not proof that the off-hand item survived a hit. */
