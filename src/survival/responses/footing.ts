@@ -18,13 +18,13 @@ import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { findPlacementSupport, occupiedCell, placeBlock, type BlockPlacementResult } from "../../world/placement.js";
 import { lowerImpulseLanding, projectedFooting } from "../positioning/footing.js";
-import type { ReflexLimits } from "../control/contract.js";
+import type { LegacyMsLimits } from "../control/contract.js";
 
 /**
  * A landing may take 30 s; 5 s without landing, entering water or falling on (the base probe) ends the footing reflex,
  * then a 2 s pause. The recovery keeps the 30 s as its own bound, so a recovery inside a fight ends there too.
  */
-export const FOOTING_LIMITS: ReflexLimits = { ceilingMs: 30_000, noProgressMs: 5_000, standDownMs: 2_000 };
+export const FOOTING_LIMITS: LegacyMsLimits = { ceilingMs: 30_000, noProgressMs: 5_000, standDownMs: 2_000 };
 
 const impulseSchema = z.object({
   entityId: z.number(),

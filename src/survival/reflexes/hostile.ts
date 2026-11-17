@@ -7,7 +7,7 @@ import type { CombatController } from "../control/combat/contract.js";
 import { answeredResponses } from "../control/combat/scopes/response.js";
 import type { HostileSettlement } from "../control/combat/response-result.js";
 import { describeResponse, responseContinuation, responseFailure } from "../control/combat/settlement.js";
-import type { ReflexLimits } from "../control/contract.js";
+import type { TickLimits } from "../control/contract.js";
 import { observeCombatProgress } from "../control/combat-progress.js";
 import { COMBAT_LIMITS } from "../control/combat/limits.js";
 import type { ReflexDriver } from "../control/driver.js";
@@ -19,13 +19,12 @@ import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
 import { decideHostile, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
-import { ticksOnTime } from "../../world/world-age.js";
 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
 
-/** Equipping a shield is one inventory move: 10 s at most, 5 s without the off-hand changing. */
-const SHIELD_LIMITS: ReflexLimits = { ceilingMs: 10_000, noProgressMs: 5_000, standDownMs: 10_000 };
+/** Equipping a shield is one inventory move: 200 world ticks (10 s) at most, 100 without the off-hand changing. */
+const SHIELD_LIMITS: TickLimits = { ceilingTicks: 200, noProgressTicks: 100, standDownTicks: 200 };
 
 export interface HostileReflex extends AsyncDisposable {
   readonly threats: ResponseContext;
@@ -74,7 +73,7 @@ function watchHostilePolicy(scene: HostileScene): () => void {
 function hostileFailureTemporal(outcome: HostileSettlement | ShieldPrepared) {
   if (outcome.kind === "shield_prepared" || (outcome.response !== "fight" && outcome.response !== "deflect")) return null;
   const failure = responseFailure(outcome);
-  return failure ? { premise: "unreachable", ticks: ticksOnTime(COMBAT_LIMITS.noProgressMs), why: failure.why } : null;
+  return failure ? { premise: "unreachable", ticks: COMBAT_LIMITS.noProgressTicks, why: failure.why } : null;
 }
 
 /** Keep response permissions live while sharing perception and the driver's retained answers. */

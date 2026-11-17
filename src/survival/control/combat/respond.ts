@@ -20,6 +20,7 @@ import { responseScope } from "./scopes/response.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
 import { COMBAT_LIMITS } from "./limits.js";
 import { watchEntityRemoval } from "../../../world/entity-removal.js";
+import { MS_PER_ON_TIME_TICK } from "../../../world/world-age.js";
 
 /**
  * Consecutive physics ticks a melee target may stay out of defensive reach before the fight ends as `contact_ended`.
@@ -37,10 +38,11 @@ function watchFightContact(bot: Bot, targetId: number, context: ResponseContext,
   const observe = () => {
     const target = bot.entities[targetId];
     if (removal.removed()) {
+      // Still real time until T5 of plan 2026-11-16-reflex-limits-ticks (the wait becomes world ticks there).
       missingTimer ??= setTimeout(() => {
         missingTimer = undefined;
         if (removal.removed()) ended.abort("target_lost");
-      }, COMBAT_LIMITS.standDownMs);
+      }, COMBAT_LIMITS.standDownTicks * MS_PER_ON_TIME_TICK);
     } else {
       clearTimeout(missingTimer);
       missingTimer = undefined;

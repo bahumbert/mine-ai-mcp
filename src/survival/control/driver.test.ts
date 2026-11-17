@@ -7,7 +7,7 @@ import { type SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
 
 /** Limits far beyond any test: a claim that is not under test never runs into them. */
-const TEST_LIMITS = { ceilingMs: 600_000, noProgressMs: 600_000, standDownMs: 2_000 };
+const TEST_LIMITS = { ceilingTicks: 12_000, noProgressTicks: 12_000, standDownTicks: 40 };
 const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
 const idleBot = () => createFakeBot().bot;
 

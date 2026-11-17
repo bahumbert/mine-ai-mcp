@@ -304,7 +304,7 @@ test("changing only assessment numbers or distances publishes one decision; targ
       directive: decideCombatResponse(observed, { kind: "automatic" }), settling: false, combatOwnsBody: false, entries: [] }),
     decisionFacts: (observed) => combatDecisionEvidence(observed, { kind: "automatic" }, decideCombatResponse(observed, { kind: "automatic" })),
     facts: () => ({ capability: "combat", response: "response", scope: "test", facts: () => null, permissions: () => null }),
-    limits: () => ({ ceilingMs: 600_000, noProgressMs: 600_000, standDownMs: 2_000 }),
+    limits: () => ({ ceilingTicks: 12_000, noProgressTicks: 12_000, standDownTicks: 40 }),
     act: async () => true,
     continuation: () => ({ kind: "resume" }),
     failure: () => null,

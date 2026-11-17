@@ -3,15 +3,15 @@ import type { Bot } from "mineflayer";
 import { isDeepStrictEqual } from "node:util";
 import { BodyAbort, type BodyAbortCause, type Continuation } from "../../session/abort.js";
 import type { ActionRunner } from "../../session/action-runner.js";
-import { ticksOnTime } from "../../world/world-age.js";
 import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
-import type {
-  DangerObservation,
-  ReflexDefinition,
-  ReflexLimits,
-  ReflexName,
-  ReflexSnapshot,
-  SurvivalTransition,
+import {
+  limitTicks,
+  type DangerObservation,
+  type ReflexDefinition,
+  type ReflexLimits,
+  type ReflexName,
+  type ReflexSnapshot,
+  type SurvivalTransition,
 } from "./contract.js";
 import { observeBodyProgress, ReflexProgress } from "./reflex-progress.js";
 
@@ -236,6 +236,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     const active: ActiveClaim = { name: responseName, startedAt: Date.now(), controller, signal: null };
     this.#active = active;
     const limits = definition.limits(response);
+    const claimTicks = limitTicks(limits);
     const progress = new ReflexProgress();
     const run: ClaimRun<Response> = {
       response,
@@ -263,9 +264,8 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       },
       definition.releaseAfterAdmission,
       {
-        // The limits are still written in ms: converted here until T4a/T4b of plan 2026-11-16-reflex-limits-ticks.
-        ceilingTicks: ticksOnTime(limits.ceilingMs),
-        noProgressTicks: ticksOnTime(limits.noProgressMs),
+        ceilingTicks: claimTicks.ceilingTicks,
+        noProgressTicks: claimTicks.noProgressTicks,
         progressMarks: () => progress.marks,
         worldAge: () => host.bot.time?.age ?? null,
       },
@@ -413,8 +413,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     host.answered.remember(
       { ...scope, facts: () => null },
       { kind: "reflex_limit", why },
-      // The limits are still written in ms: converted here until T4a/T4b of plan 2026-11-16-reflex-limits-ticks.
-      { premise: "reflex_limit", ticks: Math.min(ticksOnTime(run.limits.standDownMs) * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
+      { premise: "reflex_limit", ticks: Math.min(limitTicks(run.limits).standDownTicks * 2 ** (count - 1), STAND_DOWN_CAP_TICKS), why },
     );
   }
 }

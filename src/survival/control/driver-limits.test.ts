@@ -10,7 +10,7 @@ import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, fl
 import type { ReflexDefinition, ReflexLimits, SurvivalTransition } from "./contract.js";
 import { ReflexDriver, type ReflexDriverOptions } from "./driver.js";
 
-const LIMITS: ReflexLimits = { ceilingMs: 600_000, noProgressMs: 1_000, standDownMs: 3_000 };
+const LIMITS: ReflexLimits = { ceilingTicks: 12_000, noProgressTicks: 20, standDownTicks: 60 };
 
 /**
  * A driver on the bot's clock: `pass(ms)` moves time in 50 ms ticks with a physics tick at each, as a healthy server
@@ -100,14 +100,14 @@ for (const { ticksPerSecond, msPerTick } of RATES)
 
 // 150 000 ms is 3 000 ticks: doubled it is the 6 000-tick cap exactly; 151 000 ms (3 020) doubled would be 6 040. Each limit is
 // followed by `answered.clear()` so the reflex claims again at once and the count of its limits keeps climbing.
-const ESCALATIONS: ReadonlyArray<readonly [standDownMs: number, recordMs: readonly number[]]> = [
-  [5_000, [5_000, 10_000, 20_000]],
-  [150_000, [150_000, 300_000, 300_000]],
-  [151_000, [151_000, 300_000, 300_000]],
+const ESCALATIONS: ReadonlyArray<readonly [standDownTicks: number, recordMs: readonly number[]]> = [
+  [100, [5_000, 10_000, 20_000]],
+  [3_000, [150_000, 300_000, 300_000]],
+  [3_020, [151_000, 300_000, 300_000]],
 ];
-for (const [standDownMs, recordMs] of ESCALATIONS)
-  test(`a repeated no-progress limit doubles a ${standDownMs} ms stand-down up to 6 000 ticks: ${recordMs.join(", ")} ms`, async () => {
-    const { driver, definition, pass } = scene({ ceilingMs: 600_000, noProgressMs: 1_000, standDownMs });
+for (const [standDownTicks, recordMs] of ESCALATIONS)
+  test(`a repeated no-progress limit doubles a ${standDownTicks} tick stand-down up to 6 000 ticks: ${recordMs.join(", ")} ms`, async () => {
+    const { driver, definition, pass } = scene({ ceilingTicks: 12_000, noProgressTicks: 20, standDownTicks });
     driver.register({ ...definition(), escalateStandDown: () => true });
     try {
       for (const expected of recordMs) {
@@ -181,7 +181,7 @@ test("the limit outcome names the limit and the last progress", async () => {
 });
 
 test("a claim that keeps marking runs into its ceiling, not the no-progress limit", async () => {
-  const { combat, events, driver, definition, pass } = scene({ ceilingMs: 2_000, noProgressMs: 1_000, standDownMs: 3_000 });
+  const { combat, events, driver, definition, pass } = scene({ ceilingTicks: 40, noProgressTicks: 20, standDownTicks: 60 });
   driver.register(definition());
   for (let step = 0; step < 70; step++) { // the 2 s ceiling is 40 ticks and one packet: 3 s in at 20 tps
     combat.setHealth(step % 2 === 0 ? 19 : 20);
