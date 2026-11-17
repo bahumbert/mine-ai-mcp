@@ -4,7 +4,7 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { createMovements, createNavigationRuntime, type Navigate } from "../../../navigation/index.js";
 import { HuntTargeting, type HuntRequest } from "../../../navigation/processes/hunting/hunt-process.js";
-import { createFakeBot, type FakeEntitySpec } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeEntitySpec } from "../../../test-support/fake-bot/index.js";
 import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
 import { EndermanProgress } from "../../control/combat/enderman-progress.js";
 import type { CombatDecision } from "../../control/combat/contract.js";
@@ -27,9 +27,10 @@ function occupiedLedge(blocks = 32) {
   };
   for (const [index, [x, z]] of [[1.2, 0], [-1.2, 0], [0, 1.2], [0, -1.2]].entries())
     entities[10 + index] = { name: "cow", position: new Vec3(0.5 + x!, 66, 0.5 + z!), metadata: { 15: 1 } };
-  const harness = createFakeBot({ position: new Vec3(0.5, 66, 0.5), groundY: 63,
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), position: new Vec3(0.5, 66, 0.5), groundY: 63,
     cells: { "0,65,0": "stone" }, carried: { diamond_sword: 1, cobblestone: blocks }, entities, simulatePhysics: true });
   const { bot, clock } = harness;
+  const timers = clock.install();
   const navigation = createNavigationRuntime(bot);
   const perception = new CombatPerception(bot);
   perception.attackerIds.add(7);
@@ -54,6 +55,7 @@ function occupiedLedge(blocks = 32) {
       observation.stopEffects(); observation.close(); scene[Symbol.dispose](); scene.endermanProgress[Symbol.dispose]();
       perception[Symbol.dispose](); footingRecovery[Symbol.dispose](); survival.answered.clear();
       await navigation.close();
+      timers[Symbol.dispose]();
     },
   };
 }

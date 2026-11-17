@@ -1,8 +1,8 @@
 // Closer-contact swings use the same lethal-stance admission and final recheck as selected-target melee.
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, itemOf } from "../../../test-support/fake-bot/index.js";
 import { liveBlockReader } from "../../../navigation/index.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../../policy/contract.js";
 import type { CombatTactic } from "../../policy/combat/tactics.js";
@@ -13,12 +13,16 @@ import type { FightScene } from "./scene.js";
 import { runFightTurn } from "./turn.js";
 import { FightWeapons } from "./weapons.js";
 
+let testTimers: Disposable | undefined;
+afterEach(() => { testTimers?.[Symbol.dispose](); testTimers = undefined; });
+
 /** Real turn/contact/strike code over the shared body; readiness and route completion are explicit boundaries. */
 function contactTurn(options: {
   quarry?: string; hazard?: boolean; hold?: boolean; committed?: boolean; stopped?: string; circle?: boolean;
   shield?: boolean; realMovement?: boolean;
 } = {}) {
   const harness = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }),
     position: new Vec3(0.5, 64, 0.5),
     slots: { 36: { name: "diamond_axe" }, 45: options.shield === false ? null : { name: "shield" } },
     cells: options.hazard === false ? {} : { "0,63,-2": "lava" },
@@ -27,6 +31,7 @@ function contactTurn(options: {
       8: { name: "zombie", position: options.circle ? new Vec3(1.5, 64, 0.5) : new Vec3(0.5, 64, 1.5) },
     },
   });
+  testTimers = harness.clock.install();
   const { bot } = harness;
   const attacks: number[] = [], approaches: unknown[][] = [];
   bot.attack = target => { attacks.push(target.id); };

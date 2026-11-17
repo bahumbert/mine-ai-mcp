@@ -296,7 +296,7 @@ export class CoverFight {
               await this.weapons.defendContact();
             },
             releaseItemUse: () => this.weapons.itemUse.lowerShield(),
-            wait: this.weapons.holdFacing,
+            wait: async (ticks) => { await this.weapons.holdFacing(ticks); },
           }),
         );
         this.weapons.itemUse.invalidateShield();

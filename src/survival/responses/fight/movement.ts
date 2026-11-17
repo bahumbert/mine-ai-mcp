@@ -108,7 +108,7 @@ export class FightMovement {
           throw new Error("Footing recovery could not establish a safe landing.");
         const loadout = this.weapons.currentLoadout();
         await this.weapons.equip(loadout);
-        if (loadout.kind === "melee") this.weapons.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
+        if (loadout.kind === "melee") this.weapons.readiness.restart();
       } finally {
         this.weapons.itemUse.invalidateShield();
         this.footing.start();

@@ -7,6 +7,8 @@ import { blastBarrierScope } from "./scopes/blast-barrier.js";
 import { permitsHide } from "../../policy/combat/permissions.js";
 import { selectPolicyFood } from "../../perception/food.js";
 import { canMeleeTarget } from "../../weapons/melee.js";
+import { combatItemsForTarget } from "../../weapons/melee.js";
+import { permittedMeleeLoadout } from "../../weapons/equipment.js";
 
 /** One interruptible effect under the existing combat owner. Observation selects;
  * cancellation only requests release. The caller awaits it before the next tactic. */
@@ -36,7 +38,9 @@ export class CombatTactics {
       retreatPermitted: scene.policy.combat.retreat,
       escapeAvailable,
       counterTarget: counter?.id ?? null,
-      counterReady: scene.elapsedTicks >= weapons.weaponReadyAt,
+      counterReady: counter != null && weapons.readiness.ready(permittedMeleeLoadout(
+        bot, combatItemsForTarget(bot, bot.entities[counter.id]!), scene.policy.combat,
+      ).cooldownTicks),
       barrier: barrier ? { x: barrier.x, y: barrier.y, z: barrier.z } : null,
       // Contact defence executes before a quarry's bow turn. Price the next
       // available action, rather than treating a carried bow as a commitment.

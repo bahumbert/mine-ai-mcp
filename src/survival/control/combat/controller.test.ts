@@ -1,7 +1,7 @@
 import type { Bot, BotEvents } from "mineflayer";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import test, { afterEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import { Vec3 } from "vec3";
 import type { NavigationRuntime } from "../../../navigation/index.js";
 import { MemoryWorld as GoalTestWorld } from "../../../navigation/world/memory-world.js";
@@ -27,7 +27,7 @@ import { SupportedPositionHold } from "../../../navigation/index.js";
 import { CombatPerception, positionThreat } from "../../perception/combat/observations.js";
 import { incomingShieldProjectiles } from "../../perception/combat/shield-projectiles.js";
 import { FootingRecovery } from "../../responses/footing.js";
-import { type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeWorld } from "../../../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeClock, createFakeWorld } from "../../../test-support/fake-bot/index.js";
 import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { foreignRegionAt, setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
@@ -35,14 +35,22 @@ import { FightMovement } from "../../responses/fight/movement.js";
 import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facing.js";
 import { monotonicNow } from "../../../utils/index.js";
 import { survivalResources } from "../../state/resources.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
 import { ActionRunner } from "../../../session/action-runner.js";
 import { started, stubAction } from "../../../session/action-runner-fixtures.test.js";
 
 const goalTestWorld = new GoalTestWorld();
 const fixtureClocks = new Set<() => void>();
+let fightClock: FakeClock;
+let fightTimers: Disposable;
+beforeEach(() => {
+  fightClock = createFakeClock({ mode: "mocked" });
+  fightTimers = fightClock.install();
+});
 afterEach(() => {
   for (const stop of fixtureClocks) stop();
   fixtureClocks.clear();
+  fightTimers[Symbol.dispose]();
 });
 
 test("revoking raw food releases an End perch bite before policy settlement", async () => {
@@ -1604,6 +1612,7 @@ test("switching back from a navigation tool restores sword attack strength befor
 
 test("a guarded approach that only walked swings without paying shield readiness again", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 8 });
+  await fixture.warm();
   armWithBow(fixture.target).drawing(true);
   let returnedAt = 0;
   const navigation = {
@@ -1660,6 +1669,7 @@ interface CombatLog {
 }
 
 type CombatFixture = CombatLog & {
+  readonly warm: () => Promise<void>;
   readonly script: CombatScript;
   readonly clock: { tick: number };
   readonly bot: Bot;
@@ -1810,6 +1820,7 @@ function combatFixture(items: readonly string[], options: CombatFixtureOptions =
   items.forEach((name, index) => (slots[9 + index] = { name }));
   if (options.startingHeld) slots[36] = { name: options.startingHeld };
   const harness = createFakeBot({
+    clock: fightClock,
     position: options.feet ?? new Vec3(0, 64, 0),
     ...("groundY" in options && { groundY: options.groundY }),
     server: { timeOfDay: options.timeOfDay, ticksPerSecond: options.ticksPerSecond },
@@ -1819,7 +1830,8 @@ function combatFixture(items: readonly string[], options: CombatFixtureOptions =
   recordHands(harness, log, clock, script);
   recordBody(harness.bot, log, clock, script);
   runTicksOnListen(harness, clock, script);
-  return { ...log, script, clock, bot: harness.bot, inventory: harness.inventory, world: harness.world, combat: harness.combat, entities: harness.entities, target: harness.bot.entities[7]! };
+  return { ...log, script, clock, bot: harness.bot, inventory: harness.inventory, world: harness.world, combat: harness.combat, entities: harness.entities, target: harness.bot.entities[7]!,
+    warm: async () => { serverTickPace(harness.bot); await harness.clock.advance(4_000); } };
 }
 
 test("a pack member in reach is answered before chasing the requested target, without settling its verdict", async () => {
@@ -2278,6 +2290,7 @@ test("raises the shield when a bow target starts drawing, then resumes its own s
 
 test("keeps the shield raised while attacking and waits the cooldown in place", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
+  await fixture.warm();
   fixture.script.onWait = () => {
     if (fixture.clock.tick === 6) fixture.combat.swing(fixture.target.id);
   };
@@ -2317,6 +2330,7 @@ test("keeps the shield raised while attacking and waits the cooldown in place", 
 
 test("shielded melee strikes a drawing skeleton before it backs out of reach", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
+  await fixture.warm();
   const skeleton = armWithBow(fixture.target);
   skeleton.drawing(true);
   let waitedTicks = 0;
@@ -2370,6 +2384,7 @@ test("rechecks for a bow draw after the melee shield readiness wait", async () =
 
 test("resumes a shielded approach when a drawing target backs out of melee reach", async () => {
   const fixture = combatFixture(["iron_sword", "shield"]);
+  await fixture.warm();
   const skeleton = armWithBow(fixture.target);
   skeleton.drawing(true);
   let waitedTicks = 0;
@@ -2433,6 +2448,7 @@ test("does not reset an already-raised melee shield for the next bow volley", as
 
 test("plain melee waits the sword cooldown facing the target, without walking backwards", async () => {
   const fixture = combatFixture(["iron_sword"]);
+  await fixture.warm();
   fixture.script.onAttack = () => {
     if (fixture.directAttacks.count === 2) fixture.combat.kill(fixture.target.id);
   };
@@ -3916,7 +3932,8 @@ for (const obstructionTick of [0, 10, 20]) {
     const arrowOriginY = 64 + 1.62 - 0.1; // the arrow's trace starts 0.1 below the eye; exposure rays start at the eye
     fixture.bot.world.raycast = (from, direction, range, matcher) => {
       assert.ok(Math.abs(direction.norm() - 1) < 0.000001);
-      if (Math.abs(from.y - arrowOriginY) < 1e-6)
+      // After release, projectile-contact rays may start inside the bot and have zero distance.
+      if (fixture.shotTicks.length === 0 && Math.abs(from.y - arrowOriginY) < 1e-6)
         assert.ok(range > 0 && range <= 3, "each clear-shot ray covers one arrow tick or its final fraction");
       return raycast(from, direction, range, matcher);
     };

@@ -8,6 +8,8 @@ import { CombatExecution } from "../survival/control/combat/execution.js";
 import { combatResourceRefusal } from "../survival/control/combat/preparation.js";
 import type { CombatController } from "../survival/index.js";
 import type { FakeServer } from "./fake-bot/index.js";
+import { serverTickPace } from "../world/server-tick-pace.js";
+import { swingReadiness } from "../survival/weapons/swing-readiness.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { CreeperClearance } from "../survival/perception/combat/creepers.js";
 import { DEFAULT_COMBAT_POLICY } from "../survival/policy/combat/contract.js";
@@ -45,6 +47,8 @@ export function createTestCombatController(
   footing = own(new FootingRecovery(bot, navigation.world)),
   survival: SurvivalResources = survivalResources(),
 ) {
+  own(serverTickPace(bot));
+  own(swingReadiness(bot));
   return createCombatController(bot, navigation, perception, footing, survival);
 }
 

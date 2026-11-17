@@ -6,6 +6,8 @@ import { Vec3 } from "vec3";
 import { monotonicNow } from "../../../utils/index.js";
 import { PhysicsStoppedError, waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { tickBudgetWallMs } from "../../control/combat/progress.js";
+import { serverPacedWallMs } from "../../../world/world-age.js";
+import { attackAndRestart, swingReadiness } from "../../weapons/swing-readiness.js";
 import { observedEyeHeight, STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { exposedBodyFrom, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
@@ -45,16 +47,17 @@ import { hasSelfExplosion, mobCombatData } from "../../../world/combat-data.js";
 import type { FightScene } from "./scene.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
-/** Weapon use and readiness belong to this fight; movement can interrupt a wait. */
+/** Weapon use belongs to this fight; connection-wide recovery survives interrupted fights. */
 export class FightWeapons {
   readonly itemUse: CombatItemUse;
-  weaponReadyAt = 0;
+  readonly readiness;
   volleyTicksRemaining: number;
   constructor(
     readonly scene: FightScene,
     readonly interruptions: { recoverFooting(): Promise<void>; returnToCover(): boolean },
   ) {
-    this.itemUse = new CombatItemUse(scene.bot, (ticks) => this.holdFacing(ticks),
+    this.readiness = swingReadiness(scene.bot);
+    this.itemUse = new CombatItemUse(scene.bot, async (ticks) => { await this.holdFacing(ticks); },
       (event) => scene.reportDecision({ kind: "response", evidence: { boundary: "item_use", ...event } }));
     this.volleyTicksRemaining =
       (scene.perception.read().find((entry) => entry.id === scene.target.id)?.windingUp ?? false)
@@ -193,20 +196,23 @@ export class FightWeapons {
    * early. Only the time spent waiting for ticks counts: a shield re-equip or a footing recovery in between is not
    * the server being slow, and must not cost the hold its ticks.
    */
-  readonly holdFacing = async (ticks: number): Promise<void> => {
-    const limitMs = tickBudgetWallMs(ticks);
+  readonly holdFacing = async (ticks: number, wallEnd = Infinity): Promise<"held" | "interrupted"> => {
+    const limitMs = Math.min(tickBudgetWallMs(ticks), wallEnd - monotonicNow());
     let waitedMs = 0;
-    for (let held = 0; held < ticks && waitedMs < limitMs && !this.scene.settled(); held += 1) {
+    for (let held = 0; held < ticks; held += 1) {
+      this.scene.signal.throwIfAborted();
+      if (waitedMs >= limitMs || monotonicNow() >= wallEnd || this.scene.settled() || this.interruptions.returnToCover()) return "interrupted";
       await this.maintainGuard();
       if (this.scene.footingRecovery.needed) await this.interruptions.recoverFooting();
-      if (this.interruptions.returnToCover()) break;
+      if (this.scene.settled() || this.interruptions.returnToCover()) return "interrupted";
       if (this.itemUse.shieldRaised) await this.faceGuard();
       else await this.face();
       const waitStart = monotonicNow();
-      const ticked = await this.waitTickBefore(waitStart + limitMs - waitedMs);
+      const ticked = await this.waitTickBefore(Math.min(wallEnd, waitStart + limitMs - waitedMs));
       waitedMs += monotonicNow() - waitStart;
-      if (!ticked) break;
+      if (!ticked) return "interrupted";
     }
+    return "held";
   };
   /**
    * Wait one physics tick, at most until `wallEnd` on `monotonicNow()`. False when the wall time ran out first (the
@@ -230,30 +236,31 @@ export class FightWeapons {
     // resets vanilla attack strength even if the previous swing was long ago.
     if (previous !== (this.scene.bot.heldItem?.name ?? null)) {
       this.itemUse.invalidateShield();
-      if (loadout.kind === "melee") this.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
     }
   };
-  readonly readyWeapon = () =>
+  readonly readyWeapon = (loadout = this.currentLoadout()) =>
     this.scene.execution.run(this.itemUse.shieldRaised ? "guard" : "hold", async () => {
-      while (
-        this.scene.elapsedTicks < this.weaponReadyAt &&
-        !this.scene.settled() &&
-        !this.interruptions.returnToCover()
-      )
-        await this.holdFacing(this.weaponReadyAt - this.scene.elapsedTicks);
+      this.scene.signal.throwIfAborted();
+      if (loadout.kind !== "melee") return "held" as const;
+      const wallEnd = monotonicNow() + serverPacedWallMs(loadout.cooldownTicks);
+      while (!this.readiness.ready(loadout.cooldownTicks)) {
+        if (monotonicNow() >= wallEnd || this.scene.settled() || this.interruptions.returnToCover()) return "interrupted" as const;
+        if (await this.holdFacing(this.readiness.clientTicksUntilReady(loadout.cooldownTicks), wallEnd) === "interrupted")
+          return "interrupted" as const;
+      }
+      return "held" as const;
     });
   /** One ready hit, without owning a cooldown wait or stopping locomotion.
    * Sword attacks retain the active off-hand guard and reassert it afterward. */
   readonly strike = (target: Entity, loadout: Extract<CombatLoadout, { kind: "melee" }>): boolean => {
     this.scene.signal.throwIfAborted();
-    if (!this.scene.policy.combat.melee || this.scene.elapsedTicks < this.weaponReadyAt ||
+    if (!this.scene.policy.combat.melee || !this.readiness.ready(loadout.cooldownTicks) ||
       this.scene.bot.heldItem?.name !== loadout.weapon?.name ||
       this.scene.settled() || !target.isValid || this.scene.dead.has(target.id) ||
       !canMeleeTarget(this.scene.bot, target) ||
       (loadout.weapon && hasItemFamily(this.scene.bot, loadout.weapon.name, "sword") && hasSweepBystander(this.scene.bot, target))) return false;
-    this.scene.bot.attack(target);
+    attackAndRestart(this.scene.bot, target);
     this.scene.attacks++;
-    this.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
     this.scene.stylesUsed.add(loadout.shield ? "shielded_melee" : "melee");
     this.scene.weaponsUsed.add(loadout.weapon?.name ?? "hand");
     if (loadout.shield) this.itemUse.activateShield();
@@ -350,7 +357,7 @@ export class FightWeapons {
       const loadout = permittedMeleeLoadout(this.scene.bot, combatItemsForTarget(this.scene.bot, defender), this.scene.policy.combat);
       await this.equip(loadout);
       if (loadout.shield) await this.raiseGuard();
-      await this.readyWeapon();
+      if (await this.readyWeapon(loadout) === "interrupted") return true;
       if (loadout.shield) await this.faceGuard();
       else await this.face(defender);
       if (
@@ -362,7 +369,7 @@ export class FightWeapons {
       )
         return true;
       if (!this.strike(defender, loadout)) return true;
-      await this.holdFacing(loadout.cooldownTicks);
+      await this.readyWeapon(loadout);
       return true;
     });
   };

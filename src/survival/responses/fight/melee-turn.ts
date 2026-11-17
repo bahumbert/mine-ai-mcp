@@ -151,7 +151,7 @@ async function swingFromMeleeStance(
     if (scene.settled()) return null;
     if (weapons.volleyActive()) scene.projectileGuards++;
   }
-  await weapons.readyWeapon();
+  if (await weapons.readyWeapon(loadout) === "interrupted") return null;
   if (guarded) await weapons.faceGuard();
   else await weapons.face();
   if (scene.settled()) return null;
@@ -189,5 +189,5 @@ async function strikeMeleeTarget(
     scene.perception.creeperClearance.observe(scene.perception.tick, scene.perception.resolvedIds)
       .filter(threat => threat.id === scene.target.id),
   );
-  await weapons.holdFacing(loadout.cooldownTicks);
+  await weapons.readyWeapon(loadout);
 }

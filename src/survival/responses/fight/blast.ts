@@ -4,6 +4,7 @@ import { placeSolidBlockInto } from "../../../world/placement.js";
 import { blastBarrierScope } from "../../control/combat/scopes/blast-barrier.js";
 import { blastBarrierMaterial } from "../../positioning/combat/blast-barrier.js";
 import { permittedMeleeLoadout } from "../../weapons/equipment.js";
+import { attackAndRestart } from "../../weapons/swing-readiness.js";
 import { canMeleeTarget, combatItemsForTarget } from "../../weapons/melee.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
@@ -43,7 +44,7 @@ export class BlastDefence {
       if (!target?.isValid || !scene.policy.combat.melee || !canMeleeTarget(scene.bot, target)) return;
       const loadout = permittedMeleeLoadout(scene.bot, combatItemsForTarget(scene.bot, target), scene.policy.combat);
       await weapons.equip(loadout);
-      if (scene.elapsedTicks < weapons.weaponReadyAt) { await this.protect(); return; }
+      if (!weapons.readiness.ready(loadout.cooldownTicks)) { await this.protect(); return; }
       weapons.itemUse.lowerShield();
       await weapons.face(target);
       // Sprint adds knockback to a ready hit. Forward movement is not required
@@ -52,8 +53,7 @@ export class BlastDefence {
       try {
         scene.signal.throwIfAborted();
         if (!canMeleeTarget(scene.bot, target)) return;
-        scene.bot.attack(target);
-        weapons.weaponReadyAt = scene.elapsedTicks + loadout.cooldownTicks;
+        attackAndRestart(scene.bot, target);
         scene.attacks++;
         scene.stylesUsed.add("melee");
         scene.weaponsUsed.add(loadout.weapon?.name ?? "hand");
