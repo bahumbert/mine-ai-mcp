@@ -43,6 +43,14 @@ export async function runEngagement(signal: AbortSignal, operations: EngagementO
           break;
         case "hide":
         case "evade": {
+          // A pursuit whose target's fight is already answered ends here, before any movement: the hunt picks another target.
+          // An answer records any failed attempt (a route, a limit, a stall), so the message names no single cause.
+          if (response.kind === "evade" && response.reason === "unreachable" && operations.purpose.kind === "pursuit")
+            return {
+              ...evidence,
+              kind: "unreachable",
+              observation: `[COMBAT_ANSWERED] The fight with #${operations.purpose.targetId} is answered for this scope after an earlier failed attempt; choose another target.`,
+            };
           const recovery = await operations.recover();
           signal.throwIfAborted();
           if (operations.observe().health <= 0) return { ...evidence, kind: "bot_died" };

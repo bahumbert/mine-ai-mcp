@@ -150,6 +150,52 @@ for (const cleanupFails of [false, true]) {
   });
 }
 
+test("a pursuit of a target whose fight is answered returns unreachable at once", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  const request = new AbortController();
+  let recovered = 0;
+  const base = operations(bot);
+  const outcome = await runEngagement(request.signal, {
+    ...base,
+    observe: () => ({ ...base.observe(), answeredFights: new Map([[7, 1]]) }),
+    fight: async () => {
+      throw new Error("An answered target must not be fought again.");
+    },
+    recover: async () => {
+      // Bounded: the old code evades the same answered target forever without yielding.
+      if (++recovered === 100) request.abort("evade loop");
+      return { kind: "recovered" };
+    },
+  });
+  if (outcome.kind !== "unreachable") throw new Error("Expected an unreachable outcome.");
+  assert.equal(outcome.targetId, 7);
+  assert.equal(
+    outcome.observation,
+    "[COMBAT_ANSWERED] The fight with #7 is answered for this scope after an earlier failed attempt; choose another target.",
+  );
+  assert.equal(recovered, 0, "the answered pursuit does not move");
+});
+
+test("a contact defence of an answered target keeps its evade", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let recovered = 0;
+  const base = operations(bot);
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...base,
+    purpose: { kind: "contact_defence", targetId: 7 },
+    observe: () => ({ ...base.observe(), answeredFights: new Map([[7, 1]]) }),
+    fight: async () => {
+      throw new Error("An answered target must not be fought again.");
+    },
+    recover: async () => {
+      recovered++;
+      return { kind: "blocked", observation: "The withdrawal stopped." };
+    },
+  });
+  assert.equal(recovered, 1, "the reflex's evade still runs once");
+  assert.equal(outcome.kind, "capability_blocked");
+});
+
 function operations(bot: Bot, minimumHealth = 12) {
   return {
     purpose: { kind: "pursuit", targetId: 7, minimumHealth } as const,

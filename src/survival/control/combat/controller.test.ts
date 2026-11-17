@@ -2699,6 +2699,42 @@ test("reports a target no route reached as unreachable rather than failed", asyn
   assert.equal(fixture.controlsCleared.count, 1);
 });
 
+test("an answered pursuit of a target returns unreachable without walking, and the next pursuit walks once the answer is forgotten", async () => {
+  const fixture = combatFixture(["iron_sword"], { targetDistance: 10 });
+  const survival = survivalResources();
+  survival.answered.remember(
+    { capability: "combat.fight", response: "fight", scope: "target:7", facts: () => null, permissions: () => null },
+    { kind: "no_route", why: "an earlier approach found no route" },
+  );
+  let navigations = 0;
+  const navigation = {
+    ...navigationFixture(),
+    cancel: () => undefined,
+    navigate: async () => {
+      navigations++;
+      return { status: "stopped", reason: "no path; closest node was 9,64,0", elapsedMs: 1 };
+    },
+  } as unknown as NavigationRuntime;
+  using perception = new CombatPerception(fixture.bot);
+  using footing = new FootingRecovery(fixture.bot, navigation.world);
+  const controller = createCombatController(fixture.bot, navigation, perception, footing, survival);
+
+  const answered = await controller.engage(7, new AbortController().signal, "pursue");
+  assert.equal(answered.kind, "unreachable");
+  assert.match(answered.kind === "unreachable" ? answered.observation : "", /^\[COMBAT_ANSWERED\]/);
+  assert.equal(navigations, 0, "the answered pursuit does not walk");
+  assert.deepEqual(fixture.controls, [], "the early return sets no movement control to release");
+
+  survival.answered.forget("combat.fight", "target:7");
+  const next = await controller.engage(7, new AbortController().signal, "pursue");
+  assert.equal(navigations, 1, "the next pursuit walks once");
+  assert.equal(next.kind, "unreachable");
+  assert.equal(
+    next.kind === "unreachable" ? next.observation : "",
+    "Combat approach stopped: no path; closest node was 9,64,0.",
+  );
+});
+
 for (const offset of [new Vec3(8, 0, 0), new Vec3(2, 5, 0)]) {
   test(`an enderman without reachable protection is neither chased nor shot at ${offset}`, async () => {
     const fixture = combatFixture(["iron_sword", "shield", "bow", "arrow"]);

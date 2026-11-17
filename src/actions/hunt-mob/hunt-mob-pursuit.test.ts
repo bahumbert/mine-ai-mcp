@@ -283,6 +283,74 @@ test("real pursuit reports selected target changes and the refusal that caused t
   assert.match(formatHuntMobResult(result), /retargets: 1/);
 });
 
+// The engagement's own answer is the fake here: the engagement's D3 test proves it returns this outcome.
+const answeredPursuit =
+  "[COMBAT_ANSWERED] The fight with #7 is answered for this scope after an earlier failed attempt; choose another target.";
+
+test("a hunt whose nearer target is answered moves on to the other loaded target", async () => {
+  const inventory = { count: 0 };
+  const type = minecraftData("1.21.4").entitiesByName.blaze.id;
+  const bot = huntBot([mob(7, type, "blaze", 3, "Hostile mobs"), mob(8, type, "blaze", 5, "Hostile mobs")], inventory);
+  const engaged: number[] = [];
+  const result = await huntMob(
+    bot,
+    { campSpawner: false, allowWithoutShield: true, observeForMs: 0, mobName: "blaze", dropName: "white_wool", count: 1 },
+    {},
+    {
+      ...dependencies(bot, inventory, []),
+      pursue: (pursuit) =>
+        hunt(bot, {
+          ...pursuit,
+          movements: {} as never,
+          route: async () => {
+            throw new Error("already in contact");
+          },
+        }),
+      engageTarget: async (target) => {
+        engaged.push(target.id);
+        return target.id === 7
+          ? { outcome: outcome("unreachable", 0, { observation: answeredPursuit }), deathPosition: null }
+          : died(2, 5);
+      },
+    },
+  );
+  assert.deepEqual(engaged, [7, 8]);
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.hunt.targetChanges[0]?.toTargetId, 8);
+  assert.match(result.hunt.targetChanges[0]?.reason ?? "", /\[COMBAT_ANSWERED\]/);
+});
+
+test("a hunt whose only target is answered tries it twice without moving, then settles targets_unreachable", async () => {
+  const inventory = { count: 0 };
+  const type = minecraftData("1.21.4").entitiesByName.blaze.id;
+  const bot = huntBot([mob(7, type, "blaze", 3, "Hostile mobs")], inventory);
+  const engaged: number[] = [];
+  const result = await huntMob(
+    bot,
+    { campSpawner: false, allowWithoutShield: true, observeForMs: 0, mobName: "blaze", dropName: "white_wool", count: 1 },
+    {},
+    {
+      ...dependencies(bot, inventory, []),
+      pursue: (pursuit) =>
+        hunt(bot, {
+          ...pursuit,
+          movements: {} as never,
+          route: async () => {
+            throw new Error("already in contact");
+          },
+        }),
+      engageTarget: async (target) => {
+        engaged.push(target.id);
+        return { outcome: outcome("unreachable", 0, { observation: answeredPursuit }), deathPosition: null };
+      },
+    },
+  );
+  assert.deepEqual(engaged, [7, 7]);
+  assert.deepEqual({ x: bot.entity.position.x, z: bot.entity.position.z }, { x: 0, z: 0 });
+  assert.equal(result.status, "failed");
+  assert.equal(result.termination, "targets_unreachable");
+});
+
 test("publishes the action as an intentional destructive task", () => {
   const action = createCollectMobDropAction(
     huntBot([], { count: 0 }),
