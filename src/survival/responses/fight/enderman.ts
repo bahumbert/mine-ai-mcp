@@ -5,15 +5,15 @@ import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { observedEyeHeight } from "../../../world/block-visibility.js";
 import { clearCombatRay } from "../../../world/entity-geometry.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
-import { tickBudgetWall, tickBudgetWallMs } from "../../control/combat/progress.js";
+import { tickBudgetWallMs } from "../../control/combat/progress.js";
 import { positionThreat } from "../../perception/combat/observations.js";
 import { roofLurePath, type RoofPosition } from "../../positioning/combat/planner.js";
-import type { AttemptBudget, ProgressBudget } from "../../state/budgets.js";
+import type { ProgressBudget } from "../../state/budgets.js";
 import { aimPoint } from "../../weapons/aim.js";
 import { canMeleeTarget } from "../../weapons/melee.js";
 export type EndermanRoof =
   | { readonly kind: "unprepared" | "unavailable" }
-  | { readonly kind: "provoking"; readonly plan: RoofPosition; readonly budget: AttemptBudget }
+  | { readonly kind: "provoking"; readonly plan: RoofPosition; readonly budget: ProgressBudget; readonly key: string }
   | { readonly kind: "committed"; readonly cell: Vec3; readonly budget: ProgressBudget; hits: number };
 
 import type { FightMovement } from "./movement.js";
@@ -23,7 +23,7 @@ import type { FightWeapons } from "./weapons.js";
 export type TacticalStep =
   { readonly kind: "ready" | "continue" } | { readonly kind: "outcome"; readonly outcome: CombatOutcome };
 /** Provocation, roof preparation and confirmed-damage windows for one quarry. */
-export class EndermanFight implements Disposable {
+export class EndermanFight {
   state: EndermanRoof = { kind: "unprepared" };
   readonly heldTarget: ProgressBudget | null;
   private motionPosition: Vec3 | null = null;
@@ -37,7 +37,7 @@ export class EndermanFight implements Disposable {
   ) {
     this.heldTarget =
       scene.heightLimitedTarget && scene.movement === "hold"
-        ? this.targetWindow("enderman_return", `target:${scene.targetId}`)
+        ? scene.endermanProgress.open("return", scene.targetId, null)
         : null;
   }
   /** The wait's two bounds as the model reads them: its physics ticks, or the wall time they stand for, whichever came first. */
@@ -45,34 +45,19 @@ export class EndermanFight implements Disposable {
     const ticks = this.scene.policy.combat.enderman_wait_ticks;
     return `${ticks} ticks or ${tickBudgetWallMs(ticks) / 1000} s`;
   }
-  readonly targetWindow = (name: string, scope: string) =>
-    this.scene.survival.budgets.progress({
-      name,
-      scope,
-      unit: "ticks",
-      limit: this.scene.policy.combat.enderman_wait_ticks,
-      measure: () => this.scene.elapsedTicks,
-      wall: tickBudgetWall(this.scene.policy.combat.enderman_wait_ticks),
-      progress: "confirmed_target_damage",
-      exhaustion:
-        "Return unreachable or reject this observed position; defensive hits and commands do not renew quarry progress.",
-    });
   readonly setRoof = (next: EndermanRoof) => {
-    if ("budget" in this.state) this.state.budget[Symbol.dispose]();
+    const previous = this.state;
+    if ("budget" in previous && (!("budget" in next) || previous.budget !== next.budget)) {
+      const key = previous.kind === "provoking" ? previous.key : `roof:${this.scene.targetId}:${previous.cell}`;
+      this.scene.endermanProgress.close(key);
+    }
     this.state = next;
   };
   readonly provokeRoof = (plan: RoofPosition): EndermanRoof => ({
     kind: "provoking",
     plan,
-    budget: this.scene.survival.budgets.attempt({
-      name: "enderman_provocation",
-      scope: `target:${this.scene.targetId}`,
-      unit: "ticks",
-      limit: this.scene.policy.combat.enderman_wait_ticks,
-      measure: () => this.scene.elapsedTicks,
-      wall: tickBudgetWall(this.scene.policy.combat.enderman_wait_ticks),
-      exhaustion: "Return without constructing a roof when no hostility was observed.",
-    }),
+    budget: this.scene.endermanProgress.open("provocation", this.scene.targetId, String(plan.cell)),
+    key: `provocation:${this.scene.targetId}:${plan.cell}`,
   });
   readonly reportRoof = (state: "waiting" | "hit" | "stopped", reason: string | null = null) => {
     if (this.state.kind !== "committed") return;
@@ -82,7 +67,7 @@ export class EndermanFight implements Disposable {
       cell: this.state.cell,
       state,
       confirmedHits: this.state.hits,
-      noProgressTicks: this.scene.policy.combat.enderman_wait_ticks - this.state.budget.remaining,
+      noProgressTicks: this.scene.endermanProgress.ticks(`roof:${this.scene.targetId}:${this.state.cell}`),
       reason,
     });
   };
@@ -90,7 +75,7 @@ export class EndermanFight implements Disposable {
     this.setRoof({
       kind: "committed",
       cell: this.scene.position.cell,
-      budget: this.targetWindow("enderman_roof", `target:${this.scene.targetId}:cell:${this.scene.position.cell}`),
+      budget: this.scene.endermanProgress.open("roof", this.scene.targetId, String(this.scene.position.cell)),
       hits: 0,
     });
     this.reportRoof("waiting");
@@ -109,10 +94,8 @@ export class EndermanFight implements Disposable {
       this.setRoof({ kind: "unprepared" });
   }
   confirmedHit() {
-    this.heldTarget?.observe("confirmed_target_damage");
     if (this.state.kind !== "committed") return;
     this.state.hits++;
-    this.state.budget.observe("confirmed_target_damage");
     this.reportRoof("hit");
   }
   /** Movement invites a stalled quarry; only damage renews the engagement budget. */
@@ -277,6 +260,14 @@ export class EndermanFight implements Disposable {
     }));
   }
   async prepare(guarded: boolean): Promise<TacticalStep> {
+    // A refused preparation must not bypass the hostile quarry's return window (P4-29 a8 C7).
+    if (this.heldTarget?.exhausted)
+      return {
+        kind: "outcome",
+        outcome: this.unreachableRoof(
+          `No confirmed damage to enderman#${this.scene.targetId} for ${this.waitLimit} during defensive hold.`,
+        ),
+      };
     // Existing protection already permits a safe melee provocation. Looking
     // through its ceiling for a neutral target's eyes would discard that roof.
     if (
@@ -407,7 +398,7 @@ export class EndermanFight implements Disposable {
               kind: "outcome",
               outcome: this.unreachableRoof(`Enderman lure obstructed before construction: ${planned.reason}`),
             };
-          this.state = { ...this.state, plan: planned.plan };
+          this.setRoof({ ...this.state, plan: planned.plan });
           return { kind: "continue" };
         }
         if (guarded) await this.weapons.raiseGuard();
@@ -475,20 +466,6 @@ export class EndermanFight implements Disposable {
         kind: "outcome",
         outcome: this.unreachableRoof("Enderman is out of reach and no protected fighting position was established."),
       };
-    // The same teleport-return window applies without a roof. Otherwise a
-    // refused construction leaves automatic defence holding the body forever.
-    if (this.heldTarget?.exhausted)
-      return {
-        kind: "outcome",
-        outcome: this.unreachableRoof(
-          `No confirmed damage to enderman#${this.scene.targetId} for ${this.waitLimit} during defensive hold.`,
-        ),
-      };
-
     return { kind: "ready" };
-  }
-  [Symbol.dispose]() {
-    this.heldTarget?.[Symbol.dispose]();
-    if ("budget" in this.state) this.state.budget[Symbol.dispose]();
   }
 }

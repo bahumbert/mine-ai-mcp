@@ -6,6 +6,7 @@ import { createMovements, createNavigationRuntime, type Navigate } from "../../.
 import { HuntTargeting, type HuntRequest } from "../../../navigation/processes/hunting/hunt-process.js";
 import { createFakeBot, type FakeEntitySpec } from "../../../test-support/fake-bot/index.js";
 import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
 import type { CombatDecision } from "../../control/combat/contract.js";
 import { CombatPerception } from "../../perception/combat/observations.js";
 import { survivalResources } from "../../state/resources.js";
@@ -39,7 +40,7 @@ function occupiedLedge(blocks = 32) {
   const scene = new FightScene({ bot, navigation, perception, footingRecovery, survival,
     policy: new SurvivalPolicyState(bot), reportDecision: event => decisions.push(event) },
   { target: bot.entities[7]!, movement: "pursue", signal, ownerSignal: signal, minimumHealth: 12 },
-  new ProtectedAttackProgress(survival.budgets, 7, 300));
+  new ProtectedAttackProgress(survival.budgets, 7, 300), new EndermanProgress(survival.budgets, 300));
   const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
   const movement = new FightMovement(scene, weapons);
   const roof = new EndermanFight(scene, weapons, movement);
@@ -50,7 +51,7 @@ function occupiedLedge(blocks = 32) {
     prepare: () => clock.settle(roof.prepare(false), 30_000),
     turn: () => clock.settle(runFightTurn(scene, weapons, movement, cover, roof, { kind: "act" }), 5_000),
     async close() {
-      observation.stopEffects(); observation.close(); roof[Symbol.dispose](); scene[Symbol.dispose]();
+      observation.stopEffects(); observation.close(); scene[Symbol.dispose](); scene.endermanProgress[Symbol.dispose]();
       perception[Symbol.dispose](); footingRecovery[Symbol.dispose](); survival.answered.clear();
       await navigation.close();
     },

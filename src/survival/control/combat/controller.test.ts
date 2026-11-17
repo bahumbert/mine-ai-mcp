@@ -33,6 +33,9 @@ import { PerchObservation } from "../../perception/combat/perch.js";
 import { FightMovement } from "../../responses/fight/movement.js";
 import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facing.js";
 import { monotonicNow } from "../../../utils/index.js";
+import { survivalResources } from "../../state/resources.js";
+import { ActionRunner } from "../../../session/action-runner.js";
+import { started, stubAction } from "../../../session/action-runner-fixtures.test.js";
 
 const goalTestWorld = new GoalTestWorld();
 const fixtureClocks = new Set<() => void>();
@@ -455,8 +458,8 @@ test("an unprotected defensive hold keeps its guard while an angry enderman retu
   assert.ok(fixture.clock.tick >= 40);
 });
 
-function protectedEndermanFixture(items: readonly string[] = ["iron_sword", "shield"], options: { readonly roof?: boolean } = {}) {
-  const fixture = combatFixture(items, { targetDistance: 8 });
+function protectedEndermanFixture(items: readonly string[] = ["iron_sword", "shield"], options: { readonly roof?: boolean; readonly ticksPerSecond?: number } = {}) {
+  const fixture = combatFixture(items, { targetDistance: 8, ticksPerSecond: options.ticksPerSecond });
   fixture.target.name = "enderman";
   fixture.target.height = 2.9;
   fixture.target.kind = "Hostile mobs";
@@ -472,6 +475,112 @@ function protectedEndermanFixture(items: readonly string[] = ["iron_sword", "shi
   if (options.roof !== false)
     for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) fixture.world.setCell(new Vec3(x, 66, z), "stone");
   return { ...fixture, navigation };
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  for (const renews of [false, true]) {
+    test(`Enderman roof progress survives a fireball every 120 fight ticks (${ticksPerSecond} tps, confirmed hit: ${renews})`, async () => {
+      const fixture = protectedEndermanFixture(undefined, { ticksPerSecond });
+      const { bot, combat, script } = fixture;
+      const survival = survivalResources();
+      using perception = new CombatPerception(bot);
+      perception.attackerIds.add(7);
+      using footing = new FootingRecovery(bot, fixture.navigation.world);
+      const controller = createCombatController(bot, fixture.navigation, perception, footing, survival);
+      const decisions: CombatDecision[] = [];
+      controller.onDecision(event => decisions.push(event));
+      const stop = new AbortController();
+      let fightTicks = 0;
+      let hitAt = 0;
+      script.onAttack = entity => {
+        if (entity.name === "fireball") fixture.entities.remove(entity.id);
+      };
+      const damage = (packet: { entityId: number; sourceCauseId: number }) => {
+        if (packet.entityId === 7 && packet.sourceCauseId === bot.entity.id + 1) hitAt = fightTicks;
+      };
+      bot._client.on("damage_event", damage);
+      script.onWait = () => {
+        if (!survival.budgets.snapshot().some(window => window.name === "enderman_roof")) return;
+        fightTicks++;
+        if (renews && fightTicks === 250) fixture.target.position.set(2, 64, 0.5);
+        if (hitAt) fixture.target.position.set(8, 64, 0.5);
+        if (fightTicks % 120 === 0)
+          combat.launchFireball(bot.entity.position.offset(6, 1, 0), new Vec3(-0.3, 0, 0));
+        if (fightTicks >= 1_200) stop.abort("No unreachable settlement after 1200 fight ticks.");
+      };
+      try {
+        const outcome = await controller.engage(7, stop.signal, "pursue");
+        assert.equal(outcome.kind, "unreachable", JSON.stringify({ outcome, fightTicks,
+          roofs: decisions.filter(event => event.kind === "roof_engagement") }));
+        assert.match("observation" in outcome ? outcome.observation : "", /300 ticks or 30 s from the roof/);
+        const waits = decisions.filter((event): event is Extract<CombatDecision, { kind: "roof_engagement" }> =>
+          event.kind === "roof_engagement" && event.state === "waiting");
+        assert.ok(waits.length >= 3);
+        for (let index = 1; index < waits.length; index++) {
+          const previous = waits[index - 1]!;
+          const current = waits[index]!;
+          assert.equal(current.targetId, previous.targetId);
+          assert.deepEqual(current.cell, previous.cell);
+          const between = decisions.slice(decisions.indexOf(previous) + 1, decisions.indexOf(current));
+          const ended = between.findIndex(event => event.kind === "engagement" && event.state === "ended" && event.outcome === "response_required");
+          const deflect = between.findIndex(event => event.kind === "response" &&
+            (event.evidence as { decision?: { kind?: string } } | null)?.decision?.kind === "deflect");
+          assert.ok(ended >= 0 && deflect > ended, "response_required -> selected deflect -> reopened roof");
+          if (!between.some(event => event.kind === "roof_engagement" && event.state === "hit"))
+            assert.ok(current.noProgressTicks > previous.noProgressTicks, JSON.stringify({ previous, current }));
+        }
+        assert.ok(fightTicks >= (renews ? hitAt + 300 : 300));
+        assert.ok(fightTicks <= (renews ? hitAt + 310 : 310), `fight ticks ${fightTicks}, hit ${hitAt}`);
+        if (renews) assert.ok(hitAt >= 250 && hitAt < 270, `confirmed damage at ${hitAt}`);
+        assert.equal(bot.time.age, 24_000 + Math.floor(fixture.clock.tick * ticksPerSecond / 400) * 20,
+          `fake ${fixture.clock.tick * 50} ms; world age packet at ${ticksPerSecond} tps`);
+        assert.deepEqual(survival.budgets.snapshot(), []);
+      } finally { bot._client.off("damage_event", damage); }
+    });
+  }
+
+  test(`a refused Enderman roof cannot bypass the defensive return window and the waiting walk finishes (${ticksPerSecond} tps)`, async () => {
+    const fixture = protectedEndermanFixture(["iron_sword", "shield", "cobblestone"], { roof: false, ticksPerSecond });
+    fixture.inventory.slots[9 + 2]!.count = 64;
+    const navigation = { ...fixture.navigation, navigate: async () => ({ status: "stopped" as const,
+      reason: "No reachable supporting face", elapsedMs: 0 }) };
+    const controller = controllerAfterObservedHit(fixture, navigation);
+    const decisions: CombatDecision[] = [];
+    controller.onDecision(event => decisions.push(event));
+    const stop = new AbortController();
+    fixture.script.onWait = () => {
+      // A moving quarry reopens geometry, as the failed construction in t00027 did.
+      fixture.target.position.set(fixture.clock.tick % 2 ? 8 : -8, 64, 0.5);
+      if (fixture.clock.tick >= 1_200) stop.abort("Roof preparation retried past 1200 ticks.");
+    };
+    const runner = new ActionRunner();
+    const runs = { count: 0 };
+    const walk = runner.run(stubAction(async (_request, context) => {
+      if (++runs.count === 1) {
+        await new Promise<void>(resolve => context.signal!.addEventListener("abort", () => resolve(), { once: true }));
+        return { status: "cancelled", error: "interrupted" };
+      }
+      fixture.bot.entity.position.set(12.5, 64, 0.5);
+      return { status: "succeeded" };
+    }, { kind: "resumable_task" }), { block_name: "stone" });
+    await started(runs, 1);
+    const claim = runner.claim("hostile_reflex", "Enderman contact", async () => ({
+      value: await controller.engage(7, stop.signal, "hold"), continuation: { kind: "resume" },
+    }));
+    assert.equal(claim.kind, "claimed");
+    if (claim.kind !== "claimed") return;
+    const outcome = await claim.outcome;
+    assert.equal(outcome.kind, "unreachable", JSON.stringify({ outcome,
+      preparations: decisions.filter(event => event.kind === "roof_prepared").slice(-3), tick: fixture.clock.tick }));
+    assert.match("observation" in outcome ? outcome.observation : "", /300 ticks or 30 s during defensive hold/);
+    assert.ok(decisions.some(event => event.kind === "roof_prepared" && event.stopped?.includes("No reachable supporting face")),
+      JSON.stringify(decisions.filter(event => event.kind === "roof_prepared")));
+    assert.ok(fixture.clock.tick >= 300 && fixture.clock.tick < 330);
+    assert.equal(controller.activeEngagement(), null);
+    assert.equal((await walk).result.status, "succeeded", "the suspended walk resumes after the body is released");
+    assert.equal(runs.count, 2);
+    assert.equal(fixture.bot.entity.position.x, 12.5);
+  });
 }
 
 test("an existing roof admits melee provocation when the target's eyes are occluded", async () => {
@@ -1566,6 +1675,7 @@ interface CombatFixtureOptions {
   readonly feet?: Vec3;
   readonly timeOfDay?: number;
   readonly groundY?: number | null;
+  readonly ticksPerSecond?: number;
 }
 
 /** The hands: each call is logged, then the fake does what the game does with it (a bow shot needs the draw the server counts). */
@@ -1701,7 +1811,7 @@ function combatFixture(items: readonly string[], options: CombatFixtureOptions =
   const harness = createFakeBot({
     position: options.feet ?? new Vec3(0, 64, 0),
     ...("groundY" in options && { groundY: options.groundY }),
-    ...(options.timeOfDay !== undefined && { server: { timeOfDay: options.timeOfDay } }),
+    server: { timeOfDay: options.timeOfDay, ticksPerSecond: options.ticksPerSecond },
     slots,
     entities: { 7: { name: "zombie", position: new Vec3(options.targetDistance ?? 2, 64, 0) } },
   });

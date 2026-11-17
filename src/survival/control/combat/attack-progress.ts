@@ -3,7 +3,7 @@ import type { Budgets, ProgressBudget } from "../../state/budgets.js";
 import { tickBudgetWallMs } from "./progress.js";
 
 /** Time spent at one refuge: its physics ticks, and the wall time those ticks would span (`tickBudgetWallMs`). */
-class RefugeClock {
+export class RefugeClock {
   ticks = 0;
   #bankedMs = 0;
   #runningSince: number | null = null;

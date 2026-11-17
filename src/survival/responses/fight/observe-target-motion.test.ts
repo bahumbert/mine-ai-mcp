@@ -9,16 +9,19 @@ import type { FightMovement } from "./movement.js";
 import { observeFight } from "./observe.js";
 import { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
+import { Budgets } from "../../state/budgets.js";
 
 /**
  * The fight's physics-tick observer over a stub scene (as in melee-turn.test.ts: only what the tick reads is stubbed),
  * with the scene's own `countTick`: a skeleton walking 0.2 b/tick must show up as the target's velocity.
  */
 test("each physics tick of a fight records where its target stands, so the bow leads a walking skeleton", () => {
+  using endermanProgress = new EndermanProgress(new Budgets(), 300);
   const { bot } = createFakeBot({ position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "skeleton", position: new Vec3(12.5, 64, 0.5) } } });
   const target = bot.entities[8]!;
   const scene = {
-    bot, target, elapsedTicks: 0, targetMotion: new TargetMotion(), countTick: FightScene.prototype.countTick,
+    bot, target, endermanProgress, elapsedTicks: 0, targetMotion: new TargetMotion(), countTick: FightScene.prototype.countTick,
     navigation: { onEvent: () => () => {} },
     tactics: { observe: () => {} }, observeBoundary: () => {},
     execution: { tick: () => {}, progress: { milestone: () => {}, observe: () => null } },

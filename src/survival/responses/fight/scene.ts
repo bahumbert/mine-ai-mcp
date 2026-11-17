@@ -5,6 +5,7 @@ import { type NavigationRuntime } from "../../../navigation/index.js";
 import { entityMetadata } from "../../../world/end-fight.js";
 import { selectPolicyFood } from "../../perception/food.js";
 import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
 import type { CombatDecision, CombatOutcome, CombatResult, CombatStyle } from "../../control/combat/contract.js";
 import type { FightOutcome } from "../../control/combat/engagement.js";
 import { CombatExecution } from "../../control/combat/execution.js";
@@ -72,6 +73,7 @@ export class FightScene implements Disposable {
     readonly environment: FightEnvironment,
     readonly request: FightRequest,
     readonly protectedProgress: ProtectedAttackProgress,
+    readonly endermanProgress: EndermanProgress,
   ) {
     this.#target = request.target;
     this.tactics = new CombatTactics(AbortSignal.any([request.signal, this.dragonDefense.signal, this.responseRequired.signal]));
@@ -229,6 +231,7 @@ export class FightScene implements Disposable {
       entityMetadata(this.bot, this.requestedTarget, "creepy") === true);
   [Symbol.dispose]() {
     this.protectedProgress.leave();
+    this.endermanProgress.leave();
     this.responsiveness[Symbol.dispose]();
   }
 }

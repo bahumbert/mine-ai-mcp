@@ -10,6 +10,8 @@ import type { FightMovement } from "./movement.js";
 import { FightWeapons } from "./weapons.js";
 import { selectMeleeLoadout } from "../../weapons/equipment.js";
 import { familyIndexOf } from "../../../world/item-families.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
+import { Budgets } from "../../state/budgets.js";
 
 /** Run `action` while the clock turns one physics tick at a time, until it settles; its outcome is returned as it came. */
 async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
@@ -22,6 +24,7 @@ async function drive<T>(clock: FakeClock, action: Promise<T>): Promise<T> {
 
 for (const terrain of ["level", "late", "stationary", "gap", "blocked", "hold", "unshielded", "cancel", "knockback"] as const)
   test(`roof bait returns to the centre and respects ${terrain}`, async () => {
+    using endermanProgress = new EndermanProgress(new Budgets(), 300);
     const { bot, clock } = createFakeBot({ position: new Vec3(0.5, 0, 0.5), entities: { 7: { name: "enderman", position: new Vec3(10, 0, 0.5) } } });
     const world = new MemoryWorld();
     for (let x = -1; x <= 5; x++)
@@ -33,7 +36,7 @@ for (const terrain of ["level", "late", "stationary", "gap", "blocked", "hold", 
     const setControlState = bot.setControlState.bind(bot);
     bot.setControlState = (key, value) => { if (key in controls) Reflect.set(controls, key, value); setControlState(key, value); };
     let stopped = 0, resumed = 0, maximumX = 0.5, ticks = 0;
-    const scene = { bot, target: bot.entities[7]!,
+    const scene = { bot, target: bot.entities[7]!, endermanProgress,
       targetId: 7, movement: terrain === "hold" ? "hold" : "pursue", navigation: { world },
       signal: controller.signal, settled: () => false,
       elapsedTicks: 20, position: { hasHeightProtection: () => true, at: () => bot.entity.position.distanceTo(new Vec3(0.5, 0, 0.5)) < 0.2 },
