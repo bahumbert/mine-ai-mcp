@@ -7,6 +7,9 @@ export type ReflexName = (typeof REFLEX_PRIORITY)[number];
 export type ResponseContinuation = Exclude<Continuation, { kind: "hold" }>
   | { readonly kind: "hold"; readonly reason: string };
 
+/** The observed reason a held threat ended, or the first observation that still blocks a resume. */
+export type HeldThreatEnd = { readonly ended: string } | { readonly notEnded: string };
+
 export type DangerObservation<Danger> =
   | { readonly kind: "observed"; readonly danger: Danger; readonly evidence: Facts }
   | { readonly kind: "unknown"; readonly missing: string }
@@ -70,7 +73,7 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   act(response: Response, signal: AbortSignal): Promise<Outcome>;
   continuation(outcome: Outcome): ResponseContinuation;
   /** Positive evidence that a held response's threat ended at this non-response decision. */
-  heldEnded?(held: Response, observed: Danger | null, decision: "none_observed" | Facts): string | null;
+  heldEnded?(held: Response, observed: Danger | null, decision: "none_observed" | Facts): HeldThreatEnd | null;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
   /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureTicks`. */

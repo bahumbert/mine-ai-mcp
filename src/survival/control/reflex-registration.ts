@@ -6,6 +6,7 @@ import type { ActionRunner } from "../../session/action-runner.js";
 import type { Answered, Facts, TemporalPremise } from "../state/answered.js";
 import {
   type DangerObservation,
+  type HeldThreatEnd,
   type ReflexDefinition,
   type ReflexLimits,
   type ReflexName,
@@ -81,6 +82,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   #ticks = 0;
   #holding = false;
   #heldResponse: Response | null = null;
+  #notEnded: string | null = null;
   readonly #stopObservingHold: () => void;
   readonly #limitsByScope = new Map<string, number>();
 
@@ -95,6 +97,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
       host.publish({ kind: "phase", reflex: definition.name, evidence: {
         phase: "hold", outcome: transition.outcome, worldAge: transition.worldAge, generation: transition.generation,
         resumed: transition.resumed,
+        ...(transition.outcome === "released" && this.#notEnded !== null ? { notEnded: this.#notEnded } : {}),
       } });
     });
   }
@@ -339,15 +342,20 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   /** A non-response ends this reflex's waiting generation; a busy claim leaves it for the next tick. */
-  #releaseHold(decision: string, ended: string | null = null): void {
+  #releaseHold(decision: string, evidence: HeldThreatEnd | null = null): void {
     if (!this.#holding) return;
-    this.host.runner.releaseHold(this.definition.name, decision, ended);
-    this.#holding = false;
-    this.#heldResponse = null;
+    this.#notEnded = evidence && "notEnded" in evidence ? evidence.notEnded : null;
+    try {
+      this.host.runner.releaseHold(this.definition.name, decision, evidence && "ended" in evidence ? evidence.ended : null);
+    } finally {
+      this.#notEnded = null;
+      this.#holding = false;
+      this.#heldResponse = null;
+    }
   }
 
   /** Consult only the response that offered the current waiting generation. */
-  #heldEnded(observed: Danger | null, decision: "none_observed" | Facts): string | null {
+  #heldEnded(observed: Danger | null, decision: "none_observed" | Facts): HeldThreatEnd | null {
     return this.#holding && this.#heldResponse !== null
       ? this.definition.heldEnded?.(this.#heldResponse, observed, decision) ?? null : null;
   }

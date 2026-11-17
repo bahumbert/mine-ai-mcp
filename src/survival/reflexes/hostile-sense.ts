@@ -9,7 +9,7 @@ import { HOSTILE_OBSERVATION_RANGE, isHostile, observeHostileContact } from "../
 import { combatDecisionEvidence, decideCombatResponse } from "../policy/combat/decision.js";
 import { recoveryHealth } from "../policy/combat/health.js";
 import type { HostileResponse } from "../policy/combat/response.js";
-import type { ResponseDecision } from "../control/contract.js";
+import type { HeldThreatEnd, ResponseDecision } from "../control/contract.js";
 import { decideHostileReflex } from "../policy/combat/reflex-decision.js";
 import { OFF_HAND_SLOT, shieldInOffHand } from "../weapons/equipment.js";
 import { carriedShields, type HostileScene } from "./hostile-scene.js";
@@ -142,15 +142,21 @@ export function senseHostile(scene: HostileScene) {
 type HostileDanger = NonNullable<ReturnType<typeof senseHostile>>["danger"];
 
 /** A non-response can resume a held walk only when the current observations show its threat ended. */
-export function heldThreatEnded(scene: HostileScene, held: HostileResponse, observed: HostileDanger | null): string | null {
-  if (incomingFireball(scene.bot, Infinity) || incomingShieldProjectiles(scene.bot).length) return null;
-  if (observed === null) return "no projectile in flight, no hostile tracked";
+export function heldThreatEnded(scene: HostileScene, held: HostileResponse, observed: HostileDanger | null): HeldThreatEnd {
+  // A still-incoming projectile beyond the contact range must not buy a short resume between responses.
+  const fireball = incomingFireball(scene.bot, Infinity);
+  if (fireball) return { notEnded: `projectile ${fireball.name}#${fireball.id} incoming at ${fireball.position.distanceTo(scene.bot.entity.position).toFixed(1)}` };
+  const shieldProjectile = incomingShieldProjectiles(scene.bot)[0];
+  if (shieldProjectile) return { notEnded: `shield projectile ${shieldProjectile.name}#${shieldProjectile.id}` };
+  if (observed === null) return { ended: "no projectile in flight, no hostile tracked" };
   const targets = "targetId" in held ? [{ id: held.targetId,
     name: held.threats.find((threat) => threat.id === held.targetId)?.name ?? scene.bot.entities[held.targetId]?.name ?? "entity" }]
     : held.threats;
-  if (!targets.length || targets.some(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid)) return null;
-  return ["no projectile in flight", ...targets.map(({ id, name }) =>
-    `target ${name}#${id} ${scene.perception.resolvedIds.has(id) ? "dead" : "gone"}`)].join(", ");
+  if (!targets.length) return { notEnded: "hostile tracked" };
+  const alive = targets.find(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid && held.kind !== "deflect");
+  if (alive) return { notEnded: `target ${alive.name}#${alive.id} alive` };
+  return { ended: ["no projectile in flight", ...targets.map(({ id, name }) =>
+    `target ${name}#${id} ${scene.perception.resolvedIds.has(id) ? "dead" : scene.bot.entities[id]?.isValid ? "passed" : "gone"}`)].join(", ") };
 }
 
 export function hostileDecisionFacts({
