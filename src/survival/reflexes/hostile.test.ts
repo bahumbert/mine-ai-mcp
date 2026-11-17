@@ -26,6 +26,7 @@ import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/r
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import { responseScope } from "../control/combat/scopes/response.js";
+import { isIncomingArrow } from "../perception/combat/shield-projectiles.js";
 import { attachHostileReflex } from "./hostile.js";
 
 // The unreachable premise counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 600 ticks from the age cached when the
@@ -245,6 +246,7 @@ test("an automatic target disappearing resumes the original request without clai
 /** What a test sets on the fake bot at the start, and how its runner is configured (its clock is the fake bot's). */
 interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food" | "server"> {
   readonly runner?: Omit<ActionRunnerOptions, "clock">;
+  readonly onHeldEnded?: () => void;
 }
 
 /** The recorded encounters, oldest first, as `response -> outcome`. */
@@ -257,6 +259,18 @@ function recordedEncounters(data: SqlBotData): string[] {
       const payload = JSON.parse(String(row.payload_json)) as { response: string; outcome: string };
       return `${payload.response} -> ${payload.outcome}`;
     });
+}
+
+/** Observe the real callback without replacing its threat evidence or registration behavior. */
+function watchHeldEnded(driver: ReflexDriver, onHeldEnded: () => void): void {
+  const register = driver.register.bind(driver);
+  driver.register = (definition) => {
+    const heldEnded = definition.heldEnded;
+    return register(heldEnded ? { ...definition, heldEnded: (held, observed, decision) => {
+      onHeldEnded();
+      return heldEnded(held, observed, decision);
+    } } : definition);
+  };
 }
 
 function reflexFixture(engage: CombatController["engage"], navigate: NavigationRuntime["navigate"] = async () => ({ status: "completed", elapsedMs: 0 }), options: FixtureOptions = {}) {
@@ -293,6 +307,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   const controller = engagingCombat(bot, engage);
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const perception = new CombatPerception(bot);
+  if (options.onHeldEnded) watchHeldEnded(driver, options.onHeldEnded);
   const attached = attachHostileReflex(bot, driver, navigation, controller, perception);
   const status = new SurvivalObserver(bot, runner, driver, controller);
   const receipts = attachSurvivalReceipts(bot, data, runner, driver, controller, status, navigation);
@@ -336,21 +351,26 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
 type ReflexFixture = ReturnType<typeof reflexFixture>;
 
 /** A resumable journey around real hostile decisions; only its navigation and fight results are contract stubs. */
-function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "removed" | "hide" | "hunger") {
+function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "removed" | "hide" | "hunger" | "deflect" | "higher",
+  entities: Record<number, FakeEntitySpec> = { 7: hostile("zombie", 3) }, onHeldEnded?: () => void) {
   let finishEvade!: () => void;
   let reachedEvade!: () => void;
   const entered = new Promise<void>((resolve) => { reachedEvade = resolve; });
   const route = new Promise<void>((resolve) => { finishEvade = resolve; });
-  const fixture = reflexFixture(async (id) => {
+  const fixture = reflexFixture(async (id, signal) => {
+    if (ending === "higher") {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { ...died(id), kind: "cancelled" };
+    }
     if (ending === "return" || ending === "hunger")
       return { ...died(id), kind: "capability_blocked", reason: "policy", observation: "Pursuit prohibited" };
     fixture.entities.remove(id);
     return died(id);
   }, async () => { reachedEvade(); await route; return { status: "stopped", reason: "no path", elapsedMs: 0 }; },
   { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
-    entities: { 7: hostile("zombie", 3) }, health: 11, food: ending === "hunger" ? 10 : 20 });
+    entities, health: 11, food: ending === "hunger" ? 10 : 20, onHeldEnded });
   let attempts = 0;
-  const phases: { phase: string; outcome: string; worldAge: number; generation: number }[] = [];
+  const phases: { phase: string; outcome: string; worldAge: number; generation: number; resumed: boolean }[] = [];
   fixture.driver.onTransition((event) => {
     if (event.kind === "phase" && event.reflex === "hostile_reflex")
       phases.push(event.evidence as typeof phases[number]);
@@ -372,7 +392,14 @@ function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "remo
     const pending = fixture.runner.run(action, {});
     await flush();
     fixture.tick();
-    await fixture.clock.settle(entered, 1_000);
+    if (ending === "deflect") {
+      await flush();
+      assert.equal(fixture.observer.activeResponse(), "deflect");
+      fixture.entities.remove(7);
+      fixture.tick();
+      await flush();
+      assert.equal(phases.at(-1)?.outcome, "held");
+    } else await fixture.clock.settle(entered, 1_000);
     return { pending, state: watch(pending) };
   }, async [Symbol.asyncDispose]() {
     fixture.runner.cancelActive("End chain test");
@@ -382,10 +409,171 @@ function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "remo
   } };
 }
 
+/** Request cleanup is checked before fixture disposal can retire any retained response listener. */
+function watchJourneyListeners(fixture: ReflexFixture): () => void {
+  const botAdded = listenersAddedSince(fixture.bot);
+  const clientAdded = listenersAddedSince(fixture.bot._client);
+  return () => {
+    for (const event of ["physicsTick", "entityHurt", "entityDead", "entityGone", "time", "health", "death", "game", "mount", "dismount", "end"])
+      assert.equal(botAdded(event), 0, `request retained bot ${event} listener`);
+    for (const event of ["entity_status", "explosion"])
+      assert.equal(clientAdded(event), 0, `request retained client ${event} listener`);
+  };
+}
+
+/** A visible incoming fireball; its direction and size are read through the real projectile readers. */
+function incomingBall(x: number): FakeEntitySpec {
+  return { name: "fireball", kind: "Projectiles", position: new Vec3(x, 65, 0), velocity: new Vec3(-0.5, 0, 0) };
+}
+
+type HeldEvidenceCase = "deflect_gone" | "deflect_incoming" | "deflect_far_answered" | "arrow" | "arrow_gone"
+  | "alive" | "dead" | "mixed" | "all_dead" | "combat" | "stand_down" | "cancel";
+
+/** Change only server observations or existing controller contracts after the held response has ended. */
+async function arrangeHeldEvidence(fixture: ReturnType<typeof heldJourney>, scenario: HeldEvidenceCase) {
+  if (scenario.startsWith("deflect")) {
+    fixture.entities.spawn({ id: 9, ...hostile("magma_cube", 12) });
+    if (scenario !== "deflect_gone") {
+      fixture.entities.spawn({ id: 8, ...incomingBall(scenario === "deflect_incoming" ? 12 : 20) });
+      if (scenario === "deflect_far_answered") fixture.driver.answered.remember(
+        responseScope(fixture.bot, () => fixture.controller.policy.effective, "deflect", 8),
+        { kind: "execution_failed", why: "Already answered this incoming fireball" });
+    }
+    return;
+  }
+  fixture.finishEvade();
+  await flush();
+  assert.equal(fixture.phases.at(-1)?.outcome, "held");
+  if (scenario === "alive" || scenario === "mixed") fixture.bot.entities[scenario === "mixed" ? 8 : 7]!.position.x = 12;
+  if (scenario === "dead" || scenario === "mixed" || scenario === "all_dead") {
+    fixture.combat.kill(7);
+    if (scenario === "all_dead") fixture.combat.kill(8);
+    fixture.entities.spawn({ id: 9, ...hostile("magma_cube", 12) });
+  }
+  if (scenario === "arrow" || scenario === "arrow_gone") {
+    fixture.entities.remove(7);
+    const arrow = fixture.entities.spawn({ id: 8, name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1) });
+    assert.equal(isIncomingArrow(fixture.bot, arrow), true);
+    if (scenario === "arrow_gone") fixture.entities.remove(8);
+  }
+  if (scenario === "combat") {
+    fixture.entities.remove(7);
+    fixture.entities.spawn({ id: 9, ...hostile("magma_cube", 12) });
+    fixture.controller.activeEngagement = () => ({ kind: "mob", targetId: 9 });
+  }
+  if (scenario === "stand_down") await fixture.controller.policy.edit({ operation: "set",
+    expected_revision: fixture.controller.policy.snapshot().revision,
+    changes: { combat: { retreat: false, melee: false, bow: false } }, lifetime: { kind: "session" }, reason: "Stand down while a threat remains" });
+  if (scenario === "cancel") {
+    assert.equal(fixture.runner.cancelRequest(fixture.runner.request()!.id, "Cancel the held journey").kind, "cancellation_requested");
+    fixture.entities.remove(7);
+  }
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  for (const scenario of ["deflect_gone", "deflect_incoming", "deflect_far_answered", "arrow", "arrow_gone",
+    "alive", "dead", "mixed", "all_dead", "combat", "stand_down", "cancel"] as const) {
+    test(`held threat evidence ${scenario} decides the walk at ${ticksPerSecond} tps`, async () => {
+      const deflect = scenario.startsWith("deflect");
+      const entities: Record<number, FakeEntitySpec> = { 7: deflect ? incomingBall(12) : hostile(scenario.startsWith("arrow") ? "skeleton" : "zombie", 3) };
+      if (scenario === "mixed" || scenario === "all_dead") entities[8] = hostile("zombie", -3);
+      await using fixture = heldJourney(ticksPerSecond, deflect ? "deflect" : "removed", entities);
+      using _clock = fixture.clock.install();
+      const baseline = fixture.clock.pendingGlobalTimers();
+      const assertListeners = watchJourneyListeners(fixture);
+      const { pending, state } = await fixture.start();
+      await arrangeHeldEvidence(fixture, scenario);
+      let settlements = 0;
+      void pending.then(() => settlements++);
+      fixture.tick();
+      await flush();
+      if (scenario === "deflect_incoming") {
+        assert.equal(state.over, false);
+        assert.equal(fixture.phases.at(-1)?.outcome, "attached");
+        assert.equal(fixture.observer.activeResponse(), "deflect");
+        assert.equal(fixture.attempts(), 1);
+        fixture.runner.cancelRequest(fixture.runner.request()!.id, "End the attached deflection");
+        fixture.entities.remove(8);
+        fixture.tick();
+      }
+      const output = await fixture.clock.settle(pending, 1_000);
+      const resumes = ["deflect_gone", "arrow_gone", "dead", "all_dead"].includes(scenario);
+      assert.equal(output.result.status, resumes ? "succeeded" : "cancelled");
+      assert.equal(fixture.attempts(), resumes ? 2 : 1);
+      assert.equal(fixture.clock.now(), 0, "the deciding body tick needs no grace period");
+      assert.equal(fixture.bot.time.age, 1_000);
+      assert.equal(fixture.phases.at(-1)?.resumed, resumes);
+      const receipt = output.interruptions?.at(-1) ?? "";
+      if (resumes) assert.match(receipt, /saw the threat end \(no projectile in flight, (?:no hostile tracked|target .+)\): the walk resumes\.$/);
+      if (scenario === "deflect_gone") assert.ok(receipt.endsWith("target fireball#7 gone): the walk resumes."));
+      if (scenario === "dead") assert.ok(receipt.endsWith("target zombie#7 dead): the walk resumes."));
+      if (scenario === "all_dead") assert.ok(receipt.endsWith("target zombie#7 dead, target zombie#8 dead): the walk resumes."));
+      if (scenario === "alive" || scenario === "mixed" || scenario === "combat" || scenario === "deflect_far_answered")
+        assert.match(receipt, /chose no further response \(handled\)\.$/);
+      if (scenario === "arrow") assert.match(receipt, /chose no further response \(none_observed\)\.$/);
+      if (scenario === "stand_down") assert.match(receipt, /chose no further response \(stand_down\)\.$/);
+      assert.equal(settlements, 1);
+      for (const entity of Object.values(fixture.bot.entities)) if (entity.id !== fixture.bot.entity.id) fixture.entities.remove(entity.id);
+      const next = await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000);
+      assert.equal(next.result.status, "succeeded");
+      const phases = fixture.phases.length;
+      await fixture.clock.advance(100_000, 1_000);
+      assert.equal(fixture.phases.length, phases);
+      assert.equal(fixture.clock.pendingGlobalTimers(), baseline);
+      assertListeners();
+    });
+  }
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  for (const ended of [true, false]) {
+    test(`held threat evidence survives an attached fight yielding to footing, threat ended ${ended} (${ticksPerSecond} tps)`, async () => {
+      let evidenceCalls = 0;
+      await using fixture = heldJourney(ticksPerSecond, "higher", undefined, () => evidenceCalls++);
+      using _clock = fixture.clock.install();
+      const assertListeners = watchJourneyListeners(fixture);
+      const { pending, state } = await fixture.start();
+      fixture.finishEvade();
+      await flush();
+      fixture.tick();
+      await flush();
+      assert.equal(fixture.observer.activeResponse(), "fight");
+      assert.equal(fixture.phases.at(-1)?.outcome, "attached");
+      const higher = fixture.runner.claim("recover_footing", "Landing before combat continues",
+        async () => ({ value: null, continuation: { kind: "resume" } }));
+      assert.equal(higher.kind, "claimed");
+      if (higher.kind === "claimed") await higher.outcome;
+      await flush();
+      assert.equal(state.over, false, "footing resume cannot itself decide the hostile hold");
+      assert.equal(fixture.phases.at(-1)?.outcome, "held");
+      assert.equal(fixture.phases.at(-1)?.generation, 2);
+      if (ended) fixture.entities.remove(7);
+      else fixture.bot.entities[7]!.position.x = 12;
+      fixture.tick();
+      const output = await fixture.clock.settle(pending, 1_000);
+      assert.equal(output.result.status, ended ? "succeeded" : "cancelled");
+      assert.equal(fixture.attempts(), ended ? 2 : 1);
+      assert.equal(evidenceCalls, 1);
+      assert.equal(fixture.phases.at(-1)?.resumed, ended);
+      assert.equal(fixture.clock.now(), 0);
+      assert.equal(fixture.bot.time.age, 1_000);
+      assert.match(output.interruptions!.at(-1)!, ended
+        ? /saw the threat end \(no projectile in flight, no hostile tracked\): the walk resumes\.$/
+        : /chose no further response \(handled\)\.$/);
+      if (!ended) fixture.entities.remove(7);
+      assert.equal((await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000)).result.status, "succeeded");
+      await fixture.clock.advance(100_000, 1_000);
+      assertListeners();
+    });
+  }
+}
+
 for (const ticksPerSecond of [20, 10]) {
   test(`a dimension change resumes a held journey when the driver observes game before the runner (${ticksPerSecond} tps)`, async () => {
-    await using fixture = heldJourney(ticksPerSecond, "resume");
+    let evidenceChecks = 0;
+    await using fixture = heldJourney(ticksPerSecond, "resume", undefined, () => evidenceChecks++);
     using _clock = fixture.clock.install();
+    const assertListeners = watchJourneyListeners(fixture);
     const timers = fixture.clock.pendingGlobalTimers();
     const { pending, state } = await fixture.start();
     fixture.finishEvade();
@@ -411,9 +599,11 @@ for (const ticksPerSecond of [20, 10]) {
       await fixture.clock.advance(100_000, 1_000);
       assert.equal(fixture.clock.pendingGlobalTimers(), timers);
       assert.equal(fixture.phases.length, phases, "the retired hold's backstop cannot publish later");
+      assert.equal(evidenceChecks, 0, "a world change resumes through the runner without asking heldEnded");
     } finally {
       fixture.bot.off("game", retireWorld);
     }
+    assertListeners();
   });
 }
 
@@ -446,12 +636,13 @@ for (const ticksPerSecond of [20, 10]) {
       if (ending === "removed") fixture.entities.remove(7);
       fixture.tick();
       const output = await fixture.clock.settle(pending, 1_000);
-      assert.equal(output.result.status, ending === "resume" ? "succeeded" : "cancelled");
-      assert.equal(fixture.attempts(), ending === "resume" ? 2 : 1);
+      assert.equal(output.result.status, ending === "resume" || ending === "removed" ? "succeeded" : "cancelled");
+      assert.equal(fixture.attempts(), ending === "resume" || ending === "removed" ? 2 : 1);
       const interruptions = output.interruptions ?? [];
       assert.match(interruptions[0]!, /^\[HOSTILE_SETTLED\] evade ended with capability_limit at health 11:/);
       if (ending === "removed") {
-        assert.match(output.result.status === "cancelled" ? output.result.error : "", /hostile_reflex chose no further response \(none_observed\)\.$/);
+        assert.match(interruptions.at(-1)!, /hostile_reflex saw the threat end \(no projectile in flight, no hostile tracked\): the walk resumes\.$/);
+        assert.equal(fixture.phases.at(-1)?.resumed, true);
         assert.equal(fixture.clock.now(), 20_000 / ticksPerSecond, "release needs no world-tick grace window");
       } else {
         assert.equal(interruptions.length, 3);

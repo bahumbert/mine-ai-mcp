@@ -69,6 +69,8 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   progress?(response: Response, mark: (reason: string) => void): () => void;
   act(response: Response, signal: AbortSignal): Promise<Outcome>;
   continuation(outcome: Outcome): ResponseContinuation;
+  /** Positive evidence that a held response's threat ended at this non-response decision. */
+  heldEnded?(held: Response, observed: Danger | null, decision: "none_observed" | Facts): string | null;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
   /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureTicks`. */

@@ -757,8 +757,10 @@ cancelled perch request does not silently start a new perch window.
 
 For resumable body requests, an exhausted automatic evade or an unreflected
 deflection keeps the request suspended through the hostile reflex's next
-decision. A further response decides resume or return; no further response
-returns the request with its last receipt. The result's `interruptions` records
+decision. A further response decides resume or return. A decision with no
+response resumes only when it observes no projectile in flight and either no
+hostile tracked or all held targets dead or gone; its receipt names that evidence.
+Other non-response decisions return the request with its last receipt. The result's `interruptions` records
 the ordered response receipts and the final chain summary, also on resume.
 
 ### `attack_dragon_perch`

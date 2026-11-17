@@ -477,14 +477,14 @@ const SETTLED_RETURN = "[HOSTILE_SETTLED] fight ended with capability_blocked; 2
 const HOLD: Continuation = { kind: "hold", owner: "hostile_reflex", reason: SETTLED_HOLD, backstopTicks: 600 };
 
 /** Suspend the first attempt; a resumed attempt demonstrates a fresh usable body. */
-async function heldWalk(clock: FakeClock, ticksPerSecond: number, resumable = true, receipted = false) {
+async function heldWalk(clock: FakeClock, ticksPerSecond: number, resumable = true, receipted = false, holds = 1) {
   const harness = createFakeBot({ clock, server: { ticksPerSecond, startAge: 1_000 } });
   const runner = new ActionRunner({ clock, worldAge: () => harness.bot.time.age });
   const caller = new AbortController();
   const runs = { count: 0 };
   const task = stubAction(async (_request, context) => {
     runs.count++;
-    if (runs.count === 1) {
+    if (runs.count <= holds) {
       await new Promise<void>((resolve) => context.signal!.addEventListener("abort", () => resolve(), { once: true }));
       if (receipted) return { status: "cancelled", error: `${CONTACT} ${SETTLED_HOLD}` };
       context.signal!.throwIfAborted();
@@ -525,6 +525,38 @@ async function nextWalk(runner: ActionRunner, connected = true) {
 }
 
 for (const ticksPerSecond of [20, 10]) {
+  for (const holds of [1, 2]) {
+    test(`held walk resumes on evidence and preserves ${holds} hold records at ${ticksPerSecond} tps`, async () => {
+      const clock = createFakeClock({ mode: "mocked" });
+      using _timers = clock.install();
+      const { runner, runs, pending, bot, caller } = await heldWalk(clock, ticksPerSecond, true, false, holds);
+      const evidence = "no projectile in flight, no hostile tracked";
+      const receipt = `${SETTLED_HOLD}; hostile_reflex saw the threat end (${evidence}): the walk resumes.`;
+      assert.equal(runner.releaseHold("hunger_reflex", "none_observed", evidence), false);
+      assert.equal(runner.releaseHold("hostile_reflex", "none_observed", evidence), true);
+      await started(runs, 2);
+      if (holds === 2) {
+        const second = gatedClaim(runner);
+        second.release(HOLD);
+        await second.claim.outcome;
+        await flush();
+        assert.equal(runner.releaseHold("hostile_reflex", "handled", null), true);
+      }
+      const output = await clock.settle(pending, 1_000);
+      assert.equal(runs.count, 2);
+      assert.equal(clock.now(), 0);
+      assert.equal(bot.time.age, 1_000);
+      assert.equal(output.result.status, holds === 1 ? "succeeded" : "cancelled");
+      assert.deepEqual(output.interruptions, holds === 1 ? [receipt]
+        : [receipt, `${SETTLED_HOLD}; hostile_reflex chose no further response (handled).`]);
+      if (output.result.status === "cancelled") assert.ok(output.result.error.includes(SETTLED_HOLD));
+      assert.equal(runner.releaseHold("hostile_reflex", "late", evidence), false);
+      await nextWalk(runner);
+      await clock.advance(100_000, 1_000);
+      assert.equal(clock.pendingGlobalTimers(), 0);
+      assert.equal(getEventListeners(caller.signal, "abort").length, 0);
+    });
+  }
   for (const scenario of ["resume", "return", "release", "release-receipted", "hold-again", "hunger", "higher", "backstop", "backstop-receipted", "busy"] as const) {
     test(`held walk ${scenario}: preserves the request and ordered chain at ${ticksPerSecond} tps`, async () => {
       const ending = scenario === "release-receipted" ? "release" : scenario === "backstop-receipted" ? "backstop" : scenario;

@@ -17,7 +17,7 @@ import { responsePolicyChanged } from "../policy/combat/permissions.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
-import { decideHostile, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
+import { decideHostile, heldThreatEnded, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
 
 
@@ -131,6 +131,9 @@ export function attachHostileReflex(
     sense: () => senseHostile(scene),
     decisionFacts: hostileDecisionFacts,
     decide: decideHostile,
+    heldEnded: (held, observed, decision) => held.kind !== "prepare_shield" && (decision === "none_observed" ||
+      typeof decision === "object" && decision !== null && "kind" in decision && decision.kind === "handled" &&
+      "by" in decision && decision.by === "no_contact") ? heldThreatEnded(scene, held, observed) : null,
     facts: (response) => hostileScope(scene, response),
     limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
     bodyTravel: (response) => response.kind !== "fight",

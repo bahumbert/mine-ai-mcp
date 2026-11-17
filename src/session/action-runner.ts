@@ -11,7 +11,7 @@ import type { RouteOutcomes } from "../navigation/index.js";
 import type { PinnedEscape, PinnedWatch } from "./pinned-watch.js";
 import { measured, message, outcomes, refusal } from "./runner-outcomes.js";
 import { watchBodyOwner, type BodyLimitHit, type BodyWatchOptions } from "./body-watch.js";
-import { HeldRequest, awaitHeldRequest, appendHeldReasons, type HoldTransition } from "./held-request.js";
+import { HeldRequest, awaitHeldRequest, appendHeldReasons, heldInterruptions, type HoldTransition } from "./held-request.js";
 /**
  * What is true between actions: one owner of the bot's body at a time, with an
  * explicitly separate control path that can cancel it.
@@ -453,13 +453,13 @@ export class ActionRunner {
       if (!resumable && verdict.kind !== "hold") return measured(definition.name, startedAtMs, result, interruptions);
       if (verdict.kind !== "resume") {
         if (reasons.length) {
-          interruptions.push(...reasons.slice(0, -1), `${reasons[reasons.length - 1]}${suffix ?? ""}`);
+          interruptions.push(...heldInterruptions(reasons, suffix));
           result = appendHeldReasons(result, reasons, suffix);
         }
         return measured(definition.name, startedAtMs, result, interruptions);
       }
       if (invocation.lifetime.signal.aborted) return measured(definition.name, startedAtMs, result, interruptions);
-      interruptions.push(...(held ? reasons : [preemption.reason, ...reasons]));
+      interruptions.push(...(held ? heldInterruptions(reasons, suffix) : [preemption.reason, ...reasons]));
       invocation.state = { kind: "resuming" };
       invocation.progress.transition("resuming");
       await this.#awaitIdle();
@@ -724,9 +724,9 @@ export class ActionRunner {
   }
 
   /** The hold's owner chose a decision that does not start another response. */
-  releaseHold(owner: string, decisionKind: string): boolean {
+  releaseHold(owner: string, decisionKind: string, ended: string | null = null): boolean {
     const held = this.#admittedRequest?.held;
-    return held?.owner === owner && held.release(decisionKind);
+    return held?.owner === owner && held.release(decisionKind, ended);
   }
 
   /** A claim is held to the physics-stall limit and to the limits its reflex asked for; none given: no watch. */

@@ -4,6 +4,7 @@ import { responseScope } from "../control/combat/scopes/response.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
 import type { AnsweredScope, Facts } from "../state/answered.js";
 import { incomingFireball } from "../perception/combat/fireball.js";
+import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { HOSTILE_OBSERVATION_RANGE, isHostile, observeHostileContact } from "../perception/combat/threats.js";
 import { combatDecisionEvidence, decideCombatResponse } from "../policy/combat/decision.js";
 import { recoveryHealth } from "../policy/combat/health.js";
@@ -139,6 +140,18 @@ export function senseHostile(scene: HostileScene) {
 }
 
 type HostileDanger = NonNullable<ReturnType<typeof senseHostile>>["danger"];
+
+/** A non-response can resume a held walk only when the current observations show its threat ended. */
+export function heldThreatEnded(scene: HostileScene, held: HostileResponse, observed: HostileDanger | null): string | null {
+  if (incomingFireball(scene.bot, Infinity) || incomingShieldProjectiles(scene.bot).length) return null;
+  if (observed === null) return "no projectile in flight, no hostile tracked";
+  const targets = "targetId" in held ? [{ id: held.targetId,
+    name: held.threats.find((threat) => threat.id === held.targetId)?.name ?? scene.bot.entities[held.targetId]?.name ?? "entity" }]
+    : held.threats;
+  if (!targets.length || targets.some(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid)) return null;
+  return ["no projectile in flight", ...targets.map(({ id, name }) =>
+    `target ${name}#${id} ${scene.perception.resolvedIds.has(id) ? "dead" : "gone"}`)].join(", ");
+}
 
 export function hostileDecisionFacts({
   facts,

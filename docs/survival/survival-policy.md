@@ -224,8 +224,11 @@ withdrawal to accept from one to change with a policy edit or another request.
 A resumable request stays suspended after an exhausted evade or an unreflected
 deflection while the hostile reflex makes its next decision. A further response
 keeps the request suspended until that response decides whether to resume or
-return it. If the reflex chooses no further response, the request returns with
-the last receipt and that decision. A response by another reflex cannot resume
+return it. If its next non-response decision observes no projectile in flight
+and either no hostile tracked or all of the held response's targets dead or gone,
+the request resumes with a receipt naming that evidence. Otherwise it returns
+with the last receipt and that decision. A stand-down or an existing combat owner
+still returns it. A response by another reflex cannot resume
 the hostile-held request. `[HOSTILE_SETTLED]` receipts name the response chain,
 including when its last response permits the request to resume.
 

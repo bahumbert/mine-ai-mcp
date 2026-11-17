@@ -80,6 +80,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   #observedWorld = -1;
   #ticks = 0;
   #holding = false;
+  #heldResponse: Response | null = null;
   readonly #stopObservingHold: () => void;
   readonly #limitsByScope = new Map<string, number>();
 
@@ -90,8 +91,10 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     this.#stopObservingHold = host.runner.onHoldChange((transition) => {
       if (transition.owner !== definition.name) return;
       this.#holding = transition.outcome === "held";
+      if (transition.outcome !== "held" && transition.outcome !== "attached") this.#heldResponse = null;
       host.publish({ kind: "phase", reflex: definition.name, evidence: {
         phase: "hold", outcome: transition.outcome, worldAge: transition.worldAge, generation: transition.generation,
+        resumed: transition.resumed,
       } });
     });
   }
@@ -156,7 +159,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     if (this.#pending) return;
     if (sensed?.kind !== "observed") {
       this.#changeDecision(null);
-      this.#releaseHold(sensed?.kind ?? "none_observed");
+      this.#releaseHold(sensed?.kind ?? "none_observed", sensed === null ? this.#heldEnded(null, "none_observed") : null);
       return;
     }
     this.#chooseResponse(sensed.danger);
@@ -217,7 +220,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
             },
         inputs,
       );
-      this.#releaseHold(chosen.kind);
+      this.#releaseHold(chosen.kind, chosen.kind === "handled" ? this.#heldEnded(danger, chosen) : null);
       return;
     }
     const scope = this.definition.facts(chosen.response);
@@ -276,8 +279,9 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
         active.signal = signal;
         signal.throwIfAborted();
         const outcome = await definition.act(response, signal);
-        const continuation = definition.continuation(outcome);
-        return { value: outcome, continuation: this.#continuationAfter(signal, continuation) };
+        const continuation = this.#continuationAfter(signal, definition.continuation(outcome));
+        if (continuation.kind === "hold") this.#heldResponse = response;
+        return { value: outcome, continuation };
       },
       definition.releaseAfterAdmission,
       {
@@ -335,10 +339,17 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
   }
 
   /** A non-response ends this reflex's waiting generation; a busy claim leaves it for the next tick. */
-  #releaseHold(decision: string): void {
+  #releaseHold(decision: string, ended: string | null = null): void {
     if (!this.#holding) return;
-    this.host.runner.releaseHold(this.definition.name, decision);
+    this.host.runner.releaseHold(this.definition.name, decision, ended);
     this.#holding = false;
+    this.#heldResponse = null;
+  }
+
+  /** Consult only the response that offered the current waiting generation. */
+  #heldEnded(observed: Danger | null, decision: "none_observed" | Facts): string | null {
+    return this.#holding && this.#heldResponse !== null
+      ? this.definition.heldEnded?.(this.#heldResponse, observed, decision) ?? null : null;
   }
 
   /** A cancel (policy, death, dimension, close) is no attempt; a limit is, and stands the reflex down in time. */

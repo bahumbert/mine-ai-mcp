@@ -18,6 +18,7 @@ export interface HoldTransition {
   readonly outcome: "held" | "attached" | "released" | "backstop";
   readonly generation: number;
   readonly worldAge: number | null;
+  readonly resumed: boolean;
 }
 
 export interface HoldEnd {
@@ -39,6 +40,7 @@ export class HeldRequest {
   readonly #options: HeldRequestOptions;
   #resolve!: (end: HoldEnd) => void;
   #ended = false;
+  #resumed = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
   constructor(options: HeldRequestOptions) {
     this.#options = options;
@@ -77,10 +79,11 @@ export class HeldRequest {
     });
   }
 
-  release(decision: string): boolean {
+  release(decision: string, ended: string | null = null): boolean {
     if (this.state !== "waiting") return false;
-    const suffix = `; ${this.owner} chose no further response (${decision}).`;
-    return this.#finish("released", { kind: "return", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
+    const suffix = ended === null ? `; ${this.owner} chose no further response (${decision}).`
+      : `; ${this.owner} saw the threat end (${ended}): the walk resumes.`;
+    return this.#finish("released", { kind: ended === null ? "return" : "resume", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
   }
 
   abort(cause: unknown): boolean {
@@ -97,7 +100,7 @@ export class HeldRequest {
   snapshot(): HoldTransition {
     return { request: this.request, owner: this.owner, generation: this.generation, worldAge: this.#options.worldAge(),
       outcome: this.state === "waiting" ? "held" : this.state === "attached" ? "attached"
-        : this.state === "backstop" ? "backstop" : "released" };
+        : this.state === "backstop" ? "backstop" : "released", resumed: this.#resumed };
   }
 
   /** A generation owns one polled packet-origin deadline, retired before attachment or any exit. */
@@ -123,6 +126,7 @@ export class HeldRequest {
     this.#ended = true;
     this.state = state;
     this.suffix = suffix;
+    this.#resumed = state === "released" && end.kind === "resume" && suffix !== null;
     this.#clearTimer();
     this.#resolve(end);
     this.#options.onTransition?.(this.snapshot());
@@ -137,6 +141,11 @@ export async function awaitHeldRequest(record: HeldRequest, signals: readonly Ab
   if (signals.some((signal) => signal.aborted)) onAbort();
   try { return await record.done; }
   finally { for (const signal of signals) signal.removeEventListener("abort", onAbort); }
+}
+
+/** Keep the release annotation on the last receipt for both returned and resumed requests. */
+export function heldInterruptions(reasons: readonly string[], suffix: string | null): string[] {
+  return reasons.map((reason, index) => index === reasons.length - 1 ? `${reason}${suffix ?? ""}` : reason);
 }
 
 /** Append every new receipt to a cancelled result without altering an executor's other outcomes. */

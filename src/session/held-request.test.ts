@@ -26,9 +26,9 @@ test("held observers report only winning changes, including re-entry and the ter
   record.release("late");
   record.abort("late");
   assert.deepEqual(events, [
-    { request: "walk", owner: OWNER, outcome: "attached", generation: 1, worldAge: 1_000 },
-    { request: "walk", owner: OWNER, outcome: "held", generation: 2, worldAge: 1_000 },
-    { request: "walk", owner: OWNER, outcome: "backstop", generation: 2, worldAge: 1_000 },
+    { request: "walk", owner: OWNER, outcome: "attached", generation: 1, worldAge: 1_000, resumed: false },
+    { request: "walk", owner: OWNER, outcome: "held", generation: 2, worldAge: 1_000, resumed: false },
+    { request: "walk", owner: OWNER, outcome: "backstop", generation: 2, worldAge: 1_000, resumed: false },
   ]);
   await record.done;
   await clock.advance(100_000, 1_000);
@@ -49,13 +49,15 @@ for (const first of ["attach", "release", "backstop", "abort"] as const) {
       const record = held();
       const transitions = {
         attach: () => record.attach(OWNER, CONTACT),
-        release: () => record.release("stand_down"),
+        release: () => record.release("stand_down", first !== "release" && second === "release"
+          ? "no projectile in flight, no hostile tracked" : null),
         backstop: () => record.backstop(),
         abort: () => record.abort("operator stop"),
       };
       assert.equal(transitions[first](), true);
       // Cancellation of the request is final even after a claim attached.
       assert.equal(transitions[second](), first === "attach" && second === "abort");
+      assert.equal(record.snapshot().resumed, false);
       if (first === "attach" && second !== "abort") {
         assert.equal(record.state, "attached");
         record.verdict({ kind: "resume" }, OWNER);
@@ -63,6 +65,7 @@ for (const first of ["attach", "release", "backstop", "abort"] as const) {
       const end = await record.done;
       assert.equal(end.kind, first === "abort" || second === "abort" && first === "attach" ? "abort"
         : first === "attach" ? "resume" : "return");
+      assert.equal(record.snapshot().resumed, false, "an attached verdict is not an evidence release");
       assert.equal(clock.pendingGlobalTimers(), 0);
       await clock.advance(100_000, 1_000);
       assert.equal(clock.pendingGlobalTimers(), 0);
@@ -129,8 +132,22 @@ test("held request: release keeps the last receipt and names the decision", asyn
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   const record = held();
-  assert.equal(record.release("stand_down"), true);
+  assert.equal(record.release("stand_down", null), true);
   assert.deepEqual(await record.done, { kind: "return", reason: `${HOLD}; ${OWNER} chose no further response (stand_down).` });
+});
+
+test("held request: threat-ended evidence resumes once with the receipt and release suffix", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const record = held();
+  const suffix = "; hostile_reflex saw the threat end (no projectile in flight, no hostile tracked): the walk resumes.";
+  assert.equal(record.release("none_observed", "no projectile in flight, no hostile tracked"), true);
+  assert.deepEqual(await record.done, { kind: "resume", reason: `${HOLD}${suffix}` });
+  assert.equal(record.suffix, suffix);
+  assert.equal(record.snapshot().resumed, true);
+  assert.equal(record.release("late", "late evidence"), false);
+  await clock.advance(100_000, 1_000);
+  assert.equal(clock.pendingGlobalTimers(), 0);
 });
 
 for (const ticksPerSecond of [20, 10]) {
