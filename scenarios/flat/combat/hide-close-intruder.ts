@@ -2,12 +2,12 @@
 import type { Bot } from "mineflayer";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
-import { hideInPlace } from "../../../src/survival/responses/hide.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { ScenarioCombat } from "../../src/combat.ts";
+import { observeIdleWindow } from "./idle-reflex-window.ts";
 
 /** Observe the existing frozen-intruder fixture before starting the measured hide. */
-async function arrangeHideIntruder(bot: Bot, neutral: boolean) {
+async function arrangeHideIntruder(bot: Bot, neutral: boolean, signal: AbortSignal) {
   const species = neutral ? "piglin" : "wither_skeleton";
   for (const [name, slot] of [
     ["iron_helmet", "head"],
@@ -26,7 +26,7 @@ async function arrangeHideIntruder(bot: Bot, neutral: boolean) {
   bot.chat(`/summon minecraft:${species} 0.5 -60 -0.1 {NoAI:1b,PersistenceRequired:1b${equipment}}`);
   await bot.waitForTicks(10);
   bot.chat("/damage @s 12.4 minecraft:magic");
-  for (let tick = 0; tick < 20 && bot.health > 8; tick++) await bot.waitForTicks(1);
+  await observeIdleWindow(bot, 20, () => bot.health <= 8, signal);
   const mob = bot.nearestEntity((entity) => entity.name === species);
   if (!mob || bot.health > 8) throw new Error("Low-health intruder arrangement was not observed");
   const observedWeapon = mob.equipment[0]?.name ?? null;
@@ -46,7 +46,7 @@ function openShelterCells(bot: Bot): Vec3[] {
 
 export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, log }) => {
   const neutral = scenario.name?.endsWith("neutral") ?? false;
-  const { mob, observedWeapon } = await arrangeHideIntruder(bot, neutral);
+  const { mob, observedWeapon } = await arrangeHideIntruder(bot, neutral, signal);
   log(JSON.stringify({ kind: "arranged", mobId: mob.id, observedWeapon, health: bot.health }));
   const started = monotonicNow();
   const abort = new AbortController();
@@ -80,19 +80,14 @@ export const run: MineAiScenario = async ({ bot, navigation, scenario, signal, l
   bot.on("death", onDeath);
   try {
     using responseOwner1 = new ScenarioCombat(bot, navigation);
-    const result = await hideInPlace(bot, {
+    const result = await responseOwner1.hide(bot, {
       signal: AbortSignal.any([signal, abort.signal]),
       recoverTo: 18,
       // The whole hide, repelling included, must fit (construction ends at this budget).
       maximumMs: 12_000,
-      threatContext: {
-        ...responseOwner1.context,
-        resolvedIds: new Set(),
-        attackerIds: new Set(),
-      },
     });
     const openCells = openShelterCells(bot);
-    for (let tick = 0; tick < 80 && !died; tick++) await bot.waitForTicks(1);
+    await observeIdleWindow(bot, 80, () => died, signal);
     const passed =
       !died &&
       (neutral

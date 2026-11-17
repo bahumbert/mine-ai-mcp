@@ -1,6 +1,5 @@
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
-import { hideInPlace } from "../../../src/survival/responses/hide.ts";
 import { standStill } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { ScenarioCombat } from "../../src/combat.ts";
@@ -14,12 +13,7 @@ export const run: MineAiScenario = async (context) => {
     .reduce((sum, item) => sum + item.count, 0);
   const started = monotonicNow();
   using responseOwner1 = new ScenarioCombat(context.bot, context.navigation);
-  const result = await hideInPlace(context.bot, {
-    threatContext: {
-      ...responseOwner1.context,
-      resolvedIds: new Set(),
-      attackerIds: new Set(),
-    },
+  const result = await responseOwner1.hide(context.bot, {
     signal: context.signal,
     recoverTo: 18,
     maximumMs: 1000,
