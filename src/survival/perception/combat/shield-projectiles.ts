@@ -22,8 +22,13 @@ export function arrowImpact(bot: Bot, arrow: Entity, movementAllowance = 0, targ
     width: target.width + movementAllowance * 2,
     height: target.height,
   };
-  let { position, velocity } = arrowFlight(bot, arrow);
+  const flight = arrowFlight(bot, arrow);
+  let { position, velocity } = flight;
   if (velocity.norm() === 0) return null;
+  // The launch overlaps its shooter's body. Candidate cover and a later return still need collision prediction (a11 T1c).
+  const launch = flight.ownLaunch;
+  if (launch && position.distanceTo(launch.position) <= 1e-6 && velocity.dot(launch.direction) > 0 &&
+      target.position.distanceTo(launch.feet) <= 1e-6) return null;
   // Horizontal drag cannot reverse an arrow. Stop once it has passed the
   // body's expanded footprint, fallen below it, or hit terrain, rather than
   // predicting an arbitrary number of ticks into the future.

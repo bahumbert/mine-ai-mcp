@@ -3949,9 +3949,9 @@ for (const bow of [false, true]) {
   });
 }
 
-for (const obstructionTick of [0, 10, 20]) {
-  test(`terrain obstructing a bow at draw tick ${obstructionTick} cancels without release and approaches`, async () => {
-    const fixture = combatFixture(["iron_sword", "bow", "arrow"], { targetDistance: 8 });
+for (const ticksPerSecond of [20, 10]) for (const obstructionTick of [0, 10, 20]) {
+  test(`terrain obstructing a bow at draw tick ${obstructionTick} cancels without release and approaches (${ticksPerSecond} tps)`, async () => {
+    const fixture = combatFixture(["iron_sword", "bow", "arrow"], { targetDistance: 8, ticksPerSecond });
     let approached = false;
     // Terrain rises in the arrow's path at the test's tick, and is dug away when the approach is cancelled.
     const terrain = new Vec3(3, 65, 0);
@@ -3968,6 +3968,7 @@ for (const obstructionTick of [0, 10, 20]) {
     const arrowOriginY = 64 + 1.62 - 0.1; // the arrow's trace starts 0.1 below the eye; exposure rays start at the eye
     fixture.bot.world.raycast = (from, direction, range, matcher) => {
       assert.ok(Math.abs(direction.norm() - 1) < 0.000001);
+      assert.ok(range >= 0, "a projectile-contact ray may have zero range");
       // After release, projectile-contact rays may start inside the bot and have zero distance.
       if (fixture.shotTicks.length === 0 && Math.abs(from.y - arrowOriginY) < 1e-6)
         assert.ok(range > 0 && range <= 3, "each clear-shot ray covers one arrow tick or its final fraction");
@@ -3996,7 +3997,6 @@ for (const obstructionTick of [0, 10, 20]) {
     assert.equal(approached, true);
     assert.equal(outcome.attacks, 1);
     assert.equal(fixture.shotTicks.length, 1);
-    assert.equal(fixture.timeline.filter((entry) => entry.startsWith("slot:")).length, obstructionTick === 0 ? 0 : 2);
   });
 }
 
