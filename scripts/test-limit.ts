@@ -3,8 +3,7 @@
  * asserts it on a fake clock (`src/test-support/fake-bot/`).
  *
  * Loaded by `bunfig.toml` (`[test] preload`) before any test file, so it covers every `bun test` run from the
- * repository root. Bun 1.4.2 applies this to the first file only, so `test-fast` also passes the same value by CLI
- * for later files (2026-11-16). Bun ignores `[test] timeout` in bunfig.toml. A test's own `{ timeout }`, and a file's own `setDefaultTimeout`
+ * repository root. Bun 1.4.2 applies this to the first file only, so `test-fast` also passes the same value by CLI, so do `check.ts` and the worker brief's direct `bun test` (a preload `beforeAll` and bunfig's `[test] timeout` do not reach later files either: probe 2026-11-17) for later files (2026-11-16). Bun ignores `[test] timeout` in bunfig.toml. A test's own `{ timeout }`, and a file's own `setDefaultTimeout`
  * (`launcher/src/build/bundle.test.ts`), keep theirs.
  *
  * Numbers (audit `test-audit.md:408,420`): under load 50 the slowest default-limited test took 9.8 s; at 5 s two tests
