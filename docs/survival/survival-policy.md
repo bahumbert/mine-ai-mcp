@@ -104,6 +104,7 @@ For example, use `set_survival_policy` with the current revision:
 | `combat.critical_health`                    | `8`                      | Below this health, observed nearby threats can trigger protection before contact; a stationary retreat guard stops below it.      |
 | `combat.recover_to_health`                  | `18`                     | Recovery target; hostile pursuit uses at least `engage_min_health`.                                                               |
 | `combat.protected_wait_ticks`               | `300`                    | Protected waiting without confirmed quarry damage before rejecting the position.                                                  |
+| `combat.quarry_wait_ticks`                  | `600`                    | Server ticks without confirmed quarry damage across the engagement. Recovery and the guard execution phase pause this clock. |
 | `combat.enderman_wait_ticks`                | `300`                    | Enderman lure or roof waiting window; commands and incidental damage do not renew it.                                             |
 | `combat.volley_wait_ticks`                  | `100`                    | Window for an observed ranged volley to finish.                                                                                   |
 | `combat.recovery_timeout_ms`                | `90000`                  | One protected recovery hold, including movement and eating.                                                                       |

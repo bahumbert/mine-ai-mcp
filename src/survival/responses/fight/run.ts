@@ -1,6 +1,7 @@
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
 import { EndermanProgress } from "../../control/combat/enderman-progress.js";
+import type { QuarryProgress } from "../../control/combat/quarry-progress.js";
 import type { FightOutcome } from "../../control/combat/engagement.js";
 import { type CombatExecutionSnapshot } from "../../control/combat/execution.js";
 import { CombatPosition } from "../../positioning/combat/position.js";
@@ -16,6 +17,17 @@ import { BlastDefence } from "./blast.js";
 import type { CombatTactic } from "../../policy/combat/tactics.js";
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** Owner cancellation wins; quarry exhaustion retains its physical fight outcome through tactic cancellation. */
+function interruptedFightOutcome(scene: FightScene, cause: unknown): FightOutcome {
+  if (scene.parentSignal.aborted) return scene.result("cancelled");
+  if (scene.noProgress.signal.aborted) return scene.noProgressLimit();
+  if (scene.dragonDefense.signal.aborted)
+    return { ...scene.result("defence_required"), observation: String(scene.dragonDefense.signal.reason) };
+  if (scene.responseRequired.signal.aborted)
+    return { ...scene.result("response_required"), observation: String(scene.responseRequired.signal.reason) };
+  return scene.signal.aborted ? scene.result("cancelled") : scene.failure(message(cause));
 }
 
 /** Dispatch the selected physical effect, preserving the quarry while an incidental threat owns focus. */
@@ -51,8 +63,9 @@ export async function runMobFight(
   protectedProgress: ProtectedAttackProgress,
   endermanProgress: EndermanProgress,
   observe: { position(value: CombatPosition): void; execution(read: () => CombatExecutionSnapshot): void },
+  quarryProgress: QuarryProgress,
 ): Promise<FightOutcome> {
-  using scene = new FightScene(environment, request, protectedProgress, endermanProgress);
+  using scene = new FightScene(environment, request, protectedProgress, endermanProgress, quarryProgress);
   scene.reportProgress("started");
   if (!scene.requestedTarget.isValid) {
     scene.reportProgress("ended", "target_lost");
@@ -72,6 +85,7 @@ export async function runMobFight(
   let outcome: FightOutcome;
   try {
     while (true) {
+      scene.observeQuarryStop(cover.recovering);
       await scene.responsiveness.checkpoint(scene.signal);
       if (scene.bot.health <= 0) { outcome = scene.result("bot_died"); break; }
       const tickBefore = scene.elapsedTicks;
@@ -102,14 +116,7 @@ export async function runMobFight(
       if (scene.elapsedTicks === tickBefore) await waitForPhysicsTicks(scene.bot, 1, scene.signal);
     }
   } catch (cause) {
-    outcome =
-      scene.dragonDefense.signal.aborted && !scene.parentSignal.aborted
-        ? { ...scene.result("defence_required"), observation: String(scene.dragonDefense.signal.reason) }
-        : scene.responseRequired.signal.aborted && !scene.parentSignal.aborted
-          ? { ...scene.result("response_required"), observation: String(scene.responseRequired.signal.reason) }
-          : scene.signal.aborted
-            ? scene.result("cancelled")
-            : scene.failure(message(cause));
+    outcome = interruptedFightOutcome(scene, cause);
   } finally {
     observation.stopEffects();
   }

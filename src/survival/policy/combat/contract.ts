@@ -38,6 +38,9 @@ export const combatPolicySchema = z.strictObject({
     .min(0)
     .max(20)
     .describe("Health sought before resuming combat; never lower than engage_min_health for hostile pursuit."),
+  quarry_wait_ticks: z.number().int().positive().describe(
+    "Server ticks of fighting without confirmed quarry damage before ending unreachable. Recovery and the guard execution phase pause this engagement window.",
+  ),
   protected_wait_ticks: z
     .number()
     .int()
@@ -90,6 +93,7 @@ export const DEFAULT_COMBAT_POLICY: Readonly<CombatPolicy> = Object.freeze({
   critical_health: 8,
   recover_to_health: 18,
   protected_wait_ticks: 300,
+  quarry_wait_ticks: 600,
   enderman_wait_ticks: 300,
   volley_wait_ticks: 100,
   recovery_timeout_ms: 90_000,

@@ -1,31 +1,51 @@
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Bot } from "mineflayer";
+import type { AnsweredEntry } from "../../../src/survival/state/answered.ts";
+import { createCombatController } from "../../../src/survival/control/combat/controller.ts";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs, waitForServerTicks } from "../../../src/world/world-age.ts";
+import { DEFAULT_COMBAT_POLICY } from "../../../src/survival/policy/combat/contract.ts";
 import { MELEE_RANGE } from "../../../src/survival/weapons/equipment.ts";
 import { meleeDistance } from "../../../src/survival/weapons/melee.ts";
 import { openRuntime, standStill, type Runtime } from "../../src/runtime.ts";
 import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-client.ts";
 
-/** The fight's no-progress window is 30 s; its claim ends within this long of starting (window, cancel grace, slack). */
-const LONGEST_FIGHT_MS = 36_000;
-const SHORTEST_FIGHT_MS = 29_000;
-/** The stand-down from the target is 10 s: no new fight claim sooner than this after the release. */
-const STAND_DOWN_MS = 9_000;
+/** One packet to arm, one to observe release, and the cancel grace surround the engagement bound. */
+const QUARRY_TICKS = DEFAULT_COMBAT_POLICY.quarry_wait_ticks;
+const SHORTEST_FIGHT_TICKS = QUARRY_TICKS + 1;
+const LONGEST_FIGHT_TICKS = QUARRY_TICKS + 60;
 /** A status read must answer within this long while a reflex holds the body. */
 const STATUS_DEADLINE_MS = 2_000;
 const POLL_MS = 250;
-const OBSERVE_MS = 80_000;
-/** The zombie is summoned by the world setup; the scripted hit waits this long for its entity to reach the client. */
-const ZOMBIE_SEEN_TIMEOUT_MS = 5_000;
-const ZOMBIE_SEEN_POLL_MS = 50;
+const OBSERVE_TICKS = 4 * QUARRY_TICKS + 200;
+/** The setup's former five on-time seconds, counted on the server clock; a stalled clock has its own backstop. */
+const ZOMBIE_SEEN_TICKS = 100;
 
 interface Claim {
   readonly kind: string;
   readonly from: number;
   to: number | null;
+  readonly ageFrom: number;
+  ageTo: number | null;
   /** The zombie's melee distance when the claim started and ended (`null`: the zombie is not seen). */
   readonly reachFrom: number | null;
   reachTo: number | null;
+}
+
+/** Synchronous physical-fight boundaries avoid charging the status poll's partial time-packet interval. */
+function recordFightAges() {
+  const spans: { from: number; to: number | null }[] = [];
+  let stop = () => {};
+  const create: typeof createCombatController = (...args) => {
+    const combat = createCombatController(...args);
+    stop = combat.onDecision(event => {
+      if (event.kind !== "engagement") return;
+      if (event.state === "started") spans.push({ from: args[0].time.age, to: null });
+      if (event.state === "ended" && spans.at(-1)) spans.at(-1)!.to = args[0].time.age;
+    });
+    return combat;
+  };
+  return { spans, create, [Symbol.dispose]: () => stop() };
 }
 
 /** One physics tick of the evidence log: the raw melee distance (not rounded) and the bot's x and x velocity. */
@@ -64,12 +84,8 @@ function rawReach(bot: Bot): number | null {
 
 /** The scripted hit needs the zombie in `bot.entities`: the reflex defends only against an attacker it can observe (race removed, not measured as the flake's cause). */
 async function waitForZombie(bot: Bot, signal: AbortSignal): Promise<void> {
-  const waitStart = performance.now();
-  while (findZombie(bot) === undefined) {
-    signal.throwIfAborted();
-    assert.ok(performance.now() - waitStart < ZOMBIE_SEEN_TIMEOUT_MS, "zombie never seen");
-    await sleep(ZOMBIE_SEEN_POLL_MS, undefined, { signal });
-  }
+  const result = await waitForServerTicks(bot, ZOMBIE_SEEN_TICKS, { signal, until: () => findZombie(bot) !== undefined });
+  assert.equal(result, "until", `zombie never seen: ${result}`);
 }
 
 /** The claim's tick samples reduced to the numbers the log keeps. */
@@ -127,16 +143,18 @@ async function newestOutcomeEvidence(runtime: Runtime, signal: AbortSignal): Pro
 function logClaimEnds(context: Pick<MineAiScenarioContext, "bot" | "signal" | "log">, runtime: Runtime, startedAt: number) {
   const { bot, signal, log } = context;
   const ticks: TickSample[] = [];
+  let lastOutcome: unknown = null;
   const sampleTick = () => {
     ticks.push({ t: performance.now() - startedAt, reach: rawReach(bot), x: bot.entity.position.x, vx: bot.entity.velocity.x });
   };
   bot.on("physicsTick", sampleTick);
   const logClaim = async (claim: Claim, now: number, answered: readonly unknown[], openAtEnd: boolean): Promise<void> => {
+    lastOutcome = await newestOutcomeEvidence(runtime, signal);
     const end: ClaimEnd = {
       kind: claim.kind,
       ...summarizeClaimTicks(ticks, claim.from, now),
       answered: answered.at(-1) ?? null,
-      outcomeEvidence: await newestOutcomeEvidence(runtime, signal),
+      outcomeEvidence: lastOutcome,
       openAtEnd,
     };
     log(`claim-end ${JSON.stringify(end)}`);
@@ -144,11 +162,12 @@ function logClaimEnds(context: Pick<MineAiScenarioContext, "bot" | "signal" | "l
   return {
     /** Closes the open claim and logs what ended it. */
     async endClaim(open: Claim, now: number, survival: { answered: readonly unknown[] }): Promise<void> {
-      Object.assign(open, { to: now, reachTo: zombieReach(bot) });
+      Object.assign(open, { to: now, ageTo: bot.time.age, reachTo: zombieReach(bot) });
       await logClaim(open, now, survival.answered, false);
     },
     /** Logs a claim that was never released, without closing it (the verdict reads its `to`). */
     logOpenClaim: (open: Claim, now: number, survival: { answered: readonly unknown[] }) => logClaim(open, now, survival.answered, true),
+    lastOutcome: () => lastOutcome,
     [Symbol.dispose]: () => bot.off("physicsTick", sampleTick),
   };
 }
@@ -169,11 +188,23 @@ function zombieReach(bot: Bot): number | null {
 function fixtureOutOfReach(claims: readonly Claim[], reachNow: number | null): string | null {
   const fightIndex = claims.findIndex((claim) => claim.kind === "fight");
   const fight = claims[fightIndex];
-  const endedAloneEarly = fight?.to != null && fight.to - fight.from < SHORTEST_FIGHT_MS && claims[fightIndex + 1] === undefined;
+  const endedAloneEarly = fight?.ageTo != null && fight.ageTo - fight.ageFrom < SHORTEST_FIGHT_TICKS && claims[fightIndex + 1] === undefined;
   const reach = fight === undefined ? reachNow : endedAloneEarly ? fight.reachTo : null;
   return reach !== null && reach > MELEE_RANGE
     ? `the scripted hit left the bot ${reach} blocks from the zombie, out of melee reach: fixture, not the limit`
     : null;
+}
+
+/** Judge the physical fight on its synchronous age boundaries; retained-answer records carry the retry window. */
+function fightVerdict(claims: readonly Claim[], physical: { from: number; to: number | null } | undefined,
+  entry: AnsweredEntry | null) {
+  const fight = claims.find(claim => claim.kind === "fight");
+  if (!fight || fight.to === null || fight.ageTo === null || !entry || !physical || physical.to === null) return null;
+  const later = claims.find(claim => claim.kind === "fight" && claim.from > fight.to!);
+  return { fightMs: Math.round(fight.to - fight.from), fightTicks: physical.to - physical.from,
+    ageFrom: physical.from, ageTo: physical.to,
+    nextFightAfterTicks: later ? later.ageFrom - fight.ageTo : null,
+    standDownTicks: entry.temporal ? (entry.temporal.expiresAt - entry.since) / MS_PER_ON_TIME_TICK : null };
 }
 
 /**
@@ -184,11 +215,13 @@ function fixtureOutOfReach(claims: readonly Claim[], reachNow: number | null): s
 export const run: MineAiScenario = async (context) => {
   const { bot, signal, log } = context;
   assert.ok(await standStill(context));
-  await using runtime = await openRuntime(context, "fight-no-progress");
+  using fightAges = recordFightAges();
+  await using runtime = await openRuntime(context, "fight-no-progress", { createCombatController: fightAges.create });
   const status = runtime.actions.find((action) => action.name === "view_status")!;
   const claims: Claim[] = [];
   let slowestStatusMs = 0;
-  let limitEntry = false;
+  let limitEntry: AnsweredEntry | null = null;
+  let quarryOutcome: unknown = null;
   let lastSurvival: unknown = null;
   let seenLast = "";
   // One scripted hit by the zombie: the reflex defends only against an observed attacker, and NoAI keeps it from hitting.
@@ -200,17 +233,17 @@ export const run: MineAiScenario = async (context) => {
   await waitForZombie(bot, signal);
   bot.chat("/damage @s 1 minecraft:mob_attack by @e[type=minecraft:zombie,limit=1]");
   const startedAt = performance.now();
+  const startedAge = bot.time.age;
+  let lastAge = startedAge, lastAgeAt = startedAt;
   using claimLog = logClaimEnds(context, runtime, startedAt);
-  const verdict = () => {
-    const fight = claims.find((claim) => claim.kind === "fight");
-    if (!fight || fight.to === null || !limitEntry) return null;
-    const later = claims.filter((claim) => claim.kind === "fight" && claim.from > fight.to!);
-    return { fightMs: Math.round(fight.to - fight.from), nextFightAfterMs: later[0] ? Math.round(later[0].from - fight.to) : null };
-  };
+  const verdict = () => fightVerdict(claims, fightAges.spans[0], limitEntry);
   try {
-    // Polled on the wall clock: the point of the limit is that it does not need physics ticks.
-    while (performance.now() - startedAt < OBSERVE_MS && !(verdict() && performance.now() - startedAt > (claims.find((claim) => claim.kind === "fight")?.to ?? Infinity) + STAND_DOWN_MS + 1_500)) {
+    // wall bound: status polling stays responsive even when the server stops advancing.
+    while (bot.time.age - startedAge < OBSERVE_TICKS && !(verdict() &&
+      bot.time.age >= (claims.find(claim => claim.kind === "fight")?.ageTo ?? Infinity) + (verdict()!.standDownTicks ?? Infinity))) {
       signal.throwIfAborted();
+      if (bot.time.age !== lastAge) { lastAge = bot.time.age; lastAgeAt = performance.now(); }
+      assert.ok(performance.now() - lastAgeAt < serverPacedWallMs(QUARRY_TICKS), "server world age stopped during observation");
       const asked = performance.now();
       await runtime.run(status, {}, signal);
       slowestStatusMs = Math.max(slowestStatusMs, performance.now() - asked);
@@ -228,22 +261,29 @@ export const run: MineAiScenario = async (context) => {
       if (open !== undefined && open.to === null && (!owned || (kind !== "unknown" && open.kind !== "unknown" && kind !== open.kind)))
         await claimLog.endClaim(open, now, survival);
       // The response that follows a released one (the evade after the fight) is a new claim.
-      if (owned && (claims.at(-1) === undefined || claims.at(-1)!.to !== null)) claims.push({ kind, from: now, to: null, reachFrom: zombieReach(bot), reachTo: null });
+      if (owned && (claims.at(-1) === undefined || claims.at(-1)!.to !== null)) claims.push({ kind, from: now, to: null, ageFrom: bot.time.age, ageTo: null, reachFrom: zombieReach(bot), reachTo: null });
       else if (owned && open !== undefined && open.kind === "unknown" && kind !== "unknown") Object.assign(open, { kind });
-      if (survival.answered.some((entry) => entry.failure.kind === "reflex_limit")) limitEntry = true;
+      const answer = survival.answered.find(entry => entry.response === "fight" && entry.failure.kind === "no_confirmed_damage");
+      if (answer && limitEntry === null) {
+        limitEntry = answer;
+        const evidence = claimLog.lastOutcome();
+        quarryOutcome = evidence && typeof evidence === "object" && "outcome" in evidence ? evidence.outcome : null;
+      }
       await sleep(POLL_MS, undefined, { signal });
     }
     const stillOpen = claims.at(-1);
     if (stillOpen?.to === null) await claimLog.logOpenClaim(stillOpen, performance.now() - startedAt, runtime.status().survival);
     const result = verdict();
     const reachNow = zombieReach(bot);
-    const detail = JSON.stringify({ claims, result, limitEntry, hurtBy, reachNow, health: bot.health, lastSurvival, slowestStatusMs: Math.round(slowestStatusMs), zombies: Object.values(bot.entities).filter((entity) => entity.name === "zombie").length });
+    const detail = JSON.stringify({ claims, result, limitEntry, quarryOutcome, hurtBy, reachNow, health: bot.health, lastSurvival, slowestStatusMs: Math.round(slowestStatusMs), zombies: Object.values(bot.entities).filter((entity) => entity.name === "zombie").length });
     log(detail);
     const fixtureFailure = fixtureOutOfReach(claims, reachNow);
     assert.ok(fixtureFailure === null, `${fixtureFailure}: ${detail}`);
-    assert.ok(result, `no fight claim ended with a reflex_limit answer: ${detail}`);
-    assert.ok(result.fightMs >= SHORTEST_FIGHT_MS && result.fightMs <= LONGEST_FIGHT_MS, `the fight held the body ${result.fightMs} ms: ${detail}`);
-    assert.ok(result.nextFightAfterMs === null || result.nextFightAfterMs >= STAND_DOWN_MS, `the target was fought again after ${result.nextFightAfterMs} ms: ${detail}`);
+    assert.ok(result, `no fight claim ended with a no_confirmed_damage answer: ${detail}`);
+    assert.ok(result.fightTicks >= SHORTEST_FIGHT_TICKS && result.fightTicks <= LONGEST_FIGHT_TICKS, `the fight held the body ${result.fightTicks} server ticks: ${detail}`);
+    assert.ok(result.standDownTicks !== null && (result.nextFightAfterTicks === null || result.nextFightAfterTicks >= result.standDownTicks), `the target was fought before its retained answer expired: ${detail}`);
+    assert.equal(limitEntry!.failure.why, `No confirmed damage to zombie#${findZombie(bot)!.id} during ${QUARRY_TICKS} server ticks of fighting or ${serverPacedWallMs(QUARRY_TICKS) / 1000} s.`, detail);
+    assert.ok(quarryOutcome && typeof quarryOutcome === "object" && "outcome" in quarryOutcome && quarryOutcome.outcome === "target_unreachable", `no physical target_unreachable receipt: ${detail}`);
     assert.ok(slowestStatusMs < STATUS_DEADLINE_MS, `a status read took ${slowestStatusMs} ms: ${detail}`);
     return { status: "succeeded", detail };
   } finally {

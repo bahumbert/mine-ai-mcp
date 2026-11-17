@@ -10,6 +10,7 @@ import { observeFight } from "./observe.js";
 import { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
 import { EndermanProgress } from "../../control/combat/enderman-progress.js";
+import { QuarryProgress } from "../../control/combat/quarry-progress.js";
 import { Budgets } from "../../state/budgets.js";
 
 /**
@@ -20,11 +21,12 @@ test("each physics tick of a fight records where its target stands, so the bow l
   using endermanProgress = new EndermanProgress(new Budgets(), 300);
   const { bot } = createFakeBot({ position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "skeleton", position: new Vec3(12.5, 64, 0.5) } } });
   const target = bot.entities[8]!;
+  using quarryProgress = new QuarryProgress(new Budgets(), 8, 600, () => bot.time.age);
   const scene = {
-    bot, target, endermanProgress, elapsedTicks: 0, targetMotion: new TargetMotion(), countTick: FightScene.prototype.countTick,
+    bot, target, endermanProgress, quarryProgress, observeQuarryStop: () => {}, elapsedTicks: 0, targetMotion: new TargetMotion(), countTick: FightScene.prototype.countTick,
     navigation: { onEvent: () => () => {} },
     tactics: { observe: () => {} }, observeBoundary: () => {},
-    execution: { tick: () => {}, progress: { milestone: () => {}, observe: () => null } },
+    execution: { tick: () => {}, snapshot: () => ({ phase: "decide" }), progress: { milestone: () => {}, observe: () => null } },
     position: { plan: null }, reportProgress: () => {},
   } as unknown as FightScene;
   const weapons = { observeVolley: () => {}, aimGuardBeforeMovement: () => {} } as unknown as FightWeapons;

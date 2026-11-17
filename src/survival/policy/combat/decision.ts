@@ -44,6 +44,8 @@ export interface CombatDecisionFacts {
   readonly fireball: HostileThreat | null;
   /** Target -> retained failed-fight entry for the current scope, independently of reachability. */
   readonly answeredFights: ReadonlyMap<number, number>;
+  /** Quarry damage exhaustion remains answered even when contact is reachable. */
+  readonly quarryAnsweredFights?: ReadonlySet<number>;
   readonly answered: ReadonlySet<string>;
 }
 
@@ -87,6 +89,7 @@ export function combatDecisionEvidence(
       })),
       fireball: facts.fireball ? { ...facts.fireball, position: { ...facts.fireball.position } } : null,
       answeredFights: [...facts.answeredFights],
+      quarryAnsweredFights: [...(facts.quarryAnsweredFights ?? [])],
       answered: [...facts.answered],
     },
     decision:
@@ -170,8 +173,9 @@ function defendReachedContact(facts: CombatDecisionFacts, threats: readonly Host
 /** A retained fight failure excludes only its target, unless the whole response is answered. */
 function fightAnswered(facts: CombatDecisionFacts, targetId: number): boolean {
   const inReach = facts.health >= facts.policy.engage_min_health &&
-    facts.contacts.some((contact) => contact.id === targetId && contact.inReach);
-  return facts.answered.has("fight") || (!inReach && facts.answeredFights.has(targetId));
+    facts.contacts.some(contact => contact.id === targetId && contact.inReach);
+  return facts.answered.has("fight") || facts.quarryAnsweredFights?.has(targetId) === true ||
+    (!inReach && facts.answeredFights.has(targetId));
 }
 
 /** Keep refusal wording shared by purpose and withdrawal branches. */

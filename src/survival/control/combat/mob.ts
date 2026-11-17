@@ -6,6 +6,7 @@ import { runMobFight } from "../../responses/fight/run.js";
 import type { FightEnvironment } from "../../responses/fight/scene.js";
 import { ProtectedAttackProgress } from "./attack-progress.js";
 import { EndermanProgress } from "./enderman-progress.js";
+import { QuarryProgress } from "./quarry-progress.js";
 import type { CombatOutcome, CombatResult } from "./contract.js";
 import { runEngagement } from "./engagement.js";
 import { CombatExecution, type CombatExecutionSnapshot } from "./execution.js";
@@ -31,6 +32,14 @@ export interface MobObservation {
   position(value: CombatPosition | null): void;
   execution(read: () => CombatExecutionSnapshot): void;
   policyUse(value: "fight" | "recovery"): void;
+}
+
+/** Explosion evidence spans deflections and recoveries as well as the physical fights. */
+function observeExplosions(bot: FightEnvironment["bot"]) {
+  let count = 0;
+  const onExplosion = () => { count++; };
+  bot._client.on("explosion", onExplosion);
+  return { get count() { return count; }, stop: () => bot._client.off("explosion", onExplosion) };
 }
 
 /** A deflect or recovery owns its own execution observation while quarry clocks are paused. */
@@ -98,12 +107,9 @@ export async function runMobEngagement(
     policy.combat.protected_wait_ticks,
   );
   using endermanProgress = new EndermanProgress(survival.budgets, policy.combat.enderman_wait_ticks);
+  using quarryProgress = new QuarryProgress(survival.budgets, targetId, policy.combat.quarry_wait_ticks, () => bot.time?.age);
   // Evidence belongs to the engagement, including intervals between physical responses.
-  let explosions = 0;
-  const onExplosion = () => {
-    explosions++;
-  };
-  bot._client.on("explosion", onExplosion);
+  const explosions = observeExplosions(bot);
   try {
     const result = await runEngagement(signal, {
       purpose,
@@ -119,6 +125,7 @@ export async function runMobEngagement(
           protectedProgress,
           endermanProgress,
           observe,
+          quarryProgress,
         );
       },
       deflect: (projectileId) =>
@@ -145,8 +152,8 @@ export async function runMobEngagement(
           return result;
         }),
     });
-    return { ...result, explosions };
+    return { ...result, explosions: explosions.count };
   } finally {
-    bot._client.off("explosion", onExplosion);
+    explosions.stop();
   }
 }

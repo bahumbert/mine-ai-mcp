@@ -34,11 +34,14 @@ import { ThreatChains } from "../state/threat-chains.js";
 
 // The unreachable premise counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 600 ticks from the age cached when the
 // failure was remembered plus one packet, the packet of age A + 620 (31 s in at 20 tps, 62 s at 10 tps; old code: 30 s after it).
-for (const ticksPerSecond of [20, 10])
-test(`an unreachable fight is not chosen again until the packet of age A + 620 when bot and target step a block (${ticksPerSecond} tps)`, async () => {
-  const fixture = reflexFixture(async (id) => ({ ...died(id), kind: "unreachable", observation: "No route onto the pillar." }),
+for (const ticksPerSecond of [20, 10]) for (const quarry of [true, false])
+test(`${quarry ? "a reachable quarry with no confirmed damage retains its time-only answer" : "an unreachable fight is not chosen again until the packet of age A + 620 when bot and target step a block"} (${ticksPerSecond} tps)`, async () => {
+  const fixture = reflexFixture(async id => ({ ...died(id), kind: "unreachable",
+    ...(quarry ? { premise: "no_confirmed_damage" as const } : {}),
+    observation: quarry ? "No confirmed damage to zombie#7 during 600 server ticks of fighting or 93 s." : "No route onto the pillar." }),
     async () => ({ status: "stopped", reason: "no path", elapsedMs: 0 }),
-    { entities: { 7: { ...hostile("skeleton", 6), position: new Vec3(6, 68, 0) } }, cells: { "6,67,0": "obsidian" }, server: { ticksPerSecond } });
+    { entities: { 7: quarry ? hostile("zombie", 2) : { ...hostile("skeleton", 6), position: new Vec3(6, 68, 0) } },
+      cells: { "6,67,0": "obsidian" }, server: { ticksPerSecond } });
   try {
     await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
       changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise the fight retry without a cornered hide." });
@@ -47,6 +50,18 @@ test(`an unreachable fight is not chosen again until the packet of age A + 620 w
     const remembered = fixture.driver.answered.snapshot().find((entry) => entry.response === "fight");
     assert.ok(remembered);
     assert.equal(remembered.temporal?.premise, "unreachable");
+    const fights = () => fixture.recorded().filter(outcome => outcome.startsWith("fight ->")).length;
+    if (quarry) {
+      assert.equal(remembered.failure.kind, "no_confirmed_damage");
+      assert.equal(remembered.temporal && (remembered.temporal.expiresAt - remembered.since) / 50, 600);
+      assert.notEqual(observeHostileResponse(fixture.bot, fixture.observer.threats).kind, "fight", `reachable at age ${fixture.bot.time.age}`);
+      const age = fixture.bot.time.age;
+      await fixture.clock.advance(599 * 1000 / ticksPerSecond);
+      assert.equal(fights(), 1, `age ${fixture.bot.time.age}, before ${age + 620}`);
+      await fixture.clock.advance(41 * 1000 / ticksPerSecond);
+      assert.ok(fights() >= 2, `answer expires at age ${fixture.bot.time.age}`);
+      return;
+    }
     fixture.bot.entity.position.x++;
     fixture.bot.entities[7]!.position.x++;
     const decision = observeHostileResponse(fixture.bot, fixture.observer.threats);
@@ -55,7 +70,6 @@ test(`an unreachable fight is not chosen again until the packet of age A + 620 w
     assert.ok(await until(() => fixture.recorded().length === 2));
     assert.deepEqual(fixture.recorded(), ["fight -> target_unreachable", "evade -> capability_limit"]);
     const readAge = fixture.bot.time.age; // the pause was remembered a few ticks ago, at this cached age or the packet before
-    const fights = () => fixture.recorded().filter((outcome) => outcome.startsWith("fight ->")).length;
     while (fixture.bot.time.age < readAge + 600) {
       assert.equal(fights(), 1, `age ${fixture.bot.time.age}, short of A + 600`);
       await fixture.clock.advance(50);
@@ -2103,6 +2117,20 @@ function standoffSceneOn(server: FakeBotOptions["server"], ...zombies: number[])
   };
   return { ...fixture, engaged, pass, active, decision, close };
 }
+
+for (const rate of [20, 10]) test(`an active quarry budget owns fight progress while a guard pauses it (${rate} tps)`, async () => {
+  const scene = standoffSceneOn({ ticksPerSecond: rate }, 7);
+  try {
+    await scene.pass(50);
+    const budget = scene.driver.budgets.progress({ name: "quarry_progress", scope: "target:7", unit: "ticks",
+      measure: () => 0, startedAt: 0, limit: 600, progress: "confirmed_target_damage", exhaustion: "fight owns its no-hit bound" });
+    await scene.pass(700 * 1000 / rate);
+    assert.equal(scene.active(), true, `guard at wall ${scene.clock.now()}, age ${scene.bot.time.age}`);
+    budget[Symbol.dispose]();
+    await scene.pass(640 * 1000 / rate);
+    assert.equal(scene.active(), false, "a fight without a live quarry budget still has the watchdog backstop");
+  } finally { await scene.close(); }
+});
 
 test("a wounded defender after its fight's limit picks evade, and target A is not fought again during stand-down", async () => {
   const scene = standoffScene(7);

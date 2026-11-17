@@ -3,10 +3,19 @@ import test from "node:test";
 import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { familyIndexOf } from "../../../world/item-families.js";
 import { watchServerTags } from "../../../world/server-tags.js";
-import { DEFAULT_COMBAT_POLICY } from "./contract.js";
+import { combatPolicySchema, DEFAULT_COMBAT_POLICY } from "./contract.js";
 import { permittedCombatItems, responsePolicyChanged } from "./permissions.js";
 
 const names = (items: readonly { readonly name: string }[]) => items.map((item) => item.name);
+
+test("the quarry window is a positive server-tick permission of fights only", () => {
+  assert.equal(DEFAULT_COMBAT_POLICY.quarry_wait_ticks, 600);
+  for (const invalid of [0, -1, 1.5, Infinity])
+    assert.equal(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, quarry_wait_ticks: invalid }).success, false);
+  const after = { ...DEFAULT_COMBAT_POLICY, quarry_wait_ticks: 700 };
+  for (const response of ["fight", "hide", "evade", "deflect"] as const)
+    assert.equal(responsePolicyChanged(DEFAULT_COMBAT_POLICY, after, response), response === "fight");
+});
 
 test("an evade's permissions include the clear and cover ranges but not bow", () => {
   for (const field of ["evade_clear_range", "evade_cover_range"]) {

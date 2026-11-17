@@ -61,22 +61,27 @@ export function assessContacts(bot: Bot, contacts: readonly Pick<CombatContact, 
 }
 
 /** Reopen disproved approach failures before selection and admission read the same target memory. */
-function observeAnsweredFights(bot: Bot, context: HostileContext, contacts: readonly CombatContact[]): Map<number, number> {
+function observeAnsweredFights(bot: Bot, context: HostileContext, contacts: readonly CombatContact[]) {
   const policy = context.policy ?? DEFAULT_COMBAT_POLICY;
   const answeredFights = new Map<number, number>();
-  if (!context.survival) return answeredFights;
+  const quarryAnsweredFights = new Set<number>();
+  if (!context.survival) return { answeredFights, quarryAnsweredFights };
   for (const contact of contacts) {
     const scope = responseScope(bot, contextPolicy(context), "fight", contact.id);
     const entry = context.survival.answered.find(scope.capability, scope.scope);
     // A reachable attacker disproves an approach failure; clear admission's veto too.
     // Limit stand-downs remain time-only (P4-06c T2, 2026-11-09).
-    if (entry && entry.failure.kind !== "reflex_limit" && bot.health >= policy.engage_min_health && contact.inReach) {
+    if (entry && entry.failure.kind !== "reflex_limit" && entry.failure.kind !== "no_confirmed_damage" &&
+      bot.health >= policy.engage_min_health && contact.inReach) {
       context.survival.answered.forget(scope.capability, scope.scope);
       continue;
     }
-    if (entry) answeredFights.set(contact.id, entry.id);
+    if (entry) {
+      answeredFights.set(contact.id, entry.id);
+      if (entry.failure.kind === "no_confirmed_damage") quarryAnsweredFights.add(contact.id);
+    }
   }
-  return answeredFights;
+  return { answeredFights, quarryAnsweredFights };
 }
 
 /** Read shared relationship, exposure and equipment once before deciding. */
@@ -124,7 +129,7 @@ export function observeCombatDecision(bot: Bot, context: HostileContext = NO_CON
         }
       : null,
     contacts,
-    answeredFights: observeAnsweredFights(bot, context, contacts),
+    ...observeAnsweredFights(bot, context, contacts),
     answered,
   };
 }

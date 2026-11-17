@@ -138,10 +138,18 @@ export function attachHostileReflex(
     limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
     bodyTravel: (response) => response.kind !== "fight",
     escalateStandDown: (response) => response.kind === "fight",
-    progress: (response, mark) =>
-      response.kind === "prepare_shield"
-        ? watchBodyTicks(bot, mark, { off_hand_changed: changes(() => offHandItem(bot)) })
-        : observeCombatProgress(bot, response.threats.map((threat) => threat.id), mark, response.kind),
+    progress: (response, mark) => {
+      if (response.kind === "prepare_shield")
+        return watchBodyTicks(bot, mark, { off_hand_changed: changes(() => offHandItem(bot)) });
+      const stopPhysical = observeCombatProgress(bot, response.threats.map(threat => threat.id), mark, response.kind);
+      // A live fight owns the no-hit bound, including guard/recovery pauses. The driver's ceiling and stopped-body
+      // watchdog remain backstops; fights without this budget retain the ordinary no-progress watchdog.
+      const stopQuarry = response.kind === "fight" ? watchBodyTicks(bot, mark, {
+        quarry_bound_active: () => driver.budgets.snapshot().some(budget =>
+          budget.name === "quarry_progress" && budget.scope === `target:${response.targetId}`),
+      }) : () => {};
+      return () => { stopQuarry(); stopPhysical(); };
+    },
     act: (directive, signal): Promise<HostileSettlement | ShieldPrepared> =>
       directive.kind === "prepare_shield" ? prepareShield(scene, signal) : respondToHostile(scene, directive, signal),
     continuation: (outcome) => outcome.kind === "shield_prepared" ? { kind: "resume" } : responseContinuation(outcome),

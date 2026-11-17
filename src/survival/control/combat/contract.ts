@@ -31,6 +31,7 @@ export type CombatDecision =
       readonly execution: CombatExecutionSnapshot;
       readonly outcome: string | null;
       readonly observation: string | null;
+      readonly quarryStopPending?: boolean;
     }
   | { readonly kind: "roof_prepared"; readonly targetId: number; readonly cell: Vec3; readonly stopped: string | null }
   | { readonly kind: "roof_provoked"; readonly targetId: number; readonly cell: Vec3; readonly plannedBlocks: number }
@@ -67,7 +68,7 @@ export type CombatOutcome =
   /** A different immediate danger must be handled before this target can be pursued. */
   | (CombatResult<"defence_required"> & { readonly observation: string })
   /** No route reached the target; the caller must decide, because retrying is being shot for nothing. */
-  | (CombatResult<"unreachable"> & { readonly observation: string })
+  | (CombatResult<"unreachable"> & { readonly observation: string; readonly premise?: "no_confirmed_damage" })
   | (CombatResult<"failed"> & { readonly observation: string });
 
 export interface CombatResult<Kind extends string> {

@@ -27,6 +27,7 @@ const assessmentSchema = z.object({
 });
 export const recordedCombatPolicySchema = combatPolicySchema.extend({
   fight_margin: combatPolicySchema.shape.fight_margin.default(DEFAULT_COMBAT_POLICY.fight_margin),
+  quarry_wait_ticks: combatPolicySchema.shape.quarry_wait_ticks.default(DEFAULT_COMBAT_POLICY.quarry_wait_ticks),
   evade_clear_range: combatPolicySchema.shape.evade_clear_range.optional(),
   evade_cover_range: combatPolicySchema.shape.evade_cover_range.optional(),
 }).transform((policy) => ({ ...policy,
@@ -47,6 +48,7 @@ const inputs = z.object({
   unreachable: z.array(z.number()).optional(),
   // Older incident captures predate target-specific exclusion inputs.
   answeredFights: z.array(z.tuple([z.number(), z.number()])).default([]),
+  quarryAnsweredFights: z.array(z.number()).default([]),
   answered: z.array(z.string()),
   contacts: z.array(
     threat.extend({
@@ -120,6 +122,7 @@ export function replayCombatDecision(recorded: unknown) {
     ...selected.inputs,
     assessment: selected.inputs.assessment ?? legacyAssessment(selected.inputs.contacts, selected.inputs.weapon, DEFAULT_MINECRAFT_VERSION),
     answeredFights: new Map(selected.inputs.answeredFights),
+    quarryAnsweredFights: new Set(selected.inputs.quarryAnsweredFights),
     answered: new Set(selected.inputs.answered),
   };
   if ("boundary" in record) {

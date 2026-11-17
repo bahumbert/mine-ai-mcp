@@ -26,8 +26,10 @@ function observeFightBody(
   if (change) scene.reportProgress(change);
   if (scene.position.plan) scene.protectedProgress.tick(cover.recovering);
   scene.endermanProgress.tick(cover.recovering);
+  scene.quarryProgress.tick(cover.recovering || scene.execution.snapshot(scene.attacks).phase === "guard");
   weapons.observeVolley();
   locomotion.observeFooting();
+  scene.observeQuarryStop(cover.recovering);
   if (effectsActive) weapons.aimGuardBeforeMovement();
 }
 
@@ -70,6 +72,7 @@ export function observeFight(
     if (hit === scene.targetId) {
       scene.protectedProgress.confirmedTargetDamage();
       scene.endermanProgress.confirmedTargetDamage(scene.targetId);
+      scene.quarryProgress.confirmedTargetDamage();
       roof.confirmedHit();
     }
   };

@@ -126,7 +126,7 @@ export function responseFailure(settlement: HostileSettlement): AnsweredEntry["f
       const result = physical.result;
       if (["died", "contact_ended", "cancelled", "bot_died"].includes(result.kind)) return null;
       return {
-        kind: result.kind,
+        kind: result.kind === "unreachable" && result.premise === "no_confirmed_damage" ? result.premise : result.kind,
         why: "observation" in result ? result.observation : "The target left observation without a death.",
       };
     }
