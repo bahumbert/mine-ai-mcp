@@ -499,6 +499,11 @@ async function until(condition: () => boolean, turns = 50): Promise<boolean> {
   return condition();
 }
 
+/** Clock slices of 50 ms until the runner has released the body, at most `maxMs` of clock. */
+async function advanceUntilIdle(fixture: ReflexFixture, maxMs: number): Promise<void> {
+  for (let passed = 0; fixture.runner.status().busy && passed < maxMs; passed += 50) await fixture.clock.advance(50);
+}
+
 test("the automatic enderman response holds its stance across a teleport", async () => {
   const fixture = reflexFixture(
     async (targetId, signal, movement) => {
@@ -1641,12 +1646,14 @@ test("a creeper that exploded and is no longer observed ends the fight by the st
     fixture.entities.remove(7);
     if (ending === "reappeared") fixture.entities.spawn({ id: 7, ...hostile("creeper", 3) });
     if (ending === "cancelled") await fixture.driver.cancel("hostile_reflex", new BodyAbort({ kind: "cancelled", by: "model" }, "Stop fighting."));
-    await fixture.clock.advance(10_100);
+    // The wait is 200 world ticks and one packet (1 to 39 ticks late): at most 239 ticks = 11 950 ms at 20 tps, so 12 000 ms
+    // of clock bound it (plan 2026-11-16-reflex-limits-ticks T5; its tick-exact cases: respond-missing-quarry.test.ts).
     if (ending === "reappeared") {
+      await fixture.clock.advance(12_000); // past the wait with the quarry back: the verdict must not come
       assert.equal(fixture.runner.status().busy, true, "same-id reappearance cancels the missing-target verdict");
       fixture.entities.remove(7);
-      await fixture.clock.advance(10_100);
     }
+    await advanceUntilIdle(fixture, 12_000);
     assert.equal(fixture.runner.status().busy, false);
     assert.deepEqual(fixture.recorded(), [ending === "cancelled" ? "fight -> cancelled" : "fight -> target_lost"]);
     assert.equal(fixture.driver.answered.snapshot().some(entry => entry.failure.kind === "reflex_limit"), false);

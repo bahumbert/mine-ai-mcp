@@ -20,7 +20,8 @@ import { responseScope } from "./scopes/response.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
 import { COMBAT_LIMITS } from "./limits.js";
 import { watchEntityRemoval } from "../../../world/entity-removal.js";
-import { MS_PER_ON_TIME_TICK } from "../../../world/world-age.js";
+import { monotonicNow } from "../../../utils/index.js";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline, type ServerTickDeadline } from "../../../world/world-age.js";
 
 /**
  * Consecutive physics ticks a melee target may stay out of defensive reach before the fight ends as `contact_ended`.
@@ -30,23 +31,41 @@ import { MS_PER_ON_TIME_TICK } from "../../../world/world-age.js";
  */
 export const CONTACT_GRACE_TICKS = 20;
 
-/** Keep blast clearance during contact loss, but a missing quarry cannot hold the body beyond its stand-down window. */
+/**
+ * Keep blast clearance during contact loss, but a missing quarry cannot hold the body beyond its stand-down window of
+ * world ticks. The deadline is also read on time packets (they come with physics stopped) and a wall timer backs it
+ * up; the packets never count towards the contact grace (plan 2026-11-16-reflex-limits-ticks D5).
+ */
 function watchFightContact(bot: Bot, targetId: number, context: ResponseContext, ended: AbortController): () => void {
   const removal = watchEntityRemoval(bot, targetId);
   let readsOutOfReach = 0;
-  let missingTimer: ReturnType<typeof setTimeout> | undefined;
+  let missing: { readonly deadline: ServerTickDeadline; readonly wallTimer: ReturnType<typeof setTimeout> } | undefined;
+  const stopWaiting = () => {
+    if (missing) clearTimeout(missing.wallTimer);
+    missing = undefined;
+  };
+  const startWaiting = () => {
+    stopWaiting();
+    const wallMs = serverPacedWallMs(COMBAT_LIMITS.standDownTicks);
+    // With no age heard yet the deadline is only `ticks * 50` ms (D1): the timer wakes at that, not at the wall.
+    const wakeMs = bot.time?.age == null ? COMBAT_LIMITS.standDownTicks * MS_PER_ON_TIME_TICK : wallMs;
+    missing = {
+      deadline: serverTickDeadline(() => bot.time?.age ?? null, COMBAT_LIMITS.standDownTicks, monotonicNow(),
+        { origin: "packet", wallMs, stoppedMs: null }),
+      wallTimer: setTimeout(() => {
+        missing = undefined;
+        if (removal.removed()) ended.abort("target_lost");
+      }, wakeMs),
+    };
+  };
+  const endWaitWhenOver = () => {
+    if (missing && removal.removed() && missing.deadline.passed(monotonicNow())) ended.abort("target_lost");
+  };
   const observe = () => {
     const target = bot.entities[targetId];
-    if (removal.removed()) {
-      // Still real time until T5 of plan 2026-11-16-reflex-limits-ticks (the wait becomes world ticks there).
-      missingTimer ??= setTimeout(() => {
-        missingTimer = undefined;
-        if (removal.removed()) ended.abort("target_lost");
-      }, COMBAT_LIMITS.standDownTicks * MS_PER_ON_TIME_TICK);
-    } else {
-      clearTimeout(missingTimer);
-      missingTimer = undefined;
-    }
+    if (!removal.removed()) stopWaiting();
+    else if (!missing) startWaiting();
+    endWaitWhenOver();
     const { perception } = context;
     const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
     if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target)) readsOutOfReach++;
@@ -54,15 +73,22 @@ function watchFightContact(bot: Bot, targetId: number, context: ResponseContext,
     if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
     if (readsOutOfReach >= CONTACT_GRACE_TICKS) ended.abort("contact_ended");
   };
-  const onGone = (entity: { id: number }) => { if (entity.id === targetId) observe(); };
+  // Each removal of the id starts its own wait: the same id may have come back and gone again between two reads.
+  const onGone = (entity: { id: number }) => {
+    if (entity.id !== targetId) return;
+    stopWaiting();
+    observe();
+  };
   bot.on("physicsTick", observe);
   bot.on("entityGone", onGone);
+  bot.on("time", endWaitWhenOver);
   observe();
   return () => {
     removal[Symbol.dispose]();
-    clearTimeout(missingTimer);
+    stopWaiting();
     bot.off("physicsTick", observe);
     bot.off("entityGone", onGone);
+    bot.off("time", endWaitWhenOver);
   };
 }
 
