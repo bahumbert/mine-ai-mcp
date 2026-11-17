@@ -9,7 +9,7 @@ import { arenaFrame } from "../arena/frame.ts";
 import { scenarioTestContext } from "../scenario-test-context.ts";
 import type { ScenarioCall } from "../scenario.ts";
 import { DRIVER_CLOCK_STOPPED_MS } from "./server-ticks.ts";
-import { MAX_FIGHT_TICKS, run } from "./pacing-target.ts";
+import { type AgedFight, MAX_FIGHT_TICKS, run, spanProblems, spansHold } from "./pacing-target.ts";
 
 /** One fight is a scope of the Collector's `combat` operation opened and closed at fake clock times (ms from the start). */
 type Fight = readonly [start: number, end: number];
@@ -17,6 +17,8 @@ type Rate = 20 | 10;
 const RATES: readonly Rate[] = [20, 10];
 /** The fake server sends a 20-tick time packet each second at 20 tps and each 2 s at 10 tps (`fake-server.ts` ticksPerSecond), so the age moves `rate` ticks per second. */
 const ageAt = (rate: Rate, ms: number) => rate * Math.floor(ms / 1000);
+/** Fake milliseconds of `ticks` server ticks at `rate`: 1000 / rate ms each. */
+const msOf = (rate: Rate, ticks: number) => ticks * 1000 / rate;
 
 function pacingFixture(options: { fights: readonly Fight[]; limitsAt: readonly number[]; limit?: string; rate: Rate; cancelThrows?: boolean }) {
   const clock = createFakeClock({ mode: "mocked" });
@@ -70,22 +72,39 @@ async function assertCleanExit(fixture: ReturnType<typeof pacingFixture>) {
   assert.deepEqual(fixture.calls, calls, "no driver call after it settled");
 }
 
-test("pacing timing checks run in any lane and reject early retries or missing limits, at both rates, at the third fight's poll", async () => {
-  // Fights: [50, 30_050], [firstRetry, secondEnd], [third + 50, third + 100]; each limit is read at its fight's end. Pauses asserted: 10 s, then 20 s.
+/**
+ * The timeline in ticks: fight 0 starts at 100 ms, each gap and span converts at `rate`; the third fight starts at a multiple of 100 ms
+ * so the driver sees it at the poll `third + 100`. Every span is a whole number of seconds, so the ages read exactly.
+ */
+function timeline(rate: Rate, plan: { span1: number; span2: number; gap1: number; gap2: number }) {
+  const end0 = 100 + msOf(rate, plan.span1);
+  const start1 = end0 + msOf(rate, plan.gap1);
+  const end1 = start1 + msOf(rate, plan.span2);
+  const third = end1 + msOf(rate, plan.gap2);
+  const fights: Fight[] = [[100, end0], [start1, end1], [third + 50, third + 100]];
+  return { fights, limitsAt: [end0, end1], polledAt: third + 100 };
+}
+
+/** The owner's passing timeline at 20 tps: fights of 620 ticks (31 s), pauses of 220 and 420 ticks (11 s and 21 s). */
+const PASSING = { span1: 620, span2: 620, gap1: 220, gap2: 420 };
+
+test("pacing timing checks run in any lane and reject early retries, short fights or missing limits, at both rates, at the third fight's poll", async () => {
+  const cases: { plan: typeof PASSING; limit?: string; reason?: RegExp }[] = [
+    { plan: PASSING },
+    { plan: { ...PASSING, gap1: 200, gap2: 400 } },
+    { plan: { ...PASSING, gap1: 180 }, reason: /pause 0 is 180 ticks/u },
+    { plan: { ...PASSING, gap2: 380 }, reason: /pause 1 is 380 ticks/u },
+    { plan: { ...PASSING, span1: 580 }, reason: /fight 0 spans 580 ticks/u },
+    { plan: { ...PASSING, span2: 300 }, reason: /fight 1 spans 300 ticks/u },
+    { plan: PASSING, limit: "ceiling", reason: /ceiling/u },
+  ];
   for (const rate of RATES) {
-    for (const { firstRetry = 40_050, third, secondEnd, limit = "no_progress", reason } of [
-      { third: 90_000, secondEnd: 70_050 },
-      { third: 90_000, secondEnd: 70_050, firstRetry: 39_950, reason: /"pause":10000/u },
-      { third: 80_000, secondEnd: 70_050, reason: /"pause":20000/u },
-      { third: 90_000, secondEnd: 70_050, limit: "ceiling", reason: /ceiling/u },
-      { third: 90_000, secondEnd: 80_050, reason: /"pause":20000/u },
-    ]) {
-      const label = `${rate} tps, retry at ${firstRetry}, third at ${third}, second end ${secondEnd}, limit ${limit}`;
-      const fixture = pacingFixture({ fights: [[50, 30_050], [firstRetry, secondEnd], [third + 50, third + 100]],
-        limitsAt: [30_050, secondEnd], limit, rate });
+    for (const { plan, limit = "no_progress", reason } of cases) {
+      const label = `${rate} tps, ${JSON.stringify(plan)}, limit ${limit}`;
+      const { fights, limitsAt, polledAt } = timeline(rate, plan);
+      const fixture = pacingFixture({ fights, limitsAt, limit, rate });
       using _installed = fixture.installed;
-      const completion = fixture.clock.settle(run(fixture.context, fixture.sleep), 100_000);
-      const polledAt = third + 100;
+      const completion = fixture.clock.settle(run(fixture.context, fixture.sleep), 300_000);
       if (reason) await assert.rejects(completion, (error: unknown) => error instanceof assert.AssertionError && reason.test(error.message), label);
       else {
         const result = await completion;
@@ -96,6 +115,28 @@ test("pacing timing checks run in any lane and reject early retries or missing l
       assert.equal(fixture.bot.time.age - fixture.startAge, ageAt(rate, polledAt), `${label}: world age`);
       await assertCleanExit(fixture);
     }
+  }
+});
+
+test("spansHold: each no_progress fight spans 581 ticks and each pause 181 and 381, with both sides of each bound", () => {
+  const fightsAt = (spans: readonly [number, number], pauses: readonly [number, number]): AgedFight[] => {
+    const firstEnd = spans[0];
+    const secondStart = firstEnd + pauses[0];
+    const secondEnd = secondStart + spans[1];
+    return [{ startAge: 0, endAge: firstEnd }, { startAge: secondStart, endAge: secondEnd }, { startAge: secondEnd + pauses[1], endAge: null }];
+  };
+  assert.equal(spansHold(fightsAt([581, 581], [181, 381])), true);
+  const cases = [
+    { spans: [580, 581], pauses: [181, 381], reason: /fight 0 spans 580 ticks/u },
+    { spans: [581, 580], pauses: [181, 381], reason: /fight 1 spans 580 ticks/u },
+    { spans: [581, 581], pauses: [180, 381], reason: /pause 0 is 180 ticks/u },
+    { spans: [581, 581], pauses: [181, 380], reason: /pause 1 is 380 ticks/u },
+  ] as const;
+  for (const { spans, pauses, reason } of cases) {
+    const problems = spanProblems(fightsAt(spans, pauses));
+    assert.equal(spansHold(fightsAt(spans, pauses)), false, JSON.stringify({ spans, pauses }));
+    assert.equal(problems.length, 1, JSON.stringify({ spans, pauses, problems }));
+    assert.match(problems[0]!, reason);
   }
 });
 
@@ -122,7 +163,12 @@ test("a world age past MAX_FIGHT_TICKS with two fights fails with the fights, at
     using _installed = fixture.installed;
     await assert.rejects(fixture.clock.settle(run(fixture.context, fixture.sleep), 500_000), (error: unknown) => {
       assert.ok(error instanceof assert.AssertionError);
-      assert.match(error.message, /"fights":\[\{"scope":"[^"]+","target":7,"start":\d+,"end":30\d{3}\},\{"scope":"[^"]+","target":7,"start":40\d{3},"end":70\d{3}\}\]/u);
+      // The failure message carries the fights as JSON: each recorded field is checked on its own, not the key order.
+      assert.equal(error.message.match(/"target":7/gu)?.length, 2, error.message);
+      assert.match(error.message, /"end":30\d{3}/u);
+      assert.match(error.message, /"start":40\d{3}/u);
+      assert.match(error.message, /"startAge":\d+/u);
+      assert.match(error.message, /"endAge":\d+/u);
       return true;
     });
     // The age passes MAX_FIGHT_TICKS (a multiple of 20) at the next 20-tick packet: MAX + 20 ticks after the start, `rate` ticks per second of fake time.
