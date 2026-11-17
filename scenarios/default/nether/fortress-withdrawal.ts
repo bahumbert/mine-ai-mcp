@@ -7,6 +7,7 @@ import { observeIdleWindow } from "../../flat/combat/idle-reflex-window.ts";
 import { readEncounters, type Encounter } from "../../flat/combat/reflex.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
+import { judgeWithdrawal } from "./withdrawal-judge.ts";
 
 export const run: MineAiScenario = async (context) => {
   const params = fortressParamsSchema.parse(context.scenario.params);
@@ -29,17 +30,21 @@ export const run: MineAiScenario = async (context) => {
       if (!navigate) throw new Error("Fortress withdrawal requires the normal navigate action.");
       const [x, y, z] = params.exit;
       const release = releaseThreats(context);
-      const pending = runtime.run(navigate, { x, y, z, range: 1 }, context.signal);
-      const [, returned] = await Promise.all([release, pending]);
+      const pending = runtime.run(navigate, { x, y, z, range: 1 }, context.signal).then((returned) => ({
+        returned, positionAtWalkEnd: context.bot.entity.position.clone(),
+      }));
+      const [, { returned, positionAtWalkEnd }] = await Promise.all([release, pending]);
       context.log(`RETURN ${JSON.stringify(returned.result)}`);
       // Keep the reflex and native mobs active for delayed contact after arrival.
       const idle = await observeIdleWindow(context.bot, 100, () => evidence.snapshot().deaths > 0, context.signal);
       encounters.push(...(await readEncounters(context, runtime)));
       const final = evidence.snapshot();
-      const atExit = context.bot.entity.position.distanceTo(new Vec3(x + 0.5, y, z + 0.5)) <= 2;
+      const { atExit, passed } = judgeWithdrawal({
+        positionAtWalkEnd, positionAfterWindow: context.bot.entity.position.clone(),
+        exit: new Vec3(x + 0.5, y, z + 0.5), final, returned,
+      });
       return {
-        status:
-          final.deaths === 0 && final.health > 0 && final.dimension === "the_nether" && atExit ? "succeeded" : "failed",
+        status: passed ? "succeeded" : "failed",
         detail: JSON.stringify({
           ...final,
           atExit,

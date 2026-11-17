@@ -9,6 +9,7 @@ import { declaredEntitiesArranged, openRuntime, standStill, wearArmor } from "..
 import type { MineAiScenario } from "../../../src/scenario-client.ts";
 import { observe } from "./pit.ts";
 import { isAngry } from "./observe.ts";
+import { judgeTraverse } from "./basalt-judge.ts";
 
 const paramsSchema = z.strictObject({
   trial: z.enum(["traverse", "wounded_gaze"]).default("traverse"),
@@ -153,38 +154,6 @@ function trackCrossfire(
   };
 }
 
-/** The walk's outcome: arrived, sheltered in the hide, a blast handoff, or incomplete. Only arrival satisfies the travel goal. */
-function classifyTraverse(
-  bot: Bot,
-  travel: { result: { status: string } },
-  handoff: { outcome: string; explosions: number; healthAfter: number } | undefined,
-  shelter: { samples: number; coveredSamples: number },
-  arrived: boolean,
-) {
-  // Classify handoff evidence for diagnosis. Only arrival satisfies the travel goal.
-  const blastHandoff =
-    travel.result.status === "cancelled" &&
-    handoff?.outcome === "target_died" &&
-    handoff.explosions > 0 &&
-    bot.health >= 12 &&
-    bot.entity.onGround;
-  const sheltered =
-    travel.result.status === "cancelled" &&
-    handoff?.outcome === "hidden" &&
-    handoff.healthAfter >= 18 &&
-    shelter.samples >= 1 &&
-    shelter.coveredSamples === shelter.samples;
-  const outcome =
-    travel.result.status === "succeeded" && arrived
-      ? "arrived"
-      : sheltered
-        ? "sheltered"
-        : blastHandoff
-          ? "blast_handoff"
-          : "incomplete";
-  return { outcome, sheltered, blastHandoff };
-}
-
 /** The declared ghast's `is_charging` flag, watched from before the NoAI release: `latchedAge` is the server age of the first update that sets it. */
 interface GhastCharge {
   readonly ghast: Entity;
@@ -282,31 +251,27 @@ export const run: MineAiScenario = async (context) => {
     if ("failure" in charged) return { status: "failed", detail: charged.failure };
     const action = runtime.actions.find((a) => a.name === "navigate")!;
     const travel = await runtime.run(action, { x: 36, y: 101, z: 0, range: 1 }, signal);
+    const positionAtWalkEnd = bot.entity.position.clone();
     // Observe damage after arrival or handoff, and independently verify a claimed shelter.
     // The shelter is sampled on each body tick of the 40-server-tick window, not on client ticks.
     const shelter = await observeShelter(bot, 40, signal);
     const reflex = await readReflexOutcomes(context, runtime);
-    const arrived = bot.entity.position.distanceTo(new Vec3(36.5, 101, 0.5)) < 2;
+    const positionAfterWindow = bot.entity.position.clone();
     const handoff = reflex.encounters.findLast((response) => response.interrupted?.action === "navigate");
-    const { outcome, sheltered, blastHandoff } = classifyTraverse(bot, travel, handoff, shelter, arrived);
     const required =
       params.trial === "wounded_gaze"
         ? ["magma_cube", "enderman", "ghast"]
         : ["magma_cube", "enderman", "ghast", "fireball"];
     const exercised = required.every((name) => state.seen.has(name));
-    const passed =
-      arrived &&
-      bot.health > 0 &&
-      exercised &&
-      state.deaths === 0 &&
-      !state.inLava &&
-      !state.onMagma &&
-      !state.endermanAttackedFirst &&
-      bot.game.dimension === "the_nether";
+    const { arrived, finalDistance, outcome, sheltered, blastHandoff, passed } = judgeTraverse({
+      travel, positionAtWalkEnd, positionAfterWindow, handoff, shelter, state, exercised,
+      health: bot.health, onGround: bot.entity.onGround, dimension: bot.game.dimension,
+    });
     return {
       status: passed ? "succeeded" : "failed",
       detail: JSON.stringify({
         arrived,
+        finalDistance,
         outcome,
         chargeTicks: charged.chargeTicks,
         sheltered,
