@@ -14,7 +14,7 @@ export interface FakeRuntimeChildOptions {
   readonly historyMs?: number;
   readonly pauseMs?: number;
   readonly slowMs?: number;
-  /** Route delays share the supervisor's manual clock; the incident-ring case leaves this unset. */
+  /** Route delays share the supervisor's manual clock; a fixture user without a supervisor leaves this unset and waits real time. */
   readonly clock?: SupervisorClock;
 }
 
@@ -150,8 +150,9 @@ class FakeChild extends EventEmitter implements FakeRuntimeChild {
     return new ExecutionScope(owner);
   }
 
-  /** Wall-clock corrections must not stretch the background delay. */
+  /** On an injected clock the delay is that clock's own timer; without one, wall-clock corrections must not stretch it. */
   async #waitForBackgroundDelay(ms: number): Promise<void> {
+    if (this.options.clock) return this.#wait(ms);
     const end = monotonicNow() + ms;
     while (!this.#exited && monotonicNow() < end) await this.#wait(50);
   }
@@ -213,7 +214,7 @@ class FakeChild extends EventEmitter implements FakeRuntimeChild {
   }
 }
 
-/** Cancellable route delay when the fixture intentionally runs beside a real wall-clock incident ring. */
+/** Cancellable route delay for a fixture built without an injected clock. */
 function afterRealTime(ms: number, fire: () => void): () => void {
   const timer = setTimeout(fire, ms);
   return () => clearTimeout(timer);

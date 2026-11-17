@@ -28,7 +28,7 @@ async function supervised(
   deadlines?: McpSupervisorOptions["deadlines"],
   restartWindowMs = 0, // The older tests look at the failed state, so they run without a restart.
   incidentHistoryMs?: number,
-  seams: Partial<Pick<McpSupervisorOptions, "clock" | "spawnRuntime">> = {},
+  seams: Partial<Pick<McpSupervisorOptions, "clock" | "spawnRuntime" | "wallClock">> = {},
 ) {
   const directory = await mkdtemp(path.join(os.tmpdir(), `mcp-watchdog-${instanceId}-`));
   const child = launch?.(directory) ?? { executable, args };
@@ -60,29 +60,25 @@ async function supervised(
 /** Deadlines short enough for a test: a hang is declared after one second of silence instead of five. */
 const fastDeadlines = { startupMs: 10_000, unresponsiveMs: 1_000 };
 
-/** Real HTTP and incident writes, but explicit child liveness and watchdog time; only ring ageing needs real time. */
+/** Real HTTP and incident writes, but explicit child liveness, watchdog time and incident-ring ageing, all on one manual clock. */
 async function fakeSupervised(
   t: TestContext,
   instanceId: string,
-  options: { deadlines?: McpSupervisorOptions["deadlines"]; restartWindowMs?: number; historyMs?: number; slowMs?: number; realTime?: boolean; startReady?: boolean } = {},
+  options: { deadlines?: McpSupervisorOptions["deadlines"]; restartWindowMs?: number; historyMs?: number; slowMs?: number; startReady?: boolean } = {},
 ) {
   const clock = createFakeClock({ mode: "manual" });
   const children: ReturnType<typeof createFakeRuntimeChild>[] = [];
   const spawnRuntime = () => {
-    const child = createFakeRuntimeChild({ ...options, clock: options.realTime ? undefined : clock });
+    const child = createFakeRuntimeChild({ ...options, clock });
     children.push(child);
     if (children.length > 1) setImmediate(() => { void child.ready(); });
     return child;
   };
   const result = await supervised(t, instanceId, undefined, options.deadlines ?? fastDeadlines,
-    options.restartWindowMs ?? 0, options.historyMs, { clock: options.realTime ? undefined : clock, spawnRuntime });
+    options.restartWindowMs ?? 0, options.historyMs, { clock, wallClock: clock.now, spawnRuntime });
   t.after(async () => { await Promise.all(children.map((child) => child.close())); });
   const fake = children[0]!;
   if (options.startReady !== false) await fake.ready();
-  if (options.realTime) {
-    const beat = setInterval(() => fake.beat(), 250);
-    t.after(() => clearInterval(beat));
-  }
   return { ...result, clock, fake, children };
 }
 
@@ -100,7 +96,8 @@ async function whenFailed(url: string, pollMs = 100) {
     const response = await fetch(`${url}/health`);
     const status = await response.json();
     if (status.runtime?.state === "failed") return { httpStatus: response.status, status };
-    await sleepMs(pollMs);
+    if (pollMs > 0) await sleepMs(pollMs);
+    else await nextTurn();
   }
 }
 
@@ -193,21 +190,33 @@ test(
   },
 );
 
-/** The attribution test's incident ring age, short so the rows age out in seconds; the child waits it too (`--history-ms`). */
+/** The attribution test's incident ring age, short so the rows age out in seconds of fake clock; the child waits it too (`historyMs`). */
 const SHORT_HISTORY_MS = 3_000;
 
 test(
   "retains active request and restored phase after the client and entry event are gone",
   async (t) => {
-    const { url } = await fakeSupervised(t, "attribution", { realTime: true, historyMs: SHORT_HISTORY_MS });
+    const { url, clock, fake, directory } = await fakeSupervised(t, "attribution", { historyMs: SHORT_HISTORY_MS });
+    // The runtime beats every 250 ms of the clock the watchdog ticks on; the beat is a no-op once the child is silent.
+    t.after(clock.every(() => fake.beat(), 250));
     await whenHealthy(url);
     assert.equal(await (await fetch(`${url}/background`)).text(), "accepted");
+    fake.beat();
     const diagnostics = await whenReported(url);
     assert.equal(diagnostics.activity.active[0].owner.requestId, 812);
     assert.ok(diagnostics.heartbeat.memory.rss > 0);
 
+    // The ring holds the transitions before they age: a fault capture now carries them.
+    fake.fault(aFault("before ageing"));
+    const [early] = await processFaultIncidents(directory);
+    assert.ok(early!.some((row) => row.kind === "execution"), "The ring held the original transitions.");
+
     // The runtime wedges on its own timer, after the ring's age; the supervisor then declares the failure itself.
-    const { httpStatus, status } = await whenFailed(url);
+    await clock.advance(SHORT_HISTORY_MS + 2_000 - 250, 250);
+    assert.equal(await stateOf(url), "ready", "The runtime wedges only after the ring's age.");
+    // Last beat at 5 000 ms, failure at 6 000 ms of clock.
+    await clock.advance(250 + fastDeadlines.unresponsiveMs + 250, 250);
+    const { httpStatus, status } = await whenFailed(url, 0);
 
     assert.equal(httpStatus, 503);
     const reference = status.runtime.failure.incident;

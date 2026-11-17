@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeIncidentArtifact, type IncidentReference } from "../bot-data/incident-log.js";
-import { IncidentRecorder, type IncidentCapture } from "./incident-recorder.js";
+import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
+import { INCIDENT_HISTORY_BYTES, IncidentRecorder, type IncidentCapture } from "./incident-recorder.js";
 
 function text(capture: IncidentCapture): string {
   return Buffer.concat(capture.contents).toString();
@@ -39,6 +40,25 @@ test("capture freezes facts and retains the committed plan beyond the history wi
   assert.match(text(saved[0]!), /old-but-still-committed/);
   assert.match(text(saved[0]!), /"x":1}/);
   assert.doesNotMatch(text(saved[0]!), /expired|"x":100/);
+});
+
+test("the ring ages its rows by the injected wall clock", async () => {
+  const budget = { durationMs: 1_000, bytes: INCIDENT_HISTORY_BYTES };
+  // Each recorder has its own clock: one reads the age exactly (kept: expiry is strictly older), one a millisecond past it.
+  async function executionRowKept(ageMs: number): Promise<boolean> {
+    const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+    const saved: IncidentCapture[] = [];
+    const recorder = new IncidentRecorder({}, async (capture) => {
+      saved.push(capture);
+      return receipt;
+    }, () => {}, budget, undefined, clock.now);
+    recorder.record("execution", {});
+    await clock.advance(ageMs);
+    await recorder.capture("operator", null);
+    return text(saved[0]!).includes('"kind":"execution"');
+  }
+  assert.equal(await executionRowKept(1_000), true, "A row exactly as old as the history window is kept.");
+  assert.equal(await executionRowKept(1_001), false, "A row older than the history window has aged out.");
 });
 
 test("fine-grained events retain their facts without duplicating physics context", async () => {

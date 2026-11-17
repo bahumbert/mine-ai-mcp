@@ -54,9 +54,11 @@ export class IncidentRecorder {
     private readonly published: (reference: IncidentReference) => void,
     private readonly budget = { durationMs: INCIDENT_HISTORY_MS, bytes: INCIDENT_HISTORY_BYTES },
     private readonly context: () => object = () => ({}),
+    /** Wall-clock reading in epoch ms that stamps and ages the rows; tests pass their manual clock's `now`. */
+    private readonly wallClock: () => number = () => Date.now(),
   ) {}
 
-  record(kind: string, facts: object, atMs = Date.now()): void {
+  record(kind: string, facts: object, atMs = this.wallClock()): void {
     const started = performance.now();
     // Fine-grained events correlate with physics and decision snapshots by
     // timestamp. Repeating the full policy/ownership state on every route or
@@ -99,7 +101,7 @@ export class IncidentRecorder {
     requestId: number | null,
     precedingRequestId: number | null = null,
   ): Promise<IncidentCaptureResult> {
-    const atMs = Date.now();
+    const atMs = this.wallClock();
     this.#trim(atMs);
     if (this.#damageCheckpointRecent(trigger, atMs)) {
       this.#coalesced += 1;

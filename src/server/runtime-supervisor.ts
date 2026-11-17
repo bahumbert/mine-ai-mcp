@@ -86,6 +86,8 @@ export interface McpSupervisorOptions {
   readonly source: SourceIdentity;
   readonly incidents: { directory: string; retention: IncidentRetention };
   readonly clock?: SupervisorClock;
+  /** Wall-clock reading of the incident ring's row times and ageing (default `Date.now`); tests pass their manual clock's `now`. */
+  readonly wallClock?: () => number;
   readonly spawnRuntime?: (executable: string, args: readonly string[]) => RuntimeChild;
   /**
    * Silence allowed before `ready` and after it, the watchdog's interval (default {@link RUNTIME_HEARTBEAT_MS}) and the
@@ -144,6 +146,8 @@ const supervisorIncidentRecorder = (options: McpSupervisorOptions) =>
       ),
     () => {},
     incidentHistoryBudget(options),
+    undefined,
+    options.wallClock,
   );
 
 /** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
