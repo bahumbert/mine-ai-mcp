@@ -74,7 +74,7 @@ export function watchExplosions(context: MineAiScenarioContext): { count(): numb
  * counters record what it asked for; this records what the server did.
  */
 // @function-metrics size=6 branches=1 fan-out=3 depth=2 interface=1 fan-in=3
-export function watchShield(context: MineAiScenarioContext): { summary(): string; close(): void } {
+export function watchShield(context: MineAiScenarioContext): { counts(): { hurt: number; blocked: number }; summary(): string; close(): void } {
   const LIVING_ENTITY_FLAGS_INDEX = 8;
   // The entity status the server sends for the bot's own entity on a block;
   // damage arrives as its own event, which Mineflayer surfaces as entityHurt.
@@ -109,6 +109,7 @@ export function watchShield(context: MineAiScenarioContext): { summary(): string
   context.bot.on("entitySpawn", onSpawn);
   context.bot._client.on("entity_status", onStatus);
   return {
+    counts: () => ({ hurt, blocked }),
     summary: () => `shield up ${raised}/${sampled} ticks; blocked ${blocked}; hurt ${hurt}; arrows loosed ${loosed}`,
     close: () => {
       context.bot.off("physicsTick", onTick);

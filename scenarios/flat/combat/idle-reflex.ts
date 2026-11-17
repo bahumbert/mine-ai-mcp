@@ -19,6 +19,10 @@ const paramsSchema = z.strictObject({
   finishAfterTargetDeath: z.string().optional(),
   maxExplosions: z.number().int().nonnegative().optional(),
   requiredWallCells: z.array(z.tuple([z.number().int(), z.number().int(), z.number().int()])).default([]),
+  /** The encounter record must hold an evade: the bot declined the fight and got away. */
+  expectEvade: z.boolean().default(false),
+  /** No hit lands on the bot and none is blocked by its shield (a blocked hit is contact too). */
+  noContact: z.boolean().default(false),
 });
 
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
@@ -51,9 +55,12 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     const encounters = await readEncounters(context, runtime);
     const exploded = excessExplosions(explosions.count(), params.maxExplosions);
     const openWalls = params.requiredWallCells.filter(([x, y, z]) => !fullProtectionBlock(context.bot.blockAt(new Vec3(x, y, z))));
+    const evaded = !params.expectEvade || encounters.some((encounter) => encounter.response === "evade");
+    const contact = shield.counts();
+    const contactFree = !params.noContact || (contact.hurt === 0 && contact.blocked === 0);
     return {
-      status: !died && context.bot.health > 0 && !exploded && openWalls.length === 0 ? "succeeded" : "failed",
-      detail: `observedTicks ${observedTicks}; ${exploded ?? ""}; open required walls ${JSON.stringify(openWalls)}; health ${context.bot.health}; died ${died}; ${encounters.map(describe).join(" | ")}; ${shield.summary()}`,
+      status: !died && context.bot.health > 0 && !exploded && openWalls.length === 0 && evaded && contactFree ? "succeeded" : "failed",
+      detail: `observedTicks ${observedTicks}; ${exploded ?? ""}; open required walls ${JSON.stringify(openWalls)}; health ${context.bot.health}; died ${died}; evaded ${evaded}; contact-free ${contactFree}; ${encounters.map(describe).join(" | ")}; ${shield.summary()}`,
     };
   } finally {
     context.bot.off("entityDead", targetDeath);
