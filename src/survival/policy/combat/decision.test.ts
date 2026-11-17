@@ -177,6 +177,54 @@ test("a hunted species in contact is fought, not withdrawn from, until health ru
   if (hurt.kind === "evade") assert.equal(hurt.reason, "hurt");
 });
 
+/** The bow skeleton of `skeletonScene` stepped into sword reach (2.7 blocks, as C2 measured): what a defend-only walk meets on a bridge (P4-29 a5 C2). */
+const skeletonInReachScene = (): CombatDecisionFacts => {
+  const facts = skeletonScene();
+  const skeleton = facts.contacts[0]!;
+  return { ...facts, contacts: [{ ...skeleton, distance: 2.7, inReach: true,
+    utility: { ...skeleton.utility, inReach: true, distance: 2.7 } }] };
+};
+
+/** The directive's `endsOnContactLoss`, read by name so a test of a missing field fails on the value, not on a type. */
+const endsOnContactLoss = (directive: ReturnType<typeof decideCombatResponse>) => Reflect.get(directive, "endsOnContactLoss");
+
+test("a defend-only fight admitted only because its target is in reach ends when the target leaves reach", () => {
+  const facts = skeletonInReachScene();
+  const fight = decideCombatResponse(facts, { kind: "automatic" });
+  assert.equal(fight.kind, "fight");
+  assert.equal(endsOnContactLoss(fight), true);
+  // Out of reach the same bot withdraws: the flag only marks the fight the withdrawal's absence made.
+  const away = skeletonScene();
+  assert.equal(decideCombatResponse(away, { kind: "automatic" }).kind, "evade");
+});
+
+test("a fight that is not the in-reach stand-in for a withdrawal does not end on contact loss", async (t) => {
+  const inReach = skeletonInReachScene();
+  const hunter = (facts: CombatDecisionFacts) => ({ ...facts, policy: { ...facts.policy, engagement: "respond_to_threats" as const } });
+  const cases = [
+    { name: "retreat prohibited", facts: { ...inReach, policy: { ...inReach.policy, retreat: false } }, purpose: { kind: "automatic" } as const },
+    { name: "evade answered", facts: { ...inReach, answered: new Set(["evade"]) }, purpose: { kind: "automatic" } as const },
+    { name: "automatic quarry", facts: inReach, purpose: { kind: "automatic", quarry: ["skeleton"] } as const },
+    { name: "respond_to_threats", facts: hunter(inReach), purpose: { kind: "automatic" } as const },
+    { name: "contact defence", facts: inReach, purpose: { kind: "contact_defence", targetId: 24617 } as const },
+    { name: "shield at range, evade answered", facts: { ...skeletonScene(), answered: new Set(["evade"]) }, purpose: { kind: "automatic" } as const },
+    { name: "shield at range, retreat prohibited", facts: { ...skeletonScene(), policy: { ...skeletonScene().policy, retreat: false } }, purpose: { kind: "automatic" } as const },
+  ];
+  for (const entry of cases) await t.test(entry.name, () => {
+    const result = decideCombatResponse(entry.facts, entry.purpose);
+    assert.equal(result.kind, "fight");
+    assert.equal(endsOnContactLoss(result), undefined);
+  });
+});
+
+test("the flag follows the contact the fight defends, not another contact that is in reach", () => {
+  const inReach = skeletonInReachScene();
+  const shieldTarget = { ...skeletonScene().contacts[0]!, id: 31 };
+  const fight = decideCombatResponse({ ...inReach, contacts: [shieldTarget, ...inReach.contacts] }, { kind: "automatic" });
+  assert.ok(fight.kind === "fight" && fight.targetId === 31, "the shield-defended contact comes first");
+  assert.equal(endsOnContactLoss(fight), undefined);
+});
+
 test("a hunted contact whose fight is answered leaves the decision to the hunt", () => {
   const facts = skeletonScene();
   const answered = decideCombatResponse(

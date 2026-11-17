@@ -154,6 +154,19 @@ function defendContact(facts: CombatDecisionFacts, threats: readonly HostileThre
       );
 }
 
+/**
+ * Defend-only contact defence of a target in reach. While withdrawal is open the target out of reach would be
+ * `evade("withdraw")`, so a fight on a contact that is in reach ends when that contact leaves reach (`endsOnContactLoss`).
+ * Defence the policy leaves no withdrawal for (retreat prohibited or the evade answered) and shield defence of a contact
+ * out of reach end as they always did.
+ */
+function defendReachedContact(facts: CombatDecisionFacts, threats: readonly HostileThreat[]): HostileDirective {
+  const defence = defendContact(facts, threats);
+  if (defence.kind !== "fight" || !facts.policy.retreat || facts.answered.has("evade")) return defence;
+  const defended = facts.contacts.find((contact) => contact.id === defence.targetId);
+  return defended?.inReach ? { ...defence, endsOnContactLoss: true } : defence;
+}
+
 /** A retained fight failure excludes only its target, unless the whole response is answered. */
 function fightAnswered(facts: CombatDecisionFacts, targetId: number): boolean {
   const inReach = facts.health >= facts.policy.engage_min_health &&
@@ -278,7 +291,7 @@ function decideAutomaticCombat(facts: CombatDecisionFacts, purpose: Extract<Comb
   if (answered.has("fight")) return hunted(target) ? { kind: "none" } : evade("unreachable");
   return policy.engagement === "defend_only" && !hunted(target)
     ? target.inReach
-      ? defendContact(facts, threats)
+      ? defendReachedContact(facts, threats)
       : evade("withdraw")
     : { kind: "fight", targetId: target.id, threats };
 }

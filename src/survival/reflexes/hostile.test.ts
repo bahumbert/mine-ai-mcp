@@ -8,8 +8,10 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, engagingCombat } from "../../test-support/combat.js";
-import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeBotOptions, type FakeCell, type FakeEntitySpec, createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { observation } from "../../test-support/navigation.js";
+import { exactBlockGoal } from "../../navigation/goals/index.js";
+import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
@@ -794,31 +796,94 @@ test("ending the original melee contact cannot drop the owner while another fuse
   fixture.data.close();
 });
 
-/** A zombie in reach, a fight claimed that waits for its abort: `ticksOut` puts it out of reach for that many physics ticks, `ticksIn` in reach (a knockback flight and its landing). */
-async function contactScene() {
+/**
+ * A bounded walk request: its result is what the route answered. With `startReflex` its first run starts the reflex's
+ * fight and ends `cancelled` once the reflex has taken its body; a resumed run (or a run with none) navigates once.
+ */
+function walkRequest(navigation: NavigationRuntime, navigations: { count: number }, name: string, startReflex?: () => void) {
+  const input = z.object({});
+  let attempts = 0;
+  return defineAction({
+    name,
+    description: "walk to a block",
+    inputSchema: input,
+    resultSchema: actionResultSchema({}),
+    formatResult: (result) => result.status,
+    parse: (value: unknown) => input.parse(value),
+    execution: { kind: "resumable_task" },
+    begin: () => async (context) => {
+      if (++attempts === 1 && startReflex) {
+        const preempted = new Promise<void>((resolve) => context.signal!.addEventListener("abort", () => resolve(), { once: true }));
+        startReflex();
+        await preempted;
+        return { status: "cancelled" as const, error: "interrupted" };
+      }
+      const route = await navigation.navigate({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 60, y: 64, z: 0 }) });
+      navigations.count += 1;
+      return route.status === "completed" ? { status: "succeeded" as const } : { status: "failed" as const, error: `route ${route.status}` };
+    },
+  });
+}
+
+interface ContactSceneOptions {
+  /**
+   * A bow skeleton under defend-only instead of the zombie, the fight a walk meets on a bridge (P4-29 a5 C2): `retreat` says
+   * whether withdrawal is open. Open, the decision admits the fight only because the skeleton is in reach and marks it
+   * `endsOnContactLoss`; prohibited, it is plain shield-and-sword defence.
+   */
+  readonly shooter?: { readonly retreat: boolean };
+  /** The fight suspends a resumable walk (the request a reflex interrupts) instead of an idle body. */
+  readonly walk?: boolean;
+  readonly server?: FakeBotOptions["server"];
+}
+
+/**
+ * A mob in reach, a fight claimed that waits for its abort: `ticksOut` puts it out of reach for that many physics ticks,
+ * `ticksIn` in reach (a knockback flight and its landing). The fight settles as `abortAs` and its abort reason is read
+ * from `abortedBy()`. With `walk` the fight meets a walk that navigates once more when it resumes.
+ */
+async function contactScene(options: ContactSceneOptions = {}) {
   let engaged = false;
   let aborted = false;
+  let abortedBy: unknown;
+  let abortAs: "cancelled" | "bot_died" = "cancelled";
   const fixture = reflexFixture(
     (targetId, signal) =>
       new Promise((resolve) => {
         engaged = true;
-        signal.addEventListener("abort", () => { aborted = true; resolve({ ...died(targetId), kind: "cancelled" }); }, { once: true });
-      }), undefined, { entities: { 7: hostile("zombie", 2) } },
+        signal.addEventListener("abort", () => { aborted = true; abortedBy = signal.reason; resolve({ ...died(targetId), kind: abortAs }); }, { once: true });
+      }), undefined, { entities: { 7: hostile(options.shooter ? "skeleton" : "zombie", 2) }, server: options.server },
   );
-  fixture.tick();
+  const mob = fixture.bot.entities[7]!;
+  if (options.shooter) {
+    mob.equipment[0] = itemOf(fixture.bot.registry, "bow");
+    await fixture.controller.policy.edit({
+      operation: "set",
+      expected_revision: fixture.controller.policy.snapshot().revision,
+      changes: { combat: { engagement: "defend_only", retreat: options.shooter.retreat } },
+      lifetime: { kind: "session" },
+      reason: "test",
+    });
+  }
+  const added = listenersAddedSince(fixture.bot);
+  const navigations = { count: 0 };
+  const navigateAction = (name: string, startReflex?: () => void) => walkRequest(fixture.navigation, navigations, name, startReflex);
+  let walking: Promise<Awaited<ReturnType<typeof fixture.runner.run>>> | undefined;
+  if (options.walk) {
+    walking = fixture.runner.run(navigateAction("walk_test", () => fixture.tick()), {});
+  } else fixture.tick();
   assert.ok(await until(() => engaged), "the fight is claimed");
-  const zombie = fixture.bot.entities[7]!;
   const ticksOut = (count: number) => {
-    zombie.position.x = 12;
+    mob.position.x = 12;
     for (let tick = 0; tick < count; tick += 1) fixture.tick();
   };
   const ticksIn = (count: number) => {
-    zombie.position.x = 2;
+    mob.position.x = 2;
     for (let tick = 0; tick < count; tick += 1) fixture.tick();
   };
   const close = async () => {
     fixture.runner.cancelActive("Test completed");
-    await fixture.observer[Symbol.asyncDispose]();
+    await fixture.observer.close();
     fixture.data.close();
   };
   /** The encounters recorded once the fight settled (or after the turns given: a fight that goes on records none). */
@@ -826,48 +891,176 @@ async function contactScene() {
     await until(() => fixture.recorded().length > 0, 30);
     return fixture.recorded();
   };
-  return { ...fixture, ticksOut, ticksIn, settled, fighting: () => !aborted && fixture.runner.status().busy, close };
+  /** After the fight: the watcher left none of its listeners, and a later bounded navigation runs and answers. */
+  const assertNothingLeftAndNextActionRuns = async () => {
+    for (const event of ["physicsTick", "entityGone", "time"]) assert.equal(added(event), 0, `${event} listeners the fight added`);
+    const before = navigations.count;
+    const next = await fixture.runner.run(navigateAction("next_action_test"), {});
+    assert.equal(next.result.status, "succeeded");
+    assert.equal(navigations.count, before + 1, "the next request navigated once");
+  };
+  return {
+    ...fixture, ticksOut, ticksIn, settled, close, assertNothingLeftAndNextActionRuns, navigations,
+    fighting: () => !aborted && fixture.runner.status().busy,
+    walking: () => walking!,
+    abortedBy: () => abortedBy,
+    abortAs: (kind: typeof abortAs) => { abortAs = kind; },
+    age: () => fixture.bot.time.age,
+  };
 }
 
-// The 20th tick ending it (`contact_ended`) is held by the renamed pin above ("ending after 20 ticks out of reach").
-test("12 or 19 ticks out of reach then back keeps fighting", async () => {
-  for (const ticks of [12, 19]) {
-    const scene = await contactScene();
+const MOBS = [
+  { mob: "zombie (melee)", options: {} },
+  { mob: "bow skeleton (withdrawal open, marked)", options: { shooter: { retreat: true } } },
+] as const satisfies readonly { mob: string; options: ContactSceneOptions }[];
+
+// The 20th tick ending a melee contact (`contact_ended`) is held by "melee contact ending after 20 ticks out of reach".
+for (const { mob, options } of MOBS) {
+  test(`${mob}: 12 or 19 ticks out of reach then back keeps fighting, and 19 + 1 in + 19 out is not 20 in a row, the next tick out ends it`, async () => {
+    for (const ticks of [12, 19]) {
+      const scene = await contactScene(options);
+      try {
+        scene.ticksOut(ticks);
+        scene.ticksIn(1);
+        assert.deepEqual(await scene.settled(), [], `${ticks} ticks out of reach does not end the fight`);
+        assert.equal(scene.fighting(), true);
+      } finally {
+        await scene.close();
+      }
+    }
+    const scene = await contactScene(options);
     try {
-      scene.ticksOut(ticks);
+      scene.ticksOut(CONTACT_GRACE_TICKS - 1);
       scene.ticksIn(1);
-      assert.deepEqual(await scene.settled(), [], `${ticks} ticks out of reach does not end the fight`);
+      scene.ticksOut(CONTACT_GRACE_TICKS - 1);
+      assert.deepEqual(await scene.settled(), [], "the count restarted at the tick in reach");
       assert.equal(scene.fighting(), true);
+      scene.ticksOut(1);
+      assert.deepEqual(await scene.settled(), ["fight -> contact_ended"], "the 20th read in a row ends it");
     } finally {
       await scene.close();
     }
+  });
+}
+
+test("a defend-only fight on a shooter that steps out of reach ends contact_ended after 20 ticks and the reflex is free", async () => {
+  const scene = await contactScene({ shooter: { retreat: true } });
+  try {
+    scene.ticksOut(CONTACT_GRACE_TICKS);
+    assert.ok(await until(() => !scene.runner.status().busy));
+    assert.deepEqual(scene.recorded(), ["fight -> contact_ended"]);
+    assert.equal(scene.driver.answered.snapshot().some((entry) => entry.response === "fight"), false, "a lost contact is not an answered fight");
+    await scene.assertNothingLeftAndNextActionRuns();
+  } finally {
+    await scene.close();
   }
 });
 
-test("one tick back in reach restarts the count", async () => {
-  const scene = await contactScene();
+test("without withdrawal open the same shooter keeps the shield fight past 30 ticks out of reach", async () => {
+  const scene = await contactScene({ shooter: { retreat: false } });
   try {
-    scene.ticksOut(15);
-    scene.ticksIn(1);
-    scene.ticksOut(15);
-    assert.deepEqual(await scene.settled(), [], "15 + 15 ticks out with one in between is not 20 in a row");
+    scene.ticksOut(CONTACT_GRACE_TICKS + 10);
+    assert.deepEqual(await scene.settled(), [], "no end after 30 ticks out of reach");
     assert.equal(scene.fighting(), true);
   } finally {
     await scene.close();
   }
 });
 
-test("with physics stopped the grace does not count and the 30 s no-progress limit ends the fight", async () => {
-  const scene = await contactScene();
+/** A walk the fight suspends, then one of three exits during the out-of-reach count: each settles the fight once with its own outcome. */
+for (const exit of ["cancel", "death", "preemption"] as const) {
+  test(`a ${exit} during the shooter fight's out-of-reach count settles it once, never resumes a cancelled walk, and leaves the body free`, async () => {
+    const scene = await contactScene({ shooter: { retreat: true }, walk: true });
+    try {
+      scene.ticksOut(CONTACT_GRACE_TICKS - 8);
+      if (exit === "cancel") {
+        scene.runner.cancelActive("Caller cancelled the walk");
+        const walked = (await scene.walking()).result;
+        assert.equal(walked.status, "cancelled", JSON.stringify(walked));
+      } else if (exit === "death") {
+        scene.abortAs("bot_died");
+        const cancelOnDeath = () => { scene.runner.cancelActive("bot died"); };
+        scene.bot.on("death", cancelOnDeath);
+        try {
+          scene.combat.setHealth(0);
+          await scene.clock.advance(150);
+        } finally {
+          scene.bot.off("death", cancelOnDeath);
+        }
+        assert.equal((await scene.walking()).result.status, "cancelled");
+      } else {
+        let release: () => void = () => assert.fail("the claim has not started");
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        let successor: AbortSignal | undefined;
+        const claim = scene.runner.claim("fire_reflex", "burning", async (signal) => {
+          successor = signal;
+          await held;
+          return { value: "out", continuation: { kind: "resume" as const } };
+        });
+        assert.equal(claim.kind, "claimed");
+        assert.ok(await until(() => successor !== undefined));
+        const reason = scene.abortedBy();
+        assert.ok(reason instanceof BodyAbort, "the fight was aborted with a body abort");
+        assert.deepEqual(reason.detail, { kind: "preempted", by: "fire_reflex" });
+        // The higher reflex keeps the body past the contact grace and the 600-tick limit: nothing of the old fight touches it.
+        scene.ticksOut(CONTACT_GRACE_TICKS);
+        await scene.clock.advance(35_000);
+        assert.equal(successor!.aborted, false, "the higher reflex is untouched by the old fight's cleanup");
+        release();
+        if (claim.kind === "claimed") await claim.outcome;
+        assert.equal((await scene.walking()).result.status, "succeeded", "the held reflex resumed the suspended walk");
+        assert.equal(scene.navigations.count, 1, "the resumed walk navigated once");
+      }
+      assert.ok(await until(() => scene.recorded().length > 0));
+      assert.deepEqual(scene.recorded(), [`fight -> ${exit === "death" ? "bot_died" : "cancelled"}`]);
+      scene.ticksOut(CONTACT_GRACE_TICKS);
+      await scene.clock.advance(35_000);
+      assert.equal(scene.recorded().length, 1, "the old fight settled once");
+      if (exit !== "preemption") assert.equal(scene.navigations.count, 0, "a cancelled walk is not resumed");
+      await scene.assertNothingLeftAndNextActionRuns();
+    } finally {
+      await scene.close();
+    }
+  });
+}
+
+/** With the client's physics stopped the contact count never runs: the 600-tick no-progress limit ends the fight in world ticks, at any rate. */
+for (const { mob, options } of MOBS) {
+  for (const ticksPerSecond of [20, 10]) {
+    test(`${mob}: with physics stopped the grace does not count and the 600-tick no-progress limit ends the fight (${ticksPerSecond} tps)`, async () => {
+      const scene = await contactScene({ ...options, server: { ticksPerSecond } });
+      const msPerTick = 1000 / ticksPerSecond;
+      try {
+        const start = scene.age();
+        scene.bot.physicsEnabled = false; // a chunk unloaded under the bot: the client runs no tick
+        scene.bot.entities[7]!.position.x = 12;
+        await scene.clock.advance(500 * msPerTick);
+        assert.ok(scene.age() - start >= 480 && scene.age() - start < 600, `${scene.age() - start} world ticks in`);
+        assert.equal(scene.fighting(), true, "no tick, no grace: 500 world ticks later the fight is still held");
+        await scene.clock.advance(140 * msPerTick); // the window is 600 world ticks and one packet: it ends at the packet of age A + 620
+        await until(() => !scene.fighting());
+        assert.ok(scene.age() - start >= 600, `${scene.age() - start} world ticks in`);
+        assert.equal(scene.fighting(), false, "the 600-tick no-progress limit ended it");
+        assert.equal(scene.driver.answered.snapshot()[0]?.failure.kind, "reflex_limit", "a limit, not contact_ended");
+      } finally {
+        await scene.close();
+      }
+    });
+  }
+}
+
+test("a stopped server ends the shooter fight on the 20 s wall of its 600-tick no-progress window, the world age unmoved", async () => {
+  const scene = await contactScene({ shooter: { retreat: true } });
   try {
-    scene.bot.physicsEnabled = false; // a chunk unloaded under the bot: the client runs no tick
-    scene.bot.entities[7]!.position.x = 12;
-    await scene.clock.advance(25_000);
-    assert.equal(scene.fighting(), true, "no tick, no grace: 25 s later the fight is still held");
-    await scene.clock.advance(7_000); // the 30 s window is 600 world ticks and one packet: it ends at the packet of age A + 620, 31 s in at 20 tps
+    const start = scene.age();
+    scene.server.stop();
+    await scene.clock.advance(19_000);
+    assert.equal(scene.fighting(), true, "19 s on a still clock: still held");
+    await scene.clock.advance(2_000);
     await until(() => !scene.fighting());
-    assert.equal(scene.fighting(), false, "the 30 s no-progress limit ended it");
-    assert.equal(scene.driver.answered.snapshot()[0]?.failure.kind, "reflex_limit", "a limit, not contact_ended");
+    assert.equal(scene.fighting(), false, "20 s on a still clock ended it");
+    assert.equal(scene.age(), start, "the age never moved");
+    assert.equal(scene.driver.answered.snapshot()[0]?.failure.kind, "reflex_limit");
   } finally {
     await scene.close();
   }

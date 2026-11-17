@@ -27,7 +27,9 @@ import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline, type Server
  * Consecutive physics ticks a melee target may stay out of defensive reach before the fight ends as `contact_ended`.
  * A knockback flight lasts about 0.6 s (12 ticks, `facts/runtime-pitfalls.md` "a `/damage` attributed to an entity
  * knocks the bot back"); 20 ticks is one second, above it. The count lives on physics ticks only: with no tick the
- * fight's 30 s no-progress limit bounds it.
+ * fight's 30 s no-progress limit bounds it. A target that does not defend on contact (a bow holder) counts too when
+ * the decision marked the fight `endsOnContactLoss`: it is a contact-only fight that withdrawal would have replaced
+ * once the target left reach (P4-29 a5 C2); any other fight on such a target holds its shield until its limits.
  */
 export const CONTACT_GRACE_TICKS = 20;
 
@@ -36,7 +38,13 @@ export const CONTACT_GRACE_TICKS = 20;
  * world ticks. The deadline is also read on time packets (they come with physics stopped) and a wall timer backs it
  * up; the packets never count towards the contact grace (plan 2026-11-16-reflex-limits-ticks D5).
  */
-function watchFightContact(bot: Bot, targetId: number, context: ResponseContext, ended: AbortController): () => void {
+function watchFightContact(
+  bot: Bot,
+  request: Extract<HostileDirective, { kind: "fight" }>,
+  context: ResponseContext,
+  ended: AbortController,
+): () => void {
+  const targetId = request.targetId;
   const removal = watchEntityRemoval(bot, targetId);
   let readsOutOfReach = 0;
   let missing: { readonly deadline: ServerTickDeadline; readonly wallTimer: ReturnType<typeof setTimeout> } | undefined;
@@ -68,7 +76,8 @@ function watchFightContact(bot: Bot, targetId: number, context: ResponseContext,
     endWaitWhenOver();
     const { perception } = context;
     const creepers = perception.creeperClearance.observe(perception.tick, perception.resolvedIds);
-    if (target?.isValid && defendsOnContact(bot, target) && !inDefensiveContact(bot, target)) readsOutOfReach++;
+    const endsOnLeavingReach = request.endsOnContactLoss === true || (target ? defendsOnContact(bot, target) : false);
+    if (target?.isValid && endsOnLeavingReach && !inDefensiveContact(bot, target)) readsOutOfReach++;
     else readsOutOfReach = 0;
     if (creeperEscape({ creepers, clearancePending: perception.creeperClearance.pending, stationaryCommitment: false })) return;
     if (readsOutOfReach >= CONTACT_GRACE_TICKS) ended.abort("contact_ended");
@@ -103,7 +112,7 @@ async function fight(
   const contactEnded = new AbortController();
   const policyRevision = controller.policy.snapshot().revision;
   const target = bot.entities[request.targetId];
-  const stopWatching = watchFightContact(bot, request.targetId, context, contactEnded);
+  const stopWatching = watchFightContact(bot, request, context, contactEnded);
   let result: CombatOutcome;
   try {
     const pending = controller.engage(
