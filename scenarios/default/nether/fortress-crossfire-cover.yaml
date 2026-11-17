@@ -30,4 +30,4 @@ players:
 client:
   command: bun
   args: ["../../src/client-host.ts", "./fortress-crossfire-cover.ts"]
-goal: { kind: completion, who: FortressCover, timeout: 120 }
+goal: { kind: completion, who: FortressCover, timeout: 120, stillTicks: 1480 } # P4-29 a5 T2: longest passing still span 731 ticks (20 tps 731, 10 tps 698; n 5 and 3); 2x rounded up to 20.
