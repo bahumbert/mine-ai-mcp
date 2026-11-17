@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { ActionRunner } from "../../session/action-runner.js";
-import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { stubAction } from "../../session/action-runner-fixtures.test.js";
+import { createMovements, createNavigationRuntime, exactBlockGoal } from "../../navigation/index.js";
+import { createFakeBot, createFakeClock, flush, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachFootingReflex } from "./footing.js";
 
@@ -64,3 +66,82 @@ test("landing marks, and so does entering water", async () => {
   assert.equal(scene.runner.status().activeAction?.action, "recover_footing", "so did the splash at 8 s");
   await scene.dispose();
 });
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a footing takeover of an airborne stationary search starts recovery within two physics ticks at ${ticksPerSecond} tps`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot, server } = createFakeBot({ clock, position: new Vec3(0.5, 63, 0.5), groundY: 62,
+      server: { ticksPerSecond, startAge: 0 } });
+    const added = listenersAddedSince(bot);
+    const runner = new ActionRunner({ clock });
+    const navigation = createNavigationRuntime(bot);
+    const driver = new ReflexDriver(bot, runner, { now: clock.now });
+    let needed = false;
+    let claimedAt: number | null = null;
+    let recoveredAt: number | null = null;
+    let landed = false;
+    let searching = false;
+    driver.onTransition(event => {
+      if (event.kind === "claim") claimedAt = clock.now();
+    });
+    navigation.onEvent(event => {
+      if (event.kind === "search_started") {
+        searching = true;
+        bot.entity.onGround = false;
+        bot.entity.position.y += 0.5;
+        needed = true;
+      }
+    });
+    const recovery = {
+      get needed() { return needed; },
+      async recover(): Promise<"landed"> {
+        recoveredAt = clock.now();
+        assert.equal(bot.entity.onGround, false, "the successor receives the released airborne body");
+        bot.entity.position.y = 63;
+        bot.entity.onGround = true;
+        needed = false;
+        landed = true;
+        return "landed";
+      },
+    };
+    const reflex = attachFootingReflex(driver, { activeEngagement: () => null }, recovery,
+      reason => navigation.releaseForTakeover(reason));
+    const action = stubAction(async (_request, context) => {
+      await navigation.navigate({ movements: createMovements(bot), goal: exactBlockGoal({ x: 5, y: 63, z: 0 }), signal: context.signal });
+      context.signal?.throwIfAborted();
+      return { status: "succeeded" };
+    });
+    let pending: ReturnType<typeof runner.run> | undefined;
+    try {
+      await clock.advance(2_000);
+      assert.equal(bot.time.age, ticksPerSecond === 20 ? 40 : 20, "at fake-clock 2000 ms: two/one time packets");
+      pending = runner.run(action, { block_name: "stone" });
+      await flush();
+      assert.equal(searching, true);
+      assert.equal(navigation.active, true);
+      await clock.advance(50);
+      assert.equal(claimedAt, 2_050, "the first physics tick after the airborne search claims footing");
+      await clock.advance(100);
+      assert.ok(recoveredAt !== null && recoveredAt - claimedAt! <= 100,
+        `recovery at fake-clock ${recoveredAt} ms, claim ${claimedAt} ms, world age ${bot.time.age}`);
+      assert.equal(bot.time.age, ticksPerSecond === 20 ? 40 : 20, "at fake-clock 2150 ms, no further time packet was needed");
+      assert.equal(landed, true);
+      assert.equal(navigation.active, false);
+      await clock.settle(pending, 50);
+      assert.equal(runner.status().owner, "idle");
+      server.stop();
+      await clock.advance(2_050);
+      assert.equal(runner.status().owner, "idle", "the stopped server leaves the completed handoff settled");
+      assert.equal(bot.time.age, ticksPerSecond === 20 ? 40 : 20);
+    } finally {
+      navigation.releaseForTakeover("test cleanup");
+      await clock.settle(navigation.close(), 2_050);
+      if (pending) await clock.settle(pending, 2_050);
+      await reflex[Symbol.asyncDispose]();
+      await driver[Symbol.asyncDispose]();
+    }
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  });
+}

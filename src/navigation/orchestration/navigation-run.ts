@@ -271,6 +271,7 @@ export class NavigationRun {
   #routeDependencies: ReadonlySet<number> = new Set<number>();
   #routeLavaDependencies: ReadonlySet<number> = new Set<number>();
   #routeExecutor: RouteExecutor | undefined;
+  readonly #terminated = new AbortController();
   /** The search running alongside the route being walked, held so settlement can stop and drain it. */
   #pending: PendingContinuation | null = null;
   #goalRevision = "unresolved";
@@ -339,9 +340,7 @@ export class NavigationRun {
     return this.#failed({ kind: "internal_error", message: describeError(cause) });
   }
   /** The world ended or another owner will steer; release the route without waiting for its landing. */
-  terminate(): void {
-    this.#routeExecutor?.terminate();
-  }
+  terminate(): void { this.#terminated.abort(); this.#routeExecutor?.terminate(); }
 
   /** Own setup through settlement, including partial setup and failed cleanup. */
   async #navigateWithResources(): Promise<NavigationOutcome> {
@@ -694,9 +693,9 @@ export class NavigationRun {
       return await this.#search(goal, node, reason, signal, field, null);
     } finally {
       try {
-        // An impulse can invalidate the search's start mid-flight. Keep its hold through the
-        // wall-bounded landing wait, cancel included, before another owner takes over.
-        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, null);
+        // Keep the hold through cancellation or replanning, but an admitted successor must
+        // be free to establish the landing itself (P4-29 a10, 2026-11-17).
+        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, this.#terminated.signal);
       } finally {
         release();
       }
