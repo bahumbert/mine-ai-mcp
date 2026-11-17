@@ -122,16 +122,27 @@ function refusingPolicy(origin: { x: number; y: number; z: number }, probe: Stra
   }) as typeof policy;
 }
 
-/** A roofed flooded room east of the air pocket, closed before the goal: the search spreads over it and fails. */
+/** The flooded room spans x 1..ROOM_EAST - 1 and z -ROOM_HALF_WIDTH..ROOM_HALF_WIDTH; the goal's air pocket starts at GOAL_POCKET_X. */
+const ROOM_EAST = 12;
+const ROOM_HALF_WIDTH = 4;
+const GOAL_POCKET_X = 16;
+const FLOODED_GOAL_X = GOAL_POCKET_X + 1;
+
+/**
+ * A roofed flooded room east of the air pocket, closed before the goal: the search spreads over it and fails. Small
+ * on purpose: the search runs its whole open set on a frozen clock, so its CPU time grows with the room (about 3 ms a
+ * node; 100 nodes here, still 7 stranded checks). A 305-node room ran past the runner's 5 s limit under load.
+ */
 function floodedRoom(probe: StrandedProbe): MemoryWorld {
   const world = new ProbedWorld(probe);
-  for (let x = -4; x <= 42; x++)
-    for (let z = -14; z <= 14; z++)
+  for (let x = -4; x <= FLOODED_GOAL_X + 2; x++)
+    for (let z = -ROOM_HALF_WIDTH - 2; z <= ROOM_HALF_WIDTH + 2; z++)
       for (let y = FLOOR; y <= ROOF + 1; y++) {
-        const hollow = y > FLOOR && y < ROOF && ((z === 0 && x <= 0) || (x > 0 && x < 31 && Math.abs(z) <= 12) || (x >= 39 && z === 0));
+        const hollow = y > FLOOR && y < ROOF
+          && ((z === 0 && x <= 0) || (x > 0 && x < ROOM_EAST && Math.abs(z) <= ROOM_HALF_WIDTH) || (x >= GOAL_POCKET_X && z === 0));
         world.load({ x, y, z }, !hollow
           ? { stateId: 1 }
-          : x <= 0 || x >= 39 ? { stateId: 0 } : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true, safeToBreak: false } });
+          : x <= 0 || x >= GOAL_POCKET_X ? { stateId: 0 } : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true, safeToBreak: false } });
       }
   return world;
 }
@@ -140,7 +151,7 @@ test("past the primary budget a refused selection is judged once, not once per e
   const probe: StrandedProbe = { armed: false, checks: [] };
   const world = floodedRoom(probe);
   const start = { x: 0, y: FLOOR + 1, z: 0 };
-  const goal = exactBlockGoal({ x: 40, y: FLOOR + 1, z: 0 }).resolve(observation(0, start.y, 0));
+  const goal = exactBlockGoal({ x: FLOODED_GOAL_X, y: FLOOR + 1, z: 0 }).resolve(observation(0, start.y, 0));
   if (goal.kind !== "active") throw new Error(goal.observation);
   const update = new IncrementalSearch({
     id: "flooded-room", start: planningStart(start), goal, now: () => 0,
