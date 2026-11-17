@@ -16,11 +16,22 @@ import { kickReason, startRuntimeHost } from "./runtime-host.js";
 
 const source = { kind: "unavailable", reason: "Host lifecycle test" } as const;
 
+/** Real time the tool plugin gets to load its pathfinder (it does so in a 0 ms timer of its own, `mineflayer-tool/lib/index.js` line 8). */
+const PATHFINDER_LOAD_REAL_MS = 5_000;
+
+/** The tool plugin loads the pathfinder, and so its `physicsTick` listener, in a timer: wait for the pathfinder itself, not for a guess of how long the timer takes (a loaded event loop ran it after the host's whole failed start: 0 listeners seen, 2 reds in 40 runs). */
+async function pathfinderLoaded(bot: object): Promise<void> {
+  const loaded = () => Reflect.get(bot, "pathfinder") != null;
+  const deadline = performance.now() + PATHFINDER_LOAD_REAL_MS;
+  while (!loaded() && performance.now() < deadline) await delay(1);
+  assert.ok(loaded(),`the tool plugin did not load the pathfinder within ${PATHFINDER_LOAD_REAL_MS} ms of real time`);
+}
+
 /** The `physicsTick` listeners the tool plugin and the pathfinder it loads a tick later keep on a bot for good: a plugin cannot be unloaded, so a real bot keeps them after the host is gone. */
 const TOOL_PLUGIN_PHYSICS_LISTENERS = await (async () => {
   const { bot } = createFakeBot();
   bot.loadPlugin(toolPlugin);
-  await delay(0);
+  await pathfinderLoaded(bot);
   return bot.listenerCount("physicsTick");
 })();
 
@@ -88,9 +99,19 @@ test("a plugin startup failure still quits the newly created bot", async (t) => 
   assert.equal(bot._client.listenerCount("registry_data"), 0);
 });
 
+/** A 0 ms timer set while the host starts runs this late: how a loaded event loop runs the tool plugin's pathfinder timer after the host's whole failed start. Measured 2026-11-17 (worker hf2-w7, probe not kept): with 0 ms timers held 400 ms the assert below read 0 listeners 6 of 6 times, the text of the loaded reds; held 100 ms it still passed 1 run in 3, as the test itself lasts about 150 ms. */
+const LATE_ZERO_MS_TIMER_MS = 400;
+
 test("failed HTTP binding releases the runtime and bot and retains combined cleanup failures", async (t) => {
   const options = await configuration(t);
   const { bot } = connectedBot(t);
+  // The tool plugin loads its pathfinder in a 0 ms timer: holding it back makes the start fail before the pathfinder
+  // (and its physicsTick listener) exists, the order a loaded event loop produces.
+  const realSetTimeout = globalThis.setTimeout;
+  // Assigned, not `t.mock.method` (measured in the same probe: the mocked global timer did not delay the plugin's call).
+  globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) =>
+    realSetTimeout(callback, ms === 0 ? LATE_ZERO_MS_TIMER_MS : ms, ...rest)) as typeof setTimeout;
+  t.after(() => void (globalThis.setTimeout = realSetTimeout));
   await using occupied = createServer();
   await once(occupied.listen(0, "127.0.0.1"), "listening");
   const address = occupied.address();
@@ -122,6 +143,7 @@ test("failed HTTP binding releases the runtime and bot and retains combined clea
     return true;
   });
   assert.deepEqual(releases, ["database", "bot"]);
+  await pathfinderLoaded(bot);
   assert.equal(bot.listenerCount("physicsTick"), TOOL_PLUGIN_PHYSICS_LISTENERS, "only the tool plugin's own listener is left");
   assert.equal(bot.listenerCount("error"), 0);
 });
@@ -134,6 +156,7 @@ test(
     const { bot } = connectedBot(t);
     const signals = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
     await using host = await startRuntimeHost(source, options);
+    await pathfinderLoaded(bot);
     assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], signals);
     const address = host.server.address();
     assert.ok(address && typeof address === "object");
