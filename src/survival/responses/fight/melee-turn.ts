@@ -1,4 +1,3 @@
-export const HOLD_GROUND_RANGE = 16;
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
@@ -68,16 +67,11 @@ export async function runMeleeTurn(
   roof: EndermanFight,
   loadout: Extract<CombatLoadout, { kind: "melee" }>,
 ): Promise<CombatOutcome | null> {
-  const distance = scene.target.position.distanceTo(scene.bot.entity.position);
   const guarded = loadout.shield !== null;
 
   if (meleeDistance(scene.bot, scene.target) > MELEE_RANGE && scene.holdsGround) {
-    if (distance > HOLD_GROUND_RANGE) {
-      return {
-        ...scene.result("unreachable"),
-        observation: `Target ${scene.targetId} left holding range without attacking.`,
-      };
-    }
+    // A diving attacker crosses its old holding range between hits; confirmed quarry damage,
+    // not distance, renews the engagement's existing no-progress bound (P4-29 a11 T3d).
     if (guarded) await weapons.raiseGuard();
     await scene.execution.run("hold", () => weapons.holdFacing(1));
     return null;

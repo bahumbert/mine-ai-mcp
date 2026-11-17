@@ -27,7 +27,7 @@ import { SupportedPositionHold } from "../../../navigation/index.js";
 import { CombatPerception, positionThreat } from "../../perception/combat/observations.js";
 import { incomingShieldProjectiles } from "../../perception/combat/shield-projectiles.js";
 import { FootingRecovery } from "../../responses/footing.js";
-import { type FakeClock, type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeClock, createFakeWorld } from "../../../test-support/fake-bot/index.js";
+import { type FakeClock, type FakeHarness, type FakeInventory, type FakeWorld, createFakeBot, createFakeClock, createFakeWorld, listenersAddedSince } from "../../../test-support/fake-bot/index.js";
 import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { foreignRegionAt, setProtectedRegionsProvider } from "../../../world/protected-regions.js";
 import { PerchObservation } from "../../perception/combat/perch.js";
@@ -38,6 +38,7 @@ import { survivalResources } from "../../state/resources.js";
 import { serverTickPace } from "../../../world/server-tick-pace.js";
 import { ActionRunner } from "../../../session/action-runner.js";
 import { started, stubAction } from "../../../session/action-runner-fixtures.test.js";
+import { serverPacedWallMs } from "../../../world/world-age.js";
 
 const goalTestWorld = new GoalTestWorld();
 const fixtureClocks = new Set<() => void>();
@@ -1676,6 +1677,8 @@ type CombatFixture = CombatLog & {
   readonly inventory: FakeInventory;
   readonly world: FakeWorld;
   readonly combat: FakeHarness["combat"];
+  readonly server: FakeHarness["server"];
+  readonly pauseTicks: () => Promise<() => void>;
   readonly entities: FakeHarness["entities"];
   readonly target: Entity;
 };
@@ -1766,13 +1769,16 @@ function recordBody(bot: Bot, log: CombatLog, clock: { tick: number }, script: C
  * The server's ticks run while anything waits for one, as on a server: 50 ms of the bot's clock each, the test's
  * `onWait` first. A new `physicsTick` listener starts them; the test owns its final cleanup.
  */
-function runTicksOnListen(harness: FakeHarness, clock: { tick: number }, script: CombatScript): void {
+function runTicksOnListen(harness: FakeHarness, clock: { tick: number }, script: CombatScript): () => Promise<() => void> {
   const { bot } = harness;
   let pumping = false;
   let stopped = false;
+  let idle = () => {};
+  let quiescent = Promise.resolve();
   const pump = async () => {
     if (pumping) return;
     pumping = true;
+    quiescent = new Promise<void>(resolve => { idle = resolve; });
     try {
       while (!stopped && bot.listenerCount("physicsTick") > 0) {
         clock.tick++;
@@ -1786,6 +1792,7 @@ function runTicksOnListen(harness: FakeHarness, clock: { tick: number }, script:
       });
     } finally {
       pumping = false;
+      idle();
     }
   };
   // `newListener` is the emitter's own event; Mineflayer's typings only list the game's.
@@ -1798,6 +1805,11 @@ function runTicksOnListen(harness: FakeHarness, clock: { tick: number }, script:
   fixtureClocks.add(() => {
     stopped = true;
   });
+  return async () => {
+    stopped = true;
+    await quiescent;
+    return () => { stopped = false; };
+  };
 }
 
 function combatFixture(items: readonly string[], options: CombatFixtureOptions = {}): CombatFixture {
@@ -1829,8 +1841,8 @@ function combatFixture(items: readonly string[], options: CombatFixtureOptions =
   });
   recordHands(harness, log, clock, script);
   recordBody(harness.bot, log, clock, script);
-  runTicksOnListen(harness, clock, script);
-  return { ...log, script, clock, bot: harness.bot, inventory: harness.inventory, world: harness.world, combat: harness.combat, entities: harness.entities, target: harness.bot.entities[7]!,
+  const pauseTicks = runTicksOnListen(harness, clock, script);
+  return { ...log, script, clock, pauseTicks, bot: harness.bot, inventory: harness.inventory, world: harness.world, combat: harness.combat, server: harness.server, entities: harness.entities, target: harness.bot.entities[7]!,
     warm: async () => { serverTickPace(harness.bot); await harness.clock.advance(4_000); } };
 }
 
@@ -2662,19 +2674,109 @@ test("holds its ground against a flier and swings when it dives into reach", asy
   assert.deepEqual(fixture.controls, []);
 });
 
-test("releases the body when a flier circles beyond holding range", async () => {
-  const fixture = combatFixture(["iron_sword"], { targetDistance: 20 });
+/** Released fights cannot react to late receipts or their former wall deadline before the next engagement. */
+async function proveLateFlierRelease(
+  fixture: CombatFixture, controller: ReturnType<typeof createCombatController>,
+  added: ReturnType<typeof listenersAddedSince>, packetsAdded: ReturnType<typeof listenersAddedSince>,
+  settlements: () => number,
+): Promise<void> {
+  const resume = await fixture.pauseTicks();
+  const assertReleased = () => {
+    assert.equal(controller.activeEngagement(), null);
+    assert.equal(fixture.bot.usingHeldItem, false);
+    assert.deepEqual([...fixture.activeControls], []);
+    assert.equal(fixture.controlsCleared.count, 1, "one cleanup for the released fight");
+    assert.equal(settlements(), 1, "the fight settles once");
+    for (const event of ["physicsTick", "entityHurt", "entityDead", "entityGone", "entitySwingArm", "death", "health"] as const) assert.equal(added(event), 0, event);
+    for (const event of ["damage_event", "entity_status", "explosion"]) assert.equal(packetsAdded(event), 0, event);
+  };
+  try {
+    assertReleased();
+    const attacks = fixture.directAttacks.count;
+    await fightClock.advance(serverPacedWallMs(DEFAULT_COMBAT_POLICY.quarry_wait_ticks) + 50);
+    fixture.bot.emit("entityDead", fixture.target);
+    fixture.bot.emit("entityGone", fixture.target);
+    fixture.bot._client.emit("damage_event", { entityId: 7, sourceCauseId: fixture.bot.entity.id + 1 });
+    fixture.bot._client.emit("explosion", {});
+    assertReleased();
+    assert.equal(fixture.directAttacks.count, attacks, "late evidence does not attack again");
+  } finally { resume(); }
+  fixture.entities.spawn({ id: 8, name: "zombie", position: new Vec3(2, 64, 0) });
+  fixture.script.onAttack = target => fixture.combat.kill(target.id);
+  assert.equal((await controller.engage(8, new AbortController().signal, "pursue")).kind, "died");
+  assert.equal(controller.activeEngagement(), null);
+}
+
+for (const rate of [20, 10]) test(`a returning flier takes another confirmed hit without a ground chase at ${rate} tps`, async () => {
+  const fixture = combatFixture(["iron_sword"], { targetDistance: 2, startingHeld: "iron_sword", ticksPerSecond: rate });
   fixture.target.name = "phantom";
+  await fixture.warm();
+  const controller = createCombatController(fixture.bot, navigationFixture());
+  const added = listenersAddedSince(fixture.bot);
+  const packetsAdded = listenersAddedSince(fixture.bot._client);
+  let hits = 0, departedAt: number | null = null, returned = false;
+  const stages: number[] = [];
+  const onHurt = (target: Entity) => { if (target.id === 7) hits++; };
+  fixture.bot.on("entityHurt", onHurt);
+  fixture.script.onWait = () => {
+    if (hits === 1 && departedAt === null) departedAt = fixture.server.gameTime;
+    if (departedAt === null) return;
+    const distance = [16, 16.1, 20][Math.floor((fixture.server.gameTime - departedAt) / 20)];
+    if (distance !== undefined) {
+      fixture.target.position.set(distance, 64, 0);
+      if (stages.at(-1) !== distance) stages.push(distance);
+    } else {
+      returned = true;
+      fixture.target.position.set(2, 64, 0);
+    }
+  };
+  let settlements = 0;
+  const outcome = await controller.engage(7, new AbortController().signal, "pursue")
+    .then(result => { settlements++; return result; })
+    .finally(() => { fixture.bot.off("entityHurt", onHurt); });
+  assert.equal(outcome.kind, "died", "a flight across 16 blocks is not an unreachable quarry");
+  assert.equal(returned, true);
+  assert.ok(hits >= 2, "return is followed by server-confirmed damage in the same engagement");
+  assert.deepEqual(stages, [16, 16.1, 20], "the holding fight survives each old-range boundary for 20 server ticks");
+  assert.ok(fixture.server.gameTime - departedAt! >= 60);
+  assert.deepEqual(fixture.controls, []);
+  fixture.script.onWait = undefined;
+  await proveLateFlierRelease(fixture, controller, added, packetsAdded, () => settlements);
+});
 
-  const outcome = await createCombatController(fixture.bot, navigationFixture()).engage(
-    7,
-    new AbortController().signal,
-    "pursue",
-  );
-
-  assert.equal(outcome.kind, "unreachable");
-  assert.equal(outcome.attacks, 0);
-  assert.equal(fixture.controlsCleared.count, 1);
+for (const rate of [20, 10]) for (const exit of ["never_returns", "lost", "dead", "abort", "stopped"] as const)
+test(`a holding flier releases on ${exit} and permits the next engagement at ${rate} tps`, async () => {
+  const fixture = combatFixture(["iron_sword"], { targetDistance: 20, startingHeld: "iron_sword", ticksPerSecond: rate });
+  fixture.target.name = "phantom";
+  await fixture.warm();
+  const controller = createCombatController(fixture.bot, navigationFixture());
+  const added = listenersAddedSince(fixture.bot);
+  const packetsAdded = listenersAddedSince(fixture.bot._client);
+  const parent = new AbortController();
+  const started = fixture.server.gameTime;
+  let triggered = false;
+  fixture.script.onWait = () => {
+    if (triggered || fixture.server.gameTime - started < 20) return;
+    triggered = true;
+    if (exit === "lost") fixture.entities.remove(7);
+    if (exit === "dead") fixture.combat.kill(7);
+    if (exit === "abort") parent.abort("parent releases holding defence");
+    if (exit === "stopped") fixture.server.stop();
+  };
+  let settlements = 0;
+  const outcome = await controller.engage(7, parent.signal, "pursue").then(result => { settlements++; return result; });
+  assert.equal(outcome.kind, exit === "lost" ? "target_lost" : exit === "dead" ? "died" : exit === "abort" ? "cancelled" : "unreachable");
+  if (exit === "never_returns") {
+    assert.ok(fixture.server.gameTime - started >= DEFAULT_COMBAT_POLICY.quarry_wait_ticks);
+    assert.ok(fixture.server.gameTime - started <= DEFAULT_COMBAT_POLICY.quarry_wait_ticks + 40);
+  }
+  if (exit === "never_returns" || exit === "stopped") {
+    assert.equal(outcome.kind === "unreachable" && outcome.premise, "no_confirmed_damage");
+  }
+  if (exit === "stopped") assert.equal(fixture.server.gameTime, started + 20);
+  fixture.script.onWait = undefined;
+  if (exit === "stopped") fixture.server.resume();
+  await proveLateFlierRelease(fixture, controller, added, packetsAdded, () => settlements);
 });
 
 test("reports a target no route reached as unreachable rather than failed", async () => {
