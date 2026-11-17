@@ -340,7 +340,7 @@ export class NavigationRun {
   }
   /** The world ended or another owner will steer; release the route without waiting for its landing. */
   terminate(): void {
-    this.#routeExecutor?.invalidate();
+    this.#routeExecutor?.terminate();
   }
 
   /** Own setup through settlement, including partial setup and failed cleanup. */

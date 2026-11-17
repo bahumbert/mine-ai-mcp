@@ -147,6 +147,7 @@ function canHandoffToInteraction(step: PlannedStep, next: PlannedStep | undefine
 export class RouteExecutor {
   #state: RouteExecutionState = { kind: "starting_step", stepIndex: 0 };
   #invalidated = false;
+  readonly #invalidation = new AbortController();
   #latestMovementSnapshot: MovementSnapshot | null = null;
   /** The monotonic time of the last physics tick; the executor starts it so a bot that never ticks reads as silent from the start. */
   #lastTickAt = performance.now();
@@ -165,7 +166,15 @@ export class RouteExecutor {
     if (this.#invalidated) return;
     this.#invalidated = true;
     this.#resolveInvalidated();
-    if (this.#state.kind === "moving") this.#settleMovement({ kind: "invalidated" });
+    this.#invalidation.abort();
+    if (this.#state.kind === "moving" && this.#canReleaseMovement(this.#movementSnapshot()))
+      this.#settleMovement({ kind: "invalidated" });
+  }
+
+  /** The world ended or another owner must steer immediately, even during a committed jump. */
+  terminate(): void {
+    this.invalidate();
+    this.#settleMovement({ kind: "invalidated" });
   }
 
   async execute(): Promise<RouteExecutionResult> {
@@ -173,7 +182,7 @@ export class RouteExecutor {
     resources.defer(this.request.context.bot.subscribePhysicsTick(() => this.#onPhysicsTick()));
     resources.use(
       armNoTickCancel({
-        signal: this.request.context.signal,
+        signal: AbortSignal.any([this.request.context.signal, this.#invalidation.signal]),
         lastTickAt: () => this.#lastTickAt,
         settle: () => this.#settleMovement({ kind: "cancelled" }),
       }),
@@ -510,22 +519,16 @@ export class RouteExecutor {
     const running = this.request.plan.steps[this.#state.stepIndex];
     markPhase(`physicsTick: ${running?.kind} ${running?.id}`);
     if (!snapshot.onGround) this.#state.airborneObserved = true;
-    if (this.#invalidated) {
-      this.#settleMovement({ kind: "invalidated" });
-      return;
-    }
     try {
       // Resolve cancellation against this tick's position and momentum, not
       // the previous phase seen by an earlier combat/contact listener.
       if (
-        this.request.context.signal.aborted &&
-        (canReleaseOnObservedGround(this.request.context.world, snapshot) ||
-          this.#state.controller.cancel(snapshot) === "stopped")
+        (this.#invalidated || this.request.context.signal.aborted) && this.#canReleaseMovement(snapshot)
       ) {
-        this.#settleMovement({ kind: "cancelled" });
+        this.#settleMovement({ kind: this.#invalidated ? "invalidated" : "cancelled" });
         return;
       }
-      if (this.request.context.signal.aborted && snapshot.onGround && this.#state.airborneObserved) {
+      if ((this.#invalidated || this.request.context.signal.aborted) && snapshot.onGround && this.#state.airborneObserved) {
         const landing = safeSupportingCell(this.request.context.world, snapshot.position);
         if (landing) {
           // The coast check rejected release, but this landing is safe now.
@@ -564,9 +567,16 @@ export class RouteExecutor {
     return snapshot;
   }
 
+  #canReleaseMovement(snapshot: MovementSnapshot): boolean {
+    return this.#state.kind === "moving" &&
+      (canReleaseOnObservedGround(this.request.context.world, snapshot) ||
+        this.#state.controller.cancel(snapshot) === "stopped");
+  }
+
   #settleMovement(result: MovementResult): void {
     if (this.#state.kind !== "moving") return;
     if (this.request.context.signal.aborted) result = { kind: "cancelled" };
+    else if (this.#invalidated && result.kind !== "cancelled") result = { kind: "invalidated" };
     const { stepIndex, execution, settle } = this.#state;
     this.#state = { kind: "starting_step", stepIndex };
     if (result.kind !== "completed" || execution.end === "settled") this.request.context.bot.clearOwnedControls();
