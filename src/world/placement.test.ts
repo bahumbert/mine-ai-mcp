@@ -195,6 +195,59 @@ test("waits for every cell of a multi-block placement", async () => {
   assert.equal(result.kind, "placed");
 });
 
+test("a placement whose reach no longer holds once the turn is done sends nothing and never presses the shift key", async () => {
+  // A bot hanging on a ladder without sneaking slides while the turn takes its ticks (prismarine-physics `ladderMaxSpeed`):
+  // the caller judged the reach before the awaits, so it is asked again at the instant of the send (live 2026-11-16, saltbox roof).
+  let clicks = 0;
+  const { bot, clock, server, item } = placer("red_bed", {
+    overrides: {
+      _placeBlockWithOptions: async () => {
+        clicks += 1;
+      },
+    },
+  });
+  using _timers = clock.install();
+  const yawsWhenAsked: number[] = [];
+  const direction = new Vec3(1, 0, 0);
+
+  const result = await clock.settle(
+    placeBlock(bot, {
+      ...placementAt(bot, item, new Vec3(0, 64, 0)),
+      lookDirection: direction,
+      stillInReach: () => {
+        yawsWhenAsked.push(bot.entity.yaw);
+        return false;
+      },
+    }),
+    QUARTER_TURN_MS,
+  );
+
+  assert.equal(result.kind, "failed");
+  assert.equal(result.kind === "failed" ? result.cause : null, "moved");
+  assert.equal(clicks, 0, "no packet is sent");
+  assert.ok(!shiftPackets(server).includes(0), "the shift key is not pressed for a placement that is not made");
+  assert.deepEqual(yawsWhenAsked, [Math.atan2(-direction.x, -direction.z)], "asked once, after the turn");
+});
+
+test("a placement whose reach still holds at the send is made as before", async () => {
+  const { bot, clock, item } = placer("red_bed", { overrides: { _placeBlockWithOptions: async () => undefined } });
+  using _timers = clock.install();
+  let asked = 0;
+
+  const outcome = placeBlock(bot, {
+    ...placementAt(bot, item, new Vec3(0, 64, 0)),
+    matches: () => true,
+    stillInReach: () => {
+      asked += 1;
+      return true;
+    },
+  });
+  const result = await clock.settle(outcome, SERVER_ANSWER_MS);
+
+  assert.equal(result.kind, "placed");
+  assert.equal(asked, 1);
+});
+
 test("releases sneak when Mineflayer rejects placement", async () => {
   const { bot, clock, server, item } = placer("red_bed", {
     overrides: {

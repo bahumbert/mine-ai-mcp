@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-roof-counted-scaffold-adobe-pueblo
+tags: [acceptance]
+description: >-
+  The adobe-pueblo template built call by call from its bill plus exactly the 5 dirt the brain's count (scaffoldNeed) asks for
+  its first stage out of the eye's reach, with the calls of the stages before it sending the later stages' blocks as
+  reserve_items, as the build skill does: the whole house must stand and no scaffold may be left. The driver first checks
+  that 5 is the helper's count (the runtime's own columns for the busiest call, the earlier stages standing, are 4 at the door; the brain's tie-break is the footprint's middle); the audits' scaffold placed per call is the measure (plan 2026-11-14-house-build-fixes-2 Task 3).
+
+# The house stands on coarse_dirt (the floor replaces its top layer; the shovel picks up no scaffold block from it), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: coarse_dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: sandstone, count: 64 }
+      - { item: sandstone, count: 64 }
+      - { item: sandstone, count: 40 }
+      - { item: cut_sandstone, count: 64 }
+      - { item: cut_sandstone, count: 64 }
+      - { item: cut_sandstone, count: 11 }
+      - { item: smooth_sandstone, count: 64 }
+      - { item: smooth_sandstone, count: 2 }
+      - { item: glass_pane, count: 8 }
+      - { item: spruce_log, count: 6 }
+      - { item: ladder, count: 5 }
+      - { item: acacia_door, count: 1 }
+      - { item: dirt, count: 5 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: adobe-pueblo
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+  scaffoldCarried: 5
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

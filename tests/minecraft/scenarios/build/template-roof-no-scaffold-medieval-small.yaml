@@ -3,10 +3,10 @@ template: ../../templates/flat-single-action.yaml
 name: template-roof-no-scaffold-medieval-small
 tags: [acceptance]
 description: >-
-  The medieval-small template built stage by stage from exactly its bill and no block to stand on (no dirt): the stages the
-  brain's reach rule (scaffoldNeed) does not flag are built whole, and the first one it flags must stop with
-  "no scaffold block carried to stand on", as a bot that carries only the bill meets it. A stage that builds all the same
-  fails the run (the rule overflagged it).
+  The medieval-small template (Bruno's house: roof 5 above the door) built call by call from exactly its bill and no block
+  to stand on (no dirt). Until plan 2026-11-14-house-build-fixes-2 Task 2a its roof stopped with "no scaffold block carried
+  to stand on"; now the eye reaches the whole roof from the ground (the brain's count is 0, the runtime plans no stand
+  column), so every call must succeed, no scaffold block is carried (so none is placed) and the whole house must stand.
 
 # The house stands on coarse_dirt (the floor replaces its top layer), a clear ground of 33 x 33 around it.
 reset:
@@ -39,7 +39,7 @@ params:
   template: medieval-small
   door: { x: 0, y: -59, z: 6 }
   facing: north
-  expectScaffoldStop: true
+  scaffoldCarried: 0
 
 goal:
   kind: all

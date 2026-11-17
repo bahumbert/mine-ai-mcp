@@ -10,7 +10,7 @@ import { builtBefore, endedForWantOfRoute, onlyRefused, refusedCells, sameCell, 
 import { houseBox } from "./building/house-site.ts";
 import { replacedHouseNote, siteRefusal } from "./building/new-site.ts";
 import { builderStand, catalogueLine, chooseSite, planTemplate, siteAt, type HousePlan, type Materials, type Site } from "./building/plan.ts";
-import { billFrom, buildAgain, describeShortfall, fetchClause, missingForStage, scaffoldNeed, scaffoldReserve, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
+import { billFrom, buildAgain, callWorks, describeShortfall, fetchClause, inPlaceWorks, missingForStage, scaffoldNeed, scaffoldReserve, stageAt, stageCells, stageCellsNow, stagesBuilt } from "./building/stage-progress.ts";
 import { classicTemplate, familiesOf, resumeStep, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./building/templates.ts";
 import type { ActOutcome, Body } from "./body.ts";
 import { awayFrom, backStep, failedFetchNote, houseReserve, navigateInput, scaffoldReserveBetween, stageScaffoldReserve, walkKeeping } from "./walks.ts";
@@ -592,7 +592,7 @@ async function build(context: SkillContext, step: Extract<Step, { skill: "build"
     // And what it needs to stand on, when some of its cells are out of reach of the ground (the whole bill is kept off the scaffold list while the house is built).
     const first = stageCells(plan, plan.stages[0]!);
     const { missing, owedNote } = billShortfall(billOfMaterials(first), snapshot.inventory, context.owed?.() ?? []);
-    const scaffold = scaffoldNeed(first, plan.site.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, plan.bill.map((entry) => entry.item));
+    const scaffold = scaffoldNeed(callWorks(plan, plan.stages[0]!, first), plan.site.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, plan.bill.map((entry) => entry.item));
     if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: missingForStage(plan, 0, what, { missing, owedNote, scaffold }, { fresh: true, newSite: untracked }) };
     replaced = replacedHouseNote(context, unfinished, areas);
   }
@@ -769,8 +769,8 @@ async function buildStages(context: SkillContext, run: { plan: HousePlan; what: 
     const cells = await stageCellsNow(plan, stage, index === start && resumed !== null ? context.runtime : null);
     const status = await context.runtime.status();
     const { missing, owedNote } = billShortfall(billOfMaterials(cells), status.inventory, context.owed?.() ?? []);
-    const kept = remaining.map((entry) => entry.item);
-    const scaffold = scaffoldNeed(cells, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, kept);
+    const kept = remaining.map((entry) => entry.item), works = callWorks(plan, stage, cells);
+    const scaffold = scaffoldNeed(works, plan.site.door.y, status.inventory, status.policy?.scaffoldBlocks, kept);
     if (missing.length > 0 || scaffold !== null) {
       const shortfall = { missing, owedNote, scaffold };
       return index === start
@@ -778,7 +778,7 @@ async function buildStages(context: SkillContext, run: { plan: HousePlan; what: 
         : { status: "done", detail: stagesBuilt(plan, start, index, shortfall) };
     }
     // A stage that stands on no scaffold of its own keeps the later stages' scaffold; one that needs its own uses what it has (its check was made alone).
-    const reserve = scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, kept).length > 0 || index === plan.stages.length - 1
+    const reserve = scaffoldReserve(works, plan.site.door.y, status.policy?.scaffoldBlocks, kept).length > 0 || index === plan.stages.length - 1
       ? []
       : await scaffoldReserveBetween(context, plan, { first: plan.stages[index + 1]!.first, last: plan.stages.at(-1)!.last }, kept, false);
     const stopped = await buildParts(context, plan, what, { ...options, from: stage.first, to: stage.last, audit: false, reserve });
@@ -809,11 +809,11 @@ async function improveHouse(context: SkillContext, step: Extract<Step, { skill: 
   const snapshot = await context.runtime.status();
   const { missing, owedNote } = billShortfall(bill, snapshot.inventory, context.owed?.() ?? []);
   // A roof swapped in place is reached the same way a roof built is: from the ground, by the routes' scaffold.
-  const scaffold = scaffoldNeed(changed, house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
+  const scaffold = scaffoldNeed(inPlaceWorks(after, changed), house.door.y, snapshot.inventory, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
   if (missing.length > 0 || scaffold !== null) return { status: "failed", detail: `missing ${describeShortfall({ missing, scaffold })} to improve ${what} (the rest is carried${owedNote === "" ? "" : `; ${owedNote}`}): ${fetchClause({ missing, scaffold })}, then improve again` };
   const { x, y, z } = house.door;
   context.progress?.(`walking to ${what} at ${x} ${y} ${z}`);
-  const there = await walkKeeping(context, builderStand(after.site), `Walk to ${what}.`, { items: bill.map((entry) => entry.item), reserve: [], scaffold: scaffoldReserve(changed, house.door.y, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item)) }, bill);
+  const there = await walkKeeping(context, builderStand(after.site), `Walk to ${what}.`, { items: bill.map((entry) => entry.item), reserve: [], scaffold: scaffoldReserve(inPlaceWorks(after, changed), house.door.y, snapshot.policy?.scaffoldBlocks, bill.map((entry) => entry.item)) }, bill);
   if (context.signal.aborted) return { status: "stopped" };
   if (there.status !== "succeeded") return { status: "failed", detail: `could not reach ${what} at ${x} ${y} ${z}: ${there.error ?? there.status}` };
   return withMaterialsKept(context.runtime, bill.map((entry) => entry.item), () => improveOnSite(context, { place, house, template, roles, after, rest, bill, kind, what }));

@@ -2,7 +2,7 @@
 // (plan 2026-11-12-house-build-fixes Task 1), and the way back a failed fetch names (Task 3).
 import type { ActOutcome } from "./body.ts";
 import { planTemplate, type HousePlan } from "./building/plan.ts";
-import { scaffoldReserve, stageAt, stageCellsNow } from "./building/stage-progress.ts";
+import { callWorks, scaffoldReserve, stageAt, stageCellsNow } from "./building/stage-progress.ts";
 import { templateFor, templateOfKind, TEMPLATES } from "./building/templates.ts";
 import { billOfMaterials, type MaterialCount } from "./building/blueprint.ts";
 import { sameDimension } from "./bot-data-sql.ts";
@@ -37,7 +37,7 @@ export async function walkKeeping(context: Pick<SkillContext, "body" | "signal" 
 export async function scaffoldReserveBetween(context: Pick<SkillContext, "runtime">, plan: HousePlan, range: { readonly first: number; readonly last: number }, kept: readonly string[], read: boolean): Promise<ItemCount[]> {
   const cells = await stageCellsNow(plan, { ...plan.stages[stageAt(plan, range.first)]!, ...range }, read ? context.runtime : null);
   const status = await context.runtime.status();
-  return scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, kept);
+  return scaffoldReserve(callWorks(plan, range, cells), plan.site.door.y, status.policy?.scaffoldBlocks, kept);
 }
 
 /** The blocks the cells of the stage holding `part`, from that part on, need carried to stand on, by count: what a tool-loss refetch's walks must not lay below it. */
@@ -69,7 +69,7 @@ export async function houseReserve(context: Pick<SkillContext, "runtime" | "buil
   const cells = await stageCellsNow(plan, { ...first, last: plan.stages.at(-1)!.last }, context.runtime);
   const bill = billOfMaterials(cells).map(({ item, count }) => ({ item, count }));
   const status = await context.runtime.status();
-  const scaffold = scaffoldReserve(cells, plan.site.door.y, status.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
+  const scaffold = scaffoldReserve(callWorks(plan, { first: first.first, last: plan.stages.at(-1)!.last }, cells), plan.site.door.y, status.policy?.scaffoldBlocks, bill.map((entry) => entry.item));
   return { keep: { items: [], reserve: bill, scaffold }, bill };
 }
 

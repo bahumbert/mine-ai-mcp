@@ -435,8 +435,8 @@ test("the nudge of a refused build quotes the step its result gave, and none aft
   const farNote = `${head}; this would be a new house here: your unfinished medium japanese house is 380 blocks north-west (door -18 76 -7), and {"skill":"build","template":"japanese-medium","x":-18,"y":76,"z":-7} goes on with it; a new house here leaves it untracked: fetch exactly the missing items with get_items, then {"skill":"build","template":"medieval-small","x":251,"y":62,"z":-273} again`;
   assert.doesNotMatch(await nudged(farNote), /is carried now/u, "quoting the first step would push the replacement");
   // Two items before the phrase: the list parser reads the first, finds it carried and would nudge, were the phrase not checked.
-  const scaffold = "missing 7 spruce_slab, 3 oak_log and about 4 blocks to stand on for its cells 5 above the ground (scaffold the build lays and takes back: one of dirt, basalt) for stage 3 of 4 (roof) of a small medieval house (the rest is carried)";
-  assert.doesNotMatch(await nudged(`${scaffold}: fetch exactly the missing items and 4 or more blocks to stand on with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /is carried now/u, "the blocks to stand on are not in the inventory check");
+  const scaffold = "missing 7 spruce_slab, 3 oak_log and about 5 blocks to stand on for its cells 8 above the ground (scaffold the build lays and takes back: one of dirt, basalt) for stage 3 of 4 (roof) of a small medieval house (the rest is carried)";
+  assert.doesNotMatch(await nudged(`${scaffold}: fetch exactly the missing items and 5 or more blocks to stand on with get_items, then {"skill":"build","template":"medieval-small","x":1,"y":2,"z":3} again`), /is carried now/u, "the blocks to stand on are not in the inventory check");
 });
 
 

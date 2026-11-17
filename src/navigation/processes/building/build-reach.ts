@@ -7,7 +7,7 @@
  * placement sneaks; the spike's probe did not). One test, three users: the
  * in-reach work (`BuildTargeting.reaches`), the route's goal for a cell (`reachGoal`) and the stand columns for the cells the
  * ground cannot serve (`coverWithColumns`). `brain/` mirrors `withinBlockReach` and `coverWithColumns`
- * (`brain/src/building/stage-progress.ts`, which does not import `src/`).
+ * (`brain/src/building/stand-columns.ts`, which does not import `src/`).
  */
 import type { Bot } from "mineflayer";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";

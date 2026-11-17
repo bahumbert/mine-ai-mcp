@@ -5,8 +5,9 @@ import type { ClientCompletion } from "mine-labs/client";
 import { builtBefore } from "#brain/building/build-audit.ts";
 import { FACINGS, type WorldCell } from "#brain/building/blueprint.ts";
 import { planTemplate, type HousePlan } from "#brain/building/plan.ts";
-import { scaffoldNeed, stageCells, type ScaffoldNeed } from "#brain/building/stage-progress.ts";
+import { callWorks, scaffoldNeed, scaffoldReserve, stageCells, type ScaffoldNeed } from "#brain/building/stage-progress.ts";
 import { templateFor, type Stage } from "#brain/building/templates.ts";
+import type { ItemCount } from "#brain/runtime-client.ts";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "#src/survival/policy/contract.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
@@ -25,8 +26,14 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   cancelAfterMs: z.number().int().nonnegative().default(3_000),
   /** The scenario carries the bill and no block to stand on: the first stage the brain's reach rule flags must stop with "no scaffold block carried to stand on" (every stage before it builds whole). */
   expectScaffoldStop: z.boolean().default(false),
-  /** The scenario carries exactly this many dirt for the roof's scaffold: the run first checks it equals the brain's count (`scaffoldNeed`) for the first stage the reach rule flags, then builds the whole template (the measure of that count at that height), with the policy's scaffold list as `build` leaves it (`scaffoldListKeepingBill`). */
-  scaffoldCarried: z.number().int().positive().optional(),
+  /**
+   * The scenario carries exactly this many dirt for the roof's scaffold (0: none, for a roof the eye reaches from the ground): the
+   * run first checks it equals the brain's count (`scaffoldNeed`) for the first stage the reach rule flags (0 when it flags none),
+   * then builds the whole template (the measure of that count at that height), with the policy's scaffold list as `build` leaves it
+   * (`scaffoldListKeepingBill`) and the calls of stages that need none of their own sending the later stages' blocks as
+   * `reserve_items` (`stageReserves`).
+   */
+  scaffoldCarried: z.number().int().nonnegative().optional(),
 });
 
 /** `view_blocks` reads at most this many cells per call (`MAX_CELLS`, src/actions/view-blocks/contract.ts). */
@@ -46,17 +53,36 @@ class Failed extends Error {}
 
 const keyOf = ({ x, y, z }: { readonly x: number; readonly y: number; readonly z: number }) => `${x},${y},${z}`;
 
-interface PartInput {
+export interface PartInput {
   readonly blocks: readonly Record<string, unknown>[];
   readonly keep: readonly { x: number; y: number; z: number }[];
+  /** `reserve_items` of the first pass: the scaffold a later stage stands on, kept by count (empty: none sent). */
+  readonly reserve: readonly ItemCount[];
+}
+
+/**
+ * What the brain's `buildStages` (brain/src/skills.ts) sends each stage as `reserve_items`, per stage: a stage that needs none
+ * of its own (no reserve of its cells) and is not the last keeps what the cells of the later stages need to stand on
+ * (`scaffoldReserve` over the stages after it, from none carried, with the scaffold list `build` leaves and the bill kept);
+ * a stage with its own need, or the last, sends none.
+ */
+export function stageReserves(plan: HousePlan): ItemCount[][] {
+  const kept = plan.bill.map((entry) => entry.item);
+  const list = scaffoldListKeepingBill(plan);
+  const reserveOf = (range: { readonly first: number; readonly last: number }) => scaffoldReserve(callWorks(plan, range, stageCells(plan, range)), plan.site.door.y, list, kept);
+  return plan.stages.map((stage, index) => {
+    if (index === plan.stages.length - 1 || reserveOf(stage).length > 0) return [];
+    return reserveOf({ first: plan.stages[index + 1]!.first, last: plan.stages.at(-1)!.last });
+  });
 }
 
 /**
  * What `buildParts` (brain/src/skills.ts) sends for each call: only the cells whose last call this is (a doorway is air
- * early and the door last; a door claims the cell above it), `keep` = every non-air cell of earlier calls. A call with
- * no such cell is null.
+ * early and the door last; a door claims the cell above it), `keep` = every non-air cell of earlier calls, `reserve` =
+ * its stage's (`stageReserves`) when `reserved`. A call with no such cell is null.
  */
-function partInputs(plan: HousePlan): (PartInput | null)[] {
+export function partInputs(plan: HousePlan, reserved: boolean): (PartInput | null)[] {
+  const reserves = reserved ? stageReserves(plan) : [];
   const lastPart = new Map<string, number>();
   plan.batches.forEach((batch, part) => batch.forEach((cell) => {
     lastPart.set(keyOf(cell), part);
@@ -69,12 +95,16 @@ function partInputs(plan: HousePlan): (PartInput | null)[] {
       ...(half !== undefined && { half }),
       ...(axis !== undefined && { axis }),
     }));
-    return blocks.length === 0 ? null : { blocks, keep: builtBefore(plan.batches, part, lastPart) };
+    const stage = plan.stages.findIndex((entry) => part >= entry.first && part <= entry.last);
+    return blocks.length === 0 ? null : { blocks, keep: builtBefore(plan.batches, part, lastPart), reserve: reserves[stage] ?? [] };
   });
 }
 
-const buildInput = (part: PartInput, auditing: boolean) => ({
-  blocks: part.blocks, remove_wrong_blocks: true, ...(!auditing && part.keep.length > 0 && { keep: part.keep }),
+/** The `build_structure` input of a call; the audit pass (`auditing`) sends no `keep` and no reserve, as the brain's does. */
+export const buildInput = (part: PartInput, auditing: boolean) => ({
+  blocks: part.blocks, remove_wrong_blocks: true,
+  ...(!auditing && part.keep.length > 0 && { keep: part.keep }),
+  ...(!auditing && part.reserve.length > 0 && { reserve_items: part.reserve }),
 });
 
 function structureOf(call: ScenarioCall): z.output<typeof answerSchema>["structure"] {
@@ -158,7 +188,7 @@ const callAfter = (inputs: readonly (PartInput | null)[], after: number): number
 
 /** The name of the plan's stage the cut call (the one after call `after`) belongs to: what a scenario's `interruptStage` names. */
 export function stageOfCutCall(plan: HousePlan, after: number): string | undefined {
-  const index = callAfter(partInputs(plan), after);
+  const index = callAfter(partInputs(plan, false), after);
   return plan.stages.find((stage) => index >= stage.first && index <= stage.last)?.name;
 }
 
@@ -248,7 +278,7 @@ const seconds = (since: number) => ((performance.now() - since) / 1000).toFixed(
 export function flaggedStages(plan: HousePlan, walkingY: number): { stage: Stage; need: ScaffoldNeed }[] {
   const kept = plan.bill.map((entry) => entry.item);
   return plan.stages.flatMap((stage) => {
-    const need = scaffoldNeed(stageCells(plan, stage), walkingY, [], DEFAULT_SCAFFOLD_BLOCKS, kept);
+    const need = scaffoldNeed(callWorks(plan, stage, stageCells(plan, stage)), walkingY, [], DEFAULT_SCAFFOLD_BLOCKS, kept);
     return need === null ? [] : [{ stage, need }];
   });
 }
@@ -256,6 +286,7 @@ export function flaggedStages(plan: HousePlan, walkingY: number): { stage: Stage
 /** Null when `carried` is the count the reach rule gives for the first stage it flags from `walkingY`; else what differs, so a run does not measure a count the scenario never carried. */
 export function scaffoldCarriedMismatch(plan: HousePlan, walkingY: number, carriedCount: number): string | null {
   const first = flaggedStages(plan, walkingY)[0];
+  if (first === undefined && carriedCount === 0) return null;
   if (first === undefined) return `scaffoldCarried is set but the reach rule flags no stage of ${plan.template.id} from y ${walkingY}: pick a template with a stage out of reach, or check the door's y in the scenario`;
   if (first.need.count === carriedCount) return null;
   return `the scenario carries ${carriedCount} scaffold dirt but the helper's count for stage ${first.stage.name} (${first.need.height} above the ground) is ${first.need.count}: set scaffoldCarried (and the scenario's dirt) to the count, if the count changed on purpose, or fix the typo`;
@@ -339,11 +370,12 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
   if (params.scaffoldCarried !== undefined && (params.expectScaffoldStop || params.interruptAfterBatch !== undefined)) return { status: "failed", detail: "scaffoldCarried builds the whole template in one pass: it cannot be combined with expectScaffoldStop or interruptAfterBatch" };
   const mismatch = params.scaffoldCarried === undefined ? null : scaffoldCarriedMismatch(plan, params.door.y, params.scaffoldCarried);
   if (mismatch !== null) return { status: "failed", detail: mismatch };
-  if (params.scaffoldCarried !== undefined) {
+  // Both runs leave the policy's scaffold list as `build` does: without it the runtime would lay the bill's own spare block (a cobblestone) as scaffold and the stop would never come.
+  if (params.scaffoldCarried !== undefined || params.expectScaffoldStop) {
     const refused = await setScaffoldListKeepingBill(context, plan);
     if (refused !== undefined) return { status: "failed", detail: refused };
   }
-  const inputs = partInputs(plan);
+  const inputs = partInputs(plan, params.scaffoldCarried !== undefined);
   const started = performance.now();
   const notes: string[] = [];
   try {

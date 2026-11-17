@@ -1,0 +1,56 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-roof-counted-scaffold-saltbox
+tags: [acceptance]
+description: >-
+  The saltbox template built call by call from its bill plus exactly the 11 dirt the brain's count (scaffoldNeed) asks for
+  its first stage out of the eye's reach, with the calls of the stages before it sending the later stages' blocks as
+  reserve_items, as the build skill does: the whole house must stand and no scaffold may be left. The driver first checks
+  that 11 is the helper's count; the audits' scaffold placed per call is the measure (plan 2026-11-14-house-build-fixes-2 Task 3).
+
+# The house stands on coarse_dirt (the floor replaces its top layer; the shovel picks up no scaffold block from it), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: coarse_dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: birch_planks, count: 64 }
+      - { item: birch_planks, count: 64 }
+      - { item: birch_planks, count: 23 }
+      - { item: oak_planks, count: 64 }
+      - { item: oak_planks, count: 18 }
+      - { item: dark_oak_stairs, count: 64 }
+      - { item: dark_oak_stairs, count: 17 }
+      - { item: cobblestone, count: 30 }
+      - { item: oak_log, count: 22 }
+      - { item: oak_fence, count: 11 }
+      - { item: glass_pane, count: 10 }
+      - { item: dark_oak_planks, count: 9 }
+      - { item: ladder, count: 5 }
+      - { item: dark_oak_door, count: 1 }
+      - { item: dirt, count: 11 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: saltbox
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+  scaffoldCarried: 11
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

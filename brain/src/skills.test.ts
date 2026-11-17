@@ -12,7 +12,7 @@ import { TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import { neededItems } from "./inventory-room.ts";
 import { BodyDown, type BotSnapshot, type ProtectedArea } from "./runtime-client.ts";
 import type { KnownPlace } from "./mind.ts";
-import { DEFAULT_POLICY, FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL, steppedClocks } from "./testing.ts";
+import { DEFAULT_POLICY, FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL, steppedClocks, TEMPLATES_WITH_HIGH_ROOF } from "./testing.ts";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, ...extra };
@@ -1922,13 +1922,14 @@ test("improving the roof stops for want of blocks to stand on when its cells are
   const roofBlocks = SMALL_MEDIEVAL.filter((stack) => stack.name.startsWith("spruce"));
   const bare = new FakeRuntime();
   bare.snapshot = { ...bare.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: roofBlocks, policy: DEFAULT_POLICY };
-  const refused = await runStep(roofStep, contextFor(bare, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE }));
+  // The raised-roof fixture: the real roof is within the eye's reach from the door's level and asks no block to stand on.
+  const refused = await runStep(roofStep, contextFor(bare, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE, templates: TEMPLATES_WITH_HIGH_ROOF }));
   assert.equal(refused.status, "failed");
-  assert.match(refused.status === "failed" ? refused.detail : "", /^missing about 4 blocks to stand on for its cells 5 above the ground \(scaffold the build lays and takes back: one of dirt, .*\) to improve your small medieval house \(the rest is carried\): fetch 4 or more blocks to stand on with get_items, then improve again$/u);
+  assert.match(refused.status === "failed" ? refused.detail : "", /^missing about 3 blocks to stand on for its cells 8 above the ground \(scaffold the build lays and takes back: one of dirt, .*\) to improve your small medieval house \(the rest is carried\): fetch 3 or more blocks to stand on with get_items, then improve again$/u);
   assert.equal(bare.submitted.length, 0, "nothing was sent");
   const carrying = new FakeRuntime();
-  carrying.snapshot = { ...carrying.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [...roofBlocks, { name: "dirt", count: 4 }], policy: DEFAULT_POLICY };
-  const done = await runStep(roofStep, contextFor(carrying, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE }));
+  carrying.snapshot = { ...carrying.snapshot, position: { x: 0.5, y: 64, z: 0.5 }, inventory: [...roofBlocks, { name: "dirt", count: 5 }], policy: DEFAULT_POLICY };
+  const done = await runStep(roofStep, contextFor(carrying, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE, templates: TEMPLATES_WITH_HIGH_ROOF }));
   assert.equal(done.status, "done", JSON.stringify(done));
   assert.ok(builds(carrying).length > 0, "the roof calls were sent");
 });
@@ -1936,15 +1937,15 @@ test("improving the roof stops for want of blocks to stand on when its cells are
 test("improve_house keeps its bill and the roof's scaffold on its walk to the house", async () => {
   const roofBlocks = SMALL_MEDIEVAL.filter((stack) => stack.name.startsWith("spruce"));
   const runtime = new FakeRuntime();
-  runtime.snapshot = { ...runtime.snapshot, position: { x: 30.5, y: 64, z: 0.5 }, inventory: [...roofBlocks, { name: "dirt", count: 4 }], policy: DEFAULT_POLICY };
-  const done = await runStep({ skill: "improve_house" as const, roles: ["roof" as const] }, contextFor(runtime, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE }));
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 30.5, y: 64, z: 0.5 }, inventory: [...roofBlocks, { name: "dirt", count: 5 }], policy: DEFAULT_POLICY };
+  const done = await runStep({ skill: "improve_house" as const, roles: ["roof" as const] }, contextFor(runtime, { style: "medieval", ownHouse: () => TEMPORARY_HOUSE, templates: TEMPLATES_WITH_HIGH_ROOF }));
   assert.equal(done.status, "done", JSON.stringify(done));
   const walks = runtime.submitted.filter((call) => call.tool === "navigate");
   assert.equal(walks.length, 1);
   const keep = walks[0]!.input.keep_items as string[];
   assert.ok(keep.includes("spruce_slab"), `the bill's kinds (${keep.join(", ")})`);
-  // Plan 2026-11-14 Task 6: the scaffold is kept by count (the roof is 5 above the door: 4), not by name.
-  assert.deepEqual(walks[0]!.input.reserve_items, DEFAULT_POLICY.scaffoldBlocks!.map((item) => ({ item, count: 4 })), "every admitted kind at the roof's count of 4");
+  // Plan 2026-11-14 Task 6: the scaffold is kept by count (the raised roof's stand columns: 3), not by name.
+  assert.deepEqual(walks[0]!.input.reserve_items, DEFAULT_POLICY.scaffoldBlocks!.map((item) => ({ item, count: 3 })), "every admitted kind at the roof's count of 3");
   assert.ok(DEFAULT_POLICY.scaffoldBlocks!.every((kind) => !keep.includes(kind)), "no admitted kind is kept by name");
 });
 

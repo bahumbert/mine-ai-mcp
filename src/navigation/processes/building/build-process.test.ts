@@ -134,6 +134,38 @@ test("a column under a ceiling is not one: the world's solid blocks stop it, and
   assert.equal(revision, "any(reach:0,71,0:4.5)");
 });
 
+/** The route goal's revision a fresh look at the world gives with the bot's feet over the given x (z 0); the run's own search reads it so. */
+function revisionWithBotAt(world: ReturnType<typeof structureWorld>, targeting: BuildTargeting, x: number): string {
+  world.bot.entity.position.set(x + 0.5, 64, 0.5);
+  targeting.refresh();
+  const resolved = targeting.goal().resolve(observation(0, 64, 0));
+  assert.equal(resolved.kind, "active");
+  return resolved.kind === "active" ? resolved.revision : "";
+}
+
+// Mine Labs 2026-11-17, template-roof-counted-scaffold-saltbox, 2 of 72 runs: the same search (same world revision) from the
+// same feet came twice, each route having ended as "goal revised" after a few steps toward columns the other feet did not
+// choose, and the run refused the ridge stair as repeated_search.
+test("the stand columns do not change while the world does not, wherever the bot stands on the way to them", () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 70, 0), "stone");
+  const targeting = new BuildTargeting(world.bot, { ...({} as BuildRequest), cells: cells([[0, 71, 0]]), removeWrongBlocks: false });
+  const first = revisionWithBotAt(world, targeting, -3);
+  assert.equal(revisionWithBotAt(world, targeting, 3), first, "walking toward the column does not pick another one");
+  assert.equal(revisionWithBotAt(world, targeting, -3), first);
+});
+
+test("a stand column the world has since filled is chosen again, from where the bot stands", () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 70, 0), "stone");
+  const targeting = new BuildTargeting(world.bot, { ...({} as BuildRequest), cells: cells([[0, 71, 0]]), removeWrongBlocks: false });
+  const first = revisionWithBotAt(world, targeting, -3);
+  const column = /block:(-?\d+),(-?\d+),(-?\d+)/.exec(first)!;
+  world.put(new Vec3(Number(column[1]), Number(column[2]) + 1, Number(column[3])), "stone");
+  const second = revisionWithBotAt(world, targeting, -3);
+  assert.notEqual(second, first, "the column's head room is solid now");
+});
+
 test("walks to cells out of reach under one goal that moves on as cells are placed, protecting the cells already right", async () => {
   const { bot, physics, routes, protectedSets, placements } = structureWorld();
   const result = await build(bot, {
@@ -604,14 +636,21 @@ test("a walk that passes over another drop does not stop at it: the drop it was 
   assert.equal(dropped.walkedTo.length, 1, "the other drop, picked up on the way, needed no walk of its own");
 });
 
-test("what a pickup walk places is scaffold too: it is reported as left, not forgotten", async () => {
+/**
+ * Mine Labs 2026-11-17 (template-roof-counted-scaffold-saltbox, probe on every sweep walk, 13 of 60 runs): the sweep began
+ * 1 ms after the last dig, the item of the highest dug block was still falling 2.3 above the bot's feet, and the walk set
+ * a step block one cell ahead to get under it; the build ended with that dirt standing at (5,-59,z) and the scenario's
+ * "scaffold stands after the build" check failed.
+ */
+test("what a pickup walk places is scaffold too: the next takedown round digs it, so the build ends with none standing", async () => {
   const dropped = droppingScaffold([[9, 65, 2]], "reaches", async ({ options }) => {
+    if (dropped.walkedTo.length > 1) return;
     dropped.harness.world.setCell(new Vec3(20, 64, 0), 10);
     options.onPlacement?.({ position: { x: 20, y: 64, z: 0 }, stateId: 10 });
   });
   using _timers = dropped.clock.install();
   const result = await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }), 60_000);
-  assert.deepEqual(result.scaffold, { placed: 2, removed: 1, left: [{ x: 20, y: 64, z: 0 }] });
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 2, left: [] });
 });
 
 test("a build cut during the sweep is resumed into it: the drops the first attempt left are picked up by the next", async () => {
@@ -708,6 +747,58 @@ test("a refused cell carries the cause: placement, entity, policy or route", asy
     removeWrongBlocks: false,
   });
   assert.equal(refusalCause(route), "route");
+});
+
+test("a placement the body moved out of reach of before the click is no refusal: the cell is walked to again and placed", async () => {
+  // Live 2026-11-16 (saltbox roof): hanging on a ladder, the bot slid 2 blocks while a stair's turn took its ticks, and the
+  // click went out 6.1 from the cell: the server dropped it in silence and the build refused a cell it could place.
+  // The bot starts 2 above the ground (on a ladder), the cell 2.4 from its eye; it ends 6.4 below the cell, the fake's route
+  // arrives at the ground 3.7 from it.
+  const world = structureWorld({ feet: new Vec3(0, 66, 0) });
+  world.put(new Vec3(0, 68, 0), "stone");
+  const asked: boolean[] = [];
+  let slid = false;
+  const result = await build(world.bot, {
+    ...world.physics,
+    place: async (placement) => {
+      if (!slid) {
+        slid = true;
+        world.bot.entity.position = new Vec3(0.5, 62, 0.5);
+        const stillInReach = placement.stillInReach?.() ?? true;
+        asked.push(stillInReach);
+        if (!stillInReach) return { kind: "failed", error: "moved out of reach", cause: "moved" };
+      }
+      return world.physics.place(placement);
+    },
+    cells: cells([[0, 69, 0]]),
+    removeWrongBlocks: false,
+  });
+
+  assert.deepEqual(asked, [false], "the build hands the placement its own reach test, which fails from 2 blocks lower");
+  assert.equal(result.status, "complete");
+  assert.deepEqual(world.placements, ["0,69,0"], "placed once, after the walk back");
+  assert.ok(world.routes.length >= 1, "the cell was out of reach where the bot stood, so the route took it back");
+  assert.equal(result.placed, 1);
+});
+
+test("a body that moves out of reach before every click ends the run by idle passes, not by spinning", async () => {
+  const world = structureWorld();
+  world.put(new Vec3(0, 69, 0), "stone");
+  let clicks = 0;
+  const result = await build(world.bot, {
+    ...world.physics,
+    place: async () => {
+      clicks += 1;
+      return { kind: "failed", error: "moved out of reach", cause: "moved" };
+    },
+    cells: cells([[0, 70, 0]]),
+    removeWrongBlocks: false,
+  });
+
+  assert.equal(result.status, "stopped");
+  assert.equal(result.placed, 0);
+  assert.ok(clicks > 0 && clicks <= 8, `tried ${clicks} times`);
+  assert.equal(kinds(result)[0], "placeable", "not refused for good");
 });
 
 test("a dig that came out just before the abort threw is counted in the progress the next attempt reports", async () => {

@@ -53,18 +53,18 @@ async function pickUpDrop(bot: Bot, request: BuildRequest, progress: BuildProgre
 }
 
 /**
- * Walks to and picks up the items the takedown's digs of `removed` dropped (each item tried once), through the request's
+ * Walks to and picks up the items the takedown's digs of `removed` dropped (each item tried once: `tried` is the takedown's
+ * own set, shared by the sweeps of all its rounds, and takes the ids tried), through the request's
  * own route with the structure protected; what the walk places is recorded as scaffold in `progress`. An item it cannot
  * reach is left (the build is complete either way); an abort ends the sweep with the abort, and a policy stop
  * (`request.stopSignal`) ends it at once. The baseline is the request's: entities lying when its first takedown began.
  * No wait for a late drop: the dig's own confirmation and the build loop's turn after it pass the packets that follow
  * the block's change (the item spawn came 1 ms after it in the Mine Labs run).
  */
-export async function pickUpScaffoldDrops(bot: Bot, request: BuildRequest, progress: BuildProgress, removed: readonly BlockPosition[]): Promise<void> {
+export async function pickUpScaffoldDrops(bot: Bot, request: BuildRequest, progress: BuildProgress, removed: readonly BlockPosition[], tried: Set<number>): Promise<void> {
   const baseline = progress.lyingBeforeTakedown;
   if (removed.length === 0 || baseline === null) return;
   const movements = request.movements(new Set(request.cells.map((cell) => packKey(cell.position.x, cell.position.y, cell.position.z))));
-  const tried = new Set<number>();
   for (let drop = nextDrop(bot, baseline, tried, removed); drop !== null; drop = nextDrop(bot, baseline, tried, removed)) {
     request.signal?.throwIfAborted();
     if (request.stopSignal?.aborted === true) return;

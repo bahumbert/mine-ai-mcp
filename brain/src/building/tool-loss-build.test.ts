@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Body } from "../body.ts";
 import { runStep, type SkillContext, type UnfinishedHouse } from "../skills.ts";
-import { DEFAULT_POLICY, FakeRuntime, SMALL_MEDIEVAL_HOUSE } from "../testing.ts";
+import { DEFAULT_POLICY, FakeRuntime, SMALL_MEDIEVAL_HOUSE, TEMPLATES_WITH_HIGH_ROOF } from "../testing.ts";
 
 // Live 2026-10-09: Tom's stone pickaxe wore out at part 1/9 of his house and the build ended there.
 const RECIPES = {
@@ -103,7 +103,7 @@ test("a pickaxe made from the house's planks and a build that then stops still t
 
 test("a tool lost mid-stage refetches keeping the stage's scaffold: the walk back does not lay the roof's dirt", async () => {
   const runtime = builder();
-  runtime.snapshot = { ...runtime.snapshot, policy: DEFAULT_POLICY, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 4 }] };
+  runtime.snapshot = { ...runtime.snapshot, policy: DEFAULT_POLICY, inventory: [...runtime.snapshot.inventory, { name: "dirt", count: 5 }] };
   // The pickaxe is lost on the first part of the roof (the fifth call: the floor and the walls took four); making the new one
   // takes the bot 40 blocks off, so the fetch walks back.
   let sent = 0;
@@ -113,21 +113,22 @@ test("a tool lost mid-stage refetches keeping the stage's scaffold: the walk bac
     if (tool === "craft_item") runtime.snapshot = { ...runtime.snapshot, position: { x: 40.5, y: 64, z: 0.5 } };
     return submit(tool, input, ...rest);
   };
-  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { building: { unfinished: null as UnfinishedHouse | null } }));
+  // The raised-roof fixture: the real roof is within the eye's reach from the door's level and asks no block to stand on.
+  const result = await runStep({ skill: "build", structure: "house", size: "small" }, contextFor(runtime, { building: { unfinished: null as UnfinishedHouse | null }, templates: TEMPLATES_WITH_HIGH_ROOF }));
   assert.equal(result.status, "done", JSON.stringify(result));
   const walks = runtime.submitted.filter((call) => call.tool === "navigate");
   // Two walks, both far from the site: back home between the stick craft and the pickaxe craft, then the fetch's way back.
   assert.equal(walks.length, 2, "the walk home before the pickaxe craft, and the fetch's way back");
   // The admitted kinds besides the house's own (its cobblestone is kept by the build's own policy keep).
   const admitted = DEFAULT_POLICY.scaffoldBlocks!.filter((kind) => !SMALL_MEDIEVAL_HOUSE.some((stack) => stack.name === kind));
-  // Plan 2026-11-14 Task 6: kept by count (the roof is 5 above the door: 4 of each), not by name.
+  // Plan 2026-11-14 Task 6: kept by count (the raised roof's stand columns: 3 of each, the busiest call's), not by name.
   for (const walk of walks) {
     const reserve = (walk.input.reserve_items ?? []) as { item: string; count: number }[];
     assert.ok(admitted.includes("dirt"), "dirt is an admitted kind");
-    assert.deepEqual(reserve, admitted.map((item) => ({ item, count: 4 })), "the roof's scaffold kinds are reserved at its count");
+    assert.deepEqual(reserve, admitted.map((item) => ({ item, count: 3 })), "the roof's scaffold kinds are reserved at its count");
   }
   assert.ok((walks.at(-1)!.input.keep_items as string[]).includes("wooden_pickaxe"), "the tool it fetched");
-  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "dirt")?.count, 4, "no walk laid the roof's dirt");
+  assert.equal(runtime.snapshot.inventory.find((stack) => stack.name === "dirt")?.count, 5, "no walk laid the roof's dirt");
 });
 
 test("the pickaxe lost again in the same step ends the build, saying what was remade", async () => {

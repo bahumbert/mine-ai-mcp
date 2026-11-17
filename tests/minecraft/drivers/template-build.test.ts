@@ -14,14 +14,14 @@ import { TEMPLATES, templateFor } from "#brain/building/templates.ts";
 import { ZERO_ARENA, arenaFrame } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "#src/survival/policy/contract.ts";
-import { flaggedStages, scaffoldCarriedMismatch, scaffoldListKeepingBill, stageOfCutCall } from "./template-build.ts";
+import { buildInput, flaggedStages, partInputs, scaffoldCarriedMismatch, scaffoldListKeepingBill, stageOfCutCall } from "./template-build.ts";
 
 // check-reads: tests/minecraft/scenarios/build/*.yaml, brain/building-templates/*.json
 const BUILD_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../scenarios/build");
 /** Carried besides the bill: the tool that digs the ground under the floor and the dirt the routes' scaffold is made of. */
 const EXTRAS = new Set(["iron_shovel", "dirt"]);
 
-const files = readdirSync(BUILD_DIR).filter((name) => /^template-(builds|stages|roof-no-scaffold|roof-counted-scaffold)-.*\.yaml$/.test(name));
+const files = readdirSync(BUILD_DIR).filter((name) => /^template-(builds|stages|roof-no-scaffold|roof-stops-for-scaffold|roof-counted-scaffold)-.*\.yaml$/.test(name));
 
 interface Params {
   readonly scaffoldCarried?: number;
@@ -47,9 +47,9 @@ for (const name of files) {
     const billed = new Set(plan.bill.map(({ item }) => item));
     assert.deepEqual([...carried.keys()].filter((item) => !billed.has(item) && !EXTRAS.has(item)), [], "items carried that the template does not use");
     assert.equal(carried.get("iron_shovel"), 1, "the shovel that digs the ground under the floor");
-    // A run with no block to stand on carries no dirt at all: the stop it expects is for want of one; a counted run carries exactly the count.
-    const dirtCarried = params.expectScaffoldStop === true ? undefined : params.scaffoldCarried ?? 32;
-    assert.equal(carried.get("dirt"), dirtCarried, "the dirt the routes' scaffold is made of (none when the run expects the scaffold stop, the counted scaffold when the run names it)");
+    // A run with no block to stand on carries no dirt at all (it expects the stop for want of one, or counts 0); a counted run carries exactly the count.
+    const dirtCarried = params.expectScaffoldStop === true || params.scaffoldCarried === 0 ? undefined : params.scaffoldCarried ?? 32;
+    assert.equal(carried.get("dirt"), dirtCarried, "the dirt the routes' scaffold is made of (none when the run carries no scaffold, the counted scaffold when the run names it)");
     if (params.interruptAfterBatch !== undefined) {
       assert.equal(stageOfCutCall(plan, params.interruptAfterBatch), params.interruptStage, "the cut call lies in the stage the scenario names");
     }
@@ -67,20 +67,47 @@ test("every regional template and two classic ones have a template-builds scenar
 
 const noScaffoldFiles = files.filter((name) => name.startsWith("template-roof-no-scaffold-"));
 
-/** Bruno's house: a roof out of reach. (The saltbox's flagged walls build by its inner ladder, an overflag the spec accepts: no scenario expects a stop there.) */
-const NO_SCAFFOLD_TEMPLATES = ["medieval-small"];
+/**
+ * Bruno's house (medieval-small) and the hanok: since the build works a cell from the eye (plan 2026-11-14-house-build-fixes-2
+ * Task 2a) their roofs are within reach from the ground, so the helper counts 0 blocks and a bot that carries no block to
+ * stand on builds the whole house (before, the medieval-small roof was the stop this scenario expected).
+ */
+const NO_SCAFFOLD_TEMPLATES = ["medieval-small", "hanok"];
 
 test("the roof-without-scaffold scenarios exist for the templates the plan names", () => {
   assert.deepEqual(NO_SCAFFOLD_TEMPLATES.filter((id) => !noScaffoldFiles.includes(`template-roof-no-scaffold-${id}.yaml`)), []);
 });
 
 for (const name of noScaffoldFiles) {
-  test(`${name} is named after its template, expects the stop and has no block to stand on`, async () => {
+  test(`${name} is named after its template, counts 0 scaffold and has no block to stand on`, async () => {
     const scenario = await loadScenario(path.join(BUILD_DIR, name));
     const params = scenario.params as unknown as Params;
     assert.equal(name, `template-roof-no-scaffold-${params.template}.yaml`, "the file is named after its template");
-    assert.equal(params.expectScaffoldStop, true);
+    assert.equal(params.scaffoldCarried, 0, "the run builds the whole template with no scaffold carried");
+    const door = arenaCell(arenaFrame(ZERO_ARENA)).parse(params.door);
+    const plan = planTemplate(templateFor(params.template)!, { door, facing: params.facing ?? "north" });
+    assert.deepEqual(flaggedStages(plan, door.y).map(({ stage }) => stage.name), [], "the helper flags no stage of this template");
     // The shovel digs the ground under the floor and picks up what it drops (measured 2026-11-11: 13 dirt carried by the roof, 2 and 4 scaffold placed there).
+    assert.deepEqual(groundBlocksAdmittedAsScaffold(scenario), [], "a ground that drops a block the policy admits as scaffold");
+  });
+}
+
+const stopFiles = files.filter((name) => name.startsWith("template-roof-stops-for-scaffold-"));
+
+test("a roof-stops-for-scaffold scenario exists: the proof that a roof out of reach with no block to stand on still ends for want of one", () => {
+  assert.ok(stopFiles.length > 0);
+});
+
+for (const name of stopFiles) {
+  test(`${name} is named after its template, expects the stop and the helper flags a stage of it`, async () => {
+    const scenario = await loadScenario(path.join(BUILD_DIR, name));
+    const params = scenario.params as unknown as Params;
+    assert.equal(name, `template-roof-stops-for-scaffold-${params.template}.yaml`, "the file is named after its template");
+    assert.equal(params.expectScaffoldStop, true);
+    assert.equal(params.scaffoldCarried, undefined, "the run carries no scaffold: it is not a counted run");
+    const door = arenaCell(arenaFrame(ZERO_ARENA)).parse(params.door);
+    const plan = planTemplate(templateFor(params.template)!, { door, facing: params.facing ?? "north" });
+    assert.ok(flaggedStages(plan, door.y).length > 0, "the helper flags a stage of this template, else nothing stops");
     assert.deepEqual(groundBlocksAdmittedAsScaffold(scenario), [], "a ground that drops a block the policy admits as scaffold");
   });
 }
@@ -91,9 +118,9 @@ function groundBlocksAdmittedAsScaffold(scenario: Awaited<ReturnType<typeof load
   return ground.filter((block) => (DEFAULT_SCAFFOLD_BLOCKS as readonly string[]).includes(block));
 }
 
-// The counted-scaffold scenarios (medieval-small h = 5, hanok h = 6; plan 2026-11-12-house-build-fixes Task 6) are kept
-// off the suite while the route spends more scaffold than scaffoldNeed counts (owner 2026-11-12; backlog "the route lays
-// scaffold at ground level"): their YAMLs are on branch claude/hf-w4 (a952f3b). A counted YAML added back is checked here.
+// The counted-scaffold scenarios (plan 2026-11-12-house-build-fixes Task 6, back on the suite by plan 2026-11-14 Task 3):
+// a template whose roof needs blocks by the helper's count (`scaffoldNeed`) carries exactly that many, and the whole
+// house must stand with none left.
 const countedFiles = files.filter((name) => name.startsWith("template-roof-counted-scaffold-"));
 
 for (const name of countedFiles) {
@@ -101,8 +128,6 @@ for (const name of countedFiles) {
     const scenario = await loadScenario(path.join(BUILD_DIR, name));
     const params = scenario.params as unknown as Params;
     assert.equal(name, `template-roof-counted-scaffold-${params.template}.yaml`, "the file is named after its template");
-    assert.notEqual(params.expectScaffoldStop, true, "the run builds the whole template, it does not expect a stop");
-    assert.equal(params.interruptAfterBatch, undefined, "no cut and resume: the count is measured in one pass");
     const door = arenaCell(arenaFrame(ZERO_ARENA)).parse(params.door);
     const plan = planTemplate(templateFor(params.template)!, { door, facing: params.facing ?? "north" });
     const first = flaggedStages(plan, door.y)[0];
@@ -112,16 +137,26 @@ for (const name of countedFiles) {
   });
 }
 
-test("scaffoldCarriedMismatch names the helper's count when the carried count differs, and a template with no flagged stage", () => {
-  const plan = planTemplate(templateFor("medieval-small")!, { door: { x: 0, y: -59, z: 6 }, facing: "north" });
-  assert.equal(scaffoldCarriedMismatch(plan, -59, 4), null);
-  assert.match(scaffoldCarriedMismatch(plan, -59, 3) ?? "", /carries 3.*stage roof.*is 4/u);
-  // Standing at y 0 the whole house is below reach: no stage is flagged.
-  assert.match(scaffoldCarriedMismatch(plan, 0, 4) ?? "", /flags no stage/u);
+const DOOR = { x: 0, y: -59, z: 6 } as const;
+
+// Fixtures: the saltbox has a roof out of the eye's reach from the ground (the count is the helper's, read here, not pinned); the
+// medieval-small roof is within it (count 0: plan 2026-11-14-house-build-fixes-2 Task 2a and 2c).
+test("scaffoldCarriedMismatch is null at the helper's count, else names it; 0 matches a roof the eye reaches, and nothing is flagged from a level that reaches all", () => {
+  const high = planTemplate(templateFor("saltbox")!, { door: DOOR, facing: "north" });
+  const [first] = flaggedStages(high, DOOR.y);
+  assert.ok(first, "the saltbox flags a stage (else this test checks nothing)");
+  const count = first.need.count;
+  assert.equal(scaffoldCarriedMismatch(high, DOOR.y, count), null);
+  assert.match(scaffoldCarriedMismatch(high, DOOR.y, count - 1) ?? "", new RegExp(`carries ${count - 1}.*stage ${first.stage.name}.*is ${count}`, "u"));
+  assert.match(scaffoldCarriedMismatch(high, DOOR.y, 0) ?? "", new RegExp(`carries 0.*is ${count}`, "u"));
+  assert.match(scaffoldCarriedMismatch(high, 0, count) ?? "", /flags no stage/u);
+  const low = planTemplate(templateFor("medieval-small")!, { door: DOOR, facing: "north" });
+  assert.equal(scaffoldCarriedMismatch(low, DOOR.y, 0), null);
+  assert.match(scaffoldCarriedMismatch(low, DOOR.y, 1) ?? "", /flags no stage/u);
 });
 
 test("the counted runs send build_structure with the policy's scaffold list the brain leaves while it builds: the admitted kinds minus the bill's", () => {
-  const plan = planTemplate(templateFor("medieval-small")!, { door: { x: 0, y: -59, z: 6 }, facing: "north" });
+  const plan = planTemplate(templateFor("medieval-small")!, { door: DOOR, facing: "north" });
   const billKinds = plan.bill.map((entry) => entry.item);
   const list = scaffoldListKeepingBill(plan);
   assert.ok(billKinds.some((item) => (DEFAULT_SCAFFOLD_BLOCKS as readonly string[]).includes(item)), "the template's bill holds an admitted kind (else this test checks nothing)");
@@ -130,9 +165,31 @@ test("the counted runs send build_structure with the policy's scaffold list the 
   assert.equal(list.some((block) => billKinds.includes(block)), false, "no bill kind is scaffold");
 });
 
-test("the reach rule flags only the roof of the medieval-small house, with the helper's count of 4", () => {
-  const plan = planTemplate(templateFor("medieval-small")!, { door: { x: 0, y: -59, z: 6 }, facing: "north" });
-  const flagged = flaggedStages(plan, -59);
-  assert.deepEqual(flagged.map(({ stage }) => stage.name), ["roof"]);
-  assert.equal(flagged[0]!.need.count, 4);
+/** The index of the stage a call (an index of `plan.batches`) belongs to. */
+const stageIndexOfCall = (plan: ReturnType<typeof planTemplate>, call: number) => plan.stages.findIndex((stage) => call >= stage.first && call <= stage.last);
+
+test("the walls' calls carry the roof's reserve: the stages before the first one that needs scaffold keep it by count, that stage and the later ones send none (as the brain's buildStages does)", () => {
+  const plan = planTemplate(templateFor("saltbox")!, { door: DOOR, facing: "north" });
+  const flaggedStage = plan.stages.indexOf(flaggedStages(plan, DOOR.y)[0]!.stage);
+  assert.ok(flaggedStage > 0, "the saltbox has stages before the one that needs scaffold (else this test checks nothing)");
+  // The counts are the brain's own (`scaffoldReserve` over the later stages' cells, none built: the floor's covers the walls too),
+  // so the test holds their shape: one entry per kind of the scaffold list, each positive.
+  const kinds = scaffoldListKeepingBill(plan);
+  partInputs(plan, true).forEach((call, index) => {
+    if (call === null) return;
+    const stage = stageIndexOfCall(plan, index);
+    if (stage >= flaggedStage) return assert.deepEqual(call.reserve, [], `call ${index + 1} (${plan.stages[stage]!.name}) needs scaffold itself or is later`);
+    assert.deepEqual(call.reserve.map((entry) => entry.item), kinds, `call ${index + 1} (${plan.stages[stage]!.name}) keeps one entry per kind`);
+    assert.ok(call.reserve.every((entry) => entry.count > 0));
+  });
+});
+
+test("a run with no scaffold carried sends no reserve, and the final check never sends one", () => {
+  const plan = planTemplate(templateFor("saltbox")!, { door: DOOR, facing: "north" });
+  assert.ok(partInputs(plan, false).every((call) => call === null || call.reserve.length === 0));
+  const reserving = partInputs(plan, true).find((call) => call !== null && call.reserve.length > 0)!;
+  assert.ok(reserving, "a call reserves (else this test checks nothing)");
+  assert.deepEqual(buildInput(reserving, false).reserve_items, reserving.reserve);
+  assert.equal("reserve_items" in buildInput(reserving, true), false, "the audit pass sends none");
+  assert.equal("reserve_items" in buildInput(partInputs(plan, false).find((call) => call !== null)!, false), false, "an empty reserve is not sent");
 });

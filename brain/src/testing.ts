@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import { ModelUnavailable, type ChatModel, type ChatReply, type ChatTurn, type CompleteOptions } from "./chat-model.ts";
 import { LlmMind, type LocalizedChat } from "./llm-mind.ts";
 import type { Persona } from "./persona.ts";
@@ -36,6 +37,24 @@ export const SMALL_MEDIEVAL_HOUSE: BotSnapshot["inventory"] = [
   { name: "glass_pane", count: 3 },
   { name: "oak_door", count: 1 },
 ];
+
+/**
+ * The small medieval house with its roof layers 3 higher, the gap left empty (a fixture: nothing is built from it, so the roof
+ * may float): the same stages and bill as {@link SMALL_MEDIEVAL_HOUSE}, but its roof is out of the eye's reach from the door's
+ * level, so the stand columns ask 5 blocks (8 above the ground) where the real roof, 5 above, asks none (plan
+ * 2026-11-14-house-build-fixes-2 Task 2c). Under the id and the classic tag of the real one: a registry holding it in place of
+ * the real house builds it for `build` by template and by size.
+ */
+export const MEDIEVAL_SMALL_HIGH_ROOF: Template = (() => {
+  const real = templateFor("medieval-small")!;
+  const roofFloor = Math.min(...real.blueprint.cells.filter((cell) => cell.role === "roof").map((cell) => cell.y));
+  const raise = 3;
+  const cells = real.blueprint.cells.map((cell) => (cell.y >= roofFloor ? { ...cell, y: cell.y + raise } : cell));
+  return { ...real, blueprint: { ...real.blueprint, size: { ...real.blueprint.size, y: real.blueprint.size.y + raise }, cells } };
+})();
+
+/** The shipped templates with the small medieval house replaced by {@link MEDIEVAL_SMALL_HIGH_ROOF}: a `templates` registry for a test whose roof needs blocks to stand on. */
+export const TEMPLATES_WITH_HIGH_ROOF: ReadonlyMap<string, Template> = new Map([...TEMPLATES, [MEDIEVAL_SMALL_HIGH_ROOF.id, MEDIEVAL_SMALL_HIGH_ROOF]]);
 
 /** Test double for one bot: scripted durations, recorded calls, no Minecraft. */
 export class FakeRuntime implements BotRuntime {

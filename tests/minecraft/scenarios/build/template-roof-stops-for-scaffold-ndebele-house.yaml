@@ -1,0 +1,52 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-roof-stops-for-scaffold-ndebele-house
+tags: [acceptance]
+description: >-
+  The ndebele-house template (roof 7 above the door, the brain's count 1) built stage by stage from exactly its bill and no block
+  to stand on (no dirt): the stages the brain's reach rule (scaffoldNeed) does not flag are built whole, and the first one it
+  flags must stop with "no scaffold block carried to stand on", as a bot that carries only the bill meets it. A stage that
+  builds all the same fails the run. This is the stop that the medieval-small roof gave before the build worked a cell from the
+  eye (plan 2026-11-14-house-build-fixes-2 Task 3).
+
+# The house stands on coarse_dirt (the floor replaces its top layer; the shovel picks up no scaffold block from it), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: coarse_dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: acacia_planks, count: 64 }
+      - { item: acacia_planks, count: 52 }
+      - { item: acacia_stairs, count: 64 }
+      - { item: acacia_stairs, count: 16 }
+      - { item: birch_planks, count: 42 }
+      - { item: cobblestone, count: 24 }
+      - { item: sandstone, count: 16 }
+      - { item: glass_pane, count: 5 }
+      - { item: acacia_door, count: 1 }
+      - { item: acacia_slab, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: ndebele-house
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+  expectScaffoldStop: true
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }

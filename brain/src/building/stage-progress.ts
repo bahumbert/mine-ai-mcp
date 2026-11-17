@@ -3,6 +3,7 @@
 import { areaKey, BodyDown, type BotRuntime, type ItemCount } from "../runtime-client.ts";
 import { billOfMaterials, cellsCountedOnce, describeMaterials, type MaterialCount, type WorldCell } from "./blueprint.ts";
 import type { HousePlan } from "./plan.ts";
+import { columnsForCells, outOfReachFromGround } from "./stand-columns.ts";
 import { resumeStep, type Stage } from "./templates.ts";
 
 /** The step that goes on with the house of `plan` at its door (`resumeStep`'s, given the template's own id, whatever registry it is in). */
@@ -20,7 +21,7 @@ export function billFrom(plan: HousePlan, first: number): MaterialCount[] {
 }
 
 /** The cells a stage places, counted in their last call only (as {@link HousePlan.stageBill} does), air left out. */
-export function stageCells(plan: HousePlan, stage: Stage): WorldCell[] {
+export function stageCells(plan: HousePlan, stage: Pick<Stage, "first" | "last">): WorldCell[] {
   return cellsCountedOnce(plan.batches).slice(stage.first, stage.last + 1).flat().filter((cell) => cell.block !== "air");
 }
 
@@ -44,53 +45,94 @@ export async function stageCellsNow(plan: HousePlan, stage: Stage, runtime: Pick
   }
 }
 
-/**
- * How far above the bot's feet a block is placed from where it stands: the runtime's `BUILD_REACH`
- * (`src/navigation/processes/building/build-process.ts`, used by `withinReach`). `brain/` does not import `src/`; the Mine Labs
- * scenario `template-roof-no-scaffold-*` (plan 2026-11-11-house-templates-live-fixes Task 5) measures it against the runtime.
- */
-export const BUILD_REACH = 4;
+/** One `build_structure` call's work: the cells it still places and the cells standing around them, which its stand columns cannot pass through. */
+export interface CallWork {
+  /** The cells the call still places. */
+  readonly cells: readonly WorldCell[];
+  /** The cells of the house standing when the call runs, air left out: those of the calls before, and the house's own already right (a resumed or swapped house). The terrain is not known here. */
+  readonly built: readonly WorldCell[];
+}
 
-/** Blocks to stand on that a stage lacks: the column the routes' scaffold needs for its cells out of reach of the ground. */
+const cellKey = (cell: WorldCell): string => `${cell.x},${cell.y},${cell.z}`;
+
+/**
+ * The calls of parts `range` that still place `wrong` cells (each cell in its last call, as `buildParts` sends it), the way the
+ * runtime plans each: the calls before are built, the cells not in `wrong` stand (a resumed stage's right cells, the unchanged
+ * cells of a house swapped in place), and the cells of the calls after are not yet there (plan 2026-11-14-house-build-fixes-2
+ * Task 2d; the runtime's `keep` is every non-air cell of the earlier calls). From the house's own plan: no world read.
+ */
+export function callWorks(plan: HousePlan, range: { readonly first: number; readonly last: number }, wrong: readonly WorldCell[]): CallWork[] {
+  const stillWrong = new Set(wrong.map(cellKey));
+  const works: CallWork[] = [];
+  for (let part = range.first; part <= range.last && part < plan.batches.length; part += 1) {
+    const cells = stageCells(plan, { first: part, last: part }).filter((cell) => stillWrong.has(cellKey(cell)));
+    if (cells.length === 0) continue;
+    const standing = stageCells(plan, { first: part, last: range.last }).filter((cell) => !stillWrong.has(cellKey(cell)));
+    works.push({ cells, built: [...stageCells(plan, { first: 0, last: part - 1 }), ...standing] });
+  }
+  return works;
+}
+
+/** The calls of a house `after` standing whole but for the cells `changed` (a swap in place): {@link callWorks} over all its calls. */
+export const inPlaceWorks = (after: HousePlan, changed: readonly WorldCell[]): CallWork[] => callWorks(after, { first: 0, last: after.batches.length - 1 }, changed);
+
+/** Blocks to stand on that a stage lacks: the stand columns the routes' scaffold builds for its cells out of the eye's reach from the ground. */
 export interface ScaffoldNeed {
-  /** About how many blocks the routes lay: two columns of the height the cells lack (Mine Labs placed 4 in one medieval-small roof call, facts houses.md "A stage out of reach from the ground"). */
+  /** The blocks of the stand columns the runtime's cover gives for the stage's out-of-reach cells: their heights summed (`columnsForCells`). */
   readonly count: number;
-  /** How far above the ground the highest cell is. */
+  /** How far above the ground the highest out-of-reach cell is. */
   readonly height: number;
   /** The kinds the movement policy admits as scaffold, besides the house's own blocks. */
   readonly admitted: readonly string[];
 }
 
+/** The middle of the cells' footprint: where the bot may stand among them, as the cover's tie-break (the bot's own place is not known here). */
+function footprintCentre(cells: readonly WorldCell[]): { x: number; z: number } {
+  const middle = (axis: "x" | "z") => (Math.min(...cells.map((cell) => cell[axis])) + Math.max(...cells.map((cell) => cell[axis]))) / 2;
+  return { x: middle("x"), z: middle("z") };
+}
+
 /**
- * What a stage needs to stand on, from where the bot's feet are (`walkingY`, the site's level): the cells `BUILD_REACH` or
- * more above it are reached only by the routes' scaffold (live 2026-11-10: Bruno's roof passed the material check and
- * failed mid-stage, both his scaffold-able blocks spent on the foundation). Null when every cell is within reach, when
- * enough of a block the policy admits is carried, or when none could be used: `scaffoldBlocks` unread, or every admitted
- * kind one of `kept` (the house's own blocks, kept off the list while it is built): fetching one cannot help, and the
- * runtime's own refusal says why. `cells` are the cells still to place (a resumed stage's wrong ones).
+ * What a stage needs to stand on, from where the bot's feet are (`walkingY`, the site's level): the cells the eye cannot reach
+ * from the ground (`outOfReachFromGround`) are worked from the top of stand columns, each laid by the routes as blocks of a
+ * kind the policy admits (live 2026-11-10: Bruno's roof passed the material check and failed mid-stage, both his
+ * scaffold-able blocks spent on the foundation); `count` is the blocks of those columns, as the runtime plans them
+ * (plan 2026-11-14-house-build-fixes-2 Task 2c). Null when every cell is within reach (the hanok and medieval-small roofs),
+ * when no column could serve one, when enough of a block the policy admits is carried, or when none could be used:
+ * `scaffoldBlocks` unread, or every admitted kind one of `kept` (the house's own blocks, kept off the list while it is
+ * built): fetching one cannot help, and the runtime's own refusal says why. `works` are the calls still to place cells
+ * ({@link callWorks}): the runtime plans the columns of each call alone, with the calls before it built, and the scaffold is
+ * taken back between calls, so `count` is the largest of the calls' (a roof's last layer, its lower layers standing, needs
+ * taller columns than the whole roof planned at once: saltbox 11 against 10).
  */
-export function scaffoldNeed(cells: readonly WorldCell[], walkingY: number, inventory: readonly { readonly name: string; readonly count: number }[], scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): ScaffoldNeed | null {
+export function scaffoldNeed(works: readonly CallWork[], walkingY: number, inventory: readonly { readonly name: string; readonly count: number }[], scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): ScaffoldNeed | null {
   // A cell dug clear places nothing: only the blocks of the bill (`billOfMaterials` leaves the air out) are placed from a height.
-  const placed = new Set(billOfMaterials(cells).map(({ item }) => item));
-  const high = cells.filter((cell) => placed.has(cell.block) && cell.y - walkingY >= BUILD_REACH);
-  if (high.length === 0 || scaffoldBlocks === undefined) return null;
-  const admitted = scaffoldBlocks.filter((block) => !kept.includes(block));
-  if (admitted.length === 0) return null;
-  const height = Math.max(...high.map((cell) => cell.y)) - walkingY;
-  const count = 2 * (height - BUILD_REACH + 1);
+  const needs = works.map(({ cells, built }) => {
+    const placed = new Set(billOfMaterials(cells).map(({ item }) => item));
+    const placing = cells.filter((cell) => placed.has(cell.block));
+    const high = placing.filter((cell) => outOfReachFromGround(cell, walkingY));
+    if (high.length === 0) return { count: 0, top: walkingY };
+    const count = columnsForCells(placing, walkingY, footprintCentre(placing), built).reduce((sum, column) => sum + column.height, 0);
+    return { count, top: Math.max(...high.map((cell) => cell.y)) };
+  });
+  const admitted = (scaffoldBlocks ?? []).filter((block) => !kept.includes(block));
+  const count = Math.max(0, ...needs.map((need) => need.count));
+  if (count === 0 || admitted.length === 0) return null;
   const carried = inventory.filter((stack) => admitted.includes(stack.name)).reduce((sum, stack) => sum + stack.count, 0);
-  return carried >= count ? null : { count, height, admitted };
+  // The height is the one a call that asks for blocks reaches: a call no column serves says nothing of what to fetch.
+  return carried >= count ? null : { count, height: Math.max(...needs.filter((need) => need.count > 0).map((need) => need.top)) - walkingY, admitted };
 }
 
 /**
  * What a walk must keep of each kind the cells still to place need to stand on (`navigate`'s `reserve_items`: the route lays
  * a reserved kind only while it carries more than the count, its fallback scaffold included): every admitted kind besides
  * `kept` at the count {@link scaffoldNeed} gives for none carried, whatever is carried (5 dirt for a count of 4 keep 4: the
- * spare may bridge; a kind carried later on the same walk is kept too). `[]` when no placed cell is `BUILD_REACH` or more above
- * `walkingY`, the policy is unread, or every admitted kind is one of `kept`.
+ * spare may bridge; a kind carried later on the same walk is kept too). `works` may span stages (a floor's walk keeps what the
+ * roof takes): the count is the largest call's, the same function as the stage's own check. `[]` when {@link scaffoldNeed}
+ * gives none: no placed cell out of the eye's reach from `walkingY`, the policy unread, or every admitted kind one of `kept`.
  */
-export function scaffoldReserve(cells: readonly WorldCell[], walkingY: number, scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): ItemCount[] {
-  const needed = scaffoldNeed(cells, walkingY, [], scaffoldBlocks, kept);
+export function scaffoldReserve(works: readonly CallWork[], walkingY: number, scaffoldBlocks: readonly string[] | undefined, kept: readonly string[]): ItemCount[] {
+  const needed = scaffoldNeed(works, walkingY, [], scaffoldBlocks, kept);
   return needed === null ? [] : needed.admitted.map((item) => ({ item, count: needed.count }));
 }
 

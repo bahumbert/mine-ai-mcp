@@ -47,6 +47,13 @@ export interface BlockPlacement {
   /** For stairs and slabs: the half a side-face click must give (ADR-013). */
   readonly half?: BlockHalf;
   readonly signal?: AbortSignal;
+  /**
+   * Asked once at the instant of the send, after the equip and the turn have given the body time to move: false means the
+   * reach the caller judged before them no longer holds, and nothing is sent (`cause: "moved"`). A bot hanging on a ladder
+   * without sneaking slides while it turns (live 2026-11-16, saltbox roof: 2 blocks lower, the click 6.1 from the cell,
+   * dropped in silence by the server); a caller that judges reach asks its own test again here.
+   */
+  readonly stillInReach?: () => boolean;
   /** Called right before the placement packet is sent: an abort after it may still leave the block placed. */
   readonly onSent?: () => void;
   /** Longest wait for the server's answer on the wall clock; default `PLACEMENT_ANSWER_WALL_MS`. */
@@ -66,7 +73,12 @@ export type RefusalCause = (typeof REFUSAL_CAUSES)[number];
 
 export type BlockPlacementResult =
   | { kind: "placed"; block: WorldBlock }
-  | { kind: "failed"; error: string; /** Set when a body stood in the cell; any other failure is a placement one. */ cause?: "entity" };
+  | {
+      kind: "failed";
+      error: string;
+      /** `entity` when a body stood in the cell, `moved` when the body left the caller's reach before the send (nothing was sent); any other failure is a placement one. */
+      cause?: "entity" | "moved";
+    };
 
 function message(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -153,6 +165,9 @@ export async function placeBlock(bot: Bot, placement: BlockPlacement): Promise<B
     placement.signal?.throwIfAborted();
     const currentBlocker = occupiedCell(bot, cubeCell);
     if (currentBlocker) return { kind: "failed", error: currentBlocker, cause: "entity" };
+    if (placement.stillInReach && !placement.stillInReach()) {
+      return { kind: "failed", error: `The bot moved out of reach of the cell while it equipped and turned; nothing was sent.`, cause: "moved" };
+    }
     setSneaking(bot, true);
     sentAtAge = bot.time?.age;
     placement.onSent?.();

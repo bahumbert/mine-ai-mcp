@@ -182,10 +182,12 @@ export class BuildTargeting {
   readonly #ownBlockCells: ReadonlySet<number>;
   /** The reach of the bot's eye, read once per build (the attribute does not change within a call). */
   readonly #range: number;
-  /** The columns for the cells the ground cannot serve, kept until the next look at the world. */
-  #columns: { readonly look: number; readonly plan: StandColumns } | null = null;
-  /** How many times the world was looked at again; what a plan kept from the last look is checked against. */
-  #looks = 0;
+  /**
+   * The columns for the cells the ground cannot serve, with the cells they were chosen for: kept while those cells stay
+   * the same and every column is still free. Chosen again at each look from where the bot has walked to, equal columns
+   * fall the other way and the route walking to the first is revised at every step (Mine Labs 2026-11-17, saltbox roof).
+   */
+  #columns: { readonly owed: string; readonly plan: StandColumns } | null = null;
   #refreshedAtMs = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -261,7 +263,6 @@ export class BuildTargeting {
       this.#states.set(keyOf(cell.position), this.classify(cell, feet, head, carried));
     }
     this.#refreshedAtMs = now;
-    this.#looks += 1;
     return this.#states;
   }
 
@@ -388,27 +389,29 @@ export class BuildTargeting {
    * under itself. Only a cell to place is served so (a dig also needs a visible face, which the cell's own goal checks).
    */
   private standColumns(): StandColumns {
-    if (this.#columns?.look === this.#looks) return this.#columns.plan;
     const feet = feetOf(this.bot);
-    const plan = planStandColumns({
-      cells: this.request.cells.flatMap((cell) => {
-        const kind = this.stateOf(cell).kind;
-        // Every block still owed, the layers waiting for their support included: a roof's layers share their pillars.
-        return OWED_KINDS.has(kind) && cell.blockName !== "air"
-          ? [{ ...cell.position, key: keyOf(cell.position), placeable: kind === "placeable" }]
-          : [];
-      }),
-      ground: this.progress.groundY ?? feet.y,
-      range: this.#range,
-      near: feet,
-      isFree: (x, y, z) => {
-        const key = packKey(x, y, z);
-        if (this.#ownBlockCells.has(key)) return false;
-        const block = this.bot.blockAt(new Vec3(x, y, z));
-        return block !== null && (!obstructs(this.bot, block) || this.progress.scaffold.has(key));
-      },
+    const ground = this.progress.groundY ?? feet.y;
+    const cells = this.request.cells.flatMap((cell) => {
+      const kind = this.stateOf(cell).kind;
+      // Every block still owed, the layers waiting for their support included: a roof's layers share their pillars.
+      return OWED_KINDS.has(kind) && cell.blockName !== "air"
+        ? [{ ...cell.position, key: keyOf(cell.position), placeable: kind === "placeable" }]
+        : [];
     });
-    this.#columns = { look: this.#looks, plan };
+    const owed = cells.map((cell) => `${cell.key}${cell.placeable ? "+" : "-"}`).join(",");
+    const isFree = (x: number, y: number, z: number): boolean => {
+      const key = packKey(x, y, z);
+      if (this.#ownBlockCells.has(key)) return false;
+      const block = this.bot.blockAt(new Vec3(x, y, z));
+      return block !== null && (!obstructs(this.bot, block) || this.progress.scaffold.has(key));
+    };
+    const kept = this.#columns;
+    // A kept column is free from the ground to the head room of its top (the cells `planStandColumns` asked free).
+    const stillFree = (plan: StandColumns) =>
+      plan.columns.every((column) => Array.from({ length: column.height + 2 }, (_, up) => isFree(column.x, ground + up, column.z)).every(Boolean));
+    if (kept !== null && kept.owed === owed && stillFree(kept.plan)) return kept.plan;
+    const plan = planStandColumns({ cells, ground, range: this.#range, near: feet, isFree });
+    this.#columns = { owed, plan };
     return plan;
   }
 
@@ -480,8 +483,10 @@ async function workInReach(
     if (!target) return worked;
     const state = targeting.stateOf(target);
     if (state.kind === "diggable") await digCell(bot, request, targeting, movements, target, state.holds, signal);
-    else if (state.kind === "placeable") await placeCell(bot, request, targeting, target, state, signal);
-    else {
+    else if (state.kind === "placeable") {
+      // The body moved off before the click: where it stands now is for the caller's next look (the route), not this loop's.
+      if (!(await placeCell(bot, request, targeting, target, state, signal))) return worked;
+    } else {
       // A cell within reach that still reads as unloaded is nothing to work on.
       return worked;
     }
@@ -514,7 +519,12 @@ async function digCell(
   }
 }
 
-/** Put the cell's block down; an abort after the block landed still counts the placement (same rule as `digCell`). */
+/**
+ * Put the cell's block down; an abort after the block landed still counts the placement (same rule as `digCell`). The
+ * reach was judged before the placement's equip and turn: it is judged again at the send (`stillInReach`), and a body that
+ * moved off leaves the cell as it was, to be worked again from where the route puts the bot, not refused. Returns whether
+ * the call changed anything (a placement or a refusal), which the idle-pass count needs.
+ */
 async function placeCell(
   bot: Bot,
   request: BuildRequest,
@@ -522,7 +532,7 @@ async function placeCell(
   target: BuildCell,
   state: Extract<BuildCellState, { kind: "placeable" }>,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<boolean> {
   const item = bot.inventory.items().find((candidate) => candidate.name === target.blockName)!;
   try {
     const placed = await request.place({
@@ -531,12 +541,18 @@ async function placeCell(
       face: state.face,
       expectedCells: [target.position],
       matches: (block) => holdsCell(block, target),
+      stillInReach: () => targeting.reaches(target.position),
       ...(target.facing !== undefined && { lookDirection: facingVector(target.facing) }),
       ...(target.half !== undefined && { half: target.half }),
       signal,
     });
-    if (placed.kind === "placed") targeting.progress.placed += 1;
-    else targeting.refuse(target, placed.error, placed.cause ?? "placement");
+    if (placed.kind === "placed") {
+      targeting.progress.placed += 1;
+      return true;
+    }
+    if (placed.cause === "moved") return false;
+    targeting.refuse(target, placed.error, placed.cause ?? "placement");
+    return true;
   } catch (error) {
     const block = bot.blockAt(asVec3(target.position));
     if (block !== null && holdsCell(block, target)) targeting.progress.placed += 1;

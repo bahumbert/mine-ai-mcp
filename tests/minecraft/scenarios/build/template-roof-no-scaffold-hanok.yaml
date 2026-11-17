@@ -1,0 +1,50 @@
+template: ../../templates/flat-single-action.yaml
+
+name: template-roof-no-scaffold-hanok
+tags: [acceptance]
+description: >-
+  The hanok template (roof 6 above the door) built call by call from exactly its bill and no block to stand on (no dirt):
+  the eye reaches the whole roof from the ground (the brain's count is 0, the runtime plans no stand column), so every call
+  must succeed, no scaffold block is carried (so none is placed) and the whole house must stand (plan 2026-11-14-house-build-fixes-2 Task 3).
+
+# The house stands on coarse_dirt (the floor replaces its top layer; the shovel picks up no scaffold block from it), a clear ground of 33 x 33 around it.
+reset:
+  - "fill -16 -60 -8 16 -40 24 air"
+
+geometry:
+  - fill: { block: coarse_dirt, from: [-16, -60, -8], to: [16, -60, 24] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    inventory:
+      - { item: iron_shovel, count: 1 }
+      - { item: stone_brick_stairs, count: 64 }
+      - { item: stone_brick_stairs, count: 36 }
+      - { item: oak_log, count: 61 }
+      - { item: stone_bricks, count: 53 }
+      - { item: cobblestone, count: 49 }
+      - { item: oak_planks, count: 39 }
+      - { item: oak_fence, count: 20 }
+      - { item: white_wool, count: 12 }
+      - { item: stone_brick_slab, count: 3 }
+      - { item: oak_door, count: 1 }
+
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/template-build.ts
+
+params:
+  template: hanok
+  door: { x: 0, y: -59, z: 6 }
+  facing: north
+  scaffoldCarried: 0
+
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: completion, who: Actor }
