@@ -10,8 +10,57 @@ import { respondFromBoat, seatedAtSea, type SeatedThreat } from "./boat-seated-r
 import { watchVehicle } from "./vehicle-sync.js";
 import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
 import { crossByBoat } from "./boat-crossing.js";
-import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+
+for (const rate of [20, 10]) test(`seated sword strikes wait thirteen server ticks at ${rate} tps without physics`, async () => {
+  const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"], ticksPerSecond: rate });
+  const { bot, clock, server } = world;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  await clock.advance(4_000);
+  const hits: number[] = [];
+  server.onPacket("use_entity", data => {
+    if ((data as { mouse: number }).mouse === 1) hits.push(server.gameTime);
+  });
+  const start = server.gameTime;
+  const added = listenersAddedSince(bot);
+  const result = await clock.settle(respondFromBoat(bot, () => hits.length === 2 ? [] : [world.threat], new AbortController().signal), SETTLE_MS);
+  assert.deepEqual(hits.map(tick => tick - start), [13, 26]);
+  assert.equal(result.strikes, 2);
+  assert.equal(bot.vehicle?.id, BOAT_ID);
+  assert.equal(added("death"), 0);
+  await clock.advance(25_000);
+  assert.equal(hits.length, 2, "no attack after the completed response's old ceiling");
+});
+
+test("a seated sword with no server clock stays bounded and abort releases its response", async () => {
+  const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"], ticksPerSecond: 10 });
+  const { bot, clock, server } = world;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  server.stop();
+  const stoppedAge = bot.time.age;
+  const stoppedTick = server.gameTime;
+  const added = listenersAddedSince(bot);
+  const result = await clock.settle(respondFromBoat(bot, () => [world.threat], new AbortController().signal, { wallMs: 2_000 }), SETTLE_MS);
+  assert.equal(result.outcome, "timed_out");
+  assert.equal(result.strikes, 0);
+  assert.equal(bot.time.age, stoppedAge);
+  assert.equal(added("death"), 0, "the timeout releases its listener before another response starts");
+  const stop = new AbortController();
+  clock.after(100, () => stop.abort(new Error("seat cancelled")));
+  await assert.rejects(clock.settle(respondFromBoat(bot, () => [world.threat], stop.signal), SETTLE_MS), /seat cancelled/);
+  assert.equal(added("death"), 0);
+  await clock.advance(25_000);
+  assert.equal(bot.time.age, stoppedAge);
+  assert.equal(server.gameTime, stoppedTick, "the wall backstop and abort do not require server ticks");
+  assert.deepEqual(attackedIds(server), []);
+});
 
 const THREAT_ID = 20;
 const BOAT_ID = SEATED_BOAT_ID;
@@ -33,6 +82,9 @@ test("only the combat policy's permitted items are used seated", async () => {
   for (const melee of [false, true]) {
     const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword", "shield"] });
     using _timers = world.clock.install();
+    using _pace = serverTickPace(world.bot);
+    using _readiness = swingReadiness(world.bot);
+    await world.clock.advance(4_000);
     await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal,
       { wallMs: 1_000, policy: { ...DEFAULT_COMBAT_POLICY, melee, shield: false } }), SETTLE_MS);
     assert.equal(attackedIds(world.server).length > 0, melee);
@@ -40,14 +92,14 @@ test("only the combat policy's permitted items are used seated", async () => {
   }
 });
 
-test("the first strike waits the equip settle and sends no sneak field that ejects the rider", async () => {
+test("a seated strike sends no sneak field that ejects the rider", async () => {
   const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"] });
   using _timers = world.clock.install();
-  const began = performance.now();
-  const hits: number[] = [];
+  using _pace = serverTickPace(world.bot);
+  using _readiness = swingReadiness(world.bot);
+  await world.clock.advance(4_000);
   world.server.onPacket("use_entity", (data) => {
     if ((data as { mouse: number }).mouse === 1) {
-      hits.push(performance.now() - began);
       assert.equal((data as { sneaking: boolean }).sneaking, false);
     }
   });
@@ -55,7 +107,6 @@ test("the first strike waits the equip settle and sends no sneak field that ejec
   world.bot.setControlState("sneak", true);
   const packetsBeforeResponse = world.server.packets.length;
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 1_000 }), SETTLE_MS);
-  assert.ok(hits.length > 0 && hits[0]! >= 650, "the new sword must have its full cooldown before the first strike");
   assert.equal(world.bot.vehicle?.id, BOAT_ID);
   assert.deepEqual(attackedIds(world.server), [THREAT_ID]);
   assert.equal(result.strikes, 1);

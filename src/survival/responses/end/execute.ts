@@ -893,7 +893,7 @@ export class EndCombat {
       );
       observation.released(0);
       observation.beginBlastObservation();
-      bot.attack(crystal);
+      attackAndRestart(bot, crystal);
     }
     const receipt = await this.observeCrystalShot(observation, signal);
     if (receipt.outcome !== "crystal_destroyed") return receipt;

@@ -309,8 +309,6 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     overrides: options.overrides,
   });
   swingReadiness(bot); // Installed before actions by the connected runtime.
-  // The fake's own `death` listener (its physics stop at a death): the count of the code under test is on top of it.
-  const harnessDeathListeners = bot.listenerCount("death");
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
     identity: { worldId: "reflex-test", scope: { kind: "bot", botId: "reflex-bot" } },
@@ -330,6 +328,8 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
   const attached = attachHostileReflex(bot, driver, navigation, controller, perception);
   const status = new SurvivalObserver(bot, runner, driver, controller);
   const receipts = attachSurvivalReceipts(bot, data, runner, driver, controller, status, navigation);
+  // Connection services share the body pacer; capture their baseline before any response adds listeners.
+  const deathListenersAtRest = bot.listenerCount("death");
   const observer = {
     ...attached,
     async close() {
@@ -363,7 +363,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     /** One client tick at once, with no time passing: a test reads the state the tick left before the promise queue runs. */
     tick: () => bot.emit("physicsTick"),
     /** The `death` listeners an idle bot has: the fake's own and the code under test's. */
-    deathListenersAtRest: harnessDeathListeners + DEATH_LISTENERS_AT_REST,
+    deathListenersAtRest,
   };
 }
 
@@ -889,9 +889,6 @@ test("a blaze shot travelling away does not attribute another victim's combat to
     fixture.data.close();
   }
 });
-
-/** "death" listeners the code under test keeps on an idle bot: the hostile reflex's own and the body-tick pacer's (the driver ticks through it). */
-const DEATH_LISTENERS_AT_REST = 3;
 
 /** Let the claimed response run to its recorded event, or give up after a bounded number of turns. */
 async function until(condition: () => boolean, turns = 50): Promise<boolean> {

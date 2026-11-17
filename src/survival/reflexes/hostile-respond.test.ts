@@ -22,6 +22,8 @@ import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
 import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../weapons/swing-readiness.js";
 
 for (const recovery of [true, false]) test(recovery
   ? "recovery's evade that separates in its start cell is no new recovery cell"
@@ -61,7 +63,6 @@ test("a hurt boat rider beside a beach keeps hide available in the sensed decisi
     const harness = moving ? await mountedSea({ landFromZ: 60,
       entities: { 8: { name: "zombie", position: new Vec3(2.5, 63, 3.5) } } }) : undefined;
     await using fixture = responseFixture(false, harness);
-    using _clock = fixture.clock.install();
     await fixture.driver[Symbol.asyncDispose]();
     if (!moving) {
       fixture.bot.mount(fixture.bot.entities[7]!);
@@ -91,6 +92,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
     },
   }), navigation = { cancel: () => undefined } as unknown as NavigationRuntime) {
   const { bot, clock } = harness;
+  const timers = clock.install();
   const controller = engagingCombat(bot, unexpectedEngage);
   const runner = new ActionRunner({ clock });
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
@@ -105,6 +107,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
     await reflex[Symbol.asyncDispose]();
     await driver[Symbol.asyncDispose]();
     perception[Symbol.dispose]();
+    timers[Symbol.dispose]();
   } };
 }
 
@@ -116,7 +119,6 @@ test("a second evade on the same zombie carries its chain into the settled text"
     return { status: "stopped", reason: "no path", elapsedMs: 0 };
   } } as unknown as NavigationRuntime;
   await using fixture = responseFixture(false, harness, navigation);
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
   const evade = () => respondToHostile(fixture.scene, { kind: "evade", reason: "hurt", safeRange: 36,
     threats: [{ id: 8, name: "zombie", position: harness.bot.entities[8]!.position,
@@ -137,7 +139,6 @@ test("a second evade on the same zombie carries its chain into the settled text"
 test("a cancelled response is recorded once", async () => {
   await using fixture = responseFixture(false, createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
     entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } }));
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
   const directive: HostileResponse = { kind: "fight", targetId: 8,
     threats: [{ id: 8, name: "zombie", position: fixture.bot.entities[8]!.position, distance: 4 }] };
@@ -157,7 +158,6 @@ for (const { hit, occluded, name } of [
 ]) {
   test(name, async () => {
     const fixture = responseFixture(occluded);
-    using _clock = fixture.clock.install();
     const { bot, clock, combat, driver, perception } = fixture;
     try {
       const sensed: boolean[] = [];
@@ -181,7 +181,6 @@ for (const { hit, occluded, name } of [
 
 test("a cancel during get-off ends it at once", async () => {
   await using fixture = responseFixture();
-  using _clock = fixture.clock.install();
   const { bot, clock, server, scene } = fixture;
   // Directly exercise response preparation; the reflex itself must not start another response.
   await fixture.driver[Symbol.asyncDispose]();
@@ -211,9 +210,11 @@ for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
     await using fixture = responseFixture(false, await mountedSea({
       carries: ["iron_sword"], entities: { 8: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) } },
     }));
-    using _clock = fixture.clock.install();
     const { bot, clock, scene, combat, server } = fixture;
     await fixture.driver[Symbol.asyncDispose]();
+    using _pace = serverTickPace(bot);
+    using _readiness = swingReadiness(bot);
+    await clock.advance(4_000);
     const threat = { id: 8, name: "zombie", position: { x: 2.5, y: 62.5, z: 3.5 }, distance: 2 };
     const directive: HostileResponse = kind === "evade"
       ? { kind, threats: [threat], reason: "hurt", safeRange: 36 }
@@ -251,7 +252,6 @@ for (const kind of ["fight", "evade", "hide", "death", "abort"] as const) {
 
 test("near shore the prepare path runs", async () => {
   await using fixture = responseFixture(false, await mountedSea({ landUntilZ: 2 }));
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
   const settlement = await fixture.clock.settle(respondToHostile(fixture.scene,
     { kind: "fight", targetId: 8, threats: [] }, new AbortController().signal), 30_000);
@@ -265,8 +265,10 @@ test("a seated fight attacks only the selected authorized target among avoidance
     8: { name: "piglin", position: new Vec3(1.5, 62.5, 3.5) },
     9: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) },
   } }));
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
+  using _pace = serverTickPace(fixture.bot);
+  using _readiness = swingReadiness(fixture.bot);
+  await fixture.clock.advance(4_000);
   const flags = fixture.bot.registry.entitiesByName.piglin!.metadataKeys?.indexOf("mob_flags") ?? -1;
   assert.ok(flags >= 0);
   Reflect.set(fixture.bot.entities[8]!.metadata, flags, 4);
@@ -281,8 +283,10 @@ test("a seated fight attacks only the selected authorized target among avoidance
 
 test("a seated deflection reports the observed projectile reversal", async () => {
   await using fixture = responseFixture(false, await mountedSea());
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
+  using _pace = serverTickPace(fixture.bot);
+  using _readiness = swingReadiness(fixture.bot);
+  await fixture.clock.advance(4_000);
   const ball = fixture.combat.launchFireball(new Vec3(2.5, 64, 3.5), new Vec3(-0.1, 0, 0));
   const incoming = ball.velocity.clone();
   let reversed = false;
@@ -299,8 +303,10 @@ test("seated settlement retains strikes, deaths and explosions across completion
       8: { name: "zombie", position: new Vec3(2.5, 62.5, 3.5) },
       9: { name: "zombie", position: new Vec3(3.5, 62.5, 3.5) },
     } }));
-    using _clock = fixture.clock.install();
     await fixture.driver[Symbol.asyncDispose]();
+    using _pace = serverTickPace(fixture.bot);
+    using _readiness = swingReadiness(fixture.bot);
+    await fixture.clock.advance(4_000);
     const abort = new AbortController();
     const before = fixture.bot._client.listenerCount("explosion");
     fixture.clock.after(900, () => { fixture.combat.explode(new Vec3(10.5, 62.5, 3.5)); fixture.combat.kill(9); });
@@ -323,7 +329,6 @@ test("seated settlement retains strikes, deaths and explosions across completion
 
 test("near shore a stalled server ends preparation without queueing take-back hits", async () => {
   await using fixture = responseFixture();
-  using _clock = fixture.clock.install();
   const { bot, clock, server, scene } = fixture;
   await fixture.driver[Symbol.asyncDispose]();
   bot.entity.position.y = 64 + bot.entities[7]!.height;
@@ -345,7 +350,6 @@ test("near shore a progressing slow server stops take-back at the hostile hit ca
     entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
       8: { name: "zombie", position: new Vec3(100.5, 64, 0.5) } },
   }));
-  using _clock = fixture.clock.install();
   await fixture.driver[Symbol.asyncDispose]();
   fixture.bot.entity.position.y = 64 + fixture.bot.entities[7]!.height;
   const result = await fixture.clock.settle(respondToHostile(fixture.scene,

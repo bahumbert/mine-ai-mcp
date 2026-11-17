@@ -11,6 +11,34 @@ import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/p
 import { executeRawAction } from "./raw-action.js";
 import { parseRawActionRequest, rawActionInputSchema } from "./contract.js";
 import { useBucketOutcomes } from "../use-bucket/contract.js";
+import { attackedIds } from "../../test-support/combat.js";
+import { fightSwordAfter } from "../../test-support/swing-handoff.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+
+for (const rate of [20, 10]) test(`a raw attack is immediate and the next reflex sword waits its shared recovery at ${rate} tps`, async () => {
+  const { bot, clock, server } = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    slots: { 36: { name: "iron_sword" } },
+    entities: { 7: { name: "zombie", position: new Vec3(0.5, 64, 2.5) } },
+  });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  await clock.advance(4_000);
+  const start = server.gameTime;
+  for (let attack = 0; attack < 2; attack++) {
+    const result = await executeRawAction(bot, { operation: "swing", entityId: 7 }, {});
+    assert.equal(result.status, "succeeded");
+    assert.equal(server.gameTime, start, "the model's attack adds no readiness wait");
+  }
+  assert.deepEqual(attackedIds(server), [7, 7]);
+  await clock.advance(5_000 / rate);
+  bot.entities[7]!.position.set(0.5, 64, 2.5);
+  assert.equal(await clock.settle(fightSwordAfter(bot, 7), 5_000), true);
+  assert.equal(server.gameTime - start, 13, "the reflex waits thirteen server ticks from the raw attack");
+  assert.deepEqual(attackedIds(server), [7, 7, 7]);
+});
 
 test("use_item with a held lava bucket aimed at the bot's own feet cell is refused with the same message", async () => {
   const { bot, clock, server } = createFakeBot({

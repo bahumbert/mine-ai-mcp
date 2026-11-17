@@ -1,5 +1,6 @@
 // One connected bot's estimate of its server-metered swing recovery.
 import type { Bot } from "mineflayer";
+import { onBodyTick } from "../../runtime/body-ticks.js";
 import { serverTickPace, type TickMark } from "../../world/server-tick-pace.js";
 import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
 
@@ -17,6 +18,7 @@ class BotSwingReadiness implements SwingReadiness {
   #clientTicks = 0;
   #heldType: number | undefined;
   readonly #pace;
+  #stopTicks: (() => void) | undefined;
   readonly #onTick = () => { if (this.#mark !== null) this.#clientTicks++; };
   readonly #onHeldItemChanged = () => {
     const type = this.bot.heldItem?.type;
@@ -29,7 +31,8 @@ class BotSwingReadiness implements SwingReadiness {
     this.#heldType = bot.heldItem?.type;
     try {
       bot.on("heldItemChanged", this.#onHeldItemChanged);
-      bot.on("physicsTick", this.#onTick);
+      // A mount stops physics; body ticks preserve the floor while the server pace still gates recovery (a11 T3c).
+      this.#stopTicks = onBodyTick(bot, this.#onTick);
     } catch (cause) {
       this[Symbol.dispose]();
       throw cause;
@@ -54,7 +57,7 @@ class BotSwingReadiness implements SwingReadiness {
 
   [Symbol.dispose](): void {
     this.bot.off("heldItemChanged", this.#onHeldItemChanged);
-    this.bot.off("physicsTick", this.#onTick);
+    this.#stopTicks?.();
     if (observers.get(this.bot) === this) observers.delete(this.bot);
   }
 }

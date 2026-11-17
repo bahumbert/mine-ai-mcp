@@ -1,5 +1,6 @@
 /** The boat back: broken by hand, its item picked up (spec 2026-10-04 deep-water-and-boats); the bound is time, and the report says how it went. */
 import type { Bot } from "mineflayer";
+import { attackAndRestart } from "../../survival/weapons/swing-readiness.js";
 import type { Entity } from "prismarine-entity";
 import { swimToDrop } from "../../navigation/mineflayer/swim-to-drop.js";
 import { droppedItemName, isItemEntity } from "../../world/item-pickup.js";
@@ -105,7 +106,7 @@ async function hitUntilGone(bot: Bot, boat: Entity | null, signal: AbortSignal |
     await bot.lookAt(boat.position.offset(0, 0.3, 0), true);
     if (!present() || signal?.aborted || clock.over()) break;
     using progress = observeBoatAttackProgress(bot, boat);
-    bot.attack(boat);
+    attackAndRestart(bot, boat);
     hits += 1;
     await progress.wait(TAKE_BACK_WALL_MS, () => !present() || signal?.aborted === true || clock.over());
   }

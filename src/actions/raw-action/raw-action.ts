@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { attackAndRestart } from "../../survival/weapons/swing-readiness.js";
 import { Vec3 } from "vec3";
 import { recordPlacedContainer, type SqlBotData } from "../../bot-data/index.js";
 import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
@@ -282,7 +283,7 @@ function swing(
       `[RAW_OUT_OF_REACH] Entity ${request.entityId} is beyond the ${ENTITY_REACH}-block interaction reach.`,
     );
   evidence.attempted = true;
-  bot.attack(entity);
+  attackAndRestart(bot, entity);
   evidence.effectObserved = null;
 }
 

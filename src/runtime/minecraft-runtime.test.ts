@@ -294,8 +294,8 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
   assert.equal(added(bot, "blockUpdate"), 3, "world observation, fire sensing and the driver's cleanup retry each own one listener");
   assert.equal(
     added(bot, "physicsTick"),
-    10,
-    "the runtime owns shared perception, bow timing, swing readiness, footing, one reflex loop, idle water, Nether vine physics, End gaze and action progress; survival observation rides the shared body tick (onBodyTick), which also ticks while seated",
+    9,
+    "the runtime owns shared perception, bow timing, footing, one reflex loop, idle water, Nether vine physics, End gaze and action progress; survival observation and swing readiness ride the shared body tick (onBodyTick), which also ticks while seated",
   );
   assert.equal(added(bot, "chat"), 1);
   assert.equal(added(bot, "whisper"), 1);

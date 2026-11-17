@@ -17,6 +17,50 @@ import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.j
 
 import { PerchObservation } from "../../perception/combat/perch.js";
 import { swingReadiness } from "../../weapons/swing-readiness.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { CrystalObservation } from "../../perception/combat/crystal.js";
+import { planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
+import { fightSwordAfter } from "../../../test-support/swing-handoff.js";
+
+for (const rate of [20, 10]) test(`a crystal melee swing leaves shared recovery for the next fight at ${rate} tps`, async () => {
+  const cells: Record<string, string> = { "0,82,0": "bedrock" };
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++)
+    if (x * x + z * z <= 5) for (let y = 61; y <= 81; y++) cells[`${x},${y},${z}`] = "obsidian";
+  const { bot, clock, server, world } = createFakeBot({
+    dimension: "the_end", position: new Vec3(2.5, 81, -1.5), groundY: 60, cells,
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    slots: { 36: { name: "iron_sword" } },
+    entities: { 42: { name: "end_crystal", position: new Vec3(0.5, 83, 0.5) },
+      7: { name: "zombie", position: new Vec3(2.5, 81, 0.5) } },
+  });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  using observation = new CrystalObservation(bot, 42, "melee");
+  // An already-built staircase keeps this command-handoff test independent of construction receipts.
+  const plan = planCrystalStaircase(bot, bot.entities[42]!.position);
+  for (const cell of plan.cells) world.setCell(new Vec3(cell.position.x, cell.position.y, cell.position.z), cell.blockName);
+  await clock.advance(4_000);
+  const caller = new AbortController();
+  let attackedAt = -1;
+  const stopWatching = onAttack(server, id => {
+    if (id !== 42) return;
+    attackedAt = server.gameTime;
+    // The handoff follows the command; crystal explosion physics are not this test's subject.
+    caller.abort(new Error("crystal swing handed off"));
+  });
+  const navigation = { navigate: async () => ({ status: "completed", elapsedMs: 1 }) } as unknown as NavigationRuntime;
+  try {
+    await assert.rejects(clock.settle(new EndCombat(bot, navigation, { needed: false } as FootingRecovery)
+      .crystal(42, caller.signal, observation), SETTLE_LIMIT_MS), /crystal swing handed off/);
+    assert.deepEqual(attackedIds(server), [42]);
+    await clock.advance(5_000 / rate);
+    bot.entities[7]!.position.set(2.5, 81, 0.5);
+    assert.equal(await clock.settle(fightSwordAfter(bot, 7), 5_000), true);
+    assert.equal(server.gameTime - attackedAt, 13, "the next sword waits thirteen server ticks from the crystal swing");
+    assert.deepEqual(attackedIds(server), [42, 7]);
+  } finally { stopWatching(); }
+});
 
 /**
  * A bot in the End on a mocked clock: the code under test reads `Date.now` and sets timers, so each test installs the

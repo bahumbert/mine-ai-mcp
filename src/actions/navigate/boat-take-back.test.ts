@@ -11,6 +11,41 @@ import { boatsCarried, makeHitsMiss, settled, shoreSea, stallServerAtFirstHit } 
 import { TAKE_BACK_WALL_MS, takeBoatBack, takeBoatBackReport } from "./boat-take-back.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { createNavigateAction } from "./navigate.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { fightSwordAfter } from "../../test-support/swing-handoff.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+
+for (const rate of [20, 10]) test(`a take-back hit leaves its recovery for the next fight sword at ${rate} tps`, async () => {
+  const harness = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate },
+    slots: { 36: { name: "iron_sword" } },
+    entities: { 7: { name: "oak_boat", position: new Vec3(1.5, 64, 0.5) },
+      8: { name: "zombie", position: new Vec3(0.5, 64, 2.5) } },
+  });
+  const { bot, clock, server } = harness;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  // No unmeasured sword damage to boats: the server's boat is out of reach, as in the missed-hit regressions.
+  makeHitsMiss(harness);
+  await clock.advance(4_000);
+  const start = server.gameTime;
+  const added = listenersAddedSince(bot);
+  const stop = new AbortController();
+  clock.after(5_000 / rate, () => stop.abort());
+  const report = await clock.settle(takeBoatBackReport(bot, bot.entities[7]!, stop.signal, { settleMs: 0, maxHits: 1 }), 5_000);
+  assert.equal(report.hits, 1);
+  assert.equal(server.gameTime - start, 5);
+  assert.equal(added("entityUpdate"), 0, "the cancelled take-back releases its attack observer before the handoff");
+  assert.equal(await clock.settle(fightSwordAfter(bot, 8), 5_000), true);
+  assert.equal(server.gameTime - start, 13, "the fight waits thirteen server ticks from the take-back hit");
+  assert.deepEqual(attackedIds(server), [7, 8]);
+  assert.equal(added("physicsTick"), 0);
+  await clock.advance(25_000);
+  assert.deepEqual(attackedIds(server), [7, 8], "neither completed owner attacks after its old deadline");
+  assert.equal(added("entityUpdate"), 0);
+});
 
 const navigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
 /** Standing on boat 7 over water two deep by the shore (the feet the server sets her at on top of it). */

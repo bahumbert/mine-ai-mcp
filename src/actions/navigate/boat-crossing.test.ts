@@ -13,6 +13,8 @@ import { boatsCarried, farBankSea, mountedSea, seaHarness, settled, shifts, shor
 import { getOff } from "./boat-get-off.js";
 import { freeHeldSeat, watchServerSeat } from "./server-seat-watch.js";
 import { watchVehicle } from "./vehicle-sync.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
 
 const AHEAD = { x: 0, z: 1 };
 const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
@@ -149,6 +151,8 @@ test("a ride end the server does not answer releases shift after the wait, forge
 test("a boat she could not get into is left with no listener behind and taken back", async () => {
   const world = seaHarness({ physics: true });
   using _timers = world.clock.install();
+  using _pace = serverTickPace(world.bot);
+  using _readiness = swingReadiness(world.bot);
   // The boat is full when she tries (two other riders: the server refuses with silence, contract check boat-mount-refused).
   world.bot.on("entitySpawn", (entity) => {
     if (entity.name !== "oak_boat") return;

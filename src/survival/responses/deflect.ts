@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { attackAndRestart } from "../weapons/swing-readiness.js";
 import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 import type { Vec3 } from "vec3";
@@ -60,7 +61,7 @@ export async function deflectFireball(bot: Bot, targetId: number, signal: AbortS
     const dy = Math.max(estimated.y - eye.y, eye.y - estimated.y - target.height, 0);
     const dz = Math.max(0, Math.abs(eye.z - estimated.z) - halfWidth);
     if (Math.hypot(dx, dy, dz) <= ATTACK_REACH) {
-      bot.attack(target);
+      attackAndRestart(bot, target);
       attacks += 1;
     }
     await waitForTicksOrCancel(bot, 1, signal);

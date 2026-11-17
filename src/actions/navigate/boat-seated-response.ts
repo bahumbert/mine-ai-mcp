@@ -1,7 +1,7 @@
 /**
  * A threat while seated in a boat: strike what is in reach, else row away over open water, never get off (owner
  * 2026-10-19). The shift would put her in the water beside the monster, the boat lost; the boat is hers to fight from.
- * Every wait here runs on the wall clock: no physics tick comes while seated.
+ * No physics tick comes while seated; recovery reads the shared server pace and the seated body ticks.
  */
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
@@ -12,13 +12,14 @@ import { BoatRide } from "./boat-crossing.js";
 import { atSeaFrom } from "./boat-at-sea.js";
 import { isBoatEntity } from "./boat-entities.js";
 import { currentVehicle } from "./vehicle-sync.js";
-import { monotonicNow, raceSignal, sleepMs } from "../../utils/index.js";
+import { raceSignal, sleepMs } from "../../utils/index.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
 
 /** Longest one response lasts on the wall clock, whatever the threat does. */
 export const SEATED_RESPONSE_WALL_MS = 20_000;
 /** Blocks one rowing leg goes before the threat is looked at again. */
 export const SEATED_ROW_BLOCKS = 24;
-/** A server tick: the pace of the looks at the threats and the unit of a weapon's cooldown. */
+/** The client sampling pace while physics is stopped in the seat. */
 const TICK_MS = 50;
 /** Eye height above her feet, from which a strike's reach is measured. */
 const EYE_HEIGHT = 1.62;
@@ -87,38 +88,36 @@ function awayFrom(bot: Bot, threats: readonly SeatedThreat[]): { readonly x: num
   return length < 1e-6 ? { x: 0, z: 1 } : { x: dx / length, z: dz / length };
 }
 
-/** What the strikes so far leave: how many, when the last landed, and the weapon equipped once. */
+/** What the strikes so far leave: how many, and the weapon equipped once. */
 interface StrikeState {
   strikes: number;
-  lastStrikeAt: number;
   loadout: ReturnType<typeof permittedMeleeLoadout> | null;
   readonly weaponsUsed: Set<string>;
 }
 
-/** One strike at `threat` if the weapon's cooldown has passed (wall clock): equipped on the first, looked at, hit. */
+/** One strike after shared server-paced recovery: equipped on the first, looked at, hit without sneak. */
 async function strikeWhenReady(bot: Bot, state: StrikeState, target: Entity, policy: Readonly<CombatPolicy>, signal: AbortSignal): Promise<void> {
+  const readiness = swingReadiness(bot);
   if (state.loadout === null) {
     state.loadout = permittedMeleeLoadout(bot, readCombatItems(bot), policy);
-    const previous = bot.heldItem?.name ?? null;
     await equipCombatLoadout(bot, state.loadout, signal);
-    if (previous !== (bot.heldItem?.name ?? null)) state.lastStrikeAt = monotonicNow();
   }
-  if (monotonicNow() - state.lastStrikeAt < state.loadout.cooldownTicks * TICK_MS) return;
+  if (!readiness.ready(state.loadout.cooldownTicks)) return;
   await raceSignal(bot.lookAt(target.position.offset(0, 1, 0), true), signal);
   signal.throwIfAborted();
   if (!target.isValid || !isBoatEntity(currentVehicle(bot))) return;
   // use-entity-sneak-in-boat: this field alone ejects a rider on 1.21.4 (T10a, 2026-11-08).
   bot._client.write("use_entity", { target: target.id, mouse: 1, sneaking: false });
+  readiness.restart();
   bot.swingArm("right");
   state.strikes += 1;
   state.weaponsUsed.add(bot.heldItem?.name ?? "hand");
-  state.lastStrikeAt = monotonicNow();
 }
 
 /**
  * Responds to `threats()` from the boat she sits in until none is left (within `hostileRadius`, default: every one the
  * caller lists), she dies, the boat is gone from under her or `wallMs` passes. An abort stops the boat and rejects with
- * its reason. Strikes use the melee loadout, one per its cooldown on the wall clock.
+ * its reason. Strikes use the melee loadout and the connection's server-paced swing recovery.
  */
 export async function respondFromBoat(
   bot: Bot,
@@ -136,7 +135,7 @@ export async function respondFromBoat(
     died = true;
     stop.abort();
   };
-  const state: StrikeState = { strikes: 0, lastStrikeAt: Number.NEGATIVE_INFINITY, loadout: null, weaponsUsed: new Set() };
+  const state: StrikeState = { strikes: 0, loadout: null, weaponsUsed: new Set() };
   let rowed = 0;
   const result = (outcome: SeatedResponse): SeatedOutcome => ({ outcome, strikes: state.strikes, rowed, weaponsUsed: [...state.weaponsUsed] });
   bot.once("death", onDeath);
