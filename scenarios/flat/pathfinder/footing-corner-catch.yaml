@@ -1,0 +1,27 @@
+name: footing-corner-catch
+tags: [regression]
+description: A native diagonal knockback over lava needs two attached catch blocks across the body's footprint, where centre-line samples missed the corner.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  time: noon
+  difficulty: normal
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, randomTickSpeed: 0, keepInventory: true }
+reset: ["kill @e[type=!minecraft:player]", "fill -8 -59 -8 8 -35 8 air"]
+geometry:
+  - fill: { block: bedrock, from: [-8, -61, -8], to: [8, -61, 8] }
+  - fill: { block: lava, from: [-8, -60, -8], to: [8, -60, 8] }
+  - setblock: { block: bedrock, at: [0, -41, 0] }
+entities:
+  - type: cow
+    pos: [2.3, -40, 3.5]
+    nbt: '{NoAI:1b,NoGravity:1b,Invulnerable:1b,PersistenceRequired:1b}'
+players:
+  - name: CornerCatch
+    op: true
+    pos: [0.3, -40, 0.5]
+    inventory: [{ item: cobblestone, count: 16 }]
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./footing-corner-catch.ts"]
+goal: { kind: completion, who: CornerCatch, timeout: 30 }
