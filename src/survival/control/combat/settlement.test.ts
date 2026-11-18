@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { encounterBaseline, type EncounterEvidence, type FightResponseResult, type HostileResponseResult } from "./response-result.js";
-import { completeResponse, encounterReceipt, responseContinuation } from "./settlement.js";
+import { completeResponse, encounterReceipt, responseContinuation, responseFailure } from "./settlement.js";
 
 test("a survived explosion preserves request reassessment after a completed fight", () => {
   const { bot } = createFakeBot();
@@ -90,4 +90,17 @@ test("a chain's successful last response resumes with a receipt naming the whole
     kind: "resume",
     reason: "[HOSTILE_SETTLED] fight ended with target_died at health 11; 2nd response to zombie#8 in 25 s, 1 evades, gained 3.1 blocks overall.",
   });
+});
+
+test("a withheld deflection retains its bystander reason as a capability limit and per-shot failure", () => {
+  const physical = responseResults()[3]!;
+  assert.equal(physical.response, "deflect");
+  if (physical.response !== "deflect") return;
+  const observation = "Deflection withheld: enderman#61 stands on the return line.";
+  const settlement = completeResponse({ ...physical, result: { kind: "withheld", attacks: 0, observation } },
+    new AbortController().signal);
+  assert.equal(encounterReceipt(settlement).outcome, "capability_limit");
+  assert.equal(encounterReceipt(settlement).error, observation);
+  assert.deepEqual(responseFailure(settlement), { kind: "deflection_unobserved", why: observation });
+  assert.equal(responseContinuation(settlement).kind, "hold");
 });

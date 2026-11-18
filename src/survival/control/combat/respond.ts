@@ -239,7 +239,7 @@ export async function deflectWithinCombat(bot: Bot, targetId: number, context: R
   const scope = responseScope(bot, contextPolicy(context), "deflect", targetId);
   const result = await deflectFireball(bot, targetId, signal);
   signal.throwIfAborted();
-  if (result.kind === "unobserved")
+  if (result.kind !== "reflected")
     context.survival.answered.remember(scope, { kind: "deflection_unobserved", why: result.observation });
   return result;
 }
