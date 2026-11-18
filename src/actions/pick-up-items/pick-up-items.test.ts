@@ -5,6 +5,8 @@ import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/inde
 import { Vec3 } from "vec3";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
+import { ITEM_GONE_SETTLE_TICKS } from "../../world/item-pickup.js";
+import { AGE_PACKET_TICKS, MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
 import { createPickUpItemsAction } from "./pick-up-items.js";
 
 for (const cause of ["whole take", "silent removal", "partial take then silent removal"] as const) {
@@ -23,7 +25,14 @@ for (const cause of ["whole take", "silent removal", "partial take then silent r
     const lifetime = new AbortController();
     t.after(() => lifetime.abort());
 
-    const result = await clock.settle(action.begin({ radius: 8, recoverDeathItems: false }, lifetime.signal, () => {})({}), 1_500);
+    // item-pickup.ts's settleOnServerTicks needs the tick budget plus world-age.ts's packet margin/metadata grace;
+    // two packet intervals cover packet rounding and the final look/read on this fake's default 20-tps clock (T4, 2026-11-18).
+    const metadataWaitMs = 2 * AGE_PACKET_TICKS * MS_PER_ON_TIME_TICK;
+    const settleBoundMs = ITEM_GONE_SETTLE_TICKS * MS_PER_ON_TIME_TICK + metadataWaitMs;
+    const result = await clock.settle(
+      action.begin({ radius: 8, recoverDeathItems: false }, lifetime.signal, () => {})({}),
+      cause === "whole take" ? 1_500 : settleBoundMs,
+    );
     assert.equal(result.pickup.sightings[0]?.outcome, cause === "whole take" ? "taken_by_other" : "gone_unconfirmed");
     assert.equal(result.pickup.sightings[0]?.takenBy, cause === "whole take" ? "piglin" : null);
     assert.doesNotThrow(() => action.resultSchema.parse(result));

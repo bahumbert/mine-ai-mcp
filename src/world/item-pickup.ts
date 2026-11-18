@@ -5,11 +5,12 @@ import { armSignal, asVec3, type ArmedSignal, type Position3 } from "../utils/in
 import { itemPickupGoal, type MovementPolicy, type Navigate, type NavigationResult } from "../navigation/index.js";
 import { withinItemPickupReach } from "../navigation/world/item-geometry.js";
 import { hasInventorySpaceFor } from "./inventory-capacity.js";
+import { waitForServerPaced } from "./server-paced.js";
 
 /** How long inventory settlement gets when an observed item entity is already gone. */
-const ITEM_GONE_SETTLE_MS = 1_500;
+export const ITEM_GONE_SETTLE_TICKS = 30;
 /** How long to keep waiting after Pathfinder reaches a pickup stance. */
-const PICKUP_SETTLE_MS = 900;
+const PICKUP_SETTLE_TICKS = 18;
 
 /** Events that can first make a newly spawned dropped item identifiable. */
 export const DROPPED_ITEM_OBSERVATION_EVENTS = ["entitySpawn", "entityUpdate", "itemDrop"] as const;
@@ -37,8 +38,8 @@ export interface ObservedItemPickupOptions {
   readonly collectors?: ItemCollectorWatch;
   /** Optional caller-owned patience for a route with a concrete local bound. */
   readonly timeoutMs?: number;
-  /** How long inventory settlement gets once the item is gone, and after reaching a pickup stance. */
-  readonly settleMs?: { readonly itemGone?: number; readonly pickup?: number };
+  /** Server ticks for inventory settlement once the item is gone, and after reaching a pickup stance. */
+  readonly settleTicks?: { readonly itemGone?: number; readonly pickup?: number };
 }
 
 export type ObservedItemPickupResult =
@@ -173,17 +174,34 @@ async function settleGoneItem(
 ): Promise<ObservedItemPickupResult> {
   const takenBy = !bot.entities[options.entityId] ? collectors.takenBy(options.entityId) : null;
   if (takenBy && !options.hasArrived()) return { kind: "item_gone", takenBy };
-  const settlement = await pickup.settle(options.settleMs?.itemGone ?? ITEM_GONE_SETTLE_MS);
+  const settlement = await settleOnServerTicks(bot, pickup, options.settleTicks?.itemGone ?? ITEM_GONE_SETTLE_TICKS, options.signal);
   options.signal?.throwIfAborted();
   return settlement.kind === "signalled" ? { kind: "collected" } : { kind: "item_gone", takenBy: null };
 }
 
-/** Wake an existing pickup settle when the server proves another entity took the drop. */
-function settlePickupOrTake(pickup: ArmedSignal<boolean>, collectors: ItemCollectorWatch, entityId: number, timeoutMs: number) {
-  return Promise.race([
-    pickup.settle(timeoutMs),
-    collectors.whenTaken(entityId).then(() => ({ kind: "taken" as const })),
-  ]);
+/** Spend server time without retiring the attempt-wide inventory watcher between arrivals. */
+async function settleOnServerTicks(bot: Bot, pickup: ArmedSignal<boolean>, ticks: number, signal?: AbortSignal) {
+  let fired = false;
+  void pickup.promise.then(() => { fired = true; });
+  await waitForServerPaced(bot, ticks, { until: () => fired, signal });
+  return await pickup.settle(0);
+}
+
+/** Wake a settle on a terminal take, and release the losing server-paced wait. */
+async function settlePickupOrTake(
+  bot: Bot, pickup: ArmedSignal<boolean>, collectors: ItemCollectorWatch,
+  entityId: number, ticks: number, signal?: AbortSignal,
+) {
+  const settleAbort = new AbortController();
+  const settleSignal = signal ? AbortSignal.any([signal, settleAbort.signal]) : settleAbort.signal;
+  try {
+    return await Promise.race([
+      settleOnServerTicks(bot, pickup, ticks, settleSignal),
+      collectors.whenTaken(entityId).then(() => ({ kind: "taken" as const })),
+    ]);
+  } finally {
+    settleAbort.abort();
+  }
 }
 
 /** Follow a rolling item after arrival, or finish the arrival so navigation can perform its handoff. */
@@ -194,7 +212,14 @@ async function settleItemArrival(
   collectors: ItemCollectorWatch,
   signal: AbortSignal,
 ): Promise<{ kind: "completed" } | { kind: "continue" }> {
-  const settlement = await settlePickupOrTake(pickup, collectors, options.entityId, options.settleMs?.pickup ?? PICKUP_SETTLE_MS);
+  const settleSignal = options.signal ? AbortSignal.any([options.signal, signal]) : signal;
+  let settlement;
+  try {
+    settlement = await settlePickupOrTake(bot, pickup, collectors, options.entityId, options.settleTicks?.pickup ?? PICKUP_SETTLE_TICKS, settleSignal);
+  } catch (error) {
+    if (signal.aborted && !options.signal?.aborted) return { kind: "completed" };
+    throw error;
+  }
   if (signal.aborted || settlement.kind === "signalled" || settlement.kind === "taken" || options.hasArrived()) return { kind: "completed" };
   const current = bot.entities[options.entityId];
   // A drop can roll out of reach before its pickup delay expires; keep following it.
@@ -256,7 +281,7 @@ export async function pickupObservedItem(
     const afterWalk = pickupCapacityFailure(bot, options.entityId);
     if (afterWalk) return afterWalk;
     if (route.status === "stopped") {
-      const settlement = await settlePickupOrTake(pickup, collectors, options.entityId, options.settleMs?.pickup ?? PICKUP_SETTLE_MS);
+      const settlement = await settlePickupOrTake(bot, pickup, collectors, options.entityId, options.settleTicks?.pickup ?? PICKUP_SETTLE_TICKS, options.signal);
       options.signal?.throwIfAborted();
       if (settlement.kind === "signalled" || options.hasArrived()) return { kind: "collected" };
       return bot.entities[options.entityId]
