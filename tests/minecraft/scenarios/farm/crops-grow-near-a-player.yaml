@@ -6,13 +6,13 @@ description: >-
   near. Two identical 3 x 3 plots, farmland at moisture 7 around one water cell and eight cells of wheat at age 0.
   Plot N is two blocks from the only player; plot F is 196 blocks away from it (192 east, 40 north), its chunk force-loaded by the
   scenario's own `forceload` for the whole trial. The random tick speed is 3000, so a plot that is simulated ripens in seconds. The actor stands still
-  for 30 seconds (view_status after a wait). Then N must be all ripe (age 7) while F is still all age 0, both read at
+  for 600 server ticks plus a 20-tick packet margin (view_status after a wait). Then N must be all ripe (age 7) while F is still all age 0, both read at
   the same moment. If F ripens or changes at all the goal never holds: that is the finding, not a failure to loosen.
   The scenario measures a vanilla rule (the facts line `farming.md` "Where crops grow"), not mine-ai-mcp code.
 
 world:
   gamerules:
-    # 1000 left the near plot short of age 7 on one cell of 8 in 1 run of 3 (30 s = 600 ticks): a corner cell grows
+    # 1000 left the near plot short of age 7 on one cell of 8 in 1 run of 3 (600 server ticks): a corner cell grows
     # with chance about 1/10 per random tick it gets (vanilla CropBlock growth speed 2.75, game code, unmeasured) and
     # gets 1000/4096 = 0.24 of them per tick, so 7 stages take about 290 ticks (sd about 110). At 3000 it takes
     # about 100 (sd about 40): 600 ticks is 12 sd away.
@@ -57,11 +57,14 @@ client:
 
 params:
   actions:
-    - { action: view_status, input: {}, waitTicks: 600 }
+    - { action: view_status, input: {}, waitServerTicks: 600 }
 
 goal:
   kind: all
   timeout: 60
+  # Passing still-span calibration: 20 tps 476..541 ticks (n=10), 10 tps 497..505 (n=4), 2026-11-18 t00293..t00330.
+  # S1: twice the maximum 541, rounded up to 20 ticks, keeps the 520-tick watchdog from cutting the 620-tick wait short.
+  stillTicks: 1100
   goals:
     - { kind: completion, who: Actor }
     - kind: blocksAt

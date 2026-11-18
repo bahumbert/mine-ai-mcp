@@ -6,7 +6,7 @@ description: >-
   x 0.85, its centre over the cell to dig (cell 0) but its box (0.3 either side) over the neighbour (cell 1), and digs
   the block under the centre. If it stays up the shelter flow has to step into the hole (a look and a short forward
   control); if it falls by itself the step-in is harmless and the fake of brain/src/shelter/dig-in.test.ts that waits for
-  the control is wrong. The goal is the feet still at y -59 after the dig and 20 ticks.
+  the control is wrong. The goal is the feet still at y -59 after the dig and at least 20 server settling ticks.
 
 reset:
   - "fill -16 -59 -16 20 -40 16 air"
@@ -29,7 +29,7 @@ client:
 params:
   actions:
     - { action: raw_action, input: { operation: dig, x: 0, y: -60, z: 0 } }
-    - { action: raw_action, waitTicks: 20, input: { operation: look, yaw: 0, pitch: 0 } }
+    - { action: raw_action, waitServerTicks: 20, input: { operation: look, yaw: 0, pitch: 0 } }
 
 goal:
   kind: all

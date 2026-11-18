@@ -29,11 +29,10 @@ client:
   cwd: ../..
   args: [client-host.ts, drivers/action-sequence.ts]
 params:
-  # The template has no start condition: the only step waits 400 client ticks (20 s, 100 server ticks at five a second;
-  # the hunger effect adds exhaustion per server tick) so the food has dipped when eat_food starts (Mineflayer refuses
-  # "Food is full" at 20).
+  # The template has no start condition: wait 100 hunger-effect server ticks, plus the helper's 20-tick packet margin,
+  # so the food has dipped when eat_food starts (Mineflayer refuses "Food is full" at 20).
   actions:
-    - { action: eat_food, waitTicks: 400, input: { food_name: cooked_beef }, expect: succeeded }
+    - { action: eat_food, waitServerTicks: 100, input: { food_name: cooked_beef }, expect: succeeded }
 
 goal:
   kind: all
