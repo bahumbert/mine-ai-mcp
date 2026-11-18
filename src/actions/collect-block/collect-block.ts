@@ -43,7 +43,7 @@ import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains
 import { createCollectionMovements } from "./collection-movements.js";
 import {
   cellLabel,
-  COLLECT_STALL_MS,
+  COLLECT_STALL_TICKS,
   decimal,
   HIGHLIGHT_COLOURS,
   MAX_EXTRA_BREAKS,
@@ -320,9 +320,10 @@ async function runCollection(attempt: CollectionAttempt, context: ActionContext)
     work: () => `${broken.length}:${gained()}`,
     position: () => bot.entity.position,
     inWater: () => isInWater(bot),
-    stallMs: COLLECT_STALL_MS,
-    describe: ({ seconds, walked }) =>
-      outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(attempt.start))),
+    stallTicks: COLLECT_STALL_TICKS,
+    worldAge: () => bot.time.age ?? null,
+    describe: ({ seconds, ticks, walked }) =>
+      outcomes.stalled(seconds, ticks, walked, Math.round(bot.entity.position.distanceTo(attempt.start))),
   });
   const highlights = new AbortController();
   showTargets(() => pursued, highlights.signal);

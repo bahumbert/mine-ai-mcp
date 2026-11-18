@@ -886,7 +886,8 @@ age, `ripeAge` — the age each standing crop block is ripe at, from its loot
 table or else its last age —, empty farmland, farmland not hydrated, water).
 `[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
 refuse before any work; `[TEND_STALLED]` ends a run where no cell changed for
-180 s. Defined in
+3 600 world ticks (180 s at 20 tps), with a 180 s bound when the server clock stops
+and a 543 s wall backstop. The result names both real seconds and observed world ticks. Defined in
 [src/actions/tend-crops/contract.ts](../../src/actions/tend-crops/contract.ts).
 
 ## Tools that craft and smelt items
