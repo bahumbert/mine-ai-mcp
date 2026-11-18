@@ -12,7 +12,7 @@ import { packageApp } from "./bundle.ts";
 
 /** Folders of the repository that ship, relative to its root (the `brain/` and `launcher/` tests and the rest stay out). */
 const STAGED_FOLDERS = ["src", "brain/src", "brain/building-styles", "launcher/src", "packaging", "patches"] as const;
-const STAGED_FILES = ["package.json", "bun.lock", "LICENSE"] as const;
+const STAGED_FILES = ["package.json", "bun.lock", "LICENSE", "scripts/modules-guard.ts"] as const;
 /** A path with one of these segments is never shipped: private repository, monitor, recorded test packets. */
 const EXCLUDED_SEGMENTS: ReadonlySet<string> = new Set([".agent", "monitor", "fixtures"]);
 /** Build-only folders: the build script and the Inno Setup script run on the build machine, never on the player's. */

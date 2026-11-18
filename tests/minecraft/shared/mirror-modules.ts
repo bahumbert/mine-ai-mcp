@@ -122,6 +122,11 @@ export class ModulesTrees {
     for (const name of ["package.json", "bun.lock", "patches"]) {
       if (existsSync(join(root, name))) cpSync(join(root, name), join(tmpDir, name), { recursive: true });
     }
+    const guard = join(root, "scripts", "modules-guard.ts");
+    if (existsSync(guard)) {
+      mkdirSync(join(tmpDir, "scripts"), { recursive: true });
+      cpSync(guard, join(tmpDir, "scripts", "modules-guard.ts"));
+    }
   }
 
   /** Why a finished install is no tree to use, or null when it is one. */

@@ -45,7 +45,7 @@ function fakeRepository(): string {
     "launcher/src/main.ts", "launcher/src/main.test.ts", "launcher/src/install/java.ts",
     "launcher/src/install/fixtures/status.bin", "launcher/src/build/build-windows.ts",
     "packaging/windows/mine-ai.iss",
-    PATCH_FILE, "bun.lock", "LICENSE",
+    PATCH_FILE, "bun.lock", "LICENSE", "scripts/modules-guard.ts",
     ".agent/specs/secret.md", "monitor/src/main.ts", "personas/real-world/someone.json", "personas/ayla.json",
   ]) touch(root, file);
   touch(root, "packaging/manifest.json", FIXTURE_MANIFEST_TEXT);
@@ -62,7 +62,7 @@ test("the staged list has the public app and none of the private or test files",
   try {
     assert.deepEqual(stagedOf(root), [
       "LICENSE", "brain/building-styles/rustic.json", "brain/src/main.ts", "bun.lock", "launcher/src/install/java.ts",
-      "launcher/src/main.ts", "package.json", "packaging/manifest.json", PATCH_FILE, "src/server/host.ts",
+      "launcher/src/main.ts", "package.json", "packaging/manifest.json", PATCH_FILE, "scripts/modules-guard.ts", "src/server/host.ts",
     ].sort());
   } finally {
     rmSync(root, { recursive: true, force: true });

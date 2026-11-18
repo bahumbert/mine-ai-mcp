@@ -12,6 +12,7 @@ const pathsTheImageReads = [
   'packaging/paper-settings.json',
   'launcher/src/install/paper-settings.ts',
   'launcher/src/install/paper-settings-cli.ts',
+  'scripts/modules-guard.ts',
 ];
 
 test('the build context allows the files the Paper image reads', () => {
@@ -20,6 +21,9 @@ test('the build context allows the files the Paper image reads', () => {
     assert.ok(existsSync(join(root, path)), `${path} does not exist`);
     assert.ok(allowed.includes(path), `.dockerignore does not allow ${path}`);
   }
+  const dockerfile = read('Dockerfile');
+  assert.ok(dockerfile.indexOf('COPY . .') >= 0);
+  assert.ok(dockerfile.indexOf('COPY . .') < dockerfile.indexOf('RUN bun install'));
 });
 
 // `bun install --frozen-lockfile` in the image applies every patch package.json names, so each patch file must reach the build context.

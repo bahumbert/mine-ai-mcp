@@ -4,6 +4,7 @@
 !src/
 !docker/
 !patches/
+!scripts/modules-guard.ts
 !packaging/manifest.json
 !packaging/paper-settings.json
 !launcher/src/install/paper-settings.ts
