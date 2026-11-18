@@ -138,6 +138,31 @@ test("a cell beyond the formation radius is not watched", () => {
   assert.deepEqual(observeFormations(bot, watch), {});
 });
 
+test("a poll builds a block only for a cell that changed, and counts each change under its name", () => {
+  const { bot, world } = changingWorld({ "0,0,0": "water" });
+  const watch = watchFormations(bot, cell(0, 0, 0));
+  const blockAt = bot.blockAt;
+  let reads = 0;
+  bot.blockAt = (position: Vec3) => {
+    reads += 1;
+    return blockAt(position);
+  };
+
+  observeFormations(bot, watch);
+  const afterFirstPoll = reads;
+  observeFormations(bot, watch);
+  assert.equal(reads - afterFirstPoll, 0, "a poll with no change reads no block");
+
+  world.setCell(cell(0, 0, 0), "stone");
+  assert.deepEqual(observeFormations(bot, watch), { stone: 1 });
+  assert.equal(reads - afterFirstPoll, 1, "only the changed cell builds its block");
+
+  world.setCell(cell(0, 0, 0), "cobblestone");
+  assert.deepEqual(observeFormations(bot, watch), { cobblestone: 1 });
+  world.setCell(cell(0, 0, 0), "void");
+  assert.deepEqual(observeFormations(bot, watch), {});
+});
+
 test("a cancel ends the wait for a pour to settle at once when physics has stopped, not at Mineflayer's 5 s tick timeout", async () => {
   const { bot, clock } = changingWorld({ "0,0,0": "lava" });
   const watch = watchFormations(bot, cell(0, 0, 0));

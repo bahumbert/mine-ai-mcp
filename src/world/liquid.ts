@@ -191,6 +191,10 @@ export interface FormationWatch {
   readonly cells: readonly Vec3[];
   /** Indexes into `cells` of the ones seen holding liquid so far. */
   readonly wet: Set<number>;
+  /** Per index of `cells`, the state id read last. */
+  readonly stateIds: number[];
+  /** Per index of `cells`, the block name the cell counted at that read (null: none). */
+  readonly counted: (string | null)[];
 }
 
 /** The cells within the formation radius of `around` (a sphere, walked as one flat index over its bounding cube). */
@@ -210,25 +214,49 @@ function cellsAround(around: Vec3): Vec3[] {
 export function watchFormations(bot: Bot, around: Vec3): FormationWatch {
   const cells: Vec3[] = [];
   const wet = new Set<number>();
+  const stateIds: number[] = [];
+  const counted: (string | null)[] = [];
   for (const cell of cellsAround(around)) {
     const block = bot.blockAt(cell);
     if (block === null || block.boundingBox === "block") continue;
     if (isLiquid(block)) wet.add(cells.length);
     cells.push(cell);
+    stateIds.push(bot.world.getBlockStateId(cell));
+    counted.push(null);
   }
-  return { cells, wet };
+  return { cells, wet, stateIds, counted };
 }
 
-/** The solid blocks the watched cells that held liquid hold now, counted by name. Unloaded cells say nothing. */
+/**
+ * The solid blocks the watched cells that held liquid hold now, counted by name. Unloaded cells say nothing.
+ *
+ * A cell's name, box and liquid-ness all derive from its state id, so a cell whose id is unchanged since the last read
+ * keeps what it counted then, and only a changed id is read as a block (spec D2). `wet` changes only at a liquid read:
+ * a cell that held liquid at any read stays wet. Unloaded cells and air are both id 0 and count nothing.
+ */
 export function observeFormations(bot: Bot, watch: FormationWatch): Formed {
   const formed: Record<string, number> = {};
   watch.cells.forEach((cell, index) => {
-    const block = bot.blockAt(cell);
-    if (block === null) return;
-    if (isLiquid(block)) watch.wet.add(index);
-    else if (block.boundingBox === "block" && watch.wet.has(index)) formed[block.name] = (formed[block.name] ?? 0) + 1;
+    const id = bot.world.getBlockStateId(cell);
+    if (id !== watch.stateIds[index]) {
+      watch.counted[index] = countedName(bot, watch, cell, index);
+      watch.stateIds[index] = id;
+    }
+    const name = watch.counted[index];
+    if (name !== null) formed[name] = (formed[name] ?? 0) + 1;
   });
   return formed;
+}
+
+/** The name a watched cell counts as now: its block's name when it is solid and held liquid before; null otherwise. */
+function countedName(bot: Bot, watch: FormationWatch, cell: Vec3, index: number): string | null {
+  const block = bot.blockAt(cell);
+  if (block === null) return null;
+  if (isLiquid(block)) {
+    watch.wet.add(index);
+    return null;
+  }
+  return block.boundingBox === "block" && watch.wet.has(index) ? block.name : null;
 }
 
 function sameFormed(left: Formed, right: Formed): boolean {
