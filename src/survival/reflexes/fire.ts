@@ -4,7 +4,7 @@ import { LIFE_SAVING_REMOVAL_MS, pendingLifeSavingPlacements, removeLifeSavingPl
 import { describeProtectedRegion } from "../../world/protected-regions.js";
 import { bucketAvailable, waterLandingSupply, type WorldView } from "../../navigation/index.js";
 import { advancingLavaAt, lavaChangedNear } from "../../world/lava-flow.js";
-import { ticksOnTime } from "../../world/world-age.js";
+import { AGE_PACKET_TICKS, ticksOnTime } from "../../world/world-age.js";
 import { LETHAL_REFLEX_RETRY_TICKS, type ReflexLimits } from "../control/contract.js";
 import { climbsBy, turnsTrue, watchBodyTicks } from "../control/reflex-progress.js";
 import type { ReflexDriver } from "../control/driver.js";
@@ -18,8 +18,8 @@ import {
   nearbyFireEscape,
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
-import { FIRE_ESCAPE_MAXIMUM_MS, type FireEscapeOutcome, type FireEscapeOptions, type FireEscapeRecord } from "../responses/fire.js";
-import { escapeThenSettle, LAVA_SETTLE_MAXIMUM_MS, type EscapeAndSettle } from "../responses/lava-settle.js";
+import { FIRE_ESCAPE_MAXIMUM_TICKS, type FireEscapeOutcome, type FireEscapeOptions, type FireEscapeRecord } from "../responses/fire.js";
+import { escapeThenSettle, LAVA_SETTLE_MAXIMUM_TICKS, type EscapeAndSettle } from "../responses/lava-settle.js";
 
 /**
  * Whether an escape is reachable, searched once per body position, world revision and danger: the search reads up to
@@ -68,7 +68,7 @@ function lavaWaitOutcomeKind(settle: NonNullable<EscapeAndSettle["settle"]>) {
 /** Why the interrupted action was stopped rather than resumed, for each outcome that ended the escape without a resume. */
 function stoppedActionReason(kind: ReturnType<typeof reflexOutcomeKind> | ReturnType<typeof lavaWaitOutcomeKind>) {
   if (kind === "lava_spreading")
-    return "Got out of the fire onto safe ground, but lava within 4 blocks was still spreading 10 s later, so the action was stopped instead of walking back into it. Wait for the lava to stop moving, or go another way.";
+    return "Got out of the fire onto safe ground, but lava within 4 blocks was still spreading when the settle budget ended, so the action was stopped instead of walking back into it. Wait for the lava to stop moving, or go another way.";
   if (kind === "lava_endangered")
     return "Got out of the fire onto safe ground, but while recovering the bot was in danger again (fire, lava, a lethal burn, damage taken or air running low), so the action was stopped. Reach safe ground before continuing.";
   return "Fire escape did not establish safe footing.";
@@ -109,11 +109,11 @@ function observeLavaUpdate(bot: Bot, lava: LavaWatch, before: ReturnType<Bot["bl
 }
 
 /**
- * An escape (15 s), lava settling (10 s) and removal (30 s) share one claim; 6 s without leaving lava or fire, the fire
- * going out, or standing/swimming on safe footing ends the claim, and the reflex pauses 2 s (owner 2026-10-19).
+ * Escape (300 ticks), settling (200 ticks) and removal (30 s) share one claim, with two packet margins per budget.
+ * No progress for 120 ticks ends it; the reflex pauses 40 ticks (owner 2026-10-19; tick limits 2026-11-18).
  */
 const FIRE_LIMITS: ReflexLimits = {
-  ceilingTicks: ticksOnTime(FIRE_ESCAPE_MAXIMUM_MS + LAVA_SETTLE_MAXIMUM_MS + LIFE_SAVING_REMOVAL_MS),
+  ceilingTicks: FIRE_ESCAPE_MAXIMUM_TICKS + LAVA_SETTLE_MAXIMUM_TICKS + ticksOnTime(LIFE_SAVING_REMOVAL_MS) + 4 * AGE_PACKET_TICKS,
   noProgressTicks: 120,
   standDownTicks: 40,
 };
