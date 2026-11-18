@@ -11,6 +11,8 @@ export interface MineAiScenarioContext {
   scenario: ScenarioDefinition;
   signal: AbortSignal;
   log(message: string): void;
+  /** Server-confirmed productive evidence resets the trial's still watchdog. */
+  progress(reason: string): void;
   /**
    * Telemetry from the package-local Pathfinder installed by the bot host.
    * A driver never installs or translates its own navigation implementation.

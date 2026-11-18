@@ -22,6 +22,7 @@ export function scenarioTestContext(parts: ScenarioTestContextParts): ScenarioCo
     scenario: parts.scenario,
     arena: parts.arena ?? arenaFrame(ZERO_ARENA),
     bot,
+    progress: () => {},
     waitForTicks: async () => {},
     physics: { pause: () => {}, resume: () => {} },
     client: {

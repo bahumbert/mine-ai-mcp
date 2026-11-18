@@ -270,7 +270,7 @@ for (const { mode, rate } of driverCases) {
   const controller = new AbortController();
   const reason = new Error("cancel trial");
   const context = {
-    bot, signal: controller.signal, log: () => {},
+    bot, signal: controller.signal, log: () => {}, progress: () => {},
     scenario: { world: { seed: 1 } } as Parameters<typeof driver.run>[0]["scenario"],
     get navigation(): never { throw new Error("navigation is outside the failure-settle path"); },
     get pathfinder(): never { throw new Error("pathfinder is outside the failure-settle path"); },

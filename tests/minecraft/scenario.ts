@@ -23,6 +23,8 @@ export interface ScenarioContext {
   readonly arena: ArenaFrame;
   /** The bot, for reading state only (vehicle, position, inventory); every action goes through `call`. */
   readonly bot: Bot;
+  /** Server-confirmed productive evidence resets the trial's still watchdog. */
+  progress(reason: string): void;
   /** Let a fixture settle after the trial starts, before taking action. */
   waitForTicks(ticks: number): Promise<void>;
   /**
