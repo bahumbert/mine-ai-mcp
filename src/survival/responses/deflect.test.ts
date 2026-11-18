@@ -16,6 +16,7 @@ import { createNavigationRuntime, createMovements, exactBlockGoal } from "../../
 for (const rate of [20, 10]) for (const row of [
   { name: "self only", mob: null, offset: 0, withheld: false },
   { name: "neutral Enderman 0.4 off-axis", mob: "enderman", offset: 0.4, withheld: true },
+  { name: "provoked Enderman 0.4 off-axis", mob: "enderman", offset: 0.4, attacker: true, withheld: false },
   { name: "neutral Enderman 3 off-axis", mob: "enderman", offset: 3, withheld: false },
   { name: "hostile on the line", mob: "zombie", offset: 0, withheld: false },
   // Player width is 0.6 (minecraft-data 1.21.4): the inflated face is at 2.3, not 2.5.
@@ -34,7 +35,8 @@ for (const rate of [20, 10]) for (const row of [
   const added = listenersAddedSince(bot);
   const ball = combat.launchFireball(new Vec3(2, 65.5, 0.5), new Vec3(-0.2, 0, 0));
   const started = server.gameTime;
-  const result = await clock.settle(deflectFireball(bot, ball.id, new AbortController().signal), 1_000);
+  const knowledge = { resolvedIds: new Set<number>(), attackerIds: new Set("attacker" in row ? [61] : []) };
+  const result = await clock.settle(deflectFireball(bot, ball.id, new AbortController().signal, knowledge), 1_000);
   assert.equal(result.kind, row.withheld ? "withheld" : "reflected");
   assert.equal(result.attacks, row.withheld ? 0 : 1);
   assert.deepEqual(attackedIds(server), row.withheld ? [] : [ball.id]);

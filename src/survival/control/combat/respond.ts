@@ -184,6 +184,7 @@ async function hide(
 async function deflect(
   bot: Bot,
   request: Extract<HostileResponse, { kind: "deflect" }>,
+  context: ResponseContext,
   healthBefore: number,
   signal: AbortSignal,
 ): Promise<DeflectResponseResult> {
@@ -193,7 +194,7 @@ async function deflect(
   };
   bot._client.on("explosion", onExplosion);
   try {
-    const result = await deflectFireball(bot, request.targetId, signal);
+    const result = await deflectFireball(bot, request.targetId, signal, context);
     return {
       ...encounterBaseline(bot, request, healthBefore),
       response: "deflect",
@@ -224,7 +225,7 @@ export async function executeHostileResponse(
   signal.throwIfAborted();
   switch (request.kind) {
     case "deflect":
-      return deflect(bot, request, healthBefore, signal);
+      return deflect(bot, request, context, healthBefore, signal);
     case "fight":
       return fight(bot, controller, request, context, healthBefore, signal);
     case "hide":
@@ -237,7 +238,7 @@ export async function executeHostileResponse(
 /** A combat request keeps ownership and retains an unobserved deflection before reconsidering. */
 export async function deflectWithinCombat(bot: Bot, targetId: number, context: ResponseContext, signal: AbortSignal) {
   const scope = responseScope(bot, contextPolicy(context), "deflect", targetId);
-  const result = await deflectFireball(bot, targetId, signal);
+  const result = await deflectFireball(bot, targetId, signal, context);
   signal.throwIfAborted();
   if (result.kind !== "reflected")
     context.survival.answered.remember(scope, { kind: "deflection_unobserved", why: result.observation });
