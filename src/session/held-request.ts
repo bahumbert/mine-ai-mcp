@@ -90,9 +90,13 @@ export class HeldRequest {
     return this.#finish("aborted", { kind: "abort", reason: cause instanceof Error ? cause.message : String(cause) });
   }
 
-  backstop(): boolean {
+  /** `elapsed` is the deadline's reading when it fired: a budget reached keeps the tick receipt, a stopped clock names itself. */
+  backstop(elapsed: { readonly ms: number; readonly ticks: number | null } | null = null): boolean {
     if (this.state !== "waiting") return false;
-    const suffix = `; no decision from ${this.owner} within ${this.#options.backstopTicks} world ticks.`;
+    const budget = this.#options.backstopTicks;
+    const suffix = elapsed === null || elapsed.ticks === null || elapsed.ticks >= budget
+      ? `; no decision from ${this.owner} within ${budget} world ticks.`
+      : `; no decision from ${this.owner}: the server clock stood still for ${Math.round(elapsed.ms / 1000)} s (${elapsed.ticks} world ticks heard).`;
     return this.#finish("backstop", { kind: "return", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
   }
 
@@ -110,7 +114,8 @@ export class HeldRequest {
       origin: "packet", wallMs: serverPacedWallMs(this.#options.backstopTicks),
     });
     const poll = () => {
-      if (deadline.passed(monotonicNow())) this.backstop();
+      const now = monotonicNow();
+      if (deadline.passed(now)) this.backstop(deadline.elapsed(now));
       else this.#timer = setTimeout(poll, AGE_PACKET_TICKS * MS_PER_ON_TIME_TICK);
     };
     this.#timer = setTimeout(poll, AGE_PACKET_TICKS * MS_PER_ON_TIME_TICK);

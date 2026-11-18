@@ -525,7 +525,8 @@ async function nextWalk(runner: ActionRunner, connected = true) {
 }
 
 for (const ticksPerSecond of [20, 10]) {
-  for (const first of ["backstop", "stopped"] as const) {
+  // The stopped rows: `stopped` at once (0 ticks heard), `partial` after 100 server ticks heard, then the clock stops.
+  for (const first of ["backstop", "stopped", "partial"] as const) {
     test(`held walk evidence ${first} wins before the retired deadline at ${ticksPerSecond} tps`, async () => {
       const clock = createFakeClock({ mode: "mocked" });
       using _timers = clock.install();
@@ -533,14 +534,26 @@ for (const ticksPerSecond of [20, 10]) {
       const evidence = "no projectile in flight, target zombie#12 alive at 21.7 blocks";
       let settlements = 0;
       void pending.then(() => settlements++);
-      if (first === "stopped") server.stop();
+      if (first === "partial") await clock.advance(100 * (1_000 / ticksPerSecond), 100);
+      if (first !== "backstop") server.stop();
       await clock.settle(pending, 100_000);
-      assert.ok(first === "stopped" ? bot.time.age === 1_000 : bot.time.age >= 1_620);
+      const heard = bot.time.age - 1_000;
+      if (first === "backstop") assert.ok(bot.time.age >= 1_620);
+      if (first === "stopped") assert.equal(heard, 0);
+      if (first === "partial") assert.ok(heard > 0 && heard < 600, `expected some ticks heard, got ${heard}`);
       assert.equal(runner.releaseHold("hostile_reflex", "stand_down", evidence), false);
       const output = await clock.settle(pending, 1_000);
       assert.equal(output.result.status, "cancelled");
       assert.equal(runs.count, 1);
-      assert.match(output.interruptions!.at(-1)!, /within 600 world ticks/);
+      const receipt = output.interruptions!.at(-1)!;
+      if (first === "backstop") assert.match(receipt, /within 600 world ticks\.$/);
+      else {
+        const match = /; no decision from hostile_reflex: the server clock stood still for (\d+) s \((\d+) world ticks heard\)\.$/
+          .exec(receipt);
+        assert.ok(match, `receipt names the stopped clock: ${receipt}`);
+        assert.equal(Number(match[2]), heard);
+        assert.ok(Number(match[1]) >= 20, `stood still for at least the 20 s stop bound, got ${match[1]} s`);
+      }
       await nextWalk(runner);
       await clock.advance(100_000, 1_000);
       assert.equal(settlements, 1);
