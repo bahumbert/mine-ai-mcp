@@ -210,6 +210,24 @@ test("a midwater arrival records current completion without claiming grounded fo
   assert.equal(output.request?.evidence?.completion.observed, true);
 });
 
+test("navigate publishes its objective: the remaining distance and a tolerance of max(1, range), null after a dimension change", async () => {
+  for (const [range, tolerance] of [[0, 1], [1, 1], [3, 3]] as const) {
+    const { bot } = flatGroundBot();
+    const runner = new ActionRunner();
+    const seen: unknown[] = [];
+    const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+      bot.entity.position.set(4.5, 64, 0.5);
+      seen.push(runner.request()?.evidence?.objective);
+      bot.game.dimension = "the_nether";
+      seen.push(runner.request()?.evidence?.objective);
+      return { status: "stopped", reason: "stopped", elapsedMs: 1 };
+    }));
+    await runner.run(action, { x: 10, y: 64, z: 0, range });
+    const remaining = Math.hypot(10 - 4.5, 0 - 0.5); // the body at (4.5, 64, 0.5), the target (10, 64, 0)
+    assert.deepEqual(seen, [{ remaining, tolerance }, null], `range ${range}`);
+  }
+});
+
 test("resumed navigation retains the request origin and stocks and sums only route elapsed time", async () => {
   const { bot, useUntil } = flatGroundBot();
   let entered!: () => void;
