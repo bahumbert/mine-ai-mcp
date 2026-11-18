@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import type { Bot } from "mineflayer";
-import { createMovements, reportNavigationDig, type NavigationResult } from "../../navigation/index.js";
+import { createMovements, createNavigationRuntime, reportNavigationDig, type NavigationResult } from "../../navigation/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { parseNavigateRequest } from "./contract.js";
@@ -706,6 +706,20 @@ test("a route stopped at the shore of deep open water, with no boat carried, say
   );
 });
 
+test("a refused route at the shore of deep water keeps the caller's refusal, not the deep-water text", async () => {
+  const { bot } = flatGroundBot(64, { cells: seaCells(10, 40) });
+  const refusal = "[COVER_ROUTE_REFUSED] choose a covered target";
+  const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+    bot.entity.position.set(9.5, 64, 0.5);
+    return { status: "stopped", reason: `route_refused: ${refusal}`, elapsedMs: 5, routeFailed: true, routeRefused: true };
+  }));
+  const output = await new ActionRunner().run(action, { x: 60, y: 64, z: 0 });
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? String(output.result.error) : "";
+  assert.ok(error.includes(refusal), error);
+  assert.doesNotMatch(error, /NAVIGATION_DEEP_WATER/u);
+});
+
 test("a route with no path is planned once more with the common block the bot carries when the policy list holds none", async () => {
   const { bot, useUntil } = flatGroundBot(64, { carried: { stone: 80 } });
   const movementOptions: unknown[] = [];
@@ -1036,4 +1050,23 @@ test("a route that only dug beside flowing water does not claim to have dug down
   const text = formatNavigateResult(escapedResult(["dig_next_to_flowing_water"]));
   assert.match(text, /Dug out of a pocket beside flowing water: a dig that lets in flowing water was allowed once \(a water source and lava still refuse\)\./);
   assert.doesNotMatch(text, /Dug down|digging straight down/);
+});
+
+test("a refusal reaches the navigate error", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = flatGroundBot(64, { clock });
+  await using navigation = createNavigationRuntime(bot);
+  navigation.setRouteAdmissionProvider(() => ({ check: () => "[COVER_ROUTE_REFUSED] the route crosses the shooter's sight" }));
+  const output = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: 10, y: 64, z: 0 }), 20_000);
+  assert.equal(output.result.status, "failed");
+  const error = "error" in output.result ? output.result.error : "";
+  assert.match(error, /route_refused/);
+  assert.match(error, /\[COVER_ROUTE_REFUSED\] the route crosses the shooter's sight/);
+  assert.equal(bot.entity.position.x, 0.5, "the body did not move");
+  // The next navigate request is admitted and runs: a refusal leaves no run behind.
+  navigation.setRouteAdmissionProvider(null);
+  const next = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: 10, y: 64, z: 0 }), 20_000);
+  assert.ok(!/busy|route_refused/i.test(JSON.stringify(next.result)), JSON.stringify(next.result));
+  assert.equal(navigation.active, false);
 });

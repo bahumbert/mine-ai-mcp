@@ -46,6 +46,14 @@ export type NavigationEvent =
       readonly plan: Pick<RoutePlan, "start" | "end" | "steps" | "complete">;
     }
   | {
+      /** The caller's route admission refused a route, at its commit or at a step boundary; the run ends without a search. */
+      readonly kind: "route_refused";
+      readonly runId: string;
+      readonly planId: string;
+      readonly observation: string;
+      readonly atMs: number;
+    }
+  | {
       readonly kind: "step_started";
       readonly runId: string;
       readonly planId: string;

@@ -24,6 +24,7 @@ import type { Navigate, NavigationResult } from "./navigate.js";
 import { navigateAroundDragonBreath } from "./navigate-around-dragon-breath.js";
 import { createNavigator, type Navigator } from "./orchestration/navigator.js";
 import { waterStancesHeld } from "./steering/hold-water-position.js";
+import type { RouteAdmissionProvider } from "./route-admission.js";
 import type { StepFieldProvider } from "./step-field.js";
 import type { NavigationEvent, TelemetrySink } from "./telemetry/index.js";
 
@@ -57,6 +58,14 @@ export interface NavigationRuntime extends AsyncDisposable {
    * `stepField: null`.
    */
   setStepFieldProvider(provider: StepFieldProvider): void;
+  /**
+   * Register the one provider asked, at each route commit and each step boundary, whether the route may be walked.
+   *
+   * Unlike the step field this is a prohibition: a refused route ends the run (`no_progress`, `route_refused`) with the
+   * provider's text, and no other search is made. `null` clears it. The provider is read each time, so the caller
+   * returns null when no obligation holds.
+   */
+  setRouteAdmissionProvider(provider: RouteAdmissionProvider | null): void;
   /** Whether a route currently owns the bot. */
   readonly active: boolean;
   /** Whether navigation steers the body: a route, process or dive owns it, or a water stance is held (mining under water keeps its depth). */
@@ -148,6 +157,17 @@ function createNavigationTelemetry(bot: Bot, diving: Diving, cover: CoverWatch, 
   };
 }
 
+/** Whether `pending` settled (either way) within `ms`; the timer is always cleared. */
+async function settledWithin(pending: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = await Promise.race([
+    pending.then(() => true, () => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), ms); }),
+  ]);
+  clearTimeout(timer);
+  return settled;
+}
+
 /** Build the navigation runtime for one connected Mineflayer bot. */
 export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOptions = {}): NavigationRuntime {
   const releaseWaitMs = options.releaseWaitMs ?? 5_000;
@@ -179,12 +199,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     const held = activeNavigation;
     if (held === null) return;
     if (!held.cancelled && !held.signal?.aborted) throw new Error("Navigation is busy with another request.");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const settled = await Promise.race([
-      held.pending.then(() => true, () => true),
-      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), releaseWaitMs); }),
-    ]);
-    clearTimeout(timer);
+    const settled = await settledWithin(held.pending, releaseWaitMs);
     if (activeNavigation !== held) {
       if (activeNavigation !== null) throw new Error("Navigation is busy with another request.");
       return;
@@ -245,6 +260,7 @@ export function createNavigationRuntime(bot: Bot, options: NavigationRuntimeOpti
     routesAsEscape: () => escapes.hold(),
     breakBlockInPlace: (options) => breakInPlaceWithinDive({ bot, world, navigationBot, diving, requireOpen }, options),
     setStepFieldProvider: (provider) => navigator.setStepFieldProvider(provider),
+    setRouteAdmissionProvider: (provider) => navigator.setRouteAdmissionProvider(provider),
     get active() {
       return diving.active || navigator.active !== null;
     },

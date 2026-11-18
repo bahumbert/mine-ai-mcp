@@ -32,6 +32,7 @@ function fakeNavigator(
       } as const;
     },
     setStepFieldProvider: () => undefined,
+    setRouteAdmissionProvider: () => undefined,
     active: null,
     cancelActive: () => undefined,
     terminateActive: () => undefined,
@@ -192,6 +193,7 @@ test("a route is marked failed only when the route or the movement itself failed
     [{ kind: "no_path", search, closest }, true],
     [{ kind: "search_limit", search, limit: { kind: "search_time", limit: 2000, observed: 2001, closest } }, true],
     [{ kind: "no_progress", reason: "planning_stalled", observation: "20000 ms" }, true],
+    [{ kind: "no_progress", reason: "route_refused", observation: "[COVER_ROUTE_REFUSED] x" }, true],
     [{ kind: "movement_failed", movement }, true],
     [{ kind: "invalid_goal", observation: "the goal is a portal" }, false],
     [{ kind: "world_unavailable", observation: "chunks not loaded" }, false],
@@ -202,6 +204,9 @@ test("a route is marked failed only when the route or the movement itself failed
   for (const [failure, expected] of failures) {
     const result = await runNavigation(fakeNavigator(() => ({ kind: "failed", failure, evidence: evidence() })).navigator, request);
     assert.equal(result.status === "stopped" && result.routeFailed === true, expected, failure.kind);
+    // Only a refusal by the caller's route admission carries the marker that stops the action's recovery legs.
+    const refused = failure.kind === "no_progress" && failure.reason === "route_refused";
+    assert.equal(result.status === "stopped" && result.routeRefused === true, refused, failure.kind);
   }
   const stopped = await runNavigation(fakeNavigator(() => ({ kind: "stopped", reason: "the pickaxe broke", evidence: evidence() })).navigator, request);
   assert.equal(stopped.status === "stopped" && stopped.routeFailed, undefined);

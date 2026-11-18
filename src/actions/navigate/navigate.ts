@@ -509,6 +509,8 @@ async function judgeRoute(
     const slow = walkWindowOf(leg).reason();
     if (slow !== null) return { status: "failed", error: slow, navigation: evidence };
     const stopped: NavigateResult = { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
+    // The caller refused this route and said why: a climb, swim or boat leg would answer a question nobody asked.
+    if (route.routeRefused) return stopped;
     return (await climbOutFirst(leg, stopped, context)) ?? crossDeepWater(leg, stopped, route, context);
   }
   if (leg.destination === null) {

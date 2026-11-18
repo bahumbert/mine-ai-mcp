@@ -85,6 +85,7 @@ export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";
 export type { StepField, StepFieldProvider } from "./step-field.js";
+export type { RouteAdmission, RouteAdmissionProvider } from "./route-admission.js";
 
 export type { NavigationEvent } from "./telemetry/index.js";
 
