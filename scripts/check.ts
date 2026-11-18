@@ -8,7 +8,8 @@
  * `--all` go to its `bun test` call (`bun run test -- --coverage`).
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { enforceModules } from "./modules-guard.ts";
 import {
   aliasesFromPackageJson,
   buildReverseGraph,
@@ -246,6 +247,7 @@ function parsedArgsOrExit(): ReturnType<typeof parseCheckArgs> {
 }
 
 function main(): never {
+  if (!enforceModules(resolve(import.meta.dir, ".."))) process.exit(1);
   if (process.argv[2] === "--all") runAll(process.argv.slice(3));
   const args = parsedArgsOrExit();
   const base = args.base === undefined ? "HEAD" : git("merge-base", "HEAD", args.base)[0] ?? "HEAD";

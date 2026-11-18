@@ -32,6 +32,8 @@
     "README.md"
   ],
   "scripts": {
+    "preinstall": "bun scripts/modules-guard.ts unstamp",
+    "postinstall": "bun scripts/modules-guard.ts stamp",
     "clean": "bun -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "bun run clean && bunx --bun tsc -p tsconfig.build.json && bun -e \"require('node:fs').copyFileSync('src/bot-data/bot-data.sql', 'dist/bot-data/bot-data.sql')\"",
     "typecheck": "bunx --bun tsc -p tsconfig.check.json --noEmit",
@@ -49,10 +51,10 @@
     "evidence:render": "bun scenarios/src/action-evidence-page.ts",
     "scenarios": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios --repeat 10",
     "scenarios:once": "bun tests/minecraft/shared/submit.ts tests/minecraft/scenarios",
-    "scenarios:isolated": "bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
+    "scenarios:isolated": "bun scripts/modules-guard.ts check && bunx --bun mine-labs run tests/minecraft/scenarios --jobs 2 --repeat 1",
     "scenarios:stop": "bun tests/minecraft/shared/submit.ts --stop",
-    "scenarios:spectator": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --spectator",
-    "scenarios:tailscale": "bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --tailscale"
+    "scenarios:spectator": "bun scripts/modules-guard.ts check && bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --spectator",
+    "scenarios:tailscale": "bun scripts/modules-guard.ts check && bun tests/minecraft/build-spectator-mods.ts && bunx --bun mine-labs run tests/minecraft/scenarios --tailscale"
   },
   "engines": {
     "node": ">=24.15.0",

@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { enforceModules } from "../../../scripts/modules-guard.ts";
 import { loadScenarioServerConfig } from "./config.ts";
 import { exchange } from "./daemon-client.ts";
 import { ensureDaemon } from "./daemon-launch.ts";
@@ -55,6 +56,7 @@ async function stopDaemon(args: SubmitArgs): Promise<number> {
 async function main(argv: readonly string[]): Promise<number> {
   const args = parseSubmitArgs(argv, process.cwd());
   if (args.stop) return stopDaemon(args);
+  if (!enforceModules(REPO_ROOT)) return 1;
   if (args.isolated) return runIsolated(args);
   return runOnDaemon(args);
 }
