@@ -510,6 +510,104 @@ test("a step out of the structure that does not move the bot ends the run instea
   assert.ok(exits <= 3, `asked to step out ${exits} times`);
 });
 
+/** A correct far cell of the structure: it widens the bounds, so `outsideGoal` (near max.x + 2, max.z + 2) is out of reach of x <= 3. */
+const FAR_CELL: [number, number, number] = [10, 64, 0];
+
+/**
+ * Routes of review B1's cycle, answering as the navigator does: an exit (no `onArrival`) completes inside its
+ * `outsideGoal`, at (12, 64, 2); a route with `onArrival` puts the bot at its next `stands` cell and completes only
+ * through `onArrival` (navigation-run.ts 1052-1062); past the listed stands, `after` routes (the last stand repeats when
+ * it is absent). `guard` aborts the run past 20 routes, so a spinning loop fails the test instead of hanging it.
+ */
+function cyclingRoutes(world: ReturnType<typeof structureWorld>, stands: Vec3[], guard: AbortController, after?: typeof world.physics.route) {
+  const counts = { exits: 0, routesIn: 0 };
+  const route: typeof world.physics.route = async (request) => {
+    if (counts.exits + counts.routesIn >= 20) guard.abort(new Error("the build loop is spinning"));
+    if (request.onArrival === undefined) {
+      counts.exits += 1;
+      world.bot.entity.position = new Vec3(12.5, 64, 2.5);
+      return { status: "completed", elapsedMs: 0 };
+    }
+    const stand = stands[counts.routesIn];
+    counts.routesIn += 1;
+    if (stand === undefined && after !== undefined) return after(request);
+    world.bot.entity.position = (stand ?? stands.at(-1)!).offset(0.5, 0, 0.5);
+    const decision = await request.onArrival({ signal: undefined } as never);
+    assert.equal(decision.kind, "completed", "an arrival that works nothing ends the route");
+    return { status: "completed", elapsedMs: 0 };
+  };
+  return { counts, route };
+}
+
+/** Test 1's world: the bot stands in an owed cell and a far cell widens the bounds, so the way out ends beyond reach. */
+function cycleWorld() {
+  const world = structureWorld({ feet: new Vec3(2, 64, 0) });
+  world.put(new Vec3(...FAR_CELL), "cobblestone");
+  return { world, structure: cells([[2, 64, 0], FAR_CELL]), guard: new AbortController() };
+}
+
+const CYCLE_STOP = /stepped out of the structure and the walk back to the work placed and dug nothing; last route completed/u;
+
+test("stepping out and walking back in without work ends the run by idle passes, not by spinning", async () => {
+  const { world, structure, guard } = cycleWorld();
+  const { counts, route } = cyclingRoutes(world, [new Vec3(2, 64, 0)], guard);
+  const result = await build(world.bot, { ...world.physics, route, cells: structure, removeWrongBlocks: false, signal: guard.signal });
+  assert.equal(result.status, "stopped");
+  assert.match(result.reason ?? "", CYCLE_STOP);
+  assert.equal(result.routeStop, undefined);
+  assert.equal(result.placed, 0);
+  assert.deepEqual(counts, { exits: 2, routesIn: 2 });
+});
+
+test("a step-out cycle through a cell that would seal the bot in ends the same way", async () => {
+  const world = structureWorld({ feet: new Vec3(1, 64, 1) });
+  const structure = [...cells(hollowBox()), ...cells([FAR_CELL])];
+  for (const cell of structure) if (!(cell.position.x === 1 && cell.position.y === 64 && cell.position.z === 0)) world.put(new Vec3(cell.position.x, cell.position.y, cell.position.z), "cobblestone");
+  const guard = new AbortController();
+  const request = { ...world.physics, cells: structure, removeWrongBlocks: false };
+  const targeting = new BuildTargeting(world.bot, request);
+  targeting.refresh();
+  assert.equal(targeting.stateOf(cells([[1, 64, 0]])[0]!).kind, "would_enclose");
+  assert.equal(targeting.onlyEnclosing(), true);
+  const { counts, route } = cyclingRoutes(world, [new Vec3(1, 64, 1)], guard);
+  const result = await build(world.bot, { ...request, route, signal: guard.signal });
+  assert.equal(result.status, "stopped");
+  assert.match(result.reason ?? "", CYCLE_STOP);
+  assert.equal(result.routeStop, undefined);
+  assert.equal(result.placed, 0);
+  assert.deepEqual(counts, { exits: 2, routesIn: 2 });
+});
+
+test("one idle route after a step out does not end the build: the next route that works completes it", async () => {
+  const { world, structure, guard } = cycleWorld();
+  const { counts, route } = cyclingRoutes(world, [new Vec3(8, 64, 0)], guard, world.physics.route);
+  const result = await build(world.bot, { ...world.physics, route, cells: structure, removeWrongBlocks: false, signal: guard.signal });
+  assert.equal(result.status, "complete");
+  assert.equal(result.placed, 1);
+  assert.deepEqual(counts, { exits: 1, routesIn: 2 });
+});
+
+test("after a step-out cycle stopped the run, the next build with working routes completes", async () => {
+  const { world, structure, guard } = cycleWorld();
+  const progress = new BuildProgress();
+  const { route } = cyclingRoutes(world, [new Vec3(2, 64, 0)], guard);
+  const first = await build(world.bot, { ...world.physics, route, cells: structure, removeWrongBlocks: false, signal: guard.signal }, false, progress);
+  assert.equal(first.status, "stopped");
+  const second = await build(world.bot, { ...world.physics, cells: structure, removeWrongBlocks: false }, false, progress);
+  assert.equal(second.status, "complete");
+  assert.equal(second.placed, 1);
+});
+
+test("a step out before two idle routes keeps the idle-route stop and its route-stop flag", async () => {
+  const { world, structure, guard } = cycleWorld();
+  const { counts, route } = cyclingRoutes(world, [new Vec3(8, 64, 0)], guard);
+  const result = await build(world.bot, { ...world.physics, route, cells: structure, removeWrongBlocks: false, signal: guard.signal });
+  assert.equal(result.status, "stopped");
+  assert.equal(result.reason, "2 passes changed nothing; last route completed");
+  assert.equal(result.routeStop, true);
+  assert.deepEqual(counts, { exits: 1, routesIn: 2 });
+});
+
 // Live 2026-10-11 (Theo): the routes of a house build pillared up in a ring round it with dirt and never took it down;
 // the ring shut him in. The routes now report what they place, and a complete build takes those blocks down.
 function scaffoldedWorld(scaffold: [number, number, number][], breakFails: string[] = [], reportOnly: [number, number, number][] = [], options: Parameters<typeof structureWorld>[0] = {}) {

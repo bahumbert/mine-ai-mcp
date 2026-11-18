@@ -69,7 +69,9 @@ export { enclosesBot } from "./build-enclosure.js";
  * Passes that change nothing before the process stops. One covers a route that
  * completed without bringing anything into reach; a second in a row means the
  * world and the loop disagree about what is workable, and continuing would
- * only repeat the disagreement.
+ * only repeat the disagreement. A step out that moved the bot between two idle
+ * routes does not reset the count (it neither counts nor forgives), so "step
+ * out, route back in" cannot alternate for ever.
  */
 const IDLE_PASSES = 2;
 
@@ -574,6 +576,8 @@ export async function build(
   // The takedown's own routes pillar up to the highest block too: what they place is kept, for the next round of the takedown.
   const onPlacement = (placed: PlacedScaffold) => void scaffold.set(keyOf(placed.position), placed);
   let idlePasses = 0;
+  // A step-out that moved the bot ran since the last route pass: if the next idle route reaches the limit, the stop says so.
+  let steppedOutSinceRoute = false;
 
   for (;;) {
     // Each pass gives the event loop a turn: a pass whose route and work resolve at once (nothing to walk, nothing in
@@ -595,8 +599,11 @@ export async function build(
       if (exit.status === "stopped") {
         return targeting.result("stopped", `could not step out of the structure: ${exit.reason}`);
       }
-      // An exit that left the bot where it was changes nothing the next pass would see.
-      idlePasses = feetOf(bot).equals(before) ? idlePasses + 1 : 0;
+      // An exit that left the bot where it was changes nothing the next pass would see: it counts. One that moved neither
+      // counts nor resets: moving out is not work (a reset here let "step out" and "route back in" alternate for ever,
+      // review B1), and the exit route cannot place, dig or refuse a cell, so nothing here is progress.
+      if (feetOf(bot).equals(before)) idlePasses += 1;
+      else steppedOutSinceRoute = true;
       if (idlePasses >= IDLE_PASSES) {
         return targeting.result("stopped", "could not step out of the structure: the way out leaves it where it stands");
       }
@@ -605,6 +612,7 @@ export async function build(
 
     if (await workInReach(bot, request, targeting, movements, request.signal)) {
       idlePasses = 0;
+      steppedOutSinceRoute = false;
       continue;
     }
     if (targeting.targets().length === 0) return targeting.result("stopped", null);
@@ -623,8 +631,12 @@ export async function build(
 
     idlePasses = targeting.workDone === workBefore ? idlePasses + 1 : 0;
     if (idlePasses >= IDLE_PASSES) {
+      if (steppedOutSinceRoute) {
+        return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing: the bot stepped out of the structure and the walk back to the work placed and dug nothing; last route ${route.status}`);
+      }
       return targeting.result("stopped", `${IDLE_PASSES} passes changed nothing; last route ${route.status}`, true);
     }
+    steppedOutSinceRoute = false;
   }
 }
 
