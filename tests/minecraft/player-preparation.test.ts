@@ -121,3 +121,50 @@ test("a preparation whose updates all arrived names the state that still differs
   assert.doesNotMatch(described, /inventory update/u, "an update the scenario does not declare is not listed");
   observation.close();
 });
+
+/**
+ * Health reports that arrive before the wait is armed (`arranged`), then a wait that either settles or is
+ * ended by its signal. The signal is the stop: a wait that never settles fails here, it does not hang the run.
+ */
+async function healthWaitSettles(healthReports: readonly number[], declared: number): Promise<boolean> {
+  const { bot, inventory } = scenarioBot("Fighter");
+  const idle = { bot: listenerCounts(bot), inventory: listenerCounts(inventory) };
+  const scenario = {
+    world: { dimension: "overworld" },
+    players: [{ name: "Fighter", health: declared, inventory: [] }],
+  } as unknown as ScenarioDefinition;
+  const stop = new AbortController();
+  const observation = observeScenarioPlayerPreparation(bot, scenario, stop.signal);
+  for (const health of healthReports) {
+    bot.health = health;
+    bot.emit("health");
+  }
+  const prepared = observation.wait();
+  stop.abort(new Error("the wait never settled"));
+  try {
+    await prepared;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    observation.close();
+    assert.deepEqual({ bot: listenerCounts(bot), inventory: listenerCounts(inventory) }, idle, "every listener is removed on settle and on abort");
+  }
+}
+
+test("health latches the declared value at its first report within one point of it, and only then", async () => {
+  // The first row is the red: the arrival latches, so regeneration after it does not undo the arrival.
+  const cases: readonly { readonly reports: readonly number[]; readonly settles: boolean; readonly why: string }[] = [
+    { reports: [11, 12.1], settles: true, why: "the arrival latches; regeneration after it does not undo it" },
+    { reports: [11, 11.83], settles: true, why: "control: a report within tolerance" },
+    { reports: [10], settles: true, why: "lower tolerance edge (11 - 1)" },
+    { reports: [12], settles: true, why: "upper tolerance edge (11 + 1)" },
+    { reports: [9.99], settles: false, why: "just below the lower edge" },
+    { reports: [12.01], settles: false, why: "just above the upper edge" },
+    { reports: [16.5], settles: false, why: "never within tolerance: the wait ends on its signal" },
+    { reports: [20, 19], settles: false, why: "neither report within tolerance: not latched" },
+  ];
+  for (const { reports, settles, why } of cases) {
+    assert.equal(await healthWaitSettles(reports, 11), settles, `reports ${reports.join(", ")}: ${why}`);
+  }
+});

@@ -66,6 +66,7 @@ export function observeScenarioPlayerPreparation(
     health: expectedHealth === undefined,
   };
   let settle: (() => void) | undefined;
+  const health = healthLatch(bot, expectedHealth);
 
   const armedAt = performance.now();
   const lastHeard = new Map<string, EventHeard>();
@@ -77,7 +78,7 @@ export function observeScenarioPlayerPreparation(
     { name: "position update", declared: expectedPosition !== undefined, observed: () => observed.position, events: ["move", "forcedMove", "spawn"] },
     { name: "health update", declared: expectedHealth !== undefined, observed: () => observed.health, events: ["health"] },
   ];
-  const expectedStates = expectedPlayerStates(bot, { inventory: expectedInventory, equipment: expectedEquipment, dimension: expectedDimension, position: expectedPosition, health: expectedHealth });
+  const expectedStates = expectedPlayerStates(bot, { inventory: expectedInventory, equipment: expectedEquipment, dimension: expectedDimension, position: expectedPosition, health: expectedHealth, healthLatched: health.reached });
 
   const preparationMatches = () =>
     awaitedUpdates.every(({ observed }) => observed()) && expectedStates.every(({ matches }) => matches());
@@ -87,6 +88,7 @@ export function observeScenarioPlayerPreparation(
   const close = listenForUpdates(bot, (update, event) => {
     hear(event);
     observed[update] = true;
+    if (update === "health") health.heard();
     check();
   });
 
@@ -110,6 +112,20 @@ export function observeScenarioPlayerPreparation(
     },
     close,
     describePending: () => describePendingPreparation(awaitedUpdates, expectedStates, lastHeard),
+  };
+}
+
+/**
+ * The first health report within tolerance of the declared value latches it: regeneration after the arrival
+ * moves the live value past the tolerance, and a later report must not undo the arrival. No declared health: latched.
+ */
+function healthLatch(bot: Bot, declared: number | undefined): { readonly reached: () => boolean; readonly heard: () => void } {
+  let latched = declared === undefined;
+  return {
+    reached: () => latched,
+    heard: () => {
+      if (!latched && healthMatches(bot, declared)) latched = true;
+    },
   };
 }
 
@@ -164,6 +180,7 @@ function expectedPlayerStates(
     readonly dimension: string;
     readonly position: readonly [number, number, number] | undefined;
     readonly health: number | undefined;
+    readonly healthLatched: () => boolean;
   },
 ): readonly ExpectedState[] {
   const wanted = [...expected.inventory].map(([type, count]) => `${count} ${itemName(bot, type)}`).join(", ") || "nothing";
@@ -172,7 +189,7 @@ function expectedPlayerStates(
     { name: "equipment", matches: () => expected.equipment.every(({ slot, type }) => bot.inventory.slots[slot]?.type === type), detail: () => `slots ${expected.equipment.map(({ slot, type }) => `${slot}=${itemNameIn(bot, slot)} (expected ${itemName(bot, type)})`).join(", ")}` },
     { name: "dimension", matches: () => bot.game.dimension === expected.dimension, detail: () => `is ${bot.game.dimension}, expected ${expected.dimension}` },
     { name: "position", matches: () => positionMatches(bot, expected.position), detail: () => `is ${vectorText(bot.entity.position)}, expected ${expected.position ? vectorText(expected.position) : "anywhere"}` },
-    { name: "health", matches: () => healthMatches(bot, expected.health), detail: () => `is ${bot.health}, expected ${expected.health}` },
+    { name: "health", matches: expected.healthLatched, detail: () => `is ${bot.health}, expected ${expected.health}` },
   ];
 }
 
