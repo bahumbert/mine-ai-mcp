@@ -39,6 +39,8 @@ params:
 goal:
   kind: all
   timeout: 480
+  # Longest passing still spans: 117-330 ticks at 20 tps, 134-336 at 10 tps; n=8 each.
+  stillTicks: 680 # 2 x 336, rounded up to 20 (2026-11-18).
   goals:
     - { kind: completion, who: EnderExpedition }
     - { kind: survive, who: EnderExpedition, seconds: 1 }

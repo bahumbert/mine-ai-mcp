@@ -10,6 +10,7 @@ import { createNativeWave } from "../../src/native-wave.ts";
 import { runExpeditionAction } from "../../src/expedition-action.ts";
 import { judgeDrops } from "../../src/game-rate.ts";
 import { waitForServerPaced } from "../../../src/world/server-paced.ts";
+import { declareProductiveProgress } from "../../../tests/minecraft/drivers/productive-progress.ts";
 
 const position = z.tuple([z.number().int(), z.number().int(), z.number().int()]);
 const damageEventSchema = z.object({ entityId: z.number(), sourceCauseId: z.number(), sourceDirectId: z.number() });
@@ -175,6 +176,7 @@ function expeditionResult(context: MineAiScenarioContext, params: Params, start:
 export const run: MineAiScenario = async (context) => {
   await recordSourceIdentity();
   const { bot, log } = context;
+  using _progress = declareProductiveProgress(bot, context.progress, context.signal);
   const died = new AbortController();
   const params = paramsSchema.parse(context.scenario.params);
   const start = declaredStart(context);
