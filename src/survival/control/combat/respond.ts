@@ -1,8 +1,10 @@
 import type { Bot } from "mineflayer";
+import { BodyAbort } from "../../../session/abort.js";
 import { type NavigationRuntime } from "../../../navigation/index.js";
 import { defendsOnContact, inDefensiveContact } from "../../perception/combat/contact.js";
-import { decideFightMovement } from "../../policy/combat/decision.js";
+import { decideCombatResponse, decideFightMovement } from "../../policy/combat/decision.js";
 import { recoveryHealth } from "../../policy/combat/health.js";
+import { responsePolicyChanged } from "../../policy/combat/permissions.js";
 import type { HostileDirective, HostileResponse } from "../../policy/combat/response.js";
 import { deflectFireball } from "../../responses/deflect.js";
 import { evade } from "../../responses/evade.js";
@@ -16,7 +18,9 @@ import {
   type HideResponseResult,
   type HostileResponseResult,
 } from "./response-result.js";
-import { responseScope } from "./scopes/response.js";
+import { answeredResponses, responseScope } from "./scopes/response.js";
+import { observeCombatDecision } from "./observation.js";
+import { completeResponse, responseFailure } from "./settlement.js";
 import { creeperEscape } from "../../policy/combat/tactics.js";
 import { COMBAT_LIMITS } from "./limits.js";
 import { watchEntityRemoval } from "../../../world/entity-removal.js";
@@ -152,9 +156,52 @@ async function fight(
   };
 }
 
+/** Reconsider one occupied shell using current premises, without reopening the failed construction. */
+async function followOccupiedShelter(
+  bot: Bot,
+  navigation: NavigationRuntime,
+  controller: CombatController,
+  context: ResponseContext,
+  healthBefore: number,
+  signal: AbortSignal,
+  why: string,
+): Promise<HideResponseResult["followUp"]> {
+  const policy = contextPolicy(context);
+  context.survival.answered.remember(responseScope(bot, policy, "hide"), { kind: "enclosure_failed", why });
+  signal.throwIfAborted();
+  if (bot.health <= 0) return null;
+  const facts = observeCombatDecision(bot, context);
+  const next = decideCombatResponse({ ...facts,
+    answered: new Set([...facts.answered, ...answeredResponses(bot, policy, context.survival), "hide"]),
+  }, { kind: "automatic" });
+  if (next.kind !== "fight" && next.kind !== "evade") return null;
+  const changed = new AbortController();
+  let previousPolicy = controller.policy.combat;
+  const stopWatching = controller.policy.onChange(snapshot => {
+    if (responsePolicyChanged(previousPolicy, controller.policy.combat, next.kind))
+      changed.abort(new BodyAbort({ kind: "policy_changed", revision: snapshot.revision }, "Combat policy changed."));
+    previousPolicy = controller.policy.combat;
+  });
+  const followUpSignal = AbortSignal.any([signal, changed.signal]);
+  let physical: HostileResponseResult;
+  try {
+    physical = await executeHostileResponse(bot, navigation, controller, next, context, healthBefore, followUpSignal);
+    followUpSignal.throwIfAborted();
+  } finally {
+    stopWatching();
+  }
+  if (physical.response !== "fight" && physical.response !== "evade") return null;
+  const failure = responseFailure(completeResponse(physical, signal));
+  if (failure && bot.health > 0) context.survival.answered.remember(
+    responseScope(bot, policy, next.kind, next.kind === "fight" ? next.targetId : undefined), failure,
+    next.kind === "fight" ? { premise: "unreachable", ticks: COMBAT_LIMITS.noProgressTicks, why: failure.why } : null);
+  return physical;
+}
+
 async function hide(
   bot: Bot,
   navigation: NavigationRuntime,
+  controller: CombatController,
   request: Extract<HostileDirective, { kind: "hide" }>,
   context: ResponseContext,
   healthBefore: number,
@@ -167,10 +214,14 @@ async function hide(
     recoverTo: recoveryHealth(context.policy),
     maximumMs: context.policy.recovery_timeout_ms,
   });
+  signal.throwIfAborted();
+  const followUp = bot.health > 0 && result.kind === "failed" && result.refusal?.cause === "occupied"
+    ? await followOccupiedShelter(bot, navigation, controller, context, healthBefore, signal, result.error) : null;
   return {
     ...encounterBaseline(bot, request, healthBefore),
     response: "hide",
     result,
+    followUp,
     attacks: 0,
     combatStyles: [],
     weaponsUsed: [],
@@ -229,7 +280,7 @@ export async function executeHostileResponse(
     case "fight":
       return fight(bot, controller, request, context, healthBefore, signal);
     case "hide":
-      return hide(bot, navigation, request, context, healthBefore, signal);
+      return hide(bot, navigation, controller, request, context, healthBefore, signal);
     case "evade":
       return evade(bot, navigation, request, context, healthBefore, signal);
   }

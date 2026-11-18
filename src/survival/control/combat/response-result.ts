@@ -50,7 +50,11 @@ export type EvadeResponseResult = EncounterEvidence & {
   readonly ends: readonly EvadeThreatEnd[];
   readonly result: { readonly kind: "separated" } | { readonly kind: "exhausted" | "failed"; readonly reason: string };
 };
-export type HideResponseResult = EncounterEvidence & { readonly response: "hide"; readonly result: HideResult };
+export type HideResponseResult = EncounterEvidence & {
+  readonly response: "hide";
+  readonly result: HideResult;
+  readonly followUp: FightResponseResult | EvadeResponseResult | null;
+};
 export type DeflectResponseResult = EncounterEvidence & {
   readonly response: "deflect";
   readonly result: Awaited<ReturnType<typeof deflectFireball>>;

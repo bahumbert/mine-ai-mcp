@@ -171,7 +171,7 @@ export async function respondToHostile(
     if (entity.id === bot.entity.id && source) answeredAttackers.delete(source.id);
   };
   bot.on("death", capture);
-  if (directive.kind === "evade") bot.on("entityHurt", preserveNewAttack);
+  if (directive.kind === "evade" || directive.kind === "hide") bot.on("entityHurt", preserveNewAttack);
   try {
     let settlement: HostileSettlement;
     try {
@@ -187,7 +187,10 @@ export async function respondToHostile(
       resolvedIds.add(id);
       attackerIds.delete(id);
     }
-    if (settlement.physical?.response === "evade" && settlement.physical.result.kind === "separated")
+    const physical = settlement.physical;
+    const evade = physical?.response === "hide" ? physical.followUp : physical;
+    if (settlement.kind === "completed" && settlement.response === "evade"
+      && evade?.response === "evade" && evade.result.kind === "separated")
       for (const id of answeredAttackers) attackerIds.delete(id);
     return finalize(settlement);
   } finally {
