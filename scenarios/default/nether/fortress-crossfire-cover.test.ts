@@ -107,9 +107,12 @@ async function runFixture(hide: ScriptedHide, options: { burning: boolean; healt
   } as unknown as MineAiScenarioContext;
   installMocks();
   let outcome: Outcome;
+  let settlements = 0;
   try {
     const { run } = await import("./fortress-crossfire-cover.ts");
-    outcome = { status: (await clock.settle(run(context), 120_000)).status };
+    const trial = run(context);
+    void trial.then(() => { settlements++; }, () => { settlements++; });
+    outcome = { status: (await clock.settle(trial, 120_000)).status };
   } catch (error) {
     outcome = { error };
   } finally {
@@ -128,9 +131,15 @@ async function runFixture(hide: ScriptedHide, options: { burning: boolean; healt
     }
   }
   cancelScheduledTick();
+  assert.equal(settlements, 1, "the fixture settled once");
+  assert.equal(added("entitySpawn"), 0, "no spawn listener left");
+  assert.equal(added("entityHurt"), 0, "no hurt listener left");
   assert.equal(clock.pendingTimers(), initialTimers, "no local timer left");
   assert.equal(clock.pendingGlobalTimers(), initialGlobalTimers, "no global timer left");
   await clock.advance(31_000);
+  assert.equal(settlements, 1, "the old deadline did not settle the fixture again");
+  assert.equal(added("entitySpawn"), 0, "no spawn listener after the old deadline");
+  assert.equal(added("entityHurt"), 0, "no hurt listener after the old deadline");
   assert.equal(clock.pendingTimers(), initialTimers, "no local timer after the old deadline");
   assert.equal(clock.pendingGlobalTimers(), initialGlobalTimers, "no global timer after the old deadline");
   const readReturned = (): ReturnedAt | undefined => returnedAt;
@@ -159,10 +168,14 @@ async function recoversAfterBurn(bot: FakeHarness["bot"], options: HideOptions):
     defendIntruder: async () => {}, releaseItemUse: () => {},
     wait: async () => {
       waits++;
+      if (waits === 1) assert.equal(options.holdWhile?.(), true, "burn keeps healthy recovery pending");
+      if (waits === 2) assert.deepEqual([bot.health, isBurning(bot)], [17, true]);
+      if (waits === 3) assert.deepEqual([bot.health, isBurning(bot)], [17, false]);
       const age = bot.time.age!;
       const advanced = await waitForServerTicks(bot, 1, { signal: options.signal });
       assert.equal(advanced, "moved");
       assert.ok(bot.time.age! > age, "recovery waited for a server-age advance");
+      if (bot.health <= 0) return;
       if (waits === 1) bot.health = 17;
       if (waits === 2) setBurning(bot, false);
       if (waits === 3) bot.health = 18;
@@ -186,6 +199,51 @@ function afterTicks(bot: FakeHarness["bot"], ticks: number, action: () => void):
 }
 
 for (const ticksPerSecond of [20, 10]) {
+  for (const health of [20]) {
+    test(`at ${ticksPerSecond} tps burning at health ${health} stays in recovery until burn clears and health returns`, async () => {
+      let startAge = 0;
+      const run = await runFixture((bot, options) => {
+        startAge = bot.time.age!;
+        return recoversAfterBurn(bot, options);
+      }, { burning: true, health, ticksPerSecond });
+      assert.deepEqual(run.outcome, { status: "succeeded" });
+      assert.deepEqual([run.returnedAt?.burning, run.returnedAt?.health], [false, 18]);
+      assert.equal(run.returnedAt!.age - startAge, 60, "three recovery waits advanced 60 server ticks");
+      assertNothingLeft(run);
+    });
+  }
+
+  for (const interruption of ["death", "abort"] as const) {
+    for (const phase of ["recovery", "handoff"] as const) {
+      test(`at ${ticksPerSecond} tps ${interruption} during ${phase} prevents a protection window`, async () => {
+        const run = await runFixture(async (bot, options) => {
+          const interrupt = () => interruption === "death" ? void (bot.health = 0) : activeController!.abort();
+          if (phase === "recovery") afterTicks(bot, 20, interrupt);
+          const result = await recoversAfterBurn(bot, options);
+          if (phase === "handoff") interrupt();
+          return result;
+        }, { burning: true, health: 18, ticksPerSecond });
+        if (interruption === "abort") assert.ok("error" in run.outcome, "abort rejects the fixture");
+        else assert.deepEqual(run.outcome, { status: "failed" });
+        if (run.returnedAt) assert.equal(run.endAge, run.returnedAt.age, "no protection ticks elapsed");
+        assertNothingLeft(run);
+      });
+    }
+  }
+
+  test(`at ${ticksPerSecond} tps a stopped server bounds a pending burn recovery`, async () => {
+    let stoppedAt: number | undefined;
+    const run = await runFixture(async (bot, options) => {
+      stoppedAt = bot.time.age!;
+      activeHarness!.server.stop();
+      return recoversAfterBurn(bot, options);
+    }, { burning: true, health: 18, ticksPerSecond });
+    assert.ok("error" in run.outcome, "a stopped recovery fails rather than hanging");
+    assert.match(String((run.outcome as { error: unknown }).error), /stalled/);
+    assert.equal(run.endAge, stoppedAt, "world age did not advance");
+    assertNothingLeft(run);
+  });
+
   test(`at ${ticksPerSecond} tps the burn holds the shelter, and the 400-tick window opens only with no burn at health 18`, async () => {
     let receivedHold = false;
     const run = await runFixture(async (bot, options) => {
