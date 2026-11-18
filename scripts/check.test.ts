@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { afterAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { gitProgram, importerReport, importerTestCommand, missingGitMessage, parseCheckArgs, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
+import { dirname, join } from "node:path";
+import { checkRun, gitProgram, importerReport, importerTestCommand, missingGitMessage, parseCheckArgs, runAllInSlot, siblingTests, suiteTestCommand, suiteTestPaths, suiteTestRoots, typecheckPlan } from "./check.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport } from "./data-readers.js";
 import { aliasesFromPackageJson, buildReverseGraph, IMPORTER_DEPTH, IMPORTER_TEST_CAP, testsReachedBy } from "./import-graph.js";
 import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
@@ -251,4 +251,134 @@ test("a change to a module the daemon test reads alone selects the daemon test, 
 test("the next step is named in what check prints about a stale or malformed declaration", () => {
   expect(unmatchedReport([{ reader: "tests/a.ts", glob: "gone/*.yaml" }])[0]).toContain("fix or remove");
   expect(malformedReport([{ file: "tests/a.ts", line: 2, reason: "empty glob", text: "x" }])[0]).toContain("fix or remove");
+});
+
+const slotRoots: string[] = [];
+const slotHolders: { proc: Bun.Subprocess; pid?: number }[] = [];
+afterAll(() => {
+  for (const holder of slotHolders) {
+    if (holder.pid !== undefined) stopPid(holder.pid);
+    holder.proc.kill();
+  }
+  for (const root of slotRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function stopPid(pid: number): void {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // already exited
+  }
+}
+
+function slotLockFile(): string {
+  const dir = mkdtempSync(join(tmpdir(), "check-slot-"));
+  slotRoots.push(dir);
+  return join(dir, "unit.lock");
+}
+
+/**
+ * Another process holding `lock` as a real flock. It is registered before its first output is read, so a failed set-up
+ * still gets cleaned up; `exec` makes `sleep` the process that holds the slot, and its pid is the one printed.
+ */
+async function holdSlot(lock: string): Promise<{ pid: number; stop(): void }> {
+  const proc = Bun.spawn(["flock", lock, "sh", "-c", "echo $$; exec sleep 30"], { stdout: "pipe", stderr: "ignore" });
+  const holder: { proc: Bun.Subprocess; pid?: number } = { proc };
+  slotHolders.push(holder);
+  const reader = proc.stdout.getReader();
+  const first = await reader.read();
+  reader.releaseLock();
+  const pid = Number(new TextDecoder().decode(first.value).trim());
+  holder.pid = pid;
+  return { pid, stop: () => stopPid(pid) };
+}
+
+/** The holder file `runInSlot` reads for the named holder. */
+function writeNamedHolder(lock: string, pid: number): void {
+  writeFileSync(`${lock}.holder`, JSON.stringify({ pid, root: "/work/holder", since: "2026-11-18T09:00:00.000Z" }));
+}
+
+const NAMED_HOLDER_LINE = (pid: number): string =>
+  `test:fast: waiting for the unit slot, held by pid ${pid}, /work/holder, since 2026-11-18T09:00:00.000Z`;
+
+test("--all waits while a named run holds the slot, runs its queued command once the holder goes, and returns that exit", async () => {
+  const lock = slotLockFile();
+  const holder = await holdSlot(lock);
+  writeNamedHolder(lock, holder.pid);
+  const lines: string[] = [];
+  const { promise: waiting, resolve: sawWaiting } = Promise.withResolvers<void>();
+  const marker = join(dirname(lock), "queued-ran");
+  let suiteRuns = 0;
+  const run = runAllInSlot({
+    slot: true,
+    env: { PATH: process.env.PATH },
+    lock,
+    say: (line) => {
+      lines.push(line);
+      sawWaiting();
+    },
+    queued: ["sh", "-c", `echo ran > ${marker}; exit 4`],
+    here: () => {
+      suiteRuns++;
+      return 0;
+    },
+  });
+  await waiting;
+  expect(existsSync(marker)).toBe(false);
+  holder.stop();
+  expect(await run).toBe(4);
+  expect(readFileSync(marker, "utf8")).toBe("ran\n");
+  expect(suiteRuns).toBe(0);
+  expect(lines).toEqual([NAMED_HOLDER_LINE(holder.pid)]);
+});
+
+test("bun run test prints the named holder and waits: no typecheck or suite line before the slot is free", async () => {
+  const lock = slotLockFile();
+  const holder = await holdSlot(lock);
+  writeNamedHolder(lock, holder.pid);
+  const env: Record<string, string | undefined> = { ...process.env, MINE_AI_TEST_SLOT_LOCK: lock };
+  delete env.MINE_AI_TEST_SLOT_HELD;
+  const check = Bun.spawn([process.execPath, join(import.meta.dir, "check.ts"), "--all"], {
+    cwd: join(import.meta.dir, ".."),
+    env,
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const decoder = new TextDecoder();
+  let text = "";
+  // the output's own state ends the read: the waiting line, or a typecheck line that would mean it ran at once
+  for await (const chunk of check.stdout) {
+    text += decoder.decode(chunk);
+    if (text.includes("waiting for the unit slot") || text.includes("$ bun run")) break;
+  }
+  check.kill();
+  await check.exited;
+  holder.stop();
+  expect(text).toContain(NAMED_HOLDER_LINE(holder.pid));
+  expect(text).not.toContain("$ bun run");
+});
+
+const SLOT_BYPASSES: { name: string; options: { slot: boolean; env: NodeJS.ProcessEnv } }[] = [
+  { name: "--no-slot", options: { slot: false, env: { PATH: process.env.PATH } } },
+  { name: "MINE_AI_TEST_SLOT_HELD=1 (no nested lock)", options: { slot: true, env: { PATH: process.env.PATH, MINE_AI_TEST_SLOT_HELD: "1" } } },
+];
+for (const { name, options } of SLOT_BYPASSES) {
+  test(`${name} runs the suite at once while a named run holds the slot, the holder still alive after`, async () => {
+    const lock = slotLockFile();
+    const holder = await holdSlot(lock);
+    writeNamedHolder(lock, holder.pid);
+    const lines: string[] = [];
+    const code = await runAllInSlot({ ...options, lock, say: (line) => lines.push(line), queued: ["sh", "-c", "exit 4"], here: () => 7 });
+    expect(code).toBe(7);
+    expect(lines).toEqual([]);
+    expect(() => process.kill(holder.pid, 0)).not.toThrow();
+    holder.stop();
+  });
+}
+
+test("the default check takes no slot; --all takes it, and --no-slot is check's own flag, not bun test's", () => {
+  expect(checkRun([])).toEqual({ mode: "quick" });
+  expect(checkRun(["origin/main", "--depth", "0"])).toEqual({ mode: "quick" });
+  expect(checkRun(["--all"])).toEqual({ mode: "all", slot: true, testArgs: [] });
+  expect(checkRun(["--all", "--no-slot", "--coverage"])).toEqual({ mode: "all", slot: false, testArgs: ["--coverage"] });
 });
