@@ -52,6 +52,7 @@ tick:
 goal:
   kind: all
   timeout: 70
+  stillTicks: 1320 # P4-29 a11 T8: longest passing still span 651 ticks (20 tps 577, 10 tps 651; n 3 and 8); 2x rounded up to 20.
   goals:
     - kind: kill
       who: BowBot
