@@ -3,6 +3,7 @@ import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Action, ActionOutput, ActionResult } from "../actions/index.js";
@@ -411,11 +412,17 @@ function observeBotEvents(
   };
 }
 
+/** Select an incident directory and register cleanup when the runtime owns it. */
+function incidentDirectory(options: MinecraftRuntimeOptions, botData: SqlBotData, resources: AsyncDisposableStack): string {
+  if (options.incidents?.directory !== undefined) return options.incidents.directory;
+  if (botData.location.kind === "persistent") return path.join(path.dirname(botData.location.file), "incidents");
+  const directory = path.join(os.tmpdir(), "mine-ai-incidents", randomUUID());
+  resources.defer(async () => { try { await rm(directory, { recursive: true, force: true }); } catch { /* Best effort. */ } });
+  return directory;
+}
+
 /** Own every long-lived facility attached to one connected Minecraft bot. */
-export async function createMinecraftRuntime(
-  bot: Bot,
-  options: MinecraftRuntimeOptions,
-): Promise<MinecraftRuntime> {
+export async function createMinecraftRuntime(bot: Bot, options: MinecraftRuntimeOptions): Promise<MinecraftRuntime> {
   await using resources = new AsyncDisposableStack();
   const botData = resources.use(SqlBotData.create(options.botData));
   // One list per bot: routes read it through the provider, the region tools write it (ADR-012).
@@ -444,11 +451,7 @@ export async function createMinecraftRuntime(
     observeIncidents(bot, navigation, {
       perception,
       survival: () => survival.snapshot(),
-      directory:
-        options.incidents?.directory ??
-        (botData.location.kind === "persistent"
-          ? path.join(path.dirname(botData.location.file), "incidents")
-          : path.join(os.tmpdir(), "mine-ai-incidents", randomUUID())),
+      directory: incidentDirectory(options, botData, resources),
       identity: {
         ...options.botData.identity,
         username: bot.username,

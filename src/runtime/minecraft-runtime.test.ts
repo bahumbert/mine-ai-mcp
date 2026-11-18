@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { z } from "zod";
 import type { CombatDecision } from "../survival/control/combat/contract.js";
 
@@ -9,12 +10,18 @@ import path from "node:path";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
+import * as incidentLog from "../bot-data/incident-log.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
 import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
+
+const { spyOn } = require("bun:test") as {
+  spyOn(target: typeof incidentLog, method: "writeIncidentArtifact"): { mockImplementation(implementation: typeof incidentLog.writeIncidentArtifact): { mockRestore(): void } };
+  spyOn(target: typeof fs, method: "rm"): { mockImplementation(implementation: typeof fs.rm): { mockRestore(): void } };
+};
 
 // check-reads: src/**/*.ts
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
@@ -65,6 +72,176 @@ function runtimeHarness(controlStates: boolean[] = [], rejectedListener?: string
   bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
   return harness;
 }
+
+test("temporary incident folders are removed after close without affecting another runtime", async () => {
+  const options = {
+    botData: { storage: { kind: "temporary" as const }, identity: { worldId: "incident-ownership", scope: { kind: "bot" as const, botId: "runtime-bot" } } },
+    createCombatController: () => combatController,
+  };
+  const first = await createMinecraftRuntime(runtimeBot(), options);
+  const second = await createMinecraftRuntime(runtimeBot(), options);
+  let firstDirectory = "";
+  let secondDirectory = "";
+  let releasePending!: () => void;
+  let releaseFinal!: () => void;
+  const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+  const finalGate = new Promise<void>((resolve) => { releaseFinal = resolve; });
+  let pendingEntered!: () => void;
+  let finalEntered!: () => void;
+  const pendingStarted = new Promise<void>((resolve) => { pendingEntered = resolve; });
+  const finalStarted = new Promise<void>((resolve) => { finalEntered = resolve; });
+  const originalWrite = incidentLog.writeIncidentArtifact;
+  let finalWritten = false;
+  let writeSpy: { mockRestore(): void } | undefined;
+  try {
+    const firstCapture = await first.captureIncident();
+    const secondCapture = await second.captureIncident();
+    assert.ok(firstCapture.kind === "completed" && firstCapture.reference.artifact.kind === "written");
+    assert.ok(secondCapture.kind === "completed" && secondCapture.reference.artifact.kind === "written");
+    firstDirectory = path.dirname(firstCapture.reference.artifact.path);
+    secondDirectory = path.dirname(secondCapture.reference.artifact.path);
+    assert.notEqual(firstDirectory, secondDirectory);
+    writeSpy = spyOn(incidentLog, "writeIncidentArtifact").mockImplementation(async (...args) => {
+      if (args[0] === firstDirectory && args[1] === "operator") { pendingEntered(); await pendingGate; }
+      if (args[0] === firstDirectory && args[1] === "runtime_closed") { finalEntered(); await finalGate; }
+      const result = await originalWrite(...args);
+      if (args[0] === firstDirectory && args[1] === "runtime_closed") finalWritten = result.artifact.kind === "written";
+      return result;
+    });
+    const pending = first.captureIncident();
+    await pendingStarted;
+    let settled = false;
+    const closing = first.close();
+    assert.equal(first.close(), closing);
+    void closing.then(() => { settled = true; });
+    await access(firstDirectory);
+    assert.equal(settled, false);
+    releasePending();
+    const pendingResult = await pending;
+    assert.ok(pendingResult.kind === "completed" && pendingResult.reference.artifact.kind === "written");
+    await finalStarted;
+    await access(firstDirectory);
+    assert.equal(settled, false);
+    releaseFinal();
+    await closing;
+    assert.equal(finalWritten, true);
+    await assert.rejects(access(firstDirectory), { code: "ENOENT" });
+    await access(secondDirectory);
+    const nextCapture = await second.captureIncident();
+    assert.ok(nextCapture.kind === "completed" && nextCapture.reference.artifact.kind === "written");
+    const query = second.actions.find((action) => action.name === "query_bot_data");
+    assert.ok(query);
+    assert.equal((await second.run(query, { sql: "SELECT 1" })).result.status, "succeeded");
+    const next = await createMinecraftRuntime(runtimeBot(), options);
+    try {
+      const captured = await next.captureIncident();
+      assert.ok(captured.kind === "completed" && captured.reference.artifact.kind === "written");
+      const nextQuery = next.actions.find((action) => action.name === "query_bot_data");
+      assert.ok(nextQuery);
+      assert.equal((await next.run(nextQuery, { sql: "SELECT 1" })).result.status, "succeeded");
+    } finally {
+      await next.close();
+    }
+  } finally {
+    releasePending();
+    releaseFinal();
+    await first.close();
+    await second.close();
+    writeSpy?.mockRestore();
+    if (firstDirectory) await rm(firstDirectory, { recursive: true, force: true });
+    if (secondDirectory) await rm(secondDirectory, { recursive: true, force: true });
+  }
+});
+
+test("construction rollback removes the owned incident folder", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-rollback-"));
+  const previous = process.env.TMPDIR;
+  const bot = runtimeBot();
+  const slots = bot.inventory.listenerCount("updateSlot");
+  process.env.TMPDIR = root;
+  try {
+    await assert.rejects(createMinecraftRuntime(bot, {
+      botData: { storage: { kind: "temporary" }, identity: { worldId: "rollback", scope: { kind: "bot", botId: "bot" } } },
+      createCombatController: () => ({ ...combatController, onDecision: () => { throw new Error("registration failed"); } }),
+    }), /registration failed/);
+    assert.deepEqual(await readdir(path.join(root, "mine-ai-incidents")), []);
+    for (const event of ["end", "physicsTick", "chat", "death"]) assert.equal(added(bot, event), 0, event);
+    assert.equal(bot.inventory.listenerCount("updateSlot"), slots);
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("caller and persistent incident artifacts survive close", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-retained-"));
+  try {
+    for (const persistent of [false, true]) {
+      const runtime = await createMinecraftRuntime(runtimeBot(), {
+        incidents: persistent ? undefined : { directory: path.join(root, "explicit") },
+        botData: { storage: persistent ? { kind: "persistent", root } : { kind: "temporary" }, identity: { worldId: "retained", scope: { kind: "bot", botId: "bot" } } },
+        createCombatController: () => combatController,
+      });
+      const capture = await runtime.captureIncident();
+      assert.ok(capture.kind === "completed" && capture.reference.artifact.kind === "written");
+      await runtime.close();
+      assert.ok((await readFile(capture.reference.artifact.path)).length > 0);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed artifacts, disposal errors and removal errors settle independently", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-removal-"));
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  try {
+    for (const [disposalFails, removalFails] of [[true, false], [false, true], [true, true]]) {
+      const bot = runtimeBot();
+      let registrations = 0;
+      let disposals = 0;
+      const runtime = await createMinecraftRuntime(bot, {
+        incidents: { retention: { days: 5, maxBytes: 0 } },
+        botData: { storage: { kind: "temporary" }, identity: { worldId: "failure", scope: { kind: "bot", botId: "bot" } } },
+        createCombatController: () => ({ ...combatController, onDecision: () => {
+          const registration = ++registrations;
+          return () => { disposals++; if (disposalFails && registration === 1) throw new Error("disposal failed"); };
+        } }),
+      });
+      let removal: { mockRestore(): void } | undefined;
+      try {
+        // The real writer reports an artifact failure when the configured budget is zero.
+        const capture = await runtime.captureIncident();
+        assert.ok(capture.kind === "completed" && capture.reference.artifact.kind === "failed");
+        const parent = path.join(root, "mine-ai-incidents");
+        const directory = path.join(parent, (await readdir(parent))[0]!);
+        const originalRemove = fs.rm;
+        let removals = 0;
+        removal = spyOn(fs, "rm").mockImplementation(async (...args) => {
+          if (args[0] === directory) { removals++; if (removalFails) throw new Error("removal failed"); }
+          return originalRemove(...args);
+        });
+        const closing = runtime.close();
+        assert.equal(runtime.close(), closing);
+        if (disposalFails) await assert.rejects(closing, /disposal failed/); else await closing;
+        assert.equal(disposals, registrations);
+        assert.equal(removals, 1);
+        if (removalFails) await access(directory); else await assert.rejects(access(directory), { code: "ENOENT" });
+        for (const event of ["end", "physicsTick", "chat", "death"]) assert.equal(added(bot, event), 0, event);
+        removal.mockRestore();
+        removal = undefined;
+        await rm(directory, { recursive: true, force: true });
+      } finally {
+        removal?.mockRestore();
+        await runtime.close().catch(() => {});
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("completed combat decisions are retained without a physics sample and unsubscribe on close", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "combat-decision-test-"));
