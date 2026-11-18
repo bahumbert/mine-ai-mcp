@@ -525,13 +525,38 @@ async function nextWalk(runner: ActionRunner, connected = true) {
 }
 
 for (const ticksPerSecond of [20, 10]) {
+  for (const first of ["backstop", "stopped"] as const) {
+    test(`held walk evidence ${first} wins before the retired deadline at ${ticksPerSecond} tps`, async () => {
+      const clock = createFakeClock({ mode: "mocked" });
+      using _timers = clock.install();
+      const { runner, pending, bot, server, runs, caller } = await heldWalk(clock, ticksPerSecond);
+      const evidence = "no projectile in flight, target zombie#12 alive at 21.7 blocks";
+      let settlements = 0;
+      void pending.then(() => settlements++);
+      if (first === "stopped") server.stop();
+      await clock.settle(pending, 100_000);
+      assert.ok(first === "stopped" ? bot.time.age === 1_000 : bot.time.age >= 1_620);
+      assert.equal(runner.releaseHold("hostile_reflex", "stand_down", evidence), false);
+      const output = await clock.settle(pending, 1_000);
+      assert.equal(output.result.status, "cancelled");
+      assert.equal(runs.count, 1);
+      assert.match(output.interruptions!.at(-1)!, /within 600 world ticks/);
+      await nextWalk(runner);
+      await clock.advance(100_000, 1_000);
+      assert.equal(settlements, 1);
+      assert.equal(clock.pendingGlobalTimers(), 0);
+      assert.equal(getEventListeners(caller.signal, "abort").length, 0);
+    });
+  }
   for (const holds of [1, 2]) {
     test(`held walk resumes on evidence and preserves ${holds} hold records at ${ticksPerSecond} tps`, async () => {
       const clock = createFakeClock({ mode: "mocked" });
       using _timers = clock.install();
       const { runner, runs, pending, bot, caller } = await heldWalk(clock, ticksPerSecond, true, false, holds);
+      let settlements = 0;
+      void pending.then(() => settlements++);
       const evidence = "no projectile in flight, no hostile tracked";
-      const receipt = `${SETTLED_HOLD}; hostile_reflex saw the threat end (${evidence}): the walk resumes.`;
+      const receipt = `${SETTLED_HOLD}; hostile_reflex stood down (${evidence}): the walk resumes.`;
       assert.equal(runner.releaseHold("hunger_reflex", "none_observed", evidence), false);
       assert.equal(runner.releaseHold("hostile_reflex", "none_observed", evidence), true);
       await started(runs, 2);
@@ -553,6 +578,7 @@ for (const ticksPerSecond of [20, 10]) {
       assert.equal(runner.releaseHold("hostile_reflex", "late", evidence), false);
       await nextWalk(runner);
       await clock.advance(100_000, 1_000);
+      assert.equal(settlements, 1);
       assert.equal(clock.pendingGlobalTimers(), 0);
       assert.equal(getEventListeners(caller.signal, "abort").length, 0);
     });

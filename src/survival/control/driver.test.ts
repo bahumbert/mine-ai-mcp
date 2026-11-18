@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BodyAbort } from "../../session/abort.js";
-import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { ActionRunner } from "../../session/action-runner.js";
+import { stubAction } from "../../session/action-runner-fixtures.test.js";
 import { type SurvivalTransition } from "./contract.js";
 import { ReflexDriver } from "./driver.js";
 
@@ -142,6 +143,88 @@ const RATES = [
   { ticksPerSecond: 20, msPerTick: 50 },
   { ticksPerSecond: 10, msPerTick: 100 },
 ] as const;
+
+for (const { ticksPerSecond } of RATES) for (const stage of ["held", "attached", "answered", "sensor_failed", "closed"] as const)
+  test(`${stage} retires the hostile journey without evidence resume (${ticksPerSecond} tps)`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _clock = clock.install();
+    const { bot } = createFakeBot({ clock, server: { startAge: START_AGE, ticksPerSecond } });
+    const runner = new ActionRunner({ clock, worldAge: () => bot.time.age });
+    await using driver = new ReflexDriver(bot, runner, { now: clock.now });
+    let response = "evade", attempts = 0, evidenceCalls = 0, settlements = 0, sensorFailed = false;
+    const phases: SurvivalTransition[] = [];
+    driver.onTransition(event => { if (event.kind === "phase") phases.push(event); });
+    const registration = driver.register({
+      name: "hostile_reflex",
+      sense: () => {
+        if (sensorFailed) throw new Error("chunk not loaded");
+        return bot.health > 0 ? { kind: "observed", danger: true, evidence: true } : null;
+      },
+      decide: () => ({ kind: "respond", response, name: response, reason: response }),
+      facts: chosen => ({ capability: "combat", response: chosen, scope: chosen, facts: () => null, permissions: () => null }),
+      act: async (chosen, signal) => {
+        if (chosen === "fight") {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+          signal.throwIfAborted();
+        }
+      },
+      failure: () => ({ kind: "exhausted", why: "Evade exhausted" }),
+      continuation: () => ({ kind: "hold", reason: "Evade exhausted" }),
+      heldEnded: () => { evidenceCalls++; return { ended: "no projectile in flight" }; },
+      describe: () => null,
+      limits: () => ({ ...TEST_LIMITS, noProgressTicks: 600 }),
+    });
+    const listeners = listenersAddedSince(bot), timers = clock.pendingGlobalTimers();
+    const action = stubAction(async (_input, { signal }) => {
+      if (++attempts === 1) {
+        await new Promise<void>(resolve => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        signal!.throwIfAborted();
+      }
+      return { status: "succeeded" };
+    }, { kind: "resumable_task" });
+    const pending = runner.run(action, { block_name: "stone" });
+    void pending.then(() => settlements++);
+    await settled();
+    bot.emit("physicsTick");
+    await settled();
+    assert.equal(runner.request()?.state.kind, "suspended");
+    assert.equal((phases.at(-1)?.evidence as { outcome: string }).outcome, "held");
+    assert.equal(driver.answered.snapshot().length, 1);
+    if (stage === "attached") {
+      response = "fight";
+      bot.emit("physicsTick");
+      await settled();
+      assert.equal(driver.snapshot()[0]?.response?.name, "fight");
+    }
+    const death = stage === "held" || stage === "attached";
+    if (death) { bot.health = 0; bot.emit("death"); }
+    else if (stage === "closed") await registration[Symbol.asyncDispose]();
+    else { sensorFailed = stage === "sensor_failed"; bot.emit("physicsTick"); }
+    const output = await clock.settle(pending, 1_000);
+    assert.equal(output.result.status, "cancelled");
+    await settled();
+    if (death) { assert.deepEqual(driver.answered.snapshot(), []); assert.equal(driver.snapshot()[0]?.stale, true); }
+    else assert.ok(output.interruptions!.at(-1)!.endsWith(`chose no further response (${stage}).`));
+    assert.equal(driver.snapshot()[0]?.response ?? null, null);
+    if (stage === "sensor_failed") assert.equal(driver.snapshot()[0]?.missing, "sensor_failed: chunk not loaded");
+    assert.equal(phases.filter(event => (event.evidence as { outcome: string }).outcome === "released").length, 1);
+    assert.equal((phases.at(-1)!.evidence as { resumed: boolean }).resumed, false);
+    assert.equal(output.interruptions!.some(receipt => receipt.includes("the walk resumes")), false);
+    assert.equal(runner.releaseHold("hostile_reflex", "stand_down", "late evidence"), false);
+    assert.equal(evidenceCalls, 0);
+    assert.equal(attempts, 1);
+    assert.equal(clock.now(), 0);
+    assert.equal(bot.time.age, START_AGE);
+    sensorFailed = false;
+    bot.health = 0; // Retire further sensing after checking the actual return route.
+    assert.equal((await clock.settle(runner.run(action, { block_name: "stone" }), 1_000)).result.status, "succeeded");
+    const phaseCount = phases.length;
+    await clock.advance(100_000, 1_000);
+    assert.equal(phases.length, phaseCount);
+    assert.equal(settlements, 1);
+    assert.equal(clock.pendingGlobalTimers(), timers);
+    for (const event of ["physicsTick", "time", "health", "death", "game", "end"]) assert.equal(listeners(event), 0);
+  });
 
 /** A driver on the fake bot's own clock and server, as the production driver is wired (`now` the clock, the age the bot's). */
 function retryScene(ticksPerSecond: number, retryAfterFailureTicks: number | undefined) {

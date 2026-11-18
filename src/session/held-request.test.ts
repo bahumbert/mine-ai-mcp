@@ -136,11 +136,11 @@ test("held request: release keeps the last receipt and names the decision", asyn
   assert.deepEqual(await record.done, { kind: "return", reason: `${HOLD}; ${OWNER} chose no further response (stand_down).` });
 });
 
-test("held request: threat-ended evidence resumes once with the receipt and release suffix", async () => {
+test("held request: stand-down evidence resumes once with the receipt and release suffix", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   const record = held();
-  const suffix = "; hostile_reflex saw the threat end (no projectile in flight, no hostile tracked): the walk resumes.";
+  const suffix = "; hostile_reflex stood down (no projectile in flight, no hostile tracked): the walk resumes.";
   assert.equal(record.release("none_observed", "no projectile in flight, no hostile tracked"), true);
   assert.deepEqual(await record.done, { kind: "resume", reason: `${HOLD}${suffix}` });
   assert.equal(record.suffix, suffix);

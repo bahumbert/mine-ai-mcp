@@ -141,20 +141,20 @@ export function senseHostile(scene: HostileScene) {
 
 type HostileDanger = NonNullable<ReturnType<typeof senseHostile>>["danger"];
 
-/** A non-response can resume a held walk only when the current observations show its threat ended. */
+/** Projectile-free stand-down can resume a held walk; evidence still names every live held target. */
 export function heldThreatEnded(scene: HostileScene, held: HostileResponse, observed: HostileDanger | null): HeldThreatEnd {
   // A still-incoming projectile beyond the contact range must not buy a short resume between responses.
   const fireball = incomingFireball(scene.bot, Infinity);
   if (fireball) return { notEnded: `projectile ${fireball.name}#${fireball.id} incoming at ${fireball.position.distanceTo(scene.bot.entity.position).toFixed(1)}` };
   const shieldProjectile = incomingShieldProjectiles(scene.bot)[0];
   if (shieldProjectile) return { notEnded: `shield projectile ${shieldProjectile.name}#${shieldProjectile.id}` };
-  if (observed === null) return { ended: "no projectile in flight, no hostile tracked" };
   const targets = "targetId" in held ? [{ id: held.targetId,
     name: held.threats.find((threat) => threat.id === held.targetId)?.name ?? scene.bot.entities[held.targetId]?.name ?? "entity" }]
     : held.threats;
-  if (!targets.length) return { notEnded: "hostile tracked" };
-  const alive = targets.find(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid && held.kind !== "deflect");
-  if (alive) return { notEnded: `target ${alive.name}#${alive.id} alive` };
+  const alive = targets.filter(({ id }) => !scene.perception.resolvedIds.has(id) && scene.bot.entities[id]?.isValid && held.kind !== "deflect");
+  if (alive.length) return { ended: ["no projectile in flight", ...alive.map(({ id, name }) =>
+    `target ${name}#${id} alive at ${scene.bot.entities[id]!.position.distanceTo(scene.bot.entity.position).toFixed(1)} blocks`)].join(", ") };
+  if (observed === null) return { ended: "no projectile in flight, no hostile tracked" };
   return { ended: ["no projectile in flight", ...targets.map(({ id, name }) =>
     `target ${name}#${id} ${scene.perception.resolvedIds.has(id) ? "dead" : scene.bot.entities[id]?.isValid ? "passed" : "gone"}`)].join(", ") };
 }

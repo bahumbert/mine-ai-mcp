@@ -223,7 +223,7 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
             },
         inputs,
       );
-      this.#releaseHold(chosen.kind, chosen.kind === "handled" ? this.#heldEnded(danger, chosen) : null);
+      this.#releaseHold(chosen.kind, this.#heldEnded(danger, chosen));
       return;
     }
     const scope = this.definition.facts(chosen.response);

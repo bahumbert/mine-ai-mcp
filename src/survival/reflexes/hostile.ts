@@ -132,8 +132,8 @@ export function attachHostileReflex(
     decisionFacts: hostileDecisionFacts,
     decide: decideHostile,
     heldEnded: (held, observed, decision) => held.kind !== "prepare_shield" && (decision === "none_observed" ||
-      typeof decision === "object" && decision !== null && "kind" in decision && decision.kind === "handled" &&
-      "by" in decision && decision.by === "no_contact") ? heldThreatEnded(scene, held, observed) : null,
+      typeof decision === "object" && decision !== null && "kind" in decision && (decision.kind === "stand_down" ||
+      decision.kind === "handled" && "by" in decision && decision.by === "no_contact")) ? heldThreatEnded(scene, held, observed) : null,
     facts: (response) => hostileScope(scene, response),
     limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
     bodyTravel: (response) => response.kind !== "fight",

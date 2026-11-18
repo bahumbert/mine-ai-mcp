@@ -21,7 +21,7 @@ import type { HostileResponse } from "../policy/combat/response.js";
 
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { MineflayerWorldView } from "../../navigation/mineflayer/world.js";
-import { observeHostileResponse } from "../control/combat/observation.js";
+import { observeCombatDecision, observeHostileResponse } from "../control/combat/observation.js";
 import { CONTACT_GRACE_TICKS, executeHostileResponse } from "../control/combat/respond.js";
 import { completeResponse, encounterReceipt } from "../control/combat/settlement.js";
 import { CombatPerception } from "../perception/combat/observations.js";
@@ -371,7 +371,8 @@ type ReflexFixture = ReturnType<typeof reflexFixture>;
 
 /** A resumable journey around real hostile decisions; only its navigation and fight results are contract stubs. */
 function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "removed" | "hide" | "hunger" | "deflect" | "deflect_passed" | "higher",
-  entities: Record<number, FakeEntitySpec> = { 7: hostile("zombie", 3) }, onHeldEnded?: () => void) {
+  entities: Record<number, FakeEntitySpec> = { 7: hostile("zombie", 3) }, onHeldEnded?: () => void,
+  options: Pick<FixtureOptions, "carried" | "slots"> & { startAge?: number; holds?: number } = {}) {
   let finishEvade!: () => void;
   let reachedEvade!: () => void;
   const entered = new Promise<void>((resolve) => { reachedEvade = resolve; });
@@ -386,8 +387,8 @@ function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "remo
     fixture.entities.remove(id);
     return died(id);
   }, async () => { reachedEvade(); await route; return { status: "stopped", reason: "no path", elapsedMs: 0 }; },
-  { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
-    entities, health: 11, food: ending === "hunger" ? 10 : 20, onHeldEnded });
+  { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: options.startAge ?? 1_000 },
+    ...options, entities, health: 11, food: ending === "hunger" ? 10 : 20, onHeldEnded });
   let attempts = 0;
   const phases: { phase: string; outcome: string; worldAge: number; generation: number; resumed: boolean; notEnded?: string }[] = [];
   fixture.driver.onTransition((event) => {
@@ -398,7 +399,7 @@ function heldJourney(ticksPerSecond: number, ending: "resume" | "return" | "remo
   const action = defineAction({ name: "held_journey", description: "Journey interrupted by a hostile chain",
     inputSchema: input, resultSchema: actionResultSchema({}), parse: (value) => input.parse(value),
     formatResult: (result) => result.status, execution: { kind: "resumable_task" }, begin: () => async ({ signal }) => {
-      if (++attempts === 1) {
+      if (++attempts <= (options.holds ?? 1)) {
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
         signal!.throwIfAborted();
       }
@@ -448,7 +449,9 @@ function incomingBall(x: number): FakeEntitySpec {
 
 type HeldEvidenceCase = "deflect_gone" | "deflect_incoming" | "deflect_far_answered" | "arrow" | "arrow_gone"
   | "deflect_passed" | "deflect_passed_incoming" | "deflect_passed_far_incoming"
-  | "alive" | "dead" | "mixed" | "all_dead" | "combat" | "stand_down" | "cancel";
+  | "alive" | "dead" | "mixed" | "all_dead" | "combat" | "policy_settlement" | "stand_down" | "cancel"
+  | "at_range" | "outside_range" | "pursuer" | "live_arrow" | "live_arrow_gone"
+  | "live_fireball" | "live_fireball_gone" | "live_far_fireball";
 
 /** Change only server observations or existing controller contracts after the held response has ended. */
 async function arrangeHeldEvidence(fixture: ReturnType<typeof heldJourney>, scenario: HeldEvidenceCase) {
@@ -472,6 +475,19 @@ async function arrangeHeldEvidence(fixture: ReturnType<typeof heldJourney>, scen
   await flush();
   assert.equal(fixture.phases.at(-1)?.outcome, "held");
   if (scenario === "alive" || scenario === "mixed") fixture.bot.entities[scenario === "mixed" ? 8 : 7]!.position.x = 12;
+  if (["at_range", "outside_range", "pursuer"].includes(scenario)) {
+    fixture.bot.entities[7]!.position.x = scenario === "at_range" ? 16 : scenario === "outside_range" ? 16.1 : 21.7;
+    fixture.bot.entities[7]!.velocity.x = 0.2;
+  }
+  if (scenario.startsWith("live_")) {
+    fixture.bot.entities[7]!.position.x = 6;
+    const arrow = scenario.includes("arrow");
+    fixture.entities.spawn({ id: 8, ...(arrow ? { name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1) }
+      : incomingBall(scenario === "live_far_fireball" ? 20 : 12)) });
+    if (!arrow) fixture.driver.answered.remember(responseScope(fixture.bot, () => fixture.controller.policy.effective, "deflect", 8),
+      { kind: "deflection_unobserved", why: "This shot's deflection was already answered" });
+    if (scenario.endsWith("gone")) fixture.entities.remove(8);
+  }
   if (scenario === "dead" || scenario === "mixed" || scenario === "all_dead") {
     fixture.combat.kill(7);
     if (scenario === "all_dead") fixture.combat.kill(8);
@@ -488,6 +504,16 @@ async function arrangeHeldEvidence(fixture: ReturnType<typeof heldJourney>, scen
     fixture.entities.spawn({ id: 9, ...hostile("magma_cube", 12) });
     fixture.controller.activeEngagement = () => ({ kind: "mob", targetId: 9 });
   }
+  if (scenario === "policy_settlement") {
+    const policy = fixture.controller.policy;
+    const stop = policy.onChange(() => {
+      fixture.tick();
+      assert.deepEqual(fixture.driver.snapshot()[0]?.decision, { kind: "handled", by: "policy_settlement" });
+    });
+    try { await policy.edit({ operation: "set", expected_revision: policy.snapshot().revision,
+      changes: { combat: { melee: false } }, lifetime: { kind: "session" }, reason: "Observe the admission barrier" }); }
+    finally { stop(); }
+  }
   if (scenario === "stand_down") await fixture.controller.policy.edit({ operation: "set",
     expected_revision: fixture.controller.policy.snapshot().revision,
     changes: { combat: { retreat: false, melee: false, bow: false } }, lifetime: { kind: "session" }, reason: "Stand down while a threat remains" });
@@ -499,8 +525,10 @@ async function arrangeHeldEvidence(fixture: ReturnType<typeof heldJourney>, scen
 
 for (const ticksPerSecond of [20, 10]) {
   for (const scenario of ["deflect_gone", "deflect_incoming", "deflect_far_answered", "arrow", "arrow_gone",
-    "alive", "dead", "mixed", "all_dead", "combat", "stand_down", "cancel",
-    "deflect_passed", "deflect_passed_incoming", "deflect_passed_far_incoming"] as const) {
+    "alive", "dead", "mixed", "all_dead", "combat", "policy_settlement", "stand_down", "cancel",
+    "deflect_passed", "deflect_passed_incoming", "deflect_passed_far_incoming",
+    "at_range", "outside_range", "pursuer", "live_arrow", "live_arrow_gone", "live_fireball",
+    "live_fireball_gone", "live_far_fireball"] as const) {
     const label = scenario === "deflect_passed_far_incoming" ? "deflect_passed with a still incoming fireball beyond observation range" : scenario;
     test(`held threat evidence ${label} decides the walk at ${ticksPerSecond} tps`, async () => {
       const deflect = scenario.startsWith("deflect");
@@ -531,14 +559,15 @@ for (const ticksPerSecond of [20, 10]) {
         fixture.tick();
       }
       const output = await fixture.clock.settle(pending, 1_000);
-      const resumes = ["deflect_gone", "deflect_passed", "arrow_gone", "dead", "all_dead"].includes(scenario);
+      const resumes = ["deflect_gone", "deflect_passed", "arrow_gone", "dead", "all_dead", "alive", "mixed", "stand_down",
+        "at_range", "outside_range", "pursuer", "live_arrow_gone", "live_fireball_gone"].includes(scenario);
       assert.equal(output.result.status, resumes ? "succeeded" : "cancelled");
       assert.equal(fixture.attempts(), resumes ? 2 : 1);
       assert.equal(fixture.clock.now(), 0, "the deciding body tick needs no grace period");
       assert.equal(fixture.bot.time.age, 1_000);
       assert.equal(fixture.phases.at(-1)?.resumed, resumes);
       const receipt = output.interruptions?.at(-1) ?? "";
-      if (resumes) assert.match(receipt, /saw the threat end \(no projectile in flight, (?:no hostile tracked|target .+)\): the walk resumes\.$/);
+      if (resumes) assert.match(receipt, /stood down \(no projectile in flight, (?:no hostile tracked|target .+)\): the walk resumes\.$/);
       if (scenario === "deflect_gone") assert.ok(receipt.endsWith("target fireball#7 gone): the walk resumes."));
       if (scenario === "deflect_passed") {
         assert.ok(receipt.endsWith("target fireball#7 passed): the walk resumes."));
@@ -549,13 +578,21 @@ for (const ticksPerSecond of [20, 10]) {
       if (scenario === "deflect_passed_far_incoming") assert.equal(fixture.phases.at(-1)?.notEnded, "projectile fireball#8 incoming at 20.0");
       if (scenario === "dead") assert.ok(receipt.endsWith("target zombie#7 dead): the walk resumes."));
       if (scenario === "all_dead") assert.ok(receipt.endsWith("target zombie#7 dead, target zombie#8 dead): the walk resumes."));
-      if (scenario === "alive" || scenario === "mixed" || scenario === "combat" || scenario === "deflect_far_answered")
+      if (scenario === "combat" || scenario === "policy_settlement" || scenario === "deflect_far_answered")
         assert.match(receipt, /chose no further response \(handled\)\.$/);
       if (scenario === "arrow") assert.match(receipt, /chose no further response \(none_observed\)\.$/);
-      if (scenario === "alive") assert.equal(fixture.phases.at(-1)?.notEnded, "target zombie#7 alive");
+      if (scenario === "alive" || scenario === "mixed") assert.ok(receipt.includes(`target zombie#${scenario === "mixed" ? 8 : 7} alive at 12.0 blocks`));
+      if (["at_range", "outside_range", "pursuer"].includes(scenario)) {
+        assert.ok(receipt.includes(`target zombie#7 alive at ${fixture.bot.entities[7]!.position.distanceTo(fixture.bot.entity.position).toFixed(1)} blocks`));
+        assert.equal(receipt.includes("no hostile tracked"), false);
+      }
+      if (scenario === "live_arrow") assert.equal(fixture.phases.at(-1)?.notEnded, "shield projectile arrow#8");
+      if (scenario === "live_fireball" || scenario === "live_far_fireball")
+        assert.equal(fixture.phases.at(-1)?.notEnded, `projectile fireball#8 incoming at ${scenario === "live_fireball" ? "12.0" : "20.0"}`);
       if (scenario === "arrow") assert.equal(fixture.phases.at(-1)?.notEnded, "shield projectile arrow#8");
-      if (scenario === "stand_down") assert.match(receipt, /chose no further response \(stand_down\)\.$/);
+      if (scenario === "stand_down") assert.ok(receipt.includes("target zombie#7 alive at 3.0 blocks"));
       assert.equal(settlements, 1);
+      if (scenario === "policy_settlement") assert.equal(fixture.runner.releaseHold("hostile_reflex", "late", "late evidence"), false);
       for (const entity of Object.values(fixture.bot.entities)) if (entity.id !== fixture.bot.entity.id) fixture.entities.remove(entity.id);
       const next = await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000);
       assert.equal(next.result.status, "succeeded");
@@ -567,6 +604,60 @@ for (const ticksPerSecond of [20, 10]) {
     });
   }
 }
+
+// Release-time inputs from a8 T4's four receipts, not the later idle-window observations (a8 T5, 2026-11-18).
+for (const ticksPerSecond of [20, 10]) for (const capture of [
+  { trial: "t00004", age: 420, id: 50, distance: 11.248794967740228, blaze: 69.64800147226045, contact: false },
+  { trial: "t00007", age: 400, id: 50, distance: 6.7943847616726645, blaze: 55.12222432182629, contact: true },
+  { trial: "t00009", age: 380, id: 46, distance: 5.982700363314753, blaze: 66.55278980762178, contact: true },
+  { trial: "t00011", age: 440, id: 46, distance: 4.776674263424586, blaze: 71.74877596518783, contact: true },
+]) test(`captured fortress ${capture.trial} resumes after its unchanged decision at ${ticksPerSecond} tps`, async () => {
+  await using fixture = heldJourney(ticksPerSecond, "removed", {
+    [capture.id]: hostile("wither_skeleton", 4), [capture.id + 1]: hostile("blaze", 10.44),
+  }, undefined, { startAge: capture.age, carried: { iron_sword: 1, bow: 1, arrow: 32, cooked_beef: 16, cobblestone: 64 },
+    slots: { 45: { name: "shield" } } });
+  using _clock = fixture.clock.install();
+  const baseline = fixture.clock.pendingGlobalTimers();
+  const assertListeners = watchJourneyListeners(fixture);
+  const { pending } = await fixture.start();
+  fixture.bot.entities[capture.id]!.position.x = capture.distance;
+  fixture.bot.entities[capture.id + 1]!.position.x = capture.blaze;
+  fixture.finishEvade();
+  await flush();
+  assert.equal(fixture.phases.at(-1)?.outcome, "held");
+  const facts = observeCombatDecision(fixture.bot, fixture.observer.threats);
+  assert.deepEqual(facts.contacts.map(({ id, distance, inContact, inReach, defendsOnContact, ranged }) =>
+    ({ id, distance, inContact, inReach, defendsOnContact, ranged })),
+    [{ id: capture.id, distance: capture.distance, inContact: capture.contact, inReach: false, defendsOnContact: true, ranged: false }]);
+  assert.equal(facts.health, 11);
+  assert.equal(facts.hideAllowed, false);
+  assert.equal(facts.answered.has("evade"), true);
+  let settlements = 0;
+  void pending.then(() => settlements++);
+  fixture.tick();
+  const output = await fixture.clock.settle(pending, 1_000);
+  const decision = fixture.driver.snapshot().find(({ name }) => name === "hostile_reflex")?.decision;
+  if (!capture.contact) assert.deepEqual(decision, { kind: "handled", by: "no_contact" });
+  else assert.ok(decision && typeof decision === "object" && "kind" in decision && decision.kind === "stand_down");
+  assert.equal(output.result.status, "succeeded");
+  assert.equal(fixture.attempts(), 2);
+  assert.equal(fixture.phases.filter(({ outcome }) => outcome === "released").length, 1);
+  assert.equal(fixture.phases.at(-1)?.resumed, true);
+  const receipt = output.interruptions!.at(-1)!;
+  assert.ok(receipt.endsWith(`hostile_reflex stood down (no projectile in flight, target wither_skeleton#${capture.id} alive at ${capture.distance.toFixed(1)} blocks, target blaze#${capture.id + 1} alive at ${capture.blaze.toFixed(1)} blocks): the walk resumes.`));
+  assert.equal(receipt.includes("no hostile tracked"), false);
+  assert.equal(receipt.includes("saw the threat end"), false);
+  assert.equal(fixture.clock.now(), 0);
+  assert.equal(fixture.bot.time.age, capture.age);
+  for (const id of [capture.id, capture.id + 1]) fixture.entities.remove(id);
+  assert.equal((await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000)).result.status, "succeeded");
+  const phases = fixture.phases.length;
+  await fixture.clock.advance(100_000, 1_000);
+  assert.equal(fixture.phases.length, phases);
+  assert.equal(settlements, 1);
+  assert.equal(fixture.clock.pendingGlobalTimers(), baseline);
+  assertListeners();
+});
 
 for (const ticksPerSecond of [20, 10]) {
   test(`a held fight target walking away stays alive at ${ticksPerSecond} tps`, async () => {
@@ -585,7 +676,11 @@ for (const ticksPerSecond of [20, 10]) {
       assert.equal(observed?.kind, "observed");
       assert.deepEqual(heldThreatEnded(scene, { kind: "fight", targetId: 7,
         threats: [{ id: 7, name: "zombie", position: { x: 12, y: 64, z: 0 }, distance: 12 }] }, observed!.danger),
-      { notEnded: "target zombie#7 alive" });
+      { ended: "no projectile in flight, target zombie#7 alive at 12.0 blocks" });
+      assert.deepEqual(heldThreatEnded(scene, { kind: "evade", threats: [], safeRange: 36, reason: "hurt" }, observed!.danger),
+        { ended: "no projectile in flight" });
+      assert.deepEqual(heldThreatEnded(scene, { kind: "evade", threats: [], safeRange: 36, reason: "hurt" }, null),
+        { ended: "no projectile in flight, no hostile tracked" });
       assert.equal(fixture.clock.now(), 0);
       assert.equal(fixture.bot.time.age, 1_000);
     } finally {
@@ -597,6 +692,70 @@ for (const ticksPerSecond of [20, 10]) {
 }
 
 for (const ticksPerSecond of [20, 10]) {
+  for (const ending of ["resume", "return"] as const)
+    test(`a new deciding-tick contact attaches and its ${ending} verdict decides the held walk (${ticksPerSecond} tps)`, async () => {
+      let evidenceCalls = 0;
+      await using fixture = heldJourney(ticksPerSecond, ending, undefined, () => evidenceCalls++);
+      using _clock = fixture.clock.install();
+      const assertListeners = watchJourneyListeners(fixture);
+      const { pending } = await fixture.start();
+      fixture.finishEvade();
+      await flush();
+      fixture.entities.remove(7);
+      fixture.entities.spawn({ id: 9, ...hostile("zombie", 3) });
+      fixture.tick();
+      const output = await fixture.clock.settle(pending, 1_000);
+      assert.equal(output.result.status, ending === "resume" ? "succeeded" : "cancelled");
+      assert.equal(fixture.attempts(), ending === "resume" ? 2 : 1);
+      assert.deepEqual(fixture.phases.map(({ outcome }) => outcome), ["held", "attached", "released"]);
+      assert.equal(evidenceCalls, 0, "a respond decision keeps its real verdict in charge");
+      assert.ok(output.interruptions!.some(receipt => receipt.includes("fight response for zombie#9")));
+      await flush();
+      assert.ok(fixture.recorded().includes(ending === "resume" ? "fight -> target_died" : "fight -> capability_limit"));
+      if (fixture.bot.entities[9]) fixture.entities.remove(9);
+      assert.equal((await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000)).result.status, "succeeded");
+      await fixture.clock.advance(100_000, 1_000);
+      assertListeners();
+    });
+
+  test(`a resumed walk can be preempted into a fresh hostile hold (${ticksPerSecond} tps)`, async () => {
+    await using fixture = heldJourney(ticksPerSecond, "removed", undefined, undefined, { holds: 2 });
+    using _clock = fixture.clock.install();
+    const assertListeners = watchJourneyListeners(fixture), timers = fixture.clock.pendingGlobalTimers();
+    const { pending, state } = await fixture.start();
+    fixture.finishEvade();
+    await flush();
+    fixture.bot.entities[7]!.position.x = 12;
+    fixture.tick();
+    await flush();
+    assert.equal(fixture.attempts(), 2);
+    assert.equal(state.over, false);
+    assert.equal(fixture.phases.at(-1)?.resumed, true);
+    fixture.entities.remove(7);
+    fixture.bot.entity.position.x = 1; // A new cell is a real changed premise for the spent evade.
+    fixture.entities.spawn({ id: 9, ...hostile("zombie", 4) });
+    fixture.tick();
+    await flush();
+    assert.equal(fixture.phases.at(-1)?.outcome, "held");
+    assert.equal(fixture.phases.at(-1)?.generation, 1);
+    fixture.bot.entities[9]!.position.x = 13;
+    fixture.tick();
+    const output = await fixture.clock.settle(pending, 1_000);
+    assert.equal(output.result.status, "succeeded");
+    assert.equal(fixture.attempts(), 3);
+    assert.deepEqual(fixture.phases.map(({ outcome }) => outcome), ["held", "released", "held", "released"]);
+    assert.equal(output.interruptions!.filter(receipt => receipt.includes("stood down")).length, 2);
+    assert.ok(output.interruptions![0]!.includes("zombie#7 alive at 12.0 blocks"));
+    assert.ok(output.interruptions!.at(-1)!.includes("zombie#9 alive at 12.0 blocks"));
+    assert.equal(fixture.clock.now(), 0);
+    assert.equal(fixture.bot.time.age, 1_000);
+    fixture.entities.remove(9);
+    assert.equal((await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000)).result.status, "succeeded");
+    await fixture.clock.advance(100_000, 1_000);
+    assert.equal(fixture.clock.pendingGlobalTimers(), timers);
+    assertListeners();
+  });
+
   for (const ended of [true, false]) {
     test(`held threat evidence survives an attached fight yielding to footing, threat ended ${ended} (${ticksPerSecond} tps)`, async () => {
       let evidenceCalls = 0;
@@ -622,15 +781,15 @@ for (const ticksPerSecond of [20, 10]) {
       else fixture.bot.entities[7]!.position.x = 12;
       fixture.tick();
       const output = await fixture.clock.settle(pending, 1_000);
-      assert.equal(output.result.status, ended ? "succeeded" : "cancelled");
-      assert.equal(fixture.attempts(), ended ? 2 : 1);
+      assert.equal(output.result.status, "succeeded");
+      assert.equal(fixture.attempts(), 2);
       assert.equal(evidenceCalls, 1);
-      assert.equal(fixture.phases.at(-1)?.resumed, ended);
+      assert.equal(fixture.phases.at(-1)?.resumed, true);
       assert.equal(fixture.clock.now(), 0);
       assert.equal(fixture.bot.time.age, 1_000);
       assert.match(output.interruptions!.at(-1)!, ended
-        ? /saw the threat end \(no projectile in flight, no hostile tracked\): the walk resumes\.$/
-        : /chose no further response \(handled\)\.$/);
+        ? /stood down \(no projectile in flight, no hostile tracked\): the walk resumes\.$/
+        : /stood down \(no projectile in flight, target zombie#7 alive at 12.0 blocks\): the walk resumes\.$/);
       if (!ended) fixture.entities.remove(7);
       assert.equal((await fixture.clock.settle(fixture.runner.run(fixture.action, {}), 1_000)).result.status, "succeeded");
       await fixture.clock.advance(100_000, 1_000);
@@ -712,7 +871,7 @@ for (const ticksPerSecond of [20, 10]) {
       const interruptions = output.interruptions ?? [];
       assert.match(interruptions[0]!, /^\[HOSTILE_SETTLED\] evade ended with capability_limit at health 11:/);
       if (ending === "removed") {
-        assert.match(interruptions.at(-1)!, /hostile_reflex saw the threat end \(no projectile in flight, no hostile tracked\): the walk resumes\.$/);
+        assert.match(interruptions.at(-1)!, /hostile_reflex stood down \(no projectile in flight, no hostile tracked\): the walk resumes\.$/);
         assert.equal(fixture.phases.at(-1)?.resumed, true);
         assert.equal(fixture.clock.now(), 20_000 / ticksPerSecond, "release needs no world-tick grace window");
       } else {

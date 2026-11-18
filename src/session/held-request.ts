@@ -82,7 +82,7 @@ export class HeldRequest {
   release(decision: string, ended: string | null = null): boolean {
     if (this.state !== "waiting") return false;
     const suffix = ended === null ? `; ${this.owner} chose no further response (${decision}).`
-      : `; ${this.owner} saw the threat end (${ended}): the walk resumes.`;
+      : `; ${this.owner} stood down (${ended}): the walk resumes.`;
     return this.#finish("released", { kind: ended === null ? "return" : "resume", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
   }
 
