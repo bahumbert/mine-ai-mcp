@@ -10,7 +10,7 @@ import {
   parseTendCropsRequest,
   TEND_CROPS,
   TEND_CROPS_DESCRIPTION,
-  TEND_STALL_MS,
+  TEND_STALL_TICKS,
   tendCropsAnnotations,
   tendCropsInputSchema,
   tendCropsOutcomes,
@@ -37,7 +37,7 @@ export function settleTend(evidence: TendEvidence, stop: string | null, refused:
 
 /** The stall watch of one attempt: how long nothing may change, and (for a test) how often it looks and by which clock. */
 export interface TendStallSettings {
-  readonly stallMs: number;
+  readonly stallTicks: number;
   readonly sampleMs?: number;
   readonly clock?: StallClock;
 }
@@ -53,7 +53,7 @@ export function beginTendCrops(
   facts: PlotFacts,
   bodyFor: (signal?: AbortSignal) => FarmBody,
   observe: ObserveRequest = () => {},
-  stall: TendStallSettings = { stallMs: TEND_STALL_MS },
+  stall: TendStallSettings = { stallTicks: TEND_STALL_TICKS },
 ): RequestExecution<TendCropsResult> {
   const plotState = () => {
     const parts: string[] = [];
@@ -77,8 +77,9 @@ export function beginTendCrops(
     const watch = watchForStall({
       work: plotState,
       position: () => bot.entity.position,
+      worldAge: () => bot.time.age ?? null,
       ...stall,
-      describe: ({ seconds, walked }) => tendCropsOutcomes.stalled(seconds, walked),
+      describe: ({ seconds, ticks, walked }) => tendCropsOutcomes.stalled(seconds, ticks, walked),
     });
     try {
       const outcome = await plot.attempt(bodyFor(context.signal), watch.reason);
@@ -96,9 +97,9 @@ export function tendCrops(
   body: FarmBody,
   facts: PlotFacts,
   context: ActionContext,
-  stallMs = TEND_STALL_MS,
+  stallTicks = TEND_STALL_TICKS,
 ): Promise<TendCropsResult> {
-  return beginTendCrops(bot, request, facts, () => body, context.observeProgress, { stallMs })(context);
+  return beginTendCrops(bot, request, facts, () => body, context.observeProgress, { stallTicks })(context);
 }
 
 export function formatTendCropsResult(result: TendCropsResult): string {

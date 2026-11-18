@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import { createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../../test-support/fake-bot/index.js";
 import { cellKey } from "../../../utils/index.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
 import { clearMiningWater } from "./mining-water.js";
@@ -120,4 +120,43 @@ test("aborting a drain releases its water stance and lets the next clearing fini
   assert.equal(waterStancesHeld(bot), 0);
   assert.equal(bot.controlState.jump, false);
   assert.equal(await clock.settle(clearMiningWater(bot, new Vec3(1, 64, 0), place, null), 100), null);
+});
+
+for (const { rate, stopped, endMs } of [
+  { rate: 20, stopped: false, endMs: 2_000 },
+  { rate: 10, stopped: false, endMs: 4_000 },
+  { rate: 20, stopped: true, endMs: 20_000 },
+]) for (const decays of [true, false]) test(`wading drain ${decays ? "decays" : "stays wet"} at ${rate} tps (stopped ${stopped})`, async () => {
+  const { bot, world, clock, server } = wetSite({ "0,64,0": "water@1", "1,64,0": "water@1", "2,64,0": "water" }, rate);
+  using _timers = clock.install();
+  if (stopped) server.stop();
+  Object.assign(bot.entity, { isInWater: true, onGround: true });
+  bot.physicsEnabled = false;
+  const source = new Vec3(2, 64, 0);
+  const start = bot.time.age;
+  const added = listenersAddedSince(bot);
+  const timers = clock.pendingGlobalTimers();
+  const clearing = clearMiningWater(bot, new Vec3(1, 63, 0), async (_bot, position) => {
+    const cell = new Vec3(position.x, position.y, position.z);
+    world.setCell(cell, "cobblestone");
+    return { kind: "placed", block: bot.blockAt(cell)! };
+  }, null);
+  await clock.advance(endMs - 50);
+  assert.equal(bot.blockAt(source)?.name, "cobblestone");
+  if (decays) {
+    // Server flow decay is supplied by the scenario, not simulated by the fake.
+    world.setCell(new Vec3(0, 64, 0), "air");
+    world.setCell(new Vec3(1, 64, 0), "air");
+    Reflect.set(bot.entity, "isInWater", false);
+  }
+  await clock.advance(50);
+  assert.equal(await clearing, decays ? null : "the mining stance is still in water after isolating the target");
+  assert.equal(bot.time.age, start + (stopped ? 0 : 40));
+  assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, decays ? "air" : "water");
+  assert.equal(waterStancesHeld(bot), 0);
+  assert.equal(added("physicsTick"), 0);
+  assert.equal(clock.pendingGlobalTimers(), timers);
+  await clock.advance(20_050);
+  assert.equal(added("physicsTick"), 0);
+  assert.equal(clock.pendingGlobalTimers(), timers);
 });

@@ -60,6 +60,7 @@ import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movem
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { IncrementalSearch } from "../search/search.js";
+import type { RouteAdmission } from "../route-admission.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
@@ -212,6 +213,8 @@ export interface RunContext extends RouteContext {
    * supplies the field or whether the caller opted out.
    */
   readonly stepField: StepFieldProvider | null;
+  /** The caller's route veto, read afresh at each commit and step boundary; absent or null when no obligation holds. */
+  readonly routeAdmission?: () => RouteAdmission | null;
   /** What this bot's earlier runs failed on, priced as refused by every search here. */
   readonly failedEdges?: FailedEdges;
   /** Whether the run was abandoned and its view of the bot withdrawn; its deferred cleanup then leaves shared state alone. */
@@ -255,6 +258,8 @@ export class NavigationRun {
   };
   /** Whether the world subscription is still installed; the one thing execute itself can leak. */
   #subscribed = false;
+  /** The admission's text when the step boundary just refused the rest of the route; read by the `goal_revised` branch. */
+  #boundaryRefusal: string | null = null;
   readonly #searchIdentities = new Set<string>();
   readonly #planningStall: PlanningStall;
   readonly #arrivalRepeat: ArrivalRepeat;
@@ -835,7 +840,18 @@ export class NavigationRun {
       return { kind: "arrived", node: resolved.node, observation };
     return { kind: "continue", observation, latestGoal: resolved.goal };
   }
+  /** The text the caller's route admission refuses `steps` with, read afresh from the provider; null when admitted. */
+  #admissionRefusal(start: BlockPosition, steps: readonly PlannedStep[]): string | null {
+    return this.context.routeAdmission?.()?.check({ start, steps }, this.context.world) ?? null;
+  }
+  /** End the run on a refused route: told once, no search, the body wherever its last settled step left it. */
+  #refused(plan: RoutePlan, observation: string): ExecutionResult {
+    this.#events.emit({ kind: "route_refused", planId: plan.id, observation });
+    return { kind: "outcome", outcome: this.#failed({ kind: "no_progress", reason: "route_refused", observation }) };
+  }
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
+    const refusal = this.#admissionRefusal(plan.start, plan.steps);
+    if (refusal !== null) return this.#refused(plan, refusal);
     this.#planningStall.committed();
     this.#arrivalRepeat.reset();
     this.#counters.plans += 1;
@@ -877,6 +893,8 @@ export class NavigationRun {
       case "invalidated":
         return { kind: "retry", reason: "world_changed" };
       case "goal_revised":
+        // A step boundary that refused the rest of the route also returns "goal_revised" (the executor's one early stop).
+        if (this.#boundaryRefusal !== null) return this.#refused(plan, this.#boundaryRefusal);
         return { kind: "retry", reason: "goal_revised" };
       case "goal_satisfied": {
         const observation = this.context.bot.observe();
@@ -941,6 +959,12 @@ export class NavigationRun {
     if (revised.kind === "invalid") return "goal_revised";
     if (revised.goal.isSatisfied(revised.node, this.context.world)) return "goal_satisfied";
     if (this.#goalRevisesRoute(goal, revised.goal, plan, revised.node)) return "goal_revised";
+    // Last: a goal that finished or revised the route settles it first, and a replanned route is judged at its own commit.
+    const remaining = plan.steps.slice(plan.steps.indexOf(step) + 1);
+    if (remaining.length > 0) {
+      this.#boundaryRefusal = this.#admissionRefusal(arrival, remaining);
+      if (this.#boundaryRefusal !== null) return "goal_revised";
+    }
     return "continue";
   }
   /** A complete route promises arrival; a partial route promises useful progress. */

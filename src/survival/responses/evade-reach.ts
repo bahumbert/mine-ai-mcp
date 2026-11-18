@@ -71,12 +71,17 @@ function reachBasis(input: ReachInput, advancing: boolean | null): ReachBasis | 
   if (input.dead) return "dead";
   if (input.distance >= input.policy.evade_safe_range) return "range";
   if (!input.observed || input.threat.attack === "unmodelled" || advancing !== false) return null;
-  if (input.threat.attack === "projectile"
-    && input.distance >= Math.min(input.policy.evade_cover_range, input.policy.evade_safe_range)
-    && !input.exposed()) return "cover";
+  if (coverHolds({ attack: input.threat.attack, distance: input.distance, policy: input.policy, exposed: input.exposed })) return "cover";
   if (input.distance >= Math.min(input.policy.evade_clear_range, input.policy.evade_safe_range)
     && (input.threat.attack === "melee" || !input.shotInWindow)) return "disengaged";
   return null;
+}
+
+/** Cover supports both a reach verdict and a wait only outside its minimum range. */
+export function coverHolds(input: { attack: PositionThreat["attack"]; distance: number; policy: ReachPolicy; exposed: () => boolean }): boolean {
+  return input.attack === "projectile"
+    && input.distance >= Math.min(input.policy.evade_cover_range, input.policy.evade_safe_range)
+    && !input.exposed();
 }
 
 /** Decide reach from observed facts; live exposure is evaluated only for a cover candidate. */

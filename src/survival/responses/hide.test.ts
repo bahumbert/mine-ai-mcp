@@ -185,6 +185,7 @@ test("with nothing to dig and nothing to place, the failure says the bot carried
 test("a wall-in that cannot clear the body's overlap refuses before placing walls", async () => {
   let equips = 0;
   const { bot, clock } = scene({
+    mockedClock: true,
     health: 20,
     position: new Vec3(0.5, 64, 0.146),
     carried: { cobblestone: 32 },
@@ -195,19 +196,23 @@ test("a wall-in that cannot clear the body's overlap refuses before placing wall
       },
     },
   });
+  using _installed = clock.install();
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /could not centre inside/);
+  assert.equal(result.refusal?.cause, "not_centred");
   assert.equal(equips, 0);
   assert.equal(result.walled, 0);
 });
 
-test("wall centering does not walk off adjacent lip support into an unsupported origin cell", async () => {
+for (const floor of ["lip", "slab"] as const) test(`wall centering refuses an unsupported ${floor} floor`, async () => {
   let presses = 0;
   const { bot, clock } = scene({
+    mockedClock: true,
     health: 20,
-    position: new Vec3(0.5, 64, 0.146),
+    position: new Vec3(0.5, 64, floor === "lip" ? 0.146 : 0.5),
     groundY: null,
+    ...(floor === "slab" ? { cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]) } : {}),
     carried: { cobblestone: 32 },
     overrides: {
       // Counts the controls pressed; the fake's clearControlStates releases each control through this too.
@@ -216,22 +221,17 @@ test("wall centering does not walk off adjacent lip support into an unsupported 
       },
     },
   });
+  using _installed = clock.install();
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /no solid floor/);
-  assert.equal(presses, 0);
-});
-
-test("a partial collision block without center-height footing is not a wall-in floor", async () => {
-  const { bot, clock } = scene({
-    health: 20,
-    groundY: null,
-    cells: boxOf("stone_slab", [-4, 4], [58, 63], [-4, 4]),
-    carried: { cobblestone: 32 },
-  });
-  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
-  assert.equal(result.kind, "failed");
-  assert.match(result.error ?? "", /no solid floor/);
+  assert.equal(result.refusal?.cause, "no_floor");
+  if (floor === "lip") assert.equal(presses, 0);
+  else {
+    assert.deepEqual(result.refusal?.floor?.shapes, [[0, 0, 0, 1, 0.5, 1]]);
+    assert.equal(result.refusal?.position.y, 64);
+    assert.equal(result.refusal?.onGround, true);
+  }
 });
 
 test("breaking a block without falling into its cell is a failed hide, even at full health", async () => {
@@ -503,14 +503,54 @@ for (const ticksPerSecond of [20, 10]) test(`a shell closed around a fire in the
 });
 
 test("a shell around a fire that cannot be dug fails as exposed, and digs nothing", async () => {
-  const { bot, clock, server } = scene({ health: 18, food: 20, cells: BURNING_SHELL, overrides: { canDigBlock: () => false } });
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, food: 20, cells: BURNING_SHELL, overrides: { canDigBlock: () => false } });
+  using _installed = clock.install();
   const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
 
   assert.equal(result.kind, "failed");
   assert.equal(result.error, "The shelter became exposed or unsafe during recovery (fire).");
+  assert.equal(result.refusal?.cause, "exposed");
   assert.equal(bot.blockAt(new Vec3(0, 64, 0))?.name, "fire");
   // Status 0 starts a dig; the hide's own item release is status 5.
   assert.equal(server.packets.some(({ name, data }) => name === "block_dig" && (data as { status: number }).status === 0), false, "no dig was started");
+});
+
+test("death while a construction hazard is observed does not report a refusal", async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 7 });
+  using _installed = clock.install();
+  const result = await clock.settle(hideInPlace(bot, {
+    threatContext: combatTestContext(bot), signal: new AbortController().signal, recoverTo: 18, maximumMs: 5_000,
+    unsafe: () => { bot.health = 0; return "danger"; },
+  }), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal, undefined);
+});
+
+test("recovery exposure records a projectile in flight", async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 7, cells: SEALED_BOX,
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal?.cause, "exposed");
+  assert.equal(result.refusal?.hazard, "projectile");
+  assert.deepEqual(result.refusal?.projectiles[0], { id: 61, name: "arrow",
+    position: { x: 0.5, y: 65, z: 0.1 }, velocity: { x: 0, y: 0, z: 0.3 } });
+});
+
+test("cancellation during exposure leaves no refusal and the next hide recovers", async () => {
+  const { bot, clock, entities } = scene({ mockedClock: true, health: 7, cells: SEALED_BOX,
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const abort = new AbortController();
+  const pending = hideInPlace(bot, { threatContext: combatTestContext(bot), signal: abort.signal, recoverTo: 18, maximumMs: 5_000 });
+  queueMicrotask(() => abort.abort(new Error("hide cancelled")));
+  const result = await clock.settle(pending, 6_000);
+  entities.remove(61);
+  bot.health = 20;
+  const next = await clock.settle(hide(bot), 6_000);
+  assert.equal(next.kind, "recovered");
+  assert.equal(result.kind === "recovered" ? undefined : result.refusal, undefined);
 });
 
 const LIQUID_BODIES = [
@@ -535,6 +575,7 @@ for (const [liquid, flag] of LIQUID_BODIES) {
   test(`hideInPlace in ${liquid} fails at once with [SHELTER]`, async () => {
     let equips = 0;
     const { bot, clock } = scene({
+      mockedClock: true,
       health: 7,
       carried: { cobblestone: 32 },
       overrides: {
@@ -544,10 +585,13 @@ for (const [liquid, flag] of LIQUID_BODIES) {
         },
       },
     });
+    using _installed = clock.install();
     Reflect.set(bot.entity, flag, true);
     const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
     assert.equal(result.kind, "failed");
     assert.match(result.error ?? "", /^\[SHELTER\].*liquid/);
+    assert.equal(result.refusal?.cause, "liquid");
+    assert.ok(result.refusal?.shell.length);
     assert.equal(equips, 0, "nothing is dug or placed in a liquid");
     assert.equal(result.dug + result.walled, 0);
   });

@@ -6,6 +6,7 @@ import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { advancingLavaAt } from "../../world/lava-flow.js";
 import { occupiedCell, placeSolidBlockInto } from "../../world/placement.js";
 import { bucketItem } from "../../world/buckets.js";
+import { serverPacedSignal, type ServerPacedSignal } from "../../world/server-paced.js";
 import { fireContactCells, isBurning, isInFire, isInLava } from "../perception/body.js";
 import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import type { FootingRecovery } from "./footing.js";
@@ -19,7 +20,7 @@ import {
   type FireEscapeReason,
 } from "../positioning/fire-escape.js";
 
-/** `timed_out`: the wall clock ended the walk (15 s of burning), as against `blocked`: no way on. */
+/** `timed_out`: the server-paced budget ended the walk, as against `blocked`: no way on. */
 export type FireEscapeOutcome = "escaped" | "blocked" | "timed_out" | "died";
 
 /** Calls to the shared landing recovery and empty-route ticks, accumulated across one fire claim. */
@@ -31,7 +32,9 @@ export interface FireEscapeRecord {
 
 /** Optional runtime landing obligation; direct escape callers can omit it. */
 export interface FireEscapeOptions {
-  maximumMs?: number;
+  maximumTicks?: number;
+  /** A shared budget remains owned by its caller across escape and settle reruns. */
+  budget?: ServerPacedSignal;
   footing?: Pick<FootingRecovery, "needed" | "recover">;
   record?: FireEscapeRecord;
 }
@@ -107,8 +110,8 @@ export async function buildLavaEscapeStep(
   return null;
 }
 
-/** Lava burns for 15 s: a fire escape that has not ended by then hands the body back, on the wall clock beside the ticks. */
-export const FIRE_ESCAPE_MAXIMUM_MS = 15_000;
+/** Lava's 300-tick residual burn bounds the escape, with wall and stopped-server backstops. */
+export const FIRE_ESCAPE_MAXIMUM_TICKS = 300;
 
 /** The cells being walked: the body steers to `route[next]`, which `departure` says how it was left. */
 interface FireWalk {
@@ -173,25 +176,20 @@ function arriveAtCell(bot: Bot, world: WorldView, reason: FireEscapeReason, walk
 }
 
 /**
- * The wall clock and a death end the waits even when physics ticks have stopped (as in breath's surfacing). `waits` is the
- * signal for every wait of the escape; `outcome` says why it ended; `release` removes the timer and the listeners.
+ * The server budget and a death end waits even without physics ticks. The caller owns the budget's timer;
+ * `release` removes this escape's death and respawn listeners.
  */
-function startEscapeClock(bot: Bot, signal: AbortSignal, maximumMs: number) {
+function startEscapeClock(bot: Bot, signal: AbortSignal, budget: ServerPacedSignal) {
   const ended = new AbortController();
   const end = () => ended.abort();
-  let timedOut = false;
-  const wallClock = setTimeout(() => {
-    timedOut = true;
-    end();
-  }, maximumMs);
   bot.once("death", end);
   bot.once("respawn", end);
+  const endedSignal = AbortSignal.any([ended.signal, budget.signal]);
   return {
-    ended: ended.signal,
-    waits: AbortSignal.any([signal, ended.signal]),
-    outcome: (): FireEscapeOutcome => (bot.health <= 0 ? "died" : timedOut ? "timed_out" : "blocked"),
+    ended: endedSignal,
+    waits: AbortSignal.any([signal, endedSignal]),
+    outcome: (): FireEscapeOutcome => (bot.health <= 0 ? "died" : budget.end() !== null ? "timed_out" : "blocked"),
     release(): void {
-      clearTimeout(wallClock);
       bot.off("death", end);
       bot.off("respawn", end);
     },
@@ -324,12 +322,13 @@ export async function escapeFire(
   world: WorldView,
   signal: AbortSignal,
   reason: FireEscapeReason = "contact",
-  { maximumMs = FIRE_ESCAPE_MAXIMUM_MS, footing, record = { recovered: 0, last: null, airborneTicks: 0 } }: FireEscapeOptions = {},
+  { maximumTicks = FIRE_ESCAPE_MAXIMUM_TICKS, budget, footing, record = { recovered: 0, last: null, airborneTicks: 0 } }: FireEscapeOptions = {},
 ): Promise<FireEscapeOutcome> {
   bot.stopDigging();
   bot.deactivateItem();
   bot.clearControlStates();
-  const clock = startEscapeClock(bot, signal, maximumMs);
+  using ownedBudget = budget ? null : serverPacedSignal(bot, maximumTicks);
+  const clock = startEscapeClock(bot, signal, budget ?? ownedBudget!);
   const { ended, waits } = clock;
   const state: FireWalkProgress = {
     walk: newFireWalk(bot, fireEscapeRoute(bot, world, reason)), stalled: 0, waitedAirborne: false,

@@ -1,7 +1,7 @@
 import type { Vec3 } from "vec3";
 import { boxEntry } from "../../../navigation/world/line-of-sight.js";
 import type { BlockRaycaster } from "../../../world/block-visibility.js";
-import { exposedBodyFrom, type EntityBody } from "../../../world/entity-geometry.js";
+import { exposedBodyFrom, shooterSeesBody, type EntityBody } from "../../../world/entity-geometry.js";
 
 // Vanilla 1.21.4 ProjectileUtil.getHitResultOnMoveVector expands the target's
 // box by 0.3 on every face. Projectile width is not the entity-hit margin.
@@ -16,15 +16,12 @@ export interface PositionThreat extends EntityBody {
 /** Current attack exposure, not a promise that a mob cannot walk around the obstacle later. */
 export function positionExposed(world: BlockRaycaster, body: EntityBody, threat: PositionThreat): boolean {
   if (threat.attack === "unmodelled") return true;
-  const eye = threat.position.offset(0, threat.height * 0.85, 0);
   if (threat.attack === "projectile") {
     // A point-perfect line behind a fence post stopped being cover as soon
     // as the native blaze shifted. Check the firing body's width as well.
-    const half = threat.width / 2;
-    return [eye, eye.offset(half, 0, 0), eye.offset(-half, 0, 0), eye.offset(0, 0, half), eye.offset(0, 0, -half)].some(
-      (from) => exposedBodyFrom(world, from, body),
-    );
+    return shooterSeesBody(world, threat, body);
   }
+  const eye = threat.position.offset(0, threat.height * 0.85, 0);
   const dx = Math.max(0, Math.abs(body.position.x - threat.position.x) - (body.width + threat.width) / 2);
   const dz = Math.max(0, Math.abs(body.position.z - threat.position.z) - (body.width + threat.width) / 2);
   const dy = Math.max(

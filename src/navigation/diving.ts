@@ -4,13 +4,13 @@ import { airSupplyTicks } from "../world/air-supply.js";
 import { botEyesInWater } from "../world/eyes-in-water.js";
 import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
-import { timeoutSignal } from "../utils/wall-timers.js";
-import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../world/world-age.js";
+import { serverPacedSignal, type ServerPacedSignal } from "../world/server-paced.js";
+import { SERVER_ANSWER_TICKS, serverPacedWallMs, waitForWorldAge } from "../world/world-age.js";
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
 import type { BlockPosition, WorldView } from "./world/world.js";
-import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, SWIM_HORIZONTAL_TICKS, type SwimAscent, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
@@ -28,6 +28,8 @@ interface DiveSession {
   lastBreathable: Vec3 | null;
   /** The run ended with its goal reached: the body is where it was asked to be, whatever the water. */
   completed: boolean;
+  /** The ascent's next cell observed on the preceding backstop read in this leg. */
+  ascentStroke: BlockPosition | null;
 }
 
 const FULL_AIR_TICKS = 300;
@@ -40,10 +42,40 @@ const AIR_REFILL_PER_TICK = 4;
 const BREATHING_STOP_WALL_MS = 15_000;
 const FULL_AIR_NOT_OBSERVED = "Full air was not observed at the breathing stop: the server's clock passed the refill time, or 15 s went by, without it";
 
-/** Longest wall-clock wait for the swim back, whatever the air says. */
-const SWIM_BACK_TIMEOUT_MS = 15_000;
-/** One physics tick, for turning the air left into a wall-clock bound. */
-const TICK_MS = 50;
+/** Return limits in server ticks: at most one breath, with time for a short return even at very low air. */
+const SWIM_BACK_MAXIMUM_TICKS = 300;
+const SWIM_BACK_MINIMUM_TICKS = 40;
+
+/**
+ * Credit progress only along the remembered first stroke; price distance off it. The body is read at the middle of its
+ * cell on x and z and at its feet level on y (a body's `position.y` is its feet); drift off the line is priced by
+ * distance, never a zero test (T30a, 2026-11-18).
+ */
+function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, previous: BlockPosition | null): number {
+  const stroke = ascent.path[0];
+  if (!stroke || previous?.x !== stroke.cell.x || previous.y !== stroke.cell.y || previous.z !== stroke.cell.z)
+    return ascent.ticks;
+  const direction = new Vec3(stroke.cell.x - feet.x, stroke.cell.y - feet.y, stroke.cell.z - feet.z);
+  const offset = bot.entity.position.minus(feet.offset(0.5, 0, 0.5));
+  const projection = offset.dot(direction);
+  const sideways = offset.minus(direction.scaled(projection)).norm();
+  if (projection >= 0 && projection <= 1 && bot.entity.velocity.dot(direction) > 0)
+    return ascent.ticks - projection * stroke.ticks + sideways * SWIM_HORIZONTAL_TICKS;
+  const extra = Math.hypot(Math.min(0, projection), sideways, Math.max(0, projection - 1));
+  return ascent.ticks + extra * SWIM_HORIZONTAL_TICKS;
+}
+
+/** Remember the last air pocket and request a breathing stop before an owned dive spends its ascent reserve. */
+function observeDiveTick(bot: Bot, read: WorldView["blockAt"], session: DiveSession): void {
+  if (!botEyesInWater(bot)) session.lastBreathable = bot.entity.position.floored();
+  if (!session.owned || session.returning || session.stop.signal.aborted) return;
+  const ascent = swimAscent(read, bot.entity.position.floored());
+  const air = airSupplyTicks(bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
+  // With a lost corridor the survival backstop must take over; do not call it a planned return.
+  if (!ascent) return;
+  if (botEyesInWater(bot) && (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
+    session.stop.abort(BREATHING_STOP);
+}
 
 /** Scoped declaration shared with survival; never a switch that removes the reflex. */
 export class Diving {
@@ -55,17 +87,26 @@ export class Diving {
   }
   get owned(): boolean { return this.#session?.owned === true; }
   get active(): boolean { return this.#session !== null; }
-  cancel(reason: string): void { this.#session?.cancelled.abort(reason); }
+  cancel(reason: string): void {
+    if (!this.#session) return;
+    this.#session.ascentStroke = null;
+    this.#session.cancelled.abort(reason);
+  }
   workCompleted(): void { if (this.#session) this.#session.completedWork++; }
 
   backstop(): number | null {
     const session = this.#session;
     if (!session?.owned) return null;
-    if (!botEyesInWater(this.bot)) return DIVE_BACKSTOP_TICKS;
+    if (!botEyesInWater(this.bot)) {
+      session.ascentStroke = null;
+      return DIVE_BACKSTOP_TICKS;
+    }
     const feet = this.bot.entity.position.floored();
     const ascent = swimAscent(this.#read, feet);
-    if (!ascent) return 300; // The admission premise disappeared: request immediate rescue.
-    return ascent.ticks + DIVE_BACKSTOP_TICKS;
+    const previous = session.ascentStroke;
+    session.ascentStroke = session.cancelled.signal.aborted ? null : ascent?.path[0]?.cell ?? null;
+    if (!ascent) return FULL_AIR_TICKS; // The admission premise disappeared: request immediate rescue.
+    return remainingAscentTicks(this.bot, feet, ascent, previous) + DIVE_BACKSTOP_TICKS;
   }
 
   committed(plan: Pick<RoutePlan, "steps">): void {
@@ -96,7 +137,7 @@ export class Diving {
   async run(options: NavigateOptions, navigate: Navigate) {
     if (this.#session) throw new Error("Navigation already owns a dive session.");
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled: new AbortController(), completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false };
+      cancelled: new AbortController(), completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false, ascentStroke: null };
     this.#session = session;
     const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
@@ -104,23 +145,16 @@ export class Diving {
     const started = monotonicNow();
     let previousStop = "";
     let repeatedStops = 0;
-    const tick = () => {
-      if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
-      if (!session.owned || session.returning || session.stop.signal.aborted) return;
-      const feet = this.bot.entity.position.floored();
-      const ascent = swimAscent(this.#read, feet);
-      const air = airSupplyTicks(this.bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
-      // With a lost corridor the survival backstop must take over; do not call it a planned return.
-      if (!ascent) return;
-      if (botEyesInWater(this.bot) &&
-        (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
-        session.stop.abort(BREATHING_STOP);
-    };
+    const tick = () => observeDiveTick(this.bot, this.#read, session);
+    const forgetStroke = () => { session.ascentStroke = null; };
     this.bot.on("physicsTick", tick);
+    this.bot.on("death", forgetStroke);
+    this.bot.on("respawn", forgetStroke);
     if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
     try {
       await this.#observeAir(options, session, lifetime);
       for (;;) {
+        session.ascentStroke = null;
         options.signal?.throwIfAborted();
         if (options.stopSignal?.aborted) return { status: "stopped" as const,
           reason: String(options.stopSignal.reason), elapsedMs: elapsedSince(started) };
@@ -149,6 +183,7 @@ export class Diving {
         previousStop = progress;
         if (repeatedStops >= 2) return { status: "stopped" as const, reason: "Dive cannot make progress within one breath", elapsedMs: elapsedSince(started) };
         session.returning = true;
+        session.ascentStroke = null;
         this.report("breathing");
         // A process's quantity signal ends its route, but still owes a safe
         // handoff. Action cancellation and defensive takeover always win.
@@ -156,6 +191,7 @@ export class Diving {
         const unbreathed = await this.#breatheAtSurface(session, options, navigate, surface, lifetime, returnStop);
         if (unbreathed) return { ...unbreathed, elapsedMs: elapsedSince(started) };
         session.returning = false;
+        session.ascentStroke = null;
         session.stop = new AbortController();
         this.report("resumed");
         // A mining process may revise targets between navigation transactions.
@@ -169,7 +205,10 @@ export class Diving {
       throw error;
     } finally {
       this.bot.off("physicsTick", tick);
-      if (session.returning) this.bot.setControlState("jump", false);
+      this.bot.off("death", forgetStroke);
+      this.bot.off("respawn", forgetStroke);
+      session.ascentStroke = null;
+      if (session.returning && !session.cancelled.signal.aborted) this.bot.setControlState("jump", false);
       await this.#swimBackToAir(session, options, navigate);
       this.#session = null;
       if (session.owned) this.report("released");
@@ -179,7 +218,8 @@ export class Diving {
   /** The breathing stop's swim to `surface` and wait for full air; why it ended without full air, or null. */
   async #breatheAtSurface(session: DiveSession, options: NavigateOptions, navigate: Navigate, surface: BlockPosition,
     lifetime: AbortSignal, returnStop: AbortSignal | undefined): Promise<Omit<Extract<NavigationResult, { status: "stopped" }>, "elapsedMs"> | null> {
-    const returned = await this.#returnToAir(session, options, navigate, exactBlockGoal(surface), 15_000, returnStop);
+    using budget = this.#returnBudget(null);
+    const returned = await this.#returnToAir(session, options, navigate, exactBlockGoal(surface), budget, returnStop);
     // The route's own failure fields are kept (the pinned watch reads `routeFailed`). A cancel, a takeover or a death keeps
     // its own reason; a return that found no way says so and what the model can do next.
     if (returned.status !== "completed") return session.cancelled.signal.aborted || returnStop?.aborted || returned.reason === RETURN_DIED
@@ -194,29 +234,27 @@ export class Diving {
     // shallow head immersion before admitting any dive; never invent full air.
     // This stays within one block of an already verified breathable surface.
     const initialSurface = openWaterSurface(this.#read, this.bot.entity.position.floored());
-    if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface &&
-      this.bot.entity.position.y >= initialSurface.y - 0.5) {
-      try {
-        for (let ticks = 0; ticks < 80 && airSupplyTicks(this.bot) === null; ticks++) {
-          options.signal?.throwIfAborted();
-          if (options.stopSignal?.aborted) break;
-          this.bot.setControlState("jump", this.bot.entity.position.y < initialSurface.y - 0.8);
-          await waitForPhysicsTicks(this.bot, 1, lifetime);
-        }
-      } finally { this.bot.setControlState("jump", false); }
-    }
+    if (!options.movements.allowSwimming || airSupplyTicks(this.bot) !== null) return;
+    const shallow = initialSurface !== null && this.bot.entity.position.y >= initialSurface.y - 0.5;
+    if (initialSurface !== null && !shallow) return;
     // Roofed, there is no surface to breathe at to make the server report the air (live 2026-10-10: a bot stuck on
     // the sea floor under an overhang never got a dive budget, so no route out). The server sends the air whenever
     // it changes, so a head kept under water for a moment with none sent means it is not running down.
-    if (options.movements.allowSwimming && airSupplyTicks(this.bot) === null && initialSurface === null) {
-      for (let ticks = 0; ticks < AIR_OBSERVATION_TICKS && airSupplyTicks(this.bot) === null &&
-        botEyesInWater(this.bot); ticks++) {
+    using budget = serverPacedSignal(this.bot, shallow ? 80 : AIR_OBSERVATION_TICKS);
+    const stop = AbortSignal.any([lifetime, budget.signal, ...(options.stopSignal ? [options.stopSignal] : [])]);
+    try {
+      while (!stop.aborted && airSupplyTicks(this.bot) === null && (shallow || botEyesInWater(this.bot))) {
         options.signal?.throwIfAborted();
-        await waitForPhysicsTicks(this.bot, 1, lifetime);
+        if (shallow) this.bot.setControlState("jump", this.bot.entity.position.y < initialSurface!.y - 0.8);
+        await waitForPhysicsTicks(this.bot, 1, stop);
       }
-      session.unchangedAir = airSupplyTicks(this.bot) === null &&
-        botEyesInWater(this.bot);
+    } catch (cause) {
+      lifetime.throwIfAborted();
+      if (!budget.signal.aborted && !options.stopSignal?.aborted) throw cause;
+    } finally {
+      if (shallow && !session.cancelled.signal.aborted) this.bot.setControlState("jump", false);
     }
+    session.unchangedAir = !shallow && budget.end() === "ticks" && airSupplyTicks(this.bot) === null && botEyesInWater(this.bot);
   }
 
   #headInAir(): boolean {
@@ -242,14 +280,18 @@ export class Diving {
     if (session.completed || !session.owned || target === null || session.cancelled.signal.aborted || options.signal?.aborted ||
       (this.bot.health ?? 20) <= 0) return;
     if (!botEyesInWater(this.bot)) return;
-    const air = airSupplyTicks(this.bot);
-    const budgetMs = air === null ? SWIM_BACK_TIMEOUT_MS : Math.min(SWIM_BACK_TIMEOUT_MS, Math.max(2_000, air * TICK_MS));
+    using budget = this.#returnBudget(airSupplyTicks(this.bot));
     try {
-      await this.#returnToAir(session, options, navigate, exactBlockGoal(target), budgetMs,
-        AbortSignal.any([timeoutSignal(budgetMs), ...(options.signal ? [options.signal] : [])]));
+      await this.#returnToAir(session, options, navigate, exactBlockGoal(target), budget, options.signal);
     } catch {
       // The route back failed: the body stays where it is for the breath reflex, which owns the last resort.
     }
+  }
+
+  /** Bound a return by the air's server ticks, with the shared wall and stopped-clock backstops. */
+  #returnBudget(air: number | null) {
+    const ticks = air === null ? SWIM_BACK_MAXIMUM_TICKS : Math.min(SWIM_BACK_MAXIMUM_TICKS, Math.max(SWIM_BACK_MINIMUM_TICKS, air));
+    return { ticks, ...serverPacedSignal(this.bot, ticks) };
   }
 
   /**
@@ -258,7 +300,8 @@ export class Diving {
    * fires: T5 probe 2026-10-21). A death or a respawn ends it.
    */
   async #returnToAir(session: DiveSession, options: NavigateOptions, navigate: Navigate, goal: NavigateOptions["goal"],
-    timeoutMs: number, stopSignal: AbortSignal | undefined): ReturnType<Navigate> {
+    budget: ServerPacedSignal & { readonly ticks: number }, stopSignal: AbortSignal | undefined): ReturnType<Navigate> {
+    session.ascentStroke = null;
     const ended = new AbortController();
     const onEnd = () => ended.abort(RETURN_DIED);
     this.bot.once("death", onEnd);
@@ -267,8 +310,9 @@ export class Diving {
       // Air not reported here was never seen running down (the swim back's rule before T6): taken as full.
       const air = airSupplyTicks(this.bot) ?? FULL_AIR_TICKS;
       const dive = options.movements.allowSwimming ? { dive: { origin: this.bot.entity.position.clone(), airTicks: air, toAir: true } } : {};
-      return await navigate({ movements: { ...options.movements, ...dive }, goal, signal: options.signal, timeoutMs,
-        stopSignal: AbortSignal.any([ended.signal, ...(stopSignal ? [stopSignal] : [])]) });
+      return await navigate({ movements: { ...options.movements, ...dive }, goal, signal: options.signal,
+        timeoutMs: serverPacedWallMs(budget.ticks),
+        stopSignal: AbortSignal.any([budget.signal, session.cancelled.signal, ended.signal, ...(stopSignal ? [stopSignal] : [])]) });
     } finally {
       this.bot.off("death", onEnd);
       this.bot.off("respawn", onEnd);

@@ -6,6 +6,7 @@ import type { HideResult } from "../../responses/hide.js";
 import type { CombatOutcome, CombatStyle } from "./contract.js";
 import type { ReachBasis } from "../../responses/evade-reach.js";
 import type { ChainFacts } from "../../state/threat-chains.js";
+import type { StallFacts } from "../../state/request-stall.js";
 export interface EncounterEvidence {
   readonly reason: string;
   readonly threats: readonly HostileThreat[];
@@ -49,7 +50,11 @@ export type EvadeResponseResult = EncounterEvidence & {
   readonly ends: readonly EvadeThreatEnd[];
   readonly result: { readonly kind: "separated" } | { readonly kind: "exhausted" | "failed"; readonly reason: string };
 };
-export type HideResponseResult = EncounterEvidence & { readonly response: "hide"; readonly result: HideResult };
+export type HideResponseResult = EncounterEvidence & {
+  readonly response: "hide";
+  readonly result: HideResult;
+  readonly followUp: FightResponseResult | EvadeResponseResult | null;
+};
 export type DeflectResponseResult = EncounterEvidence & {
   readonly response: "deflect";
   readonly result: Awaited<ReturnType<typeof deflectFireball>>;
@@ -58,6 +63,7 @@ export type HostileResponseResult =
   FightResponseResult | EvadeResponseResult | HideResponseResult | DeflectResponseResult;
 export type HostileSettlement = {
   readonly chain: ChainFacts | null;
+  readonly stall: StallFacts | null;
   readonly response: HostileResponse["kind"];
   readonly evidence: EncounterEvidence;
   readonly physical: HostileResponseResult | null;

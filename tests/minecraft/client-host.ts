@@ -95,6 +95,7 @@ function scenarioContextOf(bot: Bot, session: NodeClientSession, arena: ArenaFra
     scenario: session.scenario,
     arena,
     bot,
+    progress: (reason) => session.progress(reason),
     waitForTicks: async (ticks) => {
       await bot.waitForTicks(ticks);
       session.signal.throwIfAborted();

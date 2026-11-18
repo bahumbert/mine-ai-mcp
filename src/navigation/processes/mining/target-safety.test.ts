@@ -47,8 +47,35 @@ test("stone under a seabed with no wet face decides as today, and lava over a bl
   assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 0), { kind: "mineable", routeMayBreak: true });
   world.setCell(new Vec3(0, 65, 0), "lava");
   assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 16), { kind: "prohibited", reason: BREAK_UNDER_WATER });
-  world.setCell(new Vec3(0, 65, 0), "water");
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 16), { kind: "prohibited", reason: BREAK_UNDER_WATER, underWater: true });
+});
+
+test("water above obsidian is drained from dry ground before mining", () => {
+  const { bot } = createFakeBot({ groundY: 63, cells: { "1,64,0": "obsidian", "1,65,0": "water" } });
+  const target = bot.blockAt(new Vec3(1, 64, 0))!;
+  const policy = createMineflayerMovementPolicy(bot);
+  const decision = evaluateMineTarget(bot, policy, target, viewOf(bot), 32);
+  assert.equal(decision.kind, "mineable");
+  assert.ok(decision.kind === "mineable" && decision.drained);
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, viewOf(bot), 0), {
+    kind: "prohibited", underWater: true, reason: "in water: draining it takes 1 block to place, 0 carried",
+  });
+});
+
+test("a feeding source is counted through four cells but not five", () => {
+  for (const distance of [3, 4, 5]) {
+    const cells: Record<string, FakeCell> = { "1,64,0": "obsidian" };
+    for (let step = 0; step < distance; step++) cells[`${1 + step},65,0`] = { name: "water", properties: { level: distance - step } };
+    cells[`${1 + distance},65,0`] = "water";
+    const { bot } = createFakeBot({ groundY: 63, cells });
+    const target = bot.blockAt(new Vec3(1, 64, 0))!;
+    const policy = createMineflayerMovementPolicy(bot);
+    const verdict = evaluateMineTarget(bot, policy, target, viewOf(bot), 1);
+    if (distance <= 4) assert.deepEqual(verdict, { kind: "prohibited", underWater: true,
+      reason: "in water: draining it takes 2 blocks to place, 1 carried" });
+    else assert.ok(verdict.kind === "mineable" && verdict.drained);
+    const funded = evaluateMineTarget(bot, policy, target, viewOf(bot), 32);
+    assert.ok(funded.kind === "mineable" && funded.drained);
+  }
 });
 
 test("lava preparation counts permitted building material, not reserved inventory", () => {
@@ -82,9 +109,9 @@ test("water-face isolation needs building material even when the miner is alread
   });
   Reflect.set(bot.entity, "isInWater", false);
   gameWorld.setCell(new Vec3(1, 65, 0), "water");
-  // Owner, 2026-10-02: never mine under water, whatever the occasion; a submerged block is reached from the land below.
-  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "prohibited", reason: BREAK_UNDER_WATER, underWater: true },
-    "a submerged target is never mined, not even from the shore");
+  // A wet target still needs enough material to drain it before a dry break.
+  assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), { kind: "prohibited", reason: "in water: draining it takes 2 blocks to place, 0 carried", underWater: true },
+    "both wet faces need isolation before mining");
 });
 
 test("lava below an open drop column needs a floor under the target", () => {

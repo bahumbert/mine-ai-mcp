@@ -502,15 +502,24 @@ for (const ticksPerSecond of [20, 10]) {
       const stop = new AbortController();
       let fightTicks = 0;
       let hitAt = 0;
+      let hitAge: number | null = null;
+      const samples: { age: number; spent: number }[] = [];
+      const added = listenersAddedSince(bot);
+      const packetsAdded = listenersAddedSince(bot._client);
       script.onAttack = entity => {
         if (entity.name === "fireball") fixture.entities.remove(entity.id);
       };
       const damage = (packet: { entityId: number; sourceCauseId: number }) => {
-        if (packet.entityId === 7 && packet.sourceCauseId === bot.entity.id + 1) hitAt = fightTicks;
+        if (packet.entityId === 7 && packet.sourceCauseId === bot.entity.id + 1) {
+          hitAt = fightTicks;
+          hitAge = bot.time.age;
+        }
       };
       bot._client.on("damage_event", damage);
       script.onWait = () => {
-        if (!survival.budgets.snapshot().some(window => window.name === "enderman_roof")) return;
+        const window = survival.budgets.snapshot().find(window => window.name === "enderman_roof");
+        if (!window) return;
+        samples.push({ age: bot.time.age, spent: window.spent });
         fightTicks++;
         if (renews && fightTicks === 250) fixture.target.position.set(2, 64, 0.5);
         if (hitAt) fixture.target.position.set(8, 64, 0.5);
@@ -522,7 +531,7 @@ for (const ticksPerSecond of [20, 10]) {
         const outcome = await controller.engage(7, stop.signal, "pursue");
         assert.equal(outcome.kind, "unreachable", JSON.stringify({ outcome, fightTicks,
           roofs: decisions.filter(event => event.kind === "roof_engagement") }));
-        assert.match("observation" in outcome ? outcome.observation : "", /300 ticks or 30 s from the roof/);
+        assert.match("observation" in outcome ? outcome.observation : "", /300 server ticks or 48 s from the roof/);
         const waits = decisions.filter((event): event is Extract<CombatDecision, { kind: "roof_engagement" }> =>
           event.kind === "roof_engagement" && event.state === "waiting");
         assert.ok(waits.length >= 3);
@@ -539,16 +548,33 @@ for (const ticksPerSecond of [20, 10]) {
           if (!between.some(event => event.kind === "roof_engagement" && event.state === "hit"))
             assert.ok(current.noProgressTicks > previous.noProgressTicks, JSON.stringify({ previous, current }));
         }
-        assert.ok(fightTicks >= (renews ? hitAt + 300 : 300));
-        assert.ok(fightTicks <= (renews ? hitAt + 310 : 310), `fight ticks ${fightTicks}, hit ${hitAt}`);
+        const stopped = decisions.findLast((event): event is Extract<CombatDecision, { kind: "roof_engagement" }> =>
+          event.kind === "roof_engagement" && event.state === "stopped");
+        assert.equal(stopped?.noProgressTicks, 300, "deflections retain the same 300 credited server ticks");
+        for (let index = 1; index < samples.length; index++) {
+          const previous = samples[index - 1]!, current = samples[index]!;
+          if (current.spent > previous.spent)
+            assert.ok(current.spent - previous.spent <= current.age - previous.age,
+              `only forward world age earns credit: ${JSON.stringify({ previous, current })}`);
+        }
+        assert.ok(samples.length > 0);
+        assert.ok(bot.time.age - (hitAge ?? samples[0]!.age) >= 300, "the final window receives full server time");
         if (renews) assert.ok(hitAt >= 250 && hitAt < 270, `confirmed damage at ${hitAt}`);
         assert.equal(bot.time.age, 24_000 + Math.floor(fixture.clock.tick * ticksPerSecond / 400) * 20,
           `fake ${fixture.clock.tick * 50} ms; world age packet at ${ticksPerSecond} tps`);
         assert.deepEqual(survival.budgets.snapshot(), []);
-      } finally { bot._client.off("damage_event", damage); }
+        assert.equal(controller.activeEngagement(), null);
+      } finally {
+        bot._client.off("damage_event", damage);
+        assert.equal(added("physicsTick"), 0);
+        assert.equal(packetsAdded("damage_event"), 0);
+      }
     });
   }
 
+  // 150 is the largest quarry flip interval (fake ticks) tried that still fails with `prepare`'s `heldTarget?.exhausted`
+  // guard deleted (2026-11-18 sweep, both rates); each case took 12.8-18.1 s flipping every tick, 0.27-0.61 s now.
+  const QUARRY_MOVE_EVERY_TICKS = 150;
   test(`a refused Enderman roof cannot bypass the defensive return window and the waiting walk finishes (${ticksPerSecond} tps)`, async () => {
     const fixture = protectedEndermanFixture(["iron_sword", "shield", "cobblestone"], { roof: false, ticksPerSecond });
     fixture.inventory.slots[9 + 2]!.count = 64;
@@ -560,7 +586,7 @@ for (const ticksPerSecond of [20, 10]) {
     const stop = new AbortController();
     fixture.script.onWait = () => {
       // A moving quarry reopens geometry, as the failed construction in t00027 did.
-      fixture.target.position.set(fixture.clock.tick % 2 ? 8 : -8, 64, 0.5);
+      fixture.target.position.set(Math.floor(fixture.clock.tick / QUARRY_MOVE_EVERY_TICKS) % 2 ? 8 : -8, 64, 0.5);
       if (fixture.clock.tick >= 1_200) stop.abort("Roof preparation retried past 1200 ticks.");
     };
     const runner = new ActionRunner();
@@ -574,6 +600,7 @@ for (const ticksPerSecond of [20, 10]) {
       return { status: "succeeded" };
     }, { kind: "resumable_task" }), { block_name: "stone" });
     await started(runs, 1);
+    const startedAge = fixture.bot.time.age;
     const claim = runner.claim("hostile_reflex", "Enderman contact", async () => ({
       value: await controller.engage(7, stop.signal, "hold"), continuation: { kind: "resume" },
     }));
@@ -582,10 +609,12 @@ for (const ticksPerSecond of [20, 10]) {
     const outcome = await claim.outcome;
     assert.equal(outcome.kind, "unreachable", JSON.stringify({ outcome,
       preparations: decisions.filter(event => event.kind === "roof_prepared").slice(-3), tick: fixture.clock.tick }));
-    assert.match("observation" in outcome ? outcome.observation : "", /300 ticks or 30 s during defensive hold/);
+    assert.match("observation" in outcome ? outcome.observation : "", /300 server ticks or 48 s during defensive hold/);
     assert.ok(decisions.some(event => event.kind === "roof_prepared" && event.stopped?.includes("No reachable supporting face")),
       JSON.stringify(decisions.filter(event => event.kind === "roof_prepared")));
-    assert.ok(fixture.clock.tick >= 300 && fixture.clock.tick < 330);
+    const elapsedAge = fixture.bot.time.age - startedAge;
+    assert.ok(elapsedAge >= 300 && elapsedAge <= 340,
+      `300 server ticks plus the discarded packet interval; age +${elapsedAge}, fake ${fightClock.now()} ms`);
     assert.equal(controller.activeEngagement(), null);
     assert.equal((await walk).result.status, "succeeded", "the suspended walk resumes after the body is released");
     assert.equal(runs.count, 2);

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import type { MovementPolicy } from "../navigation/index.js";
-import { createFakeBot, createFakeClock, itemOf } from "../test-support/fake-bot/index.js";
+import type { MovementPolicy, Navigate } from "../navigation/index.js";
+import { createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { observation } from "../test-support/navigation.js";
+import { watch } from "../test-support/pending.js";
 import { armSignal } from "../utils/index.js";
 import * as itemPickup from "./item-pickup.js";
 import {
@@ -77,17 +79,17 @@ test("an item disappearing during a stopped route is gone, not an unreachable pi
         delete bot.entities[7];
         return { status: "stopped", reason: "Entity 7 is not currently observed.", elapsedMs: 0 };
       },
-      settleMs: { itemGone: 50 },
-    }), 50);
+      settleTicks: { itemGone: 1 },
+    }), 2_100);
 
   assert.deepEqual(result, { kind: "item_gone", takenBy: null });
   assert.equal(bot.inventory.listenerCount("updateSlot"), listenersBefore);
 });
 
 /** Mob pickups follow contract check item-taken-by-mob; distant items cannot auto-pick up. */
-function collectorPickupBot(count = 1) {
-  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }) });
-  const drop = harness.entities.spawn({ name: "item", position: DROP, item: { name: "gold_ingot", count }, pickupDelayTicks: 0 });
+function collectorPickupBot(count = 1, ticksPerSecond = 20, pickupDelayTicks = 0) {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { startAge: 1_000, ticksPerSecond } });
+  const drop = harness.entities.spawn({ name: "item", position: DROP, item: { name: "gold_ingot", count }, pickupDelayTicks });
   const mob = harness.entities.spawn({ name: "piglin", position: DROP });
   const options = {
     ...OBSERVED_ITEM,
@@ -170,12 +172,11 @@ for (const cause of ["no collect", "own collect", "partial take then silent remo
           return { status: "stopped", reason: "item removed", elapsedMs: 0 };
         },
       }).then((result) => { returned = true; return result; });
-      const deadline = slot ? slotAt : 1_500;
-      await clock.advance(deadline - 1);
+      const beforeAnswer = slot ? slotAt - 1 : 3_050;
+      await clock.advance(beforeAnswer);
       assert.equal(returned, false, "a collect or a disappearance is not an inventory gain");
-      await clock.advance(1);
-      assert.deepEqual(await pickup, slot ? { kind: "collected" } : { kind: "item_gone", takenBy: null });
-      assert.equal(clock.now(), deadline);
+      assert.deepEqual(await clock.settle(pickup, slot ? 51 : 1, 1), slot ? { kind: "collected" } : { kind: "item_gone", takenBy: null });
+      assert.equal(clock.now(), slot ? slotAt + 50 : 3_051);
     });
   }
 }
@@ -194,17 +195,6 @@ test("a partial take keeps the pursuit until the bot collects the remainder", as
     },
   });
   assert.deepEqual(await clock.settle(pickup, 200), { kind: "collected" });
-});
-
-test("a stopped route with the remainder loaded is not_collected", async () => {
-  const { bot, clock, entities, drop, mob, options } = collectorPickupBot(2);
-  using _timers = clock.install();
-  const route = { status: "stopped", reason: "no path", elapsedMs: 0 } as const;
-  const pickup = pickupObservedItem(bot, {
-    ...options,
-    navigate: async () => { entities.takenBy(mob, drop, 1); return route; },
-  });
-  assert.deepEqual(await clock.settle(pickup, 900), { kind: "not_collected", route });
 });
 
 test("listeners are released after navigation failure and an abort mid-walk", async () => {
@@ -239,7 +229,7 @@ test("a caller-owned watch remembers a take before pickup; a per-call watch has 
       ...options, collectors,
       navigate: async () => { throw new Error("an absent item needs no route"); },
     });
-    const result = await clock.settle(pickup, callerOwned ? 0 : 1_500);
+    const result = await clock.settle(pickup, callerOwned ? 0 : 3_100);
     assert.deepEqual(result, {
       kind: "item_gone", takenBy: callerOwned ? { entityId: mob.id, name: "piglin" } : null,
     });
@@ -344,3 +334,179 @@ test("an item entity is one even before its stack metadata arrives; a mob is not
   // An entity the server has told nothing about yet has no name.
   assert.equal(isItemEntity(Object.assign(bot.entities[6]!, { name: undefined })), false);
 });
+
+/** The route's arrival owns its signal; cancelling it must leave the attempt's inventory watcher alive. */
+function pickupArrival(signal = new AbortController().signal) {
+  return {
+    signal, goalRevision: "pickup",
+    node: { feet: { x: 3, y: 64, z: 0 }, remainingScaffolds: 0, overlayId: "overlay:0" },
+    observation: observation(3, 64, 0),
+  };
+}
+
+/** Reach the item without predicting its inventory gain; the fake server decides the pickup. */
+function arriveAtItem(harness: ReturnType<typeof collectorPickupBot>): Navigate {
+  return async ({ onArrival }) => {
+    harness.bot.entity.position.set(3, 64, 0);
+    assert.deepEqual(await onArrival!(pickupArrival()), { kind: "completed" });
+    return { status: "completed", elapsedMs: harness.clock.now() };
+  };
+}
+
+/** Every pickup exit releases its listeners and timers, including after the abandoned deadlines. */
+function pickupCleanup(harness: ReturnType<typeof collectorPickupBot>) {
+  const { bot, clock } = harness;
+  const added = listenersAddedSince(bot);
+  const inventoryAdded = listenersAddedSince(bot.inventory);
+  return async (signal?: AbortSignal) => {
+    for (const event of ["playerCollect", "entityGone"]) assert.equal(added(event), 0, event);
+    assert.equal(inventoryAdded("updateSlot"), 0);
+    if (signal) assert.equal(getEventListeners(signal, "abort").length, 0);
+    assert.equal(clock.pendingTimers(), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    await clock.advance(10_000);
+    assert.equal(clock.pendingTimers(), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  };
+}
+
+for (const rate of [20, 10]) {
+  test(`arrival keeps the watcher until a delayed server pickup at ${rate} tps`, async () => {
+    const harness = collectorPickupBot(1, rate, rate === 10 ? 30 : 10);
+    const { bot, clock, options, server } = harness;
+    using _timers = clock.install();
+    const clean = pickupCleanup(harness);
+    const pending = pickupObservedItem(bot, { ...options, navigate: arriveAtItem(harness) });
+    const state = watch(pending);
+    const gainMs = rate === 10 ? 3_000 : 500;
+    await clock.advance(gainMs - 1);
+    assert.equal(state.over, false, "arrival must not retire the attempt before the server's gain");
+    assert.equal(server.gameTime, rate === 10 ? 1_029 : 1_009);
+    assert.deepEqual(await clock.settle(pending, 101, 1), { kind: "collected" });
+    assert.equal(bot.time.age, rate === 10 ? 1_020 : 1_000);
+    await clean();
+  });
+
+  for (const path of ["arrival", "gone", "stopped"] as const) {
+    test(`${path} without a gain waits for the packet margin at ${rate} tps`, async () => {
+      const harness = collectorPickupBot(path === "stopped" ? 2 : 1, rate, 32_767);
+      const { bot, clock, entities, drop, mob, options } = harness;
+      using _timers = clock.install();
+      const clean = pickupCleanup(harness);
+      if (path === "gone") entities.remove(drop.id);
+      const route = { status: "stopped", reason: "no path", elapsedMs: 0 } as const;
+      const pending = pickupObservedItem(bot, {
+        ...options, navigate: path === "arrival" ? arriveAtItem(harness) : async () => {
+          if (path === "stopped") entities.takenBy(mob, drop, 1);
+          return route;
+        },
+      });
+      const state = watch(pending);
+      const packetMs = path === "gone" ? (rate === 10 ? 6_000 : 3_000) : (rate === 10 ? 4_000 : 2_000);
+      const endAge = path === "gone" ? 1_060 : 1_040;
+      await clock.advance(packetMs);
+      assert.equal(bot.time.age, endAge, "started at cached age 1000; the packet follows this look");
+      assert.equal(state.over, false);
+      await clock.advance(50);
+      assert.equal(state.over, false, "the first look takes the final zero-ms inventory read");
+      const result = await clock.settle(pending, 1, 1);
+      assert.equal(clock.now(), packetMs + 51);
+      if (path === "stopped") assert.deepEqual(result, { kind: "not_collected", route });
+      else assert.equal(result.kind, path === "gone" ? "item_gone" : "not_collected");
+      await clean();
+    });
+
+    test(`${path} with a stopped server uses its wall backstop at ${rate} tps`, async () => {
+      const harness = collectorPickupBot(1, rate, 32_767);
+      const { bot, clock, entities, drop, options, server } = harness;
+      using _timers = clock.install();
+      const clean = pickupCleanup(harness);
+      server.stop();
+      if (path === "gone") entities.remove(drop.id);
+      const pending = pickupObservedItem(bot, {
+        ...options,
+        navigate: path === "arrival" ? arriveAtItem(harness) : async () => ({ status: "stopped", reason: "no path", elapsedMs: 0 }),
+      });
+      const state = watch(pending);
+      // serverPacedWallMs: 3 * (budget + packet margin 20) * 50; plus the final zero-ms read.
+      const wallMs = path === "gone" ? 7_500 : 5_700;
+      await clock.advance(wallMs - 1);
+      assert.equal(state.over, false);
+      const result = await clock.settle(pending, 51, 1);
+      assert.equal(clock.now(), wallMs + 1);
+      assert.equal(bot.time.age, 1_000);
+      assert.equal(result.kind, path === "gone" ? "item_gone" : "not_collected");
+      await clean();
+    });
+  }
+
+  test(`a rolling item gets a fresh arrival settle and a later gain at ${rate} tps`, async () => {
+    const harness = collectorPickupBot(1, rate, 60);
+    const { bot, clock, options } = harness;
+    using _timers = clock.install();
+    const clean = pickupCleanup(harness);
+    const arrivals: string[] = [];
+    const pending = pickupObservedItem(bot, {
+      ...options,
+      navigate: async ({ onArrival }) => {
+        bot.entity.position.set(3, 64, 0);
+        clock.after(100, () => harness.drop.position.set(6, 64, 0));
+        const first = await onArrival!(pickupArrival());
+        arrivals.push(first.kind);
+        assert.equal(first.kind, "continue", "the drop rolled beyond reach during settlement");
+        bot.entity.position.set(6, 64, 0);
+        arrivals.push((await onArrival!(pickupArrival())).kind);
+        return { status: "completed", elapsedMs: clock.now() };
+      },
+    });
+    const packetMs = rate === 10 ? 4_000 : 2_000;
+    await clock.advance(packetMs);
+    assert.deepEqual(arrivals, [], "the first arrival has not spent its server-tick window yet");
+    assert.deepEqual(await clock.settle(pending, 2_200, 1), { kind: "collected" });
+    assert.deepEqual(arrivals, ["continue", "completed"]);
+    await clean();
+  });
+
+  for (const cancel of ["arrival", "outer"] as const) {
+    test(`${cancel} abort ends the arrival settle immediately at ${rate} tps`, async () => {
+      const harness = collectorPickupBot(1, rate, 32_767);
+      const { bot, clock, options, entities } = harness;
+      using _timers = clock.install();
+      const clean = pickupCleanup(harness);
+      const outer = new AbortController();
+      const arrival = new AbortController();
+      let arrivalEnds = 0;
+      const pending = pickupObservedItem(bot, {
+        ...options, signal: outer.signal,
+        navigate: async ({ onArrival, signal }) => {
+          try {
+            await onArrival!(pickupArrival(arrival.signal));
+          } finally {
+            arrivalEnds++;
+          }
+          if (!signal!.aborted) {
+            await new Promise<void>((resolve) => {
+              const onSlot = () => { bot.inventory.off("updateSlot", onSlot); resolve(); };
+              bot.inventory.on("updateSlot", onSlot);
+            });
+          }
+          return { status: "completed", elapsedMs: clock.now() };
+        },
+      });
+      const state = watch(pending);
+      await clock.advance(100);
+      (cancel === "outer" ? outer : arrival).abort(new Error("takeover"));
+      if (cancel === "outer") await assert.rejects(clock.settle(pending, 0), /takeover/);
+      else {
+        await clock.advance(0);
+        assert.equal(state.over, false, "arrival cancellation preserves the attempt-wide watcher");
+        entities.spawn({ name: "item", position: bot.entity.position, item: { name: "gold_ingot", count: 1 }, pickupDelayTicks: 0 });
+        assert.deepEqual(await clock.settle(pending, 200), { kind: "collected" });
+      }
+      assert.equal(arrivalEnds, 1);
+      assert.equal(getEventListeners(arrival.signal, "abort").length, 0);
+      await clean(outer.signal);
+      assert.equal(arrivalEnds, 1);
+    });
+  }
+}

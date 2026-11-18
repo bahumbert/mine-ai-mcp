@@ -32,6 +32,7 @@ export const requestSchema = z.strictObject({
       baseline: factsSchema,
       checkpoint: factsSchema,
       completion: z.strictObject({ kind: z.enum(["event", "current"]), observed: z.boolean(), owes: z.string() }),
+      objective: z.strictObject({ remaining: z.number(), tolerance: z.number() }).nullable().optional(),
     })
     .nullable(),
 }).meta({ id: "MineAiRequest" });

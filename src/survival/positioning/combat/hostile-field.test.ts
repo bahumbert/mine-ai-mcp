@@ -4,6 +4,7 @@ import { Vec3 } from "vec3";
 import type { HostileContext } from "../../control/combat/context.js";
 import { DEFAULT_COMBAT_POLICY, type CombatPolicy } from "../../policy/combat/contract.js";
 import { DEFAULT_NAVIGATION_POLICY } from "../../policy/contract.js";
+import type { CoverObligation } from "../../state/cover-obligation.js";
 import { SurvivalPolicyState } from "../../state/survival-policy.js";
 import { type FakeCell, createFakeBot } from "../../../test-support/fake-bot/index.js";
 import {
@@ -31,6 +32,8 @@ interface BotOptions {
   readonly health?: number;
   /** Cells a sight line meets; open air unless a test builds a wall. */
   readonly cells?: Readonly<Record<string, FakeCell>>;
+  /** What the request owes cover from; none unless a test is about the cover obligation. */
+  readonly cover?: readonly CoverObligation[];
 }
 
 /** The fake bot at the origin in open air at night, `mobs` around it as the entities it sees. */
@@ -76,7 +79,7 @@ function context(
 }
 
 function fieldFor(mobs: readonly Mob[], threats = context(), options: BotOptions = {}) {
-  return createHostileStepFieldProvider(botWith(mobs, options), threats, () => null, () => DEFAULT_NAVIGATION_POLICY)();
+  return createHostileStepFieldProvider(botWith(mobs, options), threats, () => null, () => DEFAULT_NAVIGATION_POLICY, () => options.cover ?? [])();
 }
 
 test("nothing to avoid is no field at all", () => {
@@ -89,7 +92,7 @@ test("nothing to avoid is no field at all", () => {
 test("an admitted evade keeps proximity costs without repricing its escape as a new hide", () => {
   const bot = botWith([{ id: 7, name: "zombie", x: 10 }], { health: 7 });
   let response: "evade" | null = "evade";
-  const provider = createHostileStepFieldProvider(bot, context(), () => response, () => DEFAULT_NAVIGATION_POLICY);
+  const provider = createHostileStepFieldProvider(bot, context(), () => response, () => DEFAULT_NAVIGATION_POLICY, () => []);
   const escaping = provider();
   assert.equal(escaping?.costAt(6, 0, 0), 10);
   response = null;
@@ -122,7 +125,7 @@ test("live policy scales capped proximity for evasion and ordinary routes, prese
   let now = 0;
   const policy = new SurvivalPolicyState(bot, () => now);
   let response: "evade" | null = "evade";
-  const provider = createHostileStepFieldProvider(bot, context(), () => response, () => policy.effective.navigation);
+  const provider = createHostileStepFieldProvider(bot, context(), () => response, () => policy.effective.navigation, () => []);
   const original = provider()!;
   assert.equal(original.costAt(0, 0, 0), SEVERE_CAP);
   for (const multiplier of [2, 0.5, 0]) {
@@ -322,8 +325,7 @@ test("observed aggressive piglin is priced for avoidance without attacker attrib
 test("under the hide bar, a cell the hostile can see costs twenty terrain breaks more than one it cannot", () => {
   // A wall in cell 4, between the zombie at x = 10 and everything west of it:
   // a sight line meets the wall when it crosses that cell.
-  const wall: Record<string, FakeCell> = {};
-  for (let y = -3; y <= 5; y++) for (let z = -3; z <= 3; z++) wall[`4,${y},${z}`] = "stone";
+  const wall = coverWall();
   const zombie = { id: 7, name: "zombie", x: 10 };
   const hurt = fieldFor([zombie], context(), { health: 7, cells: wall });
   const healthy = fieldFor([zombie], context(), { health: 20, cells: wall });
@@ -355,4 +357,68 @@ test("under the hide bar, a cell the hostile can see costs twenty terrain breaks
     { health: 7, cells: wall },
   );
   assert.equal(pack?.costAt(9, 0, 0), SEVERE_CAP + HIDE_EXPOSURE_PENALTY);
+});
+
+/** What a request that took cover from a shooter at x = 10 still owes (the same body the wall of the sight test hides behind). */
+function owedCover(over: Partial<CoverObligation> = {}): CoverObligation {
+  return { requestId: "request-1", generation: 0, threatId: 7, name: "skeleton",
+    body: { position: new Vec3(10, 0, 0), width: 0.6, height: 1.99 }, safeRange: 36, ...over };
+}
+
+function coverWall(): Record<string, FakeCell> {
+  const wall: Record<string, FakeCell> = {};
+  for (let y = -3; y <= 5; y++) for (let z = -3; z <= 3; z++) wall[`4,${y},${z}`] = "stone";
+  return wall;
+}
+
+test("an obligation prices the shooter's sight at full health", () => {
+  const field = fieldFor([], context(), { health: 20, cells: coverWall(), cover: [owedCover()] });
+  assert.notEqual(field, null, "an obligation alone is a field, though no hostile is in range");
+  if (!field) return;
+  assert.equal(field.costAt(6, 0, 0), HIDE_EXPOSURE_PENALTY, "in the shooter's sight");
+  assert.equal(field.costAt(3, 0, 0), 0, "behind the wall");
+  assert.equal(field.costAt(30, 0, 0), HIDE_EXPOSURE_PENALTY, "20 blocks past the shooter, inside the safe range of 36");
+  const shortRange = fieldFor([], context(), { cells: coverWall(), cover: [owedCover({ safeRange: 12 })] });
+  assert.equal(shortRange?.costAt(30, 0, 0), 0, "past the obligation's safe range of 12");
+  assert.equal(shortRange?.costAt(6, 0, 0), HIDE_EXPOSURE_PENALTY, "and inside it, at 4 blocks");
+  assert.equal(field.fingerprint.includes("|cover:7@10,0,0"), true, field.fingerprint);
+  const moved = fieldFor([], context(), { cells: coverWall(), cover: [owedCover({ body: { position: new Vec3(11, 0, 0), width: 0.6, height: 1.99 } })] });
+  assert.notEqual(moved?.fingerprint, field.fingerprint, "a shooter that moved a block is a different search");
+  const zombie = { id: 7, name: "zombie", x: 10 };
+  const priced = fieldFor([zombie], context(), { cells: coverWall(), cover: [owedCover()] });
+  assert.equal(priced?.costAt(6, 0, 0), 10 + HIDE_EXPOSURE_PENALTY, "the sight is priced over the proximity price");
+  const hurt = fieldFor([zombie], context(), { health: 7, cells: coverWall(), cover: [owedCover()] });
+  assert.equal(hurt?.costAt(6, 0, 0), 10 + HIDE_EXPOSURE_PENALTY, "under the hide bar the same cell is not priced twice");
+});
+
+test("a cell inside the rock a route would dig is not hidden by that rock", () => {
+  const field = fieldFor([], context(), { health: 20, cells: coverWall(), cover: [owedCover()] });
+  // The wall stands in cell 4 itself: a body there would have dug it, and its own cells never hide it (as under the hide bar).
+  assert.equal(field?.costAt(4, 0, 0), HIDE_EXPOSURE_PENALTY);
+  assert.equal(field?.costAt(3, 0, 0), 0, "the rock beyond the body's own cells still covers");
+});
+
+test("a field keeps the shooter it was built with when the obligation's body is refreshed", () => {
+  const owed = owedCover();
+  const field = fieldFor([], context(), { cells: coverWall(), cover: [owed] });
+  // The store refreshes the shooter's body in place at each read; a search already running prices the snapshot it began with.
+  owed.body = { position: new Vec3(10, 0, 30), width: 0.6, height: 1.99 };
+  assert.equal(field?.costAt(3, 0, 1), 0, "an uncached cell is priced from the old body");
+  assert.equal(field?.fingerprint.includes("|cover:7@10,0,0"), true);
+});
+
+test("no obligation leaves the field unchanged", () => {
+  assert.equal(fieldFor([], context(), { cells: coverWall() }), null);
+  const field = fieldFor([{ id: 7, name: "zombie", x: 10 }], context(), { cells: coverWall() });
+  assert.equal(field?.costAt(6, 0, 0), 10);
+  assert.equal(field?.fingerprint.includes("cover"), false, field?.fingerprint);
+});
+
+test("a response in progress prices no cover", () => {
+  const bot = botWith([], { cells: coverWall() });
+  let response: "evade" | null = "evade";
+  const provider = createHostileStepFieldProvider(bot, context(), () => response, () => DEFAULT_NAVIGATION_POLICY, () => [owedCover()]);
+  assert.equal(provider(), null, "the reflex that holds the body decides the way; the obligation prices nothing then");
+  response = null;
+  assert.equal(provider()?.costAt(6, 0, 0), HIDE_EXPOSURE_PENALTY, "the next request's search is priced");
 });

@@ -7,7 +7,7 @@ import { chainSuffix, ThreatChains } from "./threat-chains.js";
 /** A settled response with explicit observations, independent of the bot and its clock. */
 function entry(startedAtMs: number, endedAtMs: number, ids = [12], response: "fight" | "evade" = "evade") {
   const settlement: HostileSettlement = {
-    response, kind: "cancelled", reason: "Stopped by caller.", physical: null, chain: null,
+    response, kind: "cancelled", reason: "Stopped by caller.", physical: null, chain: null, stall: null,
     evidence: {
       reason: "hurt", threats: ids.map((id) => ({ id, name: "zombie", distance: 4, position: { x: 4, y: 64, z: 0 } })),
       healthBefore: 10, healthAfter: 10, finalPosition: { x: 0, y: 64, z: 0 },

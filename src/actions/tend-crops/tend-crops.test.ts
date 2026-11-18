@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeBot, createFakeClock, type FakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince, type FakeClock } from "../../test-support/fake-bot/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
 import { mineflayerFarmBody, plantFailure, plotFacts, tilledSoilNames, tillFailure } from "./farm-body.js";
@@ -53,8 +53,6 @@ test("growing crops and water are a farm as it should be; other skipped cells ma
   assert.equal(partial.status, "partial");
   assert.match("error" in partial ? partial.error : "", /^\[TEND_INCOMPLETE\] 2 cells could not be farmed/u);
   assert.equal(settleTend(evidence({ skipped: { "not tillable (stone)": [{ x: 0, z: 0 }] } }), null, null).status, "failed");
-  const stalled = settleTend(evidence({ harvested: 1 }), "[TEND_STALLED] No cell changed for 180 s (walked 40 blocks meanwhile).", null);
-  assert.equal(stalled.status, "partial");
   assert.equal(settleTend(evidence(), null, "[TEND_NO_HOE] 4 cells need tilling and no hoe is carried.").status, "failed");
 });
 
@@ -234,9 +232,6 @@ test("a failed hoe use is unchanged only when the server clock moved 20 ticks an
   assert.deepEqual(tillFailure(failed(0), true), { kind: "unconfirmed" });
   assert.deepEqual(tillFailure(failed(40), false), { kind: "error", error: "not confirmed" });
   assert.deepEqual(tillFailure(failed(null), true), { kind: "error", error: "not confirmed" });
-});
-
-test("a hoe use whose wait ended on the wall clock is never an untillable verdict", () => {
   assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 30, timedOut: true }, true), { kind: "unconfirmed" });
   assert.deepEqual(tillFailure({ error: "not confirmed", serverTicksWaited: 40 }, true), { kind: "unchanged" });
 });
@@ -261,13 +256,79 @@ function stallClock() {
 
 const wheatPlot = () => parseTendCropsRequest({ x1: 0, z1: 0, x2: 1, z2: 0, y: 63 });
 
+test("a 10 tps tend gets 1200 world ticks without cell changes and its next call gets a fresh window", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot: farmer } = createFakeBot({ clock, server: { ticksPerSecond: 10 } });
+  const request = parseTendCropsRequest({ x1: 0, z1: 0, x2: 3, z2: 0, y: 63 });
+  const farm = new FakeFarm();
+  for (let x = 0; x < 4; x += 1) farm.set(x, 0, "farmland", "wheat", 7);
+  farm.reach = async () => { await clock.sleep(61_000); return "route did not finish"; };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const added = listenersAddedSince(farmer);
+    const age = farmer.time.age;
+    const started = clock.now();
+    const run = beginTendCrops(farmer, request, PLOT_FACTS, () => farm, () => {}, { stallTicks: 1_200, clock });
+    const result = run({});
+    const pending = watch(result);
+    await clock.advance(61_000, 1_000);
+    assert.equal(pending.over, false, "61 s and 600 world ticks cannot spend the 1200-tick window");
+    const stopped = await clock.settle(result, 125_000, 1_000);
+    assert.equal(stopped.status, "failed");
+    assert.match("error" in stopped ? stopped.error : "", /TEND_STALLED.*12[23] s and 1220 world ticks/u);
+    assert.ok(clock.now() - started >= 122_000 && clock.now() - started <= 183_000,
+      "the in-flight reach returns before the caller reads the stall reason");
+    assert.ok(farmer.time.age - age >= 1_220 && farmer.time.age - age <= 1_820);
+    assert.equal(clock.pendingTimers(), 0);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(added("heldItemChanged"), 0);
+  }
+  await clock.advance(600_000, 1_000);
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+test("tend completion, cancellation and death release the watch at both rates", async () => {
+  for (const ticksPerSecond of [20, 10]) for (const end of ["done", "cancel", "death"] as const) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const { bot: farmer } = createFakeBot({ clock, server: { ticksPerSecond } });
+    const added = listenersAddedSince(farmer);
+    const farm = new FakeFarm();
+    farm.set(0, 0, "farmland", "wheat", 7);
+    farm.set(1, 0, "farmland", "wheat", 7);
+    const stop = new AbortController();
+    const reason = new Error(end === "death" ? "bot died" : "request cancelled");
+    farm.reach = async () => { await clock.sleep(end === "done" ? 50 : 600_000, stop.signal); return null; };
+    const run = beginTendCrops(farmer, wheatPlot(), PLOT_FACTS, () => farm, () => {}, { stallTicks: 1_200, clock });
+    const result = run({ signal: stop.signal });
+    const pending = watch(result);
+    let settled = 0;
+    void result.then(() => { settled += 1; }, () => { settled += 1; });
+    if (end === "done") assert.equal((await clock.settle(result, 1_000)).status, "succeeded");
+    else {
+      await clock.advance(100);
+      assert.equal(pending.over, false);
+      stop.abort(reason);
+      await assert.rejects(result, (error) => error === reason);
+    }
+    const cells = farm.calls.length;
+    assert.equal(clock.pendingTimers(), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    for (const event of ["physicsTick", "heldItemChanged"]) assert.equal(added(event), 0, `${end}: ${event}`);
+    await clock.advance(600_000, 1_000);
+    assert.equal(farm.calls.length, cells, "the abandoned attempt cannot touch another cell");
+    assert.equal(settled, 1);
+    assert.equal(clock.pendingTimers(), 0);
+  }
+});
+
 test("a tend cut by a reflex runs again under a new stall watch and answers for both attempts", async () => {
   const farm = new FakeFarm();
   farm.set(0, 0, "farmland", "wheat", 7);
   farm.set(1, 0, "farmland", "wheat", 7);
   cutAfter(farm, "breakBlock", 1);
   const { state, clock, advance, quietBot } = stallClock();
-  const run = beginTendCrops(quietBot, wheatPlot(), PLOT_FACTS, () => farm, () => {}, { stallMs: 60_000, clock });
+  const run = beginTendCrops(quietBot, wheatPlot(), PLOT_FACTS, () => farm, () => {}, { stallTicks: 1_200, clock });
   await assert.rejects(run({}), /HUNGER/);
   assert.deepEqual([state.opened, state.closed], [1, 1], "the cut attempt closed its watch");
   await advance(600_000);
@@ -275,6 +336,8 @@ test("a tend cut by a reflex runs again under a new stall watch and answers for 
   assert.equal(result.status, "succeeded", "the reflex's ten minutes are not a stall of the resumed attempt");
   assert.deepEqual([result.tended.harvested, result.tended.planted], [2, 2]);
   assert.deepEqual([state.opened, state.closed], [2, 2]);
+  await advance(600_000);
+  assert.deepEqual([state.opened, state.closed], [2, 2], "the successful resumed watch stays closed beyond its deadline");
 });
 
 test("a stall in the resumed attempt ends the request with what both attempts did", async () => {
@@ -290,7 +353,7 @@ test("a stall in the resumed attempt ends the request with what both attempts di
     if (++reaches === 3) await advance(61_000);
     return originalReach(cell);
   };
-  const run = beginTendCrops(quietBot, parseTendCropsRequest({ x1: 0, z1: 0, x2: 2, z2: 0, y: 63 }), PLOT_FACTS, () => farm, () => {}, { stallMs: 60_000, clock });
+  const run = beginTendCrops(quietBot, parseTendCropsRequest({ x1: 0, z1: 0, x2: 2, z2: 0, y: 63 }), PLOT_FACTS, () => farm, () => {}, { stallTicks: 1_200, clock });
   await assert.rejects(run({}), /HUNGER/);
   const result = await run({});
   assert.equal(result.status, "partial");

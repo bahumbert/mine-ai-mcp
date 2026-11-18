@@ -3,6 +3,9 @@ import { attackAndRestart } from "../weapons/swing-readiness.js";
 import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { STANDING_EYE_HEIGHT } from "../../world/block-visibility.js";
 import type { Vec3 } from "vec3";
+import { segmentHitsBox } from "../../world/segment-box.js";
+import { canBeBystander, hostileRelationship, type HostileKnowledge } from "../perception/combat/threats.js";
+import { entityDimensions } from "../../world/entity-dimensions.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -23,9 +26,32 @@ function projectedPosition(target: Entity, ticks: number) {
 }
 /** Vanilla survival entity interaction reach, measured from the eye to the box. */
 const ATTACK_REACH = 3;
+/** Conservative return distance when the projectile's shooter is unknown (D12, 2026-11-18). */
+const RETURN_LINE_BLOCKS = 64;
+/** Power-one ghast blast clearance, as in perception/combat/fireball.ts. */
+const BLAST_RADIUS = 2;
+
+/** A return shot must leave every non-defending bystander and its blast clearance untouched. */
+function bystanderOnReturnLine(bot: Bot, from: Vec3, incoming: Vec3, knowledge: HostileKnowledge): Entity | undefined {
+  const to = from.minus(incoming.unit().scaled(RETURN_LINE_BLOCKS));
+  return Object.values(bot.entities).find((entity) => {
+    if (entity.id === bot.entity.id || !canBeBystander(bot, entity) || hostileRelationship(bot, entity, knowledge).defend) return false;
+    const { width, height } = entityDimensions(bot, entity);
+    const half = width / 2;
+    return segmentHitsBox(from, to, {
+      min: entity.position.offset(-half, 0, -half),
+      max: entity.position.offset(half, height, half),
+    }, BLAST_RADIUS);
+  });
+}
 
 /** The caller owns the body; hold the footing and hit back along the incoming trajectory. */
-export async function deflectFireball(bot: Bot, targetId: number, signal: AbortSignal) {
+export async function deflectFireball(
+  bot: Bot,
+  targetId: number,
+  signal: AbortSignal,
+  knowledge: HostileKnowledge = { resolvedIds: new Set(), attackerIds: new Set() },
+) {
   const target = bot.entities[targetId];
   if (!target?.isValid)
     return { kind: "unobserved" as const, attacks: 0, observation: "Fireball disappeared before defense began." };
@@ -61,6 +87,11 @@ export async function deflectFireball(bot: Bot, targetId: number, signal: AbortS
     const dy = Math.max(estimated.y - eye.y, eye.y - estimated.y - target.height, 0);
     const dz = Math.max(0, Math.abs(eye.z - estimated.z) - halfWidth);
     if (Math.hypot(dx, dy, dz) <= ATTACK_REACH) {
+      const bystander = bystanderOnReturnLine(bot, target.position, incoming, knowledge);
+      if (bystander) return {
+        kind: "withheld" as const, attacks,
+        observation: `Deflection withheld: ${bystander.name}#${bystander.id} stands on the return line.`,
+      };
       attackAndRestart(bot, target);
       attacks += 1;
     }

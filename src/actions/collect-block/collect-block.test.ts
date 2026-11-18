@@ -3,14 +3,15 @@ import test from "node:test";
 import { Vec3 } from "vec3";
 import { collectBlockInputSchema, collectBlockResultSchema, formatCollectBlockResult, outcomes, parseCollectBlockRequest } from "./index.js";
 import { beginCollectBlock, breakBudget, collectBlock, collectionChance, inventoryStop, pursuedInventoryStop, reportToolLoss, settle } from "./collect-block.js";
-import type { NavigationRuntime } from "../../navigation/index.js";
+import { createMovements, type NavigationRuntime } from "../../navigation/index.js";
 import type { MineResult } from "../../navigation/processes/mining/mine-process.js";
 import { sourcesOf } from "../../world/block-drops.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { CarriedCounts } from "../../test-support/carried-counts.js";
-import { type FakeHarness, createFakeBot, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
+import { type FakeHarness, createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { liveBlockReader } from "../../navigation/mineflayer/world.js";
 import { mine } from "../../navigation/processes/mining/mine-process.js";
+import { watch } from "../../test-support/pending.js";
 
 /** Rewrite how many of `name` the harness's window carries, as the server's slot updates would. */
 function carry(harness: FakeHarness, name: string, total: number): void {
@@ -92,13 +93,91 @@ test("a stalled collection settles with what it got and how far it walked meanwh
   const result = settle(bot, request, { cobblestone: 23 }, new Set(["cobblestone", "stone"]), new Vec3(0, 0, 0), {
     status: "stopped",
     broken: [new Vec3(1, 60, 1)],
-    reason: outcomes.stalled(180, 881, 8),
+    reason: outcomes.stalled(180, 3_600, 881, 8),
   });
   assert.equal(result.status, "partial");
   assert.match(
     result.error ?? "",
-    /^\[COLLECTION_STALLED\] Nothing was broken or picked up for 180 s \(walked 881 blocks meanwhile, now 8 blocks from the start\)\. Broke 1 matching block; inventory gained 7\/32/u,
+    /^\[COLLECTION_STALLED\] Nothing was broken or picked up for 180 s and 3600 world ticks \(walked 881 blocks meanwhile, now 8 blocks from the start\)\. Broke 1 matching block; inventory gained 7\/32/u,
   );
+});
+
+test("a 10 tps collection gets its world-tick stall window and the next call starts a fresh one", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const harness = createFakeBot({ clock, server: { ticksPerSecond: 10 } });
+  // The bot-wide break cache keeps its listeners for the bot's lifetime (movement-policy.ts, 2026-11-18).
+  createMovements(harness.bot);
+  const request = parseCollectBlockRequest({ block_name: "stone" });
+  const waitForStop: MineRun = async (_bot, mining) => new Promise((_resolve, reject) => {
+    const signal = mining.signal!;
+    const aborted = () => { signal.removeEventListener("abort", aborted); reject(signal.reason); };
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const added = listenersAddedSince(harness.bot);
+    const inventoryAdded = listenersAddedSince(harness.bot.inventory);
+    const age = harness.bot.time.age;
+    const started = clock.now();
+    const result = collectBlock(harness.bot, shoreNavigation(harness), request, {}, undefined, waitForStop);
+    const pending = watch(result);
+    await clock.advance(180_000, 1_000);
+    assert.equal(harness.bot.time.age - age, 1_800);
+    assert.equal(pending.over, false, "180 s at 10 tps is only half the work window");
+    const stopped = await clock.settle(result, 185_000, 1_000);
+    assert.equal(stopped.status, "failed");
+    assert.equal(stopped.collected.gained, 0);
+    assert.match(stopped.error ?? "", /COLLECTION_STALLED.*36[23] s and 3620 world ticks/u);
+    assert.ok(clock.now() - started >= 362_000 && clock.now() - started <= 363_000);
+    assert.equal(harness.bot.time.age - age, 3_620);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(added("heldItemChanged"), 0);
+    assert.equal(inventoryAdded("updateSlot"), 0);
+  }
+  await clock.advance(60_000, 1_000);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+});
+
+test("collection completion, cancellation and death release the watch and caller listeners at both rates", async () => {
+  for (const ticksPerSecond of [20, 10]) for (const end of ["done", "cancel", "death"] as const) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const harness = createFakeBot({ clock, server: { ticksPerSecond } });
+    createMovements(harness.bot);
+    const added = listenersAddedSince(harness.bot);
+    const inventoryAdded = listenersAddedSince(harness.bot.inventory);
+    const stop = new AbortController();
+    const reason = new Error(end === "death" ? "bot died" : "request cancelled");
+    let mineSignal: AbortSignal | undefined;
+    const perform: MineRun = async (_bot, mining) => {
+      mineSignal = mining.signal;
+      await clock.sleep(end === "done" ? 50 : 600_000, mining.signal);
+      carry(harness, "cobblestone", 1);
+      return { status: "satisfied", broken: [], reason: null };
+    };
+    const result = collectBlock(harness.bot, shoreNavigation(harness), parseCollectBlockRequest({ block_name: "stone" }),
+      { signal: stop.signal }, undefined, perform);
+    const pending = watch(result);
+    let settled = 0;
+    void result.then(() => { settled += 1; }, () => { settled += 1; });
+    if (end === "done") assert.equal((await clock.settle(result, 1_000)).status, "succeeded");
+    else {
+      await clock.advance(100);
+      assert.equal(pending.over, false);
+      stop.abort(reason);
+      await assert.rejects(result, (error) => error === reason);
+    }
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    assert.equal(clock.pendingTimers(), 0);
+    for (const event of ["physicsTick", "heldItemChanged"]) assert.equal(added(event), 0, `${end}: ${event}`);
+    assert.equal(inventoryAdded("updateSlot"), 0);
+    const endedSignal = mineSignal?.aborted;
+    await clock.advance(600_000, 1_000);
+    assert.equal(mineSignal?.aborted, endedSignal, "the abandoned stall deadline never fires");
+    assert.equal(settled, 1);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  }
 });
 
 test("the break budget follows how often a break yields the item: grass gives seeds one time in eight", () => {

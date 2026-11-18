@@ -10,6 +10,7 @@ import { escapeFire, lavaStepCells, type FireEscapeOutcome } from "./fire.js";
 import { buildLavaEscapeStep } from "./fire.js";
 import { pendingLifeSavingPlacements } from "../../world/life-saving-placements.js";
 import { setProtectedRegionsProvider } from "../../world/protected-regions.js";
+import { ticksOnTime } from "../../world/world-age.js";
 
 test("lava contact includes the shallow body overlap missed by the swimming flag", () => {
   const lavaCell = new Vec3(1, 63, 0);
@@ -238,8 +239,13 @@ for (const rate of [20, 10]) {
       },
     };
     const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { footing, record: s.record });
-    assert.equal(await s.clock.settle(pending, 15_001), "timed_out");
-    assert.equal(abortedAt, 15_000);
+    const endMs = rate === 20 ? 16_050 : 32_050;
+    await s.clock.advance(endMs - 1);
+    assert.equal(abortedAt, -1, "landing still owns the body before the packet deadline");
+    await s.clock.advance(1);
+    assert.equal(await pending, "timed_out");
+    assert.equal(abortedAt, endMs);
+    assert.equal(s.bot.time.age, 24_320);
     assert.equal(release, 1);
     assert.equal(s.cleared.count, 3, "entry, recovery release, escape finally");
     for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
@@ -309,10 +315,10 @@ for (const rate of [20, 10]) {
         },
       } : undefined;
       const released = observeLandingRelease(s);
-      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumMs: 300, footing, record: s.record });
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumTicks: ticksOnTime(300), footing, record: s.record });
       await s.clock.advance(150);
       assert.equal(s.controls.jump, true, "lava swims up instead of declaring the airborne body blocked");
-      assert.equal(await s.clock.settle(pending, 500), "timed_out");
+      assert.equal(await s.clock.settle(pending, 4_100), "timed_out");
       if (failedLanding) assert.equal(s.record.last, "failed");
       await released();
     });
@@ -335,14 +341,14 @@ for (const rate of [20, 10]) {
           for (let y = 65; y <= 68; y++) s.setCell(x!, y, z!, "stone");
       }
       const released = observeLandingRelease(s);
-      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumMs: contact === "fire" ? 15_000 : 200, footing, record: s.record });
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "contact", { maximumTicks: ticksOnTime(contact === "fire" ? 15_000 : 200), footing, record: s.record });
       if (contact === "fire") {
         assert.equal(await s.clock.settle(pending, 500), "escaped");
         assert.equal(s.bot.blockAt(new Vec3(-1, 65, 0))?.name, "air");
       } else {
         await s.clock.advance(50);
         assert.equal(s.controls.jump, true);
-        assert.equal(await s.clock.settle(pending, 500), "timed_out");
+        assert.equal(await s.clock.settle(pending, 4_100), "timed_out");
       }
       // Fire contact may reopen dry landing only after its authoritative removal.
       assert.equal(calls, contact === "fire" ? 1 : 0);
@@ -356,8 +362,8 @@ for (const rate of [20, 10]) {
       s.bot.entity.onGround = body === "grounded";
       if (body === "water") { Object.assign(s.bot.entity, { isInWater: true }); setBurning(s.bot, false); }
       const released = observeLandingRelease(s);
-      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "lethal_burn", { maximumMs: 200, record: s.record });
-      assert.equal(await s.clock.settle(pending, 500), body === "grounded" ? "blocked" : body === "water" ? "escaped" : "timed_out");
+      const pending = escapeFire(s.bot, s.world, new AbortController().signal, "lethal_burn", { maximumTicks: ticksOnTime(200), record: s.record });
+      assert.equal(await s.clock.settle(pending, 4_100), body === "grounded" ? "blocked" : body === "water" ? "escaped" : "timed_out");
       await released();
     });
 }
@@ -383,7 +389,7 @@ test("extinguishing during an unanswered pour releases the body before the recei
   using _installed = clock.install();
   let issued = false;
   bot.activateItem = () => { issued = true; };
-  const seen = watch(escapeFire(bot, world, new AbortController().signal, "lethal_burn", { maximumMs: 300 }));
+  const seen = watch(escapeFire(bot, world, new AbortController().signal, "lethal_burn", { maximumTicks: ticksOnTime(300) }));
   await clock.advance(50);
   assert.equal(issued, true);
   assert.equal(seen.outcome, null);
@@ -466,35 +472,48 @@ test("a cancel mid-route stops at once", async () => {
   assert.equal(bot.listenerCount("physicsTick"), 0, "no physics listener is left");
 });
 
-test("a stopped route or lava swim ends on the wall clock and releases its scopes", async () => {
+test("a stopped route or lava swim ends at the stopped-server bound and releases its scopes", async () => {
  for (const swimming of [false, true]) {
-  const { bot, world, clock, controls } = burningScene({ clock: createFakeClock({ mode: "mocked" }),
+  const { bot, server, world, clock, controls } = burningScene({ clock: createFakeClock({ mode: "mocked" }),
     ...(swimming ? { cells: walledTwoCellPit(), position: IN_THE_PIT } : {}) });
   using _installed = clock.install();
   const added = listenersAddedSince(bot);
+  const timers = clock.pendingGlobalTimers();
   bot.physicsEnabled = false;
-  const escaping = escapeFire(bot, world, new AbortController().signal, "contact", { maximumMs: 50 });
-  await clock.advance(50);
-  const outcome = await escaping;
+  server.stop();
+  const seen = watch(escapeFire(bot, world, new AbortController().signal));
+  await clock.advance(19_999);
+  assert.equal(seen.outcome, null);
+  await clock.advance(1);
+  const outcome = seen.outcome;
   assert.equal(outcome, "timed_out", "the clock ended it: not the same as a walk with nowhere to go");
   assert.equal(Object.values(controls).some(Boolean), false);
   for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+  assert.equal(clock.pendingGlobalTimers(), timers);
+  assert.equal(bot.time.age, 24_000);
+  await clock.advance(48_000);
+  assert.equal(seen.outcome, "timed_out");
  }
 });
 
 test("a death mid-route or lava swim ends died and releases its scopes", async () => {
- for (const swimming of [false, true]) {
-  const { bot, world, physicsTicks, controls } = burningScene(swimming ? { cells: walledTwoCellPit(), position: IN_THE_PIT } : {});
+ for (const rate of [20, 10]) for (const swimming of [false, true]) {
+  const { bot, clock, world, physicsTicks, controls } = burningScene({ ticksPerSecond: rate,
+    clock: createFakeClock({ mode: "mocked" }), ...(swimming ? { cells: walledTwoCellPit(), position: IN_THE_PIT } : {}) });
+  using _timers = clock.install();
   const added = listenersAddedSince(bot);
   const seen = watch(escapeFire(bot, world, new AbortController().signal));
   await physicsTicks(5);
   if (swimming) assert.equal(bot.getControlState("jump"), true, "swimming up with no bank, no step");
   bot.health = 0;
   bot.emit("death");
-  await physicsTicks(1);
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(seen.outcome, "died");
   assert.equal(Object.values(controls).some(Boolean), false);
   for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  await clock.advance(48_000);
+  assert.equal(Object.values(controls).some(Boolean), false);
  }
 });
 
@@ -533,7 +552,7 @@ test("a burning bot beside lava that can spread into its cell is not escaped the
 test("burning on safe dry ground with no water in reach is escaped at once, whatever woke the reflex", async () => {
   for (const reason of ["contact", "advancing_lava"] as const) {
     const { bot, world, physicsTicks } = burningScene({ cells: {}, position: new Vec3(-4.5, 65, 5.5) });
-    const seen = watch(escapeFire(bot, world, new AbortController().signal, reason, { maximumMs: 2_000 }));
+    const seen = watch(escapeFire(bot, world, new AbortController().signal, reason, { maximumTicks: ticksOnTime(2_000) }));
     await physicsTicks(5);
     assert.equal(seen.outcome, "escaped", `${reason}: not held until the wall clock ends it`);
   }
@@ -544,7 +563,7 @@ test("a burning bot on an unsafe dry cell with no safe cell in reach is told blo
     cells: { "1,65,0": lavaAt(2), "-1,65,0": lavaAt(2), "0,65,1": lavaAt(2), "0,65,-1": lavaAt(2) },
     position: new Vec3(0.5, 65, 0.5),
   });
-  const seen = watch(escapeFire(bot, world, new AbortController().signal, "advancing_lava", { maximumMs: 2_000 }));
+  const seen = watch(escapeFire(bot, world, new AbortController().signal, "advancing_lava", { maximumTicks: ticksOnTime(2_000) }));
   await physicsTicks(3);
   assert.equal(seen.outcome, "blocked", "the four neighbours are lava and the cell is its own: no way on");
 });
@@ -613,6 +632,31 @@ function walledTwoCellPit(wallRadius = 5, wallHeight = 2): Record<string, FakeCe
 
 const IN_THE_PIT = new Vec3(0.5, 64, 0.5);
 
+for (const [rate, endMs] of [[20, 16_050], [10, 32_050]] as const) {
+  test(`a walled lava escape gets 300 server ticks (${rate} tps)`, async () => {
+    const s = burningScene({ clock: createFakeClock({ mode: "mocked" }), ticksPerSecond: rate,
+      cells: walledTwoCellPit(), position: IN_THE_PIT });
+    using _timers = s.clock.install();
+    const added = listenersAddedSince(s.bot);
+    const timers = s.clock.pendingGlobalTimers();
+    const age = s.bot.time.age;
+    const seen = watch(escapeFire(s.bot, s.world, new AbortController().signal));
+    await s.clock.advance(endMs - 1);
+    assert.equal(seen.outcome, null, "client ticks must not spend the server budget early");
+    assert.equal(s.controls.jump, true);
+    await s.clock.advance(1);
+    assert.equal(seen.outcome, "timed_out");
+    assert.equal(s.bot.time.age - age, 320);
+    assert.equal(s.clock.now(), endMs);
+    assert.equal(s.cleared.count, 2);
+    assert.equal(Object.values(s.controls).some(Boolean), false);
+    for (const event of ["physicsTick", "death", "respawn"]) assert.equal(added(event), 0, event);
+    assert.equal(s.clock.pendingGlobalTimers(), timers);
+    await s.clock.advance(48_000);
+    assert.equal(s.cleared.count, 2, "retired budget cannot release the body twice");
+  });
+}
+
 for (const owner of ["Tom", "own", "none"]) {
   test(`a lava step in ${owner === "Tom" ? "a foreign" : owner} region ${owner === "Tom" ? "is recorded" : "needs no removal"}`, async () => {
     const { bot, clock, world } = burningScene({ cells: walledTwoCellPit(), position: IN_THE_PIT, carried: { cobblestone: 8 } });
@@ -680,7 +724,9 @@ test("a lava step whose placement gets no answer is not retried from the same ce
   assert.equal(attempts.count, 1, "no second placement into the same cell from the same body cell and world");
   assert.equal(bot.getControlState("jump"), true, "the body keeps swimming up");
   assert.equal(seen.outcome, null);
-  await clock.advance(4_000);
-  assert.equal(seen.outcome, "timed_out", "only the 15 s wall clock ends it");
+  await clock.advance(6_999);
+  assert.equal(seen.outcome, null, "the stopped term has not ended yet");
+  await clock.advance(1);
+  assert.equal(seen.outcome, "timed_out", "the 20 s stopped-server bound ends it");
   assert.equal(bot.getControlState("jump"), false, "controls cleared");
 });

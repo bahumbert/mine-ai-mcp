@@ -724,9 +724,9 @@ export class ActionRunner {
   }
 
   /** The hold's owner chose a decision that does not start another response. */
-  releaseHold(owner: string, decisionKind: string, ended: string | null = null): boolean {
+  releaseHold(owner: string, decisionKind: string, ended: string | null = null, note?: string): boolean {
     const held = this.#admittedRequest?.held;
-    return held?.owner === owner && held.release(decisionKind, ended);
+    return held?.owner === owner && held.release(decisionKind, ended, note);
   }
 
   /** A claim is held to the physics-stall limit and to the limits its reflex asked for; none given: no watch. */

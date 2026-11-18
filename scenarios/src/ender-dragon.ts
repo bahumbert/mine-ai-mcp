@@ -10,6 +10,7 @@ import { openRuntime, wearArmor } from "./runtime.ts";
 import type { MineAiScenario, MineAiScenarioPreparation } from "./scenario-client.ts";
 import { recordSourceIdentity } from "./source-identity.ts";
 import { createCombatController } from "../../src/survival/control/combat/controller.ts";
+import { waitForServerPaced } from "../../src/world/server-paced.ts";
 
 const paramsSchema = z.object({
   phase: z.enum(["crystals", "perch", "full"]).default("full"),
@@ -29,21 +30,18 @@ export const prepare: MineAiScenarioPreparation = async context => {
   const pumpkin = bot.inventory.items().find(item => item.name === "carved_pumpkin");
   if (pumpkin) await bot.equip(pumpkin, "head");
   await bot.waitForChunksToLoad();
-  for (let t = 0; t < 400 && Object.values(bot.entities).filter(e => e.isValid && e.name === "end_crystal").length < 10; t++) {
-    signal.throwIfAborted();
-    await bot.waitForTicks(1);
-  }
-  if (Object.values(bot.entities).filter(e => e.isValid && e.name === "end_crystal").length !== 10)
-    throw new Error("Expected all ten native crystals before the scenario starts");
+  const crystalsEnd = await waitForServerPaced(bot, 400, { signal,
+    until: () => Object.values(bot.entities).filter(e => e.isValid && e.name === "end_crystal").length === 10,
+  });
+  if (crystalsEnd !== "until")
+    throw new Error(`Expected all ten native crystals before the scenario starts (${crystalsEnd})`);
   if (paramsSchema.parse(context.scenario.params ?? {}).phase !== "perch") return;
   // Arrange only the zero-crystal boundary. Landing and head direction remain native.
   bot.chat("/execute in minecraft:the_end run kill @e[type=end_crystal]");
-  for (let t = 0; t < 100 && Object.values(bot.entities).some(e => e.isValid && e.name === "end_crystal"); t++) {
-    signal.throwIfAborted();
-    await bot.waitForTicks(1);
-  }
-  if (Object.values(bot.entities).some(e => e.isValid && e.name === "end_crystal"))
-    throw new Error("Zero-crystal setup was not acknowledged");
+  const zeroEnd = await waitForServerPaced(bot, 100, { signal,
+    until: () => !Object.values(bot.entities).some(e => e.isValid && e.name === "end_crystal"),
+  });
+  if (zeroEnd !== "until") throw new Error(`Zero-crystal setup was not acknowledged (${zeroEnd})`);
 };
 
 /** Classify observed cages, never seed-specific tower heights. */

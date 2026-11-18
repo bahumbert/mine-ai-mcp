@@ -1,8 +1,12 @@
-// Seated hostile sensing and the bounded boat preparation before a hostile response.
+// Hostile response settlement, occupied shelters, and bounded boat preparation.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { z } from "zod";
+import { actionResultSchema, defineAction } from "../../actions/action.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
+import { exactBlockGoal } from "../../navigation/goals/index.js";
+import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { ActionRunner } from "../../session/action-runner.js";
 import { attackedIds, combatTestContext, engagingCombat, unexpectedEngage } from "../../test-support/combat.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
@@ -21,9 +25,13 @@ import { observeCombatDecision } from "../control/combat/observation.js";
 import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
+import { RequestStalls } from "../state/request-stall.js";
+import { CoverObligations } from "../state/cover-obligation.js";
 import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
 import { serverTickPace } from "../../world/server-tick-pace.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
+import { serverPacedWallMs, waitForServerTicks } from "../../world/world-age.js";
+import { COMBAT_LIMITS } from "../control/combat/limits.js";
 
 for (const recovery of [true, false]) test(recovery
   ? "recovery's evade that separates in its start cell is no new recovery cell"
@@ -100,7 +108,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
   const reflex = attachHostileReflex(bot, driver, navigation, controller, perception);
   const scene: HostileScene = {
     bot, navigation, controller, driver, perception, policy: controller.policy,
-    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(),
+    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(), covers: new CoverObligations(),
     transition: (pending) => { void pending; },
   };
   return { ...harness, driver, perception, scene, async [Symbol.asyncDispose]() {
@@ -110,6 +118,91 @@ function responseFixture(occluded = false, harness = createFakeBot({
     timers[Symbol.dispose]();
   } };
 }
+
+/** The real occupied-shell refusal and follow-up, borrowing the existing response services. */
+function occupiedShelterFixture(ticksPerSecond: number, onRoute: NavigationRuntime["navigate"]) {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }),
+    server: { ticksPerSecond, startAge: 1_000 }, position: new Vec3(0.5, 64, 0.5),
+    health: 2, carried: { cobblestone: 32, diamond_sword: 1 },
+    cells: { "0,63,0": "bedrock", "0,66,0": "stone", "1,65,0": "stone",
+      "-1,64,0": "stone", "-1,65,0": "stone", "0,64,1": "stone", "0,65,1": "stone",
+      "0,64,-1": "stone", "0,65,-1": "stone" },
+    entities: { 61: { name: "blaze", kind: "Hostile mobs", position: new Vec3(1.5, 64, 0.5) } } });
+  const navigation = { world: new MemoryWorld(), cancel: () => undefined, navigate: onRoute } as unknown as NavigationRuntime;
+  const fixture = responseFixture(false, harness, navigation);
+  const remember = fixture.driver.answered.remember.bind(fixture.driver.answered);
+  fixture.driver.answered.remember = (scope, failure, temporal) => {
+    const entry = remember(scope, failure, temporal);
+    if (scope.response === "hide") {
+      // A clear sensor seam admits the fresh decision, after real construction saw the occluded intruder (T7).
+      fixture.bot.world.raycast = () => null;
+      fixture.combat.hurt(61, null, 1);
+    }
+    return entry;
+  };
+  return fixture;
+}
+
+for (const ticksPerSecond of [20, 10]) for (const ending of ["old", "new", "cancel", "death"] as const)
+test(`occupied-shelter separation clears only old attack contact after ${ending} (${ticksPerSecond} tps)`, async () => {
+  const abort = new AbortController();
+  let routes = 0;
+  await using fixture = occupiedShelterFixture(ticksPerSecond, async ({ signal }) => {
+    if (++routes === 1) {
+      if (ending === "new") {
+        const age = fixture.bot.time.age;
+        assert.equal(await waitForServerTicks(fixture.bot, 20, { signal }), "moved");
+        assert.equal(fixture.bot.time.age - age, 20, "the old hurt window has elapsed on the server");
+        let observed = false;
+        const hurt = () => { observed = true; };
+        fixture.bot.once("entityHurt", hurt);
+        try { fixture.combat.hurtBot(0.1, 61); assert.ok(observed, "the new attributed hit was actually announced"); }
+        finally { fixture.bot.off("entityHurt", hurt); }
+      }
+      fixture.bot.entities[61]!.position.x = 100;
+      if (ending === "cancel") abort.abort(new Error("Cancel nested separation"));
+      if (ending === "death") fixture.combat.setHealth(0);
+    }
+    return { status: "completed", elapsedMs: 0 };
+  });
+  await fixture.driver[Symbol.asyncDispose]();
+  const added = listenersAddedSince(fixture.bot);
+  const timers = fixture.clock.pendingTimers();
+  const globals = fixture.clock.pendingGlobalTimers();
+  fixture.combat.hurtBot(0.1, 61);
+  assert.equal(fixture.perception.attackerIds.has(61), true);
+  const threat = { id: 61, name: "blaze", position: { x: 1.5, y: 64, z: 0.5 }, distance: 1 };
+  const settlement = await fixture.clock.settle(respondToHostile(fixture.scene,
+    { kind: "hide", reason: "hurt", threats: [threat] }, abort.signal), 15_000);
+  assert.equal(routes, 1, "the occupied shell must actually run its evade");
+  assert.equal(settlement.kind, ending === "cancel" ? "cancelled" : ending === "death" ? "bot_died" : "completed");
+  if (ending === "old" || ending === "new") {
+    assert.equal(settlement.response, "evade");
+    assert.equal(settlement.physical?.response, "hide", "keep the original refusal alongside the successful follow-up");
+    assert.equal(responseContinuation(settlement).kind, "resume");
+  }
+  assert.equal(fixture.perception.attackerIds.has(61), ending !== "old", "only successful separation answers old contact");
+  await fixture.clock.advance(5 * 1_000 / ticksPerSecond);
+  if (ending === "old") assert.equal(senseHostile(fixture.scene), null, "the loaded old attacker must not demand another response");
+  if (ending === "new") assert.ok(senseHostile(fixture.scene)?.danger.facts.contacts.some(contact => contact.id === 61));
+  for (const event of ["entityHurt", "physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+  fixture.entities.remove(61);
+  if (ending === "death") fixture.combat.setHealth(20);
+  const input = z.object({});
+  const navigate = defineAction({ name: "navigate", description: "Navigate after an occupied shelter",
+    inputSchema: input, resultSchema: actionResultSchema({}), parse: value => input.parse(value), formatResult: result => result.status,
+    execution: { kind: "resumable_task" }, begin: () => async () => {
+      const route = await fixture.scene.navigation.navigate({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 60, y: 64, z: 0 }) });
+      return route.status === "completed" ? { status: "succeeded" as const } : { status: "failed" as const, error: `route ${route.status}` };
+    } });
+  assert.equal((await fixture.clock.settle(fixture.driver.runner.run(navigate, {}), 1_000)).result.status, "succeeded");
+  assert.equal(routes, 2);
+  await fixture.clock.advance(serverPacedWallMs(COMBAT_LIMITS.ceilingTicks) + 1, 1_000);
+  assert.equal(routes, 2, "retired response deadlines cannot restart the old evade");
+  assert.equal(fixture.clock.pendingTimers(), timers);
+  assert.equal(fixture.clock.pendingGlobalTimers(), globals);
+  for (const event of ["entityHurt", "physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
 
 test("a second evade on the same zombie carries its chain into the settled text", async () => {
   const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: 63,

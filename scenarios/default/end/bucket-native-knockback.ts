@@ -1,9 +1,10 @@
 import type { MineAiScenario, MineAiScenarioPreparation } from '../../src/scenario-client.ts';
 import { openRuntime, wearArmor } from '../../src/runtime.ts';
 import { recordSourceIdentity } from '../../src/source-identity.ts';
+import { waitForServerPaced } from '../../../src/world/server-paced.ts';
 /** Isolated End geometry. A native TNT blast supplies the knockback; the driver never sets velocity or pours water. */
 export const prepare: MineAiScenarioPreparation = async (context) => {
-  const { bot } = context;
+  const { bot, signal } = context;
   await wearArmor(context);
   bot.chat('/kill @e[type=ender_dragon]');
   bot.chat('/kill @e[type=enderman]');
@@ -12,7 +13,14 @@ export const prepare: MineAiScenarioPreparation = async (context) => {
   bot.chat('/setblock 76 99 0 glass');
   bot.chat('/setblock 79 99 0 glass');
   bot.chat('/tp @s 79.5 100 0.5');
-  await bot.waitForTicks(10);
+  const arrived = await waitForServerPaced(bot, 100, { signal, until: () => {
+    const { x, y, z } = bot.entity.position;
+    return Math.abs(x - 79.5) < 0.1 && Math.abs(y - 100) < 0.1 && Math.abs(z - 0.5) < 0.1
+      && bot.blockAt(bot.entity.position.offset(0, -1, 0)) !== null;
+  } });
+  if (arrived !== 'until') throw new Error(`Knockback platform teleport/chunk was not acknowledged (${arrived})`);
+  const settled = await waitForServerPaced(bot, 10, { signal });
+  if (settled !== 'ticks') throw new Error(`Knockback platform settle did not observe server ticks (${settled})`);
 };
 export const run: MineAiScenario = async (context) => {
   await recordSourceIdentity();

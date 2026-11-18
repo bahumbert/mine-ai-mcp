@@ -22,6 +22,7 @@ import { attackAndRestart, swingReadiness, type SwingReadiness } from "../weapon
 import type { CoveredRecovery } from "./recover.js";
 import { type Entity, shelterFeet, shelterIntruder, shelterIntruders } from "./shelter-cells.js";
 import { clearShelterCell } from "./shelter-clearance.js";
+import { shelterEntityBox, type ShelterOccupied, type ShelterRefusal } from "./shelter-refusal.js";
 
 export interface HideOptions {
   readonly navigation?: NavigationRuntime;
@@ -69,6 +70,7 @@ export type StepEnd = "again" | StepFailure;
 export interface StepFailure {
   readonly kind: "failed";
   readonly error: string;
+  readonly refusal?: ShelterRefusal;
 }
 
 export function shelterBlocks(build: ShelterBuild): number {
@@ -235,20 +237,23 @@ export async function sealShelterCell(build: ShelterBuild, cell: Vec3): Promise<
 }
 
 /** Only intruder occupancy counts toward skipping a cell; other bodies retain the hazard owner's retry path. */
-function shelterCellOccupied(build: ShelterBuild, cell: Vec3): boolean {
+function shelterCellOccupied(build: ShelterBuild, cell: Vec3): readonly ShelterOccupied[] | null {
   const key = `${cell.x},${cell.y},${cell.z}`;
   const reason = occupiedCell(build.bot, cell);
   if (!reason) {
     build.blockedCells.delete(key);
-    return false;
+    return null;
   }
-  const intruder = [...shelterIntruders(build.bot, build.options.threatContext)]
-    .some((entity) => cellIntersectsBody(cell, entity));
+  const occupants = [...shelterIntruders(build.bot, build.options.threatContext)]
+    .filter((entity) => cellIntersectsBody(cell, entity));
+  const intruder = occupants.length > 0;
   const previous = build.blockedCells.get(key);
   const count = !intruder ? 0
     : previous?.pass === build.pass ? Math.max(1, previous.count) : previous?.pass === build.pass - 1 ? previous.count + 1 : 1;
+  const occupied = occupants.map((entity) => ({ cell: { x: cell.x, y: cell.y, z: cell.z }, intruderId: entity.id,
+    intruderName: entity.name ?? "unknown", box: shelterEntityBox(entity) }));
   build.blockedCells.set(key, { pass: build.pass, count, reason });
-  return true;
+  return occupied;
 }
 
 /**

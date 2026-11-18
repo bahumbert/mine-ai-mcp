@@ -9,6 +9,7 @@ import { setCarriedCount } from "../../../test-support/carried-counts.js";
 import { type FakeHarness, createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
 import { createNavigationRuntime } from "../../runtime.js";
 import { createMovementPolicy } from "../../movements/policy.js";
+import { createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { footprintColumns } from "../../../world/player-physics.js";
 import { waterStancesHeld } from "../../steering/hold-water-position.js";
 import { DROP_PICKUP_TIMEOUT_MS } from "./mine-drops.js";
@@ -1129,6 +1130,41 @@ test("a drain that fails with the faces dry tries another stance", async () => {
   assert.equal(result.status, "satisfied");
 });
 
+for (const [rate, stopped] of [[20, false], [10, false], [20, true]] as const)
+  test(`a failed wading drain excludes that stance and tries another (${rate} tps, stopped ${stopped})`, async () => {
+    const target = new Vec3(1, 64, 0);
+    const feet = new Vec3(0, 65, 0);
+    using scene = mineScene({ blocks: [target], solids: [new Vec3(0, 64, 0), new Vec3(1, 64, 1)], water: [feet, new Vec3(1, 65, 0), new Vec3(2, 65, 0)], feet: new Vec3(0.5, 65, 0.5), isInWater: true });
+    scene.world.setCell(feet, { name: "water", properties: { level: 1 } });
+    scene.world.setCell(new Vec3(1, 65, 0), { name: "water", properties: { level: 1 } });
+    scene.server.setTickRate(rate);
+    if (stopped) scene.server.stop();
+    const other = new Vec3(1, 65, 1);
+    const result = await runMine(scene, {
+      canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+      isSatisfied: () => scene.bot.blockAt(target)?.name === "air",
+      placeInto: async (_bot, position) => {
+        const cell = new Vec3(position.x, position.y, position.z);
+        scene.world.setCell(cell, "cobblestone");
+        return { kind: "placed", block: scene.bot.blockAt(cell)! };
+      },
+      route: async ({ goal }) => {
+        const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+        assert.equal(resolved.kind, "active");
+        if (resolved.kind !== "active") throw new Error("expected a remaining target");
+        assert.equal(resolved.isSatisfied({ feet, remainingScaffolds: 0, overlayId: "overlay:0" }, goalTestWorld), false);
+        assert.equal(resolved.isSatisfied({ feet: other, remainingScaffolds: 0, overlayId: "overlay:0" }, goalTestWorld), true);
+        scene.bot.entity.position = other.offset(0.5, 0, 0.5);
+        Reflect.set(scene.bot.entity, "isInWater", false);
+        return { status: "completed", elapsedMs: 0 };
+      },
+      breakInPlace: breakingInPlace(scene, () => {}),
+    });
+    assert.equal(result.status, "unreachable");
+    assert.ok(result.reason, "the bounded stop explains why work could not continue");
+    assert.equal(scene.bot.blockAt(target)?.name, "stone");
+  });
+
 test("only in-water targets settle unreachable with underWater and no route; mixed refusals do not", async () => {
   for (const mixed of [false, true]) {
     using scene = mineScene({ blocks: [new Vec3(1, 64, 0), new Vec3(2, 64, 0)] });
@@ -1545,6 +1581,42 @@ test("a lava face that will not close blacklists the target instead of breaking 
   assert.equal(breaks, 0);
   assert.equal(result.status, "unreachable");
   assert.match(result.reason ?? "", /the lava at 2,64,0 could not be closed: no carried item is a full block/);
+});
+
+test("water returning during lava sealing refuses the swing and the next target is tried", async () => {
+  const first = new Vec3(1, 64, 0);
+  const next = new Vec3(-1, 64, 0);
+  const water = new Vec3(1, 65, 0);
+  const lava = new Vec3(2, 64, 0);
+  using scene = mineScene({ blocks: [first, next], solids: [new Vec3(0, 63, 0), new Vec3(1, 63, 0), new Vec3(-1, 63, 0)],
+    water: [water], lava: [lava], feet: new Vec3(0.5, 64, 0.5) });
+  const navigation = createNavigationRuntime(scene.bot);
+  const attempts: string[] = [];
+  let finished = false;
+  try {
+  const result = await runMine(scene, {
+    canMine: () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } }),
+    movements: createMineflayerMovementPolicy(scene.bot),
+    isSatisfied: () => finished,
+    placeInto: async (_bot, position) => {
+      const cell = cellAt(position);
+      scene.world.setCell(cell, "cobblestone");
+      if (cell.equals(lava)) scene.world.setCell(water, "water");
+      return { kind: "placed", block: scene.bot.blockAt(cell)! };
+    },
+    breakInPlace: async (options) => {
+      attempts.push(cellAt(options.position).toString());
+      if (cellAt(options.position).equals(next)) { finished = true; return { status: "broken" }; }
+      return navigation.breakBlockInPlace(options);
+    },
+    route: noRouteNeeded,
+  });
+  assert.equal(result.status, "satisfied");
+  assert.deepEqual(attempts, [first.toString(), next.toString()]);
+  assert.equal(scene.bot.blockAt(first)?.name, "stone");
+  assert.equal(scene.server.packets.filter((packet) => packet.name === "block_dig" &&
+    (packet.data as { location: { x: number; y: number; z: number } }).location.x === first.x).length, 0);
+  } finally { await navigation.close(); }
 });
 
 /** Obsidian beside an unconverted lava source, with the bot on the working cell west of it. */

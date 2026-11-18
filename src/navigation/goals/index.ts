@@ -13,7 +13,7 @@
  * block upward costs twice a block sideways; the constants below say why.
  */
 import { Vec3 } from "vec3";
-import { exposedBodyFrom } from "../../world/entity-geometry.js";
+import { shooterSeesBody } from "../../world/entity-geometry.js";
 import { PLAYER_HALF_WIDTH, PLAYER_STANDING_HEIGHT } from "../../world/player-physics.js";
 import type { GeneratedMovement } from "../movements/catalogue.js";
 import { EMPTY_OVERLAY_IDENTITY } from "../search/planning-overlay.js";
@@ -341,11 +341,11 @@ function coveredFrom(threat: SafeFromEntity, position: Vec3, world: WorldView): 
     if (obstacles === null) unknown = true;
     return obstacles;
   });
-  const eye = new Vec3(threat.position.x, threat.position.y + cover.eyeHeight, threat.position.z);
-  const half = cover.width / 2;
+  // shooterSeesBody puts the eye at height * 0.85, so the cover's eye height is passed back as a height.
+  const shooter = { position: new Vec3(threat.position.x, threat.position.y, threat.position.z), width: cover.width,
+    height: cover.eyeHeight / 0.85 };
   const body = { position, width: PLAYER_HALF_WIDTH * 2, height: PLAYER_STANDING_HEIGHT };
-  return [eye, eye.offset(half, 0, 0), eye.offset(-half, 0, 0), eye.offset(0, 0, half), eye.offset(0, 0, -half)]
-    .every((point) => !exposedBodyFrom(ray, point, body) && !unknown);
+  return !shooterSeesBody(ray, shooter, body) && !unknown;
 }
 
 /** Identify cover geometry alongside each frozen threat position. */
@@ -372,11 +372,17 @@ function coverRevision(threat: SafeFromEntity): string {
 export function safeFromEntitiesGoal(
   entities: readonly SafeFromEntity[],
   range: number,
-  options?: { readonly follow?: "live" | "snapshot" },
+  options?: {
+    readonly follow?: "live" | "snapshot";
+    /** A node where this is true is never satisfied, cover or not; `unsafeRevision` names its state for the revision. */
+    readonly unsafe?: (feet: Vec3) => boolean;
+    readonly unsafeRevision?: number;
+  },
 ): Goal {
   if (range < 0 || !Number.isFinite(range))
     throw new RangeError("Safe entity range must be a finite non-negative number.");
   const snapshot = options?.follow === "snapshot";
+  const unsafe = options?.unsafe;
   const known = [...new Map(entities.map((entity) => [entity.id, snapshot
     ? { ...entity, position: { ...entity.position } }
     : entity])).values()].sort((a, b) => a.id - b.id);
@@ -384,11 +390,12 @@ export function safeFromEntitiesGoal(
     resolve(observation) {
       const threats = snapshot ? known : known.map((lastSeen) => ({ ...lastSeen, ...observation.entities.get(lastSeen.id) }));
       const current = navigationFeet(observation.position, observation.stance === "supported");
-      const revision = threats.some((threat) => threat.cover)
+      const threatRevision = threats.some((threat) => threat.cover)
         ? `safe-from:${range}:${snapshot ? "snapshot" : "live"}:${threats.map(coverRevision).join("|")}`
         : snapshot
         ? `safe-from:${range}:snapshot:${threats.map(({ id, position }) => `${id}@${position.x},${position.y},${position.z}`).join("|")}`
         : `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
+      const revision = unsafe ? `${threatRevision}|unsafe:${options?.unsafeRevision ?? 0}` : threatRevision;
       const cache = new Map<string, boolean>();
       const shortfall = (position: BlockPosition): number => {
         let largest = 0;
@@ -408,7 +415,7 @@ export function safeFromEntitiesGoal(
           const key = `${node.overlayId}|${node.feet.x},${node.feet.y},${node.feet.z}`;
           const cached = cache.get(key);
           if (cached !== undefined) return cached;
-          const satisfied = threats.every((threat) => {
+          const satisfied = !unsafe?.(new Vec3(node.feet.x, node.feet.y, node.feet.z)) && threats.every((threat) => {
             const distance = spatialDistance(node.feet, threat.position);
             return distance >= range || (node.overlayId === EMPTY_OVERLAY_IDENTITY
               && threat.cover !== undefined && distance >= threat.cover.minRange

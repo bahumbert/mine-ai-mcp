@@ -6,6 +6,7 @@ import { temporaryBotData } from "../../test-support/bot-data.js";
 import { readNotificationSummary, recordEvent } from "../../bot-data/event-log.js";
 import { readRecentEvents } from "../../actions/read-recent-events/read-recent-events.js";
 import { formatSurvivalOutcome, formatSurvivalStatus } from "./format.js";
+import type { Facts } from "../state/answered.js";
 
 function snapshot(): SurvivalStatus {
   return {
@@ -22,19 +23,26 @@ function snapshot(): SurvivalStatus {
   };
 }
 
-test("the outcome line shows the evade's end detail", () => {
-  const line = formatSurvivalOutcome({ kind: "outcome", source: "hostile_reflex", status: snapshot(),
-    evidence: { outcome: { outcome: "safe_separation", detail: "skeleton#5 out of sight at 9.0 blocks (gained 3.0)" } } });
-  assert.ok(line.includes("out of sight at 9.0 blocks"));
-});
-
-test("the outcome line shows the chain for a separated evade, an exhausted evade and a fight", () => {
+test("the outcome line retains evade details, stalled requests and response chains", () => {
+  const cases: { outcome: Facts; contains: RegExp; suffix: string }[] = [
+    { outcome: { outcome: "safe_separation", detail: "skeleton#5 out of sight at 9.0 blocks (gained 3.0)" },
+      contains: /out of sight at 9.0 blocks/, suffix: "(gained 3.0)" },
+    { outcome: { outcome: "safe_separation", stall: { requestId: "walk", action: "navigate",
+      evades: 8, ticks: 160, threats: [{ id: 7, name: "skeleton" }], best: 100, current: 100, limit: "evades" } },
+      contains: /\[HOSTILE_STALLED\] 8 evades from skeleton#7 over 160 server ticks without progress on navigate/,
+      suffix: "choose the next action." },
+  ];
   for (const [response, outcome] of [["evade", "safe_separation"], ["evade", "capability_limit"], ["fight", "target_died"]]) {
+    cases.push({ outcome: { response: response!, outcome: outcome!, chain: {
+      threatId: 12, name: "zombie", responses: 3, evades: 2, seconds: 41, gained: 12,
+    } }, contains: /3rd response to zombie#12/,
+    suffix: "; 3rd response to zombie#12 in 41 s, 2 evades, gained 12.0 blocks overall" });
+  }
+  for (const { outcome, contains, suffix } of cases) {
     const line = formatSurvivalOutcome({ kind: "outcome", source: "hostile_reflex", status: snapshot(),
-      evidence: { outcome: { response, outcome, chain: {
-        threatId: 12, name: "zombie", responses: 3, evades: 2, seconds: 41, gained: 12,
-      } } } });
-    assert.ok(line.endsWith("; 3rd response to zombie#12 in 41 s, 2 evades, gained 12.0 blocks overall"), line);
+      evidence: { outcome } });
+    assert.match(line, contains);
+    assert.ok(line.endsWith(suffix), line);
   }
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { encounterBaseline, type EncounterEvidence, type FightResponseResult, type HostileResponseResult } from "./response-result.js";
-import { completeResponse, responseContinuation } from "./settlement.js";
+import { completeResponse, encounterReceipt, responseContinuation, responseFailure } from "./settlement.js";
 
 test("a survived explosion preserves request reassessment after a completed fight", () => {
   const { bot } = createFakeBot();
@@ -27,7 +27,7 @@ function responseResults(): HostileResponseResult[] {
   const fight = { ...evidence, response: "fight" as const };
   const result = { targetId: 8, attacks: 0, stylesUsed: [], weaponsUsed: [],
     shieldRaisedSwings: 0, projectileGuards: 0, explosions: 0 };
-  const hide = { ...evidence, response: "hide" as const };
+  const hide = { ...evidence, response: "hide" as const, followUp: null };
   const shelter = { dug: 0, walled: 0, capped: false, enclosed: true, ate: null, swings: 0,
     healthAfter: 11, hungerAfter: 20 };
   return [
@@ -47,7 +47,10 @@ function responseResults(): HostileResponseResult[] {
     { ...fight, result: { ...result, kind: "bot_died" } },
     { ...fight, result: { ...result, kind: "cancelled" } },
     { ...hide, result: { ...shelter, kind: "recovered", recovery: { kind: "recovered", ate: null } } },
-    { ...hide, result: { ...shelter, kind: "failed", recovery: null, error: "No enclosure" } },
+    { ...hide, result: { ...shelter, kind: "failed", recovery: null, error: "No enclosure", refusal: {
+      cause: "no_floor", feet: { x: 0, y: 64, z: 0 }, position: { x: 0.5, y: 64, z: 0.5 }, onGround: true,
+      floor: null, shell: [], occupied: [], intruders: [], hazard: null, projectiles: [], worldAge: null,
+    } } },
     { ...hide, result: { ...shelter, kind: "held", recovery: null, error: "No food" } },
   ];
 }
@@ -63,6 +66,12 @@ test("only exhausted evades and unreflected deflections hold a living request; a
   ];
   for (const [index, physical] of responseResults().entries()) {
     const completed = completeResponse(physical, new AbortController().signal);
+    if (physical.response === "hide" && physical.result.kind === "failed") {
+      const hide = encounterReceipt(completed).hide;
+      assert.equal(hide?.kind, "failed");
+      if (hide?.kind !== "failed") throw new Error("expected failed hide receipt");
+      assert.deepEqual(hide.refusal, physical.result.refusal);
+    }
     const label = `${physical.response} ${physical.result.kind}`;
     const want = expected[index]!;
     if (want.kind === "return") assert.equal(responseContinuation(completed).kind, want.kind, label);
@@ -81,4 +90,40 @@ test("a chain's successful last response resumes with a receipt naming the whole
     kind: "resume",
     reason: "[HOSTILE_SETTLED] fight ended with target_died at health 11; 2nd response to zombie#8 in 25 s, 1 evades, gained 3.1 blocks overall.",
   });
+});
+
+test("a withheld deflection retains its bystander reason as a capability limit and per-shot failure", () => {
+  const physical = responseResults()[3]!;
+  assert.equal(physical.response, "deflect");
+  if (physical.response !== "deflect") return;
+  const observation = "Deflection withheld: enderman#61 stands on the return line.";
+  const settlement = completeResponse({ ...physical, result: { kind: "withheld", attacks: 0, observation } },
+    new AbortController().signal);
+  assert.equal(encounterReceipt(settlement).outcome, "capability_limit");
+  assert.equal(encounterReceipt(settlement).error, observation);
+  assert.deepEqual(responseFailure(settlement), { kind: "deflection_unobserved", why: observation });
+  assert.equal(responseContinuation(settlement).kind, "hold");
+});
+
+test("an occupied hide settles its one follow-up without losing the refusal", () => {
+  const original = responseResults()[15]!;
+  if (original.response !== "hide" || original.result.kind !== "failed" || !original.result.refusal)
+    throw new Error("expected failed hide fixture");
+  const hide = { ...original, result: { ...original.result,
+    refusal: { ...original.result.refusal, cause: "occupied" as const } } };
+  for (const index of [1, 5, 0, 7]) {
+    const followUp = responseResults()[index]!;
+    if (followUp.response !== "fight" && followUp.response !== "evade") throw new Error("expected physical follow-up fixture");
+    const physical = { ...hide, followUp };
+    const settlement = completeResponse(physical, new AbortController().signal);
+    const receipt = encounterReceipt(settlement);
+    const succeeded = index === 1 || index === 5;
+    assert.equal(receipt.outcome, succeeded ? index === 1 ? "safe_separation" : "target_died" : "capability_limit");
+    assert.equal(receipt.response, succeeded ? followUp.response : "hide");
+    assert.deepEqual(receipt.hide, hide.result, "a follow-up never forges a recovered hide");
+    assert.deepEqual(receipt.followUp, followUp);
+    assert.equal(responseContinuation(settlement).kind, succeeded ? "resume" : "return");
+    assert.equal(responseContinuation(completeResponse(physical, AbortSignal.abort("cancelled"))).kind, "return");
+    assert.equal(responseContinuation(completeResponse({ ...physical, healthAfter: 0 }, new AbortController().signal)).kind, "return");
+  }
 });

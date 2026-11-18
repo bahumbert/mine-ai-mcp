@@ -26,6 +26,45 @@ function createTestShelterBuild(bot: FakeBot, clock: FakeClock): ShelterBuild {
   };
 }
 
+for (const cause of ["hazard", "constrained"] as const) test(`construction records ${cause} and the open shell`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({ clock, health: 7 });
+  using _installed = clock.install();
+  const base = createTestShelterBuild(bot, clock);
+  const build = { ...base, options: { ...base.options,
+    ...(cause === "hazard" ? { unsafe: () => "danger" } : {
+      threatContext: { ...base.options.threatContext, policy: { ...base.options.threatContext.policy, hide: "never" as const } },
+    }) } };
+  const result = await clock.settle(constructShelterPass(build), 6_000);
+  assert.equal(typeof result, "object");
+  if (typeof result !== "object") throw new Error("expected refusal");
+  assert.equal(result.refusal?.cause, cause);
+  assert.equal(result.refusal?.hazard, cause === "hazard" ? "danger" : null);
+  assert.ok(result.refusal?.shell.some((entry) => entry.block === "air"));
+});
+
+for (const ticksPerSecond of [20, 10]) for (const change of ["depart", "move", "replace"] as const)
+test(`deadline snapshot records current occupancy after ${change} at ${ticksPerSecond} tps`, async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  const { bot } = createFakeBot({ clock, server: { ticksPerSecond }, health: 7, carried: { cobblestone: 32 },
+    cells: { "1,65,0": "stone" }, entities: { 61: { name: "blaze", position: new Vec3(1.5, 64, 0.5) },
+      62: { name: "zombie", position: new Vec3(30, 64, 30) } } });
+  using _installed = clock.install();
+  const build = createTestShelterBuild(bot, clock);
+  assert.equal(await clock.settle(constructShelterPass(build), 6_000), "again");
+  bot.entities[61]!.position = new Vec3(change === "move" ? 1.7 : 30, 64, 0.5);
+  if (change === "replace") bot.entities[62]!.position = new Vec3(1.5, 64, 0.5);
+  const result = await clock.settle(constructShelterPass({ ...build, constructionDeadline: clock.now() }), 6_000);
+  if (typeof result !== "object") throw new Error("expected deadline refusal");
+  assert.equal(result.refusal?.cause, "deadline");
+  const occupied = result.refusal?.occupied ?? [];
+  if (change === "depart") assert.equal(occupied.length, 0);
+  else {
+    assert.equal(occupied[0]?.intruderId, change === "move" ? 61 : 62);
+    assert.equal(occupied[0]?.box.min.x, (change === "move" ? 1.7 : 1.5) - bot.entities[change === "move" ? 61 : 62]!.width / 2);
+  }
+});
+
 test("shaft construction reserves the native dig answer before opening its first cell", async () => {
   for (const leftMs of [1_750, 1_700]) {
     const clock = createFakeClock({ mode: "mocked" });
@@ -192,7 +231,12 @@ for (const occupant of ["cow", "ender_dragon"]) for (const leaves of [false, tru
     assert.equal(result.capped, true, variant);
     assert.equal(result.swings, 0, variant);
     assert.ok(clock.now() - started >= (leaves ? 1_500 : 5_000), variant);
-    if (!leaves) assert.match(result.error ?? "", /not finished within/, variant);
+    if (!leaves) {
+      assert.match(result.error ?? "", /not finished within/, variant);
+      if (result.kind !== "failed") throw new Error("expected failed hide");
+      assert.equal(result.refusal?.cause, "deadline");
+      assert.ok(result.refusal?.shell.some((entry) => entry.cell.x === 1 && entry.cell.y === 64 && entry.block === "air"));
+    }
   });
 
 test("an intruder replacing a passive occupant in the same pass still stops construction on the third blocked pass", async () => {
@@ -268,6 +312,8 @@ test("an open shell that ends with no refusal names the cow still standing in it
   }), 150_000);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /^The shelter is still open: 1,64,0 \(Placement cell \(1, 64, 0\) overlaps cow #2 at \(1\.5, 64, 0\.5\)\.\)$/, result.error);
+  assert.equal(result.refusal?.cause, "open");
+  assert.ok(result.refusal?.shell.some((entry) => entry.cell.x === 1 && entry.cell.y === 64 && entry.block === "air"));
 });
 
 function solidAt(bot: FakeBot, key: string): boolean {
@@ -275,14 +321,15 @@ function solidAt(bot: FakeBot, key: string): boolean {
   return bot.blockAt(new Vec3(x, y, z))?.name === "cobblestone";
 }
 
-for (const offCenter of [false, true]) test(`three blocked passes leave a named open cell and hand recovery to withdrawal (off center ${offCenter})`, async () => {
+for (const [offCenter, name, id] of [[false, "zombie", 2], [true, "zombie", 2], [false, "blaze", 61]] as const)
+test(`three blocked passes leave a named open cell and hand recovery to withdrawal (off center ${offCenter}, ${name})`, async () => {
   const clock = createFakeClock({ mode: "mocked" });
   const { bot } = createFakeBot({
     clock, health: 7, carried: { cobblestone: 32 },
     position: new Vec3(offCenter ? 0.15 : 0.5, 64, 0.5), simulatePhysics: offCenter,
     // The solid head-height cell hides the intruder from melee; its body blocks the missing lower wall.
     cells: { "1,65,0": "stone" },
-    entities: { 2: { name: "zombie", position: new Vec3(1.5, 64, 0.5) } },
+    entities: { [id]: { name, position: new Vec3(1.5, 64, 0.5) } },
   });
   using _installed = clock.install();
   using _pace = serverTickPace(bot);
@@ -294,6 +341,14 @@ for (const offCenter of [false, true]) test(`three blocked passes leave a named 
   }), 6_000);
   assert.equal(result.kind, "failed");
   assert.match(result.error ?? "", /still open.*1,64,0/);
+  assert.equal(result.refusal?.cause, "occupied");
+  assert.equal(result.refusal?.occupied[0]?.intruderId, id);
+  assert.equal(result.refusal?.occupied[0]?.intruderName, name);
+  assert.deepEqual(result.refusal?.occupied[0]?.cell, { x: 1, y: 64, z: 0 });
+  assert.deepEqual(result.refusal?.occupied[0]?.box, {
+    min: { x: 1.5 - bot.entities[id]!.width / 2, y: 64, z: 0.5 - bot.entities[id]!.width / 2 },
+    max: { x: 1.5 + bot.entities[id]!.width / 2, y: 64 + bot.entities[id]!.height, z: 0.5 + bot.entities[id]!.width / 2 },
+  });
   assert.doesNotMatch(result.error ?? "", /not finished within/);
   assert.equal(result.capped, true, "other cells are completed despite the blocked wall");
   assert.equal(enclosedInPlace(bot), false);

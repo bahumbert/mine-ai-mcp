@@ -8,7 +8,7 @@ export type ResponseContinuation = Exclude<Continuation, { kind: "hold" }>
   | { readonly kind: "hold"; readonly reason: string };
 
 /** The observed reason a held threat ended, or the first observation that still blocks a resume. */
-export type HeldThreatEnd = { readonly ended: string } | { readonly notEnded: string };
+export type HeldThreatEnd = { readonly ended: string } | { readonly notEnded: string } | { readonly stalled: string };
 
 export type DangerObservation<Danger> =
   | { readonly kind: "observed"; readonly danger: Danger; readonly evidence: Facts }

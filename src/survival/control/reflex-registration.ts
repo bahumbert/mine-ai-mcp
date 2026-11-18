@@ -346,7 +346,8 @@ export class ReflexRegistration<Danger, Response, Outcome> implements Registered
     if (!this.#holding) return;
     this.#notEnded = evidence && "notEnded" in evidence ? evidence.notEnded : null;
     try {
-      this.host.runner.releaseHold(this.definition.name, decision, evidence && "ended" in evidence ? evidence.ended : null);
+      this.host.runner.releaseHold(this.definition.name, decision, evidence && "ended" in evidence ? evidence.ended : null,
+        evidence && "stalled" in evidence ? evidence.stalled : undefined);
     } finally {
       this.#notEnded = null;
       this.#holding = false;

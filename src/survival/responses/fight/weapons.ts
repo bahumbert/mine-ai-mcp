@@ -36,7 +36,7 @@ import {
 import { assessBowWindow } from "../../weapons/bow-window.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
 import { drawUntilFull } from "../../weapons/draw-progress.js";
-import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { serverTickPace, type TickMark } from "../../../world/server-tick-pace.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -49,11 +49,18 @@ import { hasSelfExplosion, mobCombatData } from "../../../world/combat-data.js";
 import type { FightScene } from "./scene.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
+/** Credit a volley's server ticks while keeping a real-time exit if packets or client physics stop. */
+function volleyBudget(bot: Bot, ticks: number): { readonly wallEnd: number; spent(): boolean } {
+  const pace = serverTickPace(bot), mark = pace.mark();
+  const wallEnd = mark.ms + serverPacedWallMs(ticks);
+  return { wallEnd, spent: () => pace.creditedSince(mark) >= ticks || monotonicNow() >= wallEnd };
+}
+
 /** Weapon use belongs to this fight; connection-wide recovery survives interrupted fights. */
 export class FightWeapons {
   readonly itemUse: CombatItemUse;
   readonly readiness;
-  volleyTicksRemaining: number;
+  private volleyReleasedAt: TickMark | null = null;
   constructor(
     readonly scene: FightScene,
     readonly interruptions: { recoverFooting(): Promise<void>; returnToCover(): boolean },
@@ -61,16 +68,11 @@ export class FightWeapons {
     this.readiness = swingReadiness(scene.bot);
     this.itemUse = new CombatItemUse(scene.bot, (ticks, wallEnd) => this.holdFacing(ticks, wallEnd),
       (event) => scene.reportDecision({ kind: "response", evidence: { boundary: "item_use", ...event } }));
-    this.volleyTicksRemaining =
-      (scene.perception.read().find((entry) => entry.id === scene.target.id)?.windingUp ?? false)
-        ? ARROW_RELEASE_GRACE_TICKS
-        : 0;
+    this.observeVolley();
   }
   observeVolley() {
-    this.volleyTicksRemaining =
-      (this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp ?? false)
-        ? ARROW_RELEASE_GRACE_TICKS
-        : Math.max(0, this.volleyTicksRemaining - 1);
+    if (this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp)
+      this.volleyReleasedAt = serverTickPace(this.scene.bot).mark();
   }
   readonly contact = (): Entity | null => {
     const distance = canMeleeTarget(this.scene.bot, this.scene.target)
@@ -132,9 +134,8 @@ export class FightWeapons {
         } });
       }
       await this.raiseGuard();
-      const volleyTicks = this.scene.policy.combat.volley_wait_ticks;
-      const wallEnd = monotonicNow() + tickBudgetWallMs(volleyTicks);
-      for (let tick = 0; tick < volleyTicks && monotonicNow() < wallEnd && !this.scene.settled(); tick++) {
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
+      while (!budget.spent() && !this.scene.settled()) {
         const guarded = this.itemUse.shieldRaised;
         await this.maintainGuard();
         if (guarded && !this.itemUse.shieldRaised) return true;
@@ -150,7 +151,7 @@ export class FightWeapons {
         }
         await this.scene.bot.lookAt(defence.facing, true);
         this.scene.signal.throwIfAborted();
-        if (!(await this.waitTickBefore(wallEnd))) break;
+        if (!(await this.waitTickBefore(budget.wallEnd))) break;
       }
       return this.scene.settled();
     });
@@ -164,9 +165,8 @@ export class FightWeapons {
         boundary: "final_volley", stage: "started", projectileIds: [...pending].map((entity) => entity.id),
       } });
       // Bounded like the guard loop: a projectile that never clears cannot hold the body past the volley budget.
-      const volleyTicks = this.scene.policy.combat.volley_wait_ticks;
-      const wallEnd = monotonicNow() + tickBudgetWallMs(volleyTicks);
-      for (let tick = 0; pending.size && tick < volleyTicks && monotonicNow() < wallEnd; tick++) {
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
+      while (pending.size && !budget.spent()) {
         await this.scene.responsiveness.checkpoint(this.scene.signal);
         this.scene.signal.throwIfAborted();
         await this.maintainGuard();
@@ -186,7 +186,7 @@ export class FightWeapons {
         this.scene.signal.throwIfAborted();
         await this.itemUse.raiseShield();
         // holdFacing intentionally stops at target death; this wait follows projectile lifetime instead.
-        if (!(await this.waitTickBefore(wallEnd))) break;
+        if (!(await this.waitTickBefore(budget.wallEnd))) break;
       }
       this.scene.reportDecision({ kind: "response", evidence: {
         boundary: "final_volley", stage: "ended", reason: pending.size ? "guard_unavailable" : "volley_clear",
@@ -277,9 +277,8 @@ export class FightWeapons {
   readonly guardRangedAttack = async (): Promise<GuardOutcome> =>
     this.scene.execution.run("guard", async () => {
       this.scene.projectileGuards += 1;
-      let held = 0;
       await this.raiseGuard();
-      const wallEnd = monotonicNow() + tickBudgetWallMs(this.scene.policy.combat.volley_wait_ticks);
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
       return await this.itemUse.guardUntil<GuardOutcome>(() => {
         if (this.scene.settled()) return "fight_ended";
         if (this.interruptions.returnToCover()) return "return_to_cover";
@@ -287,7 +286,7 @@ export class FightWeapons {
           this.scene.execution.progress.volleyFinished();
           return "volley_finished";
         }
-        return held++ >= this.scene.policy.combat.volley_wait_ticks || monotonicNow() >= wallEnd ? "windup_limit" : null;
+        return budget.spent() ? "windup_limit" : null;
       });
     });
   readonly clearShot = (feet = this.scene.bot.entity.position) => {
@@ -465,6 +464,8 @@ export class FightWeapons {
     if (incomingShieldProjectiles(this.scene.bot).length > 0) return true;
     const windingUp =
       this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp ?? false;
-    return (windingUp || this.volleyTicksRemaining > 0) && hasExposedBody(this.scene.bot, this.scene.target);
+    const grace = this.volleyReleasedAt !== null &&
+      serverTickPace(this.scene.bot).creditedSince(this.volleyReleasedAt) < ARROW_RELEASE_GRACE_TICKS;
+    return (windingUp || grace) && hasExposedBody(this.scene.bot, this.scene.target);
   };
 }

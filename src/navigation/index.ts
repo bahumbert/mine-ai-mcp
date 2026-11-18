@@ -85,6 +85,11 @@ export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";
 export type { StepField, StepFieldProvider } from "./step-field.js";
+export type { RouteAdmission, RouteAdmissionProvider } from "./route-admission.js";
+// What a caller's route admission needs to judge a planned route: the steps and a world that holds their edits.
+export type { MovementKind, PlannedOperation, PlannedStep, PredictedWorldEffect } from "./movements/movement.js";
+export { OverlayInterner, PlanningOverlay } from "./search/planning-overlay.js";
+export { NO_OBSTACLE, obstaclesOf, worldViewRaycaster } from "./world/line-of-sight.js";
 
 export type { NavigationEvent } from "./telemetry/index.js";
 

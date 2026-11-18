@@ -223,28 +223,32 @@ function startLeg(
 /** The progress a resumable navigate reports: its baseline, its current destination and whether it is there. */
 function observeNavigateProgress(leg: NavigateLeg, observe: ObserveRequest): void {
   const { bot, request, start, startDimension } = leg;
-  observe(() => ({
-    baseline: { dimension: startDimension, position: { ...start } },
-    checkpoint: {
-      destination: leg.destination,
-      remainingDistance: leg.destination && bot.game.dimension === startDimension
-        ? bot.entity.position.distanceTo(asVec3(leg.destination)) : null,
-      dimension: bot.game.dimension,
-      positionedDimension: startDimension,
-      died: false,
-      portal: null,
-    },
-    completion: {
-      kind: "current",
-      observed:
-        leg.destination !== null &&
-        bot.game.dimension === startDimension &&
-        asVec3(navigationFeet(bot.entity.position, bot.entity.onGround)).distanceTo(asVec3(leg.destination)) <=
-          request.range &&
-        (bot.entity.onGround || canOccupyWater(bot, navigationFeet(bot.entity.position, bot.entity.onGround))),
-      owes: "Current destination distance and supported footing or admitted water.",
-    },
-  }));
+  observe(() => {
+    const remainingDistance = leg.destination && bot.game.dimension === startDimension
+      ? bot.entity.position.distanceTo(asVec3(leg.destination)) : null;
+    return {
+      baseline: { dimension: startDimension, position: { ...start } },
+      objective: remainingDistance === null ? null : { remaining: remainingDistance, tolerance: Math.max(1, request.range) },
+      checkpoint: {
+        destination: leg.destination,
+        remainingDistance,
+        dimension: bot.game.dimension,
+        positionedDimension: startDimension,
+        died: false,
+        portal: null,
+      },
+      completion: {
+        kind: "current",
+        observed:
+          leg.destination !== null &&
+          bot.game.dimension === startDimension &&
+          asVec3(navigationFeet(bot.entity.position, bot.entity.onGround)).distanceTo(asVec3(leg.destination)) <=
+            request.range &&
+          (bot.entity.onGround || canOccupyWater(bot, navigationFeet(bot.entity.position, bot.entity.onGround))),
+        owes: "Current destination distance and supported footing or admitted water.",
+      },
+    };
+  });
 }
 
 /** The evidence of the leg as it stands, measured against its resolved destination once there is one. */
@@ -505,6 +509,8 @@ async function judgeRoute(
     const slow = walkWindowOf(leg).reason();
     if (slow !== null) return { status: "failed", error: slow, navigation: evidence };
     const stopped: NavigateResult = { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
+    // The caller refused this route and said why: a climb, swim or boat leg would answer a question nobody asked.
+    if (route.routeRefused) return stopped;
     return (await climbOutFirst(leg, stopped, context)) ?? crossDeepWater(leg, stopped, route, context);
   }
   if (leg.destination === null) {

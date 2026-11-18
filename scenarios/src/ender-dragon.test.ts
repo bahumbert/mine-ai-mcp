@@ -1,7 +1,94 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeBot } from "../../src/test-support/fake-bot/index.ts";
-import { clearCrystals, fightPerches, type EndActionCall } from "./ender-dragon.ts";
+import { getEventListeners } from "node:events";
+import { scenarioDefinitionSchema } from "mine-labs";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../src/test-support/fake-bot/index.ts";
+import { watch } from "../../src/test-support/pending.ts";
+import { clearCrystals, fightPerches, prepare, type EndActionCall } from "./ender-dragon.ts";
+import type { MineAiScenarioContext } from "./scenario-client.ts";
+
+/** Preparation never uses navigation or pathfinder telemetry. Entity answers use the shared spawn/remove handlers. */
+function crystalPreparation(rate: number, phase: "crystals" | "perch") {
+  const clock = createFakeClock({ mode: "mocked" });
+  const h = createFakeBot({ clock, server: { startAge: 1_000, ticksPerSecond: rate }, overrides: {
+    chat: () => {},
+    // Mineflayer blocks.js:70-94 returns once its surrounding columns are loaded; this fixture starts loaded.
+    waitForChunksToLoad: async () => {},
+  } });
+  const controller = new AbortController();
+  const context: MineAiScenarioContext = {
+    bot: h.bot, signal: controller.signal, log() {}, progress() {},
+    scenario: scenarioDefinitionSchema.parse({ params: { phase }, goal: { kind: "completion" } }),
+    get navigation(): never { throw new Error("preparation does not navigate"); },
+    get pathfinder(): never { throw new Error("preparation does not read telemetry"); },
+  };
+  const added = listenersAddedSince(h.bot);
+  const spawn = () => {
+    for (let i = 0; i < 10; i++) h.entities.spawn({ id: 100 + i, name: "end_crystal", position: { x: i * 10, y: 70, z: 0 } });
+  };
+  if (phase === "perch") spawn();
+  return { ...h, controller, context, spawn, remove() {
+    for (let i = 0; i < 10; i++) h.entities.remove(100 + i);
+  }, async assertClean() {
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    assert.equal(clock.pendingTimers(), 0);
+    for (const event of h.bot.eventNames()) assert.equal(added(String(event)), 0);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    await clock.advance(70_000);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+  } };
+}
+
+for (const rate of [20, 10]) {
+  for (const [phase, answerTicks, deadlineTicks] of [["crystals", 300, 420], ["perch", 80, 120]] as const) {
+    test(`${phase} preparation accepts its answer at +${answerTicks} server ticks at ${rate} tps`, async () => {
+      const h = crystalPreparation(rate, phase);
+      using _timers = h.clock.install();
+      const pending = prepare(h.context);
+      const state = watch(pending);
+      await h.clock.advance(answerTicks * 1_000 / rate);
+      assert.equal(h.bot.time.age, 1_000 + answerTicks);
+      assert.equal(state.over, false);
+      if (phase === "crystals") h.spawn();
+      else h.remove();
+      await h.clock.settle(pending, 50);
+      assert.equal(h.clock.now(), answerTicks * 1_000 / rate + 50);
+      await h.assertClean();
+    });
+
+    test(`${phase} preparation rejects a missing answer after +${deadlineTicks} at ${rate} tps`, async () => {
+      const h = crystalPreparation(rate, phase);
+      using _timers = h.clock.install();
+      const pending = prepare(h.context);
+      const rejected = assert.rejects(pending, phase === "crystals" ? /Expected all ten native crystals.*ticks/u : /Zero-crystal setup.*ticks/u);
+      const state = watch(pending);
+      await h.clock.advance(deadlineTicks * 1_000 / rate);
+      assert.equal(h.bot.time.age, 1_000 + deadlineTicks);
+      assert.equal(state.over, false);
+      await h.clock.settle(rejected, 50);
+      assert.equal(h.clock.now(), deadlineTicks * 1_000 / rate + 50);
+      await h.assertClean();
+    });
+  }
+}
+
+for (const phase of ["crystals", "perch"] as const) {
+  for (const end of ["stopped", "cancelled"] as const) {
+    test(`${phase} preparation releases its wait when ${end}`, async () => {
+      const h = crystalPreparation(10, phase);
+      using _timers = h.clock.install();
+      if (end === "stopped") h.server.stop();
+      const pending = prepare(h.context);
+      const reason = new Error("scenario cancelled");
+      const rejected = assert.rejects(pending, end === "cancelled" ? error => error === reason : new RegExp(phase === "crystals" ? "native crystals.*stalled" : "Zero-crystal setup.*wall", "u"));
+      await h.clock.advance(0);
+      if (end === "cancelled") h.controller.abort(reason);
+      await h.clock.settle(rejected, end === "cancelled" ? 0 : phase === "crystals" ? 20_000 : 18_000);
+      assert.equal(h.bot.time.age, 1_000);
+      await h.assertClean();
+    });
+  }
+}
 
 function output(outcome: string, status: "succeeded" | "failed" = "succeeded", reason: string | null = null) {
   return { action: "end_test", durationMs: 0, result: { status, ...(status === "failed" ? { error: "missed" } : {}),

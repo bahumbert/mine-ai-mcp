@@ -17,7 +17,7 @@ export const COLLECT_BLOCK_DESCRIPTION =
   "max_distance keeps the whole run within that many blocks (horizontally) of where it started: no farther target and no exploring, and with none left in range it stops naming the nearest farther one seen. " +
   "reposition with navigate first if you want blocks from a particular area. " +
   "The best carried tool for each block is equipped automatically, so equip is not needed first. " +
-  "A run that breaks and picks up nothing for 180 s stops with what it got and says how far it walked meanwhile. " +
+  "A run that breaks and picks up nothing for 3 600 world ticks (180 s at 20 tps) stops with what it got and says how far it walked meanwhile. " +
   "By default a required tool-tier loss stops with partial progress; on_tool_loss=continue keeps mining with the remaining tool. " +
   "The response lists every cell broken and its distance from where the run started, and names a tool that broke during the run (collected.toolLost). " +
   "Water beside or above a target is harmless; lava is closed with a carried block before the break, so collecting obsidian means carrying cobblestone, and a target that cannot be taken says why in numbers. " +
@@ -44,7 +44,7 @@ export const MAX_EXTRA_BREAKS = 4;
  * well inside it; the circling it ends (observed live 2026-10-02) lasted 15 to
  * 27 minutes.
  */
-export const COLLECT_STALL_MS = 180_000;
+export const COLLECT_STALL_TICKS = 3_600;
 
 export const HIGHLIGHT_COLOURS = {
   candidate: "#ffaa0d",
@@ -129,8 +129,8 @@ export const outcomes = {
   inventoryFull: (totalSlots: number, itemNames: readonly string[]) =>
     `[INVENTORY_FULL] All ${totalSlots} inventory slots are occupied with no room in a stack of ${describeItems(itemNames)}; allow_full_inventory=false.`,
   incomplete: "[COLLECTION_INCOMPLETE] Collection stopped before the requested inventory gain was observed.",
-  stalled: (seconds: number, walked: number, fromStart: number) =>
-    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
+  stalled: (seconds: number, ticks: number | null, walked: number, fromStart: number) =>
+    `[COLLECTION_STALLED] Nothing was broken or picked up for ${seconds} s and ${ticks ?? "unknown"} world ticks (walked ${walked} blocks meanwhile, now ${fromStart} blocks from the start).`,
   progress: (reason: string, gained: number, requested: number, blocksBroken: number) =>
     `${reason} Broke ${blocksBroken} matching block${blocksBroken === 1 ? "" : "s"}; inventory gained ${gained}/${requested} requested items.`,
 } as const;

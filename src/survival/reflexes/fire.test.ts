@@ -110,6 +110,13 @@ async function fireLandingScene(resources: AsyncDisposableStack, rate: number, o
   }
   const runner = new ActionRunner({ clock, worldAge: () => bot.time.age });
   const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
+  let ceilingTicks = 0;
+  const register = driver.register.bind(driver);
+  driver.register = definition => register({ ...definition, limits(response) {
+    const limits = definition.limits(response);
+    ceilingTicks = limits.ceilingTicks;
+    return limits;
+  } });
   let writes = 0;
   let clears = 0;
   const control = bot.setControlState.bind(bot);
@@ -150,6 +157,7 @@ async function fireLandingScene(resources: AsyncDisposableStack, rate: number, o
   return {
     ...h, runner, driver, footing: landing.footing, caller: walk.caller, output: walk.output, fire, action: walk.action, outcomes, placementRequest,
     get calls() { return landing.calls; }, get released() { return landing.released; }, get attempts() { return walk.attempts; },
+    get ceilingTicks() { return ceilingTicks; },
     get landingSignal() { return landing.landingSignal; }, land: landing.land, releaseFight: walk.releaseFight,
     async assertReleased() {
       assert.equal(landing.released, landing.calls, "every recovery scope released once");
@@ -260,6 +268,7 @@ for (const rate of [20, 10]) {
     await using resources = new AsyncDisposableStack();
     const s = await fireLandingScene(resources, rate);
     assert.equal(s.calls, 1, "fire lands before returning a verdict");
+    assert.equal(s.ceilingTicks, 1_180, "the claim includes packet margins for escape and settle");
     const refused = s.runner.claim("recover_footing", "same obligation", async () => {
       assert.fail("a lower footing claim cannot drive fire's body");
     });
@@ -321,7 +330,7 @@ for (const rate of [20, 10]) {
     let clientTicks = 0;
     const tick = () => { clientTicks++; };
     s.bot.on("physicsTick", tick);
-    await s.clock.advance(15_001);
+    await s.clock.advance(20_050);
     s.bot.off("physicsTick", tick);
     const finished = await s.output;
     assert.equal(s.bot.time.age, age);
@@ -617,11 +626,11 @@ test("burning with no reachable water does not lock a Nether fight out of the bo
 });
 
 /**
- * A body in lava with nothing around it to swim up to (nothing loaded): the escape holds jump until its 15 s wall clock
+ * A body in lava with nothing around it to swim up to (nothing loaded): the escape holds jump until its server budget
  * ends it, which the reflex answers `no_escape`. It used to fail at once; `fire-lava-escape.md` "A body in a deep pool
  * swims up" (plan 2026-11-07-p4-06b T1) replaced that.
  */
-const SWIM_UP_UNTIL_THE_WALL_CLOCK_MS = 15_000;
+const SWIM_UP_UNTIL_THE_PACKET_DEADLINE_MS = 16_100;
 
 test("a failed airborne fire escape does not suppress a fresh attempt after landing", async () => {
   const clock = createFakeClock({ mode: "mocked" });
@@ -633,7 +642,7 @@ test("a failed airborne fire escape does not suppress a fresh attempt after land
   const driver = resources.use(new ReflexDriver(bot, runner, { now: clock.now }));
   resources.use(attachFireReflex(bot, driver, new MemoryWorld()));
   const observe = () => clock.advance(250);
-  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+  await clock.advance(SWIM_UP_UNTIL_THE_PACKET_DEADLINE_MS);
   await observe();
   const first = driver.answered.snapshot()[0];
   assert.equal(first?.failure.kind, "no_escape");
@@ -642,7 +651,7 @@ test("a failed airborne fire escape does not suppress a fresh attempt after land
   bot.entity.onGround = true;
   await observe();
   assert.equal(runner.status().activeAction?.action, "fire_reflex", "landing changes the escape's physical premises: a fresh claim");
-  await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+  await clock.advance(SWIM_UP_UNTIL_THE_PACKET_DEADLINE_MS);
   assert.notEqual(driver.answered.snapshot()[0]?.id, first.id);
   assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
 });
@@ -709,11 +718,11 @@ test("a still body in one world revision searches once", async () => {
   assert.ok(!runner.status().activeAction, "water behind lava is no escape: the reflex stands down");
 });
 
-test("a walk that outlasts the 15 s wall clock is reported as out of time, not as no escape", async () => {
+test("a walk that outlasts its server budget is reported as out of time, not as no escape", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
   const { bot, world } = burningBesidePit(false, { clock });
-  // The body never moves, so 15 s of client ticks would end the walk as stalled (40 ticks) before the wall clock does.
+  // Client steering would stall before the server budget: freeze physics to isolate the deadline.
   bot.physicsEnabled = false;
   const runner = stillRunner();
   await using resources = new AsyncDisposableStack();
@@ -721,7 +730,7 @@ test("a walk that outlasts the 15 s wall clock is reported as out of time, not a
   resources.use(attachFireReflex(bot, driver, world));
   await tick(bot, 3);
   assert.equal(runner.status().activeAction?.action, "fire_reflex");
-  await clock.advance(15_000);
+  await clock.advance(16_050);
   await tick(bot, 3);
   const failure = driver.answered.snapshot()[0]?.failure;
   assert.equal(failure?.kind, "no_escape");
@@ -839,7 +848,7 @@ test("an escape from spreading lava resumes the action only after the lava settl
   assert.equal(finished.result.status, "succeeded");
 });
 
-test("lava still spreading after 10 s returns the action with the spreading message", async () => {
+test("lava still spreading when the server stops returns the action with the spreading message", async () => {
  for (const reescape of [false, true]) {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
@@ -854,7 +863,8 @@ test("lava still spreading after 10 s returns the action with the spreading mess
     assert.equal(scene.runner.status().activeAction?.action, "fire_reflex", "walking away from the lava");
   } else await leavePitWhileLavaSpreads(scene);
   assert.equal(scene.attempts.count, 1);
-  await scene.jump(10_000);
+  // The first budget look after the last time packet observes its move 50 ms into the freeze.
+  await scene.jump(20_050);
   const finished = await output;
   assert.equal(scene.attempts.count, 1, "the action was not resumed");
   assert.equal(finished.result.status, "cancelled");
@@ -924,7 +934,7 @@ for (const ticksPerSecond of [20, 10])
     }
     await clock.advance(100);
     assert.equal(runner.status().activeAction?.action, "fire_reflex", "still burning in the same cells: tried again");
-    await clock.advance(SWIM_UP_UNTIL_THE_WALL_CLOCK_MS);
+    await clock.advance(ticksPerSecond === 20 ? 16_100 : 32_100);
     assert.notEqual(driver.answered.snapshot()[0]?.id, first?.id, "and the second try is answered in its turn");
     assert.equal(driver.answered.snapshot()[0]?.failure.kind, "no_escape");
   });

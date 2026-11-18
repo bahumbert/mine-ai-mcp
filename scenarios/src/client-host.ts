@@ -41,6 +41,7 @@ async function runMineAiScenario(file: string, session: NodeClientSession): Prom
     scenario: session.scenario,
     signal: session.signal,
     log: session.log,
+    progress: (reason) => session.progress(reason),
   } as MineAiScenarioContext);
 
   const context: MineAiScenarioContext = {
@@ -49,6 +50,7 @@ async function runMineAiScenario(file: string, session: NodeClientSession): Prom
     scenario: session.scenario,
     signal: session.signal,
     log: session.log,
+    progress: (reason) => session.progress(reason),
     pathfinder,
   };
 

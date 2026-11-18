@@ -147,16 +147,35 @@ for (const { name, ticksPerSecond, physics, server } of [
   await nothingLeft();
 });
 
-test("the cover wait of a hidden approaching shooter stops on the evade clock at 10 tps", async () => {
-  const fixture = slowFixture({ shooter: true, cover: true });
+for (const ticksPerSecond of [20, 10]) test(`an inward crossing below the cover range while occluded leaves the wait at ${ticksPerSecond} tps`, async () => {
+  const fixture = reachFixture({ shooter: true, distance: 9, cover: true, ticksPerSecond });
   using _installed = fixture.clock.install();
-  let covered = 0;
-  fixture.navigation.navigate = async () => { covered++; return { status: "completed", elapsedMs: 0 }; };
-  // Hidden behind the wall at x 4 and closing by 0.05 blocks per server tick, so the cover verdict stays unknown.
-  fixture.server.onTick(() => { fixture.bot.entities[7]!.position.x -= 0.05; });
+  const nothingLeft = leavesNothing(fixture);
+  const start = fixture.server.gameTime;
+  let crossing: number | undefined;
+  let released: number | undefined;
+  let routes = 0;
+  fixture.navigation.navigate = async () => {
+    if (++routes === 2) {
+      released = fixture.server.gameTime - start;
+      fixture.bot.entities[7]!.position.x = 80;
+    }
+    return { status: "completed", elapsedMs: 0 };
+  };
+  const stopMoving = fixture.server.onTick(() => {
+    if (routes !== 1) return;
+    const shooter = fixture.bot.entities[7]!;
+    shooter.position.x = Math.max(8, shooter.position.x - 0.1);
+    if (crossing === undefined && shooter.position.distanceTo(fixture.bot.entity.position) < 8)
+      crossing = fixture.server.gameTime - start;
+  });
   const result = await fixture.run();
-  assertEndedOnTicks(result, fixture.ticksSpent());
-  assert.equal(covered, 1, "the wait is entered once and held to the clock");
+  stopMoving();
+  assert.ok(crossing !== undefined);
+  assert.ok(released !== undefined, "the wait replans after the inward crossing");
+  assert.ok(released - crossing <= 20, `crossed at ${crossing}, released at ${released}`);
+  assert.equal(result.result.kind, "separated");
+  await nothingLeft();
 });
 
 /**

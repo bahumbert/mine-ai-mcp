@@ -25,7 +25,7 @@ function observeFightBody(
   const change = scene.execution.progress.observe(scene.bot.health);
   if (change) scene.reportProgress(change);
   if (scene.position.plan) scene.protectedProgress.tick(cover.recovering);
-  scene.endermanProgress.tick(cover.recovering);
+  scene.endermanProgress.tick(cover.recovering, scene.bot.time?.age);
   scene.quarryProgress.tick(cover.recovering || scene.execution.snapshot(scene.attacks).phase === "guard");
   weapons.observeVolley();
   locomotion.observeFooting();

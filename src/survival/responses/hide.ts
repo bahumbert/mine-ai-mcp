@@ -15,6 +15,7 @@ import {
 } from "./shelter-build.js";
 import { enclosedInPlace, shelterIntruder } from "./shelter-cells.js";
 import { constructShelterPass } from "./shelter-construction.js";
+import { describeShelterRefusal, type ShelterRefusal } from "./shelter-refusal.js";
 
 export { enclosedInPlace } from "./shelter-cells.js";
 export type { HideOptions } from "./shelter-build.js";
@@ -44,7 +45,7 @@ type HideConclusion =
       readonly recovery: Extract<CoveredRecovery, { kind: "recovered" }>;
       readonly error?: never;
     }
-  | { readonly kind: "held" | "failed"; readonly error: string };
+  | { readonly kind: "held" | "failed"; readonly error: string; readonly refusal?: ShelterRefusal };
 export type HideResult = HideEvidence & HideConclusion;
 
 function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
@@ -69,6 +70,10 @@ function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
 
 function concludeHide(build: ShelterBuild, conclusion: HideConclusion): HideResult {
   const { bot } = build;
+  if ((bot.health <= 0 || build.options.signal.aborted) && "refusal" in conclusion) {
+    const { refusal: _refusal, ...withoutRefusal } = conclusion;
+    conclusion = withoutRefusal;
+  }
   return {
     recovery: build.recovery,
     dug: build.dug,
@@ -109,7 +114,8 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
   build.ate = recovery.ate;
   switch (recovery.kind) {
     case "exposed":
-      return { kind: "failed", error: `The shelter became exposed or unsafe during recovery (${recovery.cause}).` };
+      return { kind: "failed", error: `The shelter became exposed or unsafe during recovery (${recovery.cause}).`,
+        refusal: describeShelterRefusal(build, "exposed", { hazard: shelterHazard(build) ?? recovery.cause }) };
     case "held":
       return { kind: "held", error: recovery.reason };
     case "recovered":
@@ -141,7 +147,7 @@ export async function hideInPlace(bot: Bot, options: HideOptions): Promise<HideR
   bot.clearControlStates();
   bot.deactivateItem();
   const inLiquid = shelterLiquidFailure(bot);
-  if (inLiquid) return concludeHide(build, inLiquid);
+  if (inLiquid) return concludeHide(build, { ...inLiquid, refusal: describeShelterRefusal(build, "liquid") });
   while (!build.enclosed) {
     const pass = await constructShelterPass(build);
     if (pass === "again") continue;
@@ -152,6 +158,7 @@ export async function hideInPlace(bot: Bot, options: HideOptions): Promise<HideR
     const open = blockedCellsText(build);
     return concludeHide(build, {
       kind: "failed",
+      refusal: describeShelterRefusal(build, "open"),
       error: `The shelter is still open${build.refusal ? `: ${build.refusal}` : open ? `: ${open}` : ""}`,
     });
   }

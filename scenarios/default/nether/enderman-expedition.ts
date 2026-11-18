@@ -8,6 +8,8 @@ import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-c
 import { recordSourceIdentity } from "../../src/source-identity.ts";
 import { createNativeWave } from "../../src/native-wave.ts";
 import { runExpeditionAction } from "../../src/expedition-action.ts";
+import { judgeDrops } from "../../src/game-rate.ts";
+import { waitForServerPaced } from "../../../src/world/server-paced.ts";
 
 const position = z.tuple([z.number().int(), z.number().int(), z.number().int()]);
 const damageEventSchema = z.object({ entityId: z.number(), sourceCauseId: z.number(), sourceDirectId: z.number() });
@@ -20,12 +22,12 @@ type Wave = ReturnType<typeof createNativeWave>;
 type Runtime = Awaited<ReturnType<typeof openRuntime>>;
 
 /** Arrangement commands must visibly settle before the measured expedition begins. */
-async function arranged(bot: Bot, fact: () => boolean, label: string): Promise<void> {
-  for (let tick = 0; tick < 400; tick++) {
-    if (fact()) return;
-    await bot.waitForTicks(1);
-  }
-  throw new Error(`Arrangement did not observe ${label} within 20 seconds.`);
+async function arranged(bot: Bot, fact: () => boolean, label: string, signal: AbortSignal): Promise<void> {
+  const started = monotonicNow();
+  const startAge = bot.time?.age ?? null;
+  const end = await waitForServerPaced(bot, 400, { until: fact, signal });
+  if (end !== "until") throw new Error(`Arrangement did not observe ${label} ${JSON.stringify({ end,
+    elapsedMs: monotonicNow() - started, elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge })}`);
 }
 
 /** Survey the standing cells and confirm equipment before the native mobs are arranged. */
@@ -47,7 +49,7 @@ async function prepareExpedition(context: MineAiScenarioContext, params: Params,
   bot.on("messagestr", onEquipment);
   try {
     bot.chat('/execute if items entity @s armor.head minecraft:iron_helmet if items entity @s armor.chest minecraft:iron_chestplate if items entity @s armor.legs minecraft:iron_leggings if items entity @s armor.feet minecraft:golden_boots run tellraw @s "ENDER_EXPEDITION_ARMOR_CONFIRMED"');
-    await arranged(bot, () => equipmentConfirmed, "server-confirmed expedition armor in all four slots");
+    await arranged(bot, () => equipmentConfirmed, "server-confirmed expedition armor in all four slots", context.signal);
   } finally { bot.off("messagestr", onEquipment); }
   log("Server confirmed iron helmet, chestplate, leggings and golden boots equipped before native mob arrangement.");
   for (const { position } of endermen) {
@@ -127,6 +129,8 @@ async function travelExpedition(options: { context: MineAiScenarioContext; param
     return settled.output;
   };
   const started = monotonicNow();
+  const startAge = options.context.bot.time?.age ?? null;
+  if (startAge === null) throw new Error("Expedition setup failed: no world age heard");
   const [x, y, z] = params.approach;
   const outward = await call("navigate", { x, y, z, range: 1, dig: false, scaffold: false });
   const requested = params.collection?.drops ?? 1;
@@ -136,24 +140,26 @@ async function travelExpedition(options: { context: MineAiScenarioContext; param
   if (wave.error) throw wave.error;
   state.collecting = false;
   const returning = await call("navigate", { x: home.x, y: home.y, z: home.z, range: 1 });
-  await wave.waitForTicks(100);
-  return { hunting, returning, actions, settledWithWavePending, requested, elapsedMs: monotonicNow() - started };
+  await wave.waitServerTicks(100);
+  return { hunting, returning, actions, settledWithWavePending, requested, startAge,
+    endAge: options.context.bot.time?.age ?? null, elapsedMs: monotonicNow() - started };
 }
 
 /** Build the completion evidence from observed inventory, health and action outcomes. */
 function expeditionResult(context: MineAiScenarioContext, params: Params, start: Vec3, home: Vec3, state: Observation, trip: Awaited<ReturnType<typeof travelExpedition>>) {
   const { bot } = context;
   const gained = bot.inventory.count(state.pearlId, null) - state.initialPearls;
-  const dropsPerMinute = (Math.min(gained, trip.requested) * 60_000) / trip.elapsedMs;
+  const rate = judgeDrops({ gained, requested: trip.requested, startAge: trip.startAge, endAge: trip.endAge,
+    minimumPerMinute: params.collection?.minimumDropsPerMinute ?? 0 });
   const remaining = bot.entity.position.distanceTo(start);
-  const passed = !trip.settledWithWavePending && state.initialPearls === 0 && gained >= trip.requested &&
-    dropsPerMinute >= (params.collection?.minimumDropsPerMinute ?? 0) && state.deaths === 0 &&
+  const passed = !trip.settledWithWavePending && state.initialPearls === 0 && rate.passed && state.deaths === 0 &&
     bot.health > 0 && bot.game.dimension === "the_nether" && remaining <= 2;
   const finalArrows = bot.inventory.count(bot.registry.itemsByName.arrow!.id, null);
   const detail = JSON.stringify({
     seed: 20260906, home, approach: params.approach, dimension: bot.game.dimension, gained, collection: params.collection,
     hunting: trip.hunting, settledWithWavePending: trip.settledWithWavePending, returning: trip.returning,
-    elapsedMs: trip.elapsedMs, dropsPerMinute, nativePearlDropsObserved: state.pearlDrops.size,
+    elapsedMs: trip.elapsedMs, elapsedTicks: rate.elapsedTicks, dropsPerMinute: rate.dropsPerMinute, rateFailure: rate.reason,
+    nativePearlDropsObserved: state.pearlDrops.size,
     targetDeaths: state.targetDeaths, nativeTargetHits: state.nativeTargetHits, deaths: state.deaths,
     minimumHealth: state.minimumHealth, finalHealth: bot.health,
     arrowInventory: { initial: state.initialArrows, minimum: state.minimumArrows, final: finalArrows, netLoss: state.initialArrows - finalArrows, deathObserved: state.deaths > 0 },
@@ -174,9 +180,9 @@ export const run: MineAiScenario = async (context) => {
   const start = declaredStart(context);
   const home = start.floored();
   const endermen = declaredEntities(context).filter(({ name }) => name === "enderman");
-  const wave = createNativeWave(bot, endermen.map(({ position }) => position), log, (command) => bot.chat(command));
-  const signal = AbortSignal.any([context.signal, died.signal, wave.signal]);
   await prepareExpedition(context, params, home, endermen);
+  const wave = createNativeWave(bot, endermen.map(({ position }) => position), log, (command) => bot.chat(command), context.signal);
+  const signal = AbortSignal.any([context.signal, died.signal, wave.signal]);
   const observation = observeExpedition(context, start, wave, died, !!params.collection);
   try {
     const runtime = await openRuntime(context, "seeded-nether-enderman");

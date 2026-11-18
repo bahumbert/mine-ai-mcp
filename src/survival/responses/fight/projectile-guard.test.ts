@@ -4,7 +4,14 @@ import { Vec3 } from "vec3";
 import type { Item } from "prismarine-item";
 import { type FakeBot, type FakeClock, createFakeBot, createFakeClock, flush } from "../../../test-support/fake-bot/index.js";
 import { FightWeapons } from "./weapons.js";
-import type { FightScene } from "./scene.js";
+import { FightScene } from "./scene.js";
+import { createNavigationRuntime } from "../../../navigation/index.js";
+import { CombatPerception } from "../../perception/combat/observations.js";
+import { FootingRecovery } from "../footing.js";
+import { SurvivalPolicyState } from "../../state/survival-policy.js";
+import { survivalResources } from "../../state/resources.js";
+import { ProtectedAttackProgress } from "../../control/combat/attack-progress.js";
+import { EndermanProgress } from "../../control/combat/enderman-progress.js";
 import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { serverTickPace } from "../../../world/server-tick-pace.js";
 import { trackArrowFlights } from "../../perception/combat/arrow-flight.js";
@@ -209,7 +216,7 @@ for (const abort of [false, true]) test(`terminal volley preserves guard after t
 });
 
 /**
- * A server whose physics ticks come every `tickMs` (the fake's own come every 50 ms): the clock moves `tickMs`, then the
+ * A client whose physics ticks come every `tickMs` (the fake's own come every 50 ms): the clock moves `tickMs`, then the
  * bot ticks once, until `action` settles. Returns its outcome, the clock time it took and the ticks it saw.
  */
 async function driveTicksOf<T>(
@@ -234,18 +241,20 @@ async function driveTicksOf<T>(
 
 const SLOW_TICK_MS = 200;
 
-/** Weapons over a stub scene on a mocked clock (installed by the caller before this runs), with the volley budget of the policy. */
-function slowWeapons(options: { volleyTicks: number; shield?: boolean }) {
+/** Weapons on an installed mocked clock: real server rates, or manually driven client physics for hold tests. */
+function slowWeapons(options: { volleyTicks: number; shield?: boolean; rate?: number }) {
   const mocked = createFakeClock({ mode: "mocked" });
   const installed = mocked.install();
-  const { bot, clock } = createFakeBot({ clock: mocked, slots: { 45: { name: "shield" } }, position: new Vec3(0, 64, 0),
-    entities: { 9: { name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1), metadata: [] } } });
+  const { bot, clock, server, entities } = createFakeBot({ clock: mocked, server: { ticksPerSecond: options.rate ?? 20 },
+    slots: { 45: { name: "shield" } }, position: new Vec3(0, 64, 0),
+    entities: { 8: { name: "blaze", position: new Vec3(0, 64, 8) },
+      9: { name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1), metadata: [] } } });
   bot.world.raycast = () => null;
-  // The test sends every tick itself, at the pace of the slow server it stands for.
-  bot.physicsEnabled = false;
+  // Only the legacy client-physics hold cases send their own ticks.
+  bot.physicsEnabled = options.rate !== undefined;
   bot.lookAt = async () => {};
   const progress = { volleyFinished: () => {} };
-  const scene = { bot, target: { id: 8 }, perception: { read: () => [] }, signal: new AbortController().signal,
+  const scene = { bot, target: bot.entities[8]!, perception: { read: () => [] }, signal: new AbortController().signal,
     responsiveness: { checkpoint: async () => {} },
     execution: { run: async (_phase: string, effect: () => Promise<unknown>) => effect(), progress },
     projectileGuards: 0, settled: () => false, footingRecovery: { needed: false },
@@ -253,42 +262,120 @@ function slowWeapons(options: { volleyTicks: number; shield?: boolean }) {
     reportDecision: () => {},
   } as unknown as FightScene;
   const weapons = new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false });
-  return { bot, clock, weapons, installed };
+  return { bot, clock, weapons, installed, server, entities, scene };
 }
 
-test("the projectile guard loop ends at its 10 s wall twin when ticks come every 200 ms", async () => {
-  const slow = slowWeapons({ volleyTicks: 100 });
-  using _installed = slow.installed;
-  const { weapons } = slow;
-  Object.assign(weapons, { raiseGuard: async () => {}, maintainGuard: async () => {}, projectileDefence: () => ({
-    imminent: true, aligned: false, windingUp: [], windupForecasts: [], projectiles: [], facing: new Vec3(0, 65, 8),
-  }) });
-  const { outcome, ms, ticks } = await driveTicksOf(slow, SLOW_TICK_MS, weapons.guardIncoming());
-  assert.equal(outcome, false);
-  assert.ok(ms <= 10_000 + SLOW_TICK_MS, `the 100-tick wait took ${ms} ms of clock`);
-  assert.ok(ticks >= 45 && ticks < 100, `${ticks} ticks: the wall twin ended it, not the 100 ticks`);
+const volleyLoops = {
+  incoming: (weapons: FightWeapons) => weapons.guardIncoming(),
+  final: (weapons: FightWeapons) => weapons.guardFinalVolley(),
+  ranged: (weapons: FightWeapons) => weapons.guardRangedAttack(),
+};
+
+for (const rate of [20, 10]) for (const [name, run] of Object.entries(volleyLoops))
+test(`volley budget: ${name} credits 100 server ticks at ${rate} tps`, async () => {
+  const fixture = slowWeapons({ volleyTicks: 100, rate });
+  using _installed = fixture.installed;
+  const { bot, clock, weapons, server } = fixture;
+  using _pace = serverTickPace(bot);
+  await clock.advance(8_000); // Four time packets give the pace its three measured intervals at 10 tps.
+  keepVolleyPending(weapons);
+  const added = listenersAddedSince(bot), timers = clock.pendingGlobalTimers();
+  const start = clock.now(), age = bot.time.age;
+  let settled = false;
+  const action = run(weapons).then(outcome => { settled = true; return outcome; });
+  await clock.advance(100_000 / rate - 50);
+  assert.equal(settled, false, `still guarding before 100 server ticks at ${rate} tps`);
+  const outcome = await clock.settle(action, 100);
+  assert.equal(clock.now() - start, 100_000 / rate);
+  assert.equal(bot.time.age - age, 100, `world age at clock +${clock.now() - start} ms`);
+  assert.equal(outcome, name === "ranged" ? "windup_limit" : name === "incoming" ? false : undefined);
+  assert.equal(added("physicsTick"), 0);
+  assert.equal(clock.pendingGlobalTimers(), timers);
+  await clock.advance(20_000);
+  assert.equal(clock.pendingGlobalTimers(), timers);
+  if (name === "ranged") {
+    const nextStart = clock.now(), nextAge = server.gameTime;
+    Object.assign(weapons, { bowWindow: () => ({ safe: server.gameTime - nextAge >= 60 }) });
+    assert.equal(await clock.settle(weapons.guardRangedAttack(), 100_000 / rate), "volley_finished");
+    assert.equal(clock.now() - nextStart, 60_000 / rate);
+    assert.equal(server.gameTime - nextAge, 60);
+    assert.equal(added("physicsTick"), 0);
+    assert.equal(clock.pendingGlobalTimers(), timers);
+  }
 });
 
-test("the projectile guard loop still counts its 100 ticks when ticks come every 50 ms", async () => {
-  const slow = slowWeapons({ volleyTicks: 100 });
-  using _installed = slow.installed;
-  const { weapons } = slow;
-  Object.assign(weapons, { raiseGuard: async () => {}, maintainGuard: async () => {}, projectileDefence: () => ({
-    imminent: true, aligned: false, windingUp: [], windupForecasts: [], projectiles: [], facing: new Vec3(0, 65, 8),
-  }) });
-  const { outcome, ticks } = await driveTicksOf(slow, 50, weapons.guardIncoming());
-  assert.equal(outcome, false);
-  assert.ok(ticks >= 99 && ticks <= 101, `${ticks} ticks`);
+/** Keep the geometry and guard available so only the volley budget can end each loop. */
+function keepVolleyPending(weapons: FightWeapons): void {
+  weapons.itemUse.activateShield();
+  Object.assign(weapons, { raiseGuard: async () => {}, maintainGuard: async () => {},
+    faceGuard: async () => {}, bowWindow: () => ({ safe: false }), projectileDefence: () => ({
+      imminent: true, aligned: false, windingUp: [], windupForecasts: [], projectiles: [], facing: new Vec3(0, 65, 8),
+    }) });
+}
+
+for (const physics of [true, false]) for (const [name, run] of Object.entries(volleyLoops))
+test(`volley wall: ${name} stops at 18 s with ${physics ? "server stopped" : "no client physics"}`, async () => {
+  const fixture = slowWeapons({ volleyTicks: 100, rate: 10 });
+  using _installed = fixture.installed;
+  const { bot, clock, server, weapons } = fixture;
+  using _pace = serverTickPace(bot);
+  await clock.advance(8_000);
+  keepVolleyPending(weapons);
+  server.stop();
+  bot.physicsEnabled = physics;
+  const age = bot.time.age, start = clock.now(), added = listenersAddedSince(bot), timers = clock.pendingGlobalTimers();
+  let settled = false;
+  const action = run(weapons).then(value => { settled = true; return value; });
+  await clock.advance(17_999);
+  assert.equal(settled, false, "18 s backstop has not passed at 17,999 ms");
+  await clock.settle(action, physics ? 51 : 101, 1);
+  assert.ok(clock.now() - start >= 18_000 && clock.now() - start <= 18_100);
+  assert.equal(bot.time.age, age);
+  assert.equal(added("physicsTick"), 0);
+  assert.equal(clock.pendingGlobalTimers(), timers);
+  await clock.advance(20_000);
+  assert.equal(clock.pendingGlobalTimers(), timers);
 });
 
-test("the ranged guard's windup limit ends at its 10 s wall twin when ticks come every 200 ms", async () => {
-  const slow = slowWeapons({ volleyTicks: 100 });
-  using _installed = slow.installed;
-  const { weapons } = slow;
-  Object.assign(weapons, { raiseGuard: async () => {}, bowWindow: () => ({ safe: false }), projectileDefence: () => null });
-  const { outcome, ms } = await driveTicksOf(slow, SLOW_TICK_MS, weapons.guardRangedAttack());
-  assert.equal(outcome, "windup_limit");
-  assert.ok(ms <= 10_000 + 2 * SLOW_TICK_MS, `the 100-tick wait took ${ms} ms of clock`);
+for (const rate of [20, 10]) test(`release grace lasts 12 server ticks at ${rate} tps and a flight keeps it active`, async () => {
+  const fixture = slowWeapons({ volleyTicks: 100, rate });
+  using _installed = fixture.installed;
+  const { bot, clock, weapons, scene, entities } = fixture;
+  using _pace = serverTickPace(bot);
+  await clock.advance(8_000);
+  entities.remove(9);
+  let windingUp = true;
+  Object.assign(scene.perception, { read: () => [{ id: 8, windingUp }] });
+  weapons.observeVolley();
+  windingUp = false;
+  const age = fixture.server.gameTime, start = clock.now();
+  const observe = () => weapons.observeVolley();
+  bot.on("physicsTick", observe);
+  try {
+    await clock.advance(12_000 / rate - 50);
+    assert.equal(weapons.volleyActive(), true, `before 12 server ticks, clock +${clock.now() - start} ms`);
+    await clock.advance(50);
+    assert.equal(fixture.server.gameTime - age, 12);
+    assert.equal(weapons.volleyActive(), false, `grace over at clock +${clock.now() - start} ms`);
+    entities.spawn({ id: 9, name: "arrow", position: new Vec3(0, 67.3, 8), velocity: new Vec3(0, 0, -1) });
+    assert.equal(weapons.volleyActive(), true, "a flight outlives the release grace");
+  } finally { bot.off("physicsTick", observe); }
+});
+
+test("guard limit reports its server tick budget and 18 s backstop", async () => {
+  const { bot } = createFakeBot({ entities: { 8: { name: "blaze", position: new Vec3(0, 64, 8) } } });
+  await using navigation = createNavigationRuntime(bot);
+  using perception = new CombatPerception(bot);
+  using footingRecovery = new FootingRecovery(bot, navigation.world);
+  const survival = survivalResources(), policy = new SurvivalPolicyState(bot);
+  using protectedProgress = new ProtectedAttackProgress(survival.budgets, 8, 300);
+  using endermanProgress = new EndermanProgress(survival.budgets, 300);
+  const signal = new AbortController().signal;
+  using scene = new FightScene({ bot, navigation, perception, footingRecovery, survival, policy, reportDecision: () => {} },
+    { target: bot.entities[8]!, movement: "hold", signal, ownerSignal: signal, minimumHealth: 0 }, protectedProgress, endermanProgress);
+  const outcome = scene.guardLimit();
+  assert.ok("observation" in outcome);
+  assert.match(outcome.observation, /within 100 server ticks or 18 s/);
 });
 
 test("the facing hold ends at the wall twin of its ticks when ticks come every 200 ms", async () => {
@@ -318,8 +405,6 @@ test("a hold does not lose its ticks to work between them, such as a shield re-e
 describe("with no physics tick at all (an unloaded chunk) a wait ends at its 10 s wall twin", () => {
   const loops: Record<string, (weapons: FightWeapons) => Promise<unknown>> = {
     holdFacing: (weapons) => weapons.holdFacing(100),
-    guardIncoming: (weapons) => weapons.guardIncoming(),
-    guardFinalVolley: (weapons) => weapons.guardFinalVolley(),
   };
   for (const [name, run] of Object.entries(loops))
     test(name, async () => {
@@ -333,18 +418,6 @@ describe("with no physics tick at all (an unloaded chunk) a wait ends at its 10 
       assert.ok(ms >= 9_000 && ms <= 10_000 + 2 * SLOW_TICK_MS, `ended after ${ms} ms of clock with no tick`);
     });
 });
-
-for (const [tickMs, label] of [[SLOW_TICK_MS, "its 10 s wall twin"], [50, "its 100 ticks"]] as const)
-  test(`the final volley guard ends at ${label} when an arrow never clears`, async () => {
-    const slow = slowWeapons({ volleyTicks: 100 });
-    using _installed = slow.installed;
-    const { weapons } = slow;
-    await driveTicksOf(slow, tickMs, weapons.itemUse.raiseShield());
-    const { ms } = await driveTicksOf(slow, tickMs, weapons.guardFinalVolley());
-    const bound = tickMs === SLOW_TICK_MS ? 10_000 : 5_000;
-    assert.ok(ms <= bound + 2 * tickMs, `took ${ms} ms of clock at ${tickMs} ms a tick`);
-    assert.ok(ms >= bound - 4 * tickMs, `a bound that held the shield for its whole budget: ${ms} ms`);
-  });
 
 test("guard returns an aligned visible bow draw to shielded approach", async () => {
   const { bot, clock } = createFakeBot();

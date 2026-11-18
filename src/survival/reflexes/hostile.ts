@@ -1,7 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Bot } from "mineflayer";
-import type { NavigationRuntime } from "../../navigation/index.js";
+import type { NavigationRuntime, RouteAdmission } from "../../navigation/index.js";
 import { BodyAbort } from "../../session/abort.js";
+import { monotonicNow } from "../../utils/index.js";
 import type { ResponseContext } from "../control/combat/context.js";
 import type { CombatController } from "../control/combat/contract.js";
 import { answeredResponses } from "../control/combat/scopes/response.js";
@@ -17,8 +18,12 @@ import { responsePolicyChanged } from "../policy/combat/permissions.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
-import { decideHostile, heldThreatEnded, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
+import { decideHostile, heldThreatEnded, hostileDecisionFacts, hostileScope, senseHostile, type ShieldPreparation } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
+import { RequestStalls, stallReason } from "../state/request-stall.js";
+import { CoverObligations, type CoverObligation } from "../state/cover-obligation.js";
+import { coverRouteAdmission, currentCovers } from "./hostile-cover.js";
+import type { Facts } from "../state/answered.js";
 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
@@ -29,6 +34,13 @@ const SHIELD_LIMITS: ReflexLimits = { ceilingTicks: 200, noProgressTicks: 100, s
 export interface HostileReflex extends AsyncDisposable {
   readonly threats: ResponseContext;
   activeResponse(): HostileResponse["kind"] | null;
+  /** The cover the request now running still owes the shooters its last evade hid from; empty for any other request. */
+  coverObligations(): readonly CoverObligation[];
+  /**
+   * The veto over a route the request that owes cover is about to take, or null when none applies: no obligation, a
+   * response holding the body, or a requested engagement (`engaged()`) holding it.
+   */
+  coverAdmission(engaged: () => boolean): RouteAdmission | null;
 }
 
 /** Cancel changed response permissions and reset encounter policy at death or a dimension change. */
@@ -52,6 +64,8 @@ function watchHostilePolicy(scene: HostileScene): () => void {
   const resetPolicy = () => {
     encounterThreats.clear();
     scene.chains.clear();
+    scene.stalls.clear();
+    scene.covers.clear();
     transition(policy.reset("Death or dimension change; defaults restored."));
   };
   bot.on("death", resetPolicy);
@@ -91,6 +105,16 @@ function hostileResponseContext(bot: Bot, driver: ReflexDriver, controller: Comb
   };
 }
 
+/** A limit crossed during the hold takes precedence over evidence that would resume its objective. */
+function heldHostileEnded(scene: HostileScene, held: HostileResponse | ShieldPreparation,
+  observed: Parameters<typeof heldThreatEnded>[2], decision: "none_observed" | Facts) {
+  const stall = scene.stalls.check(scene.driver.runner.request(), scene.chains.generation, scene.bot.time.age ?? null, monotonicNow());
+  if (stall?.limit) return { stalled: stallReason(stall) };
+  return held.kind !== "prepare_shield" && (decision === "none_observed" ||
+    typeof decision === "object" && decision !== null && "kind" in decision && (decision.kind === "stand_down" ||
+    decision.kind === "handled" && "by" in decision && decision.by === "no_contact")) ? heldThreatEnded(scene, held, observed) : null;
+}
+
 /** Hostile observations and execution; admission, cancellation and failure retention belong to the driver. */
 export function attachHostileReflex(
   bot: Bot,
@@ -119,6 +143,8 @@ export function attachHostileReflex(
     context,
     encounterThreats,
     chains: new ThreatChains(),
+    stalls: new RequestStalls(),
+    covers: new CoverObligations(),
     transition,
     activeResponse: null,
   };
@@ -131,9 +157,7 @@ export function attachHostileReflex(
     sense: () => senseHostile(scene),
     decisionFacts: hostileDecisionFacts,
     decide: decideHostile,
-    heldEnded: (held, observed, decision) => held.kind !== "prepare_shield" && (decision === "none_observed" ||
-      typeof decision === "object" && decision !== null && "kind" in decision && (decision.kind === "stand_down" ||
-      decision.kind === "handled" && "by" in decision && decision.by === "no_contact")) ? heldThreatEnded(scene, held, observed) : null,
+    heldEnded: (held, observed, decision) => heldHostileEnded(scene, held, observed, decision),
     facts: (response) => hostileScope(scene, response),
     limits: (response) => (response.kind === "prepare_shield" ? SHIELD_LIMITS : COMBAT_LIMITS),
     bodyTravel: (response) => response.kind !== "fight",
@@ -161,6 +185,8 @@ export function attachHostileReflex(
   return {
     threats: context,
     activeResponse: () => scene.activeResponse,
+    coverObligations: () => currentCovers(scene),
+    coverAdmission: (engaged) => coverRouteAdmission(scene, engaged),
     [Symbol.asyncDispose]: () =>
       (closing ??= (async () => {
         stopWatchingPolicy();

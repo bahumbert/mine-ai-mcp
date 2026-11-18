@@ -10,6 +10,15 @@ import { carriedShields, messageOf, type HostileScene } from "./hostile-scene.js
 import { seatedAtSea } from "../../actions/navigate/boat-seated-response.js";
 import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { monotonicNow } from "../../utils/index.js";
+import type { RequestSnapshot } from "../../session/request.js";
+import { recordCoverObligations, type CoverCapture } from "./hostile-cover.js";
+
+interface ResponseStart extends CoverCapture {
+  readonly request: RequestSnapshot | null;
+  readonly generation: number;
+  readonly startedAtMs: number;
+  readonly firstDistances: ReadonlyMap<number, number>;
+}
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
 export const HOSTILE_TAKE_BACK_HITS = 15;
@@ -64,6 +73,7 @@ function abandonedEvidence(
     reason: messageOf(cause),
     physical: null,
     chain: null,
+    stall: null,
     evidence: {
       ...encounterBaseline(bot, directive, healthBefore),
       killedTargetIds: [],
@@ -116,22 +126,37 @@ async function executeResponse(scene: HostileScene, directive: HostileResponse, 
   return executeHostileResponse(bot, navigation, controller, directive, context, healthBefore, signal);
 }
 
+/** Record each response once, refusing late work from a life or dimension that has ended. */
+function finalizeHostileResponse(scene: HostileScene, start: ResponseStart, settlement: HostileSettlement): HostileSettlement {
+  const { request, generation, startedAtMs, firstDistances } = start;
+  const endedAtMs = monotonicNow();
+  // Reset invalidates in-flight work before the next response has observed the new generation.
+  const current = generation === scene.chains.generation;
+  const age = scene.bot.time.age ?? null;
+  if (current) scene.stalls.observe(request, generation, age, endedAtMs);
+  const stall = current && settlement.response === "evade"
+    ? scene.stalls.recordEvade(request, generation, settlement.evidence.threats, age, endedAtMs) : null;
+  recordCoverObligations(scene, start, settlement);
+  return { ...settlement, stall,
+    chain: scene.chains.record({ generation, startedAtMs, endedAtMs, settlement,
+      firstDistances: settlement.physical?.response === "evade"
+        ? new Map(settlement.physical.ends.map((end) => [end.id, end.firstDistance])) : firstDistances }) };
+}
+
 /** Execute one directed response with the body, and settle it: died, cancelled, or what the physical response did. */
 export async function respondToHostile(
   scene: HostileScene,
   directive: HostileResponse,
   signal: AbortSignal,
 ): Promise<HostileSettlement> {
+  const { bot, policy, perception } = scene;
+  const request = scene.driver.runner.request();
   const generation = scene.chains.generation;
   const startedAtMs = monotonicNow();
+  scene.stalls.observe(request, generation, bot.time.age ?? null, startedAtMs);
   const firstDistances = new Map(directive.threats.map((threat) => [threat.id, threat.distance]));
-  const finalize = (settlement: HostileSettlement): HostileSettlement => ({
-    ...settlement,
-    chain: scene.chains.record({ generation, startedAtMs, endedAtMs: monotonicNow(), settlement,
-      firstDistances: settlement.physical?.response === "evade"
-        ? new Map(settlement.physical.ends.map((end) => [end.id, end.firstDistance])) : firstDistances }),
-  });
-  const { bot, policy, perception } = scene;
+  const start: ResponseStart = { request, generation, startedAtMs, firstDistances, safeRange: directive.kind === "evade" ? directive.safeRange : null };
+  const finalize = (settlement: HostileSettlement) => finalizeHostileResponse(scene, start, settlement);
   const { resolvedIds, attackerIds } = perception;
   scene.activeResponse = directive.kind;
   policy.observeResponse({
@@ -148,7 +173,7 @@ export async function respondToHostile(
     if (entity.id === bot.entity.id && source) answeredAttackers.delete(source.id);
   };
   bot.on("death", capture);
-  if (directive.kind === "evade") bot.on("entityHurt", preserveNewAttack);
+  if (directive.kind === "evade" || directive.kind === "hide") bot.on("entityHurt", preserveNewAttack);
   try {
     let settlement: HostileSettlement;
     try {
@@ -164,7 +189,10 @@ export async function respondToHostile(
       resolvedIds.add(id);
       attackerIds.delete(id);
     }
-    if (settlement.physical?.response === "evade" && settlement.physical.result.kind === "separated")
+    const physical = settlement.physical;
+    const evade = physical?.response === "hide" ? physical.followUp : physical;
+    if (settlement.kind === "completed" && settlement.response === "evade"
+      && evade?.response === "evade" && evade.result.kind === "separated")
       for (const id of answeredAttackers) attackerIds.delete(id);
     return finalize(settlement);
   } finally {

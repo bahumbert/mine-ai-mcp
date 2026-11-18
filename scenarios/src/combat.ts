@@ -6,8 +6,10 @@ import { CombatPerception } from "../../src/survival/perception/combat/observati
 import { type HideOptions, type HideResult, hideInPlace } from "../../src/survival/responses/hide.ts";
 import { FootingRecovery } from "../../src/survival/responses/footing.ts";
 import { survivalResources } from "../../src/survival/state/resources.ts";
+import { executeHostileResponse, type HostileResponseRequest } from "../../src/survival/control/combat/respond.ts";
 /** A primitive scenario explicitly owns the services normally owned by the production runtime. */
 export class ScenarioCombat implements Disposable {
+  readonly bot: Bot;
   readonly perception: CombatPerception;
   readonly footing: FootingRecovery;
   readonly controller: ReturnType<typeof createCombatController>;
@@ -15,6 +17,7 @@ export class ScenarioCombat implements Disposable {
   readonly context: ResponseContext;
   readonly navigation: NavigationRuntime;
   constructor(bot: Bot, navigation: NavigationRuntime) {
+    this.bot = bot;
     this.navigation = navigation;
     this.perception = new CombatPerception(bot);
     this.footing = new FootingRecovery(bot, navigation.world);
@@ -32,6 +35,10 @@ export class ScenarioCombat implements Disposable {
         return controller.policy.food;
       },
     };
+  }
+  /** Run the runtime's selected response, including its single occupied-shelter reconsideration. */
+  respond(directive: HostileResponseRequest, signal: AbortSignal) {
+    return executeHostileResponse(this.bot, this.navigation, this.controller, directive, this.context, this.bot.health, signal);
   }
   /** The production hide with this scenario's navigation and an empty threat memory (every scenario caller needs both). */
   hide(bot: Bot, options: Omit<HideOptions, "threatContext" | "navigation">): Promise<HideResult> {
