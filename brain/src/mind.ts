@@ -73,6 +73,8 @@ export interface ChatInput {
   readonly snapshot: BotSnapshot;
   /** The speaker is online with no position (beyond view distance) and the line carries no distance: heard from beyond talk range. */
   readonly heardFarAway?: boolean;
+  /** The speaker is another agent of the project, not a person: its line waits behind a person's for a model slot (spec 2026-11-18 D2). */
+  readonly fromAgent?: boolean;
   /** What the agent is doing now, e.g. `idle` or `follow StarOr1 at 3 blocks`. */
   readonly activity: string;
   /** Places the agent knows, oldest first. */

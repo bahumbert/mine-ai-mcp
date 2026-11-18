@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { Agent } from "./agent.ts";
-import { otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
+import { chatSlotsFor, otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { readLocalizedChat } from "./chat-range.ts";
@@ -14,7 +14,7 @@ import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--chat-slots <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
@@ -30,6 +30,10 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
   --model-slots      How many model calls the server runs at once (Ollama's OLLAMA_NUM_PARALLEL; default: env MODEL_SLOTS,
                      else unknown). Once known, a call takes a slot before it is sent and waits in the brain beyond them, so
                      the model timeout covers inference only; the monitor's "Model queue" panel shows how many wait.
+  --chat-slots       How many of the model slots are kept for replies to a person's line (default: env MODEL_CHAT_SLOTS, else 1
+                     with 2 or more slots, else 0). Every other call runs on the rest; a reply may also use an idle slot.
+                     Needs --model-slots, and fewer than the slots (else the brain refuses to start, [BAD_CHAT_SLOTS]).
+                     Lanes order the calls of this one brain process.
   --start-gap        Seconds between one agent's start and the next one's (default 0: all at once). The model server
                      queues first calls from many bots at once for a minute or more.
   --start-when-free  Also start the next agent only once a model slot is free (needs --model-slots).
@@ -169,7 +173,10 @@ async function main(): Promise<void> {
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
-  const queue = new ModelQueue({ slots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: (line) => console.log(`${new Date().toISOString()} [queue] ${line}`) });
+  const queueLog = (line: string): void => console.log(`${new Date().toISOString()} [queue] ${line}`);
+  const chatSlots = chatSlotsFor(slots, values["chat-slots"], env("MODEL_CHAT_SLOTS"), queueLog);
+  const queue = new ModelQueue({ slots, chatSlots, file: firstLog === undefined ? null : join(dirname(dirname(dirname(firstLog.path))), MODEL_QUEUE_FILE), log: queueLog });
+  if (slots !== null) queueLog(`model slots: ${slots}, ${chatSlots} kept for chat`);
   const localizedChat = readLocalizedChat(env);
   if (localizedChat !== undefined) console.log(`localized chat: talk carries ${localizedChat.range} blocks`);
   const minds = createMinds(personas, brainLogs, queue, { chat: values["chat-model"], action: values["action-model"], planner: values["planner-model"] }, localizedChat);

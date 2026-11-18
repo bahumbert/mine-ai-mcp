@@ -2,8 +2,9 @@ import { z } from "zod";
 import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
 import { nowCarried } from "./carried-now-note.ts";
-import type { ChatModel, ChatTurn } from "./chat-model.ts";
+import type { ChatModel, ChatTurn, CompleteOptions } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
+import { tierCall, type LineFacts } from "./model-lanes.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
 import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyFields, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
@@ -125,19 +126,14 @@ const openingReplySchema = z.object({
 });
 const gistReplySchema = z.object({ gist: z.string().default(""), partners: z.unknown().optional() });
 
-/**
- * Which held model call goes out first when the brain's queue is full (lower first): a player waits for the chat tier,
- * a conversation line or a narration is read at leisure, goals and work are the bots' own pace (spec 2026-10-19).
- */
-const TIER_PRIORITY: Record<MindTier, number> = { chat: 0, conversation: 1, narrate: 1, goal: 2, work: 2 };
-
 /** A {@link Mind} backed by chat models answering in JSON, one per tier. */
 export class LlmMind implements Mind {
   /** `onCall`: told about every model call (the brain log, read by the monitor). */
   constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void, private readonly localizedChat?: LocalizedChat) {}
 
-  private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T): Promise<T> {
-    return ask(model, system, request, signal, read, TIER_PRIORITY[tier], this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
+  /** The lane and the order of the call come from its tier, and for the chat tier from the line (`tierCall`, `model-lanes.ts`). */
+  private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, line?: LineFacts): Promise<T> {
+    return ask(model, system, request, signal, read, tierCall(tier, line), this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
@@ -239,7 +235,7 @@ export class LlmMind implements Mind {
         ...(acts && reply.place !== undefined && { place: reply.place }),
         ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...relationReplyFields(input, reply),
       };
-    });
+    }, { fromAgent: input.fromAgent === true, addressed: message.addressed || message.channel === "whisper" });
   }
 
   /** Steps already sent back as a repeat of one that just succeeded, per objective. */
@@ -428,7 +424,7 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
 class SendBack extends Error {}
-async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, priority: number, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
+async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, call: CompleteOptions, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = monotonicNow();
@@ -442,7 +438,7 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
   for (;;) {
     let text: string;
     try {
-      const reply = await model.complete(turns, signal, { priority });
+      const reply = await model.complete(turns, signal, call);
       text = reply.text;
       if (reply.waitMs !== undefined) waitMs = (waitMs ?? 0) + reply.waitMs;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);

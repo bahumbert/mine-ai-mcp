@@ -5,56 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ChatModel, ChatReply, ChatTurn } from "./chat-model.ts";
 import { ModelQueue, startStaggered, type QueueSnapshot } from "./model-queue.ts";
-import { steppedClocks } from "./testing.ts";
+import { controlledModel, steppedClocks, tick } from "./testing.ts";
 
 const REPLY: ChatReply = { text: "{}", promptTokens: null, contextTokens: null };
-
-/** A model whose calls stay open until the test settles them. */
-function controlled(name = "fake"): {
-  model: ChatModel;
-  settle: (index: number, error?: Error) => void;
-  calls: () => number;
-  /** What each call that reached the model said (its first turn), in the order they reached it. */
-  entered: string[];
-  /** Settles every call that reaches the model, including those a slot lets in meanwhile, until none is left. */
-  drain: () => Promise<void>;
-} {
-  const pending: { resolve: (reply: ChatReply) => void; reject: (error: Error) => void }[] = [];
-  const entered: string[] = [];
-  let settled = 0;
-  return {
-    model: {
-      name,
-      complete: (turns) => {
-        entered.push(turns[0]?.content ?? "");
-        return new Promise<ChatReply>((resolve, reject) => pending.push({ resolve, reject }));
-      },
-    },
-    settle: (index, error) => (error === undefined ? pending[index]!.resolve(REPLY) : pending[index]!.reject(error)),
-    calls: () => pending.length,
-    entered,
-    drain: async () => {
-      for (;;) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        if (settled >= pending.length) return;
-        while (settled < pending.length) pending[settled++]!.resolve(REPLY);
-      }
-    },
-  };
-}
 
 const say = (content: string): ChatTurn[] => [{ role: "user", content }];
 
 const signal = new AbortController().signal;
 
-/** Lets queued promise callbacks run. */
-const tick = async (): Promise<void> => {
-  for (let i = 0; i < 5; i += 1) await Promise.resolve();
-};
-
 test("a tracked model keeps its name and counts calls in flight, per agent", async () => {
   const queue = new ModelQueue({ slots: 3, file: null });
-  const fake = controlled("qwen3");
+  const fake = controlledModel("qwen3");
   const ada = queue.track(fake.model, "ada");
   const bo = queue.track(fake.model, "bo");
   assert.equal(ada.name, "qwen3");
@@ -76,7 +37,7 @@ test("a tracked model keeps its name and counts calls in flight, per agent", asy
 
 test("calls beyond the slots are held and counted as waiting, not in flight", async () => {
   const queue = new ModelQueue({ slots: 2, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const calls = [model.complete([], signal), model.complete([], signal), model.complete([], signal), model.complete([], signal)];
   await Promise.resolve();
@@ -94,7 +55,7 @@ test("calls beyond the slots are held and counted as waiting, not in flight", as
 
 test("a rejected call still counts down", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const call = queue.track(fake.model, "ada").complete([], signal);
   assert.equal(queue.inFlight(), 1);
   fake.settle(0, new Error("boom"));
@@ -104,7 +65,7 @@ test("a rejected call still counts down", async () => {
 
 test("unknown slots never wait", async () => {
   const queue = new ModelQueue({ slots: null, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const calls = [model.complete([], signal), model.complete([], signal), model.complete([], signal)];
   assert.equal(queue.waiting(), 0);
@@ -116,7 +77,7 @@ test("unknown slots never wait", async () => {
 test("whenFree resolves at once when free, after a call ends otherwise, and rejects on abort", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
   await queue.whenFree(signal);
-  const fake = controlled();
+  const fake = controlledModel();
   const call = queue.track(fake.model, "ada").complete([], signal);
   let freed = false;
   const waited = queue.whenFree(signal).then(() => (freed = true));
@@ -141,7 +102,7 @@ test("the file holds counts, history and starts, written whole", async () => {
   const file = join(dir, "queue.json");
   let clock = 1_000;
   const queue = new ModelQueue({ slots: 2, file, now: () => clock });
-  const fake = controlled();
+  const fake = controlledModel();
   queue.started("ada");
   const call = queue.track(fake.model, "ada").complete([], signal);
   clock = 5_000;
@@ -170,7 +131,7 @@ test("writes are at most one per 500 ms, with a trailing write", async () => {
   const file = join(dir, "queue.json");
   let clock = 0;
   const queue = new ModelQueue({ slots: 3, file, now: () => clock });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const first = model.complete([], signal);
   // The first change is written at once; the next ones inside 500 ms wait for the trailing write.
@@ -200,7 +161,7 @@ test("history keeps the last hour and at most 4000 samples", async () => {
   const snapshot = JSON.parse(readFileSync(file, "utf8")) as QueueSnapshot;
   assert.deepEqual(snapshot.starts.map((start) => start.id), ["new"]);
 
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   for (let index = 0; index < 2_100; index += 1) {
     clock += 1;
@@ -273,7 +234,7 @@ test("a snapshot that cannot be written (rename refused on a shared drive) is lo
   const logs: string[] = [];
   let clock = 0;
   const queue = new ModelQueue({ slots: 3, file, now: () => clock, log: (line) => logs.push(line) });
-  const fake = controlled();
+  const fake = controlledModel();
   const call = queue.track(fake.model, "ada").complete([], signal);
   clock = 100;
   queue.started("bo");
@@ -285,7 +246,7 @@ test("a snapshot that cannot be written (rename refused on a shared drive) is lo
 });
 
 test("freeFor: with known slots a free slot, with unknown slots no call of this agent in flight", async () => {
-  const fake = controlled();
+  const fake = controlledModel();
   const known = new ModelQueue({ slots: 2, file: null });
   const ada = known.track(fake.model, "ada");
   void ada.complete([], signal);
@@ -309,7 +270,7 @@ test("freeFor: with known slots a free slot, with unknown slots no call of this 
 test("freeWithin is true once a slot frees in time, false on time-out or abort", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
   assert.equal(await queue.freeWithin("ada", 50, signal), true, "free at once");
-  const fake = controlled();
+  const fake = controlledModel();
   const call = queue.track(fake.model, "ada").complete([], signal);
   assert.equal(await queue.freeWithin("bob", 20, signal), false, "time-out");
   const abort = new AbortController();
@@ -326,7 +287,7 @@ test("freeWithin is true once a slot frees in time, false on time-out or abort",
 test("the third call on two slots is held until one ends, and only it reports a wait", async () => {
   let clock = 0;
   const queue = new ModelQueue({ slots: 2, file: null, now: () => clock });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const first = model.complete([], signal);
   const second = model.complete([], signal);
@@ -397,7 +358,7 @@ test("the same priority goes out in arrival order", async () => {
 
 test("a call aborted while held leaves the queue, takes no slot, and the next waiter still runs", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const tracked = queue.track(fake.model, "ada");
   const busy = tracked.complete([], signal);
   const abort = new AbortController();
@@ -421,7 +382,7 @@ test("a call aborted while held leaves the queue, takes no slot, and the next wa
 
 test("a signal already aborted never takes a slot", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const abort = new AbortController();
   abort.abort(new Error("late"));
   await assert.rejects(queue.track(fake.model, "ada").complete([], abort.signal), /late/u);
@@ -431,7 +392,7 @@ test("a signal already aborted never takes a slot", async () => {
 
 test("a model that throws frees its slot for the next waiter", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const tracked = queue.track(fake.model, "ada");
   const failing = tracked.complete([], signal);
   const next = tracked.complete([], signal);
@@ -450,7 +411,7 @@ test("a model that throws frees its slot for the next waiter", async () => {
 test("unknown slots run five calls at once with no wait", async () => {
   // A fixed clock: on the wall clock a loaded machine crosses a millisecond between the ask and the start (flaky, 2026-10-25).
   const queue = new ModelQueue({ slots: null, file: null, now: () => 0 });
-  const fake = controlled();
+  const fake = controlledModel();
   const tracked = queue.track(fake.model, "ada");
   const calls = [0, 1, 2, 3, 4].map(() => tracked.complete([], signal));
   await tick();
@@ -461,7 +422,7 @@ test("unknown slots run five calls at once with no wait", async () => {
 
 test("with 3 slots a 4th call reaches the model only once one of the first three ends, and the held time is not inside the call", async () => {
   const queue = new ModelQueue({ slots: 3, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const calls = ["a", "b", "c", "d"].map((name) => model.complete(say(name), signal));
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -480,7 +441,7 @@ test("with 3 slots a 4th call reaches the model only once one of the first three
 
 test("held calls get the slot in the order they asked", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const calls = ["first", "second", "third", "fourth"].map((name) => model.complete(say(name), signal));
   await fake.drain();
@@ -507,7 +468,7 @@ function listenerCounted(): { abort: AbortController; listeners: () => number } 
 
 test("a held call whose signal aborts leaves the line; the next one gets the slot; no listener is left on either signal", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const running = model.complete(say("running"), signal);
   const leaver = listenerCounted();
@@ -532,7 +493,7 @@ test("a held call whose signal aborts leaves the line; the next one gets the slo
 
 test("a held call whose signal is already aborted never reaches the model", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const running = model.complete(say("running"), signal);
   const gone = AbortSignal.abort(new Error("gone"));
@@ -545,7 +506,7 @@ test("a held call whose signal is already aborted never reaches the model", asyn
 
 test("a call that rejects gives its slot to the next one", async () => {
   const queue = new ModelQueue({ slots: 1, file: null });
-  const fake = controlled();
+  const fake = controlledModel();
   const model = queue.track(fake.model, "ada");
   const failing = model.complete(say("failing"), signal);
   const next = model.complete(say("next"), signal);

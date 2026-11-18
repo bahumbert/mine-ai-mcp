@@ -45,6 +45,17 @@ test("the chat tier reads a fenced JSON reply as an answer plus a route", async 
   assert.match(chat.requests[0]?.[1]?.content ?? "", /Steve says in chat, naming you: "yo Ayla stick with me"/u);
 });
 
+test("the chat tier asks in the chat lane at 0 for a person's addressed line, 1 for a person's line to everyone, and in the shared lane at 2 for an agent's line", async () => {
+  const { chat, mind } = scriptedMind();
+  const reply = { say: "", route: "ignore", request: "", spoken_to: ["everyone"], asks: "anything" };
+  chat.reply(reply, reply, reply, reply);
+  await mind.chat(chatInput("Ayla, hello", true), signal);
+  await mind.chat(chatInput("anyone got bread?", false), signal);
+  await mind.chat({ ...chatInput("Ayla, hello", true), message: { username: "Steve", channel: "whisper", message: "psst", addressed: false } }, signal);
+  await mind.chat({ ...chatInput("Ayla, hello", true), fromAgent: true }, signal);
+  assert.deepEqual(chat.options, [{ lane: "chat", priority: 0 }, { lane: "chat", priority: 1 }, { lane: "chat", priority: 0 }, { lane: "shared", priority: 2 }]);
+});
+
 test("taking something on without restating it is repaired once", async () => {
   const { chat, mind } = scriptedMind();
   chat.reply({ say: "On it.", route: "act" }, { say: "On it.", route: "act", request: "collect 3 dirt" });
@@ -1129,20 +1140,24 @@ test("a model that reports no wait leaves waitMs out of the row", async () => {
   assert.equal(calls[0]?.waitMs, undefined);
 });
 
-test("each tier asks the model queue with its priority: chat 0, conversation and narrate 1, goal and work 2", async () => {
+test("each tier asks the model queue with its lane and priority: chat on a person's line 0 or 1, conversation and narrate 3, goal and work 4 (all shared)", async () => {
   const models = scriptedMind();
   models.chat.reply({ say: "Hi!", route: "talk", request: "" });
   await models.mind.chat(chatInput("hello"), signal);
-  assert.deepEqual(models.chat.options, [{ priority: 0 }]);
+  assert.deepEqual(models.chat.options, [{ lane: "chat", priority: 0 }]);
 
   models.chat.reply({ gist: "They talked." }, { say: "" });
   await models.mind.sumUpConversation({ persona: testPersona(), others: ["Theo"], topic: "the mine", lines: [] }, signal);
   await models.mind.narrate({ persona: testPersona(), objective: "make a farm", outcome: "progress", detail: "tilling", history: [] }, signal);
-  assert.deepEqual(models.chat.options, [{ priority: 0 }, { priority: 1 }, { priority: 1 }]);
+  assert.deepEqual(models.chat.options, [{ lane: "chat", priority: 0 }, { lane: "shared", priority: 3 }, { lane: "shared", priority: 3 }]);
 
   models.action.reply({ done: "ok" });
   await models.mind.next(workInput("give Steve 5 oak_log"), signal);
-  assert.deepEqual(models.action.options, [{ priority: 2 }]);
+  assert.deepEqual(models.action.options, [{ lane: "shared", priority: 4 }]);
+
+  models.planner.reply({ objective: "Collect 16 oak_log for my base." });
+  await models.mind.chooseObjective({ persona: testPersona(), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [] }, signal);
+  assert.deepEqual(models.planner.options, [{ lane: "shared", priority: 4 }]);
 });
 
 const GREETING = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey Steve!", route: "talk", request: "" };

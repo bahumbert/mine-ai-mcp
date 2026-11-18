@@ -6,7 +6,7 @@ import { Agent, type AgentOptions } from "./agent.ts";
 import { BodyDown } from "./runtime-client.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
 import { ConversationBudget, type ConversationController } from "./conversation/controller.ts";
-import { INSTANT_TYPING } from "./body.ts";
+import { HUMAN_TYPING, INSTANT_TYPING } from "./body.ts";
 import type { BrainEvent } from "./brain-log.ts";
 import type { Persona } from "./persona.ts";
 import { templateFor } from "./building/templates.ts";
@@ -4269,4 +4269,29 @@ test("a house recorded as prepared is saved before its first part is built", asy
   await until(() => runtime.submitted.some((call) => call.tool === "build_structure"));
   const asked = runtime.submitted.flatMap((call) => call.tool === "build_structure" ? ["part"] : call.tool === "note_save" && String(call.input.context).includes("\"prepared\":true") ? ["prepared"] : []);
   assert.deepEqual(asked.slice(0, 2), ["prepared", "part"]);
+});
+
+test("a reply's typing pause counts from the read time, not from the start of the handling", async (t) => {
+  // 2400 ms of typing (20 characters at 120 ms) and a 1500 ms burst window: the window already counted as typing, so only
+  // about 900 ms are left once the model answered (spec 2026-11-18 D4); counted from the handling's start it was 2400.
+  const runtime = new FakeRuntime();
+  const { chat } = journaledAgent(t, runtime, { settings: { ...testPersona().settings, chatBurstMs: 1_500 } }, { typing: HUMAN_TYPING });
+  let modelAnsweredAt = 0;
+  let spokeAt = 0;
+  const completeOnModel = chat.complete.bind(chat);
+  chat.complete = async (...args) => {
+    const reply = await completeOnModel(...args);
+    modelAnsweredAt = monotonicNow();
+    return reply;
+  };
+  const sayOnRuntime = runtime.say.bind(runtime);
+  runtime.say = (...args) => {
+    spokeAt = monotonicNow();
+    return sayOnRuntime(...args);
+  };
+  chat.reply({ spoken_to: ["Ayla"], say: "twenty characters!!", route: "talk", request: "" });
+  runtime.inbox.push(say("Steve", "Ayla, hello there"));
+  await until(() => runtime.said.length === 1, 6_000);
+  const gap = spokeAt - modelAnsweredAt;
+  assert.ok(modelAnsweredAt > 0 && gap < 2_400 - 1_500 + 300, `the line was typed ${Math.round(gap)} ms after the model answered; the window counted already`);
 });

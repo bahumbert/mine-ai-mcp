@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import test from "node:test";
-import { otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
+import { chatSlotsFor, otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
 
 test("without --other-agent the live-run arguments parse as before and an agent's others are the in-process ones but itself", () => {
   // The argument shape of .agent/scripts/live-run/templates/start.sh.
@@ -34,6 +34,37 @@ test("--other-agents-file takes a path, absent by default", () => {
 
 test("an agent's own username and a repeated name are dropped, whatever their case", () => {
   assert.deepEqual(otherAgentsFor("Ayla", ["Ayla", "Brea"], ["Ayla", "ayla", "brea", "Cato", "Cato"]), ["Brea", "Cato"]);
+});
+
+test("chatSlotsFor: default, flag refused, env value logged and ignored", () => {
+  const logs: string[] = [];
+  const log = (line: string): void => void logs.push(line);
+  assert.equal(chatSlotsFor(3, undefined, undefined, log), 1);
+  assert.equal(chatSlotsFor(1, undefined, undefined, log), 0);
+  assert.equal(chatSlotsFor(null, undefined, undefined, log), 0);
+  assert.equal(chatSlotsFor(3, "2", undefined, log), 2);
+  assert.equal(chatSlotsFor(3, "0", undefined, log), 0);
+  assert.throws(() => chatSlotsFor(3, "x", undefined, log), /\[BAD_CHAT_SLOTS\] --chat-slots x: "x" is not a whole number/u, "the refusal quotes the text, never NaN");
+  assert.throws(() => chatSlotsFor(3, "1e0", undefined, log), /\[BAD_CHAT_SLOTS\]/u);
+  assert.throws(() => chatSlotsFor(3, "", undefined, log), /\[BAD_CHAT_SLOTS\]/u);
+  assert.throws(() => chatSlotsFor(3, "3", undefined, log), /\[BAD_CHAT_SLOTS\]/u);
+  assert.throws(() => chatSlotsFor(3, "-1", undefined, log), /\[BAD_CHAT_SLOTS\]/u);
+  assert.throws(() => chatSlotsFor(null, "1", undefined, log), /\[BAD_CHAT_SLOTS\]/u);
+  assert.deepEqual(logs, [], "nothing logged so far");
+  assert.equal(chatSlotsFor(1, undefined, "1", log), 0);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0]!, /MODEL_CHAT_SLOTS=1 ignored/u);
+  assert.equal(chatSlotsFor(null, undefined, "1", log), 0);
+  assert.equal(logs.length, 2);
+  assert.equal(chatSlotsFor(3, undefined, "2", log), 2);
+  assert.equal(logs.length, 2, "a good env value logs nothing");
+  assert.equal(chatSlotsFor(3, "2", "7", log), 2, "the flag wins over the env value");
+  assert.equal(logs.length, 2);
+});
+
+test("--chat-slots takes a value, absent by default", () => {
+  assert.equal(parseBrainArgs(["--agent", "a.json=http://x/mcp"]).values["chat-slots"], undefined);
+  assert.equal(parseBrainArgs(["--chat-slots", "2"]).values["chat-slots"], "2");
 });
 
 // CI checks out the public repository, which has no .agent: the script is run wherever it is present.

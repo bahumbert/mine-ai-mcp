@@ -477,7 +477,7 @@ export class Agent {
     if (routed === "ignore") return;
     // A whisper is answered by whisper (and so is the order it gives), anything else in public chat.
     const whisperTo = message.channel === "whisper" ? message.username : null;
-    const said = this.speak(decision.say, heardAt, [message.username], whisperTo, decision.shout === true);
+    const said = this.speak(decision.say, heard?.readAt ?? heardAt, [message.username], whisperTo, decision.shout === true); // typing counts from the read time: the burst window and the model's wait were typing (spec 2026-11-18 D4)
     this.openRequestsOnceSaid(said, decision, whisperTo, snapshot);
     // A stop with a request stops the work before `decided`: the give the line's own trade pushes is no work to stop (spec 2026-11-07-gift-asked-for D4).
     if (carriesRequest && this.stack.length > 0) this.stopAndRest(message.username);
@@ -669,7 +669,7 @@ export class Agent {
         const distance = lineDistance(message, snapshot);
         const heardMessage = message.channel === "chat" && message.distance === undefined && distance !== undefined ? { ...message, distance } : message;
         const farAway = message.channel === "chat" && heardFarAway(message, snapshot, this.noPositionSince, monotonicNow());
-        const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+        const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), fromAgent: this.isOtherAgent(message.username), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
         let decision = await mind.chat(input, this.runSignal);
         let checked: BotSnapshot | undefined;
         if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, heardAt: wallTimeOf(heardAt), snapshot, signal: this.runSignal }));

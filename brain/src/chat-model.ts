@@ -16,10 +16,18 @@ export interface ChatReply {
   readonly waitMs?: number;
 }
 
+/**
+ * Which share of the model server's slots a call may use (the brain's model queue, spec 2026-11-18 D1): `chat` is the
+ * chat tier's reply to a person's line and may use the slots kept for it; `shared` is every other call.
+ */
+export type ModelLane = "chat" | "shared";
+
 /** What a caller says about one call. Models ignore it; the brain's model queue reads it. */
 export interface CompleteOptions {
   /** Which held call goes out first when a slot frees: lower first (chat 0), equal ones by arrival. */
   readonly priority?: number;
+  /** The lane the call runs in; absent is `shared`. */
+  readonly lane?: ModelLane;
 }
 
 /**

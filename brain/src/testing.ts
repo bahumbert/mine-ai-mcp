@@ -617,6 +617,47 @@ export class ScriptedModel implements ChatModel {
   }
 }
 
+/** Lets queued promise callbacks run (a few microtask turns, no timer). */
+export const tick = async (): Promise<void> => {
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+};
+
+const CONTROLLED_REPLY: ChatReply = { text: "{}", promptTokens: null, contextTokens: null };
+
+/** A model whose calls stay open until the test settles them (the model queue's tests). */
+export function controlledModel(name = "fake"): {
+  model: ChatModel;
+  settle: (index: number, error?: Error) => void;
+  calls: () => number;
+  /** What each call that reached the model said (its first turn), in the order they reached it. */
+  entered: string[];
+  /** Settles every call that reaches the model, including those a slot lets in meanwhile, until none is left. */
+  drain: () => Promise<void>;
+} {
+  const pending: { resolve: (reply: ChatReply) => void; reject: (error: Error) => void }[] = [];
+  const entered: string[] = [];
+  let settled = 0;
+  return {
+    model: {
+      name,
+      complete: (turns) => {
+        entered.push(turns[0]?.content ?? "");
+        return new Promise<ChatReply>((resolve, reject) => pending.push({ resolve, reject }));
+      },
+    },
+    settle: (index, error) => (error === undefined ? pending[index]!.resolve(CONTROLLED_REPLY) : pending[index]!.reject(error)),
+    calls: () => pending.length,
+    entered,
+    drain: async () => {
+      for (;;) {
+        await sleep(0);
+        if (settled >= pending.length) return;
+        while (settled < pending.length) pending[settled++]!.resolve(CONTROLLED_REPLY);
+      }
+    },
+  };
+}
+
 /** One scripted model per tier, plus the mind using them. */
 export function scriptedMind(localizedChat?: LocalizedChat) {
   const models = { chat: new ScriptedModel("chat"), action: new ScriptedModel("action"), planner: new ScriptedModel("planner") };
