@@ -95,6 +95,10 @@ export type BrainEvent =
     readonly text: string;
     readonly channel: "chat" | "whisper";
     readonly lines: number;
+    /** Older lines of the speaker left out to keep the message within its caps (absent: none; spec 2026-11-18-chat-flood-bounds D1). */
+    readonly dropped?: number;
+    /** Milliseconds the message was ready and skipped for lack of a speaker token (present from 1 000; D3). */
+    readonly heldMs?: number;
     readonly route: Route;
     readonly say: string;
     readonly superseded: boolean;
@@ -105,6 +109,8 @@ export type BrainEvent =
     /** The conversation (id) the line belongs to, when it is in one. */
     readonly conversation?: string;
   }
+  /** A request not taken because its speaker already holds the most open requests (spec 2026-11-18-chat-flood-bounds D4). */
+  | { readonly kind: "order_refused"; readonly speaker: string; readonly text: string; readonly reason: "open_orders"; readonly open: number; readonly max: number }
   /** A conversation (spec 2026-10-18-conversations-design): opened, a member joined or left, ended. */
   | {
     readonly kind: "conversation";

@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Step } from "./actions.ts";
 import { Agent, type AgentOptions } from "./agent.ts";
+import type { Heard } from "./inbox.ts";
 import { BodyDown } from "./runtime-client.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
 import { ConversationBudget, type ConversationController } from "./conversation/controller.ts";
@@ -13,6 +14,7 @@ import { templateFor } from "./building/templates.ts";
 import type { KnownPlace } from "./mind.ts";
 import { memoryNote, recall } from "./memory.ts";
 import { OtherAgents } from "./other-agents.ts";
+import { SpeakerBudget } from "./speaker-budget.ts";
 import { CHAT_RETRY_MS } from "./model-wait.ts";
 import { monotonicNow } from "./monotonic-clock.ts";
 import { FakeRuntime, movedClocks, scriptedMind, SMALL_MEDIEVAL_HOUSE, steppedClocks, testPersona, until } from "./testing.ts";
@@ -48,6 +50,11 @@ function agentFor(t: { after(fn: () => Promise<void>): void }, runtime: FakeRunt
 /** A chat line; addressed to her (her name in it) unless said otherwise: only those start a conversation (owner rule). */
 function say(username: string, message: string, addressed = true) {
   return { username, channel: "chat" as const, message, addressed };
+}
+
+/** A message the inbox handed out as one line, read now: for tests that call `agent.handle` directly. */
+function heardOnce(message: Heard["message"]): Heard {
+  return { message, lines: 1, readAt: Date.now(), seq: 0, dropped: 0, lastLine: message.message, heldMs: 0 };
 }
 
 /** Who each spoken line went to: a player's name for a whisper, undefined for public chat. */
@@ -709,6 +716,247 @@ test("a line after the burst window is a message of its own", async (t) => {
   runtime.inbox.push(say("Steve", "Ayla, second"));
   await until(() => runtime.said.length === 2);
   assert.equal(chat.requests.length, 2);
+});
+
+/** Chat settings for the flood tests: quick lines join (60 ms window) and a message holds at most `burstMaxLines` lines. */
+function floodSettings(burstMaxLines: number) {
+  const base = testPersona().settings;
+  return { ...base, chatBurstMs: 60, chat: { ...base.chat, burstMaxLines } };
+}
+
+test("a flood is read as one message of its newest lines, and the journal counts the rest", async (t) => {
+  const runtime = new FakeRuntime();
+  const { chat, events } = journaledAgent(t, runtime, { settings: floodSettings(3) });
+  chat.reply({ spoken_to: ["Ayla"], say: "Slow down!", route: "talk", request: "" });
+  runtime.inbox.push(...Array.from({ length: 10 }, (_, at) => say("Steve", `l${at}`)));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 1);
+  const request = chat.requests[0]?.[1]?.content ?? "";
+  assert.match(request, /"l7 l8 l9"/u);
+  assert.match(request, /\(7 earlier lines from Steve were not read/u);
+  assert.deepEqual(events.filter((event) => event.kind === "chat").map((event) => [event.lines, event.dropped]), [[3, 7]]);
+});
+
+test("a stop at the end of a flood is read and stops the speaker's order", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = journaledAgent(t, runtime, { settings: floodSettings(3) });
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "collect some wood"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  chat.reply({ say: "Stopping.", route: "stop", request: "" });
+  runtime.inbox.push(...Array.from({ length: 8 }, (_, at) => say("Steve", `spam ${at}`)), say("Steve", "Ayla stop"));
+  await until(() => runtime.cancelled.length === 1);
+  assert.equal(agent.activity, "idle");
+  assert.match(chat.requests.at(-1)?.[1]?.content ?? "", /Ayla stop"/u);
+});
+
+/** A talk reply spoken as `say`, for the speaker-budget tests (the scripted replies go out in the order the calls come). */
+const talk = (spoken: string) => ({ spoken_to: ["Ayla"], say: spoken, route: "talk", request: "" });
+
+/** Settings for the speaker-budget tests: a 20 ms burst window, so each pushed line is a message of its own once read. */
+function budgetSettings() {
+  return { ...testPersona().settings, chatBurstMs: 20 };
+}
+
+test("a second player is answered while the first floods", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 2, y: 64, z: 0 } }, { username: "Ann", position: { x: 3, y: 64, z: 0 } }] };
+  const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 2 });
+  const { chat } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+  chat.reply(talk("S1"), talk("S2"), talk("A1"), talk("S3"));
+  runtime.inbox.push(say("Steve", "Ayla one"));
+  await until(() => runtime.said.length === 1);
+  runtime.inbox.push(say("Steve", "Ayla two"));
+  await until(() => runtime.said.length === 2);
+  runtime.inbox.push(say("Steve", "Ayla three"), say("Ann", "Ayla hello"));
+  await until(() => runtime.said.includes("A1"));
+  const fromSteve = chat.requests.filter((request) => /New message: Steve/u.test(request[1]?.content ?? ""));
+  assert.equal(fromSteve.length, 2, "Steve's third message waits for a token; Ann's is read first");
+  assert.ok(speakerBudget.waitMs("Steve") > 0);
+});
+
+test("a held speaker's stop is read at the next token", async (t) => {
+  const clocks = steppedClocks(t);
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 1 });
+  const { agent, chat, action, events } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" }, talk("Hi!"));
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "collect some wood"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  runtime.inbox.push(say("Steve", "Ayla hello"));
+  await until(() => runtime.said.includes("Hi!"));
+  assert.equal(speakerBudget.tryTake("Steve"), false, "the line spent Steve's only token");
+  const before = chat.requests.length;
+  chat.reply({ say: "Stopping.", route: "stop", request: "" });
+  runtime.inbox.push(say("Steve", "Ayla stop"));
+  await sleep(150);
+  assert.equal(chat.requests.length, before, "the stop is held: no token");
+  assert.equal(runtime.cancelled.length, 0);
+  clocks.monotonic(10_000);
+  await until(() => runtime.cancelled.length === 1);
+  assert.equal(agent.activity, "idle");
+  const stop = events.find((event) => event.kind === "chat" && event.text === "Ayla stop");
+  assert.ok(stop?.kind === "chat" && (stop.heldMs ?? 0) >= 1_000, "the journal says how long the stop was held");
+});
+
+test("three agents on one budget spend one token per handed-out message", async (t) => {
+  const speakerBudget = new SpeakerBudget({ perMinute: 1, burst: 3 });
+  const bots = [1, 2, 3].map(() => {
+    const runtime = new FakeRuntime();
+    const built = agentFor(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+    built.chat.reply(talk("Hi!"), talk("Again!"));
+    return { runtime, chat: built.chat };
+  });
+  const whisper = (message: string) => ({ username: "Steve", channel: "whisper" as const, message, addressed: true });
+  for (const bot of bots) {
+    bot.runtime.inbox.push(whisper("first"));
+    await until(() => bot.runtime.said.length === 1);
+  }
+  for (const bot of bots) bot.runtime.inbox.push(whisper("second"));
+  await sleep(150);
+  assert.deepEqual(bots.map((bot) => bot.chat.requests.length), [1, 1, 1], "the second lines wait: the brain's budget for Steve is spent");
+  assert.ok(speakerBudget.waitMs("Steve") > 0);
+});
+
+test("lines refused before the model give their token back", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 2, y: 64, z: 0 } }, { username: "Ann", position: { x: 3, y: 64, z: 0 } }] };
+  const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 2 });
+  const { chat } = journaledAgent(t, runtime, { listensTo: ["Ann"], settings: budgetSettings() }, { speakerBudget });
+  for (let at = 0; at < 5; at += 1) {
+    runtime.inbox.push(say("Steve", `Ayla ${at}`));
+    await until(() => runtime.inbox.length === 0);
+    await sleep(30);
+  }
+  assert.equal(chat.requests.length, 0, "she does not listen to Steve");
+  assert.equal(speakerBudget.waitMs("Steve"), 0);
+  assert.equal(speakerBudget.tryTake("Steve") && speakerBudget.tryTake("Steve"), true, "both tokens are still there");
+});
+
+test("a line the chat tier leaves alone without asking the model gives its token back", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Steve", position: { x: 2, y: 64, z: 0 } }, { username: "Ann", position: { x: 3, y: 64, z: 0 } }] };
+  const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 1 });
+  const { chat } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+  for (let at = 0; at < 3; at += 1) {
+    runtime.inbox.push(say("Steve", `Ann, come here ${at}`, false));
+    await until(() => runtime.inbox.length === 0);
+    await sleep(30);
+  }
+  assert.equal(chat.requests.length, 0, "a line between two other players is left alone without the model");
+  assert.equal(speakerBudget.tryTake("Steve"), true, "its token came back each time");
+});
+
+test("a retry after ModelUnavailable takes no second token", async (t) => {
+  const runtime = new FakeRuntime();
+  const speakerBudget = new SpeakerBudget({ perMinute: 6, burst: 2 });
+  const { chat } = journaledAgent(t, runtime, { settings: budgetSettings() }, { speakerBudget });
+  chat.unavailable(1).reply(talk("Here."));
+  runtime.inbox.push(say("Steve", "Ayla hello"));
+  await until(() => runtime.said.length === 1);
+  assert.equal(chat.requests.length, 2, "the failed call, then the call that answered");
+  assert.equal(speakerBudget.waitMs("Steve"), 0);
+  assert.equal(speakerBudget.tryTake("Steve"), true, "one token was spent, one is left");
+  assert.equal(speakerBudget.tryTake("Steve"), false);
+});
+
+/** An agent that is not running (no work loop): the orders it takes stay on its stack, so a test counts them. */
+function agentAtRest(runtime: FakeRuntime, openOrdersPerRequester = 2) {
+  const events: BrainEvent[] = [];
+  const logs: string[] = [];
+  const tiers = scriptedMind();
+  const base = testPersona().settings;
+  const persona = testPersona({ settings: { ...base, chat: { ...base.chat, openOrdersPerRequester } } });
+  const agent = new Agent({ persona, runtime, mind: tiers.mind, otherAgents: others(), log: (line) => logs.push(line), typing: INSTANT_TYPING, pollMs: 5, obeyRandom: () => 0, journal: (event) => events.push(event) });
+  const inside = agent as unknown as { openOrdersOf(name: string): number; takeHandoff(h: Handoff): void };
+  return { agent, events, logs, openOrdersOf: (name: string) => inside.openOrdersOf(name), takeHandoff: (h: Handoff) => inside.takeHandoff(h), ...tiers };
+}
+
+/** The agent holds two of Steve's requests (one taken, one queued behind it). */
+async function holdingTwoOf(steve: ReturnType<typeof agentAtRest>) {
+  steve.chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" }, { say: "After that.", route: "later", request: "collect 5 sand" });
+  await steve.agent.handle(say("Steve", "get me 16 logs"));
+  await steve.agent.handle(say("Steve", "then 5 sand"));
+}
+
+test("a requester at the cap gets no new order, and the refusal is journaled", async () => {
+  const runtime = new FakeRuntime();
+  const bot = agentAtRest(runtime);
+  await holdingTwoOf(bot);
+  assert.equal(bot.openOrdersOf("Steve"), 2);
+  // At the cap the first act reply is sent back; the model repeats it, so the agent refuses the order.
+  const again = { say: "Sure!", route: "act", request: "collect 3 dirt", starts_now: true };
+  bot.chat.reply(again, again);
+  await bot.agent.handle(say("Steve", "and 3 dirt"));
+  assert.equal(bot.chat.requests.length, 4, "two calls for the line: the act reply and its send-back");
+  assert.equal(bot.openOrdersOf("Steve"), 2, "no third order");
+  assert.deepEqual(bot.events.filter((event) => event.kind === "order_refused"), [{ kind: "order_refused", speaker: "Steve", text: "collect 3 dirt", reason: "open_orders", open: 2, max: 2 }]);
+  assert.ok(bot.logs.includes("not taken: Steve already holds 2 requests (max 2)"), bot.logs.join("\n"));
+  assert.equal(bot.chat.requests.at(-1)?.[1]?.content.includes("A new request from them cannot be taken on"), true, "the chat tier was told");
+});
+
+test("another player's order is taken while one requester is at the cap", async () => {
+  const bot = agentAtRest(new FakeRuntime());
+  await holdingTwoOf(bot);
+  bot.chat.reply({ say: "Sure, Ann!", route: "act", request: "collect 3 dirt for Ann" });
+  await bot.agent.handle(say("Ann", "3 dirt please"));
+  assert.equal(bot.openOrdersOf("Ann"), 1);
+  assert.equal(bot.openOrdersOf("Steve"), 2);
+  assert.deepEqual(bot.events.filter((event) => event.kind === "order_refused"), []);
+});
+
+test("a stop with a request frees the cap first", async () => {
+  const bot = agentAtRest(new FakeRuntime());
+  await holdingTwoOf(bot);
+  bot.chat.reply({ say: "Stopping, then dirt.", route: "stop", request: "collect 3 dirt" });
+  await bot.agent.handle(say("Steve", "stop all that, 3 dirt instead"));
+  assert.equal(bot.openOrdersOf("Steve"), 1, "the old orders ended, the new one is taken");
+  assert.deepEqual(bot.events.filter((event) => event.kind === "order_refused"), []);
+});
+
+test("hand-offs never count toward a requester's cap", async () => {
+  const bot = agentAtRest(new FakeRuntime(), 1);
+  bot.takeHandoff({ kind: "give", tradeId: "t1", partner: "Steve", items: [{ item: "bread", count: 5 }] });
+  assert.equal(bot.openOrdersOf("Steve"), 0, "a hand-off for Steve is no request of Steve's");
+  bot.chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" });
+  await bot.agent.handle(say("Steve", "get me 16 logs"));
+  assert.equal(bot.openOrdersOf("Steve"), 1);
+  assert.deepEqual(bot.events.filter((event) => event.kind === "order_refused"), []);
+});
+
+test("the chat tier is told the speaker's open orders", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action } = agentFor(t, runtime);
+  chat.reply({ say: "On it.", route: "act", request: "collect 16 oak_log" }, talk("Still on it."));
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "get me 16 logs"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  await agent.handle(say("Steve", "Ayla, how is it going?"));
+  assert.doesNotMatch(chat.requests[0]?.[1]?.content ?? "", /You hold/u, "no request held yet");
+  assert.match(chat.requests[1]?.[1]?.content ?? "", /You hold 1 of Steve's requests \(the most you take from one player is 3\)\./u);
+});
+
+test("two bots claim an everyone line on its newest raw line", async (t) => {
+  const everyone = new EveryoneLines();
+  const greeting = { spoken_to: ["everyone"], asks: "", language: "English", say: "Hey!", route: "talk", request: "" };
+  const bots = [["Ayla", 5, 8], ["Vex", 30, 1]].map(([name, at, burstMaxLines]) => {
+    const runtime = new FakeRuntime();
+    runtime.snapshot = { ...runtime.snapshot, players: [steveAt(at as number)] };
+    const built = agentFor(t, runtime, { id: String(name).toLowerCase(), username: String(name), settings: floodSettings(burstMaxLines as number) }, { everyone, otherAgents: others(...["Ayla", "Vex"].filter((other) => other !== name)) });
+    built.chat.reply(greeting);
+    slowModel(built.chat);
+    return runtime;
+  });
+  await sleep(100); // the agents drain the chat from before they started first
+  for (const runtime of bots) runtime.inbox.push(say("Steve", "hi", false), say("Steve", "everyone", false));
+  await until(() => bots.some((runtime) => runtime.said.length > 0), 4_000);
+  await sleep(300);
+  assert.deepEqual(bots.map((runtime) => runtime.said), [["Hey!"], []], "one answer: the nearest bot's (the one that merged both lines), whatever each bot merged");
 });
 
 test("a reply whose speaker said something since is dropped unspoken; the newest line is read with the older one in history", async (t) => {
@@ -1464,7 +1712,7 @@ test("in a group, a line naming another member is not answered by her, and a nam
   assert.equal(chat.requests.length, 1, "a line naming another member: no call");
   // Bruno spoke after the message Ayla is about to read.
   (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Bruno", "anyone hungry?", false));
-  await agent.handle(say("Vex", "I could eat", false), { message: say("Vex", "I could eat", false), lines: 1, readAt: Date.now(), seq: 0 });
+  await agent.handle(say("Vex", "I could eat", false), heardOnce(say("Vex", "I could eat", false)));
   assert.equal(chat.requests.length, 1, "a nameless line after which a member spoke: no call");
   chat.reply({ ...toAyla, say: "Me too." });
   await agent.handle(say("Vex", "bread then?", false));
@@ -2527,7 +2775,7 @@ async function talkedOverByTheo(t: Parameters<typeof agentFor>[0], reply: Record
   const release = built.chat.hold();
   built.chat.reply(reply);
   const line = say(speaker, "Ayla, take the deal", false);
-  const handling = built.agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  const handling = built.agent.handle(line, heardOnce(line));
   await until(() => built.chat.requests.length === 2);
   (built.agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say(speaker, "and quickly", false));
   meanwhile(board);
@@ -2561,7 +2809,7 @@ test("a talked-over accept restating the agreed trade while the bot's second off
   const release = chat.hold();
   chat.reply(ACCEPT_THEO);
   const line = say("Theo", "Ayla, take it too", false);
-  const handling = agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  const handling = agent.handle(line, heardOnce(line));
   await until(() => chat.requests.length === 3);
   (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Theo", "and quickly", false));
   release();
@@ -2595,7 +2843,7 @@ test("a talked-over accept from a player is dropped as before", async (t) => {
   chat.reply(ACCEPT_THEO);
   const line = say("Theo", "Ayla, take the deal");
   (agent as unknown as { inbox: { push(message: ReturnType<typeof say>): void } }).inbox.push(say("Theo", "and quickly"));
-  await agent.handle(line, { message: line, lines: 1, readAt: Date.now(), seq: 0 });
+  await agent.handle(line, heardOnce(line));
   assert.deepEqual((agent as unknown as { relations: AgentRelations }).relations.book.get("Theo")?.trades ?? [], []);
 });
 
@@ -3852,7 +4100,7 @@ test("a superseded reply's to: me still answers", async (t) => {
   const release = chat.hold();
   // The newer line is decided first (it is not held) and takes the first scripted reply.
   chat.reply(readTo(["Vex"], "ignore"), readTo(["Ayla"]));
-  const handling = agent.handle(message, { message, lines: 1, seq: 0, readAt: Date.now() });
+  const handling = agent.handle(message, heardOnce(message));
   await until(() => chat.requests.length === 2);
   runtime.inbox.push(fromTheo("Vex, never mind"));
   await until(() => chat.requests.length === 3);

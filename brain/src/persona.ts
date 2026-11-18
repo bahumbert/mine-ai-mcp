@@ -87,6 +87,17 @@ export const personaSchema = z.strictObject({
      * 2026-10-09-chat-handling); 0 reads every line alone. Every reply waits at least this long after the last line.
      */
     chatBurstMs: z.number().int().min(0).max(10_000).default(1_500),
+    /** Bounds a player's chat flood puts on what the chat tier reads (spec 2026-11-18-chat-flood-bounds D1, D4). */
+    chat: z.strictObject({
+      /** A waiting message holds at most this many lines; older ones are left out and counted. */
+      burstMaxLines: z.number().int().min(1).max(100).default(8),
+      /** ... and at most this many characters (lines joined with a space). */
+      burstMaxChars: z.number().int().min(50).max(10_000).default(1_000),
+      /** A message is ready this many seconds after its first line, however fast the lines keep coming. */
+      burstMaxSeconds: z.number().int().min(1).max(120).default(8),
+      /** The most requests (orders on its stack, later ones included) it holds for one player at a time. */
+      openOrdersPerRequester: z.number().int().min(1).max(20).default(3),
+    }).prefault({}),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
     /**

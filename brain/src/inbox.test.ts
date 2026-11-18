@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Inbox } from "./inbox.ts";
+import { Inbox, type BurstLimits } from "./inbox.ts";
 import { steppedClocks } from "./testing.ts";
 import type { PlayerMessage } from "./runtime-client.ts";
 
 const line = (username: string, message: string, extra: Partial<PlayerMessage> = {}): PlayerMessage => ({ username, channel: "chat", message, addressed: false, ...extra });
 
+const DEFAULT_LIMITS: BurstLimits = { maxLines: 8, maxChars: 1_000, maxMs: 8_000 };
+
 /** An inbox over a clock the test moves. */
-function inboxAt(burstMs = 1_500) {
+function inboxAt(burstMs = 1_500, limits: Partial<BurstLimits> = {}) {
   const clock = { now: 1_000 };
-  return { clock, inbox: new Inbox(burstMs, () => clock.now) };
+  return { clock, inbox: new Inbox(burstMs, { ...DEFAULT_LIMITS, ...limits }, () => clock.now) };
 }
 
 test("lines from one speaker within the burst window are read together as one message", () => {
@@ -28,14 +30,24 @@ test("lines from one speaker within the burst window are read together as one me
   assert.equal(inbox.next(), null);
 });
 
-test("a line after the window is a message of its own, and two speakers never mix", () => {
+test("a line after the window is a message of its own once the first was read, and two speakers never mix; a waiting speaker's next line joins it", () => {
   const { clock, inbox } = inboxAt();
   inbox.push(line("Tom", "first"));
   inbox.push(line("Bob", "hello"));
   clock.now += 2_000;
+  assert.equal(inbox.next()?.message.message, "first");
   inbox.push(line("Tom", "second"));
   clock.now += 2_000;
-  assert.deepEqual([inbox.next()?.message.message, inbox.next()?.message.message, inbox.next()?.message.message, inbox.next()], ["first", "hello", "second", null]);
+  assert.deepEqual([inbox.next()?.message.message, inbox.next()?.message.message, inbox.next()], ["hello", "second", null]);
+
+  const waiting = inboxAt();
+  waiting.inbox.push(line("Tom", "first"));
+  waiting.inbox.push(line("Bob", "hello"));
+  waiting.clock.now += 2_000;
+  waiting.inbox.push(line("Tom", "second"));
+  waiting.clock.now += 2_000;
+  const joined = waiting.inbox.next();
+  assert.deepEqual([joined?.message.message, joined?.lines, waiting.inbox.next()?.message.message, waiting.inbox.next()], ["first second", 2, "hello", null]);
 });
 
 test("one whisper makes the joined message a whisper; a window of 0 reads every line alone", () => {
@@ -47,8 +59,126 @@ test("one whisper makes the joined message a whisper; a window of 0 reads every 
 
   const alone = inboxAt(0);
   alone.inbox.push(line("Tom", "one"));
+  assert.equal(alone.inbox.next()?.message.message, "one");
   alone.inbox.push(line("Tom", "two"));
-  assert.deepEqual([alone.inbox.next()?.message.message, alone.inbox.next()?.message.message], ["one", "two"]);
+  assert.equal(alone.inbox.next()?.message.message, "two");
+});
+
+test("a burst is ready when full, without waiting for the pause", () => {
+  const { clock, inbox } = inboxAt(1_500, { maxLines: 3 });
+  inbox.push(line("Tom", "a"));
+  clock.now += 100;
+  inbox.push(line("Tom", "b"));
+  assert.equal(inbox.next(), null);
+  clock.now += 100;
+  inbox.push(line("Tom", "c"));
+  const heard = inbox.next();
+  assert.equal(heard?.lines, 3);
+  assert.equal(heard?.dropped, 0);
+  assert.equal(heard?.message.message, "a b c");
+});
+
+test("a full waiting burst keeps its newest lines and counts the others", () => {
+  const { clock, inbox } = inboxAt(1_500, { maxLines: 3 });
+  for (const text of ["a", "b", "c", "d", "e"]) {
+    inbox.push(line("Tom", text));
+    clock.now += 100;
+  }
+  clock.now += 2_000;
+  const heard = inbox.next();
+  assert.equal(heard?.message.message, "c d e");
+  assert.equal(heard?.lines, 3);
+  assert.equal(heard?.dropped, 2);
+  assert.equal(heard?.lastLine, "e");
+});
+
+test("the character cap keeps the newest lines; a newest line alone over it is cut to its first characters", () => {
+  const { clock, inbox } = inboxAt(1_500, { maxChars: 10 });
+  for (const text of ["aaaa", "bbbb", "cccc"]) inbox.push(line("Tom", text));
+  clock.now += 2_000;
+  const heard = inbox.next();
+  assert.equal(heard?.message.message, "bbbb cccc");
+  assert.equal(heard?.dropped, 1);
+
+  const long = inboxAt(1_500, { maxChars: 10 });
+  long.inbox.push(line("Tom", "x".repeat(25)));
+  long.clock.now += 2_000;
+  const cut = long.inbox.next();
+  assert.equal(cut?.message.message, "x".repeat(10));
+  assert.equal(cut?.dropped, 0);
+  assert.equal(cut?.lastLine, "x".repeat(25), "the raw line, so every bot claims the same everyone line");
+});
+
+test("a burst is ready burstMaxSeconds after its first line however fast lines come", () => {
+  const { clock, inbox } = inboxAt(1_500, { maxLines: 100, maxMs: 8_000 });
+  for (let at = 0; at < 8; at += 1) {
+    inbox.push(line("Tom", `l${at}`));
+    assert.equal(inbox.next(), null, `line ${at}: still inside the age cap`);
+    clock.now += 1_000;
+  }
+  inbox.push(line("Tom", "l8"));
+  assert.equal(inbox.next()?.lines, 9);
+});
+
+test("speakers are served in the order of their first waiting line", () => {
+  const { clock, inbox } = inboxAt();
+  for (const text of ["1", "2", "3", "4", "5"]) inbox.push(line("Tom", text));
+  inbox.push(line("Ann", "hi"));
+  inbox.push(line("Tom", "6"));
+  clock.now += 2_000;
+  const first = inbox.next();
+  assert.equal(first?.message.username, "Tom");
+  assert.equal(first?.lines, 6);
+  assert.equal(inbox.next()?.message.username, "Ann");
+});
+
+test("a speaker without a token is skipped, the token is asked once per ready burst, and heldMs counts the skip", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "hello"));
+  inbox.push(line("Ann", "hi"));
+  clock.now += 2_000;
+  const asked: string[] = [];
+  const first = inbox.next((speaker) => {
+    asked.push(speaker);
+    return speaker !== "tom";
+  });
+  assert.equal(first?.message.username, "Ann");
+  assert.deepEqual(asked, ["tom", "ann"]);
+  assert.equal(inbox.readyIn((speaker) => (speaker === "tom" ? 4_000 : 0)), 4_000);
+  clock.now += 4_000;
+  const second = inbox.next(() => true);
+  assert.equal(second?.message.username, "Tom");
+  assert.equal(second?.heldMs, 4_000);
+});
+
+test("a held burst stays within its caps over 500 lines", () => {
+  const { clock, inbox } = inboxAt();
+  for (let at = 0; at < 500; at += 1) {
+    inbox.push(line("Tom", `${at}`.padEnd(20, "x")));
+    clock.now += 10;
+    assert.equal(inbox.next(() => false), null);
+  }
+  const heard = inbox.next(() => true);
+  assert.ok(heard !== null);
+  assert.ok(heard.lines <= 8);
+  assert.ok(heard.message.message.length <= 1_000);
+  assert.equal(heard.dropped, 500 - heard.lines);
+});
+
+test("channel and addressed come from the kept lines only", () => {
+  const { clock, inbox } = inboxAt(1_500, { maxLines: 2 });
+  inbox.push(line("Tom", "stop", { channel: "whisper", addressed: true }));
+  inbox.push(line("Tom", "b"));
+  inbox.push(line("Tom", "c"));
+  clock.now += 2_000;
+  const heard = inbox.next();
+  assert.equal(heard?.message.channel, "chat");
+  assert.equal(heard?.message.addressed, false);
+
+  const kept = inboxAt(1_500, { maxLines: 2 });
+  kept.inbox.push(line("Tom", "a"));
+  kept.inbox.push(line("Tom", "psst", { channel: "whisper" }));
+  assert.equal(kept.inbox.next()?.message.channel, "whisper");
 });
 
 test("a message is superseded when its speaker spoke after it was taken, nobody else", () => {
@@ -118,7 +248,7 @@ test("a heard burst carries the read time of its newest line", () => {
 
 test("the burst window runs on the monotonic clock: a wall clock step between two lines does not split them", (t) => {
   const clocks = steppedClocks(t);
-  const inbox = new Inbox(1_500);
+  const inbox = new Inbox(1_500, DEFAULT_LIMITS);
   inbox.push(line("Tom", "Ayla"));
   clocks.wall(60_000);
   inbox.push(line("Tom", "build me a house", { addressed: true }));

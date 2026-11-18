@@ -146,3 +146,12 @@ test("obey settings are bounded", () => {
   assert.equal(ok({ rerollOnChange: 0 }), false);
   assert.equal(ok({ halfAt: -20, spread: 6, moodMinutes: 1, rerollOnChange: 5 }), true);
 });
+
+test("chat limits default and refuse out-of-range values", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.deepEqual(personaSchema.parse(base).settings.chat, { burstMaxLines: 8, burstMaxChars: 1_000, burstMaxSeconds: 8, openOrdersPerRequester: 3 });
+  assert.equal(personaSchema.parse({ ...base, settings: { chat: { burstMaxLines: 3 } } }).settings.chat.burstMaxLines, 3);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { burstMaxLines: 0 } } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { burstMaxChars: 10 } } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { openOrdersPerRequester: 0 } } }).success, false);
+});

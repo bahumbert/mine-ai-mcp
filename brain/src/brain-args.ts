@@ -33,6 +33,25 @@ export function chatSlotsFor(slots: number | null, flag: string | undefined, env
   return read.value;
 }
 
+/** Defaults of the per-speaker chat budget (spec 2026-11-18-chat-flood-bounds, open choice 3). */
+const DEFAULT_SPEAKER_CHAT_PER_MINUTE = 6;
+const DEFAULT_SPEAKER_CHAT_BURST = 15;
+
+/** A whole-number option text (or its default) read against a minimum; a bad value refuses to start. */
+function wholeOption(name: string, text: string | undefined, fallback: number, min: number): number {
+  if (text === undefined || text === "") return fallback;
+  if (!/^\d+$/u.test(text.trim()) || Number(text) < min) throw new Error(`[BAD_START_ARG] --${name} expects a whole number (${min} or more), got ${text}`);
+  return Number(text);
+}
+
+/** The per-speaker chat budget from `--speaker-chat-per-minute` and `--speaker-chat-burst` (each already falling back to its env value). */
+export function speakerBudgetLimits(perMinute: string | undefined, burst: string | undefined): { perMinute: number; burst: number } {
+  return {
+    perMinute: wholeOption("speaker-chat-per-minute", perMinute, DEFAULT_SPEAKER_CHAT_PER_MINUTE, 0),
+    burst: wholeOption("speaker-chat-burst", burst, DEFAULT_SPEAKER_CHAT_BURST, 1),
+  };
+}
+
 /** The brain's command line options: `bun brain/src/main.ts --help` lists them. */
 export function parseBrainArgs(args: string[] = process.argv.slice(2)) {
   return parseArgs({
@@ -47,6 +66,8 @@ export function parseBrainArgs(args: string[] = process.argv.slice(2)) {
       "known-names": { type: "string" },
       "model-slots": { type: "string" },
       "chat-slots": { type: "string" },
+      "speaker-chat-per-minute": { type: "string" },
+      "speaker-chat-burst": { type: "string" },
       "start-gap": { type: "string" },
       "start-when-free": { type: "boolean" },
       "max-conversations": { type: "string" },

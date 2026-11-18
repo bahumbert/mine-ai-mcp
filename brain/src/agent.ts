@@ -10,7 +10,7 @@ import { ModelUnavailable } from "./chat-model.ts";
 import { ConversationController, type ConversationBudget } from "./conversation/controller.ts";
 import { heardFarAway, lineDistance, noteNoPosition, type Conversation, type NoPositionSince } from "./conversation/state.ts";
 import { pickPartner, socialise, type SocialiseDeps } from "./conversation/socialise.ts";
-import { Inbox, type Heard } from "./inbox.ts";
+import { burstLimitsOf, Inbox, type Heard } from "./inbox.ts";
 import { namesWord, type LocalizedChat } from "./llm-mind.ts";
 import { FULL_INVENTORY, junkHint, neededItems } from "./inventory-room.ts";
 import { obtainedBy, withMaterialsKept } from "./gathering.ts";
@@ -27,19 +27,21 @@ import { askFromReply, lineIsToMe, markHeardAt } from "./relations/heard-to-me.t
 import { heldKinds, owedUsed } from "./relations/items.ts";
 import { OwnWork } from "./relations/own-work.ts";
 import { agreedDetail, heardNeeds, partnersInReach, reachOf, TradeAsks, tradeNeedsFacts, tradePlan, tradeRoutine, tradingShare, withTrading, withoutRefusedTrading } from "./relations/trading.ts";
-import { activityNotesQuery, memoryNote, recall, recallQuery, staleActivityNotes, type KnownFarm, type Memory } from "./memory.ts";
+import { memoryNote, recall, recallQuery, type KnownFarm, type Memory } from "./memory.ts";
 import { findOpportunities, type Opportunity, type OpportunityFacts, type Shortfall } from "./opportunities.ts";
 import { shelterForNight, underCover } from "./night-shelter.ts";
 import { personaSkills, type Persona } from "./persona.ts";
 import type { BlockKind, BotRuntime, BotSnapshot, PlayerMessage, Position, ProtectedArea } from "./runtime-client.ts";
 import { BodyDown, bodyDownState, bodyDownWait } from "./body-down.ts";
 import type { EveryoneLines } from "./everyone-lines.ts";
+import type { SpeakerBudget } from "./speaker-budget.ts";
 import { TillFacts } from "./farming/site.ts";
 import { runStep, type SkillContext, type SkillResult, type UnfinishedHouse } from "./skills.ts";
 import { UnfinishedHouseSaver } from "./unfinished-house-saver.ts";
 import { loopVerdict } from "./step-loop-rules.ts";
 import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./gain-watch.ts";
-import { lastOfPlay, minutesByActivity, minutesByPurpose, RECENT_MINUTES, type ActivityTime } from "./time-spent.ts";
+import { lastOfPlay, minutesByActivity, minutesByPurpose, type ActivityTime } from "./time-spent.ts";
+import { forgetOldActivityNotes } from "./activity-note-rotation.ts";
 import { WhoWasNamed } from "./who-was-named.ts";
 
 /** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
@@ -79,8 +81,6 @@ const ACTIVITY_MEMORY = 200;
 const MIN_RECORDED_MS = 5_000;
 /** How often activity-time notes older than the last hour of play are deleted (the hour rotates). */
 const ROTATE_EVERY_MS = 10 * 60_000;
-/** At most this many notes deleted in one `note_delete`. */
-const DELETE_BATCH = 500;
 
 export interface AgentOptions {
   readonly persona: Persona;
@@ -100,6 +100,8 @@ export interface AgentOptions {
    * the bot nearest the speaker only. Absent: such a line is never answered.
    */
   readonly everyone?: EveryoneLines;
+  /** The brain's chat-tier decisions per speaker (spec 2026-11-18-chat-flood-bounds D3), shared by its agents. Absent: no bound. */
+  readonly speakerBudget?: SpeakerBudget;
   /** The trade board shared by the agents of one process: a trade between two of them is made on the proposer's terms. Absent: every partner is outside the brain. */
   readonly tradeBoard?: TradeBoard;
   /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
@@ -289,7 +291,7 @@ export class Agent {
   constructor(private readonly options: AgentOptions) {
     this.soil = options.soil ?? new TillFacts();
     this.body = new Body(options.runtime, options.log, options.typing ?? HUMAN_TYPING);
-    this.inbox = new Inbox(options.persona.settings.chatBurstMs);
+    this.inbox = new Inbox(options.persona.settings.chatBurstMs, burstLimitsOf(options.persona.settings.chat));
     const { conversations, persona, localizedChat } = options;
     this.relations = !persona.settings.relations.enabled ? null : new AgentRelations({
       persona, mind: options.mind, runtime: options.runtime, body: this.body, takeHandoff: (h) => this.takeHandoff(h),
@@ -411,9 +413,10 @@ export class Agent {
   /** The chat loop: one message at a time to the chat tier, once its speaker has paused for the burst window. */
   private async chatLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
-      const heard = this.inbox.next();
+      const { speakerBudget } = this.options;
+      const heard = this.inbox.next((speaker) => speakerBudget?.tryTake(speaker) ?? true);
       if (heard === null) {
-        const wait = Math.min(this.options.pollMs ?? DEFAULT_POLL_MS, this.inbox.readyIn() ?? Number.POSITIVE_INFINITY);
+        const wait = Math.min(this.options.pollMs ?? DEFAULT_POLL_MS, this.inbox.readyIn((speaker) => speakerBudget?.waitMs(speaker) ?? 0) ?? Number.POSITIVE_INFINITY);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(done, wait);
           function done() {
@@ -458,7 +461,7 @@ export class Agent {
     // next, with this one in the history (spec 2026-10-09-chat-handling, A).
     const superseded = this.supersededBy(message, heard);
     const talkId = conversation === undefined ? undefined : this.talks?.current?.id;
-    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
+    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, ...(heard !== undefined && heard.dropped > 0 && { dropped: heard.dropped }), ...(heard !== undefined && heard.heldMs >= 1_000 && { heldMs: heard.heldMs }), route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
     if (superseded) {
       await this.dropSuperseded(decision, message.username, snapshot, seen);
       return;
@@ -494,19 +497,35 @@ export class Agent {
       log(`the request is trade ${tradeId}: no order taken (${JSON.stringify(decision.request)})`);
       return;
     }
-    // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
-    // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
-    // The speaker is the requester: their authority is the order's.
     if (routed !== "act" && routed !== "later") return;
+    this.takeRequest(message, { decision, lineDecision, routed, tradeId }, whisperTo, checked ?? snapshot);
+  }
+
+  /**
+   * The request of an `act` or `later` reply becomes an order of its speaker (their authority is the order's), unless
+   * the speaker is not obeyed, it is already on the stack, or they already hold the most requests (spec
+   * 2026-11-18-chat-flood-bounds D4). `world`: the last look at the world, for a trade errand's reach.
+   */
+  private takeRequest(message: PlayerMessage, line: { readonly decision: ChatDecision; readonly lineDecision: ChatDecision; readonly routed: "act" | "later"; readonly tradeId: string | null }, whisperTo: string | null, world: BotSnapshot): void {
+    const { decision, lineDecision, routed, tradeId } = line;
+    const { log, persona } = this.options;
     const asked = { text: decision.request, requester: message.username, purpose: parseActivity(decision.work), ...(decision.place !== undefined && { place: decision.place }) };
     // No trade errand across the map: a bot out of reach is told to come (relations block); players are obeyed at any distance.
-    if (asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, checked ?? snapshot, this.options.persona.settings.relations.tradeReach).inReach) {
+    if (asked.purpose === "trading" && this.isOtherAgent(message.username) && !reachOf(message.username, world, persona.settings.relations.tradeReach).inReach) {
       log(`not taken: ${message.username} is too far away to trade with (${JSON.stringify(decision.request)})`);
       return;
     }
     const verdict = orderVerdict(this.relations, lineDecision, message.username, asked.purpose, tradeId);
     if (verdict.kind === "refused") return void log(verdict.log);
+    // A request already on her stack is not taken again (live 2026-10-04: "thanks, no rush" while she fetched for
+    // Opus's house came back as "later" with the same request, and a second house order was queued under the first).
     if (this.stack.some(({ objective }) => objective.requester === asked.requester && sameWords(objective.text, asked.text))) return void log(`already on "${asked.text}" for ${asked.requester}`);
+    const { openOrdersPerRequester: max } = persona.settings.chat;
+    const open = this.openOrdersOf(message.username);
+    if (open >= max) {
+      log(`not taken: ${message.username} already holds ${open} requests (max ${max})`);
+      return this.options.journal?.({ kind: "order_refused", speaker: message.username, text: asked.text, reason: "open_orders", open, max });
+    }
     if (verdict.log !== undefined) log(verdict.log);
     const order: Objective = verdict.tradeCameToNothing === true ? { ...asked, tradeCameToNothing: true } : asked;
     // The partner's give runs first: the order was let through because of the trade (spec 2026-11-08-trading-p2-fixes D3).
@@ -527,6 +546,11 @@ export class Agent {
     if ((action !== "accept" && action !== "decline") || !this.isOtherAgent(speaker) || this.relations?.offerStillStands(speaker, seen.seenOfferId) !== true) return;
     this.options.log(`  superseded: the line is dropped, its trade ${action} is kept`);
     if (await this.relations.decided(decision, speaker, snapshot, seen) !== null) this.asks.resume();
+  }
+
+  /** The requests on the stack asked by `name` (any case); hand-offs and the character's own goals have no requester and never count. */
+  private openOrdersOf(name: string): number {
+    return this.stack.filter(({ objective }) => objective.requester?.toLowerCase() === name.toLowerCase()).length;
   }
 
   /** A "later" request: taken at once over the character's own goal, queued behind work done for someone. */
@@ -577,18 +601,6 @@ export class Agent {
     return !agent || this.talks?.isMember(message.username) === true;
   }
 
-  /**
-   * What lets the chat tier answer a greeting to everyone: the speaker's distance, from the positions when the line
-   * carries none, goes to the record shared with the other agents; the claim is true for the nearest bot only.
-   */
-  private everyoneLineClaim(message: PlayerMessage, snapshot: BotSnapshot): (() => boolean) | undefined {
-    const { everyone, persona } = this.options;
-    if (everyone === undefined || message.channel !== "chat") return undefined;
-    const distance = lineDistance(message, snapshot);
-    if (message.distance === undefined && distance !== undefined) everyone.heard(message.username, message.message, persona.username, distance);
-    return () => everyone.claim(message.username, message.message, persona.username);
-  }
-
   /** Whether a player's line came from within talk range: its distance, else where the last look put them. */
   private withinTalkRange(message: PlayerMessage): boolean {
     const range = this.options.localizedChat?.range ?? this.options.persona.settings.conversation.stayingDistance;
@@ -636,10 +648,11 @@ export class Agent {
   /** Whether the line is heard, may be answered now, and what the chat tier decides; the speaker counts as waiting meanwhile (requests made to them are not ignored). */
   private async decideHeard(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined, named: readonly string[]): ReturnType<Agent["decideChat"]> {
     const release = this.inbox.hold(message.username);
+    const call = { made: false };
     try {
       if (!this.hears(message, named)) return null;
       if (!(await this.conversationGate(message, heard, named))) return null;
-      const chat = await this.decideChat(message, heard, heardAt, talkedTo);
+      const chat = await this.decideChat(message, heard, heardAt, talkedTo, call);
       // Marked before the release below: the waiting hold must not end before the mark, or the request expires unheard.
       // A tier that could not read the line gives the speaker the benefit of the doubt; a line refused above marks nothing.
       const markAt = markHeardAt(chat, { aborted: this.runSignal.aborted, readAt: heard?.readAt ?? heardAt, justTalkedToAnother: talkedTo !== undefined, self: this.options.persona.username.toLowerCase() });
@@ -647,6 +660,7 @@ export class Agent {
       return chat;
     } finally {
       release();
+      if (heard !== undefined && !call.made) this.options.speakerBudget?.refund(message.username); // the token the inbox took bought no chat model call
     }
   }
 
@@ -656,7 +670,7 @@ export class Agent {
    * the line is under {@link CHAT_RETRY_MS} old and its speaker has said nothing since (a stale reply is dropped unspoken
    * anyway); any other failure drops the line, as it always did.
    */
-  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; checked?: BotSnapshot; conversation: ConversationFacts | undefined; seenOfferId?: string } | null> {
+  private async decideChat(message: PlayerMessage, heard: Heard | undefined, heardAt: number, talkedTo: { name: string; secondsAgo: number } | undefined, call: { made: boolean }): Promise<{ decision: ChatDecision; snapshot: BotSnapshot; checked?: BotSnapshot; conversation: ConversationFacts | undefined; seenOfferId?: string } | null> {
     const { persona, mind, log } = this.options;
     for (;;) {
       try {
@@ -664,13 +678,15 @@ export class Agent {
         this.onlineNames = snapshot.players.map((player) => player.username);
         noteNoPosition(this.noPositionSince, snapshot.players, monotonicNow());
         const conversation = this.talks?.facts();
-        const claimEveryoneLine = this.everyoneLineClaim(message, snapshot);
+        const claimEveryoneLine = this.options.everyone?.claimFor(message, snapshot, persona.username, heard?.lastLine ?? message.message);
         // A shout with no server distance is as far as the speaker stands in this snapshot: the model is told how far it came (a whisper carries any distance, so it is not).
         const distance = lineDistance(message, snapshot);
         const heardMessage = message.channel === "chat" && message.distance === undefined && distance !== undefined ? { ...message, distance } : message;
         const farAway = message.channel === "chat" && heardFarAway(message, snapshot, this.noPositionSince, monotonicNow());
-        const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), fromAgent: this.isOtherAgent(message.username), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+        const input: ChatInput = { persona, message: heardMessage, ...(farAway && { heardFarAway: true }), fromAgent: this.isOtherAgent(message.username), ...(heard !== undefined && heard.dropped > 0 && { unreadLines: heard.dropped }), ...(this.openOrdersOf(message.username) > 0 && { speakerOrders: { open: this.openOrdersOf(message.username), max: persona.settings.chat.openOrdersPerRequester } }), history: this.history.slice(0, -1), snapshot, activity: this.activity, places: this.knownPlaces(), areas: [...this.areas], canWait: (this.stack.at(-1)?.objective.requester ?? null) !== null, knownNames: this.options.knownNames ?? [], ...(talkedTo !== undefined && { talkedTo }), ...(conversation !== undefined && { conversation }), ...(claimEveryoneLine !== undefined && { claimEveryoneLine }), ...(this.relations !== null && { relations: this.relations.chatBlock(message.username, conversation?.others ?? [], snapshot) }) };
+        call.made = true; // a call may go out (and fail) below: the speaker's token stays spent, a retry takes no second one
         let decision = await mind.chat(input, this.runSignal);
+        call.made = decision.asked !== false;
         let checked: BotSnapshot | undefined;
         if (this.relations !== null && decision.trade !== undefined) ({ decision, snapshot: checked } = await this.relations.checkedTrade(decision, input, { speaker: message.username, heardAt: wallTimeOf(heardAt), snapshot, signal: this.runSignal }));
         this.modelFailures = 0;
@@ -1511,26 +1527,10 @@ export class Agent {
     }
   }
 
-  /**
-   * Deletes its activity-time notes older than its last hour of play (spec 2026-10-04-activity-time-travel-
-   * terraforming: only the last hour is kept), at start and then every {@link ROTATE_EVERY_MS}.
-   */
+  /** Deletes its activity-time notes older than its last hour of play, at start and then every {@link ROTATE_EVERY_MS}. */
   private async rotateActivityNotes(): Promise<void> {
     this.rotatedAt = monotonicNow();
-    try {
-      const rows = await this.options.runtime.queryBotData(activityNotesQuery(this.options.persona.username));
-      const stale = staleActivityNotes(rows, RECENT_MINUTES);
-      for (let start = 0; start < stale.length; start += DELETE_BATCH) {
-        const outcome = await this.body.act("note_delete", { note_ids: stale.slice(start, start + DELETE_BATCH) }, "Forget what is older than my last hour of play.");
-        if (outcome.status !== "succeeded") {
-          this.options.log(`could not forget old activity notes (${outcome.status}): ${outcome.error ?? ""}`);
-          return;
-        }
-      }
-      if (stale.length > 0) this.options.log(`forgot ${stale.length} activity note(s) older than its last hour of play`);
-    } catch (error) {
-      this.options.log(`could not forget old activity notes: ${String(error)}`);
-    }
+    await forgetOldActivityNotes(this.options.runtime, this.body, this.options.persona.username, this.options.log);
   }
 
   /** Saves one memory as a note; it takes the body between steps (the runtime runs `note_save` as a task). Resolves whether the note was saved; never rejects. */

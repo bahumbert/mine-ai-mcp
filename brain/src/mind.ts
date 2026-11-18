@@ -75,6 +75,10 @@ export interface ChatInput {
   readonly heardFarAway?: boolean;
   /** The speaker is another agent of the project, not a person: its line waits behind a person's for a model slot (spec 2026-11-18 D2). */
   readonly fromAgent?: boolean;
+  /** How many earlier lines of the speaker were left out because they came faster than the message could be read (spec 2026-11-18-chat-flood-bounds D1). */
+  readonly unreadLines?: number;
+  /** The requests the character holds for the speaker, and the most it takes from one player (spec 2026-11-18-chat-flood-bounds D4); absent when it holds none. */
+  readonly speakerOrders?: { readonly open: number; readonly max: number };
   /** What the agent is doing now, e.g. `idle` or `follow StarOr1 at 3 blocks`. */
   readonly activity: string;
   /** Places the agent knows, oldest first. */
@@ -106,6 +110,8 @@ export interface TradeDecision {
 export interface ChatDecision {
   /** In-character reply spoken right away; empty means stay silent. */
   readonly say: string;
+  /** `false`: the line was left alone without a chat model call, so its speaker's token goes back (spec 2026-11-18-chat-flood-bounds D3); absent: a call was made. */
+  readonly asked?: false;
   readonly route: Route;
   /** For `act` and `later`: what the player asked, restated so it stands alone, e.g. "give Steve 5 oak logs". */
   readonly request: string;

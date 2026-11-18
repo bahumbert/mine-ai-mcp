@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import { Agent } from "./agent.ts";
-import { chatSlotsFor, otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
+import { chatSlotsFor, otherAgentsFor, parseBrainArgs, speakerBudgetLimits } from "./brain-args.ts";
 import { BRAIN_LOG_FILE, BrainLog } from "./brain-log.ts";
 import { OpenAiCompatibleModel } from "./chat-model.ts";
 import { readLocalizedChat } from "./chat-range.ts";
@@ -10,11 +10,12 @@ import { EveryoneLines } from "./everyone-lines.ts";
 import { TradeBoard } from "./relations/board.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { OtherAgents } from "./other-agents.ts";
+import { SpeakerBudget } from "./speaker-budget.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--chat-slots <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--chat-slots <n>] [--speaker-chat-per-minute <n>] [--speaker-chat-burst <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
@@ -34,6 +35,12 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
                      with 2 or more slots, else 0). Every other call runs on the rest; a reply may also use an idle slot.
                      Needs --model-slots, and fewer than the slots (else the brain refuses to start, [BAD_CHAT_SLOTS]).
                      Lanes order the calls of this one brain process.
+  --speaker-chat-per-minute, --speaker-chat-burst
+                     One player's lines can cost the whole brain at most this many chat-tier decisions: --speaker-chat-burst
+                     at once (default 15), then --speaker-chat-per-minute a minute (default 6; 0 turns the bound off), however
+                     many bots they talk to (env MINE_AI_SPEAKER_CHAT_PER_MINUTE, MINE_AI_SPEAKER_CHAT_BURST). A held line
+                     is read at the next token: 60 / per-minute seconds after the last one (the bots share the tokens, so the
+                     last of N bots reading the same player waits up to N times that).
   --start-gap        Seconds between one agent's start and the next one's (default 0: all at once). The model server
                      queues first calls from many bots at once for a minute or more.
   --start-when-free  Also start the next agent only once a model slot is free (needs --model-slots).
@@ -170,6 +177,7 @@ async function main(): Promise<void> {
   const everyone = new EveryoneLines();
   const tradeBoard = new TradeBoard((line) => console.log(`${new Date().toISOString()} [board] ${line}`));
   const budget = new ConversationBudget(maxConversations(values["max-conversations"]));
+  const speakerBudget = new SpeakerBudget(speakerBudgetLimits(values["speaker-chat-per-minute"] ?? env("MINE_AI_SPEAKER_CHAT_PER_MINUTE"), values["speaker-chat-burst"] ?? env("MINE_AI_SPEAKER_CHAT_BURST")));
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
   const firstLog = brainLogs.find((log) => log !== null);
@@ -202,6 +210,7 @@ async function main(): Promise<void> {
         knownNames,
         soil,
         everyone,
+        speakerBudget,
         tradeBoard,
         conversations: { budget, modelFree: () => queue.freeFor(persona.id), waitForModel: (ms, signal) => queue.freeWithin(persona.id, ms, AbortSignal.any([signal, shutdown.signal])) },
         ...(localizedChat !== undefined && { localizedChat }),

@@ -1080,6 +1080,84 @@ test("the chat request carries the conversation block only inside a conversation
   assert.doesNotMatch(chat.requests[1]?.[0]?.content ?? "", /"close"/u);
 });
 
+test("a line left alone without the model says so", async () => {
+  const { chat, mind } = scriptedMind();
+  const left = await mind.chat({ ...chatInput("Opus, come here", false), snapshot: crowded() }, signal);
+  assert.equal(left.route, "ignore");
+  assert.equal(left.asked, false, "no chat model call was made");
+  assert.equal(chat.requests.length, 0);
+  chat.reply({ spoken_to: ["Ayla"], say: "ok", route: "talk" });
+  const answered = await mind.chat(chatInput("hey Ayla"), signal);
+  assert.equal(answered.asked, undefined, "a call was made");
+  assert.equal(chat.requests.length, 1);
+  // Left alone after the model read it (a greeting to everyone another bot claims): a call was made, so no token goes back.
+  chat.reply({ spoken_to: ["everyone"], asks: "", say: "Hey!", route: "talk", request: "" });
+  const afterCall = await mind.chat(chatInput("sups boys ?", false), signal);
+  assert.equal(afterCall.route, "ignore");
+  assert.equal(afterCall.asked, undefined, "the model was called");
+  assert.equal(chat.requests.length, 2);
+});
+
+test("the chat request says how many earlier lines were not read", async () => {
+  const { chat, mind } = scriptedMind();
+  const reply = { spoken_to: ["Ayla"], say: "ok", route: "talk" } as const;
+  chat.reply(reply, reply, reply);
+  await mind.chat({ ...chatInput("hey Ayla"), unreadLines: 4 }, signal);
+  await mind.chat({ ...chatInput("hey Ayla"), unreadLines: 1 }, signal);
+  await mind.chat(chatInput("hey Ayla"), signal);
+  const requests = chat.requests.map((request) => request[1]?.content ?? "");
+  assert.match(requests[0]!, /\(4 earlier lines from Steve were not read/u);
+  assert.match(requests[1]!, /\(1 earlier line from Steve was not read/u);
+  assert.doesNotMatch(requests[2]!, /earlier line/u);
+  assert.ok(requests[0]!.indexOf("earlier lines") < requests[0]!.indexOf("New message:"), "before the message");
+});
+
+test("the chat request says how many of the speaker's requests it holds", async () => {
+  const { chat, mind } = scriptedMind();
+  const reply = { spoken_to: ["Ayla"], say: "ok", route: "talk" } as const;
+  chat.reply(reply, reply, reply);
+  await mind.chat({ ...chatInput("hey Ayla"), speakerOrders: { open: 1, max: 3 } }, signal);
+  await mind.chat({ ...chatInput("hey Ayla"), speakerOrders: { open: 3, max: 3 } }, signal);
+  await mind.chat(chatInput("hey Ayla"), signal);
+  const requests = chat.requests.map((request) => request[1]?.content ?? "");
+  assert.match(requests[0]!, /You hold 1 of Steve's requests \(the most you take from one player is 3\)\./u);
+  assert.doesNotMatch(requests[0]!, /cannot be taken/u);
+  assert.match(requests[1]!, /You hold 3 of Steve's requests \(the most you take from one player is 3\)\. A new request from them cannot be taken on until one of these ends: answer it with "talk"\./u);
+  assert.doesNotMatch(requests[2]!, /You hold/u);
+  assert.ok(requests[1]!.indexOf("You hold") < requests[1]!.indexOf("New message:"), "before the message");
+});
+
+test("at the cap an act reply is sent back once, then passes", async () => {
+  const { chat, mind } = scriptedMind();
+  const act = { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 5 sand", starts_now: true };
+  chat.reply(act, act);
+  const decision = await mind.chat({ ...chatInput("Ayla, 5 sand please"), speakerOrders: { open: 3, max: 3 } }, signal);
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[1]?.[chat.requests[1].length - 1]?.content ?? "", /^That was not valid \("act" cannot take a new request: you already hold 3 of Steve's; answer with "talk"\)/u);
+  assert.equal(decision.route, "act", "the second reading passes: the agent refuses the order");
+  const later = { ...act, route: "later" };
+  chat.reply(later, later);
+  const waiting = await mind.chat({ ...chatInput("Ayla, 5 sand please"), canWait: true, speakerOrders: { open: 3, max: 3 } }, signal);
+  assert.equal(chat.requests.length, 4);
+  assert.match(chat.requests[3]?.[chat.requests[3].length - 1]?.content ?? "", /"later" cannot take a new request/u);
+  assert.equal(waiting.route, "later");
+  chat.reply(act);
+  await mind.chat({ ...chatInput("Ayla, 5 sand please"), speakerOrders: { open: 2, max: 3 } }, signal);
+  assert.equal(chat.requests.length, 5, "below the cap nothing is sent back");
+});
+
+test("at the cap a reply carrying a trade or a stop with a request is not sent back", async () => {
+  const { chat, mind } = scriptedMind();
+  const atCap = { speakerOrders: { open: 3, max: 3 } };
+  chat.reply({ ...TALK, route: "act", request: "give Steve 5 oak_log", starts_now: true, trade: TRADE });
+  await mind.chat({ ...withRelations(true), ...atCap }, signal);
+  assert.equal(chat.requests.length, 1, "a trade is no new order");
+  chat.reply({ spoken_to: ["Ayla"], say: "Stopping.", route: "stop", request: "collect 5 sand" });
+  const stop = await mind.chat({ ...chatInput("Ayla, stop and get 5 sand"), ...atCap }, signal);
+  assert.equal(chat.requests.length, 2, "a stop with a request frees the cap first");
+  assert.equal(stop.route, "stop");
+});
+
 test("sumUpConversation returns the gist", async () => {
   const { chat, mind } = scriptedMind();
   chat.reply({ gist: "Talked with Theo about the mine." });

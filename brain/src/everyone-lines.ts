@@ -1,3 +1,6 @@
+import { lineDistance } from "./conversation/state.ts";
+import type { BotSnapshot, PlayerMessage } from "./runtime-client.ts";
+
 /** A line to everyone is forgotten this long after the first bot heard it. */
 const FORGET_AFTER_MS = 60_000;
 
@@ -38,6 +41,18 @@ export class EveryoneLines {
     if (first?.[0] !== bot) return false;
     line.claimedBy = bot;
     return true;
+  }
+
+  /**
+   * What lets a bot's chat tier answer a greeting to everyone: the speaker's distance (from the positions when the line
+   * carries none) goes to the record, and the returned claim, on `newestLine` (the same for every bot whatever its inbox
+   * merged or dropped), is true for the nearest bot only. Undefined for a line outside public chat.
+   */
+  claimFor(message: PlayerMessage, snapshot: BotSnapshot, bot: string, newestLine: string): (() => boolean) | undefined {
+    if (message.channel !== "chat") return undefined;
+    const distance = lineDistance(message, snapshot);
+    if (message.distance === undefined && distance !== undefined) this.heard(message.username, newestLine, bot, distance);
+    return () => this.claim(message.username, newestLine, bot);
   }
 
   private lineFor(speaker: string, text: string): Line {

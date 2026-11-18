@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import test from "node:test";
-import { chatSlotsFor, otherAgentsFor, parseBrainArgs } from "./brain-args.ts";
+import { chatSlotsFor, otherAgentsFor, parseBrainArgs, speakerBudgetLimits } from "./brain-args.ts";
 
 test("without --other-agent the live-run arguments parse as before and an agent's others are the in-process ones but itself", () => {
   // The argument shape of .agent/scripts/live-run/templates/start.sh.
@@ -65,6 +65,20 @@ test("chatSlotsFor: default, flag refused, env value logged and ignored", () => 
 test("--chat-slots takes a value, absent by default", () => {
   assert.equal(parseBrainArgs(["--agent", "a.json=http://x/mcp"]).values["chat-slots"], undefined);
   assert.equal(parseBrainArgs(["--chat-slots", "2"]).values["chat-slots"], "2");
+});
+
+test("--speaker-chat-per-minute and --speaker-chat-burst take a value, absent by default", () => {
+  assert.equal(parseBrainArgs(["--agent", "a.json=http://x/mcp"]).values["speaker-chat-per-minute"], undefined);
+  const { values } = parseBrainArgs(["--speaker-chat-per-minute", "3", "--speaker-chat-burst", "9"]);
+  assert.deepEqual([values["speaker-chat-per-minute"], values["speaker-chat-burst"]], ["3", "9"]);
+});
+
+test("speakerBudgetLimits: defaults 6 a minute and 15 held, bad values refuse to start, 0 a minute turns it off", () => {
+  assert.deepEqual(speakerBudgetLimits(undefined, undefined), { perMinute: 6, burst: 15 });
+  assert.deepEqual(speakerBudgetLimits("0", "1"), { perMinute: 0, burst: 1 });
+  assert.throws(() => speakerBudgetLimits("x", undefined), /\[BAD_START_ARG\] --speaker-chat-per-minute expects a whole number \(0 or more\), got x/u);
+  assert.throws(() => speakerBudgetLimits(undefined, "0"), /\[BAD_START_ARG\] --speaker-chat-burst expects a whole number \(1 or more\), got 0/u);
+  assert.throws(() => speakerBudgetLimits("-1", undefined), /got -1/u);
 });
 
 // CI checks out the public repository, which has no .agent: the script is run wherever it is present.

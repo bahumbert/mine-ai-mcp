@@ -11,6 +11,8 @@ import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyField
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
+import { orderCapSendBack, speakerOrdersNote, unreadLinesNote } from "./chat-limit-notes.ts";
+import { checkReplyAgainstFacts, SendBack } from "./chat-reply-checks.ts";
 import { describePreferences, feelings } from "./preference-feelings.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -152,13 +154,14 @@ export class LlmMind implements Mind {
     // ("teleport me Opus", "Ayla viens construire..." for Vex), the speaker's previous line spoke to others ("fix it
     // now" after a line to Opus), or others talked among themselves just before, none of it to her ("pareil, je vois
     // plus les skins" after two players' lines on it).
-    if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return leftAlone();
+    if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return { ...leftAlone(), asked: false };
     const canWait = input.canWait ?? true;
     const request = chatRequest(input, canWait, this.localizedChat);
     // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
     // it through).
     let firstReading: readonly string[] | null = null;
+    let capSentBack = false;
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
     // The claim is asked once per line: a reply sent back reads the line again, and a second claim is always false
@@ -196,26 +199,12 @@ export class LlmMind implements Mind {
         firstReading ??= to;
         throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
       }
-      // Answering a line it reads as spoken to her by name ("everyone"/"unclear" do not count): held to the facts below.
-      const answersAsHers = reply.route !== "ignore" && to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase());
-      // The message calls others by name and names her without calling her: a reply that speaks to her and answers it is
-      // the misreading the facts were given against (bench 2026-10-09, French). Taking an order on is not held to it:
-      // "Ayla, get wood and Vex mine stone" gives Vex an order with no comma after his name (bench: Vex 0/3 when held).
-      if (answersAsHers && reply.route !== "act" && reply.route !== "later" && called.length > 0) {
-        throw new SendBack(`"spoken_to" includes you, but the message calls ${called.join(", ")} by name and names you without calling you: it speaks to ${called.join(", ")}, about you; "route" is "ignore"`);
+      checkReplyAgainstFacts(reply, input, { to, given, listeners, called, answering, canWait });
+      const atCap = capSentBack ? null : orderCapSendBack(reply.route, reply.trade !== undefined, input.speakerOrders, message.username); // sent back once (spec 2026-11-18-chat-flood-bounds D4)
+      if (atCap !== null) {
+        capSentBack = true;
+        throw new SendBack(atCap);
       }
-      // The line answers someone else who just spoke to its speaker, and names nobody: a reply that speaks to her and
-      // answers it ignores the fact given in the prompt (bench 2026-10-09, "ok j'arrive").
-      if (answersAsHers && answering !== null) {
-        throw new SendBack(`"spoken_to" includes you, but this message names nobody and ${answering} spoke to ${message.username} just before it: it answers ${answering}, not you; "route" is "ignore"`);
-      }
-      // Only her own name, or a list that named nobody but the speaker, means her: "everyone"/"unclear" lines stay hers
-      // to let pass (the bench: held to them too, she answered every line to "Opus").
-      const named = to.some((name) => name.toLowerCase() === input.persona.username.toLowerCase()) || (given.length > 0 && listeners.length === 0);
-      if (reply.route === "ignore" && named) {
-        throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which includes you: answer it ("talk", "say" may be ""), take it on, or stop; never "ignore"`);
-      }
-      if (reply.route === "later" && !canWait) throw new SendBack(`"later" is not a route now: you work for nobody else, so a request is "act"`);
       // Taken on, the order starts at once (live 2026-10-04: "Just let me finish this little project first", again,
       // though the rule says so). The model judges its own line, in the language it wrote it.
       if (reply.route === "act" && reply.starts_now === false) {
@@ -416,14 +405,14 @@ function chatRequest(input: ChatInput, canWait: boolean, localizedChat: Localize
     ...(input.relations?.requests === undefined ? [] : [requestsBlock(message.username, input.relations.requests)]),
     // The feelings sit with the line too: in the system prompt alone they were lost under a long situation (ticket 10).
     ...(input.persona.preferences === undefined ? [] : [`How you feel about work: ${feelings(input.persona)}. Your line may show it about the work asked, even when you take it on.`]),
+    ...(input.unreadLines === undefined || input.unreadLines <= 0 ? [] : [unreadLinesNote(input.unreadLines, message.username)]),
+    ...(input.speakerOrders === undefined ? [] : [speakerOrdersNote(input.speakerOrders, message.username)]),
     // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
     // 2026-10-07).
     `New message: ${message.username} ${channel}${heardFrom(message.distance, input.heardFarAway === true, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
   ].filter((part) => part !== "").join("\n\n");
 }
 
-/** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
-class SendBack extends Error {}
 async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, call: CompleteOptions, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];

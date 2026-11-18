@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EveryoneLines } from "./everyone-lines.ts";
+import { FakeRuntime } from "./testing.ts";
 
 function lines() {
   const clock = { now: 0 };
@@ -82,6 +83,19 @@ test("two speakers saying the same text are two lines; the speaker's case does n
   assert.equal(record.claim("Steve", "hi", "Vex"), true);
   assert.equal(record.claim("Bob", "hi", "Vex"), true);
   assert.equal(record.claim("STEVE", "hi", "Vex"), false);
+});
+
+test("claimFor keys the distance and the claim on the newest raw line, so a bot that merged lines is compared on the same line", () => {
+  const { lines: record } = lines();
+  const lookAt = (steveAt: number) => ({ ...new FakeRuntime().snapshot, position: { x: 0, y: 64, z: 0 }, players: [{ username: "Steve", position: { x: steveAt, y: 64, z: 0 } }] });
+  const line = (message: string) => ({ username: "Steve", channel: "chat" as const, message, addressed: false });
+  // Both bots heard "hi" and "everyone" as raw lines (no distance known); the nearer one merged them into one message.
+  for (const bot of ["Ayla", "Vex"]) for (const text of ["hi", "everyone"]) record.heard("Steve", text, bot, null);
+  const near = record.claimFor(line("hi everyone"), lookAt(5), "Ayla", "everyone");
+  const far = record.claimFor(line("everyone"), lookAt(30), "Vex", "everyone");
+  assert.equal(far?.(), false, "the farther bot does not win the line");
+  assert.equal(near?.(), true, "the nearer bot answers, whatever it merged");
+  assert.equal(record.claimFor({ ...line("hi"), channel: "whisper" }, lookAt(5), "Ayla", "hi"), undefined, "only public chat is a line to everyone");
 });
 
 test("a bot that never reported hearing the line still claims it when nobody else heard it", () => {
