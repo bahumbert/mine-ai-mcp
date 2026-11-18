@@ -172,27 +172,37 @@ export interface DiveAdmission {
   readonly toAir?: boolean;
 }
 
-/** Ticks to swim the exit path from its first stroke, each stroke priced by its direction as `swimTravelTicks` does. */
-function exitTravelTicks(from: BlockPosition, path: readonly BlockPosition[]): number {
-  let ticks = SWIM_START_TICKS;
+/** A cell reached by one swim stroke and the breath ticks that stroke costs. */
+export interface SwimStroke {
+  readonly cell: BlockPosition;
+  readonly ticks: number;
+}
+
+/** Price each stroke, optionally counting only strokes with a submerged head at either end. */
+function swimStrokes(from: BlockPosition, path: readonly BlockPosition[], read?: SwimCellReader): SwimStroke[] {
   let at = from;
-  for (const next of path) {
-    ticks += next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS;
-    at = next;
-  }
-  return ticks;
+  return path.map(cell => {
+    const wet = !read || read(at.x, at.y + 1, at.z) === "water" || read(cell.x, cell.y + 1, cell.z) === "water";
+    const ticks = wet ? cell.y < at.y ? SWIM_DOWN_TICKS : cell.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS : 0;
+    at = cell;
+    return { cell, ticks };
+  });
+}
+
+/** Sum the strokes with the overhead the existing ascent kind charges. */
+function pricedAscent(surface: BlockPosition, path: readonly SwimStroke[], startTicks: number): SwimAscent {
+  return { surface, path, startTicks, ticks: startTicks + path.reduce((sum, stroke) => sum + stroke.ticks, 0) };
+}
+
+/** Consecutive one-cell rises, including the surface cell. */
+function ascentColumn(from: BlockPosition, surface: BlockPosition): BlockPosition[] {
+  return Array.from({ length: surface.y - from.y }, (_, i) => ({ x: from.x, y: from.y + i + 1, z: from.z }));
 }
 
 /** Ticks of held breath on a swim to a breathing cell: a stroke costs only while the head is under water at either end. */
 function breathTravelTicks(read: SwimCellReader, from: BlockPosition, path: readonly BlockPosition[]): number {
-  let ticks = 0;
-  let at = from;
-  for (const next of path) {
-    if (read(at.x, at.y + 1, at.z) === "water" || read(next.x, next.y + 1, next.z) === "water")
-      ticks += (ticks === 0 ? SWIM_START_TICKS : 0) + (next.y < at.y ? SWIM_DOWN_TICKS : next.y > at.y ? SWIM_UP_TICKS : SWIM_HORIZONTAL_TICKS);
-    at = next;
-  }
-  return ticks;
+  const strokes = swimStrokes(from, path, read);
+  return pricedAscent(path.at(-1) ?? from, strokes, strokes.some(stroke => stroke.ticks > 0) ? SWIM_START_TICKS : 0).ticks;
 }
 
 /**
@@ -209,6 +219,8 @@ export function swimBreathTicks(read: WorldView["blockAt"], feet: BlockPosition)
 export interface SwimAscent {
   readonly surface: BlockPosition;
   readonly ticks: number;
+  readonly path: readonly SwimStroke[];
+  readonly startTicks: number;
 }
 
 /**
@@ -219,17 +231,20 @@ export interface SwimAscent {
  */
 export function swimAscent(read: WorldView["blockAt"], feet: BlockPosition): SwimAscent | null {
   const direct = openWaterSurface(read, feet);
-  if (direct !== null) return { surface: direct, ticks: swimTravelTicks(feet, direct) };
+  if (direct !== null) return pricedAscent(direct, swimStrokes(feet, ascentColumn(feet, direct)), SWIM_START_TICKS);
   const cells = swimCellsOf(read);
   const breath = swimBreathPath(cells, feet);
-  if (breath !== null) return { surface: breath.at(-1) ?? feet, ticks: breathTravelTicks(cells, feet, breath) };
+  if (breath !== null) {
+    const strokes = swimStrokes(feet, breath, cells);
+    return pricedAscent(breath.at(-1) ?? feet, strokes, strokes.some(stroke => stroke.ticks > 0) ? SWIM_START_TICKS : 0);
+  }
   const path = swimExitPath(cells, feet);
   if (path === null) return null;
   const exit = path.at(-1) ?? feet;
   let top = exit.y;
   while (cells(exit.x, top + 1, exit.z) === "water") top++;
   const surface = { x: exit.x, y: top, z: exit.z };
-  return { surface, ticks: exitTravelTicks(feet, path) + swimTravelTicks(exit, surface) };
+  return pricedAscent(surface, swimStrokes(feet, [...path, ...ascentColumn(exit, surface)]), 2 * SWIM_START_TICKS);
 }
 
 /** Cells below a dive origin's feet read for the water surface a body jumped from (red-phase3: its peak is 1.4 blocks over). */

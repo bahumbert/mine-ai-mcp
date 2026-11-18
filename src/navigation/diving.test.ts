@@ -9,6 +9,7 @@ import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
 import { DIVE_BACKSTOP_TICKS, admitsDive } from "./world/swimming.js";
+import { attachBreathReflex } from "../survival/reflexes/breath.js";
 import type { NavigateOptions, NavigationResult } from "./navigate.js";
 
 type Kind = "stone" | "air" | "water";
@@ -236,21 +237,6 @@ test("a dive that fails five blocks into a roofed tunnel swims back to the air p
   assert.deepEqual(states, ["released"]);
 });
 
-test("a takeover cancel leaves the swim back to the reflex that took the body", async () => {
-  const { world, bot } = tunnelFixture();
-  const diving = new Diving(bot, world);
-  let calls = 0;
-  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }) }, async () => {
-    calls++;
-    bot.emit("physicsTick");
-    diving.committed({ steps: [movementStep("swim", { x: 4, y: 60, z: 0 }, { x: 5, y: 60, z: 0 })] });
-    bot.entity.position.x = 5.5;
-    diving.cancel("takeover");
-    return { status: "stopped", reason: "takeover", elapsedMs: 0 };
-  });
-  assert.equal(calls, 1);
-});
-
 // Review 2026-10-18 (run 15 fixes), blocking 3: the swim back ran after successful arrivals and ignored the action's cancel.
 
 /** The first navigate of a run into the tunnel: the pocket passed with the head in air, then the dive owned, five blocks in. */
@@ -260,33 +246,30 @@ function intoTheTunnel(bot: Bot, diving: Diving): void {
   bot.entity.position.x = 5.5;
 }
 
-test("a goal under water that was reached is where the run ends: no swim back undoes the arrival", async () => {
-  const { world, bot } = tunnelFixture();
-  const diving = new Diving(bot, world);
-  let calls = 0;
-  const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 5, y: 60, z: 0 }) }, async () => {
-    calls++;
-    intoTheTunnel(bot, diving);
-    return { status: "completed", elapsedMs: 0 };
-  });
-  assert.equal(result.status, "completed");
-  assert.equal(calls, 1, "the arrival is not swum back from");
-  assert.equal(bot.entity.position.x, 5.5);
-});
-
-test("an action already cancelled when its run ends does not start a swim back", async () => {
-  const { world, bot } = tunnelFixture();
-  const diving = new Diving(bot, world);
-  const cancel = new AbortController();
-  let calls = 0;
-  await assert.rejects(diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 8, y: 60, z: 0 }), signal: cancel.signal }, async () => {
-    calls++;
-    intoTheTunnel(bot, diving);
-    cancel.abort("cancelled by the model");
-    throw cancel.signal.reason;
-  }), /cancelled by the model/);
-  assert.equal(calls, 1);
-  assert.equal(diving.active, false);
+test("arrival, takeover and action cancellation under a roof leave the body without an unwanted swim back", async () => {
+  for (const end of ["arrival", "takeover", "action"] as const) {
+    const { world, bot } = tunnelFixture();
+    const diving = new Diving(bot, world);
+    const cancel = new AbortController();
+    let calls = 0;
+    const run = diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: end === "arrival" ? 5 : 8, y: 60, z: 0 }),
+      signal: cancel.signal }, async () => {
+      calls++;
+      intoTheTunnel(bot, diving);
+      if (end === "action") {
+        cancel.abort("cancelled by the model");
+        throw cancel.signal.reason;
+      }
+      if (end === "takeover") diving.cancel("takeover");
+      return end === "arrival" ? { status: "completed", elapsedMs: 0 }
+        : { status: "stopped", reason: "takeover", elapsedMs: 0 };
+    });
+    if (end === "action") await assert.rejects(run, /cancelled by the model/);
+    else assert.equal((await run).status, end === "arrival" ? "completed" : "stopped");
+    assert.equal(calls, 1, `${end} never starts a swim back`);
+    assert.equal(bot.entity.position.x, 5.5);
+    assert.equal(diving.active, false);
+  }
 });
 
 /** A dive owned in open water, then roofed in the middle of the route: the admission premise (an ascent) is gone. */
@@ -714,4 +697,158 @@ for (const ticksPerSecond of [20, 10]) test(`a breathing stop's resumed leg from
   assert.equal(result.status, "completed");
   assert.equal(calls, 3);
   assert.equal(resumedAdmitted, true, "the resumed leg from the jump peak is priced from the surface (y 64) and admitted");
+});
+
+/** A submerged westward stroke, optionally followed by a northward turn into an air pocket. */
+function strokeFixture(ticksPerSecond: number, turn = false) {
+  const scene = pond(new Vec3(1.5, 60.5, 0.5), false, { mocked: true, server: { ticksPerSecond } });
+  for (const [x, z, kind] of [[1, 0, "water"], [0, 0, turn ? "water" : "air"], [0, -1, "air"]] as const)
+    for (let y = 59; y <= 63; y++) scene.load({ x, y, z }, y === 59 || y === 63 ? "stone" : kind);
+  scene.breath.hold(300);
+  Reflect.set(scene.bot.entity, "isInWater", true);
+  return scene;
+}
+
+for (const rate of [20, 10, "stopped"] as const) for (const direction of ["toward", "away", "sideways", "turn"] as const)
+  test(`the backstop prices only the current ${direction} stroke at ${rate} tps`, async () => {
+    const { bot, world, clock, harness, breath, left } = strokeFixture(rate === 10 ? 10 : 20, direction === "turn");
+    using _timers = clock.install();
+    await clock.advance(50);
+    if (rate === "stopped") harness.server.stop();
+    const age = bot.time.age;
+    const diving = new Diving(bot, world);
+    const result = await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) }, async () => {
+      const start = direction === "turn" ? 65 : 49; // 8 start + one/two 16-tick strokes + 25 reserve.
+      assert.equal(diving.backstop(), start);
+      bot.entity.position.x = direction === "away" ? 1.999 : 1;
+      bot.entity.velocity.set(direction === "away" ? 0.1 : -0.1, 0, 0);
+      if (direction === "sideways") bot.entity.position.z = 0.75;
+      const expected = direction === "away" ? start + 7.984 : direction === "sideways" ? start + 4 : start - 8;
+      const floor = diving.backstop();
+      assert.ok(floor !== null && Math.abs(floor - expected) < 0.001, `mid-stroke floor ${floor}, wanted ${expected}`);
+      if (direction === "toward") {
+        bot.entity.velocity.x = 0;
+        assert.equal(diving.backstop(), 49, "a stationary body earns no progress credit");
+        bot.entity.velocity.x = -0.1;
+        if (rate !== "stopped") {
+          let sense!: () => unknown;
+          // Only registration is stubbed; the production sense reads the shared fake's air metadata packet.
+          const driver = { register(definition: { sense: () => unknown }) {
+            sense = definition.sense;
+            return { [Symbol.asyncDispose]: async () => {} };
+          } };
+          await using _reflex = attachBreathReflex(bot, driver as never, () => diving.backstop());
+          breath.setAirSupply(42); // New floor 41, old 49.
+          assert.equal(sense(), null, "42 air is above the mid-stroke floor of 41");
+          for (const air of [40, 41]) {
+            breath.setAirSupply(air);
+            assert.equal((sense() as { kind: string }).kind, "observed", `${air} air is at or below the floor`);
+          }
+        }
+      }
+      assert.equal(clock.now(), 50, "both reads use the same first packet, cached age 0, fake time 50 ms");
+      assert.equal(bot.time.age, age);
+      return { status: "completed", elapsedMs: 0 };
+    });
+    assert.equal(result.status, "completed");
+    assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    await clock.advance(60_000);
+    assert.equal(diving.backstop(), null);
+  });
+
+for (const ticksPerSecond of [20, 10]) test(`a vertical stroke spends only its remaining rise at ${ticksPerSecond} tps`, async () => {
+  const { bot, world, clock, left } = fixture({ mocked: true, server: { ticksPerSecond } });
+  using _timers = clock.install();
+  await clock.advance(50);
+  const diving = new Diving(bot, world);
+  bot.entity.position.y = 61.5;
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 61, z: 0 }) }, async () => {
+    assert.equal(diving.backstop(), 53); // 8 start + two rises of 10 + 25 reserve.
+    bot.entity.position.y = 61.999;
+    bot.entity.velocity.set(0, 0.1, 0);
+    assert.ok(Math.abs(diving.backstop()! - 48.01) < 0.001);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a changed ascent and a cancelled dive never carry a stroke at ${ticksPerSecond} tps`, async () => {
+  const { bot, world, clock, load, left } = strokeFixture(ticksPerSecond);
+  using _timers = clock.install();
+  await clock.advance(50);
+  const diving = new Diving(bot, world);
+  const options = { movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) };
+  bot.entity.position.x = 1;
+  bot.entity.velocity.set(-0.1, 0, 0);
+  await diving.run(options, async () => {
+    assert.equal(diving.backstop(), 49, "the first mid-stroke read keeps the full cell price");
+    assert.equal(diving.backstop(), 41);
+    for (let y = 60; y <= 62; y++) load({ x: 0, y, z: 0 }, "stone");
+    assert.equal(diving.backstop(), 300, "a lost ascent requests rescue and forgets the stroke");
+    for (let y = 60; y <= 62; y++) load({ x: 0, y, z: 0 }, "air");
+    assert.equal(diving.backstop(), 49, "a reappearing ascent starts uncredited");
+    assert.equal(diving.backstop(), 41);
+    diving.cancel("reflex takeover");
+    assert.equal(diving.backstop(), 49, "cancel forgets the stroke immediately");
+    return { status: "stopped", reason: "reflex takeover", elapsedMs: 0 };
+  });
+  await diving.run(options, async () => {
+    assert.equal(diving.backstop(), 49, "the next dive at the same mid-stroke body starts fresh");
+    assert.equal(diving.backstop(), 41);
+    for (let y = 60; y <= 62; y++) {
+      load({ x: 0, y, z: 0 }, "stone");
+      load({ x: 2, y, z: 0 }, "air");
+    }
+    bot.entity.position.x = 1.999;
+    bot.entity.velocity.x = 0.1;
+    assert.equal(diving.backstop(), 49, "a changed next cell gets no reduction on its first read");
+    assert.ok(Math.abs(diving.backstop()! - 41.016) < 0.001);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  await clock.advance(60_000);
+  assert.equal(diving.backstop(), null);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`dry eyes, death, respawn, breathing return and resume forget the stroke at ${ticksPerSecond} tps`, async () => {
+  const { bot, world, clock, breath, left } = strokeFixture(ticksPerSecond);
+  using _timers = clock.install();
+  await clock.advance(50);
+  const diving = new Diving(bot, world);
+  const options = { movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 60, z: 0 }) };
+  bot.entity.position.x = 1;
+  bot.entity.velocity.set(-0.1, 0, 0);
+  let calls = 0;
+  const result = await diving.run(options, async request => {
+    calls++;
+    assert.equal(diving.backstop(), 49, "every leg, return and resume begins without credit");
+    assert.equal(diving.backstop(), 41);
+    if (calls === 1) {
+      for (const event of ["death", "respawn"] as const) {
+        bot.emit(event);
+        assert.equal(diving.backstop(), 49, `${event} forgets the remembered cell`);
+        assert.equal(diving.backstop(), 41);
+      }
+      bot.entity.position.x = 0.5;
+      assert.equal(diving.backstop(), DIVE_BACKSTOP_TICKS);
+      bot.entity.position.x = 1;
+      assert.equal(diving.backstop(), 49, "dry eyes forget the stroke");
+      assert.equal(diving.backstop(), 41);
+      breath.setAirSupply(60);
+      bot.emit("physicsTick");
+      assert.equal(request.stopSignal?.aborted, true);
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    breath.setAirSupply(300);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 3);
+  assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  await clock.advance(60_000);
+  assert.equal(diving.backstop(), null);
 });

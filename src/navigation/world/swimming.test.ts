@@ -62,7 +62,7 @@ test("a body in a thin flowing stream with its head in air is no swim from a bre
       : { stateId: 0 });
   const read = (x: number, y: number, z: number) => world.blockAt(x, y, z);
   const feet = { x: 0, y: 61, z: 0 };
-  assert.deepEqual(swimAscent(read, feet), { surface: feet, ticks: 0 });
+  assert.deepEqual(swimAscent(read, feet), { surface: feet, ticks: 0, path: [], startTicks: 0 });
   assert.ok(admitsDive(read, feet, { origin: feet, airTicks: 300 }));
 });
 
@@ -110,8 +110,6 @@ test("depth holding arrests inherited momentum and stays in a band under pinned 
     min = Math.min(min, y); max = Math.max(max, y);
   }
   assert.ok(max - min < 0.18, `hold varied from ${min} to ${max}`);
-  assert.ok(swimTravelTicks({ x: 0, y: 63, z: 0 }, { x: 0, y: 61, z: 0 }) >
-    swimTravelTicks({ x: 0, y: 61, z: 0 }, { x: 0, y: 63, z: 0 }));
 });
 
 /** Rows of text over a flat slice: `~` water, `.` air, `#` solid. Row 0 is the highest layer. */
@@ -133,23 +131,19 @@ const overhang = [
   "##########",
 ];
 
-test("an exit path swims round an overhang to the nearest open column", () => {
-  const path = swimExitPath(slice(overhang), { x: 1, y: 2, z: 0 });
-  assert.ok(path && path.length > 0);
-  assert.equal(path.at(-1)?.x, 4, "the nearest column with no roof is the first past the overhang");
-});
-
-test("an open column straight up is its own exit, and a sealed pocket has none", () => {
-  const open = slice(["~~~", "~~~", "~~~", "###"]);
-  assert.deepEqual(swimExitPath(open, { x: 1, y: 1, z: 0 }), []);
-  const sealed = slice(["#####", "#~~~#", "#~~~#", "#####"]);
-  assert.equal(swimExitPath(sealed, { x: 2, y: 1, z: 0 }), null);
-});
-
-test("an exit farther than the radius is not found, and a blocked column is crossed but not chosen", () => {
-  const sea = slice(overhang);
-  assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [], 2), null);
-  assert.equal(swimExitPath(sea, { x: 1, y: 2, z: 0 }, [{ x: 4, z: 0 }])?.at(-1)?.x, 5);
+test("exit paths choose the nearest unblocked open column within reach, with no swim when already open", () => {
+  const cases = [
+    { layers: overhang, x: 1, y: 2, radius: undefined, blocked: [], expected: 4 },
+    { layers: ["~~~", "~~~", "~~~", "###"], x: 1, y: 1, radius: undefined, blocked: [], expected: [] },
+    { layers: ["#####", "#~~~#", "#~~~#", "#####"], x: 2, y: 1, radius: undefined, blocked: [], expected: null },
+    { layers: overhang, x: 1, y: 2, radius: 2, blocked: [], expected: null },
+    { layers: overhang, x: 1, y: 2, radius: undefined, blocked: [{ x: 4, z: 0 }], expected: 5 },
+  ];
+  for (const row of cases) {
+    const path = swimExitPath(slice(row.layers), { x: row.x, y: row.y, z: 0 }, row.blocked, row.radius);
+    if (typeof row.expected === "number") assert.equal(path?.at(-1)?.x, row.expected);
+    else assert.deepEqual(path, row.expected);
+  }
 });
 
 test("a flooded roofed cell reaches the one-cell air pocket in reach, and breath is free once the head is dry", () => {
@@ -231,4 +225,44 @@ test("a dive origin in the air over water is priced from the water surface only 
   creek.load({ x: -1, y: 64, z: -3 }, { stateId: 0 });
   assert.deepEqual(diveOrigin((x, y, z) => creek.blockAt(x, y, z), at(-0.3, 64.4, -2.5)), at(-0.3, 64, -2.5),
     "a negative fractional x and z read in the column they floor to: (-1, -3)");
+});
+
+test("ascent strokes preserve the open-column, breath-path and exit-path totals and their start overheads", () => {
+  const descending = new MemoryWorld();
+  for (let x = 0; x <= 1; x++) for (let y = 59; y <= 63; y++)
+    descending.load({ x, y, z: 0 }, y === 59 || y === 63 || (x === 1 && y >= 62) ? { stateId: 1 }
+      : x === 1 && y === 61 ? { stateId: 0 } : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } });
+  const down = swimAscent((x, y, z) => descending.blockAt(x, y, z), { x: 0, y: 61, z: 0 });
+  assert.deepEqual(down, { surface: { x: 1, y: 60, z: 0 }, ticks: 68, startTicks: 8,
+    path: [{ cell: { x: 0, y: 60, z: 0 }, ticks: 44 }, { cell: { x: 1, y: 60, z: 0 }, ticks: 16 }] });
+  const world = pool();
+  const read = (x: number, y: number, z: number) => world.blockAt(x, y, z);
+  const direct = swimAscent(read, { x: 0, y: 61, z: 0 });
+  assert.deepEqual(direct, { surface: { x: 0, y: 63, z: 0 }, ticks: 28, startTicks: 8,
+    path: [{ cell: { x: 0, y: 62, z: 0 }, ticks: 10 }, { cell: { x: 0, y: 63, z: 0 }, ticks: 10 }] });
+
+  // A two-stroke turn to a roofed air pocket, and a tall open column whose surface is outside the breath search.
+  const roofed = new MemoryWorld();
+  for (const [x, z] of [[0, 0], [1, 0], [1, -1]]) for (let y = 59; y <= 62; y++)
+    roofed.load({ x: x!, y, z: z! }, y === 59 || y === 62 ? { stateId: 1 } : x === 1 && z === -1
+      ? { stateId: 0 } : { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } });
+  const breath = swimAscent((x, y, z) => roofed.blockAt(x, y, z), { x: 0, y: 60, z: 0 });
+  assert.deepEqual(breath, { surface: { x: 1, y: 60, z: -1 }, ticks: 40, startTicks: 8,
+    path: [{ cell: { x: 1, y: 60, z: 0 }, ticks: 16 }, { cell: { x: 1, y: 60, z: -1 }, ticks: 16 }] });
+
+  const tall = new MemoryWorld();
+  for (let x = 0; x <= 1; x++) for (let y = 0; y <= 22; y++)
+    tall.load({ x, y, z: 0 }, x === 0 && y >= 2 ? { stateId: 1 } : y <= 20
+      ? { stateId: 2, traits: { empty: true, liquid: "water", liquidSource: true } } : { stateId: 0 });
+  const exit = swimAscent((x, y, z) => tall.blockAt(x, y, z), { x: 0, y: 0, z: 0 });
+  assert.ok(exit);
+  assert.equal(exit.ticks, 232);
+  assert.equal(exit.startTicks, 16, "the exit and its rise each retain their existing start overhead");
+  assert.deepEqual(exit.surface, { x: 1, y: 20, z: 0 });
+  assert.deepEqual(exit.path, [{ cell: { x: 1, y: 0, z: 0 }, ticks: 16 },
+    ...Array.from({ length: 20 }, (_, i) => ({ cell: { x: 1, y: i + 1, z: 0 }, ticks: 10 }))]);
+  for (const ascent of [down, direct, breath, exit]) {
+    assert.ok(ascent);
+    assert.equal(ascent.startTicks + ascent.path.reduce((ticks, stroke) => ticks + stroke.ticks, 0), ascent.ticks);
+  }
 });
