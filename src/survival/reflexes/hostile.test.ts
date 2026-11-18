@@ -67,7 +67,7 @@ function watchStalledCleanup(fixture: ReflexFixture): () => Promise<void> {
 }
 
 /** A stationary objective whose physical attempts yield to the real hostile reflex. */
-function stalledJourney(ticksPerSecond: number, exhausted = false) {
+function stalledJourney(ticksPerSecond: number, exhausted = false, exhaustedAt = 8) {
   let finishRoute: (() => void) | null = null;
   let attempts = 0;
   let routes = 0;
@@ -75,8 +75,8 @@ function stalledJourney(ticksPerSecond: number, exhausted = false) {
     routes++;
     await new Promise<void>((resolve) => { finishRoute = resolve; });
     finishRoute = null;
-    if (!exhausted || routes < 8) fixture.bot.entities[7]!.position.x = 100;
-    return exhausted && routes === 8
+    if (!exhausted || routes < exhaustedAt) fixture.bot.entities[7]!.position.x = 100;
+    return exhausted && routes === exhaustedAt
       ? { status: "stopped", reason: "no path", elapsedMs: 0 }
       : { status: "completed", elapsedMs: 0 };
   }, { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
@@ -221,6 +221,77 @@ for (const rate of [20, 10, "stopped"] as const) test(`two evades return at the 
   assert.match(result.result.status === "cancelled" ? result.result.error : "", /\[HOSTILE_STALLED\] 2 evades/);
   await assertClean();
 });
+
+for (const ticksPerSecond of [20, 10]) {
+  for (const ending of ["ticks", "under", "cancel", "wall_decision", "wall_backstop"] as const) {
+    test(`held stall: ${ending} at release (${ticksPerSecond} tps)`, async () => {
+      await using fixture = stalledJourney(ticksPerSecond, true, 2);
+      using _clock = fixture.clock.install();
+      const assertClean = watchStalledCleanup(fixture);
+      const phases: { outcome: string; resumed: boolean }[] = [];
+      const stop = fixture.driver.onTransition((event) => {
+        if (event.kind === "phase") phases.push(event.evidence as typeof phases[number]);
+      });
+      await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+        changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise the held stall boundary" });
+      const pending = fixture.runner.run(fixture.action, {});
+      const state = watch(pending);
+      await flush();
+      fixture.bot.entities[7]!.position.x = 5;
+      await fixture.clock.advance(50);
+      fixture.finishRoute();
+      assert.ok(await until(() => fixture.recorded().length === 1));
+      await flush();
+      const progressMs = fixture.clock.now();
+      fixture.bot.physicsEnabled = false;
+      const wall = ending === "wall_decision";
+      if (wall) fixture.server.stop();
+      await fixture.clock.advance(wall ? progressMs + 254_000 - fixture.clock.now() : 1_660 * 1_000 / ticksPerSecond, 1_000);
+      assert.equal(fixture.bot.time.age, wall ? 1_000 : 2_660);
+      fixture.bot.entities[7]!.position.x = 5;
+      fixture.tick();
+      await flush();
+      fixture.finishRoute();
+      assert.ok(await until(() => fixture.recorded().length === 2));
+      await flush();
+      assert.equal(phases.at(-1)?.outcome, "held", "the second evade exhausted below the stall bound");
+      assert.equal(state.over, false);
+      if (ending === "wall_backstop") {
+        fixture.server.stop();
+        await fixture.clock.advance(93_000, 1_000);
+      } else if (wall) await fixture.clock.advance(progressMs + 255_000 - fixture.clock.now(), 1_000);
+      else await fixture.clock.advance((ending === "ticks" ? 40 : 0) * 1_000 / ticksPerSecond, 1_000);
+      assert.equal(fixture.bot.time.age, wall ? 1_000 : ending === "ticks" ? 2_700 : 2_660);
+      if (ending === "cancel") fixture.runner.cancelRequest(fixture.runner.request()!.id, "Cancel during the held stall");
+      fixture.entities.remove(7);
+      fixture.tick();
+      await flush();
+      if (ending === "under") {
+        assert.equal(fixture.attempts(), 3, "a hold below the limit resumes its objective");
+        assert.equal(phases.at(-1)?.resumed, true);
+        fixture.runner.cancelActive("Finish under-limit control");
+      } else assert.equal(fixture.attempts(), 2, "a stalled or cancelled hold cannot resume");
+      const output = await fixture.clock.settle(pending, 1_000);
+      assert.equal(output.result.status, "cancelled");
+      const error = output.result.status === "cancelled" ? output.result.error : "";
+      if (ending === "ticks" || wall) {
+        assert.match(error, /\[HOSTILE_STALLED\] 2 evades/);
+        assert.equal(output.request?.state.kind, "returned");
+        assert.ok(output.interruptions?.some(reason => reason.includes("[HOSTILE_STALLED]")));
+      }
+      if (ending === "wall_backstop") assert.match(error, /server clock stood still/);
+      const terminal = phases.filter(({ outcome }) => outcome === "released" || outcome === "backstop");
+      assert.equal(terminal.length, 1, "the hold settles once");
+      const next = defineAction({ name: "navigate", description: "Journey after a held return", inputSchema: z.strictObject({}),
+        resultSchema: actionResultSchema({}), parse: () => ({}), formatResult: result => result.status,
+        execution: { kind: "resumable_task" }, begin: () => async () => ({ status: "succeeded" as const }) });
+      assert.equal((await fixture.clock.settle(fixture.runner.run(next, {}), 1_000)).result.status, "succeeded");
+      await assertClean();
+      assert.equal(phases.filter(({ outcome }) => outcome === "released" || outcome === "backstop").length, 1);
+      stop();
+    });
+  }
+}
 
 // The unreachable premise counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 600 ticks from the age cached when the
 // failure was remembered plus one packet, the packet of age A + 620 (31 s in at 20 tps, 62 s at 10 tps; old code: 30 s after it).

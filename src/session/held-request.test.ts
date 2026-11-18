@@ -128,12 +128,17 @@ for (const by of [OWNER, "footing_reflex"]) {
   }
 }
 
-test("held request: release keeps the last receipt and names the decision", async () => {
-  const clock = createFakeClock({ mode: "mocked" });
-  using _timers = clock.install();
-  const record = held();
-  assert.equal(record.release("stand_down", null), true);
-  assert.deepEqual(await record.done, { kind: "return", reason: `${HOLD}; ${OWNER} chose no further response (stand_down).` });
+test("held request: release keeps the receipt, decision and optional stall note", async () => {
+  for (const note of [undefined, "[HOSTILE_STALLED] No objective progress; choose the next action."]) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const record = held();
+    assert.equal(record.release("stand_down", null, note), true);
+    const end = await record.done;
+    assert.equal(end.kind, "return");
+    if (note) assert.ok(end.reason?.endsWith(note));
+    else assert.deepEqual(end, { kind: "return", reason: `${HOLD}; ${OWNER} chose no further response (stand_down).` });
+  }
 });
 
 test("held request: stand-down evidence resumes once with the receipt and release suffix", async () => {

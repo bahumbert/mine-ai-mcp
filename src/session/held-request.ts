@@ -79,10 +79,10 @@ export class HeldRequest {
     });
   }
 
-  release(decision: string, ended: string | null = null): boolean {
+  release(decision: string, ended: string | null = null, note?: string): boolean {
     if (this.state !== "waiting") return false;
-    const suffix = ended === null ? `; ${this.owner} chose no further response (${decision}).`
-      : `; ${this.owner} stood down (${ended}): the walk resumes.`;
+    const suffix = (ended === null ? `; ${this.owner} chose no further response (${decision}).`
+      : `; ${this.owner} stood down (${ended}): the walk resumes.`) + (note ? ` ${note}` : "");
     return this.#finish("released", { kind: ended === null ? "return" : "resume", reason: `${this.reasons.join(" ")}${suffix}` }, suffix);
   }
 
