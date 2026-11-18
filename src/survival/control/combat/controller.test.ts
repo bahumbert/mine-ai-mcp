@@ -549,6 +549,9 @@ for (const ticksPerSecond of [20, 10]) {
     });
   }
 
+  // 150 is the largest quarry flip interval (fake ticks) tried that still fails with `prepare`'s `heldTarget?.exhausted`
+  // guard deleted (2026-11-18 sweep, both rates); each case took 12.8-18.1 s flipping every tick, 0.27-0.61 s now.
+  const QUARRY_MOVE_EVERY_TICKS = 150;
   test(`a refused Enderman roof cannot bypass the defensive return window and the waiting walk finishes (${ticksPerSecond} tps)`, async () => {
     const fixture = protectedEndermanFixture(["iron_sword", "shield", "cobblestone"], { roof: false, ticksPerSecond });
     fixture.inventory.slots[9 + 2]!.count = 64;
@@ -560,7 +563,7 @@ for (const ticksPerSecond of [20, 10]) {
     const stop = new AbortController();
     fixture.script.onWait = () => {
       // A moving quarry reopens geometry, as the failed construction in t00027 did.
-      fixture.target.position.set(fixture.clock.tick % 2 ? 8 : -8, 64, 0.5);
+      fixture.target.position.set(Math.floor(fixture.clock.tick / QUARRY_MOVE_EVERY_TICKS) % 2 ? 8 : -8, 64, 0.5);
       if (fixture.clock.tick >= 1_200) stop.abort("Roof preparation retried past 1200 ticks.");
     };
     const runner = new ActionRunner();
