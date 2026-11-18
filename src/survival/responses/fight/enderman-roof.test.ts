@@ -21,13 +21,14 @@ import { runFightTurn } from "./turn.js";
 import { FightWeapons } from "./weapons.js";
 
 /** A one-cell ledge, four NoAI column occupants, and a lower floor outside the level-only local search. */
-function occupiedLedge(blocks = 32) {
+function occupiedLedge(blocks = 32, ticksPerSecond = 20) {
   const entities: Record<number, FakeEntitySpec> = {
     7: { name: "enderman", position: new Vec3(10.5, 64, 0.5), metadata: { 17: true } },
   };
   for (const [index, [x, z]] of [[1.2, 0], [-1.2, 0], [0, 1.2], [0, -1.2]].entries())
     entities[10 + index] = { name: "cow", position: new Vec3(0.5 + x!, 66, 0.5 + z!), metadata: { 15: 1 } };
-  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), position: new Vec3(0.5, 66, 0.5), groundY: 63,
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond },
+    position: new Vec3(0.5, 66, 0.5), groundY: 63,
     cells: { "0,65,0": "stone" }, carried: { diamond_sword: 1, cobblestone: blocks }, entities, simulatePhysics: true });
   const { bot, clock } = harness;
   const timers = clock.install();
@@ -58,6 +59,22 @@ function occupiedLedge(blocks = 32) {
       timers[Symbol.dispose]();
     },
   };
+}
+
+for (const rate of [20, 10]) {
+  test(`fight observation passes world age to the Enderman window (${rate} tps)`, async () => {
+    const fixture = occupiedLedge(32, rate);
+    try {
+      await fixture.clock.advance(7 * 1_000 / rate);
+      const state = fixture.roof.provokeRoof({ cell: new Vec3(0, 66, 0), placements: [] });
+      assert.equal(state.kind, "provoking");
+      if (state.kind !== "provoking") return;
+      await fixture.clock.advance(53 * 1_000 / rate);
+      assert.equal(fixture.bot.time.age, 24_060);
+      assert.equal(fixture.clock.now(), rate === 20 ? 3_000 : 6_000);
+      assert.equal(state.budget.remaining, 260, "40 complete world ticks, regardless of client tick count");
+    } finally { await fixture.close(); }
+  });
 }
 
 test("a hostile pursuit builds below its occupied ledge, commits hits, and permits the hunt's next selection", async () => {

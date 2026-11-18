@@ -5,7 +5,7 @@ import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
 import { observedEyeHeight } from "../../../world/block-visibility.js";
 import { clearCombatRay } from "../../../world/entity-geometry.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
-import { tickBudgetWallMs } from "../../control/combat/progress.js";
+import { serverPacedWallMs } from "../../../world/world-age.js";
 import { positionThreat } from "../../perception/combat/observations.js";
 import { roofLurePath, type RoofPosition } from "../../positioning/combat/planner.js";
 import type { ProgressBudget } from "../../state/budgets.js";
@@ -40,10 +40,10 @@ export class EndermanFight {
         ? scene.endermanProgress.open("return", scene.targetId, null)
         : null;
   }
-  /** The wait's two bounds as the model reads them: its physics ticks, or the wall time they stand for, whichever came first. */
+  /** Name the credited server ticks and the same paused wall backstop as the engagement ledger. */
   private get waitLimit(): string {
     const ticks = this.scene.policy.combat.enderman_wait_ticks;
-    return `${ticks} ticks or ${tickBudgetWallMs(ticks) / 1000} s`;
+    return `${ticks} server ticks or ${serverPacedWallMs(ticks) / 1000} s`;
   }
   readonly setRoof = (next: EndermanRoof) => {
     const previous = this.state;
