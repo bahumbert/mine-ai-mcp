@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as realDelay } from "node:timers/promises";
-import { createFakeClock, failIfFakeClockLeftInstalled, type FakeClock } from "./fake-clock.js";
+import { createFakeClock, failIfFakeClockLeftInstalled, flush, type FakeClock } from "./fake-clock.js";
 import { installClockForTest } from "./fake-clock-installer-fixture.js";
 
 // The real timer functions, captured before any test installs a clock: the identity checks and the cleanups of the red tests.
@@ -294,4 +294,74 @@ test("a mocked timer cleared while installed never fires on tick", async () => {
   clearTimeout(mockedTimer);
   await clock.advance(200);
   assert.equal(fired, 0);
+});
+
+/** The function the test-start preload calls (`scripts/test-clock-cleanup.ts`): restores a leftover clock and retires every pump still running. */
+const retireLeftoverClocks = (): void => (globalThis as { [key: symbol]: () => void })[Symbol.for("mine-ai.restore-leftover-fake-clock")]?.();
+
+/** Runs `body` with a counter of `unhandledRejection` events (a retired settle must leave its input's rejection handled). */
+async function countingUnhandledRejections(body: () => Promise<void>): Promise<number> {
+  let seen = 0;
+  const count = () => void (seen += 1);
+  process.on("unhandledRejection", count);
+  try {
+    await body();
+  } finally {
+    process.off("unhandledRejection", count);
+  }
+  return seen;
+}
+
+// maxMs 50 is one slice: the old code reaches its `did not settle` throw within the 6 flushes (T9: a retire case must fail on the old code).
+const retiredInputs: { readonly name: string; readonly input: () => Promise<unknown> }[] = [
+  { name: "fulfilled", input: () => Promise.resolve(1) },
+  { name: "rejected", input: () => Promise.reject(new Error("x")) },
+  { name: "pending", input: () => new Promise(() => undefined) },
+];
+
+for (const kind of retiredInputs) {
+  test(`a settle retired during its first flush never settles (${kind.name} input)`, async () => {
+    const clock = createFakeClock({ mode: "manual" });
+    let settled = false;
+    const unhandled = await countingUnhandledRejections(async () => {
+      const outcome = clock.settle(kind.input(), 50);
+      outcome.then(() => void (settled = true), () => void (settled = true));
+      retireLeftoverClocks();
+      for (let turn = 0; turn < 6; turn += 1) await flush();
+    });
+    assert.equal(settled, false);
+    assert.equal(unhandled, 0);
+  });
+}
+
+test("a settle retired between its slices stops pumping, and the retired clock's new advance never settles and fires nothing", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  let slices = 0;
+  clock.onSlice("physics", () => void (slices += 1));
+  let settled = false;
+  const outcome = clock.settle(new Promise(() => undefined), 40_000);
+  outcome.then(() => void (settled = true), () => void (settled = true));
+  while (slices === 0) await flush();
+  let fired = 0;
+  clock.after(50, () => void (fired += 1));
+  retireLeftoverClocks();
+  const at = slices;
+  let advanced = false;
+  clock.advance(100).then(() => void (advanced = true));
+  for (let turn = 0; turn < 5; turn += 1) await flush();
+  assert.ok(slices - at <= 1, `${slices - at} slices ran after the retire`);
+  assert.equal(settled, false);
+  assert.equal(advanced, false);
+  assert.equal(fired, 0);
+});
+
+test("a clock disposed by using and advanced afterwards still advances", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  {
+    using _installed = clock.install();
+    await clock.advance(50);
+  }
+  const before = clock.now();
+  await clock.advance(50);
+  assert.equal(clock.now() - before, 50);
 });

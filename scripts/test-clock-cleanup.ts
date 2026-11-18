@@ -11,6 +11,9 @@
  * clock a file's own `beforeEach` installs is not touched; a clock installed in a `before`/`beforeAll` is (none in the
  * repository: install in the test or in `beforeEach`). `src/test-support/fake-bot/fake-clock.ts` publishes the function
  * to call under the same `Symbol.for` key (`src/` is typechecked with Node types only, so it cannot import this file).
+ * Besides restoring the clock, that function retires every clock a finished test left running an `advance` or `settle`
+ * (a body Bun let run on past its limit): those calls stop and never settle, so an orphan pump cannot throw `did not
+ * settle` or `Invalid state: You should enable MockTimers first` into the next test or file (spec 2026-11-18-unit-reds D1).
  *
  * Loaded by `bunfig.toml` (`[test] preload`) beside `test-limit.ts`, not inside it: a child `bun test` of
  * `fake-clock-timeout.test.ts` loads only this file, so its own `--timeout` stays in force. It lives in `scripts/` for

@@ -27,11 +27,15 @@ export interface FakeClock extends StallClock {
   after(ms: number, fire: () => void): () => void;
   /** Resolve after `ms` of clock (`WorldAgeOptions.sleep`, `DropClock.sleep`); reject with the signal's reason on abort. */
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
-  /** Move time on in `stepMs` slices: timers, server, physics, then the promise queue drained, once per slice. */
+  /**
+   * Move time on in `stepMs` slices: timers, server, physics, then the promise queue drained, once per slice. A clock retired
+   * by the test-start cleanup (its test ended with this call still running) never settles it.
+   */
   advance(ms: number, stepMs?: number): Promise<void>;
   /**
    * Move time on in `stepMs` slices until `promise` settles, then return its value or rethrow its error; reject naming
    * `maxMs` when it is still pending after that much clock. For code under test that waits on this clock while it runs.
+   * A clock retired by the test-start cleanup (its test ended with this call still running) never settles it.
    */
   settle<T>(promise: Promise<T>, maxMs: number, stepMs?: number): Promise<T>;
   /** Run `step` once per slice at `stage`, with the slice's length; the returned function removes it. */
@@ -58,14 +62,53 @@ export interface FakeClock extends StallClock {
 const MOCKED_APIS = ["setTimeout", "setInterval", "Date"] as const;
 
 /** One installed clock at a time: node's mock timers are global, so two would fight over them. `by` is where it was installed (a `file:line`). */
-let installed: { restore(): void; readonly by: string } | null = null;
+let installed: { restore(): void; retire(): void; readonly by: string } | null = null;
+
+/** The retire function of each clock with an `advance` or `settle` running (`inFlight > 0`): the test-start cleanup retires them all. */
+const pumping = new Set<() => void>();
 
 /**
- * Bun fails a test at its time limit and runs no hook of it, so a clock that test had installed is still installed when
- * the next test starts. The preload `scripts/test-clock-cleanup.ts` (`bunfig.toml`) calls this at the start of every
- * test, found under a `Symbol.for` key because `src/` is typechecked with Node types only and cannot import it.
+ * Bun fails a test at its time limit and runs no hook of it, and lets its body run on: a clock that test had installed is
+ * still installed when the next test starts, and an `advance` or `settle` it was awaiting keeps pumping. The preload
+ * `scripts/test-clock-cleanup.ts` (`bunfig.toml`) calls this at the start of every test, found under a `Symbol.for` key
+ * because `src/` is typechecked with Node types only and cannot import it. It restores the leftover installed clock, then
+ * retires it and every clock still running an `advance` or `settle`: those never settle, so an orphan pump stops silently
+ * instead of throwing into whichever test runs next (spec `2026-11-18-unit-reds` D1).
  */
-(globalThis as { [key: symbol]: unknown })[Symbol.for("mine-ai.restore-leftover-fake-clock")] = () => installed?.restore();
+(globalThis as { [key: symbol]: unknown })[Symbol.for("mine-ai.restore-leftover-fake-clock")] = () => {
+  const leftover = installed;
+  leftover?.restore();
+  leftover?.retire();
+  for (const retire of [...pumping]) retire();
+};
+
+/**
+ * One clock's retire flag and its running `advance`/`settle` calls. `retire` is set by the test-start cleanup (or by an outside
+ * reset of the mock timers): every call of that clock then never settles. `track` counts a call as running from its
+ * synchronous start to its end (a `settle`'s own `advance` counts apart), and keeps `retire` in `pumping` meanwhile.
+ */
+function pumpTracker(): { readonly retire: () => void; readonly isRetired: () => boolean; readonly track: <T>(run: () => Promise<T>) => Promise<T> } {
+  let retired = false;
+  let inFlight = 0;
+  const retire = () => {
+    retired = true;
+    pumping.delete(retire);
+  };
+  const track = <T>(run: () => Promise<T>): Promise<T> => {
+    inFlight += 1;
+    if (!retired) pumping.add(retire);
+    return run().finally(() => {
+      inFlight -= 1;
+      if (inFlight === 0) pumping.delete(retire);
+    });
+  };
+  return { retire, isRetired: () => retired, track };
+}
+
+/** A promise that never settles: what a retired clock's `advance` and `settle` return, so the orphan body that awaits it just stays suspended. */
+function parked<T>(): Promise<T> {
+  return new Promise<T>(() => undefined);
+}
 
 /** The `file:line` of the test that called `install()`: the first stack frame in a `*.test.ts` file (a shared helper may call `install()` for it), else the first frame outside this file. */
 function installerOfThisCall(): string {
@@ -178,14 +221,46 @@ function installRefusal(mode: FakeClockOptions["mode"]): () => void {
   };
 }
 
+/** `stepWallClock`: moves the mock `Date.now` by the sum of the steps; `undo` gives the mock's own `Date.now` back and forgets the steps. */
+function wallStepper(): { readonly step: (deltaMs: number) => void; readonly undo: () => void } {
+  let undoStep: (() => void) | null = null;
+  let offsetMs = 0;
+  return {
+    step(deltaMs) {
+      if (undoStep === null) {
+        const mockDate = Date;
+        const ownNow = mockDate.now;
+        mockDate.now = () => ownNow.call(mockDate) + offsetMs;
+        undoStep = () => {
+          mockDate.now = ownNow;
+        };
+      }
+      offsetMs += deltaMs;
+    },
+    undo() {
+      undoStep?.();
+      undoStep = null;
+      offsetMs = 0;
+    },
+  };
+}
+
+/** One slice after the clock moved: the timers due, then the server stage, then the physics stage. */
+function runSlice(timers: Set<ClockTimer>, stages: Record<SliceStage, Set<(sliceMs: number) => void>>, now: number, sliceMs: number): void {
+  fireDueTimers(timers, now);
+  for (const step of [...stages.server]) step(sliceMs);
+  for (const step of [...stages.physics]) step(sliceMs);
+}
+
 export function createFakeClock(options: FakeClockOptions): FakeClock {
   const startMs = options.startMs ?? 0;
   let elapsed = 0;
   let ownsGlobals = false;
+  /** The mock `Date` right after `install()`: Bun's reset of the mock timers between files shows as `globalThis.Date` being another. */
+  let mockDate: DateConstructor | null = null;
+  const pump = pumpTracker();
   const refuseInstall = installRefusal(options.mode);
-  /** Set while a wall step is in force: gives the mock `Date.now` back. */
-  let undoWallSteps: (() => void) | null = null;
-  let wallOffsetMs = 0;
+  const wall = wallStepper();
   const timers = new Set<ClockTimer>();
   const stages: Record<SliceStage, Set<(sliceMs: number) => void>> = { server: new Set(), physics: new Set() };
   const now = () => startMs + elapsed;
@@ -199,22 +274,29 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
     every: (tick, ms) => schedule({ due: now() + ms, fire: tick, periodMs: Math.max(1, ms) }),
     after: (ms, fire) => schedule({ due: now() + ms, fire }),
     sleep: (ms, signal) => sleepOnClock(clock, ms, signal),
-    async advance(ms, stepMs = 50) {
+    advance: (ms, stepMs = 50) => pump.track(async () => {
       if (!(ms >= 0) || !(stepMs > 0)) throw new RangeError(`advance(${ms}, ${stepMs}): ms >= 0 and stepMs > 0`);
+      if (pump.isRetired()) return parked<void>();
       // What the test started before advancing (a dig's look, a packet) runs at the time it was started.
       await flush();
       for (let passed = 0; passed < ms; ) {
+        if (pump.isRetired()) return parked<void>();
+        if (ownsGlobals && globalThis.Date !== mockDate) {
+          // Bun reset the mock timers under this pump (between files): `tick` would throw `Invalid state`, so stop silently.
+          installed?.restore();
+          pump.retire();
+          return parked<void>();
+        }
         const sliceMs = Math.min(stepMs, ms - passed);
         passed += sliceMs;
         elapsed += sliceMs;
         if (ownsGlobals) mock.timers.tick(sliceMs);
-        fireDueTimers(timers, now());
-        for (const step of [...stages.server]) step(sliceMs);
-        for (const step of [...stages.physics]) step(sliceMs);
+        runSlice(timers, stages, now(), sliceMs);
         await flush();
       }
-    },
-    settle: (promise, maxMs, stepMs = 50) => settleOnClock(clock, promise, maxMs, stepMs),
+      if (pump.isRetired()) return parked<void>();
+    }),
+    settle: (promise, maxMs, stepMs = 50) => pump.track(() => settleOnClock(clock, promise, maxMs, stepMs, pump.isRetired)),
     onSlice(stage, step) {
       stages[stage].add(step);
       return () => void stages[stage].delete(step);
@@ -223,15 +305,7 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
     stepWallClock(deltaMs) {
       if (options.mode !== "mocked") throw new Error("a manual fake clock has no Date to step: create it with mode mocked");
       if (!ownsGlobals) throw new Error("this fake clock is not installed: install it (`using installed = clock.install()`) before stepping its wall clock");
-      if (undoWallSteps === null) {
-        const mockDate = Date;
-        const ownNow = mockDate.now;
-        mockDate.now = () => ownNow.call(mockDate) + wallOffsetMs;
-        undoWallSteps = () => {
-          mockDate.now = ownNow;
-        };
-      }
-      wallOffsetMs += deltaMs;
+      wall.step(deltaMs);
     },
     install() {
       refuseInstall();
@@ -239,13 +313,13 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
       if (installed !== null) throw new Error(`a fake clock is already installed by ${installed.by}: dispose it (\`using installed = clock.install()\`) before installing another`);
       const restoreGlobals = installGlobals(now);
       ownsGlobals = true;
+      mockDate = globalThis.Date;
       const handle = {
         by,
+        retire: pump.retire,
         restore() {
           if (installed !== handle) return;
-          undoWallSteps?.();
-          undoWallSteps = null;
-          wallOffsetMs = 0;
+          wall.undo();
           restoreGlobals();
           ownsGlobals = false;
           installed = null;
@@ -259,15 +333,22 @@ export function createFakeClock(options: FakeClockOptions): FakeClock {
   return clock;
 }
 
-/** `FakeClock.settle`: one slice at a time, so the clock stops in the slice the promise settled in. */
-async function settleOnClock<T>(clock: FakeClock, promise: Promise<T>, maxMs: number, stepMs: number): Promise<T> {
+/**
+ * `FakeClock.settle`: one slice at a time, so the clock stops in the slice the promise settled in. The handlers go on the
+ * input first, so a retired settle (never settles: `isRetired`, checked at entry, after the first flush and before the
+ * outcome is read) leaves no unhandled rejection of its input.
+ */
+async function settleOnClock<T>(clock: FakeClock, promise: Promise<T>, maxMs: number, stepMs: number, isRetired: () => boolean): Promise<T> {
   let outcome: { readonly value: T } | { readonly error: unknown } | null = null;
   promise.then(
     (value) => void (outcome = { value }),
     (error: unknown) => void (outcome = { error }),
   );
+  if (isRetired()) return parked<T>();
   await flush();
+  if (isRetired()) return parked<T>();
   for (let passed = 0; outcome === null && passed < maxMs; passed += stepMs) await clock.advance(Math.min(stepMs, maxMs - passed), stepMs);
+  if (isRetired()) return parked<T>();
   const settled = outcome as { readonly value: T } | { readonly error: unknown } | null;
   if (settled === null) throw new Error(`the promise did not settle within ${maxMs} ms of clock`);
   if ("error" in settled) throw settled.error;
