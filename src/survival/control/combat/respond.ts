@@ -8,7 +8,7 @@ import { responsePolicyChanged } from "../../policy/combat/permissions.js";
 import type { HostileDirective, HostileResponse } from "../../policy/combat/response.js";
 import { deflectFireball } from "../../responses/deflect.js";
 import { evade } from "../../responses/evade.js";
-import { hideInPlace } from "../../responses/hide.js";
+import { hideInPlace, type HideOptions } from "../../responses/hide.js";
 import { contextPolicy, type ResponseContext } from "./context.js";
 import type { CombatController, CombatOutcome } from "./contract.js";
 import {
@@ -36,6 +36,12 @@ import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline, type Server
  * once the target left reach (P4-29 a5 C2); any other fight on such a target holds its shield until its limits.
  */
 export const CONTACT_GRACE_TICKS = 20;
+
+/** A caller-owned recovery hold can refine a hide without bypassing its occupied-shell follow-up. */
+export type HostileResponseRequest = Exclude<HostileResponse, { kind: "hide" }> |
+  (Extract<HostileResponse, { kind: "hide" }> & {
+    readonly recovery?: Pick<HideOptions, "recoverTo" | "maximumMs" | "holdWhile">;
+  });
 
 /**
  * Keep blast clearance during contact loss, but a missing quarry cannot hold the body beyond its stand-down window of
@@ -202,7 +208,7 @@ async function hide(
   bot: Bot,
   navigation: NavigationRuntime,
   controller: CombatController,
-  request: Extract<HostileDirective, { kind: "hide" }>,
+  request: Extract<HostileResponseRequest, { kind: "hide" }>,
   context: ResponseContext,
   healthBefore: number,
   signal: AbortSignal,
@@ -213,6 +219,7 @@ async function hide(
     threatContext: context,
     recoverTo: recoveryHealth(context.policy),
     maximumMs: context.policy.recovery_timeout_ms,
+    ...request.recovery,
   });
   signal.throwIfAborted();
   const followUp = bot.health > 0 && result.kind === "failed" && result.refusal?.cause === "occupied"
@@ -268,7 +275,7 @@ export async function executeHostileResponse(
   bot: Bot,
   navigation: NavigationRuntime,
   controller: CombatController,
-  request: HostileResponse,
+  request: HostileResponseRequest,
   context: ResponseContext,
   healthBefore: number,
   signal: AbortSignal,

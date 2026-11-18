@@ -2,6 +2,8 @@ import { isBurning, isInFire } from "../../../src/survival/perception/body.ts";
 import { z } from "zod";
 import { openRuntime, standStill } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
+import { waitForServerPaced } from "../../../src/world/server-paced.ts";
+import { waitForServerTicks } from "../../../src/world/world-age.ts";
 
 /** Fire appears under an idle body, as it did just after the fortress route settled. */
 export const run: MineAiScenario = async (context) => {
@@ -34,16 +36,17 @@ export const run: MineAiScenario = async (context) => {
     // This only arranges when the hazard appears. The verdict requires no
     // particular response, claim count, route, weapon or construction tactic.
     while (duringCombat && (runtime.status().survival.owner.current !== "hostile_reflex" || !bot.entity.onGround)) {
-      signal.throwIfAborted();
-      await bot.waitForTicks(1);
+      const ready = await waitForServerTicks(bot, 1, {
+        signal, until: () => died || (runtime.status().survival.owner.current === "hostile_reflex" && bot.entity.onGround),
+      });
+      if (died || ready === "stalled") throw new Error(`Fire-contact combat arrangement ended: ${died ? "death" : ready}.`);
     }
     const source = bot.entity.position.floored();
     bot.chat(`/setblock ${source.x} ${source.y} ${source.z} soul_fire`);
     // Observe through vanilla's residual burn, not just the first movement.
-    for (let tick = 0; tick < 240 && !died; tick++) {
-      signal.throwIfAborted();
-      await bot.waitForTicks(1);
-    }
+    const observation = await waitForServerPaced(bot, 240, { until: () => died, signal });
+    if (observation !== "ticks" && observation !== "until")
+      throw new Error(`Fire-contact observation ended without 240 server ticks: ${observation}.`);
     const navigation = await pending;
     return {
       status:
