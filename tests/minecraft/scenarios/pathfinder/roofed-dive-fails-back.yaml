@@ -47,9 +47,9 @@ tick:
 
 params:
   actions:
-    # Eight ticks on the pool floor first: the server reports the falling air, as it had for Sana. Up to the surface,
-    # where the head is in air...
-    - { action: navigate, waitTicks: 8, input: { x: -3, y: -60, z: 0, range: 1, dig: false, scaffold: false } }
+    # Eight server ticks (and the driver's packet of margin) on the pool floor first: the server reports the falling air,
+    # as it had for Sana. Up to the surface, where the head is in air...
+    - { action: navigate, waitServerTicks: 8, input: { x: -3, y: -60, z: 0, range: 1, dig: false, scaffold: false } }
     # ...then the route dives into the roofed tunnel toward its end and is cut off.
     - { action: navigate, input: { x: 5, y: -61, z: 0, range: 1, dig: false, scaffold: false }, expect: failed }
 
