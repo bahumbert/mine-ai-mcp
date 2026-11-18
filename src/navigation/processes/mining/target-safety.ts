@@ -179,10 +179,11 @@ export function evaluateMineTarget(
   const evaluation = movements.evaluateBreak(observeMineflayerBlock(block), position, world);
   const decision = evaluation.decision;
   const floodRule = decision.kind === "prohibited" && decision.cause === "opens_into_liquid";
-  if (decision.kind === "prohibited" && !floodRule) {
-    const above = world.blockAt(position.x, position.y + 1, position.z);
-    return { kind: "prohibited", reason: decision.reason,
-      ...(breakRefusalCause(decision) === "under_water" && above.kind === "loaded" && cellHoldsWater(above) && { underWater: true as const }) };
+  const above = world.blockAt(position.x, position.y + 1, position.z);
+  const drainAbove = decision.kind === "prohibited" && breakRefusalCause(decision) === "under_water" &&
+    above.kind === "loaded" && cellHoldsWater(above);
+  if (decision.kind === "prohibited" && !floodRule && !drainAbove) {
+    return { kind: "prohibited", reason: decision.reason };
   }
   const below = world.blockAt(position.x, position.y - 1, position.z);
   const needsIsolation = floodRule || (below.kind === "loaded" && below.traits.liquid === "water");

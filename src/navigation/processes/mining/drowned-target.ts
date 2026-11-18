@@ -8,6 +8,7 @@ import { findPlacementSupport } from "../../../world/placement.js";
 import { isPassable, isSafeSupport } from "../../world/block-geometry.js";
 import { cellHoldsWater } from "../../world/deep-water.js";
 import type { BlockPosition, WorldView } from "../../world/world.js";
+import { waterOccupancy } from "../../world/water.js";
 import { touching } from "./mining-water.js";
 
 export const IN_WATER_PREFIX = "in water: ";
@@ -36,17 +37,19 @@ export function hasWetFace(world: WorldView, position: BlockPosition): boolean {
   return wetFaces(world, position).length > 0;
 }
 
-/** A supported, loaded stance with passable dry feet and head. */
-function isDryStance(world: WorldView, cell: BlockPosition): boolean {
+/** A dry stance or a supported wade outside the faces the drain must fill. */
+function isDrainStance(world: WorldView, cell: BlockPosition, faceKeys: ReadonlySet<string>): boolean {
   const feet = world.blockAt(cell.x, cell.y, cell.z);
   const head = world.blockAt(cell.x, cell.y + 1, cell.z);
+  if (feet.kind === "loaded" && feet.traits.liquid === "water" && !feet.traits.liquidSource && !faceKeys.has(cellKey(cell)) &&
+    waterOccupancy((x, y, z) => world.blockAt(x, y, z), cell.x, cell.y, cell.z) === "surface") return true;
   return feet.kind === "loaded" && head.kind === "loaded" &&
     isPassable(feet) && isPassable(head) && !cellHoldsWater(feet) && !cellHoldsWater(head) &&
     feet.traits.liquid !== "lava" && head.traits.liquid !== "lava" &&
     isSafeSupport(world.blockAt(cell.x, cell.y - 1, cell.z));
 }
 
-/** Check replaceability, dry ground and the shared water/lava placement budget before any route. */
+/** Check replaceability, a usable drain stance and the shared water/lava budget before any route. */
 export function drownedVerdict(
   bot: Bot, world: WorldView, position: BlockPosition, availableBlocks: number, closures: number,
 ): DrownedVerdict {
@@ -61,7 +64,8 @@ export function drownedVerdict(
   const stances = WORKING_OFFSETS.map((offset) => ({
     x: position.x + offset.x, y: position.y + offset.y, z: position.z + offset.z,
   }));
-  const wetStances = stances.filter((cell) => !isDryStance(world, cell));
+  const faceKeys = new Set(faces.map(cellKey));
+  const wetStances = stances.filter((cell) => !isDrainStance(world, cell, faceKeys));
   if (wetStances.length === stances.length) {
     return { kind: "refused", reason: `${IN_WATER_PREFIX}no dry ground beside it to drain it from` };
   }
