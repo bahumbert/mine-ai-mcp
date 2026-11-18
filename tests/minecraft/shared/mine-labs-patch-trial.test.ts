@@ -3,6 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { parseClientEvent } from "../../../node_modules/mine-labs/src/client/protocol.ts";
 import * as mineLabs from "mine-labs";
 import * as goalRunner from "../../../node_modules/mine-labs/src/trial/run.ts";
 import * as goals from "../../../node_modules/mine-labs/src/trial/goals.ts";
@@ -876,4 +879,104 @@ test("stillTicks accepts positive root integers only", () => {
   for (const stillTicks of [1, 520]) assert.equal(parse({ kind: "completion", stillTicks }).success, true);
   for (const stillTicks of [0, -1, 1.5]) assert.equal(parse({ kind: "completion", stillTicks }).success, false);
   assert.equal(parse({ kind: "all", goals: [{ kind: "completion", stillTicks: 1 }] }).success, false);
+});
+
+/** In-memory stdio runs the real parser/dispatcher without an unrelated OS process wait. */
+function progressClientAhead(startupProgress: boolean) {
+  const stdout = new PassThrough();
+  const stdin = new PassThrough();
+  const child = Object.assign(new EventEmitter(), { stdin, stdout, stderr: new PassThrough(), exitCode: null as number | null, signalCode: null });
+  let sink: Parameters<mineLabs.ClientAhead["takeOver"]>[0] | undefined;
+  const lines: mineLabs.ClientOutputLine[] = [];
+  const closed = Promise.withResolvers<void>();
+  const send = (reason = "hit") => {
+    const entry = { stream: "stdout" as const, line: JSON.stringify({ type: "progress", reason }) };
+    if (sink) sink(entry); else lines.push(entry);
+  };
+  stdin.on("data", data => {
+    const command = JSON.parse(String(data));
+    if (command.type === "init") sink?.({ stream: "stdout", line: '{"type":"ready"}' });
+    if (command.type === "arranged") { send("before-start"); sink?.({ stream: "stdout", line: '{"type":"prepared"}' }); }
+    if (command.type === "start" && startupProgress) send("started");
+    if (command.type === "stop") {
+      send("after-stop");
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+      closed.resolve();
+    }
+  });
+  const ahead: mineLabs.ClientAhead = {
+    child: child as unknown as mineLabs.ClientAhead["child"], closed: closed.promise,
+    spawnError: () => undefined, recentOutput: () => lines,
+    takeOver(next) { sink = next; for (const line of lines.splice(0)) next(line); return 0; },
+  };
+  send("before-handover");
+  return { ahead, send };
+}
+
+/** Full trial wiring, with server time and watchdog waits on the shared fake clock. */
+async function progressTrial(options: { rate: number; events?: readonly [number, string][]; stopped?: boolean; startupProgress?: boolean }) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const serverClock = createFakeServer(clock, { ticksPerSecond: options.rate, startAge: 0 });
+  const client = progressClientAhead(options.startupProgress ?? false);
+  let started = false;
+  let event = 0;
+  const rcon = new RecordingRcon();
+  Object.assign(rcon, { playerOnline: async () => true, preparePlayerMetrics: async () => {} });
+  rcon.command = async command => {
+    const tick = serverClock.gameTime;
+    if (started) while (event < (options.events?.length ?? 0) && options.events![event]![0] <= tick) client.send(options.events![event++]![1]);
+    return command === "time query gametime" ? `The time is ${tick}` : "Actor has the following entity data: [0.5d, -60.0d, 0.5d]";
+  };
+  const root = await mkdtemp("/dev/shm/mine-labs-progress-");
+  const logs: string[] = [];
+  const running = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const fixture = mineLabs.scenarioSchema.parse({ client: { command: "unused" }, players: [{ name: "Actor" }], goal: { kind: "completion", timeout: 120 } });
+  const trial = mineLabs.runScenarioTrial({
+    scenario: fixture, server: neverStartedServer(join(root, "world"), rcon), runDir: root,
+    arrangeSettleMs: 0, settle: async () => {}, clientProvider: () => client.ahead,
+    onStarted: () => { running.resolve(); return release.promise; }, log: line => logs.push(line),
+  });
+  try {
+    await Promise.race([running.promise, trial.then(result => { throw new Error(`trial ended before start: ${JSON.stringify(result)}`); })]);
+    using _timers = clock.install();
+    started = true;
+    if (options.stopped) serverClock.stop();
+    release.resolve();
+    const result = await clock.settle(trial, 180_000, 250);
+    const tick = serverClock.gameTime;
+    const wall = clock.now();
+    const atEnd = logs.filter(line => line.startsWith("progress:"));
+    client.send("after-teardown");
+    await clock.advance(31_000);
+    assert.deepEqual(logs.filter(line => line.startsWith("progress:")), atEnd, "late events and old watchdog deadlines have no effect");
+    assert.equal(clock.pendingGlobalTimers(), 0);
+    return { result, logs, tick, wall };
+  } finally { release.resolve(); serverClock.stop(); await rm(root, { recursive: true, force: true }); }
+}
+
+test("client progress preserves still, throttle, handoff and stopped-clock behavior at both rates", async () => {
+  const cases: { name: string; options: Omit<Parameters<typeof progressTrial>[0], "rate">; tick: number; reasons: string[] }[] = [
+    { name: "encoded handoff progress through 1200 ticks", options: { startupProgress: true, events: [[400, "hit"], [800, "hit"], [1200, "hit"]] }, tick: 1720, reasons: ["started", "hit", "hit", "hit"] },
+    { name: "independent log throttle; suppressed event at 435 resets", options: { events: [[400, "hit"], [400, "healed"], [415, "hit"], [420, "hit"], [435, "hit"]] }, tick: 955, reasons: ["hit", "healed", "hit"] },
+    { name: "old client", options: {}, tick: 520, reasons: [] },
+    { name: "stopped server", options: { stopped: true, events: [[0, "hit"]] }, tick: 0, reasons: ["hit"] },
+  ];
+  for (const rate of [20, 10]) for (const row of cases) {
+    const { result, tick, wall, logs } = await progressTrial({ rate, ...row.options });
+    const label = `${row.name}, ${rate} tps: ${wall} fake ms`;
+    assert.equal(result.outcome, row.options.stopped ? "timeout" : "fail", label);
+    assert.equal(tick, row.tick, label);
+    assert.equal(wall, row.options.stopped ? 30_000 : row.tick * 1000 / rate, label);
+    assert.match(logs.at(-1)!, row.options.stopped ? /stood still for 30000 ms/u : /no progress for 520 game ticks/u, label);
+    assert.deepEqual(logs.filter(line => line.startsWith("progress:")), row.reasons.map(reason => `progress: ${reason}`), label);
+  }
+});
+
+test("progress reason accepts 1 through 64 characters; malformed and unknown events remain refused", () => {
+  for (const reason of ["x", "x".repeat(64)]) assert.deepEqual(parseClientEvent(JSON.stringify({ type: "progress", reason })), { type: "progress", reason });
+  for (const event of [{ type: "progress", reason: "" }, { type: "progress", reason: "x".repeat(65) }, { type: "unknown", reason: "x" }]) {
+    assert.throws(() => parseClientEvent(JSON.stringify(event)));
+  }
 });
