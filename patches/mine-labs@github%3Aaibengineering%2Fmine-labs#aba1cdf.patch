@@ -888,8 +888,103 @@ index 05d608a7f027d3622f07ef54fff29b119dfa01b5..50bae723303a7e655ffe960524f83141
  }
  
  /** Parse both bracketed older responses and Minecraft 1.21.4's comma-separated tag response. */
+diff --git a/src/scenario/compile.test.ts b/src/scenario/compile.test.ts
+index 8f0f652646a1eff091dcd65d461c63e170de9625..2829d732cd2e14aa447ff0df1e182882c04f3157 100644
+--- a/src/scenario/compile.test.ts
++++ b/src/scenario/compile.test.ts
+@@ -105,11 +105,11 @@ test("an arena with no declared reset is snapshotted and restored verbatim", ()
+   // Both halves raise the block limit themselves: `save` runs before the setup
+   // list, so it cannot rely on the gamerule that list sets.
+   assert.deepEqual(snapshot.save, [
+-    "gamerule commandModificationBlockLimit 1000000",
++    "gamerule commandModificationBlockLimit 32768",
+     "clone -8 -64 -8 20 -43 20 532 -64 -8",
+   ]);
+   assert.deepEqual(snapshot.restore, [
+-    "gamerule commandModificationBlockLimit 1000000",
++    "gamerule commandModificationBlockLimit 32768",
+     "clone 532 -64 -8 560 -43 20 -8 -64 -8",
+   ]);
+ });
+@@ -132,17 +132,6 @@ test("the scratch copy never overlaps the arena it backs up", () => {
+   }
+ });
+ 
+-test("an explicit reset still snapshots client block changes", () => {
+-  const scenario = scenarioSchema.parse({
+-    name: "self-cleaning",
+-    client: { command: "test-client" },
+-    reset: ["fill -8 -59 -8 8 -40 8 air"],
+-    geometry: [{ setblock: { block: "stone", at: [0, -59, 0] } }],
+-    goal: { kind: "survive", seconds: 1 },
+-  });
+-  assert.ok(compileScenario(scenario).snapshot);
+-});
+-
+ test("entity-only resets and fractional player coordinates retain a restorable arena", () => {
+   const scenario = scenarioSchema.parse({
+     name: "fractional-arena", client: { command: "test-client" },
+@@ -158,17 +147,48 @@ test("entity-only resets and fractional player coordinates retain a restorable a
+   assert.equal(compiled.region?.maxZ, 8);
+ });
+ 
+-test("large arenas permit snapshots beyond one million blocks", () => {
+-  const scenario = scenarioSchema.parse({
+-    name: "progression-snapshot", client: { command: "test-client" },
+-    reset: ["fill -64 -64 -64 96 -40 64 air"],
+-    goal: { kind: "survive", seconds: 1 },
++for (const [name, reset] of [
++    ["large", "fill -58 -60 -40 58 -40 40 air"],
++    ["wide-section", "fill 0 -60 -800 0 250 800 air"],
++    ["small", "fill -16 -60 -18 16 -40 18 air"],
++    ["million", "fill -64 -64 -64 96 -40 64 air"],
++  ]) {
++  test(`${name} snapshot clones cover the arena in bounded non-overlapping boxes`, () => {
++    const maxCandidate = 131072;
++    const { region, snapshot } = compileScenario(scenarioSchema.parse({
++      name, client: { command: "test-client" }, reset: [reset], goal: { kind: "survive", seconds: 1 },
++    }));
++    assert.ok(region && snapshot);
++    const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
++    if (name === "large") assert.equal(volume, 528941);
++    if (name === "small") assert.equal(volume, 106477);
++    if (name === "million") assert.ok(volume > 1000000);
++    if (name === "wide-section") assert.ok((region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1) > maxCandidate);
++    const boxes = snapshot.save.filter((line) => line.startsWith("clone ")).map((line) => {
++      const numbers = line.split(" ").slice(1).map(Number);
++      const [x1, y1, z1, x2, y2, z2] = numbers as [number, number, number, number, number, number];
++      return { x1, y1, z1, x2, y2, z2, volume: (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1) };
++    });
++    const saves = snapshot.save.filter((line) => line.startsWith("clone "));
++    const restores = snapshot.restore.filter((line) => line.startsWith("clone "));
++    assert.equal(restores.length, saves.length);
++    for (const [i, command] of saves.entries()) {
++      const [x1, y1, z1, x2, y2, z2, sx, sy, sz] = command.split(" ").slice(1).map(Number) as [number, number, number, number, number, number, number, number, number];
++      assert.equal(restores[i], `clone ${sx} ${sy} ${sz} ${sx + x2 - x1} ${sy + y2 - y1} ${sz + z2 - z1} ${x1} ${y1} ${z1}`);
++    }
++    assert.ok(boxes.every((b) => b.volume <= maxCandidate), `${name}: oversized clone`);
++    for (const [i, a] of boxes.entries()) {
++      assert.ok(a.x1 >= region.minX && a.x2 <= region.maxX && a.y1 >= region.minY && a.y2 <= region.maxY && a.z1 >= region.minZ && a.z2 <= region.maxZ);
++      for (const b of boxes.slice(i + 1)) {
++        assert.ok(a.x2 < b.x1 || b.x2 < a.x1 || a.y2 < b.y1 || b.y2 < a.y1 || a.z2 < b.z1 || b.z2 < a.z1, `${name}: overlapping clones`);
++      }
++    }
++    assert.equal(boxes.reduce((sum, b) => sum + b.volume, 0), volume);
++    if (name === "small") assert.equal(boxes.length, 1);
++    assert.equal(snapshot.save[0], `gamerule commandModificationBlockLimit ${Math.max(32768, ...boxes.map((b) => b.volume))}`);
++    assert.equal(snapshot.restore[0], snapshot.save[0]);
+   });
+-  const { snapshot } = compileScenario(scenario);
+-  assert.ok(snapshot);
+-  assert.equal(snapshot.save[0], "gamerule commandModificationBlockLimit 1052265");
+-  assert.equal(snapshot.restore[0], snapshot.save[0]);
+-});
++}
+ 
+ test("a Nether scenario points every world edit at the Nether and leaves server settings bare", () => {
+   const scenario = scenarioSchema.parse({
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
-index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609b609f116 100644
+index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..a82d2eb748122ab4878ef1c115992c0e4c5a6e6d 100644
 --- a/src/scenario/compile.ts
 +++ b/src/scenario/compile.ts
 @@ -17,7 +17,7 @@ import { join } from "node:path";
@@ -948,7 +1043,16 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
    const dimensions = [...new Set(regions.map((region) => region.dimension))];
    return dimensions.map((dimension) => inDimension(dimension, "forceload remove all"));
  }
-@@ -165,6 +194,21 @@ const ALLOW_LARGE_FIXTURE_COMMANDS = "gamerule commandModificationBlockLimit 100
+@@ -150,6 +179,8 @@ const BUILD_LIMITS: Record<Dimension, { minY: number; maxY: number }> = {
+ // is added to the arena's own width so they cannot, at any arena size.
+ const SCRATCH_GAP = 512;
+ 
++// Restore clones measured at load1 8.06, n=5: 131072 blocks max 381.13 ms.
++const SNAPSHOT_SLAB_BLOCKS = 131072;
+ 
+ // Scenario arenas can exceed vanilla's 32,768-block /fill ceiling. Setup and
+ // teardown happen outside the measured trial, so allow one command to cover a
+@@ -165,6 +196,21 @@ const ALLOW_LARGE_FIXTURE_COMMANDS = "gamerule commandModificationBlockLimit 100
  // it silences — so this does not affect anything `Rcon` reads back.
  const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
  
@@ -970,7 +1074,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  /**
   * Turn a scenario into world-mutation commands:
   * - geometry/setup → rcon setup commands (runs once, right after boot)
-@@ -172,12 +216,20 @@ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
+@@ -172,12 +218,20 @@ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
   * - scenario.tick → a datapack with a `#minecraft:tick` function so commands
   *   fire reliably every tick (rcon spam would starve the server loop)
   */
@@ -993,7 +1097,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  
    for (const g of s.geometry) {
      if ("fill" in g) {
-@@ -209,15 +261,15 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -209,15 +263,15 @@ export function compileScenario(s: Scenario): CompiledScenario {
  
    // Entities first: the reset clears blocks, and anything the scenario summoned
    // would otherwise be left standing in the cleared space.
@@ -1014,7 +1118,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  
    return { setup, activation, teardown, region, snapshot };
  }
-@@ -237,17 +289,17 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -237,17 +291,36 @@ export function compileScenario(s: Scenario): CompiledScenario {
   * setup list, so it cannot rely on the gamerule that list sets, and a 32,768
   * block default would silently truncate the copy of a large arena.
   */
@@ -1022,21 +1126,44 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
 +function arenaSnapshot(region: SetupRegion | null, raiseBlockLimit: boolean): ArenaSnapshot | null {
    if (!region) return null;
    const scratch = scratchRegion(region);
-   // Snapshot the actual expanded arena, which can exceed the setup fill size.
-   const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
+-  // Snapshot the actual expanded arena, which can exceed the setup fill size.
+-  const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
 -  const allowSnapshot = `gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`;
-+  const allowSnapshot = raiseBlockLimit ? [`gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`] : [];
-   const arenaBox = `${region.minX} ${region.minY} ${region.minZ} ${region.maxX} ${region.maxY} ${region.maxZ}`;
-   const scratchBox = `${scratch.minX} ${scratch.minY} ${scratch.minZ} ${scratch.maxX} ${scratch.maxY} ${scratch.maxZ}`;
+-  const arenaBox = `${region.minX} ${region.minY} ${region.minZ} ${region.maxX} ${region.maxY} ${region.maxZ}`;
+-  const scratchBox = `${scratch.minX} ${scratch.minY} ${scratch.minZ} ${scratch.maxX} ${scratch.maxY} ${scratch.maxZ}`;
++  const save: string[] = [];
++  const restore: string[] = [];
++  let largest = 32768;
++  // Split the x slabs first; when a whole y-z section is too large, split z,
++  // then y, so even a section wider than the cap cannot make an oversized box.
++  const yStep = Math.min(region.maxY - region.minY + 1, SNAPSHOT_SLAB_BLOCKS);
++  for (let y = region.minY; y <= region.maxY; y += yStep) {
++    const yEnd = Math.min(y + yStep - 1, region.maxY);
++    const height = yEnd - y + 1;
++    const zStep = Math.min(region.maxZ - region.minZ + 1, Math.floor(SNAPSHOT_SLAB_BLOCKS / height));
++    for (let z = region.minZ; z <= region.maxZ; z += zStep) {
++      const zEnd = Math.min(z + zStep - 1, region.maxZ);
++      const depth = zEnd - z + 1;
++      const xStep = Math.floor(SNAPSHOT_SLAB_BLOCKS / (height * depth));
++      for (let x = region.minX; x <= region.maxX; x += xStep) {
++        const xEnd = Math.min(x + xStep - 1, region.maxX);
++        const scratchX = scratch.minX + x - region.minX;
++        largest = Math.max(largest, (xEnd - x + 1) * height * depth);
++        save.push(inDimension(region.dimension, `clone ${x} ${y} ${z} ${xEnd} ${yEnd} ${zEnd} ${scratchX} ${y} ${z}`));
++        restore.push(inDimension(region.dimension, `clone ${scratchX} ${y} ${z} ${scratchX + xEnd - x} ${yEnd} ${zEnd} ${x} ${y} ${z}`));
++      }
++    }
++  }
++  const allowSnapshot = raiseBlockLimit ? [`gamerule commandModificationBlockLimit ${largest}`] : [];
    return {
 -    save: [allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
 -    restore: [allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
-+    save: [...allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
-+    restore: [...allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
++    save: [...allowSnapshot, ...save],
++    restore: [...allowSnapshot, ...restore],
      pin: [region, scratch],
    };
  }
-@@ -414,3 +466,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
+@@ -414,3 +487,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
      JSON.stringify({ values: [`${ns}:tick`] }, null, 2),
    );
  }

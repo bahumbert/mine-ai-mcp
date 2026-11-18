@@ -341,18 +341,73 @@ const UNEDITED_SNAPSHOT_FILES = new Set(
   SNAPSHOT_FILES.filter((file) => createHash("sha256").update(readFileSync(join(import.meta.dirname, "../../..", file))).digest("hex") === COMPILE_SNAPSHOT[file]!.sha256),
 );
 
-describe("without arena options compileScenario returns what the unpatched package returned for the scenarios not edited since", () => {
+type Compiled = ReturnType<typeof mineLabs.compileScenario>;
+const SNAPSHOT_BOX_CAP = 131072;
+
+/** Keep the pristine oracle for all fields except the deliberately changed clone commands. */
+function withoutSnapshotCommands(compiled: Compiled): Compiled {
+  return { ...compiled, snapshot: compiled.snapshot && { ...compiled.snapshot, save: [], restore: [] } };
+}
+
+type Clone = { source: [number, number, number, number, number, number]; destination: [number, number, number] };
+function parseClone(command: string, dimension: string): Clone {
+  const prefix = dimension === "overworld" ? "clone " : `execute in minecraft:${dimension} run clone `;
+  assert.ok(command.startsWith(prefix), command);
+  const coordinates = command.slice(prefix.length).split(" ").map(Number);
+  assert.equal(coordinates.length, 9, command);
+  assert.ok(coordinates.every(Number.isInteger), command);
+  return { source: coordinates.slice(0, 6) as Clone["source"], destination: coordinates.slice(6) as Clone["destination"] };
+}
+
+function assertSnapshotBoxes(compiled: Compiled): void {
+  const { region, snapshot } = compiled;
+  if (!region) { assert.equal(snapshot, null); return; }
+  assert.ok(snapshot);
+  const [saveRule, ...saveCommands] = snapshot.save;
+  const [restoreRule, ...restoreCommands] = snapshot.restore;
+  assert.ok(saveCommands.length > 0);
+  assert.equal(restoreRule, saveRule);
+  assert.equal(restoreCommands.length, saveCommands.length);
+  let total = 0;
+  let largest = 32768;
+  const boxes = saveCommands.map((command) => parseClone(command, region.dimension));
+  for (const [i, box] of boxes.entries()) {
+    const [x1, y1, z1, x2, y2, z2] = box.source;
+    const [sx, sy, sz] = box.destination;
+    assert.ok(x1 >= region.minX && y1 >= region.minY && z1 >= region.minZ && x2 <= region.maxX && y2 <= region.maxY && z2 <= region.maxZ);
+    assert.ok(x1 <= x2 && y1 <= y2 && z1 <= z2);
+    const volume = (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1);
+    assert.ok(volume <= SNAPSHOT_BOX_CAP, `box ${i} volume ${volume} exceeds ${SNAPSHOT_BOX_CAP}`);
+    total += volume;
+    largest = Math.max(largest, volume);
+    assert.deepEqual(parseClone(restoreCommands[i]!, region.dimension), {
+      source: [sx, sy, sz, sx + x2 - x1, sy + y2 - y1, sz + z2 - z1], destination: [x1, y1, z1],
+    });
+    for (const other of boxes.slice(i + 1)) {
+      const [a, b, c, d, e, f] = other.source;
+      assert.ok(x2 < a || d < x1 || y2 < b || e < y1 || z2 < c || f < z1, `boxes overlap: ${i}`);
+    }
+  }
+  assert.equal(total, (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1));
+  assert.equal(saveRule, `${BLOCK_LIMIT} ${largest}`);
+}
+
+describe("compiled scenarios preserve the pristine oracle and cover every snapshot arena", () => {
   test("the snapshot holds at least 94 scenarios, half of them unedited since", () => {
     assert.ok(SNAPSHOT_FILES.length >= 94, `snapshot holds ${SNAPSHOT_FILES.length} scenarios`);
     assert.ok(UNEDITED_SNAPSHOT_FILES.size >= SNAPSHOT_FILES.length / 2, `only ${UNEDITED_SNAPSHOT_FILES.size} of ${SNAPSHOT_FILES.length} scenarios are unchanged since the snapshot: regenerate it`);
   });
 
   for (const file of SNAPSHOT_FILES) {
-    // An edited scenario (its YAML hash changed) is skipped: its compiled output may change legitimately.
-    const register = UNEDITED_SNAPSHOT_FILES.has(file) ? test : test.skip;
-    register(file, async () => {
+    test(file, async () => {
       const scenario = await mineLabs.loadScenario(join(import.meta.dirname, "../../..", file));
-      assert.deepEqual(JSON.parse(JSON.stringify(mineLabs.compileScenario(scenario))), COMPILE_SNAPSHOT[file]!.compiled, file);
+      const actual = mineLabs.compileScenario(scenario);
+      assertSnapshotBoxes(actual);
+      // A changed YAML may legitimately compile differently from the historical oracle.
+      if (UNEDITED_SNAPSHOT_FILES.has(file)) {
+        const pristine = COMPILE_SNAPSHOT[file]!.compiled as Compiled;
+        assert.deepEqual(withoutSnapshotCommands(actual), withoutSnapshotCommands(pristine), file);
+      }
     });
   }
 });
