@@ -67,6 +67,11 @@ test("CLI refuses stale modules and override warns on stderr", () => {
   const overridden = Bun.spawnSync(["bun", cli, "check", root], { env: { ...process.env, RUN_GUARD_OVERRIDE: "deps" } });
   expect(overridden.exitCode).toBe(0);
   expect(overridden.stderr.toString()).toContain("warning: refused:");
+  // One grammar with deps.py and win-gpu.py: a comma list, items stripped, exact names.
+  const listed = Bun.spawnSync(["bun", cli, "check", root], { env: { ...process.env, RUN_GUARD_OVERRIDE: "gpu, deps" } });
+  expect(listed.exitCode).toBe(0);
+  const lookalike = Bun.spawnSync(["bun", cli, "check", root], { env: { ...process.env, RUN_GUARD_OVERRIDE: "nodeps" } });
+  expect(lookalike.exitCode).toBe(1);
 });
 
 test("preload rejects before loading tests and an override permits them", () => {

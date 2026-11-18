@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve } from "node:path";
 
 export const STAMP = ".mine-ai-modules-hash";
 
+/** SHA-256 over `package.json`, `bun.lock` and the regular files of `patches/` (symlinks skipped, as Mine Labs). */
 export function guardHash(root: string): string {
   const patches = join(root, "patches");
   const files = existsSync(patches) ? readdirSync(patches, { recursive: true, withFileTypes: true })
@@ -19,6 +20,7 @@ export function guardHash(root: string): string {
   return hash.digest("hex");
 }
 
+/** The first `node_modules` folder Bun finds walking up from `root`, or null. */
 export function resolvedModules(root: string): string | null {
   let dir = resolve(root);
   for (;;) {
@@ -30,14 +32,17 @@ export function resolvedModules(root: string): string | null {
   }
 }
 
+/** Writes `root`'s own `node_modules` stamp: the guard hash and the time (postinstall). */
 export function stampModules(root: string): void {
   writeFileSync(join(root, "node_modules", STAMP), `${guardHash(root)} ${new Date().toISOString()}\n`);
 }
 
+/** Removes the stamp before an install (preinstall), so a failed install leaves none. */
 export function unstampModules(root: string): void {
   rmSync(join(root, "node_modules", STAMP), { force: true });
 }
 
+/** Whether the resolved `node_modules` carry `root`'s guard hash; `line` is the `ok:`/`refused:` line with its fix. */
 export function checkModules(root: string): { ok: boolean; line: string } {
   root = resolve(root);
   const modules = resolvedModules(root);
@@ -51,10 +56,12 @@ export function checkModules(root: string): { ok: boolean; line: string } {
   return { ok: false, line: `refused: node_modules of ${root} do not match its package.json/bun.lock/patches (${reason}): run \`bun install --frozen-lockfile\` in WSL in ${root}` };
 }
 
+/** `checkModules` for the test and run paths: prints a refusal and returns false, or warns under RUN_GUARD_OVERRIDE=deps. */
 export function enforceModules(root: string): boolean {
   const result = checkModules(root);
   if (result.ok) return true;
-  if (process.env.RUN_GUARD_OVERRIDE?.includes("deps")) {
+  // RUN_GUARD_OVERRIDE: a comma list, items stripped, exact names (as deps.py and win-gpu.py read it).
+  if ((process.env.RUN_GUARD_OVERRIDE ?? "").split(",").map((item) => item.trim()).includes("deps")) {
     console.error(`warning: ${result.line}`);
     return true;
   }
