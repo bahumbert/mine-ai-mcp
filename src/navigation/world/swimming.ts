@@ -232,8 +232,31 @@ export function swimAscent(read: WorldView["blockAt"], feet: BlockPosition): Swi
   return { surface, ticks: exitTravelTicks(feet, path) + swimTravelTicks(exit, surface) };
 }
 
+/** Cells below a dive origin's feet read for the water surface a body jumped from (red-phase3: its peak is 1.4 blocks over). */
+export const JUMP_REACH_CELLS = 2;
+
+/**
+ * The origin a dive leg is priced from: a body in the air within a jump of the water (a breathing stop's jump peak, 1.4
+ * blocks over the surface) is priced from that surface, the water it drops into, not from the air it is in. A body in
+ * water, or with no water in reach below its feet (a solid, an unloaded cell, or air past the reach), keeps its origin.
+ */
+export function diveOrigin(read: WorldView["blockAt"], origin: Position3): Position3 {
+  const cells = swimCellsOf(read);
+  const x = Math.floor(origin.x);
+  const z = Math.floor(origin.z);
+  const feetY = Math.floor(origin.y);
+  if (cells(x, feetY, z) === "water") return origin;
+  for (let y = feetY - 1; y >= feetY - JUMP_REACH_CELLS; y--) {
+    const cell = cells(x, y, z);
+    if (cell === "water") return { x: origin.x, y: y + 1, z: origin.z };
+    if (cell !== "air") return origin;
+  }
+  return origin;
+}
+
 export function admitsDive(read: WorldView["blockAt"], feet: BlockPosition, budget: DiveAdmission, workTicks = 0): boolean {
   const ascent = swimAscent(read, feet);
   const reserve = budget.toAir ? 0 : DIVE_RESERVE_TICKS;
-  return ascent !== null && swimTravelTicks(budget.origin, feet) + workTicks + ascent.ticks + reserve <= budget.airTicks;
+  const from = diveOrigin(read, budget.origin);
+  return ascent !== null && swimTravelTicks(from, feet) + workTicks + ascent.ticks + reserve <= budget.airTicks;
 }

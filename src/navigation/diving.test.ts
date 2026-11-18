@@ -8,7 +8,7 @@ import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
-import { DIVE_BACKSTOP_TICKS } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, admitsDive } from "./world/swimming.js";
 import type { NavigateOptions, NavigationResult } from "./navigate.js";
 
 type Kind = "stone" | "air" | "water";
@@ -680,4 +680,38 @@ test("shallow air observation sees metadata after 60 server ticks at both rates"
     assert.equal(clock.pendingGlobalTimers(), 0);
     assert.equal(left("physicsTick"), 0);
   }
+});
+
+// The breathing stop's return ends with the body held at its jump peak, 1.4 blocks over the pond's surface (y 64); the
+// resumed leg is planned from there. Priced from the surface it is 298.3 ticks to the goal (admitted at 300); from the
+// peak 359.9 (refused). The server's rate is part of the stop, so both rates run the whole stop.
+for (const ticksPerSecond of [20, 10]) test(`a breathing stop's resumed leg from the jump peak is admitted as one from the surface, at ${ticksPerSecond} tps`, async () => {
+  const { world, bot, breath, clock } = fixture({ mocked: true, server: { ticksPerSecond } });
+  using _timers = clock.install();
+  const diving = new Diving(bot, world);
+  const goal = exactBlockGoal({ x: 0, y: 60, z: 0 });
+  let calls = 0;
+  let resumedAdmitted: boolean | undefined;
+  const result = await diving.run({ movements: createMovementPolicy(), goal }, async (request) => {
+    calls++;
+    if (calls === 1) {
+      bot.entity.position.y = 60;
+      breath.setAirSupply(60);
+      bot.emit("physicsTick");
+      assert.equal(request.stopSignal?.aborted, true);
+      return { status: "stopped", reason: String(request.stopSignal?.reason), elapsedMs: 0 };
+    }
+    if (calls === 2) {
+      // The return to air ends at the jump peak; the air refills during the breath wait before the resumed leg.
+      bot.entity.position.y = 65.4;
+      breath.setAirSupply(300);
+      return { status: "completed", elapsedMs: 0 };
+    }
+    assert.ok(request.movements.dive, "the resumed leg carries the dive policy");
+    resumedAdmitted = admitsDive((x, y, z) => world.blockAt(x, y, z), { x: 0, y: 60, z: 0 }, request.movements.dive);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(calls, 3);
+  assert.equal(resumedAdmitted, true, "the resumed leg from the jump peak is priced from the surface (y 64) and admitted");
 });
