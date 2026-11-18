@@ -3,10 +3,11 @@ import type { AnsweredEntry, Facts } from "../../state/answered.js";
 import type { HostileResponseResult, HostileSettlement } from "./response-result.js";
 import { evadeDetail } from "../../responses/evade-detail.js";
 import { chainSuffix } from "../../state/threat-chains.js";
+import { stallReason } from "../../state/request-stall.js";
 
 export function completeResponse(physical: HostileResponseResult, signal: AbortSignal): HostileSettlement {
   const { result: _result, response, ...evidence } = physical;
-  const common = { response, physical, evidence, chain: null };
+  const common = { response, physical, evidence, chain: null, stall: null };
   return signal.aborted
     ? {
         ...common,
@@ -73,6 +74,8 @@ export function encounterReceipt(settlement: HostileSettlement) {
     ...settlement.evidence,
     response: settlement.response,
     chain: settlement.chain ? { ...settlement.chain } : null,
+    stall: settlement.stall ? { ...settlement.stall,
+      threats: settlement.stall.threats.map((threat) => ({ ...threat })) } : null,
     outcome: summary.outcome,
     ...(summary.error === null ? {} : { error: summary.error }),
     ...(settlement.physical?.response === "evade" ? {
@@ -96,6 +99,7 @@ function settlementReason(settlement: HostileSettlement, resumed = false): strin
 }
 
 export function responseContinuation(settlement: HostileSettlement): ResponseContinuation {
+  if (settlement.stall?.limit) return { kind: "return", reason: stallReason(settlement.stall) };
   // Observed separation or a completed defence permits current-condition
   // validation; an exhausted response leaves the reflex's next decision open (P4-29 a6).
   if (settlement.kind === "completed" && settlement.evidence.healthAfter > 0) {

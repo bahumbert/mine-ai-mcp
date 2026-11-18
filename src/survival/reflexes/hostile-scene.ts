@@ -8,6 +8,7 @@ import type { CombatPerception } from "../perception/combat/observations.js";
 import type { HostileResponse } from "../policy/combat/response.js";
 import { isShield, OFF_HAND_SLOT } from "../weapons/equipment.js";
 import type { ThreatChains } from "../state/threat-chains.js";
+import type { RequestStalls } from "../state/request-stall.js";
 
 export interface HostileScene {
   readonly bot: Bot;
@@ -20,6 +21,7 @@ export interface HostileScene {
   /** Hostiles seen since the encounter began and not yet resolved or out of the evade range. */
   readonly encounterThreats: Set<number>;
   readonly chains: ThreatChains;
+  readonly stalls: RequestStalls;
   /** Hand a policy change to the policy state; a failure constrains the policy instead of throwing. */
   readonly transition: (pending: Promise<void>) => void;
   /** The response being executed now, null between responses. */

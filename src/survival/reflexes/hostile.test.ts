@@ -32,6 +32,195 @@ import { swingReadiness } from "../weapons/swing-readiness.js";
 import { heldThreatEnded, senseHostile } from "./hostile-sense.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { ThreatChains } from "../state/threat-chains.js";
+import { RequestStalls } from "../state/request-stall.js";
+import { COMBAT_LIMITS } from "../control/combat/limits.js";
+import { evadeBudgetTicks, EVADE_WALL_FACTOR } from "../responses/evade-clock.js";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs } from "../../world/world-age.js";
+
+/** Check response resources before fixture disposal, then outlive every retired response/claim deadline. */
+function watchStalledCleanup(fixture: ReflexFixture): () => Promise<void> {
+  const assertListeners = watchJourneyListeners(fixture);
+  const timers = fixture.clock.pendingTimers();
+  const globals = fixture.clock.pendingGlobalTimers();
+  let transitions = 0;
+  const stop = fixture.driver.onTransition((event) => {
+    if (event.kind === "outcome" || event.kind === "phase") transitions++;
+  });
+  return async () => {
+    if (fixture.bot.entities[7]) fixture.entities.remove(7);
+    assertListeners();
+    assert.equal(fixture.clock.pendingTimers(), timers);
+    assert.equal(fixture.clock.pendingGlobalTimers(), globals);
+    const outcomes = fixture.recorded().length;
+    const before = transitions;
+    const evadeWall = evadeBudgetTicks(fixture.controller.policy.combat) * MS_PER_ON_TIME_TICK * EVADE_WALL_FACTOR;
+    const claimWall = serverPacedWallMs(COMBAT_LIMITS.ceilingTicks);
+    await fixture.clock.advance(Math.max(evadeWall, claimWall) + 1, 1_000);
+    assert.equal(fixture.recorded().length, outcomes, "retired responses cannot settle again");
+    assert.equal(transitions, before, "retired deadlines cannot publish another outcome or hold");
+    assert.equal(fixture.runner.status().busy, false);
+    assert.equal(fixture.clock.pendingTimers(), timers);
+    assert.equal(fixture.clock.pendingGlobalTimers(), globals);
+    assertListeners();
+    stop();
+  };
+}
+
+/** A stationary objective whose physical attempts yield to the real hostile reflex. */
+function stalledJourney(ticksPerSecond: number, exhausted = false) {
+  let finishRoute: (() => void) | null = null;
+  let attempts = 0;
+  let routes = 0;
+  const fixture = reflexFixture(async () => assert.fail("withdrawal must not fight"), async () => {
+    routes++;
+    await new Promise<void>((resolve) => { finishRoute = resolve; });
+    finishRoute = null;
+    if (!exhausted || routes < 8) fixture.bot.entities[7]!.position.x = 100;
+    return exhausted && routes === 8
+      ? { status: "stopped", reason: "no path", elapsedMs: 0 }
+      : { status: "completed", elapsedMs: 0 };
+  }, { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
+    entities: { 7: hostile("skeleton", 100) }, health: 11 });
+  const input = z.strictObject({});
+  const action = defineAction({ name: "navigate", description: "A journey without objective progress",
+    inputSchema: input, resultSchema: actionResultSchema({}), parse: (value) => input.parse(value),
+    formatResult: (result) => result.status, execution: { kind: "resumable_task" }, begin: (_request, _lifetime, observe) => {
+      observe(() => ({ baseline: null, checkpoint: null, objective: { remaining: 100, tolerance: 1 },
+        completion: { kind: "current", observed: false, owes: "reach the destination" } }));
+      return async ({ signal }) => {
+        attempts++;
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        signal!.throwIfAborted();
+        return { status: "succeeded" };
+      };
+    } });
+  return { ...fixture, action, attempts: () => attempts, routes: () => routes,
+    finishRoute: () => { assert.ok(finishRoute, "evade entered navigation"); finishRoute(); },
+    async [Symbol.asyncDispose]() {
+      fixture.runner.cancelActive("End stalled journey test");
+      finishRoute?.();
+      await fixture.observer.close();
+      fixture.data.close();
+    } };
+}
+
+for (const ticksPerSecond of [20, 10]) for (const exhausted of [false, true]) {
+  test(`${exhausted ? "a stall at an exhausted evade returns instead of holding" : "eight separated evades on one navigate return HOSTILE_STALLED; a new navigate finishes"} (${ticksPerSecond} tps)`, async () => {
+    await using fixture = stalledJourney(ticksPerSecond, exhausted);
+    using _clock = fixture.clock.install();
+    const assertClean = watchStalledCleanup(fixture);
+    await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+      changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise stalled withdrawal" });
+    const pending = fixture.runner.run(fixture.action, {});
+    const state = watch(pending);
+    await flush();
+    for (let evade = 1; evade <= 8; evade++) {
+      fixture.bot.entities[7]!.position.x = 5;
+      await fixture.clock.advance(50);
+      assert.equal(fixture.observer.activeResponse(), "evade");
+      fixture.finishRoute();
+      assert.ok(await until(() => fixture.recorded().length === evade));
+      await flush();
+      if (evade < 8) {
+        assert.equal(state.over, false);
+        assert.equal(fixture.attempts(), evade + 1);
+      }
+    }
+    assert.equal(fixture.attempts(), 8, "the stalled request must return instead of a ninth resume");
+    assert.equal(state.over, true, "the eighth evade returns the request");
+    assert.equal(fixture.runner.status().busy, false, "a stalled exhausted evade must release the request");
+    const output = await pending;
+    assert.equal(output.result.status, "cancelled");
+    assert.match(output.result.status === "cancelled" ? output.result.error : "", /\[HOSTILE_STALLED\].*skeleton#7/);
+    assert.ok(output.interruptions?.some((reason) => reason.includes("[HOSTILE_STALLED]") && reason.includes("skeleton#7")));
+    assert.equal(output.request?.state.kind, "returned");
+    assert.ok(fixture.bot.time.age >= 1_000 && fixture.bot.time.age < 2_680);
+    fixture.entities.remove(7);
+    const next = defineAction({ name: "navigate", description: "Next journey", inputSchema: z.strictObject({}),
+      resultSchema: actionResultSchema({}), parse: () => ({}), formatResult: (result) => result.status,
+      execution: { kind: "resumable_task" }, begin: () => async () => ({ status: "succeeded" as const }) });
+    assert.equal((await fixture.clock.settle(fixture.runner.run(next, {}), 1_000)).result.status, "succeeded");
+    await assertClean();
+  });
+}
+
+for (const during of [false, true]) test(during ? "a late finalize after death is ignored"
+  : "death clears the stall count", async () => {
+  await using fixture = stalledJourney(20);
+  using _clock = fixture.clock.install();
+  const assertClean = watchStalledCleanup(fixture);
+  const outcomes = () => fixture.data.read(
+    "SELECT json_extract(payload_json, '$.evidence.outcome') AS payload_json FROM events WHERE event_type = 'survival_outcome' AND json_extract(payload_json, '$.source') = 'hostile_reflex' ORDER BY event_id",
+  ).map((row) => JSON.parse(String(row.payload_json)));
+  const pending = fixture.runner.run(fixture.action, {});
+  await flush();
+  fixture.bot.entities[7]!.position.x = 5;
+  await fixture.clock.advance(50);
+  if (!during) {
+    fixture.finishRoute();
+    assert.ok(await until(() => outcomes().length === 1));
+    assert.equal(outcomes()[0]?.stall?.evades, 1);
+  }
+  fixture.bot.entities[7]!.position.x = 100;
+  fixture.combat.setHealth(0);
+  await fixture.clock.advance(150);
+  if (during) {
+    fixture.finishRoute();
+    assert.ok(await until(() => outcomes().length === 1));
+    assert.equal(outcomes()[0]?.stall, null, "old-life finalization must leave stalls empty");
+  }
+  fixture.runner.cancelActive("Retire the old-life request");
+  await fixture.clock.settle(pending, 1_000);
+  fixture.driver.answered.clear();
+  fixture.combat.setHealth(11);
+  await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+    changes: { combat: { hide: "never" } }, lifetime: { kind: "session" }, reason: "Exercise the new life" });
+  const next = fixture.runner.run(fixture.action, {});
+  await flush();
+  fixture.bot.entities[7]!.position.x = 5;
+  fixture.tick();
+  await fixture.clock.advance(50);
+  assert.equal(fixture.observer.activeResponse(), "evade", JSON.stringify({ health: fixture.bot.health,
+    snapshot: fixture.driver.snapshot(), status: fixture.runner.status(), records: fixture.recorded() }));
+  fixture.finishRoute();
+  assert.ok(await until(() => outcomes().length === 2));
+  assert.equal(outcomes()[1]?.stall?.evades, 1, "the next request starts with no old evades");
+  fixture.runner.cancelActive("Finish death control");
+  await fixture.clock.settle(next, 1_000);
+  fixture.entities.remove(7);
+  // Mineflayer resumes physics 1.5 s after a respawn position (fake-bot-physics.ts); await that answer timer.
+  await fixture.clock.settle(new Promise<void>((resolve) => fixture.bot.once("physicsTick", resolve)), 2_000);
+  await assertClean();
+});
+
+for (const rate of [20, 10, "stopped"] as const) test(`two evades return at the no-progress ${rate === "stopped" ? "wall backstop" : `tick bound (${rate} tps)`}`, async () => {
+  await using fixture = stalledJourney(rate === "stopped" ? 20 : rate);
+  using _clock = fixture.clock.install();
+  const assertClean = watchStalledCleanup(fixture);
+  const pending = fixture.runner.run(fixture.action, {});
+  const state = watch(pending);
+  await flush();
+  fixture.bot.entities[7]!.position.x = 5;
+  await fixture.clock.advance(50);
+  fixture.finishRoute();
+  assert.ok(await until(() => fixture.recorded().length === 1));
+  await flush();
+  if (rate === "stopped") fixture.server.stop();
+  const firstAge = fixture.bot.time.age;
+  await fixture.clock.advance(rate === "stopped" ? 255_000 : 1_680 * 1_000 / rate, 1_000);
+  assert.equal(fixture.bot.time.age - firstAge, rate === "stopped" ? 0 : 1_680);
+  fixture.bot.entities[7]!.position.x = 5;
+  fixture.tick();
+  await flush();
+  fixture.finishRoute();
+  assert.ok(await until(() => fixture.recorded().length === 2));
+  await flush();
+  assert.equal(state.over, true, "the no-progress limit must return instead of resume");
+  const result = await fixture.clock.settle(pending, 1_000);
+  assert.equal(result.result.status, "cancelled");
+  assert.match(result.result.status === "cancelled" ? result.result.error : "", /\[HOSTILE_STALLED\] 2 evades/);
+  await assertClean();
+});
 
 // The unreachable premise counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): 600 ticks from the age cached when the
 // failure was remembered plus one packet, the packet of age A + 620 (31 s in at 20 tps, 62 s at 10 tps; old code: 30 s after it).
@@ -668,7 +857,7 @@ for (const ticksPerSecond of [20, 10]) {
     using _clock = fixture.clock.install();
     try {
       const policy = fixture.controller.policy;
-      const scene: HostileScene = { ...fixture, policy, activeResponse: null, chains: new ThreatChains(),
+      const scene: HostileScene = { ...fixture, policy, activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(),
         encounterThreats: new Set(), transition: (pending) => { void pending; },
         context: { survival: fixture.driver, policy: policy.combat, food: policy.food, perception: fixture.perception,
           resolvedIds: fixture.perception.resolvedIds, attackerIds: fixture.perception.attackerIds } };

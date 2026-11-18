@@ -19,6 +19,7 @@ import { messageOf, offHandItem, type HostileScene } from "./hostile-scene.js";
 import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-respond.js";
 import { decideHostile, heldThreatEnded, hostileDecisionFacts, hostileScope, senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
+import { RequestStalls } from "../state/request-stall.js";
 
 
 export const HOSTILE_REFLEX = "hostile_reflex" as const;
@@ -52,6 +53,7 @@ function watchHostilePolicy(scene: HostileScene): () => void {
   const resetPolicy = () => {
     encounterThreats.clear();
     scene.chains.clear();
+    scene.stalls.clear();
     transition(policy.reset("Death or dimension change; defaults restored."));
   };
   bot.on("death", resetPolicy);
@@ -119,6 +121,7 @@ export function attachHostileReflex(
     context,
     encounterThreats,
     chains: new ThreatChains(),
+    stalls: new RequestStalls(),
     transition,
     activeResponse: null,
   };
