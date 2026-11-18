@@ -26,6 +26,7 @@ import { decideCombatResponse } from "../policy/combat/decision.js";
 import { senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
 import { RequestStalls } from "../state/request-stall.js";
+import { CoverObligations } from "../state/cover-obligation.js";
 import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
 import { serverTickPace } from "../../world/server-tick-pace.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
@@ -107,7 +108,7 @@ function responseFixture(occluded = false, harness = createFakeBot({
   const reflex = attachHostileReflex(bot, driver, navigation, controller, perception);
   const scene: HostileScene = {
     bot, navigation, controller, driver, perception, policy: controller.policy,
-    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(),
+    context: reflex.threats, encounterThreats: new Set(), activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(), covers: new CoverObligations(),
     transition: (pending) => { void pending; },
   };
   return { ...harness, driver, perception, scene, async [Symbol.asyncDispose]() {

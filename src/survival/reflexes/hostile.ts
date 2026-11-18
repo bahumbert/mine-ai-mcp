@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Bot } from "mineflayer";
-import type { NavigationRuntime } from "../../navigation/index.js";
+import type { NavigationRuntime, RouteAdmission } from "../../navigation/index.js";
 import { BodyAbort } from "../../session/abort.js";
 import { monotonicNow } from "../../utils/index.js";
 import type { ResponseContext } from "../control/combat/context.js";
@@ -21,6 +21,8 @@ import { prepareShield, respondToHostile, type ShieldPrepared } from "./hostile-
 import { decideHostile, heldThreatEnded, hostileDecisionFacts, hostileScope, senseHostile, type ShieldPreparation } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
 import { RequestStalls, stallReason } from "../state/request-stall.js";
+import { CoverObligations, type CoverObligation } from "../state/cover-obligation.js";
+import { coverRouteAdmission, currentCovers } from "./hostile-cover.js";
 import type { Facts } from "../state/answered.js";
 
 
@@ -32,6 +34,13 @@ const SHIELD_LIMITS: ReflexLimits = { ceilingTicks: 200, noProgressTicks: 100, s
 export interface HostileReflex extends AsyncDisposable {
   readonly threats: ResponseContext;
   activeResponse(): HostileResponse["kind"] | null;
+  /** The cover the request now running still owes the shooters its last evade hid from; empty for any other request. */
+  coverObligations(): readonly CoverObligation[];
+  /**
+   * The veto over a route the request that owes cover is about to take, or null when none applies: no obligation, a
+   * response holding the body, or a requested engagement (`engaged()`) holding it.
+   */
+  coverAdmission(engaged: () => boolean): RouteAdmission | null;
 }
 
 /** Cancel changed response permissions and reset encounter policy at death or a dimension change. */
@@ -56,6 +65,7 @@ function watchHostilePolicy(scene: HostileScene): () => void {
     encounterThreats.clear();
     scene.chains.clear();
     scene.stalls.clear();
+    scene.covers.clear();
     transition(policy.reset("Death or dimension change; defaults restored."));
   };
   bot.on("death", resetPolicy);
@@ -134,6 +144,7 @@ export function attachHostileReflex(
     encounterThreats,
     chains: new ThreatChains(),
     stalls: new RequestStalls(),
+    covers: new CoverObligations(),
     transition,
     activeResponse: null,
   };
@@ -174,6 +185,8 @@ export function attachHostileReflex(
   return {
     threats: context,
     activeResponse: () => scene.activeResponse,
+    coverObligations: () => currentCovers(scene),
+    coverAdmission: (engaged) => coverRouteAdmission(scene, engaged),
     [Symbol.asyncDispose]: () =>
       (closing ??= (async () => {
         stopWatchingPolicy();

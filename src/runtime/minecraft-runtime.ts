@@ -48,7 +48,7 @@ import type { SurvivalStatus } from "../survival/evidence/contract.js";
 import { attachSurvivalReceipts } from "../survival/evidence/receipts.js";
 import { SurvivalObserver } from "../survival/evidence/status.js";
 import { attachEndermanGazeControl } from "../survival/guards/enderman-gaze.js";
-import { createCombatController, createHostileStepFieldProvider, type CombatController } from "../survival/index.js";
+import { createCombatController, type CombatController } from "../survival/index.js";
 import { CombatPerception } from "../survival/perception/combat/observations.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
 import { isInWater } from "../survival/perception/body.js";
@@ -57,6 +57,7 @@ import { attachFireReflex } from "../survival/reflexes/fire.js";
 import { attachFootingReflex } from "../survival/reflexes/footing.js";
 import { guardFooting } from "../survival/weapons/footing-guard.js";
 import { attachHostileReflex } from "../survival/reflexes/hostile.js";
+import { routeAroundHostiles } from "../survival/reflexes/hostile-routing.js";
 import { attachHungerReflex } from "../survival/reflexes/hunger.js";
 import { FootingRecovery } from "../survival/responses/footing.js";
 import { attachSessionFrontier, type SessionFrontier, type SessionFrontierStatus } from "./frontier.js";
@@ -572,15 +573,9 @@ export async function createMinecraftRuntime(bot: Bot, options: MinecraftRuntime
   resources.use(attachDragonReflex(bot, reflexes, combat));
   resources.use(attachEndermanGazeControl(bot, () => combat.activeEngagement()));
   const hostiles = resources.use(attachHostileReflex(bot, reflexes, navigation, combat, perception));
-  // The one place that holds both the navigation runtime and combat's live view
-  // of who is a threat, so the one place that can join them. Every route the
-  // bot takes from here is priced to prefer going around a hostile; combat's
-  // own routes, which walk toward one on purpose, pass `stepField: null`.
-  navigation.setStepFieldProvider(
-    options.stepFieldProvider ?? createHostileStepFieldProvider(
-      bot, hostiles.threats, hostiles.activeResponse, () => combat.policy.effective.navigation,
-    ),
-  );
+  // The one place that holds both the navigation runtime and combat's live view of who is a threat, so the one place that
+  // can join them: prices and vetoes (`hostile-routing.ts`).
+  routeAroundHostiles(bot, navigation, hostiles, combat, options.stepFieldProvider);
   resources.use(attachHungerReflex(bot, reflexes, combat, combat.policy));
 
   return new AttachedMinecraftRuntime(

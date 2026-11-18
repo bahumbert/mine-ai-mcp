@@ -11,8 +11,9 @@ import { seatedAtSea } from "../../actions/navigate/boat-seated-response.js";
 import { respondToHostileFromBoat } from "./hostile-boat-response.js";
 import { monotonicNow } from "../../utils/index.js";
 import type { RequestSnapshot } from "../../session/request.js";
+import { recordCoverObligations, type CoverCapture } from "./hostile-cover.js";
 
-interface ResponseStart {
+interface ResponseStart extends CoverCapture {
   readonly request: RequestSnapshot | null;
   readonly generation: number;
   readonly startedAtMs: number;
@@ -135,6 +136,7 @@ function finalizeHostileResponse(scene: HostileScene, start: ResponseStart, sett
   if (current) scene.stalls.observe(request, generation, age, endedAtMs);
   const stall = current && settlement.response === "evade"
     ? scene.stalls.recordEvade(request, generation, settlement.evidence.threats, age, endedAtMs) : null;
+  recordCoverObligations(scene, start, settlement);
   return { ...settlement, stall,
     chain: scene.chains.record({ generation, startedAtMs, endedAtMs, settlement,
       firstDistances: settlement.physical?.response === "evade"
@@ -153,7 +155,7 @@ export async function respondToHostile(
   const startedAtMs = monotonicNow();
   scene.stalls.observe(request, generation, bot.time.age ?? null, startedAtMs);
   const firstDistances = new Map(directive.threats.map((threat) => [threat.id, threat.distance]));
-  const start: ResponseStart = { request, generation, startedAtMs, firstDistances };
+  const start: ResponseStart = { request, generation, startedAtMs, firstDistances, safeRange: directive.kind === "evade" ? directive.safeRange : null };
   const finalize = (settlement: HostileSettlement) => finalizeHostileResponse(scene, start, settlement);
   const { resolvedIds, attackerIds } = perception;
   scene.activeResponse = directive.kind;

@@ -4,7 +4,8 @@ import { Vec3 } from "vec3";
 import { z } from "zod";
 import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
-import type { NavigationRuntime } from "../../navigation/index.js";
+import { createNavigateAction } from "../../actions/navigate/navigate.js";
+import { createNavigationRuntime, type NavigationEvent, type NavigationRuntime } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, createTestCombatController, engagingCombat } from "../../test-support/combat.js";
@@ -28,11 +29,16 @@ import { CombatPerception } from "../perception/combat/observations.js";
 import { responseScope } from "../control/combat/scopes/response.js";
 import { isIncomingArrow } from "../perception/combat/shield-projectiles.js";
 import { attachHostileReflex } from "./hostile.js";
+import { routeAroundHostiles } from "./hostile-routing.js";
+import { recordCoverObligations } from "./hostile-cover.js";
+import type { HostileSettlement } from "../control/combat/response-result.js";
+import { positionExposed } from "../positioning/combat/exposure.js";import { positionThreat } from "../perception/combat/observations.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
 import { heldThreatEnded, senseHostile } from "./hostile-sense.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { ThreatChains } from "../state/threat-chains.js";
 import { RequestStalls } from "../state/request-stall.js";
+import { CoverObligations } from "../state/cover-obligation.js";
 import { COMBAT_LIMITS } from "../control/combat/limits.js";
 import { evadeBudgetTicks, EVADE_WALL_FACTOR } from "../responses/evade-clock.js";
 import { MS_PER_ON_TIME_TICK, serverPacedWallMs } from "../../world/world-age.js";
@@ -522,9 +528,13 @@ test("an automatic target disappearing resumes the original request without clai
 });
 
 /** What a test sets on the fake bot at the start, and how its runner is configured (its clock is the fake bot's). */
-interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food" | "server"> {
+interface FixtureOptions extends Pick<FakeBotOptions, "clock" | "entities" | "carried" | "slots" | "cells" | "overrides" | "health" | "food" | "server" | "simulatePhysics"> {
   readonly runner?: Omit<ActionRunnerOptions, "clock">;
   readonly onHeldEnded?: () => void;
+  /** Where the bot stands and the floor under it; the open-air origin of the reflex tests when omitted. */
+  readonly stand?: { readonly position: Vec3; readonly groundY: number };
+  /** The navigation the reflex and the runner use, made on the fixture's bot; a double that only answers `navigate` when omitted. */
+  readonly navigationOn?: (bot: FakeBot) => NavigationRuntime;
 }
 
 /** The recorded encounter receipts, oldest first. */
@@ -558,10 +568,11 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     clock: options.clock,
     server: options.server,
     username: "ReflexBot",
-    position: new Vec3(0, 64, 0),
+    position: options.stand?.position ?? new Vec3(0, 64, 0),
+    simulatePhysics: options.simulatePhysics,
     // Open air without building material: hiding cannot dig or place here.
     // A diamond sword keeps lifecycle tests above fight_margin; explicit equipment replaces it.
-    groundY: null,
+    groundY: options.stand?.groundY ?? null,
     entities: options.entities,
     carried: options.carried ?? { diamond_sword: 1 },
     health: options.health,
@@ -576,7 +587,7 @@ function reflexFixture(engage: CombatController["engage"], navigate: NavigationR
     identity: { worldId: "reflex-test", scope: { kind: "bot", botId: "reflex-bot" } },
   });
   const runner = new ActionRunner({ clock, worldAge: () => bot.time.age, ...options.runner });
-  const navigation = {
+  const navigation = options.navigationOn?.(bot) ?? {
     world: new MineflayerWorldView(bot),
     onEvent: () => () => {},
     active: false,
@@ -1177,14 +1188,14 @@ for (const ticksPerSecond of [20, 10]) {
     using _clock = fixture.clock.install();
     try {
       const policy = fixture.controller.policy;
-      const scene: HostileScene = { ...fixture, policy, activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(),
+      const scene: HostileScene = { ...fixture, policy, activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(), covers: new CoverObligations(),
         encounterThreats: new Set(), transition: (pending) => { void pending; },
         context: { survival: fixture.driver, policy: policy.combat, food: policy.food, perception: fixture.perception,
           resolvedIds: fixture.perception.resolvedIds, attackerIds: fixture.perception.attackerIds } };
       const observed = senseHostile(scene);
       assert.equal(observed?.kind, "observed");
       assert.deepEqual(heldThreatEnded(scene, { kind: "fight", targetId: 7,
-        threats: [{ id: 7, name: "zombie", position: { x: 12, y: 64, z: 0 }, distance: 12 }] }, observed!.danger),
+        threats: [{ id: 7, name: "zombie", position: { x: 12, y: 64, z: 3 }, distance: 12 }] }, observed!.danger),
       { ended: "no projectile in flight, target zombie#7 alive at 12.0 blocks" });
       assert.deepEqual(heldThreatEnded(scene, { kind: "evade", threats: [], safeRange: 36, reason: "hurt" }, observed!.danger),
         { ended: "no projectile in flight" });
@@ -2933,3 +2944,255 @@ test("a creeper that exploded and is no longer observed ends the fight by the st
   } finally { await fixture.observer.close(); fixture.data.close(); }
   }
 });
+
+// A resumed request owes the cover an evade took (plan 2026-11-18-evade-resume-bound T7). The world: a wall at x 10 (z -6..8,
+// three high) with a one-cell gap at z 3, a skeleton east of it at (22.5, 64, 0.5) (within the reflex's 16 blocks of the bot), and
+// the bot in the gap's line of sight at (8.5, 64, 3.5). The gap throws a band of sight west of it; with the safe range at 20 the
+// band ends at x 2.5 (past 20 blocks from the shooter), so a route that keeps cover from the south side of the band to the north
+// side goes around its end.
+const COVER_SHOOTER = 7;
+const COVER_SAFE_RANGE = 20;
+
+/**
+ * The stimulus is scripted: the shared fake has no skeleton AI, so the test aims the skeleton at the bot and sets its bow-draw
+ * flag at each server tick, drawing only within 15 blocks. That range and the aim are **(unverified)** against the game: no
+ * contract check measures a skeleton's tracking or draw range (asked of the master; part 2's Mine Labs scenarios show the real
+ * skeleton). What the tests rely on is only that a skeleton that sees the bot within its reach is contact, as the reflex reads it.
+ */
+function coverWalk(ticksPerSecond: number, shooter: "skeleton" | "enderman" = "skeleton", engageAfterEvade = false) {
+  /** Every route asked of navigation, with whether the cover admission would veto it for the evade, a free request or an engagement. */
+  const navigateCalls: { activeResponse: string | null; admitted: boolean; engagedAdmitted: boolean }[] = [];
+  let sawEvade = false;
+  const fixture: ReflexFixture = reflexFixture(async () => assert.fail("a cover evade must not fight"), undefined, {
+    clock: createFakeClock({ mode: "mocked" }), simulatePhysics: true, health: 11,
+    server: { ticksPerSecond, startAge: 1_000 },
+    stand: { position: new Vec3(8.5, 64, 3.5), groundY: 63 },
+    entities: { [COVER_SHOOTER]: { name: shooter, kind: "Hostile mobs",
+      // An angry Enderman is contact only within 8 blocks: it stands east of the wall, in sight through the gap.
+      position: shooter === "skeleton" ? new Vec3(22.5, 64, 0.5) : new Vec3(14.5, 64, 3.5) } },
+    navigationOn: (bot) => {
+      const navigation = createNavigationRuntime(bot);
+      return { ...navigation, navigate: (options) => {
+        const active = fixture.observer.activeResponse();
+        // A requested engagement (a fight the model asked for) holds the body once the evade is over: the reflex stands down for it.
+        if (active === "evade") sawEvade = true;
+        else if (engageAfterEvade && sawEvade) fixture.controller.activeEngagement = () => ({ kind: "mob", targetId: COVER_SHOOTER });
+        navigateCalls.push({ activeResponse: fixture.observer.activeResponse(),
+          admitted: fixture.observer.coverAdmission(() => false) === null,
+          engagedAdmitted: fixture.observer.coverAdmission(() => true) === null });
+        return navigation.navigate(options);
+      } };
+    },
+  });
+  for (let z = -6; z <= 8; z++) if (z !== 3) for (let y = 64; y <= 66; y++) fixture.world.setCell(new Vec3(10, y, z), "stone");
+  if (shooter === "skeleton") fixture.bot.entities[COVER_SHOOTER]!.equipment[0] = itemOf(fixture.bot.registry, "bow");
+  else Reflect.set(fixture.bot.entities[COVER_SHOOTER]!.metadata, fixture.bot.registry.entitiesByName.enderman!.metadataKeys!.indexOf("creepy"), true);
+  routeAroundHostiles(fixture.bot, fixture.navigation, fixture.observer, fixture.controller);
+  // A skeleton only counts as contact beyond 8 blocks while it draws its bow at the bot; it keeps aiming at wherever the bot stands.
+  const aim = () => {
+    const entity = fixture.bot.entities[COVER_SHOOTER];
+    if (!entity) return;
+    const eye = entity.position.offset(0, entity.height * 0.85, 0);
+    const target = fixture.bot.entity.position.offset(0, fixture.bot.entity.height / 2, 0);
+    entity.yaw = Math.atan2(-(target.x - eye.x), -(target.z - eye.z));
+    Reflect.set(entity, "headYaw", entity.yaw);
+    entity.pitch = Math.atan2(target.y - eye.y, Math.hypot(target.x - eye.x, target.z - eye.z));
+    const flags = fixture.bot.registry.entitiesByName[shooter]!.metadataKeys!.indexOf("living_entity_flags");
+    // A skeleton shoots at what it sees within 15 blocks (its attack goal's range); further off it does not draw.
+    if (shooter === "skeleton") Reflect.set(entity.metadata, flags, entity.position.distanceTo(fixture.bot.entity.position) <= 15 ? 1 : 0);
+  };
+  aim();
+  const stopAiming = fixture.server.onTick(aim);
+  const events: NavigationEvent[] = [];
+  const stopEvents = fixture.navigation.onEvent((event) => events.push(event));
+  /** Server ticks the body stood in the shooter's sight within the safe range, while no response held it and an obligation stood. */
+  const watching = { exposedTicks: 0, obligationsSeen: 0 };
+  const stopWatching = fixture.server.onTick(() => {
+    const owed = fixture.observer.coverObligations();
+    watching.obligationsSeen = Math.max(watching.obligationsSeen, owed.length);
+    const entity = fixture.bot.entities[COVER_SHOOTER];
+    if (!owed.length || fixture.observer.activeResponse() !== null || !entity) return;
+    const within = entity.position.distanceTo(fixture.bot.entity.position) <= COVER_SAFE_RANGE;
+    if (within && positionExposed(fixture.bot.world, fixture.bot.entity, positionThreat(fixture.bot, entity))) watching.exposedTicks++;
+  });
+  const navigate = createNavigateAction(fixture.bot, fixture.navigation);
+  return { ...fixture, events, watching, navigateCalls, navigate,
+    /** The routes the request asked of navigation once an evade had interrupted it. */
+    resumedCalls: () => navigateCalls.slice(Math.max(0, navigateCalls.findIndex((call) => call.activeResponse === "evade"))).filter((call) => call.activeResponse === null),
+    /** The wall of the test, quickly: the settings the evade needs, the request, and the clock run until it ends. */
+    async walk(goal: { x: number; y: number; z: number }, limitMs = 90_000) {
+      await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
+        changes: { combat: { hide: "never", evade_safe_range: COVER_SAFE_RANGE } }, lifetime: { kind: "session" }, reason: "Exercise the cover obligation" });
+      return fixture.clock.settle(fixture.runner.run(navigate, goal), limitMs);
+    },
+    async [Symbol.asyncDispose]() {
+      stopAiming();
+      stopWatching();
+      stopEvents();
+      fixture.runner.cancelActive("End cover walk test");
+      await fixture.observer.close();
+      // The fixture made the navigation runtime: it removes its own listeners and closes its world view.
+      await fixture.navigation.close();
+      fixture.data.close();
+    } };
+}
+
+/** What the navigation events after `from` said: the refusal came at a step boundary, after a step of the resumed route completed. */
+function refusedAfterAStep(events: readonly NavigationEvent[], from: number): boolean {
+  const kinds = events.slice(from).map((event) => event.kind).filter((kind) => kind === "step_completed" || kind === "route_refused");
+  return kinds.includes("step_completed") && kinds.indexOf("route_refused") > kinds.indexOf("step_completed");
+}
+
+const refusals = (events: readonly NavigationEvent[]) => events.filter((event) => event.kind === "route_refused");
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a resumed navigate takes the covered detour after a cover evade (${ticksPerSecond} tps)`, async () => {
+    await using fixture = coverWalk(ticksPerSecond);
+    using _clock = fixture.clock.install();
+    const output = await fixture.walk({ x: 8, y: 64, z: 7 });
+    assert.equal(output.result.status, "succeeded", JSON.stringify(output.result));
+    assert.deepEqual(fixture.recorded(), ["evade -> safe_separation"], "one evade: no step of the resumed route was in sight");
+    assert.equal(fixture.watching.obligationsSeen, 1, "the evade left an obligation to the skeleton");
+    assert.equal(fixture.watching.exposedTicks, 0, "every tick of the resumed walk was out of its sight");
+    assert.equal(refusals(fixture.events).length, 0);
+    assert.ok(Math.hypot(fixture.bot.entity.position.x - 8.5, fixture.bot.entity.position.z - 7.5) < 1.5, "the body reached the goal");
+    // The evade's own route is never asked (control); the resumed request's routes are.
+    const evade = fixture.navigateCalls.filter((call) => call.activeResponse === "evade");
+    assert.ok(evade.length > 0 && evade.every((call) => call.admitted), "no admission while the evade holds the body");
+    const resumed = fixture.resumedCalls();
+    assert.ok(resumed.length > 0 && resumed.every((call) => !call.admitted), "the resumed request's routes are asked");
+  });
+
+  test(`a resumed navigate with no covered route returns COVER_ROUTE_REFUSED (${ticksPerSecond} tps)`, async () => {
+    await using fixture = coverWalk(ticksPerSecond);
+    using _clock = fixture.clock.install();
+    // The goal is east of the wall, in the skeleton's sight: no route to it keeps cover.
+    const output = await fixture.walk({ x: 12, y: 64, z: 3 });
+    assert.equal(output.result.status, "failed", JSON.stringify(output.result));
+    const error = "error" in output.result ? output.result.error : "";
+    assert.match(error, /\[COVER_ROUTE_REFUSED\]/);
+    assert.match(error, /skeleton#7/);
+    assert.equal(refusals(fixture.events).length, 1);
+    assert.equal(fixture.watching.exposedTicks, 0, "the refused route was never walked");
+    // The next request is a new request: the obligation is not its own (O3), and it finishes.
+    const next = await fixture.clock.settle(fixture.runner.run(fixture.navigate, { x: 8, y: 64, z: 2 }), 60_000);
+    assert.equal(next.result.status, "succeeded", JSON.stringify(next.result));
+    assert.equal(fixture.runner.status().busy, false);
+    assert.equal(refusals(fixture.events).length, 1, "the new request was not refused");
+    assert.deepEqual(fixture.observer.coverObligations(), [], "the old request's obligation is gone");
+  });
+
+  for (const change of ["a shooter moving into the route", "a wall removed"] as const)
+    test(`${change} after commit refuses at the next step boundary (${ticksPerSecond} tps)`, async () => {
+      await using fixture = coverWalk(ticksPerSecond);
+      using _clock = fixture.clock.install();
+      let changedAt = -1;
+      const stop = fixture.navigation.onEvent((event) => {
+        // The route resumed after the evade is the one that starts a step with the obligation in force.
+        if (event.kind !== "step_started" || changedAt >= 0 || fixture.observer.coverObligations().length === 0) return;
+        changedAt = fixture.events.length;
+        // Three blocks west: the band of sight now reaches the detour's northward leg, which is inside the 20 blocks again.
+        if (change === "a shooter moving into the route") fixture.bot.entities[COVER_SHOOTER]!.position.x = 19.5;
+        // The wall's northern part goes: the goal's side is in sight, the arrival behind its southern part still is not.
+        else for (let z = 4; z <= 8; z++) for (let y = 64; y <= 66; y++) fixture.world.setCell(new Vec3(10, y, z), "air");
+      });
+      const output = await fixture.walk({ x: 8, y: 64, z: 7 });
+      stop();
+      assert.ok(changedAt >= 0, "the world changed after a step began");
+      assert.equal(output.result.status, "failed", JSON.stringify(output.result));
+      assert.match("error" in output.result ? output.result.error : "", /\[COVER_ROUTE_REFUSED\].*skeleton#7/);
+      assert.equal(refusals(fixture.events).length, 1);
+      assert.ok(refusedAfterAStep(fixture.events, changedAt), "the refusal came at a step boundary after a step completed, not at the commit");
+    });
+
+  test(`a requested engagement's approach is never refused (${ticksPerSecond} tps)`, async () => {
+    await using fixture = coverWalk(ticksPerSecond, "skeleton", true);
+    using _clock = fixture.clock.install();
+    // The goal is in the skeleton's sight: with no engagement this is the refusal above. A fight the model asked for walks to it.
+    const output = await fixture.walk({ x: 12, y: 64, z: 3 });
+    assert.doesNotMatch(JSON.stringify(output.result), /COVER_ROUTE_REFUSED/);
+    assert.equal(refusals(fixture.events).length, 0);
+    const resumed = fixture.resumedCalls();
+    assert.ok(resumed.length > 0, "the request asked for a route after the evade");
+    assert.ok(resumed.every((call) => call.engagedAdmitted && !call.admitted), "the same routes would be asked without the engagement");
+    assert.ok(fixture.events.some((event) => event.kind === "route_committed" && event.plan.steps.length > 0), "a route was committed to the exposed goal");
+  });
+
+  test(`an Enderman creates no obligation (${ticksPerSecond} tps)`, async () => {
+    await using fixture = coverWalk(ticksPerSecond, "enderman");
+    using _clock = fixture.clock.install();
+    await fixture.walk({ x: 8, y: 64, z: 7 }, 30_000);
+    assert.ok(fixture.recorded().length >= 1, "the Enderman was answered: an evade happened");
+    assert.equal(fixture.watching.obligationsSeen, 0, "an Enderman is no shooter: no cover is owed from it");
+  });
+}
+
+/**
+ * The finalize of an evade that separated behind cover from a shooter, given to `recordCoverObligations` as the response
+ * captured its request and life when it began. The settlement is the one fact built by hand (a response's evidence is
+ * large and its other fields are not read here); the request, the reflex's runner and the skeleton are the fixture's own.
+ */
+async function coverFinalize(ticksPerSecond: number, species: "skeleton" | "zombie" = "skeleton") {
+  const fixture = reflexFixture(async () => assert.fail("no fight"), undefined, { clock: createFakeClock({ mode: "mocked" }),
+    server: { ticksPerSecond }, entities: { 7: hostile(species, 20) } });
+  if (species === "skeleton") fixture.bot.entities[7]!.equipment[0] = itemOf(fixture.bot.registry, "bow");
+  const hold = defineAction({ name: "navigate", description: "Hold the request", inputSchema: z.strictObject({}),
+    resultSchema: actionResultSchema({}), parse: () => ({}), formatResult: (result) => result.status,
+    execution: { kind: "resumable_task" }, begin: () => async ({ signal }) => {
+      await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "cancelled" as const, error: "held" };
+    } });
+  const pending = fixture.runner.run(hold, {});
+  await flush();
+  const request = fixture.runner.request()!;
+  const policy = fixture.controller.policy;
+  const scene: HostileScene = { ...fixture, policy, activeResponse: null, chains: new ThreatChains(), stalls: new RequestStalls(),
+    covers: new CoverObligations(), encounterThreats: new Set(), transition: (settled) => { void settled; }, context: fixture.observer.threats };
+  const settlement = { kind: "completed", response: "evade", chain: null, stall: null, evidence: {}, physical: { response: "evade",
+    result: { kind: "separated" }, ends: [{ id: 7, name: "skeleton", basis: "cover" }] } } as unknown as HostileSettlement;
+  const capture = { request, generation: scene.chains.generation, safeRange: 36 };
+  return { fixture, scene, settlement, capture, request,
+    /** What the store holds for the request and life the response captured, read without the empties `current` does for others. */
+    held: () => scene.covers.current(request.id, capture.generation, fixture.bot, new Set()),
+    async [Symbol.asyncDispose]() {
+      fixture.runner.cancelActive("End finalize test");
+      await fixture.clock.settle(pending, 1_000);
+      await fixture.observer.close();
+      fixture.data.close();
+    } };
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a finalize of a separated cover evade from a shooter creates the obligation (${ticksPerSecond} tps)`, async () => {
+    await using scenario = await coverFinalize(ticksPerSecond);
+    using _clock = scenario.fixture.clock.install();
+    recordCoverObligations(scenario.scene, scenario.capture, scenario.settlement);
+    assert.deepEqual(scenario.held().map((owed) => [owed.threatId, owed.requestId, owed.safeRange]), [[7, scenario.request.id, 36]]);
+  });
+
+  for (const ending of ["death", "dimension change"])
+    test(`a late finalize after a ${ending} creates no obligation (${ticksPerSecond} tps)`, async () => {
+      await using scenario = await coverFinalize(ticksPerSecond);
+      using _clock = scenario.fixture.clock.install();
+      // Both end the life the response began in: the reflex's reset moves the chains' generation (`watchHostilePolicy`).
+      scenario.scene.chains.clear();
+      recordCoverObligations(scenario.scene, scenario.capture, scenario.settlement);
+      assert.deepEqual(scenario.held(), [], "the old life's settlement, otherwise eligible, left nothing for its own life or request");
+    });
+
+  test(`a finalize captured for another request creates no obligation (${ticksPerSecond} tps)`, async () => {
+    await using scenario = await coverFinalize(ticksPerSecond);
+    using _clock = scenario.fixture.clock.install();
+    const other = { ...scenario.capture, request: { ...scenario.request, id: "another-request" } };
+    recordCoverObligations(scenario.scene, other, scenario.settlement);
+    assert.deepEqual(scenario.held(), []);
+    assert.deepEqual(scenario.scene.covers.current("another-request", scenario.capture.generation, scenario.fixture.bot, new Set()), []);
+  });
+
+  test(`a finalize for a melee threat creates no obligation (${ticksPerSecond} tps)`, async () => {
+    await using scenario = await coverFinalize(ticksPerSecond, "zombie");
+    using _clock = scenario.fixture.clock.install();
+    recordCoverObligations(scenario.scene, scenario.capture, scenario.settlement);
+    assert.deepEqual(scenario.held(), [], "a cover end from a zombie is no obligation: only a direct shooter's sight is owed");
+  });
+}
