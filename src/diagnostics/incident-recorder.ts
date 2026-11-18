@@ -15,6 +15,8 @@ export interface IncidentProvenance {
 }
 
 interface Entry {
+  /** Record order. Coverage compares sequence numbers, never times: two rows can share one millisecond. */
+  readonly seq: number;
   readonly atMs: number;
   readonly bytes: Buffer;
 }
@@ -27,7 +29,13 @@ export interface IncidentCapture {
 
 interface PendingCapture {
   readonly atMs: number;
+  /** The newest row sequence the snapshot holds. */
+  readonly seq: number;
+  /** The rows the snapshot holds, oldest first: a replacement carries forward the rows the ring has since dropped. */
+  readonly rows: readonly Entry[];
   readonly capture: IncidentCapture;
+  /** A checkpoint a trim queued for rows no artifact holds yet: it bypasses the damage cadence. */
+  readonly forced: boolean;
   readonly settle: (result: IncidentCaptureResult) => void;
 }
 
@@ -35,6 +43,7 @@ interface PendingCapture {
 export class IncidentRecorder {
   #entries: Entry[] = [];
   #bytes = 0;
+  #seq = 0;
   #omitted = { records: 0, firstAtMs: null as number | null, lastAtMs: null as number | null };
   #plan: Buffer | null = null;
   #writing: Promise<void> | null = null;
@@ -42,6 +51,14 @@ export class IncidentRecorder {
   #pending: PendingCapture | null = null;
   #coalesced = 0;
   #lastSavedDamageCapturedAt: number | null = null;
+  /** Sequence of the newest damage hit, saved or coalesced; -1 before any. */
+  #damageSeq = -1;
+  /** Sequence of the newest damage row a written checkpoint holds; -1 before any. */
+  #lastSavedDamageSeq = -1;
+  /** Rows up to this sequence are in a written artifact or in a queued snapshot. */
+  #coveredSeq = -1;
+  /** Rows up to this sequence are in a written artifact. */
+  #durableSeq = -1;
   #recordingMs = 0;
   #samples = 0;
   #writeFailures = 0;
@@ -67,7 +84,8 @@ export class IncidentRecorder {
       ? {}
       : this.context();
     const bytes = Buffer.from(`${JSON.stringify({ kind, atMs, ...facts, ...context })}\n`);
-    this.#entries.push({ atMs, bytes });
+    this.#seq += 1;
+    this.#entries.push({ seq: this.#seq, atMs, bytes });
     this.#bytes += bytes.length;
     this.#trim(atMs);
     const cost = performance.now() - started;
@@ -81,19 +99,33 @@ export class IncidentRecorder {
   }
 
   #trim(now: number): void {
-    let removed = 0;
-    for (const entry of this.#entries) {
-      const expired = entry.atMs < now - this.budget.durationMs;
-      if (!expired && this.#bytes <= this.budget.bytes) break;
+    const removed = this.#evictionCount(now);
+    if (removed === 0) return;
+    // Rows are in record order, so the newest row this trim drops is the one that decides.
+    if (!this.#mayDrop(this.#entries[removed - 1]!, now)) return;
+    const retiring = this.#entries.slice(0, removed);
+    for (const entry of retiring) {
       this.#bytes -= entry.bytes.length;
-      removed += 1;
-      if (!expired) {
+      if (entry.atMs >= now - this.budget.durationMs) {
         this.#omitted.records += 1;
         this.#omitted.firstAtMs ??= entry.atMs;
         this.#omitted.lastAtMs = entry.atMs;
       }
     }
-    if (removed) this.#entries.splice(0, removed);
+    this.#entries.splice(0, removed);
+  }
+
+  /** How many of the oldest rows a trim at `now` drops: expired first, then the oldest rows over the byte budget. */
+  #evictionCount(now: number): number {
+    let count = 0;
+    let bytes = this.#bytes;
+    for (const entry of this.#entries) {
+      const expired = entry.atMs < now - this.budget.durationMs;
+      if (!expired && bytes <= this.budget.bytes) break;
+      bytes -= entry.bytes.length;
+      count += 1;
+    }
+    return count;
   }
 
   capture(
@@ -103,14 +135,31 @@ export class IncidentRecorder {
   ): Promise<IncidentCaptureResult> {
     const atMs = this.wallClock();
     this.#trim(atMs);
+    if (trigger === "non_entity_damage") this.#damageSeq = this.#seq;
     if (this.#damageCheckpointRecent(trigger, atMs)) {
       this.#coalesced += 1;
       return Promise.resolve({ kind: "coalesced" });
     }
+    return this.#queue(trigger, requestId, precedingRequestId, atMs, false);
+  }
+
+  #queue(
+    trigger: IncidentTrigger,
+    requestId: number | null,
+    precedingRequestId: number | null,
+    atMs: number,
+    forced: boolean,
+  ): Promise<IncidentCaptureResult> {
+    // A replacement holds every row its predecessor held: a row a trim dropped since then is carried forward, so a
+    // snapshot queued just before a capture (D13) cannot leave an unsaved row in no artifact.
+    const firstRingSeq = this.#entries[0]?.seq ?? Number.POSITIVE_INFINITY;
+    const carried = this.#pending ? this.#pending.rows.filter((row) => row.seq < firstRingSeq) : [];
     if (this.#pending) {
       this.#coalesced += 1;
       this.#pending.settle({ kind: "coalesced" });
     }
+    const seq = this.#seq;
+    const rows = [...carried, ...this.#entries];
     const header = Buffer.from(
       `${JSON.stringify({
         kind: "incident",
@@ -133,14 +182,15 @@ export class IncidentRecorder {
       trigger,
       requestId,
       precedingRequestId,
-      contents: [header, ...(this.#plan ? [this.#plan] : []), ...this.#entries.map((entry) => entry.bytes)],
+      contents: [header, ...(this.#plan ? [this.#plan] : []), ...rows.map((row) => row.bytes)],
     };
     // A slow filesystem cannot queue an unbounded number of 8-MiB snapshots.
     // Keep the latest pending snapshot; every trigger remains in its history.
     // At most one writing and one pending capture retain older buffer entries.
     const completion = new Promise<IncidentCaptureResult>((settle) => {
-      this.#pending = { atMs, capture, settle };
+      this.#pending = { atMs, seq, rows, capture, forced, settle };
     });
+    this.#coveredSeq = Math.max(this.#coveredSeq, seq);
     if (!this.#writing) this.#writing = this.#drain();
     return completion;
   }
@@ -148,10 +198,14 @@ export class IncidentRecorder {
   async #drain(): Promise<void> {
     try {
       while (this.#pending) {
-        const { atMs, capture, settle } = this.#pending;
+        const { atMs, seq, rows, capture, forced, settle } = this.#pending;
         this.#pending = null;
-        if (this.#damageCheckpointRecent(capture.trigger, atMs)) {
+        // The cadence may coalesce a snapshot only when discarding it loses no row: a snapshot that holds rows the ring
+        // has since dropped is the only copy of them, so it is written (D13).
+        if (!forced && this.#damageCheckpointRecent(capture.trigger, atMs) && !this.#holdsUnsavedDroppedRows(rows)) {
           this.#coalesced += 1;
+          // The discarded snapshot covers nothing: its rows are unprotected again until a later snapshot.
+          this.#coveredSeq = this.#durableSeq;
           settle({ kind: "coalesced" });
           continue;
         }
@@ -161,14 +215,16 @@ export class IncidentRecorder {
           if (reference.artifact.kind === "failed") {
             this.#writeFailures++;
             this.#lastWriteError = reference.artifact.error;
-          } else if (capture.trigger === "non_entity_damage") {
-            this.#lastSavedDamageCapturedAt = atMs;
+            this.#coveredSeq = this.#durableSeq;
+          } else {
+            this.#markDurable(capture.trigger, atMs, seq);
           }
           this.published(reference);
           settle({ kind: "completed", reference });
         } catch (cause) {
           this.#writeFailures++;
           this.#lastWriteError = String(cause);
+          this.#coveredSeq = this.#durableSeq;
           settle({ kind: "failed", error: String(cause) });
         }
       }
@@ -178,12 +234,44 @@ export class IncidentRecorder {
     }
   }
 
+  #markDurable(trigger: IncidentTrigger, atMs: number, seq: number): void {
+    this.#durableSeq = Math.max(this.#durableSeq, seq);
+    if (trigger !== "non_entity_damage") return;
+    this.#lastSavedDamageCapturedAt = atMs;
+    this.#lastSavedDamageSeq = seq;
+  }
+
+  /**
+   * D13. A trim may drop rows up to `newest` only when they are covered, or hold no unsaved damage. Otherwise a
+   * checkpoint of the whole ring is queued now and bypasses the damage cadence: that snapshot holds the rows. A pending
+   * snapshot is never replaced, because a replacement could not hold the rows the first one lost; the drop waits for it,
+   * up to twice the byte budget (past that the oldest rows go, counted as omissions).
+   */
+  #mayDrop(newest: Entry, now: number): boolean {
+    if (newest.seq <= this.#coveredSeq || !this.#hasUnsavedDamage()) return true;
+    if (!this.#pending) {
+      void this.#queue("non_entity_damage", null, null, now, true);
+      return true;
+    }
+    return this.#bytes > this.budget.bytes * 2;
+  }
+
+  #hasUnsavedDamage(): boolean {
+    return this.#damageSeq > this.#lastSavedDamageSeq;
+  }
+
+  /** Rows a snapshot holds that the ring has dropped and no written artifact holds yet. */
+  #holdsUnsavedDroppedRows(rows: readonly Entry[]): boolean {
+    const firstRingSeq = this.#entries[0]?.seq ?? Number.POSITIVE_INFINITY;
+    return rows.some((row) => row.seq > this.#durableSeq && row.seq < firstRingSeq);
+  }
+
   /**
    * Recurring damage checkpoints compare capture times across the existing
    * history window; slow persistence does not extend the interval. Every hit
-   * stays in the ring, but does not get an independent artifact. Byte pressure
-   * can shorten that history; this cadence does not promise lossless coverage.
-   * Terminal and operator captures always bypass it, as do failed writes.
+   * stays in the ring, but does not get an independent artifact. Unsaved damage
+   * rows are not dropped without a checkpoint first (D13). Terminal and operator
+   * captures always bypass this cadence, as do failed writes and checkpoints a trim forces.
    */
   #damageCheckpointRecent(trigger: IncidentTrigger, atMs: number): boolean {
     return (
