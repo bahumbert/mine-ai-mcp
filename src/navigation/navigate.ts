@@ -90,7 +90,7 @@ export interface NavigateOptions {
    * threat avoidance while their goal chooses the required separation.
    */
   readonly stepField?: null;
-  /** Told of each block the route placed as scaffold, once the world confirmed it. */
+  /** Told of each block the route placed as scaffold, once the world confirmed it, and of a placement whose click went out when the route was cut (its block may stand). */
   readonly onPlacement?: (placement: { readonly position: BlockPosition; readonly stateId: number }) => void;
 }
 

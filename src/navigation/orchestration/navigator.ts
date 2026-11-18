@@ -68,7 +68,7 @@ export interface NavigationRequest {
    * say so here.
    */
   readonly stepField?: null | undefined;
-  /** Told of each block this run's route placed (scaffold) once the world confirmed it, with its block state. */
+  /** Told of each block this run's route placed (scaffold) once the world confirmed it, with its block state; also of a placement whose click went out when the run was cut (the block may stand, or not: the caller digs what it finds). */
   readonly onPlacement?: (placement: { readonly position: BlockPosition; readonly stateId: number }) => void;
 }
 

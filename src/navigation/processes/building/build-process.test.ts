@@ -653,6 +653,59 @@ test("what a pickup walk places is scaffold too: the next takedown round digs it
   assert.deepEqual(result.scaffold, { placed: 2, removed: 2, left: [] });
 });
 
+/**
+ * A placement the route was cut after its click (Mine Labs 2026-11-17, `navigation-run-cancelled-placement.test.ts`) is told
+ * to `onPlacement` whether or not its block stands. These three pin what the takedown does with such a report.
+ */
+test("a placement reported after a cut click that the server dropped is counted removed: nothing stands, nothing is dug", async () => {
+  const dropped = droppingScaffold([[9, 65, 2]], "reaches", async ({ options }) => {
+    if (dropped.walkedTo.length === 1) options.onPlacement?.({ position: { x: 20, y: 64, z: 0 }, stateId: 10 }); // the click went out, the block never came
+  });
+  using _timers = dropped.clock.install();
+  const result = await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }), 60_000);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 2, removed: 2, left: [] });
+});
+
+test("a build cut right after a sweep's placement is resumed into digging it: the cut attempt's progress holds the block", async () => {
+  const abort = new AbortController();
+  const dropped = droppingScaffold([[9, 65, 2]], "reaches", async ({ options }) => {
+    dropped.harness.world.setCell(new Vec3(20, 64, 0), 10);
+    options.onPlacement?.({ position: { x: 20, y: 64, z: 0 }, stateId: 10 });
+    abort.abort(new Error("a reflex cut the build"));
+  });
+  using _timers = dropped.clock.install();
+  const progress = new BuildProgress();
+  await assert.rejects(dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD, signal: abort.signal }, false, progress), 60_000), /a reflex cut the build/u);
+  assert.notEqual(dropped.harness.world.getBlockStateId(new Vec3(20, 64, 0)), 0, "the cut left the block standing");
+  const resumed = await dropped.clock.settle(build(dropped.bot, { ...dropped.physics, ...COMPLETE_BUILD }, false, progress), 60_000);
+  assert.equal(resumed.status, "complete");
+  assert.equal(resumed.scaffold?.left.length, 0);
+  assert.equal(dropped.harness.world.getBlockStateId(new Vec3(20, 64, 0)), 0, "the resumed takedown dug the reported block");
+});
+
+test("a sweep of the last takedown round that places a block leaves it, recorded and reported as left", async () => {
+  // Each sweep places a new block and each dug block drops an item, so every round (the takedown makes at most four) ends with a block standing.
+  const dropped = droppingScaffold([[9, 65, 2]], "reaches", async ({ options }) => {
+    const at = { x: 19 + dropped.walkedTo.length, y: 64, z: 0 };
+    dropped.harness.world.setCell(new Vec3(at.x, at.y, at.z), 10);
+    options.onPlacement?.({ position: at, stateId: 10 });
+  });
+  const breakInPlace = dropped.physics.breakInPlace;
+  const dropping = {
+    ...dropped.physics,
+    breakInPlace: async (options: Parameters<typeof breakInPlace>[0]) => {
+      const result = await breakInPlace(options);
+      if (options.position.x >= 20) dropped.harness.entities.spawn({ name: "item", position: new Vec3(options.position.x + 0.5, options.position.y + 0.3, options.position.z + 0.5), item: { name: "dirt", count: 1 } });
+      return result;
+    },
+  };
+  using _timers = dropped.clock.install();
+  const result = await dropped.clock.settle(build(dropped.bot, { ...dropping, ...COMPLETE_BUILD }), 60_000);
+  assert.equal(result.status, "complete");
+  assert.deepEqual(result.scaffold, { placed: 5, removed: 4, left: [{ x: 23, y: 64, z: 0 }] });
+});
+
 test("a build cut during the sweep is resumed into it: the drops the first attempt left are picked up by the next", async () => {
   const abort = new AbortController();
   const dropped = droppingScaffold([[9, 65, 2], [9, 66, 2]], "reaches", async () => abort.abort(new Error("a reflex cut the build")));

@@ -83,6 +83,8 @@ export interface RouteExecutionRequest {
   readonly stepStarted: (step: PlannedStep) => void;
   readonly phase: (step: PlannedStep, phase: MovementPhase) => void;
   readonly effectConfirmed: (operation: Exclude<PlannedOperation, { kind: "move" }>) => void;
+  /** A placement whose click went out when the route was cut, before the world confirmed it: its block may stand. */
+  readonly placementCutAfterClick?: (operation: Extract<PlannedOperation, { kind: "place" }>) => void;
   readonly stepCompleted: (step: PlannedStep, arrival: BlockPosition) => StepDecision;
 }
 
@@ -413,6 +415,8 @@ export class RouteExecutor {
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);
+    // A click that went out may have placed its block before the cut: the run's owner is told, confirmed or not (it digs what it finds).
+    if (result.kind === "cancelled" && issued && operation.kind === "place") this.request.placementCutAfterClick?.(operation);
     if (result.kind === "cancelled" || result.kind === "invalidated") return result;
     const failed = { kind: operation.kind, position };
     if (result.kind === "effect_failed") {

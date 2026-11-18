@@ -906,6 +906,7 @@ export class NavigationRun {
         }
         else this.#counters.activations += 1;
       },
+      placementCutAfterClick: ({ placement }) => this.request.onPlacement?.({ position: placement.position, stateId: placement.stateId }),
       stepCompleted: (step, arrival) => this.#onStepCompleted(goal, plan, step, arrival),
     });
     this.#routeExecutor = executor;
