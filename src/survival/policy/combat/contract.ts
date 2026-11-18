@@ -57,7 +57,7 @@ export const combatPolicySchema = z.strictObject({
     .number()
     .int()
     .positive()
-    .describe("Physics ticks allowed to observe a ranged volley finish before reporting the guard exhausted."),
+    .describe("Server ticks (world age) allowed to observe a ranged volley finish before reporting the guard exhausted, with a real-time backstop."),
   recovery_timeout_ms: z
     .number()
     .int()
