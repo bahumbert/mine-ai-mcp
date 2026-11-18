@@ -9,6 +9,8 @@
  * run, to plan the next run's shards; a `-t` run leaves it as it was (its skipped cases would time every file at ~0 s).
  * One run at a time per machine: a run queues for the unit slot (`flock` on `MINE_AI_TEST_SLOT_LOCK`, else
  * `~/.cache/mine-ai/test-fast.lock`) and says whom it waits for; `--no-slot` skips the queue.
+ * A `*.serial.test.ts` file (one that runs a host program, such as ISCC) is left to `bun run test`: under the parallel
+ * shards its child process timed out (WSL interop `accept4 failed 110`); the summary names the files left out.
  */
 
 import {
@@ -55,8 +57,20 @@ export interface ShardResult {
 const TEST_FILE = /(\.test|_test|\.spec|_spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/u;
 const MONITOR_LINK = ".agent/monitor/";
 
-/** The test files Bun would run under `testPaths` (relative to `root`), as `./` paths in the spelling given. */
+/** A test file that runs a host program: `bun run test` runs it, `test:fast` leaves it out. */
+export const SERIAL_TEST_FILE = /\.serial\.test\.ts$/u;
+
+/** The test files Bun would run under `testPaths` (relative to `root`), as `./` paths in the spelling given, minus the serial ones. */
 export function testFiles(root: string, testPaths: readonly string[]): string[] {
+  return allTestFiles(root, testPaths).filter((file) => !SERIAL_TEST_FILE.test(file));
+}
+
+/** The serial test files under `testPaths`, which `test:fast` leaves out (`./` paths, as `testFiles`). */
+export function serialFiles(root: string, testPaths: readonly string[]): string[] {
+  return allTestFiles(root, testPaths).filter((file) => SERIAL_TEST_FILE.test(file));
+}
+
+function allTestFiles(root: string, testPaths: readonly string[]): string[] {
   const found: string[] = [];
   for (const testPath of testPaths) collectTestFiles(root, testPath, found);
   return found.sort();
@@ -175,6 +189,7 @@ export function summaryLines(
   load: number,
   filtered = false,
   slotWaitS?: number,
+  leftOut: readonly string[] = [],
 ): { lines: string[]; ok: boolean } {
   const problems: string[] = [];
   let ok = true;
@@ -221,7 +236,9 @@ export function summaryLines(
   const summary =
     `test:fast: ${tests} tests, ${pass} pass, ${failures} fail, ${skipped} skip in ${(wallMs / 1000).toFixed(1)} s ` +
     `(${shards.length} shards, slowest ${slowest.toFixed(1)} s, load ${load.toFixed(2)}${waited})`;
-  return { lines: [summary, ...problems], ok };
+  const serialLine =
+    leftOut.length === 0 ? [] : [`test:fast: left out ${leftOut.length} serial file(s), run by bun run test: ${leftOut.join(", ")}`];
+  return { lines: [summary, ...serialLine, ...problems], ok };
 }
 
 /** `min(12, floor(parallelism / 2))`, at least 1. */
@@ -325,7 +342,9 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   const slotWait = slotWaitSeconds(process.env);
   const present = PROJECTS.filter((project) => existsSync(join(root, project.dir)));
-  const files = testFiles(root, present.flatMap((project) => project.tests));
+  const testPaths = present.flatMap((project) => project.tests);
+  const files = testFiles(root, testPaths);
+  const serial = serialFiles(root, testPaths);
   if (files.length === 0) {
     console.log("test:fast: no test file under the projects present");
     return 1;
@@ -361,7 +380,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       logTail: logTail(log),
     };
   });
-  const { lines, ok } = summaryLines(shards, wallMs, load, filtered, slotWait);
+  const { lines, ok } = summaryLines(shards, wallMs, load, filtered, slotWait, serial);
   for (const line of lines) console.log(line);
   console.log(`test:fast: run folder ${runDir}`);
   writeTimes(join(root, TIMES_FILE), nextTimes(oldTimes, shards.flatMap((shard) => shard.report?.cases ?? []), filtered));

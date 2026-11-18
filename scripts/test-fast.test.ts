@@ -25,6 +25,7 @@ import {
   readJunit,
   releaseHolder,
   runInSlot,
+  serialFiles,
   shardArguments,
   slotLockPath,
   summaryLines,
@@ -109,6 +110,24 @@ test("testFiles finds the test files of a path, sorted, as ./ paths in the path'
     "./src/c.spec.mts",
     "./src/d_spec.tsx",
   ]);
+});
+
+test("testFiles leaves out a serial test file, and serialFiles returns it", () => {
+  const root = tree(["a/x.test.ts", "a/y.serial.test.ts"], existsSync("/dev/shm") ? "/dev/shm" : tmpdir());
+  expect(testFiles(root, ["./a"])).toEqual(["./a/x.test.ts"]);
+  expect(serialFiles(root, ["./a"])).toEqual(["./a/y.serial.test.ts"]);
+});
+
+test("the summary names the serial files left out, and says nothing when none is left out", () => {
+  const green = readJunit(
+    '<testsuites name="bun test" tests="1" assertions="1" failures="0" skipped="0" time="0.1">' +
+      '<testsuite name="a.test.ts" file="a.test.ts"><testcase name="one" classname="" time="0.1" file="a.test.ts" /></testsuite>' +
+      "</testsuites>",
+  );
+  const one = summaryLines([shard(0, 1, green)], 1000, 1, false, undefined, ["./a/y.serial.test.ts"]);
+  expect(one.lines).toContain("test:fast: left out 1 serial file(s), run by bun run test: ./a/y.serial.test.ts");
+  const none = summaryLines([shard(0, 1, green)], 1000, 1, false, undefined, []);
+  expect(none.lines.some((line) => line.includes("left out"))).toBe(false);
 });
 
 test("testFiles keeps the spelling of a linked path (links are not resolved)", () => {
