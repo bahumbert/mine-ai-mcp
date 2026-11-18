@@ -97,7 +97,7 @@ async function navigateEvade(flight: Flight): Promise<{ route: Route; reached: b
 async function waitInCover(flight: Flight): Promise<void> {
   const { bot, observed, clock, signal, phase } = flight;
   bot.clearControlStates();
-  while (!phase.aborted && !separated(flight) && observed.canWaitInCover(observed.ends())) {
+  while (!phase.aborted && !separated(flight) && observed.canWaitInCover(observed.ends(), inFlight(flight))) {
     try { await waitForPhysicsTicks(bot, 1, phase, { wallMs: clock.remainingMs() }); }
     catch (cause) {
       // The clock ending is the budget ending, not a failure; a caller's abort still throws.
@@ -107,6 +107,22 @@ async function waitInCover(flight: Flight): Promise<void> {
     observed.observe();
   }
   if (!clock.exhausted && !separated(flight)) observed.refreshGoal();
+}
+
+/** Fuse clearance wins; otherwise every settled stop either guards or refuses incoming flight. */
+async function settleIncoming(flight: Flight, completed = false): Promise<{ kind: "guarded" | "refused" | "none"; guardStop: string | null }> {
+  const { bot, context, observed, clock } = flight;
+  if (flight.phase.aborted || escapeRequired(flight) || !bodySettled(flight, completed)) return { kind: "none", guardStop: null };
+  const projectiles = incomingShieldProjectiles(bot, RETREAT_PROJECTILE_ALLOWANCE);
+  if (projectiles.length === 0) return { kind: "none", guardStop: null };
+  if (!context.policy.shield || retreatGuardLimit(bot, context.policy)) {
+    observed.refuseTrajectories(projectiles);
+    return { kind: "refused", guardStop: null };
+  }
+  flight.projectileGuards++;
+  const guard = await guardRetreatProjectiles(bot, flight.navigation, flight.phase, monotonicNow() + clock.remainingMs(),
+    context.policy, () => escapeRequired(flight));
+  return { kind: "guarded", guardStop: guard.kind === "stopped" ? guard.reason : null };
 }
 
 /** Continue only within the original attempt, re-judging every settled stop and changed arrival. */
@@ -122,20 +138,18 @@ async function followEvadeRoutes(flight: Flight): Promise<{ route: Route; guardS
     route = stopped.route;
     observed.observe();
     if (separated(flight, route.status === "completed") || clock.exhausted || signal.aborted) break;
-    if (stopped.incoming) {
-      flight.projectileGuards++;
-      const guard = await guardRetreatProjectiles(bot, flight.navigation, flight.phase, monotonicNow() + clock.remainingMs(),
-        flight.context.policy, () => escapeRequired(flight));
-      if (guard.kind === "stopped") return { route, guardStop: guard.reason };
-      continue;
-    }
+    const incoming = await settleIncoming(flight, route.status === "completed");
+    if (incoming.guardStop) return { route, guardStop: incoming.guardStop };
+    if (incoming.kind !== "none") continue;
     if (stopped.reached) continue;
     if (route.status !== "completed") break;
-    if (observed.canWaitInCover(observed.ends()) && bodySettled(flight)) {
+    if (observed.canWaitInCover(observed.ends(), inFlight(flight)) && bodySettled(flight)) {
       await waitInCover(flight);
       // Arrival certified the body before the hold, not after a displacement during it (P4-29 T6 review).
       route = { status: "stopped", reason: "Cover wait ended without settled safe separation", elapsedMs: route.elapsedMs };
       if (separated(flight) || clock.exhausted) break;
+      const incoming = await settleIncoming(flight);
+      if (incoming.guardStop) return { route, guardStop: incoming.guardStop };
       continue;
     }
     const at = bot.entity.position.floored().toString();

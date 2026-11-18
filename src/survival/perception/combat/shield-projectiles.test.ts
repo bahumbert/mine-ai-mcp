@@ -7,7 +7,7 @@ import { projectileReachesBody } from "../../positioning/combat/exposure.js";
 import { confirmShieldBlock, observeProjectileDefence, projectileShieldFacing } from "../../weapons/shield-facing.js";
 import { CombatPerception } from "./observations.js";
 import { arrowFlight, trackArrowFlights } from "./arrow-flight.js";
-import { arrowImpact, arrowImpactInTicks, incomingShieldProjectiles, isIncomingArrow } from "./shield-projectiles.js";
+import { arrowImpact, arrowImpactInTicks, incomingShieldProjectiles, isIncomingArrow, projectileThreatensBody } from "./shield-projectiles.js";
 import { createNavigationRuntime, createMovements, exactBlockGoal } from "../../../navigation/index.js";
 import { guardRetreatProjectiles } from "../../weapons/projectile-guard.js";
 import { DEFAULT_COMBAT_POLICY } from "../../policy/combat/contract.js";
@@ -469,6 +469,30 @@ test("retreat and shield facing detect an arrow which falls into the body below 
   assert.equal(isIncomingArrow(bot, arrow), true);
   assert.deepEqual(incomingShieldProjectiles(bot), [arrow]);
   assert.ok(projectileShieldFacing(bot)!.z > 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a candidate body uses retained curved flight and directional movement allowance at ${ticksPerSecond} tps`, async () => {
+  const { bot, clock, entities } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: null,
+    position: new Vec3(0.5, 64, 0.5), server: { ticksPerSecond },
+    entities: { 8: { name: "arrow", position: new Vec3(0.5, 70, 8.5), velocity: new Vec3(0, 0, -0.5) } } });
+  using _timers = clock.install();
+  using _perception = new CombatPerception(bot);
+  await clock.advance(40_000 / ticksPerSecond);
+  const arrow = bot.entities[8]!;
+  bot._client.emit("sync_entity_position", { entityId: arrow.id });
+  const packetPosition = arrow.position.clone();
+  await clock.advance(5_000 / ticksPerSecond);
+  assert.deepEqual(arrow.position, packetPosition, "the packet position stayed stale");
+  assert.ok(arrowFlight(bot, arrow).position.distanceTo(packetPosition) > 1, "the retained flight advanced");
+  assert.equal(projectileReachesBody(bot.world, arrow, bot.entity), false);
+  assert.equal(projectileThreatensBody(bot, arrow, 0, bot.entity), true);
+  assert.equal(projectileThreatensBody(bot, arrow, 0, { ...bot.entity, position: new Vec3(30, 64, 0) }), false);
+  const shot = entities.spawn({ name: "small_fireball", position: new Vec3(8.5, 65, 0.5), velocity: new Vec3(-0.5, 0, 0) });
+  const candidate = { ...bot.entity, position: new Vec3(0.5, 64, 2) };
+  assert.equal(projectileThreatensBody(bot, shot, 0, candidate), false);
+  assert.equal(projectileThreatensBody(bot, shot, 2, candidate), true);
+  entities.remove(shot.id);
+  assert.equal(projectileThreatensBody(bot, shot, 2, candidate), false);
 });
 
 test("one defensive assessment orders impacts and covers shots independently of the quarry", () => {

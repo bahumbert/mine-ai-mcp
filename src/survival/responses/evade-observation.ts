@@ -6,11 +6,13 @@ import { monotonicNow } from "../../utils/index.js";
 import type { ResponseContext } from "../control/combat/context.js";
 import type { EvadeThreatEnd } from "../control/combat/response-result.js";
 import { positionThreat } from "../perception/combat/observations.js";
+import { projectileThreatensBody } from "../perception/combat/shield-projectiles.js";
 import { observeExposedAvoidanceContact } from "../perception/combat/threats.js";
 import type { HostileThreat } from "../policy/combat/response.js";
 import { positionExposed } from "../positioning/combat/exposure.js";
 import type { EvadeClock } from "./evade-clock.js";
-import { EVADE_CLOSING_WINDOW_TICKS, judgeReach, ReachHistory, type ReachThreat } from "./evade-reach.js";
+import { RETREAT_PROJECTILE_ALLOWANCE } from "../weapons/projectile-guard.js";
+import { coverHolds, EVADE_CLOSING_WINDOW_TICKS, judgeReach, ReachHistory, type ReachThreat } from "./evade-reach.js";
 
 const EVADE_ARRIVAL_MARGIN = 8;
 const EVADE_GOAL_REFRESH_BLOCKS = 4;
@@ -31,6 +33,8 @@ export class EvadeObservation {
   readonly #dead = new Set<number>();
   readonly #history = new ReachHistory();
   #snapshot = new Map<number, ReachThreat & { advancing: boolean | null }>();
+  #projectiles: readonly Bot["entity"][] = [];
+  #unsafeRevision = 0;
   goal!: Goal;
   goalRefreshes = 0;
 
@@ -70,8 +74,29 @@ export class EvadeObservation {
       if (!this.#dead.has(threat.id) && !this.#entries.has(threat.id)) this.#add(threat, "joined");
     if (this.goal) {
       const ends = this.ends();
-      if (this.#changed(ends)) this.refreshGoal(true, ends);
+      const retained = this.#projectiles.filter((p) => p.isValid
+        && projectileThreatensBody(bot, p, RETREAT_PROJECTILE_ALLOWANCE, bot.entity));
+      const trajectoriesChanged = retained.length !== this.#projectiles.length;
+      if (trajectoriesChanged) {
+        this.#projectiles = retained;
+        this.#unsafeRevision++;
+      }
+      if (trajectoriesChanged || this.#changed(ends)) this.refreshGoal(true, ends);
     }
+  }
+
+  /** A settled stop under fire must choose a cell outside the incoming trajectories. */
+  refuseTrajectories(projectiles: readonly Bot["entity"][]): void {
+    this.#projectiles = projectiles;
+    this.#unsafeRevision++;
+    this.refreshGoal();
+  }
+
+  /** Match navigation's current-body and candidate-cell geometry. */
+  #unsafe(feet: Vec3): boolean {
+    const position = feet.equals(this.bot.entity.position.floored()) ? this.bot.entity.position : feet.offset(0.5, 0, 0.5);
+    const body = { ...this.bot.entity, position };
+    return this.#projectiles.some((p) => p.isValid && projectileThreatensBody(this.bot, p, RETREAT_PROJECTILE_ALLOWANCE, body));
   }
 
   /** A death changes goal membership but keeps the threat's receipt. */
@@ -101,7 +126,8 @@ export class EvadeObservation {
     const minRange = Math.min(this.context.policy.evade_cover_range, this.safeRange);
     this.goal = safeFromEntitiesGoal([...this.#snapshot.values()].map((body) => ({ ...body,
       ...(body.attack === "projectile" && body.advancing !== true ? { cover: { minRange, eyeHeight: body.height * 0.85, width: body.width } } : {}) })),
-    this.safeRange + EVADE_ARRIVAL_MARGIN, { follow: "snapshot" });
+    this.safeRange + EVADE_ARRIVAL_MARGIN, { follow: "snapshot",
+      ...(this.#unsafeRevision > 0 ? { unsafe: (feet: Vec3) => this.#unsafe(feet), unsafeRevision: this.#unsafeRevision } : {}) });
     if (count) this.goalRefreshes++;
   }
 
@@ -125,10 +151,13 @@ export class EvadeObservation {
   }
 
   /** Only a hidden projectile threat may hold the body while its observation window fills. */
-  canWaitInCover(ends: readonly EvadeThreatEnd[]): boolean {
+  canWaitInCover(ends: readonly EvadeThreatEnd[], incoming: boolean): boolean {
+    if (incoming || ends.some((end) => end.advancing === true)) return false;
     return ends.filter((end) => end.basis === null).every((end) => {
       const body = this.#entries.get(end.id)!.body;
-      return body.attack === "projectile" && !positionExposed(this.bot.world, this.bot.entity, body);
+      return end.advancing === null && coverHolds({ attack: body.attack, distance: end.distance,
+        policy: { ...this.context.policy, evade_safe_range: this.safeRange },
+        exposed: () => positionExposed(this.bot.world, this.bot.entity, body) });
     });
   }
 

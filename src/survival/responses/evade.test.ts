@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
+import { createNavigationRuntime, createMovements, exactBlockGoal } from "../../navigation/index.js";
+import { EMPTY_OVERLAY_IDENTITY } from "../../navigation/search/planning-overlay.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { combatTestContext } from "../../test-support/combat.js";
 import { createFakeBot, createFakeClock, itemOf, listenersAddedSince } from "../../test-support/fake-bot/index.js";
@@ -9,7 +11,223 @@ import { completeResponse, describeResponse } from "../control/combat/settlement
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
 import { EvadeObservation } from "./evade-observation.js";
+import { EvadeClock } from "./evade-clock.js";
+import { CombatPerception } from "../perception/combat/observations.js";
+import { arrowImpact, incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
+import { projectileContact } from "../positioning/combat/exposure.js";
+import { RETREAT_PROJECTILE_ALLOWANCE, retreatGuardLimit } from "../weapons/projectile-guard.js";
+import { swingReadiness } from "../weapons/swing-readiness.js";
 import { EVADE_BUDGET_MS, evadeWallMs, judgements, leavesNothing, reachFixture, ROUTE_MS, ZOMBIE } from "./evade-fixture.test.js";
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a hidden shooter under the cover range does not hold the body at ${ticksPerSecond} tps`, async () => {
+    const fixture = reachFixture({ shooter: true, distance: 6.7, cover: true, ticksPerSecond });
+    using _timers = fixture.clock.install();
+    const nothingLeft = leavesNothing(fixture);
+    let routes = 0;
+    let refreshedAt = Infinity;
+    const age = fixture.bot.time.age;
+    fixture.navigation.navigate = async () => {
+      if (++routes === 2) {
+        refreshedAt = fixture.bot.time.age - age;
+        fixture.bot.entities[7]!.position.x = 80;
+      }
+      return { status: "completed", elapsedMs: 0 };
+    };
+    const result = await fixture.run();
+    assert.ok(result.goalRefreshes >= 1, "the under-range cover stop refreshes its goal");
+    assert.ok(refreshedAt < 60, `refreshed at ${refreshedAt} world ticks`);
+    assert.ok(result.elapsedTicks! < 300, `elapsed ${result.elapsedTicks} ticks`);
+    await nothingLeft();
+  });
+
+  for (const change of ["none", "visible", "joined"] as const)
+  test(`${change === "none" ? "a hidden still shooter at 9 blocks holds until cover" : change === "visible" ? "a shooter becoming visible leaves the wait" : "a joined visible shooter ends the wait"} at ${ticksPerSecond} tps`, async () => {
+    const fixture = reachFixture({ shooter: true, distance: 9, cover: true, ticksPerSecond });
+    using _timers = fixture.clock.install();
+    const nothingLeft = leavesNothing(fixture);
+    const start = fixture.server.gameTime;
+    let routes = 0;
+    let released = Infinity;
+    fixture.navigation.navigate = async () => {
+      if (++routes === 2) {
+        released = fixture.server.gameTime - start;
+        fixture.bot.entity.position.x = -40.5;
+      }
+      return { status: "completed", elapsedMs: 0 };
+    };
+    const stopChanging = fixture.server.onTick(() => {
+      if (fixture.server.gameTime - start !== 10) return;
+      if (change === "visible") fixture.wall(false);
+      if (change === "joined") {
+        const shooter = fixture.entities.spawn({ id: 9, name: "skeleton", position: new Vec3(0.5, 64, 6.5) });
+        shooter.equipment[0] = itemOf(fixture.bot.registry, "bow");
+      }
+    });
+    const result = await fixture.run();
+    stopChanging();
+    assert.equal(result.result.kind, "separated");
+    if (change === "none") {
+      assert.equal(routes, 1, "no arrow: the wait holds without another route");
+      assert.equal(result.goalRefreshes, 0);
+      assert.equal(result.ends[0]?.basis, "cover");
+      assert.equal(result.elapsedTicks, 40);
+    } else assert.ok(released >= 10 && released <= 30, `wait released at ${released} ticks`);
+    await nothingLeft();
+    if (change === "none") {
+      fixture.navigation.navigate = async () => {
+        fixture.bot.entity.position.x = -30.5;
+        return { status: "completed", elapsedMs: 0 };
+      };
+      assert.equal((await fixture.run()).result.kind, "separated", "the next escape must be able to leave the held cover");
+      assert.equal(fixture.bot.entity.position.x, -30.5);
+    }
+  });
+}
+
+type ArrowEscapeMode = "arrival" | "mid-wait" | "limited" | "shield" | "cancel" | "reached";
+
+/** All unshielded stops must refuse contact and move before impact; cancellation must hand back. */
+function assertEscapeResult(result: Awaited<ReturnType<typeof evade>>, mode: ArrowEscapeMode,
+  danger: { refused: boolean; movedAt: number; impactAt: number }, signal: AbortSignal) {
+  if (mode === "cancel") {
+    assert.equal(result.result.kind, "failed");
+    assert.equal(completeResponse(result, signal).kind, "cancelled");
+    return;
+  }
+  if (mode === "shield") {
+    assert.equal(result.result.kind, "separated", JSON.stringify(result.result));
+    assert.equal(result.projectileGuards, 1);
+    return;
+  }
+  assert.equal(danger.refused, true, "the next goal refuses the arrow's contact cell");
+  assert.ok(danger.movedAt < danger.impactAt, `moved at ${danger.movedAt}, predicted impact at ${danger.impactAt}`);
+  assert.equal(result.projectileGuards, 0);
+  assert.equal(result.result.kind, "separated", JSON.stringify(result.result));
+}
+
+/** Real movement after a one-step cover arrival, with an arrow passing the wall's edge along z. */
+async function settledArrowEscape(ticksPerSecond: number, mode: ArrowEscapeMode) {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), simulatePhysics: true,
+    server: { ticksPerSecond }, position: new Vec3(0.5, 64, -0.5), groundY: 63,
+    slots: mode === "limited" || mode === "shield" ? { 45: { name: "shield" } } : undefined,
+    entities: { 7: { name: "skeleton", position: new Vec3(9.5, 64, 0.5) } } });
+  using _timers = harness.clock.install();
+  const { bot, clock, server, entities, world } = harness;
+  bot.entities[7]!.equipment[0] = itemOf(bot.registry, "bow");
+  for (let y = 64; y <= 67; y++) for (let z = -2; z <= 2; z++) world.setCell(new Vec3(4, y, z), "stone");
+  using perception = new CombatPerception(bot);
+  swingReadiness(bot);
+  const added = listenersAddedSince(bot), packets = listenersAddedSince(bot._client);
+  const globalTimers = clock.pendingGlobalTimers();
+  const context = { ...combatTestContext(bot), perception, policy: { ...DEFAULT_COMBAT_POLICY, melee: false } };
+  const navigation = createNavigationRuntime(bot);
+  const cancel = new AbortController();
+  const navigate = navigation.navigate.bind(navigation);
+  let routes = 0, refused = false, movedAt = Infinity, impactAt = Infinity, spawnAt = Infinity;
+  let arrival = bot.entity.position.clone();
+  let arrow: typeof bot.entity | undefined;
+  const spawn = () => {
+    spawnAt = server.gameTime;
+    arrow = entities.spawn({ id: 8, name: "arrow", position: arrival.offset(0, 6, 8), velocity: new Vec3(0, 0, -0.5) });
+    assert.equal(projectileContact(bot.world, arrow, bot.entity), null, "the raw ray misses above the body");
+    const impact = arrowImpact(bot, arrow)!;
+    assert.ok(impact, "the retained curved flight hits the body");
+    impactAt = spawnAt + impact.ticks;
+    assert.ok(incomingShieldProjectiles(bot, RETREAT_PROJECTILE_ALLOWANCE).includes(arrow));
+    if (mode === "limited") {
+      bot.health = context.policy.critical_health - 1;
+      assert.ok(retreatGuardLimit(bot, context.policy));
+    }
+  };
+  const stopWatching = server.onTick(() => {
+    if (movedAt === Infinity && arrow && bot.entity.position.distanceTo(arrival) >= 1) movedAt = server.gameTime;
+    if (mode === "shield" && arrow?.isValid && server.gameTime >= spawnAt + 10) entities.remove(arrow.id);
+  });
+  const routed: NavigationRuntime = { ...navigation, navigate: async (options) => {
+    // The evade clock already owns stopSignal; omit navigation's independent, uncancellable timeoutSignal timer.
+    const { timeoutMs: _timeout, ...routeOptions } = options;
+    if (++routes === 1) {
+      const route = await navigate({ ...routeOptions, goal: exactBlockGoal({ x: mode === "reached" ? -30 : 0, y: 64, z: 0 }) });
+      assert.equal(route.status, mode === "reached" ? "stopped" : "completed", JSON.stringify(route));
+      if (mode === "reached") assert.ok(options.stopSignal?.aborted, "reach settled the ongoing route");
+      arrival = bot.entity.position.clone();
+      if (mode === "mid-wait") clock.after(5_000 / ticksPerSecond, spawn);
+      else if (mode === "cancel") clock.after(5_000 / ticksPerSecond, () => cancel.abort(new Error("cancel cover wait")));
+      else if (mode !== "shield") spawn();
+      return route;
+    }
+    const resolved = options.goal.resolve({ ...observation(), position: bot.entity.position });
+    assert.equal(resolved.kind, "active");
+    if (resolved.kind === "active") refused = !resolved.isSatisfied({ feet: arrival.floored(),
+      remainingScaffolds: 0, overlayId: EMPTY_OVERLAY_IDENTITY }, navigation.world);
+    return navigate(routeOptions);
+  } };
+  if (mode === "shield") spawn();
+  try {
+    const result = await clock.settle(evade(bot, routed, { kind: "evade", safeRange: 36, reason: "hurt",
+      threats: [{ id: 7, name: "skeleton", position: { x: 9.5, y: 64, z: 0.5 }, distance: 9 }] }, context, 20,
+    cancel.signal), evadeWallMs(15_000) + 1_000);
+    assertEscapeResult(result, mode, { refused, movedAt, impactAt }, cancel.signal);
+    if (arrow?.isValid) entities.remove(arrow.id);
+    const next = await clock.settle(navigate({ movements: createMovements(bot),
+      goal: exactBlockGoal({ x: -2, y: 64, z: 0 }) }), 10_000);
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally {
+    stopWatching();
+    if (arrow?.isValid) entities.remove(arrow.id);
+    await clock.settle(navigation.close(), 5_000);
+  }
+  for (const event of ["time", "physicsTick", "entityDead"]) assert.equal(added(event), 0, event);
+  assert.equal(packets("explosion"), 0);
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(clock.pendingGlobalTimers(), globalTimers);
+  await clock.advance(evadeWallMs(15_000) + 1_000);
+  assert.equal(clock.pendingTimers(), 0);
+  assert.equal(clock.pendingGlobalTimers(), globalTimers);
+}
+
+for (const ticksPerSecond of [20, 10]) for (const mode of ["arrival", "mid-wait", "limited", "shield", "cancel", "reached"] as const) {
+  const name = { arrival: "an incoming arrow at route arrival with no shield moves and refuses its contact cell",
+    "mid-wait": "an incoming arrow mid-wait with no shield moves", limited: "the guard limit reached behaves as no shield",
+    shield: "an incoming arrow with a shield guards", cancel: "a cancel during the wait settles once and the next navigate runs",
+    reached: "an incoming arrow after a reached stop refuses the settled cell" }[mode];
+  test(`${name} at ${ticksPerSecond} tps`, () => settledArrowEscape(ticksPerSecond, mode));
+}
+
+for (const ticksPerSecond of [20, 10]) for (const end of ["passed", "removed"] as const)
+test(`a ${end} arrow clears the veto at ${ticksPerSecond} tps`, async () => {
+  const fixture = reachFixture({ shooter: true, distance: 9, cover: true, ticksPerSecond });
+  using _timers = fixture.clock.install();
+  for (let y = 64; y <= 67; y++) for (let z = -2; z <= 2; z++)
+    fixture.navigation.world.load({ x: 4, y, z }, { stateId: 1 });
+  using clock = new EvadeClock(fixture.bot, 300);
+  const observed = new EvadeObservation(fixture.bot, fixture.context, fixture.request.threats, 36, clock);
+  const arrow = fixture.entities.spawn({ id: 8, name: "arrow", position: new Vec3(0.5, 70, 8.5), velocity: new Vec3(0, 0, -0.5) });
+  const resolve = () => {
+    const goal = observed.goal.resolve({ ...observation(), position: fixture.bot.entity.position });
+    assert.equal(goal.kind, "active");
+    if (goal.kind !== "active") throw new Error("inactive evade goal");
+    return goal;
+  };
+  const node = { feet: { x: 0, y: 64, z: 0 }, remainingScaffolds: 0, overlayId: EMPTY_OVERLAY_IDENTITY };
+  assert.equal(resolve().isSatisfied(node, fixture.navigation.world), true);
+  observed.refuseTrajectories([arrow]);
+  const refused = resolve();
+  assert.equal(refused.isSatisfied(node, fixture.navigation.world), false);
+  observed.observe();
+  assert.equal(resolve().revision, refused.revision, "an unchanged veto keeps its revision");
+  if (end === "removed") fixture.entities.remove(arrow.id);
+  else {
+    arrow.position.set(0.5, 65, -3);
+    arrow.velocity.set(0, 0, -0.5);
+    fixture.bot._client.emit("sync_entity_position", { entityId: arrow.id });
+  }
+  observed.observe();
+  const cleared = resolve();
+  assert.notEqual(cleared.revision, refused.revision);
+  assert.equal(cleared.isSatisfied(node, fixture.navigation.world), true);
+});
 
 for (const ticksPerSecond of [20, 10]) for (const mode of ["sub-block", "stops", "stale", "melee"] as const) {
   test(`${mode} threat updates cover at ${ticksPerSecond} tps`, async () => {
@@ -169,26 +387,10 @@ for (const ticksPerSecond of [20, 10]) {
   });
 }
 
-test("the evade waits in cover for a hidden shooter", async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9, cover: true });
+for (const ticksPerSecond of [20, 10]) for (const abort of [false, true]) test(`a cover wait releases its listeners when ${abort ? "cancelled" : "physics and the server stop until the 3x wall"} at ${ticksPerSecond} tps`, async () => {
+  const fixture = reachFixture({ shooter: true, distance: 9, cover: true, budget: 3_000, ticksPerSecond });
   using _installed = fixture.clock.install();
-  let routes = 0;
-  fixture.navigation.navigate = async () => { routes++; return { status: "completed", elapsedMs: 0 }; };
-  const result = await fixture.run();
-  assert.equal(result.result.kind, "separated");
-  assert.equal(result.ends[0]?.basis, "cover");
-  assert.equal(routes, 1);
-  fixture.navigation.navigate = async () => {
-    fixture.bot.entity.position.x = -30.5;
-    return { status: "completed", elapsedMs: 0 };
-  };
-  assert.equal((await fixture.run()).result.kind, "separated", "the next escape must be able to leave the held cover");
-  assert.equal(fixture.bot.entity.position.x, -30.5);
-});
-
-for (const abort of [false, true]) test(`a cover wait releases its listeners when ${abort ? "cancelled" : "physics and the server stop until the 3x wall"}`, async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9, cover: true, budget: 3_000 });
-  using _installed = fixture.clock.install();
+  const nothingLeft = leavesNothing(fixture);
   fixture.navigation.navigate = async () => ({ status: "completed", elapsedMs: 0 });
   const listeners = fixture.bot.listenerCount("physicsTick");
   const cancel = new AbortController();
@@ -204,6 +406,8 @@ for (const abort of [false, true]) test(`a cover wait releases its listeners whe
   assert.equal(result.elapsedMs, abort ? 500 : evadeWallMs(3_000));
   assert.equal(fixture.bot.listenerCount("physicsTick"), listeners);
   assert.equal(fixture.clock.pendingTimers(), 0);
+  assert.equal(result.elapsedTicks, 0);
+  await nothingLeft();
 });
 
 test("a completed route cannot certify footing lost during its cover wait", async () => {

@@ -64,6 +64,12 @@ export function isIncomingArrow(bot: Bot, arrow: Entity, movementAllowance = 0, 
   return arrowImpactInTicks(bot, arrow, movementAllowance, target) !== null;
 }
 
+/** Judge a candidate body by the same retained flight or directional contact as the shield. */
+export function projectileThreatensBody(bot: Bot, projectile: Entity, movementAllowance: number, body: EntityBody): boolean {
+  if (isArrowEntity(bot, projectile)) return isIncomingArrow(bot, projectile, movementAllowance, body);
+  return directionalProjectileContact(bot, projectile, { ...body, width: body.width + movementAllowance * 2 }) !== null;
+}
+
 /** Shield-facing and retreat admission must consider the same set of blockable shots. */
 export function incomingShieldProjectiles(bot: Bot, movementAllowance = 0): Entity[] {
   return assessIncomingShieldProjectiles(bot, movementAllowance).map(({ entity }) => entity);
@@ -81,6 +87,7 @@ export function assessIncomingShieldProjectiles(bot: Bot, movementAllowance = 0)
   const forecasts: { entity: Entity; impactInTicks: number | null; contact: Vec3 }[] = [];
   const body = { ...bot.entity, width: bot.entity.width + movementAllowance * 2 };
   for (const entity of Object.values(bot.entities)) {
+    if (!projectileThreatensBody(bot, entity, movementAllowance, bot.entity)) continue;
     if (isArrowEntity(bot, entity)) {
       const impact = arrowImpact(bot, entity, movementAllowance);
       if (impact) forecasts.push({ entity, impactInTicks: impact.ticks, contact: impact.position });
