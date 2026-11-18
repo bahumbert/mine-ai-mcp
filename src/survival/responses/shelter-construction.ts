@@ -24,6 +24,7 @@ import {
   waitForShelterTicks,
 } from "./shelter-build.js";
 import { diggable, enclosedInPlace, shelterFeet, shelterIntruder, SIDES, sidesByThreat, solid } from "./shelter-cells.js";
+import { describeShelterRefusal } from "./shelter-refusal.js";
 
 /** How far down the bot digs: three cells put its head below anything that walks, and out of a skeleton's line. */
 export const HIDE_DEPTH = 3;
@@ -173,13 +174,13 @@ async function centerForShelterRing(build: ShelterBuild, feet: Vec3): Promise<St
       Math.abs(feet.y - 1 + maxY - bot.entity.position.y) < 0.001,
   );
   if (shelterBlocks(build) > 0 && !supportedCenter) {
-    return { kind: "failed", error: "The shelter cell has no solid floor to centre on" };
+    return { kind: "failed", error: "The shelter cell has no solid floor to centre on", refusal: describeShelterRefusal(build, "no_floor") };
   }
   if (!constructionChanged(build, feet)) return null;
   const centered = shelterBlocks(build) === 0 || (await centerShelterCell(build, feet));
   if (!bot.entity.onGround || !shelterFeet(bot).equals(feet) || (!centered && shelterIntruder(bot, options.threatContext)))
     return "again";
-  if (!centered) return { kind: "failed", error: "The bot could not centre inside the shelter walls" };
+  if (!centered) return { kind: "failed", error: "The bot could not centre inside the shelter walls", refusal: describeShelterRefusal(build, "not_centred") };
   return constructionChanged(build, feet) ? "again" : null;
 }
 
@@ -285,15 +286,16 @@ async function capShelter(
 function constructionStopped(build: ShelterBuild): StepEnd | null {
   const { bot, options } = build;
   const hazard = shelterHazard(build);
-  if (hazard) return { kind: "failed", error: hazard };
+  if (hazard) return { kind: "failed", error: hazard, refusal: describeShelterRefusal(build, "hazard", { hazard }) };
   if (!permitsHide(options.threatContext.policy, recoveryAvailable(bot, options.threatContext.food)))
-    return { kind: "failed", error: "[COMBAT_CONSTRAINED] Hiding is no longer permitted." };
+    return { kind: "failed", error: "[COMBAT_CONSTRAINED] Hiding is no longer permitted.", refusal: describeShelterRefusal(build, "constrained") };
   const liquid = shelterLiquidFailure(bot);
-  if (liquid) return liquid;
+  if (liquid) return { ...liquid, refusal: describeShelterRefusal(build, "liquid") };
   if (monotonicNow() >= build.constructionDeadline) {
     const open = blockedCellsText(build);
     return {
       kind: "failed",
+      refusal: describeShelterRefusal(build, "deadline"),
       error: `The shelter was not finished within ${Math.ceil(options.maximumMs / 1000)} s${open ? `; still open: ${open}` : ""}`,
     };
   }
@@ -306,6 +308,7 @@ async function blockedShelterEnd(build: ShelterBuild): Promise<StepEnd | null> {
   const skipped = blocked.filter(([, cell]) => cell.count >= 3);
   if (skipped.length) return {
     kind: "failed",
+    refusal: describeShelterRefusal(build, "occupied"),
     error: `The shelter is still open: skipped ${skipped.map(([key, cell]) => `${key} (${cell.reason})`).join("; ")} ` +
       "after 3 consecutive construction passes. Evade or withdraw to another shelter cell.",
   };

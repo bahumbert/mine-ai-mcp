@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { encounterBaseline, type EncounterEvidence, type FightResponseResult, type HostileResponseResult } from "./response-result.js";
-import { completeResponse, responseContinuation } from "./settlement.js";
+import { completeResponse, encounterReceipt, responseContinuation } from "./settlement.js";
 
 test("a survived explosion preserves request reassessment after a completed fight", () => {
   const { bot } = createFakeBot();
@@ -47,7 +47,10 @@ function responseResults(): HostileResponseResult[] {
     { ...fight, result: { ...result, kind: "bot_died" } },
     { ...fight, result: { ...result, kind: "cancelled" } },
     { ...hide, result: { ...shelter, kind: "recovered", recovery: { kind: "recovered", ate: null } } },
-    { ...hide, result: { ...shelter, kind: "failed", recovery: null, error: "No enclosure" } },
+    { ...hide, result: { ...shelter, kind: "failed", recovery: null, error: "No enclosure", refusal: {
+      cause: "no_floor", feet: { x: 0, y: 64, z: 0 }, position: { x: 0.5, y: 64, z: 0.5 }, onGround: true,
+      floor: null, shell: [], occupied: [], intruders: [], hazard: null, projectiles: [], worldAge: null,
+    } } },
     { ...hide, result: { ...shelter, kind: "held", recovery: null, error: "No food" } },
   ];
 }
@@ -63,6 +66,12 @@ test("only exhausted evades and unreflected deflections hold a living request; a
   ];
   for (const [index, physical] of responseResults().entries()) {
     const completed = completeResponse(physical, new AbortController().signal);
+    if (physical.response === "hide" && physical.result.kind === "failed") {
+      const hide = encounterReceipt(completed).hide;
+      assert.equal(hide?.kind, "failed");
+      if (hide?.kind !== "failed") throw new Error("expected failed hide receipt");
+      assert.deepEqual(hide.refusal, physical.result.refusal);
+    }
     const label = `${physical.response} ${physical.result.kind}`;
     const want = expected[index]!;
     if (want.kind === "return") assert.equal(responseContinuation(completed).kind, want.kind, label);
