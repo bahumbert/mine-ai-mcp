@@ -46,17 +46,21 @@ const FULL_AIR_NOT_OBSERVED = "Full air was not observed at the breathing stop: 
 const SWIM_BACK_MAXIMUM_TICKS = 300;
 const SWIM_BACK_MINIMUM_TICKS = 40;
 
-/** Credit progress only along the remembered first stroke; price distance behind or beside it conservatively. */
+/**
+ * Credit progress only along the remembered first stroke; price distance off it. The body is read at the middle of its
+ * cell on x and z and at its feet level on y (a body's `position.y` is its feet); drift off the line is priced by
+ * distance, never a zero test (T30a, 2026-11-18).
+ */
 function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, previous: BlockPosition | null): number {
   const stroke = ascent.path[0];
   if (!stroke || previous?.x !== stroke.cell.x || previous.y !== stroke.cell.y || previous.z !== stroke.cell.z)
     return ascent.ticks;
   const direction = new Vec3(stroke.cell.x - feet.x, stroke.cell.y - feet.y, stroke.cell.z - feet.z);
-  const offset = bot.entity.position.minus(feet.offset(0.5, 0.5, 0.5));
+  const offset = bot.entity.position.minus(feet.offset(0.5, 0, 0.5));
   const projection = offset.dot(direction);
   const sideways = offset.minus(direction.scaled(projection)).norm();
-  if (sideways === 0 && projection >= 0 && projection <= 1 && bot.entity.velocity.dot(direction) > 0)
-    return ascent.ticks - Math.min(1, projection) * stroke.ticks;
+  if (projection >= 0 && projection <= 1 && bot.entity.velocity.dot(direction) > 0)
+    return ascent.ticks - projection * stroke.ticks + sideways * SWIM_HORIZONTAL_TICKS;
   const extra = Math.hypot(Math.min(0, projection), sideways, Math.max(0, projection - 1));
   return ascent.ticks + extra * SWIM_HORIZONTAL_TICKS;
 }

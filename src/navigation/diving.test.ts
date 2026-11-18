@@ -8,7 +8,7 @@ import { Diving } from "./diving.js";
 import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
-import { DIVE_BACKSTOP_TICKS, admitsDive } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, SWIM_HORIZONTAL_TICKS, admitsDive, swimAscent } from "./world/swimming.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
 import type { NavigateOptions, NavigationResult } from "./navigate.js";
 
@@ -701,9 +701,26 @@ for (const ticksPerSecond of [20, 10]) test(`a breathing stop's resumed leg from
 
 /** A submerged westward stroke, optionally followed by a northward turn into an air pocket. */
 function strokeFixture(ticksPerSecond: number, turn = false) {
-  const scene = pond(new Vec3(1.5, 60.5, 0.5), false, { mocked: true, server: { ticksPerSecond } });
+  // The body stands at the cell's feet level: `position.y` of a body is its feet, never the cell's middle.
+  const scene = pond(new Vec3(1.5, 60, 0.5), false, { mocked: true, server: { ticksPerSecond } });
   for (const [x, z, kind] of [[1, 0, "water"], [0, 0, turn ? "water" : "air"], [0, -1, "air"]] as const)
     for (let y = 59; y <= 63; y++) scene.load({ x, y, z }, y === 59 || y === 63 ? "stone" : kind);
+  scene.breath.hold(300);
+  Reflect.set(scene.bot.entity, "isInWater", true);
+  return scene;
+}
+
+/**
+ * The scenario `underwater-breathing-stop`'s last siphon: a one-cell tunnel west at the floor (-1,-59,1), then two cells
+ * up in the west compartment to its air (the east neighbour x 0 is roofed, so the way up is this stroke). The measured body rests on the floor of the tunnel (scenario run, srd-t30).
+ */
+function siphonFixture(ticksPerSecond: number) {
+  const scene = pond(new Vec3(-0.419, -58.965, 1.4914), true, { mocked: true, server: { ticksPerSecond } });
+  const cell = (x: number, y: number, kind: Kind) => scene.load({ x, y, z: 1 }, kind);
+  for (let x = -4; x <= 0; x++) for (let y = -60; y <= -55; y++) cell(x, y, "stone");
+  for (let x = -4; x <= -2; x++) for (let y = -59; y <= -57; y++) cell(x, y, "water");
+  for (let x = -4; x <= -2; x++) cell(x, -56, "air");
+  for (const x of [-1, 0]) for (const y of [-59, -58]) cell(x, y, "water"); // The tunnel is two cells high, as the scenario's.
   scene.breath.hold(300);
   Reflect.set(scene.bot.entity, "isInWater", true);
   return scene;
@@ -722,11 +739,16 @@ for (const rate of [20, 10, "stopped"] as const) for (const direction of ["towar
       assert.equal(diving.backstop(), start);
       bot.entity.position.x = direction === "away" ? 1.999 : 1;
       bot.entity.velocity.set(direction === "away" ? 0.1 : -0.1, 0, 0);
-      if (direction === "sideways") bot.entity.position.z = 0.75;
+      // A body beside its stroke and not moving along it earns nothing: the lateral distance is only priced.
+      if (direction === "sideways") { bot.entity.position.z = 0.75; bot.entity.velocity.set(0, 0, 0.1); }
       const expected = direction === "away" ? start + 7.984 : direction === "sideways" ? start + 4 : start - 8;
       const floor = diving.backstop();
       assert.ok(floor !== null && Math.abs(floor - expected) < 0.001, `mid-stroke floor ${floor}, wanted ${expected}`);
       if (direction === "toward") {
+        bot.entity.position.z = 0.52; // 0.02 off its line: the credit less the drift, no cliff at zero.
+        const drifting = diving.backstop()!;
+        assert.ok(Math.abs(drifting - (expected + 0.02 * SWIM_HORIZONTAL_TICKS)) < 0.001, `drifting floor ${drifting}`);
+        bot.entity.position.z = 0.5;
         bot.entity.velocity.x = 0;
         assert.equal(diving.backstop(), 49, "a stationary body earns no progress credit");
         bot.entity.velocity.x = -0.1;
@@ -757,17 +779,39 @@ for (const rate of [20, 10, "stopped"] as const) for (const direction of ["towar
     assert.equal(diving.backstop(), null);
   });
 
+for (const rate of [20, 10, "stopped"] as const) test(`a body resting on the floor of a siphon is priced from its feet at ${rate} tps`, async () => {
+  const { bot, world, clock, harness, left } = siphonFixture(rate === 10 ? 10 : 20);
+  using _timers = clock.install();
+  await clock.advance(50);
+  if (rate === "stopped") harness.server.stop();
+  const diving = new Diving(bot, world);
+  await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: -3, y: -57, z: 1 }) }, async () => {
+    const ascent = swimAscent((x, y, z) => world.blockAt(x, y, z), bot.entity.position.floored());
+    assert.equal(ascent?.ticks, 44, "8 start + a 16 stroke west + two rises of 10");
+    const start = 44 + DIVE_BACKSTOP_TICKS;
+    assert.equal(diving.backstop(), start, "the first read of a stroke carries no credit");
+    bot.entity.velocity.set(-0.05, 0, 0);
+    // The body is 0.081 behind the cell's centre (against its stroke), 0.035 above the floor and 0.0086 beside it:
+    // priced by its distance, 1.42 ticks, not by half a cell of height (7.5 ticks).
+    const floor = diving.backstop()!;
+    const expected = start + Math.hypot(0.081, 0.035, 0.0086) * SWIM_HORIZONTAL_TICKS;
+    assert.ok(Math.abs(floor - expected) < 0.001, `siphon floor ${floor}, wanted ${expected}`);
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
+});
+
 for (const ticksPerSecond of [20, 10]) test(`a vertical stroke spends only its remaining rise at ${ticksPerSecond} tps`, async () => {
   const { bot, world, clock, left } = fixture({ mocked: true, server: { ticksPerSecond } });
   using _timers = clock.install();
   await clock.advance(50);
   const diving = new Diving(bot, world);
-  bot.entity.position.y = 61.5;
+  bot.entity.position.y = 61; // The feet of a body in cell 61 at its floor.
   await diving.run({ movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 61, z: 0 }) }, async () => {
     assert.equal(diving.backstop(), 53); // 8 start + two rises of 10 + 25 reserve.
     bot.entity.position.y = 61.999;
     bot.entity.velocity.set(0, 0.1, 0);
-    assert.ok(Math.abs(diving.backstop()! - 48.01) < 0.001);
+    assert.ok(Math.abs(diving.backstop()! - 43.01) < 0.001);
     return { status: "completed", elapsedMs: 0 };
   });
   assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
