@@ -822,9 +822,9 @@ async function settleStillGoal(options: { rate: number; stillTicks?: number; mov
   return { ...result, tick: endedAt, wall, pendingTicks, logs };
 }
 
-/** The pacing fixture's own root override and its longest passing span (plan 2026-11-16-p1-reds T2: 1836 ticks at 20 tps, measured in `pacing-target.yaml`'s comment). */
+/** The pacing fixture's own root override and its longest passing span (plan 2026-11-18-scenario-reds-part5 T28: 642 ticks, measured in `pacing-target.yaml`'s comment). */
 const PACING_YAML = join(import.meta.dirname, "../scenarios/combat/pacing-target.yaml");
-const PACING_LONGEST_SPAN = 1836;
+const PACING_LONGEST_SPAN = 642;
 
 test("a still goal uses the default or root override at both rates; a stopped server remains a timeout", async () => {
   const pacingStill = (await mineLabs.loadScenario(PACING_YAML)).goal.stillTicks;
@@ -837,7 +837,7 @@ test("a still goal uses the default or root override at both rates; a stopped se
       { stillTicks: 600, outcome: "fail", tick: 600 },
       { stillTicks: 600, completeAt: 580, outcome: "pass", tick: 580 },
       { stillTicks: 600, completeAt: 620, outcome: "fail", tick: 600 },
-      // The pacing fixture: its override lets the longest measured span (1836 ticks) pass; the default 520 ended it (0/10 at 20 tps, 2026-11-16).
+      // The pacing fixture: its override lets the longest measured span (642 ticks, T28) pass; the default 520 ends it.
       { stillTicks: pacingStill, completeAt: PACING_LONGEST_SPAN, outcome: "pass", tick: PACING_LONGEST_SPAN },
       { stillTicks: undefined, completeAt: PACING_LONGEST_SPAN, outcome: "fail", tick: 520 },
     ] as const) {
