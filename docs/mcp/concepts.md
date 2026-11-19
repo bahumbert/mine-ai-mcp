@@ -143,7 +143,8 @@ loaded chunk columns and records biome samples, material palettes, and
 surface-water fractions.
 
 A chunk is flagged as a frontier chunk (`is_frontier = 1`) whenever at least one
-of its four cardinal neighbours has not yet been committed to SQLite.
+of its four cardinal neighbours is not seen by this bot (a sighting row in
+`frontier_seen`); the flag is computed by the `frontier_chunks` view, never stored.
 
 ## How do events produce notification summaries?
 

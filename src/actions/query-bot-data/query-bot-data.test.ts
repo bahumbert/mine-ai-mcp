@@ -5,7 +5,7 @@ import { installMinecraftKnowledge } from "../../bot-data/minecraft-knowledge.js
 import { SqlBotData } from "../../bot-data/sql-bot-data.js";
 import { queryBotDataCellSchema } from "./contract.js";
 import { createQueryBotDataAction, formatQueryBotDataResult, queryBotData } from "./query-bot-data.js";
-import { persistentBotData, temporaryBotData } from "../../test-support/bot-data.js";
+import { persistentBotData, recordChunk, temporaryBotData } from "../../test-support/bot-data.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 
 /** The connection's registry, as the shared fake bot carries it (1.21.4): its items include oak_log, "Oak Log". */
@@ -16,14 +16,14 @@ test("queries bot data and Minecraft knowledge on one connection", async (t) => 
   installMinecraftKnowledge(data, REGISTRY);
 
   // The query connection is the writing connection: no snapshot sits between them.
-  assert.deepEqual((await queryBotData(data, { sql: "SELECT COUNT(*) FROM main.frontier_chunks" })).rows, [[0]]);
-  recordChunk(data, "oak_log");
-  assert.deepEqual((await queryBotData(data, { sql: "SELECT COUNT(*) FROM main.frontier_chunks" })).rows, [[1]]);
+  assert.deepEqual((await queryBotData(data, { sql: "SELECT COUNT(*) FROM frontier_chunks" })).rows, [[0]]);
+  recordOneChunk(data, "oak_log");
+  assert.deepEqual((await queryBotData(data, { sql: "SELECT COUNT(*) FROM frontier_chunks" })).rows, [[1]]);
 
   const joined = await queryBotData(data, {
     sql: `
       SELECT material.material, item.display_name
-      FROM main.frontier_chunk_materials AS material
+      FROM frontier_chunk_materials AS material
       JOIN knowledge.items AS item ON item.name = material.material
     `,
   });
@@ -39,9 +39,9 @@ test("queries bot data and Minecraft knowledge on one connection", async (t) => 
   );
 
   const dictionary = await queryBotData(data, {
-    sql: "SELECT database_name FROM data_dictionary WHERE table_name = 'frontier_chunks' AND column_name IS NULL",
+    sql: "SELECT database_name FROM data_dictionary WHERE table_name = 'frontier_chunks' AND column_name IS NULL ORDER BY database_name",
   });
-  assert.deepEqual(dictionary.rows, [["main"]]);
+  assert.deepEqual(dictionary.rows, [["temp"], ["world"]]);
 
   const knowledgeDictionary = await queryBotData(data, {
     sql: `
@@ -61,9 +61,9 @@ test("queries bot data and Minecraft knowledge on one connection", async (t) => 
 test("persistent queries use the same SqlBotData connection", async (t) => {
   const data = persistentBotData(t).open("world");
   installMinecraftKnowledge(data, REGISTRY);
-  recordChunk(data, "oak_log");
+  recordOneChunk(data, "oak_log");
 
-  assert.deepEqual((await queryBotData(data, { sql: "SELECT material FROM main.frontier_chunk_materials" })).rows, [
+  assert.deepEqual((await queryBotData(data, { sql: "SELECT material FROM frontier_chunk_materials" })).rows, [
     ["oak_log"],
   ]);
 });
@@ -88,7 +88,7 @@ test("enforces statement, result, read-only, and pre-execution cancellation boun
   await assert.rejects(queryBotData(data, { sql: "SELECT 1e999" }), /non-finite number/);
   await assert.rejects(
     queryBotData(data, {
-      sql: "WITH value(material) AS (SELECT 'changed') UPDATE frontier_chunk_materials SET material = (SELECT material FROM value)",
+      sql: "WITH value(material) AS (SELECT 'changed') UPDATE world.frontier_chunk_materials SET material = (SELECT material FROM value)",
     }),
     /only read-only SELECT and WITH statements are allowed/,
   );
@@ -114,7 +114,7 @@ test("enforces statement, result, read-only, and pre-execution cancellation boun
 
 test("queries bot_status and joins with frontier chunks to calculate distances", async (t) => {
   const data = temporaryBotData({ closeAfter: t });
-  recordChunk(data, "oak_log");
+  recordOneChunk(data, "oak_log");
   updateBotStatus(data, {
     botId: "bot1",
     dimension: "minecraft:overworld",
@@ -144,7 +144,7 @@ test("queries bot_status and joins with frontier chunks to calculate distances",
         c.chunk_x,
         c.chunk_z,
         round(sqrt(pow((c.chunk_x - s.chunk_x) * 16, 2) + pow((c.chunk_z - s.chunk_z) * 16, 2)), 1) AS distance
-      FROM main.frontier_chunks AS c
+      FROM frontier_chunks AS c
       CROSS JOIN main.bot_status AS s
       WHERE s.bot_id = 'bot1'
     `,
@@ -153,18 +153,6 @@ test("queries bot_status and joins with frontier chunks to calculate distances",
   assert.deepEqual(query.rows, [[1, 2, 35.8]]);
 });
 
-function recordChunk(data: SqlBotData, material: string): void {
-  const key = "minecraft:overworld|1|2";
-  data.transaction((database) => {
-    database
-      .prepare(
-        `
-        INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z, first_observed_at, scanned_at, surface_water_fraction
-        ) VALUES (?, 'minecraft:overworld', 1, 2, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z', 0)
-      `,
-      )
-      .run(key);
-    database.prepare("INSERT INTO frontier_chunk_materials (chunk_key, material) VALUES (?, ?)").run(key, material);
-  });
+function recordOneChunk(data: SqlBotData, material: string): void {
+  recordChunk(data, { dimension: "minecraft:overworld", chunkX: 1, chunkZ: 2, materials: [material] });
 }

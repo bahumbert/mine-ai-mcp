@@ -82,6 +82,29 @@ logical Minecraft server host, port, and the server-provided hashed world seed
 in [src/bot-data/minecraft-identity.ts](../../src/bot-data/minecraft-identity.ts).
 The `botId` is the player UUID assigned by Minecraft upon login.
 
+## How is a bot-data file versioned?
+
+`PRAGMA user_version` is the file's version. On open, the ordered steps of
+[src/bot-data/migrations.ts](../../src/bot-data/migrations.ts) above the file's version run, each in its own
+transaction; one `migrated` line per step goes to stderr. A file newer than the runtime is refused untouched with
+`[BOT_DATA_TOO_NEW]`; a step that fails rolls back and the open fails with `[BOT_DATA_MIGRATION_FAILED] step <n>
+<name>: <cause>`, and the next open retries it. The `schema_version` metadata row mirrors the version for people
+reading the file. Step 1 builds the base tables, step 2 moves the brain's old memory notes into `memories`, step 3
+renames the old per-bot frontier tables to `legacy_frontier_*` (see "The world file"); a background import then moves
+their rows and drops them.
+
+## The world file
+
+The chunk scans are stored once per world, in `<world folder>/world/world-data.sqlite` beside the `bots/` and `shared/`
+folders (class `SqlWorldData`, [src/bot-data/sql-world-data.ts](../../src/bot-data/sql-world-data.ts), versioned like a
+bot file). Every host of the world opens it with its own connection and writes a scan in one short transaction; a write
+the file's other writer holds answers "busy" at once and the recorder tries again 20-200 ms later (at most 20 tries, then
+the scan error `Chunk <key>: world data busy for 20 tries`). A bot connection attaches it read-only as `world`, so a bot's
+own write transactions never lock it. What a bot saw is `main.frontier_seen` (one row per bot and chunk, `bot_id` the
+player name); the frontier names below are TEMP views over the sightings and the world scans, so each bot's map shows
+the chunks it saw. The whole world's map is readable as `world.frontier_chunks`,
+`world.frontier_chunk_materials` and `world.frontier_chunk_biomes`.
+
 ## What storage and scope modes exist?
 
 Storage supports two persistence modes and two scope modes:
@@ -161,16 +184,21 @@ exposes these tables and views:
 | `event_read_state`         | Table | Records the highest event ID read by each bot.                                    |
 | `action_requests`          | Table | Logs incoming MCP requests, tool arguments, rationales, and timestamps.           |
 | `action_responses`         | Table | Records settled MCP results, durations, and output JSON payloads.                 |
-| `frontier_chunks`          | Table | Records committed chunk columns, surface-water fractions, and frontier flags.     |
-| `frontier_chunk_materials` | Table | Lists non-routine block materials detected within each vertical chunk column.     |
-| `frontier_chunk_biomes`    | Table | Stores sampled biome frequencies for each chunk column.                           |
+| `frontier_seen`            | Table | The chunks this bot saw: one row per bot and chunk (the player name), first-seen time. |
+| `world.frontier_chunks`    | Table | In the world file: every scanned chunk column of the world, surface-water fraction, scan time. |
+| `world.frontier_chunk_materials` | Table | In the world file: non-routine block materials found within each chunk column. |
+| `world.frontier_chunk_biomes` | Table | In the world file: sampled biome frequencies for each chunk column.            |
 | `observed_containers`      | Table | Stores the last observed complete slot layout for opened containers.              |
 | `placed_containers`        | Table | Lists the containers this bot placed itself (the only ones its chest deposit uses). |
 | `protected_regions`        | Table | Boxes this bot never digs or scaffolds in (ADR-012), from `protect_region`.       |
+| `memories`                 | Table | Typed memories an agent saved (kind, subject, version, JSON data, a sentence), from `memory_save`. |
 | `observed_container_slots` | View  | Flattens container contents into individual slot rows with item names and counts. |
 | `observed_container_items` | View  | Aggregates item totals across container locations.                                |
-| `frontier_map_chunks`      | View  | Provides dominant biomes, all biomes, and material summaries per chunk.           |
-| `frontier_navigation`      | View  | Joins frontier chunks with live bot status to compute distance and heading.       |
+| `frontier_chunks`          | TEMP view | The chunks this bot saw with the world's scan of each: coordinates, water fraction, `is_frontier` (1 unless all four neighbours were seen). |
+| `frontier_chunk_materials` | TEMP view | Materials of the chunks this bot saw.                                         |
+| `frontier_chunk_biomes`    | TEMP view | Biome samples of the chunks this bot saw.                                     |
+| `frontier_map_chunks`      | TEMP view | Provides dominant biomes, all biomes, and material summaries per chunk.       |
+| `frontier_navigation`      | TEMP view | Joins frontier chunks with live bot status to compute distance and heading.   |
 | `knowledge.action_queries` | Table | Catalogs canonical read queries used by actions for inspection and reuse.         |
 
 ## Worked example queries

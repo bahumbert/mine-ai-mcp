@@ -5,7 +5,9 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { sameDimensionSql } from "./bot-data-sql.ts";
 import { BodyDown, McpBotRuntime, type ToolClient } from "./runtime-client.js";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 function dropsClient(sources: readonly Record<string, unknown>[]): ToolClient {
   const data = { result: { drops: { items: [{ item: "wheat", sources, mobs: [] }], blocks: [] } } };
@@ -405,17 +407,29 @@ test("seenPlaces names the dimension the places are in", async () => {
 });
 
 test("the frontier-map queries run on the real bot-data schema, each in the dimension the bot is in", async () => {
+  // The chunk scans are in the world file (attached read-only as `world`), this bot's sightings in its own file, and the
+  // frontier names the brain reads are the TEMP views over both: the same three SQL files the runtime installs.
+  const sql = (name: string) => readFileSync(new URL(`../../src/bot-data/${name}`, import.meta.url), "utf8");
+  const worldDirectory = mkdtempSync(path.join(tmpdir(), "brain-world-"));
+  const worldFile = path.join(worldDirectory, "world-data.sqlite");
+  const world = new DatabaseSync(worldFile);
+  world.exec(sql("world-data.sql"));
   const database = new DatabaseSync(":memory:");
-  database.exec(readFileSync(new URL("../../src/bot-data/bot-data.sql", import.meta.url), "utf8"));
+  database.exec(sql("bot-data.sql"));
   const chunk = (dimension: string, x: number, z: number, water: number, materials: readonly string[]) => {
-    database.prepare("INSERT INTO frontier_chunks VALUES (?, ?, ?, ?, 'now', 'now', ?, 1)").run(`${dimension}|${x}|${z}`, dimension, x, z, water);
-    for (const material of materials) database.prepare("INSERT INTO frontier_chunk_materials VALUES (?, ?)").run(`${dimension}|${x}|${z}`, material);
+    const key = `${dimension}|${x}|${z}`;
+    world.prepare("INSERT INTO frontier_chunks VALUES (?, ?, ?, ?, 'now', 'now', ?)").run(key, dimension, x, z, water);
+    for (const material of materials) world.prepare("INSERT INTO frontier_chunk_materials VALUES (?, ?)").run(key, material);
+    database.prepare("INSERT INTO frontier_seen VALUES ('Ayla', ?, ?, ?, ?, 'now')").run(key, dimension, x, z);
   };
   chunk("overworld", 5, 0, 0.9, ["oak_log"]);          // 88 blocks east: water, logs
   chunk("overworld", 6, 0, 0.9, []);
   chunk("minecraft:overworld", 12, 0, 0.1, ["oak_log"]); // stored with the prefix: land, logs
   chunk("the_nether", 3, 0, 0.0, ["nether_quartz_ore"]);
   chunk("the_nether", 4, 0, 0.0, []);
+  world.close();
+  database.prepare("ATTACH DATABASE ? AS world").run(`file:${worldFile}?mode=ro`);
+  database.exec(sql("frontier-views.sql"));
   const asked = (dimension: string) => McpBotRuntime.over(worldClient(dimension, (sql) => database.prepare(sql).all().map((row) => Object.values(row).map((cell) => (typeof cell === "bigint" ? Number(cell) : (cell as string | number | null))))));
   const overworld = asked("minecraft:overworld");
   assert.deepEqual((await overworld.seenPlaces("oak_log", ORIGIN, 0, 5)).map(({ x }) => x), [88, 200], "both spellings stored, nearest first");
@@ -432,6 +446,8 @@ test("the frontier-map queries run on the real bot-data schema, each in the dime
   assert.equal(await nether.seenAt("nether_quartz_ore", ORIGIN, 100), null, "inside the range already searched");
   assert.equal(await nether.waterAlong(ORIGIN, { x: 56, y: 64, z: 8 }).then((water) => water?.share), 0);
   assert.deepEqual(await nether.nearestLand(ORIGIN), { x: 56, z: 8 });
+  database.close();
+  rmSync(worldDirectory, { recursive: true, force: true });
 });
 
 function eventsPages(pages: readonly { events: readonly { type: string; payload: unknown }[]; remainingEventCount: number }[]): ToolClient & { calls: number } {

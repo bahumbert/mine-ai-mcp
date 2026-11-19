@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { nearestFrontierQuery, SqlBotData, type BotStatusSnapshot } from "../../bot-data/index.js";
-import { temporaryBotData } from "../../test-support/bot-data.js";
+import { recordChunk, temporaryBotData } from "../../test-support/bot-data.js";
 import { sqlActionSource } from "../sql-action.js";
 import { parseViewFrontierRequest } from "./contract.js";
 import {
@@ -15,34 +15,14 @@ import {
 
 function dataFixture(t: TestContext): SqlBotData {
   const data = temporaryBotData({ botId: "cartographer", closeAfter: t });
-  data.transaction((database) => {
-    const insertChunk = database.prepare(`
-      INSERT INTO frontier_chunks (
-        chunk_key, dimension, chunk_x, chunk_z,
-        first_observed_at, scanned_at, surface_water_fraction
-      ) VALUES (?, 'overworld', ?, ?, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:01.000Z', ?)
-    `);
-    const insertBiome = database.prepare(`
-      INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count)
-      VALUES (?, ?, ?)
-    `);
-    const insertMaterial = database.prepare(`
-      INSERT INTO frontier_chunk_materials (chunk_key, material)
-      VALUES (?, ?)
-    `);
-    const record = (chunkX: number, chunkZ: number, water: number, biomes: Array<[string, number]>) => {
-      const key = `overworld|${chunkX}|${chunkZ}`;
-      insertChunk.run(key, chunkX, chunkZ, water);
-      for (const [biome, samples] of biomes) insertBiome.run(key, biome, samples);
-      insertMaterial.run(key, chunkX === 1 ? "cactus" : "oak_log");
-    };
-    record(-1, -1, 0.8, [["forest", 64]]);
-    record(0, 0, 0.2, [
-      ["forest", 4],
-      ["plains", 60],
-    ]);
-    record(1, 0, 0, [["desert", 64]]);
-  });
+  const record = (chunkX: number, chunkZ: number, waterFraction: number, biomes: Array<[string, number]>) =>
+    recordChunk(data, { chunkX, chunkZ, waterFraction, biomes, materials: [chunkX === 1 ? "cactus" : "oak_log"] });
+  record(-1, -1, 0.8, [["forest", 64]]);
+  record(0, 0, 0.2, [
+    ["forest", 4],
+    ["plains", 60],
+  ]);
+  record(1, 0, 0, [["desert", 64]]);
   return data;
 }
 
@@ -195,16 +175,7 @@ test("auto-zooms when chunks_per_cell is omitted", (t) => {
   assert.equal(scale1, 1);
 
   // Add distant chunk at (20, 20)
-  data.transaction((database) => {
-    database
-      .prepare(
-        `INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z,
-          first_observed_at, scanned_at, surface_water_fraction
-        ) VALUES ('overworld|20|20', 'overworld', 20, 20, '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:01.000Z', 0)`,
-      )
-      .run();
-  });
+  recordChunk(data, { chunkX: 20, chunkZ: 20 });
 
   // Now maxSpan from (0,0) is 20.
   // With width 5, height 5 (halfWidth=2), scale needed is >= 20 / 2 = 10 -> scale 16.

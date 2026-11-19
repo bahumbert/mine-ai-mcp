@@ -9,4 +9,5 @@ export * from "./observed-write.js";
 export * from "./minecraft-knowledge.js";
 export * from "./minecraft-identity.js";
 export * from "./sql-bot-data.js";
+export * from "./sql-world-data.js";
 export * from "./sql-query.js";

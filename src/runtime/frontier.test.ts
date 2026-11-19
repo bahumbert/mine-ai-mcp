@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
+import { persistentBotData, recordChunk } from "../test-support/bot-data.js";
 import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, SEEN_MOVED, SEEN_TTL_MS, seenInWorld } from "./frontier.js";
 
@@ -28,7 +29,7 @@ function biomeId(name: string): number {
 }
 
 /** One column at chunk (-2, 4) whose sections hold the version's state ids, as Prismarine's palettes give them. */
-function fixture(surfaceWaterCells = 129) {
+function fixture(surfaceWaterCells = 129, options: { readonly username?: string; readonly data?: SqlBotData } = {}) {
   const ores = ["stone", "oak_log", "prismarine", "coal_ore", "diamond_ore", "gravel", "copper_ore", "deepslate_copper_ore",
     "gold_ore", "deepslate_gold_ore", "redstone_ore", "deepslate_redstone_ore", "lapis_ore", "deepslate_lapis_ore",
     "deepslate_diamond_ore"];
@@ -56,11 +57,11 @@ function fixture(surfaceWaterCells = 129) {
   };
   // Strings as the game hands them (`prismarine-world/src/world.js:195-203`; the typings say numbers).
   const columns = [{ chunkX: "-2", chunkZ: "4", column }];
-  const { bot } = createFakeBot();
+  const { bot } = createFakeBot({ username: options.username });
   // Stopgap that stays (T3b-B): the tests script this column's containers (a palette of materials over empty cells, 64 biome
   // samples, a read counter, a read that throws) and every chunk answers it; the fake's columns hold the world's real cells.
   Object.assign(bot.world, { getColumns: () => columns, getColumn: () => column });
-  const data = temporaryBotData();
+  const data = options.data ?? temporaryBotData();
   return { events: bot, bot, column, data };
 }
 
@@ -89,6 +90,8 @@ test("records useful materials and counted biomes once for each loaded chunk", a
     observedChunks: 2,
     pendingChunks: 0,
     error: null,
+    legacyLeft: 0,
+    legacyImportError: null,
   });
   assert.deepEqual(recorded, [
     { dimension: "overworld", chunkX: -2, chunkZ: 4 },
@@ -138,37 +141,6 @@ test("records useful materials and counted biomes once for each loaded chunk", a
   assert.equal(enrichment?.surface_water_fraction, 129 / 256);
 });
 
-test("clears a chunk's frontier flag once all four neighbours are recorded", async (t) => {
-  const { events, bot, data } = fixture();
-  const frontier = attachSessionFrontier(bot, data);
-  t.after(() => {
-    frontier.close();
-    data.close();
-  });
-  await frontier.idle();
-
-  events.emit("chunkColumnLoad", new Vec3(-32, 0, 48));
-  events.emit("chunkColumnLoad", new Vec3(-16, 0, 64));
-  events.emit("chunkColumnLoad", new Vec3(-32, 0, 80));
-  events.emit("chunkColumnLoad", new Vec3(-48, 0, 64));
-  await frontier.idle();
-
-  assert.deepEqual(
-    data.read(`
-      SELECT chunk_x, chunk_z, is_frontier
-      FROM frontier_chunks
-      ORDER BY chunk_z, chunk_x
-    `),
-    [
-      { chunk_x: -2, chunk_z: 3, is_frontier: 1 },
-      { chunk_x: -3, chunk_z: 4, is_frontier: 1 },
-      { chunk_x: -2, chunk_z: 4, is_frontier: 0 },
-      { chunk_x: -1, chunk_z: 4, is_frontier: 1 },
-      { chunk_x: -2, chunk_z: 5, is_frontier: 1 },
-    ],
-  );
-});
-
 test("reports only chunks committed by this session observer", async (t) => {
   const { bot, data } = fixture();
   const frontier = attachSessionFrontier(bot, data);
@@ -180,18 +152,7 @@ test("reports only chunks committed by this session observer", async (t) => {
 
   const recorded: Array<{ dimension: string; chunkX: number; chunkZ: number }> = [];
   const unsubscribe = frontier.onRecorded((chunk) => recorded.push(chunk));
-  data.transaction((database) => {
-    database
-      .prepare(
-        `
-        INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z,
-          first_observed_at, scanned_at, surface_water_fraction
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `,
-      )
-      .run("overworld|20|20", "overworld", 20, 20, "2026-08-20T00:00:00.000Z", "2026-08-20T00:00:00.001Z", 0);
-  });
+  recordChunk(data, { chunkX: 20, chunkZ: 20 });
 
   assert.deepEqual(recorded, []);
   assert.equal(frontier.boundary("overworld", { x: 1, z: 0 }), 20);
@@ -213,17 +174,17 @@ test("a recorded-chunk listener cannot poison frontier health or later listeners
 
   await frontier.idle();
 
-  assert.deepEqual(frontier.status(), { observedChunks: 1, pendingChunks: 0, error: null });
+  assert.deepEqual(frontier.status(), { observedChunks: 1, pendingChunks: 0, error: null, legacyLeft: 0, legacyImportError: null });
   assert.deepEqual(recorded, [{ dimension: "overworld", chunkX: -2, chunkZ: 4 }]);
 });
 
-test("rejects a chunk key that does not match its dimension and coordinates", (t) => {
+test("the world file rejects a chunk key that does not match its dimension and coordinates", (t) => {
   const data = temporaryBotData();
   t.after(() => data.close());
 
   assert.throws(
     () =>
-      data.transaction((database) => {
+      data.world.write((database) => {
         database
           .prepare(
             `
@@ -234,7 +195,7 @@ test("rejects a chunk key that does not match its dimension and coordinates", (t
           `,
           )
           .run("wrong", "overworld", 3, -2, "2026-08-20T00:00:00.000Z", "2026-08-20T00:00:00.001Z", 0.5);
-      }),
+      }, { name: "test" }),
     /CHECK constraint failed/,
   );
 });
@@ -303,7 +264,7 @@ test("a chunk loaded again after the rescan time is scanned again: its materials
   await frontier.idle();
   const before = frontier.status().observedChunks;
   recorded.length = 0;
-  data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
+  data.world.write((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
   column.sections[0]!.data.palette!.push(stateOf("birch_log"));
   events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
   await frontier.idle();
@@ -361,6 +322,166 @@ test("counts the recorded chunks that hold a material; a material the scan leave
   assert.equal(frontier.chunksWithMaterial("pale_oak_log"), 0);
   // Stone is left out of the scan as everywhere: no chunk records it.
   assert.equal(frontier.chunksWithMaterial("stone"), 0);
+});
+
+const UUID_AYLA = "7d2c9f1e-3a4b-4c5d-8e6f-0a1b2c3d4e5f";
+const UUID_THEO = "0b9c8d7e-6f5a-4b3c-9d2e-1f0a9b8c7d6e";
+
+/** Two bots of one world, each with its own bot file (identity botId a UUID, username a name) and the world file between them. */
+function twoBotsOfOneWorld(t: { after(fn: () => void): void }) {
+  const storage = persistentBotData(t);
+  const ayla = fixture(129, { username: "Ayla", data: storage.open("shared-world", { kind: "bot", botId: UUID_AYLA }) });
+  const theo = fixture(129, { username: "Theo", data: storage.open("shared-world", { kind: "bot", botId: UUID_THEO }) });
+  return { ayla, theo };
+}
+
+/** Counts the cells a scan of `column` reads: a chunk that is not scanned reads none. */
+function countScanReads(column: ReturnType<typeof fixture>["column"]): { count: number } {
+  const reads = { count: 0 };
+  const original = column.sections[2]!.data.get;
+  column.sections[2]!.data.get = (index: number) => {
+    reads.count += 1;
+    return original(index);
+  };
+  return reads;
+}
+
+/** A clock and a wait that move together: the recorder's retry waits cost no real time and the clock shows them. */
+function steppedTime() {
+  let now = 1_000_000;
+  const waits: number[] = [];
+  return {
+    waits,
+    options: {
+      now: () => now,
+      random: () => 0.5,
+      wait: async (ms: number) => {
+        waits.push(ms);
+        now += ms;
+      },
+    },
+  };
+}
+
+test("a chunk another bot scanned is not scanned again: this bot gets a sighting and onRecorded", async (t) => {
+  const { ayla, theo } = twoBotsOfOneWorld(t);
+  const first = attachSessionFrontier(ayla.bot, ayla.data);
+  await first.idle();
+  const reads = countScanReads(theo.column);
+  const second = attachSessionFrontier(theo.bot, theo.data);
+  const recorded: unknown[] = [];
+  second.onRecorded((chunk) => recorded.push(chunk));
+  t.after(() => {
+    first.close();
+    second.close();
+  });
+  await second.idle();
+
+  assert.equal(reads.count, 0, "the second bot did not scan the chunk");
+  assert.deepEqual(recorded, [{ dimension: "overworld", chunkX: -2, chunkZ: 4 }]);
+  assert.deepEqual(theo.data.read("SELECT bot_id, chunk_key FROM main.frontier_seen"), [{ bot_id: "Theo", chunk_key: "overworld|-2|4" }]);
+  assert.deepEqual(ayla.data.read("SELECT bot_id FROM main.frontier_seen"), [{ bot_id: "Ayla" }], "the username, not the identity's UUID");
+  assert.equal(theo.data.read("SELECT COUNT(*) AS n FROM world.frontier_chunks")[0]?.n, 1, "one world row for the two bots");
+  assert.ok(theo.data.read("SELECT material FROM frontier_chunk_materials").some((row) => row.material === "oak_log"), "its map has the chunk's materials");
+  assert.equal(second.status().observedChunks, 1);
+  assert.equal(second.status().error, null);
+});
+
+test("a chunk scanned 10+ min ago by another bot is rescanned and its materials replaced", async (t) => {
+  const { ayla, theo } = twoBotsOfOneWorld(t);
+  const first = attachSessionFrontier(ayla.bot, ayla.data);
+  await first.idle();
+  ayla.data.world.write((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
+  theo.column.sections[0]!.data.palette!.push(stateOf("birch_log"));
+  const reads = countScanReads(theo.column);
+  const second = attachSessionFrontier(theo.bot, theo.data);
+  t.after(() => {
+    first.close();
+    second.close();
+  });
+  await second.idle();
+
+  assert.ok(reads.count > 0, "the stale chunk was scanned again");
+  assert.ok(theo.data.read("SELECT material FROM world.frontier_chunk_materials WHERE chunk_key = 'overworld|-2|4'").some((row) => row.material === "birch_log"));
+  assert.equal(theo.data.read("SELECT COUNT(*) AS n FROM world.frontier_chunks")[0]?.n, 1);
+  assert.deepEqual(theo.data.read("SELECT bot_id FROM main.frontier_seen"), [{ bot_id: "Theo" }]);
+});
+
+test("busy world write re-queues the chunk and records it on a later try", async (t) => {
+  const { bot, data } = fixture();
+  const original = data.world.write.bind(data.world);
+  let busyLeft = 2;
+  const attempts: number[] = [];
+  t.mock.method(data.world, "write", (...args: Parameters<typeof original>) => {
+    attempts.push(1);
+    return busyLeft-- > 0 ? { status: "busy" as const } : original(...args);
+  });
+  const time = steppedTime();
+  const frontier = attachSessionFrontier(bot, data, time.options);
+  const recorded: unknown[] = [];
+  frontier.onRecorded((chunk) => recorded.push(chunk));
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+
+  await frontier.idle();
+
+  assert.equal(attempts.length, 3, "two busy answers, then the write");
+  assert.equal(time.waits.length, 2);
+  assert.ok(time.waits.every((ms) => ms >= 20 && ms <= 200), `retry waits ${time.waits.join(", ")} stay within 20-200 ms`);
+  assert.equal(data.read("SELECT COUNT(*) AS n FROM frontier_chunks")[0]?.n, 1);
+  assert.deepEqual(recorded, [{ dimension: "overworld", chunkX: -2, chunkZ: 4 }]);
+  assert.equal(frontier.status().error, null);
+  assert.equal(frontier.status().pendingChunks, 0);
+});
+
+test("20 busy tries give the scan error, and a later load clears it", async (t) => {
+  const { events, bot, data } = fixture();
+  t.mock.method(data.world, "write", () => ({ status: "busy" as const }));
+  const time = steppedTime();
+  const frontier = attachSessionFrontier(bot, data, time.options);
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+
+  await frontier.idle();
+
+  assert.equal(frontier.status().error, "Chunk overworld|-2|4: world data busy for 20 tries");
+  assert.equal(time.waits.length, 19, "a wait between tries, none after the 20th");
+  assert.equal(data.read("SELECT COUNT(*) AS n FROM frontier_chunks")[0]?.n, 0);
+
+  t.mock.restoreAll();
+  events.emit("chunkColumnLoad", new Vec3(-32, 0, 64));
+  await frontier.idle();
+
+  assert.equal(frontier.status().error, null);
+  assert.equal(data.read("SELECT COUNT(*) AS n FROM frontier_chunks")[0]?.n, 1);
+});
+
+test("close during a retry wait records nothing more", async (t) => {
+  const { bot, data } = fixture();
+  let writes = 0;
+  t.mock.method(data.world, "write", () => {
+    writes += 1;
+    return { status: "busy" as const };
+  });
+  let frontier: ReturnType<typeof attachSessionFrontier> | undefined;
+  frontier = attachSessionFrontier(bot, data, {
+    now: () => 0,
+    random: () => 0,
+    wait: async () => {
+      frontier?.close();
+    },
+  });
+  t.after(() => data.close());
+
+  await frontier.idle();
+
+  assert.equal(writes, 1, "no try after the close");
+  assert.equal(frontier.status().pendingChunks, 0);
+  assert.equal(data.read("SELECT COUNT(*) AS n FROM main.frontier_seen")[0]?.n, 0);
 });
 
 /** A bot whose loaded blocks within reach are `near` (block name -> count): the first cells (x, then z, then y) of chunk 0, 0 hold them. */
@@ -426,8 +547,7 @@ const RING_OFFSET: Record<RingMember, readonly [number, number]> = { C: [0, 0], 
 
 /**
  * The 3x3 spawn ring around `centre`, in the order a login lists it: the four corners, then the centre and its four
- * neighbours in `last` order. A chunk is rechecked by itself and by each neighbour, so the listing order decides which
- * recheck is the last one: the centre's last recheck comes from the neighbour listed last.
+ * neighbours in `last` order.
  */
 function spawnRing(centre: readonly [number, number], last: readonly RingMember[]): Array<[number, number]> {
   const corners: Array<readonly [number, number]> = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
@@ -456,21 +576,13 @@ function assertOnlyCentreIsInner(flags: Map<string, number>, centre: readonly [n
   for (const [chunk, flag] of flags) assert.equal(flag, chunk === `${centre[0]},${centre[1]}` ? 0 : 1, `chunk ${chunk}`);
 }
 
-// Prismarine hands the spawn ring over with string coordinates (`world.js:195-203`): `chunkX + 1` is then "-21", not -1.
-// Each row lists the ring so that the neighbour recorded last is the one whose recheck of the centre read the string.
-const SPAWN_RING_ROWS: Array<{ name: string; centre: readonly [number, number]; last: RingMember[] }> = [
-  // W (-2, -1) is last: its east recheck of C is `"-2" + 1` = "-21" on the old code, so C kept 1.
-  { name: "west neighbour listed last", centre: [-1, -1], last: ["C", "N", "E", "S", "W"] },
-  // N (-1, -2) is last: its south recheck of C is `"-2" + 1` = "-21".
-  { name: "north neighbour listed last", centre: [-1, -1], last: ["C", "E", "S", "W", "N"] },
-  // W (0, 0) is last: its east recheck of C is `"0" + 1` = "01".
-  { name: "chunk 0 west of the centre, listed last", centre: [1, 0], last: ["C", "N", "E", "S", "W"] },
-];
-for (const { name, centre, last } of SPAWN_RING_ROWS) {
-  test(`a spawn ring loaded before the frontier attaches clears the flags of its inner chunks (${name})`, async (t) => {
-    assertOnlyCentreIsInner(await flagsAfterAttach(spawnRing(centre, last), t), centre);
-  });
-}
+// Prismarine hands the spawn ring over with string coordinates (`world.js:195-203`): the coordinates must still make
+// the keys and the neighbour positions the computed `is_frontier` reads (it is no longer rechecked per insert, so the
+// order the ring is listed in does not matter: one order is enough).
+test("a spawn ring loaded before the frontier attaches clears the flags of its inner chunks", async (t) => {
+  const centre = [-1, -1] as const;
+  assertOnlyCentreIsInner(await flagsAfterAttach(spawnRing(centre, ["C", "N", "E", "S", "W"]), t), centre);
+});
 
 test("a chunk loaded by event after attach clears the same flag a spawn-ring chunk does", async (t) => {
   const centre = [1, 0] as const;
@@ -513,109 +625,6 @@ test("a column list that holds a non-integer coordinate is a storage error, the 
   assert.deepEqual(data.read("SELECT chunk_x, chunk_z FROM frontier_chunks"), [{ chunk_x: 0, chunk_z: 0 }]);
   // A recorded chunk does not wipe the report: the spawn ring is still not recorded, and health says so.
   assert.match(String(frontier.status().error), /Spawn-ring chunks are not recorded.*chunkX/);
-});
-
-/** Rows as a database kept from before p1 T1 holds them: `flagged` chunks carry `is_frontier = 1` whatever their neighbours. */
-function seedChunks(data: SqlBotData, dimension: string, chunks: Array<readonly [number, number]>, flagged: (chunk: readonly [number, number]) => boolean): void {
-  data.transaction((database) => {
-    const insert = database.prepare(
-      `INSERT INTO frontier_chunks (chunk_key, dimension, chunk_x, chunk_z, first_observed_at, scanned_at, surface_water_fraction, is_frontier)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
-    );
-    const now = new Date().toISOString();
-    for (const chunk of chunks) insert.run(`${dimension}|${chunk[0]}|${chunk[1]}`, dimension, chunk[0], chunk[1], now, now, flagged(chunk) ? 1 : 0);
-  }, { name: "seedChunks" });
-}
-
-/** The centre and its four neighbours, which is all the old ring bug left flagged. */
-const PLUS = (centre: readonly [number, number]): Array<[number, number]> =>
-  [[0, 0], [0, -1], [1, 0], [0, 1], [-1, 0]].map(([dx, dz]) => [centre[0] + dx!, centre[1] + dz!]);
-
-function attachToSeeded(t: { after(fn: () => void): void }, seed: (data: SqlBotData) => void): { data: SqlBotData; frontier: ReturnType<typeof attachSessionFrontier>; attachMs: number } {
-  const { bot } = createFakeBot({ loadedColumns: [] });
-  const data = temporaryBotData();
-  seed(data);
-  const started = performance.now();
-  const frontier = attachSessionFrontier(bot, data);
-  const attachMs = performance.now() - started;
-  t.after(() => {
-    frontier.close();
-    data.close();
-  });
-  return { data, frontier, attachMs };
-}
-
-test("attaching rechecks the rows a database kept flagged frontier: a chunk with all four neighbours recorded is cleared, a true frontier and another dimension stay", async (t) => {
-  // p1 T1 (74fdee18) fixed the string coordinates that kept the spawn ring flagged; databases written before it keep the flags.
-  const { data, frontier } = attachToSeeded(t, (seeded) => {
-    seedChunks(seeded, "overworld", PLUS([5, 5]), () => true);
-    seedChunks(seeded, "the_nether", PLUS([5, 5]), () => true);
-  });
-  await frontier.idle();
-
-  const flagged = (dimension: string) => data.read("SELECT chunk_x, chunk_z FROM frontier_chunks WHERE dimension = ? AND is_frontier = 1 ORDER BY chunk_x, chunk_z", dimension);
-  assert.deepEqual(flagged("overworld"), [{ chunk_x: 4, chunk_z: 5 }, { chunk_x: 5, chunk_z: 4 }, { chunk_x: 5, chunk_z: 6 }, { chunk_x: 6, chunk_z: 5 }], "the centre has its four neighbours; the four outer chunks do not");
-  assert.equal(flagged("the_nether").length, 5, "another dimension is not rechecked");
-});
-
-test("the attach recheck of 10 000 recorded chunks, 2 000 flagged, takes under 200 ms", async (t) => {
-  // A 100 x 100 block of chunks; the 2 000 flagged are inner chunks (each has its four neighbours), so all clear.
-  const grid: Array<[number, number]> = [];
-  for (let x = 0; x < 100; x += 1) for (let z = 0; z < 100; z += 1) grid.push([x, z]);
-  const inner = grid.filter(([x, z]) => x >= 1 && x <= 98 && z >= 1 && z <= 98).slice(0, 2_000);
-  const flagged = new Set(inner.map(([x, z]) => `${x},${z}`));
-  assert.equal(flagged.size, 2_000);
-  const { data, frontier, attachMs } = attachToSeeded(t, (seeded) => seedChunks(seeded, "overworld", grid, ([x, z]) => flagged.has(`${x},${z}`)));
-  await frontier.idle();
-
-  assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE is_frontier = 1")[0]?.count, 0);
-  assert.ok(attachMs < 200, `attach took ${attachMs.toFixed(1)} ms`);
-});
-
-test("a rescan clears the stuck flag of its own chunk and of the neighbours it completes", async (t) => {
-  const { events, bot, data } = fixture();
-  const frontier = attachSessionFrontier(bot, data);
-  t.after(() => {
-    frontier.close();
-    data.close();
-  });
-  await frontier.idle();
-  // Chunk (0, -1) has all four neighbours once (0, 0) is counted; both are stuck flagged, as the old ring bug left them.
-  const ring: Array<[number, number]> = [...PLUS([0, 0]), [0, -2], [-1, -1], [1, -1]];
-  seedChunks(data, "overworld", ring, () => true);
-  data.transaction((database) => database.prepare("UPDATE frontier_chunks SET scanned_at = ?").run(new Date(Date.now() - RESCAN_AFTER_MS - 1000).toISOString()), { name: "age" });
-
-  events.emit("chunkColumnLoad", new Vec3(0, 0, 0));
-  await frontier.idle();
-
-  const flags = frontierFlags(data);
-  assert.equal(flags.get("0,0"), 0, "the rescanned chunk's own flag");
-  assert.equal(flags.get("0,-1"), 0, "its north neighbour has all four recorded");
-  for (const outer of ["1,0", "0,1", "-1,0"]) assert.equal(flags.get(outer), 1, `${outer} is a true frontier`);
-});
-
-test("a failed attach recheck and a failed spawn-ring read are both reported in health, and a chunk loaded later is still recorded", async (t) => {
-  const { events, bot, data } = fixture();
-  seedChunks(data, "overworld", PLUS([5, 5]), () => true);
-  // Stopgap on the data object: a real database fails a recheck only when its disk does, so the one transaction is made to throw.
-  const transaction = data.transaction.bind(data);
-  Object.assign(data, { transaction: ((work, options) => {
-    if (options?.name === "recheckFrontier") throw new Error("disk is full");
-    return transaction(work, options);
-  }) satisfies typeof data.transaction });
-  Object.assign(bot.world, { getColumns: () => [{ chunkX: "1.5", chunkZ: "0", column: {} }] });
-  const frontier = attachSessionFrontier(bot, data);
-  t.after(() => {
-    frontier.close();
-    data.close();
-  });
-  await frontier.idle();
-
-  assert.match(String(frontier.status().error), /Frontier flags were not rechecked.*disk is full.*Spawn-ring chunks are not recorded/);
-
-  events.emit("chunkColumnLoad", new Vec3(48, 0, -32));
-  await frontier.idle();
-  assert.equal(data.read("SELECT COUNT(*) AS count FROM frontier_chunks WHERE chunk_key = 'overworld|3|-2'")[0]?.count, 1);
 });
 
 // Plan 2026-10-27-p1-monotonic-clock T5: the scan's TTL is a duration, so the default clock is monotonic.

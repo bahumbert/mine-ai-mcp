@@ -38,6 +38,8 @@ import { createLocateStrongholdAction, type StrongholdEyeFlights } from "./locat
 import { createNavigateAction } from "./navigate/index.js";
 import { createNoteDeleteAction } from "./note-delete/index.js";
 import { createNoteReadAction } from "./note-read/index.js";
+import { createMemoryForgetAction } from "./memory-forget/index.js";
+import { createMemorySaveAction } from "./memory-save/index.js";
 import { createNoteSaveAction } from "./note-save/index.js";
 import { createProtectRegionAction } from "./protect-region/index.js";
 import { createUnprotectRegionAction } from "./unprotect-region/index.js";
@@ -125,6 +127,8 @@ export function createActions(
     createNoteSaveAction(bot, botData),
     createNoteReadAction(botData, bot.username),
     createNoteDeleteAction(botData, bot.username),
+    createMemorySaveAction(bot, botData),
+    createMemoryForgetAction(botData, bot.username),
     createProtectRegionAction(bot, protectedRegions),
     createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation, botData),
@@ -174,6 +178,8 @@ export * from "./navigate/index.js";
 export * from "./note-read/index.js";
 export * from "./note-save/index.js";
 export * from "./note-delete/index.js";
+export * from "./memory-save/index.js";
+export * from "./memory-forget/index.js";
 export * from "./protect-region/index.js";
 export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";

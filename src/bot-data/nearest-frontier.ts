@@ -2,7 +2,7 @@ import { updateBotStatus, type BotStatusSnapshot } from "./bot-status.js";
 import { defineSqlQuery, readSqlQuery } from "./sql-query.js";
 import type { SqlBotData, SqlBotDataRow } from "./sql-bot-data.js";
 
-export const FRONTIER_NAVIGATION_VIEW = "main.frontier_navigation" as const;
+export const FRONTIER_NAVIGATION_VIEW = "frontier_navigation" as const;
 
 export interface NearestFrontierTarget {
   readonly chunkX: number;

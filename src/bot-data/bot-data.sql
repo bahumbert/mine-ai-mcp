@@ -1,3 +1,4 @@
+-- Latest shape only; a change of an existing table is a step in migrations.ts.
 CREATE TABLE IF NOT EXISTS sql_bot_data_metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -17,6 +18,24 @@ CREATE TABLE IF NOT EXISTS notes (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS notes_bot_id_note_id ON notes (bot_id, note_id DESC);
+
+CREATE TABLE IF NOT EXISTS memories (
+  memory_id INTEGER PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  version INTEGER NOT NULL CHECK (version >= 1),
+  data_json TEXT NOT NULL CHECK (json_valid(data_json) AND json_type(data_json) = 'object'),
+  note TEXT NOT NULL,
+  saved_at TEXT NOT NULL,
+  dimension TEXT NOT NULL,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  z REAL NOT NULL,
+  world_age_ticks INTEGER
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS memories_by_kind_subject ON memories (bot_id, kind, subject, memory_id DESC);
 
 CREATE TABLE IF NOT EXISTS protected_regions (
   region_id INTEGER PRIMARY KEY,
@@ -168,40 +187,21 @@ CREATE TABLE IF NOT EXISTS action_incidents (
 CREATE INDEX IF NOT EXISTS incidents_by_request ON action_incidents (request_id);
 CREATE INDEX IF NOT EXISTS incidents_by_preceding_request ON action_incidents (preceding_request_id);
 
-CREATE TABLE IF NOT EXISTS frontier_chunks (
-  chunk_key TEXT PRIMARY KEY,
+-- The chunk scans live once per world in the world file (world-data.sql, attached read-only as `world`); this table
+-- is what this bot saw of them. The frontier names a bot reads are TEMP views over both (frontier-views.sql).
+CREATE TABLE IF NOT EXISTS frontier_seen (
+  bot_id TEXT NOT NULL,
+  chunk_key TEXT NOT NULL,
   dimension TEXT NOT NULL,
   chunk_x INTEGER NOT NULL,
   chunk_z INTEGER NOT NULL,
-  first_observed_at TEXT NOT NULL,
-  scanned_at TEXT NOT NULL,
-  surface_water_fraction REAL NOT NULL CHECK (surface_water_fraction BETWEEN 0.0 AND 1.0),
-  is_frontier INTEGER NOT NULL DEFAULT 1 CHECK (is_frontier IN (0, 1)),
-  CHECK (chunk_key = dimension || '|' || chunk_x || '|' || chunk_z),
-  UNIQUE (dimension, chunk_x, chunk_z)
+  first_seen_at TEXT NOT NULL,
+  PRIMARY KEY (bot_id, chunk_key),
+  CHECK (chunk_key = dimension || '|' || chunk_x || '|' || chunk_z)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE IF NOT EXISTS frontier_chunk_materials (
-  chunk_key TEXT NOT NULL,
-  material TEXT NOT NULL,
-  PRIMARY KEY (chunk_key, material),
-  FOREIGN KEY (chunk_key)
-    REFERENCES frontier_chunks (chunk_key)
-    ON DELETE CASCADE
-) STRICT, WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS frontier_chunk_materials_by_material
-  ON frontier_chunk_materials (material);
-
-CREATE TABLE IF NOT EXISTS frontier_chunk_biomes (
-  chunk_key TEXT NOT NULL,
-  biome TEXT NOT NULL,
-  sample_count INTEGER NOT NULL CHECK (sample_count > 0),
-  PRIMARY KEY (chunk_key, biome),
-  FOREIGN KEY (chunk_key)
-    REFERENCES frontier_chunks (chunk_key)
-    ON DELETE CASCADE
-) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS frontier_seen_by_position ON frontier_seen (dimension, chunk_x, chunk_z);
+CREATE INDEX IF NOT EXISTS frontier_seen_by_chunk ON frontier_seen (chunk_key, first_seen_at);
 
 CREATE TABLE IF NOT EXISTS observed_containers (
   container_key TEXT PRIMARY KEY,
@@ -275,58 +275,6 @@ GROUP BY
   c.observed_by_bot_id,
   c.observed_at;
 
-CREATE INDEX IF NOT EXISTS frontier_chunk_biomes_by_biome
-  ON frontier_chunk_biomes (biome);
-
-CREATE VIEW IF NOT EXISTS frontier_map_chunks AS
-SELECT
-  c.dimension,
-  c.chunk_x,
-  c.chunk_z,
-  c.surface_water_fraction,
-  c.is_frontier,
-  (
-    SELECT b.biome
-    FROM frontier_chunk_biomes AS b
-    WHERE b.chunk_key = c.chunk_key
-    ORDER BY b.sample_count DESC, b.biome
-    LIMIT 1
-  ) AS dominant_biome,
-  (
-    SELECT group_concat(biome, ', ')
-    FROM (
-      SELECT biome
-      FROM frontier_chunk_biomes
-      WHERE chunk_key = c.chunk_key
-      ORDER BY biome
-    )
-  ) AS biomes,
-  (
-    SELECT group_concat(material, ', ')
-    FROM (
-      SELECT material
-      FROM frontier_chunk_materials
-      WHERE chunk_key = c.chunk_key
-      ORDER BY material
-    )
-  ) AS materials
-FROM frontier_chunks AS c;
-
-DROP VIEW IF EXISTS frontier_navigation;
-CREATE VIEW frontier_navigation AS
-SELECT
-  s.bot_id,
-  c.dimension,
-  c.chunk_x,
-  c.chunk_z,
-  c.dominant_biome,
-  c.surface_water_fraction,
-  c.is_frontier,
-  round(sqrt(pow((c.chunk_x * 16 + 8) - s.x, 2) + pow((c.chunk_z * 16 + 8) - s.z, 2)), 1) AS distance_blocks,
-  round(mod(mod(degrees(atan2((c.chunk_x * 16 + 8) - s.x, -((c.chunk_z * 16 + 8) - s.z))), 360) + 360, 360), 1) AS heading_degrees
-FROM frontier_map_chunks AS c
-JOIN bot_status AS s ON s.dimension = c.dimension;
-
 CREATE TABLE IF NOT EXISTS data_dictionary (
   database_name TEXT NOT NULL,
   table_name TEXT NOT NULL,
@@ -350,6 +298,20 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'notes', 'y', 'Bot feet position Y when the note was saved.'),
   ('main', 'notes', 'z', 'Bot feet position Z when the note was saved.'),
   ('main', 'notes', 'world_age_ticks', 'Latest server-reported world age in game ticks; null before the first time update. Persists across server restarts, excludes stopped-world time, and advances while the world ticks without this bot. Not personal playtime.'),
+  ('main', 'memories', NULL, 'Structured memories an agent saved with memory_save (the kinds are the agent''s own): one row each, typed by kind, subject and version. Reads do not consume them; memory_forget removes them, or memory_save with replace supersedes the older rows of its kind and subject.'),
+  ('main', 'memories', 'memory_id', 'Unique memory identifier; larger ids were saved later, regardless of wall-clock changes. The id memory_forget takes.'),
+  ('main', 'memories', 'bot_id', 'Bot that saved this memory.'),
+  ('main', 'memories', 'kind', 'What sort of memory this is, as the saving agent named it (lowercase letters, digits and underscores), for example place or relation.'),
+  ('main', 'memories', 'subject', 'What the memory is about within its kind (a place name, a partner, a position); empty when a kind has one row to keep or many to append. memory_save with replace removes the older rows with the same kind and subject.'),
+  ('main', 'memories', 'version', 'Version of the data shape for this kind, set by the saving agent, so a reader can tell rows of an older shape from newer ones.'),
+  ('main', 'memories', 'data_json', 'The memory itself as a JSON object, at most 16 KiB.'),
+  ('main', 'memories', 'note', 'One sentence about the memory for people and the model to read.'),
+  ('main', 'memories', 'saved_at', 'UTC timestamp when the memory was saved.'),
+  ('main', 'memories', 'dimension', 'Bot dimension when the memory was saved.'),
+  ('main', 'memories', 'x', 'Bot feet position X when the memory was saved.'),
+  ('main', 'memories', 'y', 'Bot feet position Y when the memory was saved.'),
+  ('main', 'memories', 'z', 'Bot feet position Z when the memory was saved.'),
+  ('main', 'memories', 'world_age_ticks', 'Latest server-reported world age in game ticks; null before the first time update. Not personal playtime.'),
   ('main', 'protected_regions', NULL, 'Boxes of blocks this bot never digs or scaffolds in (its builds, areas it was asked to respect); written by protect_region, removed by unprotect_region.'),
   ('main', 'protected_regions', 'region_id', 'Unique region identifier, the id unprotect_region takes.'),
   ('main', 'protected_regions', 'dimension', 'Dimension the box lies in.'),
@@ -507,38 +469,60 @@ INSERT INTO data_dictionary (database_name, table_name, column_name, description
   ('main', 'observed_container_slots', 'item_count', 'Observed stack quantity in this slot.'),
   ('main', 'observed_container_slots', 'observed_by_bot_id', 'Bot that supplied this observation.'),
   ('main', 'observed_container_slots', 'observed_at', 'UTC timestamp of this last complete observation.'),
-  ('main', 'frontier_chunks', NULL, 'Complete observations of chunk columns encountered in this world.'),
-  ('main', 'frontier_chunks', 'chunk_key', 'Stable world-relative key formatted as dimension|chunk_x|chunk_z.'),
-  ('main', 'frontier_chunks', 'dimension', 'Mineflayer dimension containing the chunk.'),
-  ('main', 'frontier_chunks', 'chunk_x', 'Chunk X coordinate; block X coordinates 16n through 16n+15.'),
-  ('main', 'frontier_chunks', 'chunk_z', 'Chunk Z coordinate; block Z coordinates 16n through 16n+15.'),
-  ('main', 'frontier_chunks', 'first_observed_at', 'UTC timestamp when this process first received the loaded chunk.'),
-  ('main', 'frontier_chunks', 'scanned_at', 'UTC timestamp when the complete chunk observation was committed.'),
-  ('main', 'frontier_chunks', 'surface_water_fraction', 'Fraction from 0.0 to 1.0 of the 256 horizontal cells whose highest non-air block is water or a bubble column.'),
-  ('main', 'frontier_chunks', 'is_frontier', '1 when at least one cardinal neighbour is not recorded; otherwise 0.'),
-  ('main', 'frontier_chunk_materials', NULL, 'Distinct non-routine block materials whose state IDs occur anywhere in each full vertical chunk palette; ubiquitous terrain and underground ores are excluded.'),
-  ('main', 'frontier_chunk_materials', 'chunk_key', 'Parent frontier_chunks join key.'),
-  ('main', 'frontier_chunk_materials', 'material', 'Minecraft block name.'),
-  ('main', 'frontier_chunk_biomes', NULL, 'Minecraft biomes sampled across each chunk vertical biome palette.'),
-  ('main', 'frontier_chunk_biomes', 'chunk_key', 'Parent frontier_chunks join key.'),
-  ('main', 'frontier_chunk_biomes', 'biome', 'Minecraft biome name.'),
-  ('main', 'frontier_chunk_biomes', 'sample_count', 'Number of 4x4x4 biome samples with this biome across the loaded chunk column.'),
-  ('main', 'frontier_map_chunks', NULL, 'One compact map row per observed chunk, derived from the canonical frontier tables.'),
-  ('main', 'frontier_map_chunks', 'dimension', 'Mineflayer dimension containing the chunk.'),
-  ('main', 'frontier_map_chunks', 'chunk_x', 'Chunk X coordinate.'),
-  ('main', 'frontier_map_chunks', 'chunk_z', 'Chunk Z coordinate.'),
-  ('main', 'frontier_map_chunks', 'surface_water_fraction', 'Surface-water fraction copied from frontier_chunks.'),
-  ('main', 'frontier_map_chunks', 'is_frontier', 'Frontier flag copied from frontier_chunks.'),
-  ('main', 'frontier_map_chunks', 'dominant_biome', 'Most frequently sampled vertical biome; alphabetical name breaks ties.'),
-  ('main', 'frontier_map_chunks', 'biomes', 'Alphabetical comma-separated biome names sampled in the chunk.'),
-  ('main', 'frontier_map_chunks', 'materials', 'Alphabetical comma-separated non-routine block materials observed in the chunk.'),
-  ('main', 'frontier_navigation', NULL, 'Derived frontier chunks joined with live bot status, providing distance in blocks and heading in degrees from the bot.'),
-  ('main', 'frontier_navigation', 'bot_id', 'Bot whose current position supplies the distance and heading.'),
-  ('main', 'frontier_navigation', 'dimension', 'Mineflayer dimension containing the chunk.'),
-  ('main', 'frontier_navigation', 'chunk_x', 'Chunk X coordinate.'),
-  ('main', 'frontier_navigation', 'chunk_z', 'Chunk Z coordinate.'),
-  ('main', 'frontier_navigation', 'dominant_biome', 'Most frequently sampled vertical biome in the chunk.'),
-  ('main', 'frontier_navigation', 'surface_water_fraction', 'Fraction of chunk surface covered by water.'),
-  ('main', 'frontier_navigation', 'is_frontier', '1 when at least one cardinal neighbour is unobserved; otherwise 0.'),
-  ('main', 'frontier_navigation', 'distance_blocks', 'Euclidean distance in blocks from the bot current position to the chunk centre.'),
-  ('main', 'frontier_navigation', 'heading_degrees', 'Compass heading in degrees (0 = North, 90 = East, 180 = South, 270 = West) from the bot to the chunk centre.');
+  ('main', 'frontier_seen', NULL, 'The chunks this bot saw, one row per bot and chunk: a chunk is in a bot''s map once its row is here and the world file holds a scan of it. The frontier views below join these rows to the world scans.'),
+  ('main', 'frontier_seen', 'bot_id', 'Player name of the bot that saw the chunk.'),
+  ('main', 'frontier_seen', 'chunk_key', 'Stable world-relative key formatted as dimension|chunk_x|chunk_z; joins world.frontier_chunks.'),
+  ('main', 'frontier_seen', 'dimension', 'Mineflayer dimension containing the chunk.'),
+  ('main', 'frontier_seen', 'chunk_x', 'Chunk X coordinate.'),
+  ('main', 'frontier_seen', 'chunk_z', 'Chunk Z coordinate.'),
+  ('main', 'frontier_seen', 'first_seen_at', 'UTC timestamp when this bot first received the loaded chunk.'),
+  ('world', 'frontier_chunks', NULL, 'Every chunk column any bot of this world scanned, once per world (the whole world map, not only this bot''s). Read-only here; the world file is shared by all bots of the world.'),
+  ('world', 'frontier_chunks', 'chunk_key', 'Stable world-relative key formatted as dimension|chunk_x|chunk_z.'),
+  ('world', 'frontier_chunks', 'dimension', 'Mineflayer dimension containing the chunk.'),
+  ('world', 'frontier_chunks', 'chunk_x', 'Chunk X coordinate; block X coordinates 16n through 16n+15.'),
+  ('world', 'frontier_chunks', 'chunk_z', 'Chunk Z coordinate; block Z coordinates 16n through 16n+15.'),
+  ('world', 'frontier_chunks', 'first_observed_at', 'UTC timestamp when any bot first received the loaded chunk.'),
+  ('world', 'frontier_chunks', 'scanned_at', 'UTC timestamp of the latest scan; a chunk loaded again later than ten minutes after it is scanned again.'),
+  ('world', 'frontier_chunks', 'surface_water_fraction', 'Fraction from 0.0 to 1.0 of the 256 horizontal cells whose highest non-air block is water or a bubble column.'),
+  ('world', 'frontier_chunk_materials', NULL, 'Distinct non-routine block materials whose state IDs occur anywhere in each full vertical chunk palette; ubiquitous terrain and underground ores are excluded. All chunks of the world.'),
+  ('world', 'frontier_chunk_materials', 'chunk_key', 'Parent world.frontier_chunks join key.'),
+  ('world', 'frontier_chunk_materials', 'material', 'Minecraft block name.'),
+  ('world', 'frontier_chunk_biomes', NULL, 'Minecraft biomes sampled across each chunk vertical biome palette. All chunks of the world.'),
+  ('world', 'frontier_chunk_biomes', 'chunk_key', 'Parent world.frontier_chunks join key.'),
+  ('world', 'frontier_chunk_biomes', 'biome', 'Minecraft biome name.'),
+  ('world', 'frontier_chunk_biomes', 'sample_count', 'Number of 4x4x4 biome samples with this biome across the loaded chunk column.'),
+  ('temp', 'frontier_chunks', NULL, 'The chunks this bot saw (frontier_seen), each with the world file''s scan of it: this bot''s map. Unqualified frontier_chunks is this view; the whole world is world.frontier_chunks.'),
+  ('temp', 'frontier_chunks', 'chunk_key', 'Stable world-relative key formatted as dimension|chunk_x|chunk_z.'),
+  ('temp', 'frontier_chunks', 'dimension', 'Mineflayer dimension containing the chunk.'),
+  ('temp', 'frontier_chunks', 'chunk_x', 'Chunk X coordinate; block X coordinates 16n through 16n+15.'),
+  ('temp', 'frontier_chunks', 'chunk_z', 'Chunk Z coordinate; block Z coordinates 16n through 16n+15.'),
+  ('temp', 'frontier_chunks', 'first_observed_at', 'UTC timestamp when this bot first received the loaded chunk.'),
+  ('temp', 'frontier_chunks', 'scanned_at', 'UTC timestamp of the latest scan of the chunk, by any bot of the world.'),
+  ('temp', 'frontier_chunks', 'surface_water_fraction', 'Fraction from 0.0 to 1.0 of the 256 horizontal cells whose highest non-air block is water or a bubble column.'),
+  ('temp', 'frontier_chunks', 'is_frontier', '1 when at least one cardinal neighbour has not been seen by this bot; otherwise 0.'),
+  ('temp', 'frontier_chunk_materials', NULL, 'Non-routine block materials of the chunks this bot saw (world.frontier_chunk_materials narrowed to frontier_seen).'),
+  ('temp', 'frontier_chunk_materials', 'chunk_key', 'Parent frontier_chunks join key.'),
+  ('temp', 'frontier_chunk_materials', 'material', 'Minecraft block name.'),
+  ('temp', 'frontier_chunk_biomes', NULL, 'Biomes sampled in the chunks this bot saw (world.frontier_chunk_biomes narrowed to frontier_seen).'),
+  ('temp', 'frontier_chunk_biomes', 'chunk_key', 'Parent frontier_chunks join key.'),
+  ('temp', 'frontier_chunk_biomes', 'biome', 'Minecraft biome name.'),
+  ('temp', 'frontier_chunk_biomes', 'sample_count', 'Number of 4x4x4 biome samples with this biome across the loaded chunk column.'),
+  ('temp', 'frontier_map_chunks', NULL, 'One compact map row per chunk this bot saw, derived from the frontier views.'),
+  ('temp', 'frontier_map_chunks', 'dimension', 'Mineflayer dimension containing the chunk.'),
+  ('temp', 'frontier_map_chunks', 'chunk_x', 'Chunk X coordinate.'),
+  ('temp', 'frontier_map_chunks', 'chunk_z', 'Chunk Z coordinate.'),
+  ('temp', 'frontier_map_chunks', 'surface_water_fraction', 'Surface-water fraction copied from frontier_chunks.'),
+  ('temp', 'frontier_map_chunks', 'is_frontier', 'Frontier flag copied from frontier_chunks.'),
+  ('temp', 'frontier_map_chunks', 'dominant_biome', 'Most frequently sampled vertical biome; alphabetical name breaks ties.'),
+  ('temp', 'frontier_map_chunks', 'biomes', 'Alphabetical comma-separated biome names sampled in the chunk.'),
+  ('temp', 'frontier_map_chunks', 'materials', 'Alphabetical comma-separated non-routine block materials observed in the chunk.'),
+  ('temp', 'frontier_navigation', NULL, 'Derived frontier chunks joined with live bot status, providing distance in blocks and heading in degrees from the bot.'),
+  ('temp', 'frontier_navigation', 'bot_id', 'Bot whose current position supplies the distance and heading.'),
+  ('temp', 'frontier_navigation', 'dimension', 'Mineflayer dimension containing the chunk.'),
+  ('temp', 'frontier_navigation', 'chunk_x', 'Chunk X coordinate.'),
+  ('temp', 'frontier_navigation', 'chunk_z', 'Chunk Z coordinate.'),
+  ('temp', 'frontier_navigation', 'dominant_biome', 'Most frequently sampled vertical biome in the chunk.'),
+  ('temp', 'frontier_navigation', 'surface_water_fraction', 'Fraction of chunk surface covered by water.'),
+  ('temp', 'frontier_navigation', 'is_frontier', '1 when at least one cardinal neighbour is unseen by this bot; otherwise 0.'),
+  ('temp', 'frontier_navigation', 'distance_blocks', 'Euclidean distance in blocks from the bot current position to the chunk centre.'),
+  ('temp', 'frontier_navigation', 'heading_degrees', 'Compass heading in degrees (0 = North, 90 = East, 180 = South, 270 = West) from the bot to the chunk centre.');

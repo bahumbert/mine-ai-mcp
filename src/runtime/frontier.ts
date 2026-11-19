@@ -1,18 +1,26 @@
 import type { Bot } from "mineflayer";
 import type { DatabaseSync } from "node:sqlite";
-import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
 import type { Vec3 } from "vec3";
 import { monotonicNow } from "../utils/monotonic-clock.js";
 import { findLoadedBlockPositions } from "../world/loaded-block-scan.js";
-import { SqlBotData } from "../bot-data/index.js";
+import { SqlBotData, worldWriteRetryDelayMs } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { sourcesOf } from "../world/block-drops.js";
 import { CHUNK_WIDTH, chunkPosition, loadedColumns } from "../world/chunks.js";
+import { startLegacyFrontierImport, type LegacyFrontierImport } from "./legacy-frontier-import.js";
 
 export interface SessionFrontierStatus {
   observedChunks: number;
   pendingChunks: number;
   error: string | null;
+  /** Chunks of the old per-bot frontier not yet moved into the world file (0 when none): the map lacks them until then. */
+  legacyLeft: number;
+  /**
+   * Why the move of the old frontier stopped (the next start resumes it), or null. Not part of `error`: exploring stops
+   * on any `error`, and the chunks it records do not depend on the old ones.
+   */
+  legacyImportError: string | null;
 }
 
 export interface FrontierChunk {
@@ -24,6 +32,8 @@ export interface FrontierChunk {
 export interface SessionFrontier extends Disposable {
   status(): SessionFrontierStatus;
   idle(): Promise<void>;
+  /** Settles when the move of the old per-bot frontier into the world file ended (at once when there is none). */
+  whenLegacyImported(): Promise<void>;
   boundary(dimension: string, direction: { readonly x: number; readonly z: number }): number | null;
   /**
    * How many recorded chunks of the bot's dimension hold this block. The scan leaves out the blocks found nearly
@@ -45,11 +55,33 @@ interface LoadedColumn {
   biomes: Array<{ data: PaletteContainer }>;
 }
 
+/** What one scan of a chunk column found: kept across the retries of a busy world write. */
+interface ChunkScan {
+  readonly scannedAt: string;
+  readonly surfaceWaterFraction: number;
+  readonly materials: readonly string[];
+  readonly biomes: ReadonlyArray<readonly [name: string, count: number]>;
+}
+
 interface PendingChunk extends FrontierChunk {
   firstObservedAt: string;
   column: LoadedColumn;
-  /** Already recorded: its materials, biomes and water are scanned again and replace the old ones. */
-  rescan?: boolean;
+  /** The monotonic time before which a busy world write is not tried again; 0 for a chunk not yet tried. */
+  retryAt: number;
+  busyTries: number;
+  scan?: ChunkScan;
+}
+
+/** A world write another connection holds is tried again at most this many times, then the chunk reports an error. */
+const WORLD_WRITE_TRIES = 20;
+
+/** Clocks and waits of the recorder; tests give their own so a retry wait costs no real time. */
+export interface FrontierTiming {
+  /** Monotonic milliseconds: deadlines and retry times. */
+  readonly now?: () => number;
+  readonly random?: () => number;
+  /** Waits `ms` and rejects when the signal aborts (the session closed). */
+  readonly wait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -159,7 +191,7 @@ export function seenInWorld(
 class ChunkRecorder {
   observedChunks: number;
   private storageError: string | null = null;
-  /** Why the spawn ring was not read, or the kept flags not rechecked, at attach: kept until close. */
+  /** Why the spawn ring was not read at attach: kept until close. */
   private readonly attachErrors: string[] = [];
   private readonly pending = new Map<string, PendingChunk>();
   private readonly listeners = new Set<(chunk: FrontierChunk) => void>();
@@ -168,23 +200,52 @@ class ChunkRecorder {
   private readonly scanErrors = new Map<string, string>();
   private readonly bot: Bot;
   private readonly data: SqlBotData;
+  private readonly abort = new AbortController();
+  private readonly now: () => number;
+  private readonly random: () => number;
+  private readonly wait: (ms: number, signal: AbortSignal) => Promise<void>;
 
-  constructor(bot: Bot, data: SqlBotData) {
+  constructor(bot: Bot, data: SqlBotData, private readonly legacyImport: LegacyFrontierImport, timing: FrontierTiming) {
     this.bot = bot;
     this.data = data;
+    this.now = timing.now ?? monotonicNow;
+    this.random = timing.random ?? Math.random;
+    this.wait = timing.wait ?? ((ms, signal) => sleep(ms, undefined, { signal }));
     this.observedChunks = Number(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count ?? 0);
   }
 
-  /** Queue the chunk when it is new, or recorded long enough ago to be scanned again. */
+  /**
+   * Queue the chunk when the world has no scan of it, or one older than {@link RESCAN_AFTER_MS} (by any bot of the
+   * world), or when this bot has no sighting of it. Two reads by key; the scan and the writes run off the packet path.
+   */
   remember(chunk: FrontierChunk, column: LoadedColumn | undefined): void {
     if (this.closed || !column) return;
     try {
-      const recorded = this.data.read("SELECT scanned_at FROM frontier_chunks WHERE chunk_key = ?", chunkKey(chunk))[0];
-      if (recorded === undefined) this.queue({ ...chunk, firstObservedAt: new Date().toISOString(), column });
-      else if (Date.now() - Date.parse(String(recorded.scanned_at)) >= RESCAN_AFTER_MS) {
-        this.queue({ ...chunk, firstObservedAt: new Date().toISOString(), column, rescan: true });
+      const key = chunkKey(chunk);
+      if (this.worldScanIsStale(key) || !this.hasSighting(key)) {
+        this.queue({ ...chunk, firstObservedAt: new Date().toISOString(), column, retryAt: 0, busyTries: 0 });
       }
       this.storageError = null;
+    } catch (cause) {
+      this.storageError = message(cause);
+    }
+  }
+
+  /** True when the world file has no scan of the chunk, or one old enough to scan again. */
+  private worldScanIsStale(key: string): boolean {
+    const scanned = this.data.read("SELECT scanned_at FROM world.frontier_chunks WHERE chunk_key = ?", key)[0];
+    return scanned === undefined || Date.now() - Date.parse(String(scanned.scanned_at)) >= RESCAN_AFTER_MS;
+  }
+
+  private hasSighting(key: string): boolean {
+    return this.data.read("SELECT 1 AS seen FROM main.frontier_seen WHERE bot_id = ? AND chunk_key = ?", this.bot.username, key).length > 0;
+  }
+
+  /** Counts the chunks on this bot's map again: the legacy import added to it after the constructor counted. */
+  recountObservedChunks(): void {
+    if (this.closed) return;
+    try {
+      this.observedChunks = Number(this.data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count ?? 0);
     } catch (cause) {
       this.storageError = message(cause);
     }
@@ -209,11 +270,15 @@ class ChunkRecorder {
       observedChunks: this.observedChunks,
       pendingChunks: this.pending.size,
       error: this.storageError ?? (this.attachErrors.join("; ") || null) ?? this.scanErrors.values().next().value ?? null,
+      legacyLeft: this.legacyImport.left(),
+      legacyImportError: this.legacyImport.error(),
     };
   }
 
   close(): void {
     this.closed = true;
+    this.abort.abort();
+    this.legacyImport.stop();
     this.pending.clear();
     this.listeners.clear();
   }
@@ -227,21 +292,80 @@ class ChunkRecorder {
   private async processPending(): Promise<void> {
     await yieldToEventLoop();
     while (!this.closed && this.pending.size > 0) {
-      const [key, chunk] = this.pending.entries().next().value!;
-      this.pending.delete(key);
-      using execution = new ExecutionScope({ bot: this.bot.username, operation: "frontier", targetId: null });
-      try {
-        if (execution.runSync(`scan_and_record:${key}`, () => scanAndRecord(this.bot, this.data, chunk))) {
-          this.observedChunks += 1;
-          this.notifyRecorded({ dimension: chunk.dimension, chunkX: chunk.chunkX, chunkZ: chunk.chunkZ });
-        }
-        this.scanErrors.delete(key);
-      } catch (cause) {
-        this.scanErrors.set(key, `Chunk ${key}: ${message(cause)}`);
+      const due = this.nextDue();
+      if (due === null) {
+        await this.waitForEarliestRetry();
+        continue;
       }
+      this.processOne(...due);
       await yieldToEventLoop();
     }
     this.processing = undefined;
+  }
+
+  /** Records one due chunk: done (told to the listeners when it is a new sighting), back in the queue when busy, or an error. */
+  private processOne(key: string, chunk: PendingChunk): void {
+    using execution = new ExecutionScope({ bot: this.bot.username, operation: "frontier", targetId: null });
+    try {
+      const outcome = execution.runSync(`scan_and_record:${key}`, () => this.record(chunk));
+      if (outcome === "busy") return this.retryLater(key, chunk);
+      this.pending.delete(key);
+      this.scanErrors.delete(key);
+      if (outcome !== "new sighting") return;
+      this.observedChunks += 1;
+      this.notifyRecorded({ dimension: chunk.dimension, chunkX: chunk.chunkX, chunkZ: chunk.chunkZ });
+    } catch (cause) {
+      this.pending.delete(key);
+      this.scanErrors.set(key, `Chunk ${key}: ${message(cause)}`);
+    }
+  }
+
+  /** The first queued chunk whose retry time has come, or null when every one is waiting out a busy world write. */
+  private nextDue(): [string, PendingChunk] | null {
+    const now = this.now();
+    for (const entry of this.pending) if (entry[1].retryAt <= now) return entry;
+    return null;
+  }
+
+  private async waitForEarliestRetry(): Promise<void> {
+    const earliest = Math.min(...Array.from(this.pending.values(), (chunk) => chunk.retryAt));
+    // Closing aborts the wait: the loop then ends on `closed`.
+    await this.wait(Math.max(0, earliest - this.now()), this.abort.signal).catch(() => {});
+  }
+
+  /** A world write another connection held: the chunk goes back with a retry time, or reports the error after the last try. */
+  private retryLater(key: string, chunk: PendingChunk): void {
+    chunk.busyTries += 1;
+    if (chunk.busyTries >= WORLD_WRITE_TRIES) {
+      this.pending.delete(key);
+      this.scanErrors.set(key, `Chunk ${key}: world data busy for ${WORLD_WRITE_TRIES} tries`);
+      return;
+    }
+    chunk.retryAt = this.now() + worldWriteRetryDelayMs(this.random);
+  }
+
+  /**
+   * Scans the chunk into the world file unless another bot's scan is fresh (it may have landed while this waited), then
+   * records this bot's sighting. Only a sighting this bot did not have is a new chunk (a rescan is not).
+   */
+  private record(chunk: PendingChunk): "busy" | "new sighting" | "known" {
+    const key = chunkKey(chunk);
+    if (this.worldScanIsStale(key)) {
+      chunk.scan ??= scanChunk(this.bot, chunk);
+      const written = this.data.world.write((database) => writeWorldScan(database, chunk, chunk.scan!), { name: "scanAndRecord" });
+      if (written.status === "busy") return "busy";
+    }
+    const inserted = this.data.transaction(
+      (database) =>
+        database
+          .prepare(
+            `INSERT OR IGNORE INTO frontier_seen (bot_id, chunk_key, dimension, chunk_x, chunk_z, first_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(this.bot.username, key, chunk.dimension, chunk.chunkX, chunk.chunkZ, chunk.firstObservedAt).changes > 0,
+      { name: "recordSighting" },
+    );
+    return inserted ? "new sighting" : "known";
   }
 
   /**
@@ -261,7 +385,7 @@ class ChunkRecorder {
 }
 
 /** How many recorded chunks of `dimension` hold `material`. */
-function countChunksWithMaterial(data: SqlBotData, dimension: string, material: string): number {
+export function countChunksWithMaterial(data: SqlBotData, dimension: string, material: string): number {
   const row = data.read(
     `SELECT COUNT(*) AS count FROM frontier_chunk_materials AS m JOIN frontier_chunks AS c USING (chunk_key)
      WHERE m.material = ? AND c.dimension = ?`,
@@ -272,7 +396,7 @@ function countChunksWithMaterial(data: SqlBotData, dimension: string, material: 
 }
 
 /** The farthest recorded chunk of `dimension` along `direction`, or null when none is recorded. */
-function recordedBoundary(data: SqlBotData, dimension: string, direction: { readonly x: number; readonly z: number }): number | null {
+export function recordedBoundary(data: SqlBotData, dimension: string, direction: { readonly x: number; readonly z: number }): number | null {
   const row = data.read(
     `
     SELECT MAX(chunk_x * ? + chunk_z * ?) AS boundary
@@ -290,8 +414,17 @@ function recordedBoundary(data: SqlBotData, dimension: string, direction: { read
  * Records loaded chunks, useful material sets, and counted biome samples.
  * Work is queued so packet delivery never performs a scan.
  */
-export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFrontier {
-  const recorder = new ChunkRecorder(bot, data);
+export function attachSessionFrontier(bot: Bot, data: SqlBotData, timing: FrontierTiming = {}): SessionFrontier {
+  // A bot file that still holds the frontier of the old per-bot shape moves it into the world file in the background.
+  const legacyImport = startLegacyFrontierImport(data, bot.username);
+  let recorder: ChunkRecorder;
+  try {
+    recorder = new ChunkRecorder(bot, data, legacyImport, timing);
+  } catch (error) {
+    legacyImport.stop(); // nobody owns the import yet: a failed attach must not leave it running
+    throw error;
+  }
+  void legacyImport.done.then(() => recorder.recountObservedChunks());
 
   const loaded = (corner: Vec3) => {
     const { chunkX, chunkZ } = chunkPosition(corner);
@@ -305,14 +438,6 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
     );
   };
   bot.on("chunkColumnLoad", loaded);
-
-  // A database kept from before p1 T1 still holds spawn-ring rows flagged frontier by the string-coordinate bug, and
-  // no insert rechecks them (74fdee18): they are rechecked here, once, before the ring is read.
-  try {
-    recheckFlaggedFrontier(data, bot.game.dimension);
-  } catch (cause) {
-    recorder.recordAttachError("Frontier flags were not rechecked (a chunk flagged by an old bug clears when it is scanned again, and a restart tries the recheck again)", cause);
-  }
 
   // The bot is already spawned when the session is built, so its spawn ring may
   // have arrived before this listener existed.
@@ -334,6 +459,7 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
   return {
     status: () => recorder.status(),
     idle: () => recorder.idle(),
+    whenLegacyImported: () => legacyImport.done,
     chunksWithMaterial: (material) => countChunksWithMaterial(data, bot.game.dimension, material),
     boundary: (dimension, direction) => recordedBoundary(data, dimension, direction),
     onRecorded: (listener) => recorder.onRecorded(listener),
@@ -342,115 +468,33 @@ export function attachSessionFrontier(bot: Bot, data: SqlBotData): SessionFronti
   };
 }
 
-function scanAndRecord(bot: Bot, data: SqlBotData, chunk: PendingChunk): boolean {
-  const key = chunkKey(chunk);
+/** Reads the chunk column's palettes: materials, biome samples and surface water. Nothing is written. */
+function scanChunk(bot: Bot, chunk: PendingChunk): ChunkScan {
   const blockNameFor = (stateId: number) => bot.registry.blocksByStateId[stateId]?.name;
-  const materials = namesFromPalettes(chunk.column.sections, 4096, blockNameFor, ROUTINE_MATERIALS);
-  const biomes = countNamesFromPalettes(chunk.column.biomes, 64, (biomeId) => bot.registry.biomes[biomeId]?.name);
-  const surfaceWaterFraction = measureSurfaceWaterFraction(chunk.column.sections, blockNameFor);
-  const scannedAt = new Date().toISOString();
-
-  if (chunk.rescan) {
-    data.transaction((database) => {
-      database.prepare("UPDATE frontier_chunks SET scanned_at = ?, surface_water_fraction = ? WHERE chunk_key = ?").run(scannedAt, surfaceWaterFraction, key);
-      database.prepare("DELETE FROM frontier_chunk_materials WHERE chunk_key = ?").run(key);
-      database.prepare("DELETE FROM frontier_chunk_biomes WHERE chunk_key = ?").run(key);
-      const insertMaterial = database.prepare("INSERT INTO frontier_chunk_materials (chunk_key, material) VALUES (?, ?)");
-      for (const material of materials) insertMaterial.run(key, material);
-      const insertBiome = database.prepare("INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count) VALUES (?, ?, ?)");
-      for (const [biome, sampleCount] of biomes) insertBiome.run(key, biome, sampleCount);
-      updateFrontierFlags(database, chunk);
-    }, { name: "rescanChunk" });
-    // Not a new chunk: no count, no listener. Its flags are rechecked anyway: a flag a past bug left stuck clears at the next scan.
-    return false;
-  }
-
-  return data.transaction((database) => {
-    const inserted = database
-      .prepare(
-        `
-        INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z,
-          first_observed_at, scanned_at, surface_water_fraction
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (chunk_key) DO NOTHING
-      `,
-      )
-      .run(
-        key,
-        chunk.dimension,
-        chunk.chunkX,
-        chunk.chunkZ,
-        chunk.firstObservedAt,
-        scannedAt,
-        surfaceWaterFraction,
-      ).changes;
-    if (!inserted) return false;
-
-    updateFrontierFlags(database, chunk);
-
-    const insertMaterial = database.prepare(`
-      INSERT INTO frontier_chunk_materials (chunk_key, material)
-      VALUES (?, ?)
-    `);
-    for (const material of materials) insertMaterial.run(key, material);
-    const insertBiome = database.prepare(`
-      INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count)
-      VALUES (?, ?, ?)
-    `);
-    for (const [biome, sampleCount] of biomes) insertBiome.run(key, biome, sampleCount);
-    return true;
-  }, { name: "scanAndRecord" });
+  return {
+    materials: namesFromPalettes(chunk.column.sections, 4096, blockNameFor, ROUTINE_MATERIALS),
+    biomes: countNamesFromPalettes(chunk.column.biomes, 64, (biomeId) => bot.registry.biomes[biomeId]?.name),
+    surfaceWaterFraction: measureSurfaceWaterFraction(chunk.column.sections, blockNameFor),
+    scannedAt: new Date().toISOString(),
+  };
 }
 
-/** Recheck only the new chunk and the four chunks whose frontier state it can change. */
-function updateFrontierFlags(database: DatabaseSync, chunk: FrontierChunk): void {
-  // Seek the five primary keys. A correlated WHERE EXISTS scans every
-  // historical chunk, making each newly streamed column cost more forever.
-  recheckFrontierFlags(database, [
-    chunkKey(chunk),
-    chunkKey({ ...chunk, chunkZ: chunk.chunkZ - 1 }),
-    chunkKey({ ...chunk, chunkX: chunk.chunkX + 1 }),
-    chunkKey({ ...chunk, chunkZ: chunk.chunkZ + 1 }),
-    chunkKey({ ...chunk, chunkX: chunk.chunkX - 1 }),
-  ]);
-}
-
-/**
- * Recheck the rows of `dimension` that are flagged frontier. A row is flagged by an insert that sees a missing
- * neighbour and cleared only by a later insert beside it, so a flag that a past bug left on a chunk with all four
- * neighbours recorded (the spawn ring of a database written before p1 T1) would stay for good.
- */
-function recheckFlaggedFrontier(data: SqlBotData, dimension: string): void {
-  data.transaction((database) => {
-    const flagged = database.prepare("SELECT chunk_key FROM frontier_chunks WHERE dimension = ? AND is_frontier = 1").all(dimension);
-    if (flagged.length > 0) recheckFrontierFlags(database, flagged.map((row) => String(row.chunk_key)));
-  }, { name: "recheckFrontier" });
-}
-
-/** The one rule: a chunk is frontier when any of its four neighbours is not recorded. Rechecks the chunks named by `keys`. */
-function recheckFrontierFlags(database: DatabaseSync, keys: readonly string[]): void {
+/** One chunk's scan in the world file: the row (the later scan replaces an earlier one) with its materials and biomes. */
+function writeWorldScan(database: DatabaseSync, chunk: PendingChunk, scan: ChunkScan): void {
+  const key = chunkKey(chunk);
   database
     .prepare(
-      `
-      WITH direction (delta_x, delta_z) AS (
-        VALUES (0, -1), (1, 0), (0, 1), (-1, 0)
-      )
-      UPDATE frontier_chunks AS candidate
-      SET is_frontier = EXISTS (
-        SELECT 1 FROM direction
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM frontier_chunks AS neighbour
-          WHERE neighbour.dimension = candidate.dimension
-            AND neighbour.chunk_x = candidate.chunk_x + direction.delta_x
-            AND neighbour.chunk_z = candidate.chunk_z + direction.delta_z
-        )
-      )
-      WHERE chunk_key IN (SELECT value FROM json_each(?))
-    `,
+      `INSERT INTO frontier_chunks (chunk_key, dimension, chunk_x, chunk_z, first_observed_at, scanned_at, surface_water_fraction)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (chunk_key) DO UPDATE SET scanned_at = excluded.scanned_at, surface_water_fraction = excluded.surface_water_fraction`,
     )
-    .run(JSON.stringify(keys));
+    .run(key, chunk.dimension, chunk.chunkX, chunk.chunkZ, chunk.firstObservedAt, scan.scannedAt, scan.surfaceWaterFraction);
+  database.prepare("DELETE FROM frontier_chunk_materials WHERE chunk_key = ?").run(key);
+  database.prepare("DELETE FROM frontier_chunk_biomes WHERE chunk_key = ?").run(key);
+  const insertMaterial = database.prepare("INSERT INTO frontier_chunk_materials (chunk_key, material) VALUES (?, ?)");
+  for (const material of scan.materials) insertMaterial.run(key, material);
+  const insertBiome = database.prepare("INSERT INTO frontier_chunk_biomes (chunk_key, biome, sample_count) VALUES (?, ?, ?)");
+  for (const [biome, sampleCount] of scan.biomes) insertBiome.run(key, biome, sampleCount);
 }
 
 function chunkKey(chunk: FrontierChunk): string {

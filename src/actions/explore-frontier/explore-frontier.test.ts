@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../../bot-data/index.js";
+import { recordChunk } from "../../test-support/bot-data.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { createMovements, type NavigationResult } from "../../navigation/index.js";
@@ -30,8 +31,9 @@ function frontierFixture(initialBoundary = 0): TestFrontier {
   const listeners = new Set<(chunk: FrontierChunk) => void>();
   const close = () => listeners.clear();
   return {
-    status: () => ({ observedChunks, pendingChunks: 0, error }),
+    status: () => ({ observedChunks, pendingChunks: 0, error, legacyLeft: 0, legacyImportError: null }),
     idle: async () => {},
+    whenLegacyImported: async () => {},
     boundary: () => currentBoundary,
     chunksWithMaterial: () => 0,
     onRecorded: (listener) => {
@@ -312,15 +314,7 @@ test("explores with botData and populates nearestFrontier from frontier_navigati
   });
   t.after(() => data.close());
 
-  data.transaction((database) => {
-    database
-      .prepare(
-        `INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z, first_observed_at, scanned_at, surface_water_fraction, is_frontier
-        ) VALUES ('overworld|3|0', 'overworld', 3, 0, '2026-08-21T00:00:00.000Z', '2026-08-21T00:00:01.000Z', 0, 1)`,
-      )
-      .run();
-  });
+  recordChunk(data, { chunkX: 3, chunkZ: 0, firstSeenAt: "2026-08-21T00:00:00.000Z", scannedAt: "2026-08-21T00:00:01.000Z" });
 
   const frontier = frontierFixture();
   const { bot } = explorerBot();

@@ -1,6 +1,13 @@
 // Runs WAL checkpoints of one bot-data file on a worker thread, so SQLite never checkpoints inside the bot connection's COMMIT.
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
+import type { DatabaseSync } from "node:sqlite";
+
+/** The checkpoint worker of `database` died: SQLite checkpoints inside commits again (stalls are back, the WAL stays bounded). */
+export function restoreAutomaticCheckpoints(database: DatabaseSync, label: string, cause: string): void {
+  database.exec("PRAGMA wal_autocheckpoint = 1000");
+  process.stderr.write(`[minecraft-bot-data] ${label} stopped (${cause}); automatic checkpoints restored\n`);
+}
 
 /** How often the worker copies WAL frames into the database file. */
 export const WAL_CHECKPOINT_INTERVAL_MS = 2_000;

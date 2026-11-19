@@ -1,9 +1,14 @@
-import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import { botDataDirectoryFor } from "./bot-data-paths.js";
 import { resolveBotDataIdentity, type BotDataIdentity, type BotDataScope } from "./bot-data-identity.js";
 import { BOT_DATA_SCHEMA } from "./bot-data-schema.js";
+import { closeSqlDatabase } from "./close-sql-database.js";
+import { installAndValidateMetadata, validateExistingMetadata } from "./file-metadata.js";
+import { BOT_DATA_STEPS, migrationContextFor, newestVersion, runMigrations } from "./migrations.js";
+import { SqlWorldData } from "./sql-world-data.js";
+import { FRONTIER_VIEWS } from "./world-data-schema.js";
 import {
   BotDataLockError,
   sqliteLock,
@@ -12,28 +17,10 @@ import {
   type StorageOperation,
   type StoragePhase,
 } from "./storage-diagnostics.js";
-import { startWalCheckpointer, WAL_JOURNAL_SIZE_LIMIT_BYTES } from "./wal-checkpointer.js";
+import { restoreAutomaticCheckpoints, startWalCheckpointer, WAL_JOURNAL_SIZE_LIMIT_BYTES } from "./wal-checkpointer.js";
 
-export { BOT_DATA_SCHEMA };
-export const SQL_BOT_DATA_SCHEMA_VERSION = 1;
-
-/** Extend call statuses without rewriting any historical response payload. */
-function migrateActionResponses(database: DatabaseSync): void {
-  const row = database.prepare("SELECT sql FROM sqlite_master WHERE name = 'action_responses'").get() as { sql: string } | undefined;
-  if (!row || row.sql.includes("'accepted'")) return;
-  database.exec(`BEGIN IMMEDIATE;
-    CREATE TABLE action_responses_async (
-      request_id INTEGER PRIMARY KEY, responded_at TEXT NOT NULL,
-      duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
-      status TEXT NOT NULL CHECK(status IN ('succeeded','partial','failed','cancelled','accepted','refused','pending','storage_failed','cancellation_requested')),
-      response_json TEXT NOT NULL CHECK(json_valid(response_json)),
-      FOREIGN KEY(request_id) REFERENCES action_requests(request_id) ON DELETE CASCADE
-    ) STRICT;
-    INSERT INTO action_responses_async SELECT * FROM action_responses;
-    DROP TABLE action_responses;
-    ALTER TABLE action_responses_async RENAME TO action_responses;
-    COMMIT;`);
-}
+export { BOT_DATA_SCHEMA, closeSqlDatabase };
+export const SQL_BOT_DATA_SCHEMA_VERSION = newestVersion(BOT_DATA_STEPS);
 
 export type SqlBotDataRow = Record<string, SQLOutputValue>;
 
@@ -54,11 +41,15 @@ export interface SqlBotDataOptions {
   readonly identity: BotDataIdentity;
   /** Replaces the checkpoint worker, for tests that need to see it started, fall back or be disposed. */
   readonly startWalCheckpointer?: typeof startWalCheckpointer;
+  /** The same for the world file's checkpoint worker. */
+  readonly startWorldWalCheckpointer?: typeof startWalCheckpointer;
 }
 
 /** Owns the SQLite representation and connection for one bot-data identity. */
 export class SqlBotData {
   readonly location: SqlBotDataLocation;
+  /** The world file of this identity's world (chunk scans every bot of the world shares); opened and closed with this store. */
+  readonly world: SqlWorldData;
 
   private closed = false;
   private readonly database: DatabaseSync;
@@ -71,8 +62,10 @@ export class SqlBotData {
     location: SqlBotDataLocation,
     metadata: ReadonlyMap<string, string>,
     startCheckpointer: typeof startWalCheckpointer,
+    world: SqlWorldData,
   ) {
     this.location = location;
+    this.world = world;
     this.connection = storageConnection(location.kind === "persistent" ? location.file : ":memory:");
 
     const database = new DatabaseSync(location.kind === "persistent" ? location.file : ":memory:", {
@@ -86,11 +79,13 @@ export class SqlBotData {
       this.at({ name: "open-bot-data" }, "configure", () => {
         configureDatabase(database, location.kind);
         validateExistingMetadata(database, metadata);
-        migrateEventReadState(database);
-        migrateBotStatus(database);
-        migrateActionResponses(database);
+        runMigrations(database, BOT_DATA_STEPS, migrationContextFor(location.kind), this.connection.file);
+        // Views and the data dictionary are rebuilt on every open; the steps own every table's shape.
         database.exec(BOT_DATA_SCHEMA);
         installAndValidateMetadata(database, metadata);
+        // Read-only: a plain attach would make this connection's write transactions lock the world file too (probe 2026-11-18).
+        database.prepare("ATTACH DATABASE ? AS world").run(world.readOnlyAttachUri());
+        database.exec(FRONTIER_VIEWS);
         // Startup may wait for a transient migration/journal lock. Once attached
         // to the bot, a synchronous five-second wait would starve physics and
         // trip the runtime watchdog. Report contention to the caller immediately.
@@ -117,7 +112,17 @@ export class SqlBotData {
     const identity = resolveBotDataIdentity(options.identity);
     const metadata = metadataFor(identity.worldId, identity.scope);
     const location = resolveSqlBotDataLocation(options.storage, identity);
-    return new SqlBotData(location, metadata, options.startWalCheckpointer ?? startWalCheckpointer);
+    const world = SqlWorldData.open({
+      storage: options.storage,
+      worldId: identity.worldId,
+      ...(options.startWorldWalCheckpointer && { startWalCheckpointer: options.startWorldWalCheckpointer }),
+    });
+    try {
+      return new SqlBotData(location, metadata, options.startWalCheckpointer ?? startWalCheckpointer, world);
+    } catch (error) {
+      world.close();
+      throw error;
+    }
   }
 
   /** Runs a trusted, synchronous read on the host thread. */
@@ -181,6 +186,8 @@ export class SqlBotData {
     this.walCheckpointer?.[Symbol.dispose]();
     this.walCheckpointer = null;
     closeSqlDatabase(this.database);
+    // After the bot connection: it has the world file attached.
+    this.world.close();
     if (this.location.kind === "persistent")
       process.stderr.write(
         `[minecraft-bot-data] ${JSON.stringify({ event: "closed", ...this.connection, observedAt: new Date().toISOString() })}\n`,
@@ -191,13 +198,10 @@ export class SqlBotData {
     this.close();
   }
 
-  /** The checkpoint worker died: SQLite checkpoints inside commits again (stalls are back, the WAL stays bounded). */
   private restoreAutomaticCheckpoints(cause: string): void {
     if (this.closed || this.walCheckpointer === null) return;
     this.walCheckpointer = null;
-    this.database.exec("PRAGMA wal_autocheckpoint = 1000");
-    process.stderr.write(`[minecraft-bot-data] WAL checkpointer stopped (${cause}); automatic checkpoints restored
-`);
+    restoreAutomaticCheckpoints(this.database, "WAL checkpointer", cause);
   }
 
   private assertOpen(): void {
@@ -259,64 +263,12 @@ export class SqlBotData {
   }
 }
 
-/**
- * Closes a connection and releases the underlying file before returning.
- *
- * Bun's `node:sqlite` leaves a closed database's outstanding statements unfinalised, so the
- * native connection — and, on Windows, the lock on the database file — survives until the
- * orphaned statement wrappers are collected. Node finalises them during `close`, so the
- * collection below only runs under Bun.
- */
-export function closeSqlDatabase(database: DatabaseSync): void {
-  database.close();
-  collectOrphanedStatements?.(true);
-}
-
-const collectOrphanedStatements = (globalThis as { Bun?: { gc: (synchronous: boolean) => void } }).Bun?.gc;
-
-/** Preserve the cursor created before event reading was separated from notification policy. */
-function migrateEventReadState(database: DatabaseSync): void {
-  const oldTable = database
-    .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'notification_state'")
-    .get();
-  const currentTable = database
-    .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'event_read_state'")
-    .get();
-  if (oldTable !== undefined && currentTable === undefined) {
-    database.exec("ALTER TABLE notification_state RENAME TO event_read_state");
-  }
-}
-
-/** The live-status row is rewritten on every refresh, so an outdated shape is dropped rather than altered. */
-function migrateBotStatus(database: DatabaseSync): void {
-  const columns = database.prepare("SELECT name FROM pragma_table_info('bot_status')").all() as { name: string }[];
-  if (columns.length > 0 && !columns.some((column) => column.name === "time_of_day")) {
-    database.exec("DROP TABLE bot_status");
-  }
-}
-
 function resolveSqlBotDataLocation(storage: BotDataStorage, identity: BotDataIdentity): SqlBotDataLocation {
   if (storage.kind === "temporary") return Object.freeze({ kind: "temporary" });
 
-  const directory = dataDirectoryFor(path.resolve(storage.root), identity.worldId, identity.scope);
+  const directory = botDataDirectoryFor(storage.root, identity.worldId, identity.scope);
   mkdirSync(directory, { recursive: true });
   return Object.freeze({ kind: "persistent", file: path.join(directory, "bot-data.sqlite") });
-}
-
-function dataDirectoryFor(root: string, worldId: string, scope: BotDataScope): string {
-  const worldDirectory = path.join(root, identitySegment("world", worldId));
-  if (scope.kind === "shared") return path.join(worldDirectory, "shared");
-  return path.join(worldDirectory, "bots", identitySegment("bot", scope.botId));
-}
-
-function identitySegment(fallback: string, identity: string): string {
-  const readable = identity
-    .normalize("NFKC")
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 12);
-  return `${readable || fallback}-${digest}`;
 }
 
 function configureDatabase(database: DatabaseSync, location: SqlBotDataLocation["kind"]): void {
@@ -332,52 +284,8 @@ function configureDatabase(database: DatabaseSync, location: SqlBotDataLocation[
   database.exec("PRAGMA foreign_keys = ON");
 }
 
-/** Reject incompatible files before schema installation can modify them. */
-function validateExistingMetadata(database: DatabaseSync, expected: ReadonlyMap<string, string>): void {
-  const metadataTable = database
-    .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sql_bot_data_metadata'")
-    .get();
-  if (metadataTable === undefined) return;
-
-  const find = database.prepare("SELECT value FROM sql_bot_data_metadata WHERE key = ?");
-  for (const [key, expectedValue] of expected) {
-    const existing = find.get(key) as { value: string } | undefined;
-    if (existing !== undefined && existing.value !== expectedValue) {
-      throw metadataMismatch(key, expectedValue, existing.value);
-    }
-  }
-}
-
-function installAndValidateMetadata(database: DatabaseSync, expected: ReadonlyMap<string, string>): void {
-  const find = database.prepare("SELECT value FROM sql_bot_data_metadata WHERE key = ?");
-  const insert = database.prepare("INSERT INTO sql_bot_data_metadata (key, value) VALUES (?, ?)");
-
-  database.exec("BEGIN IMMEDIATE");
-  try {
-    for (const [key, expectedValue] of expected) {
-      const existing = find.get(key) as { value: string } | undefined;
-      if (existing === undefined) {
-        insert.run(key, expectedValue);
-      } else if (existing.value !== expectedValue) {
-        throw metadataMismatch(key, expectedValue, existing.value);
-      }
-    }
-    database.exec("COMMIT");
-  } catch (error) {
-    if (database.isTransaction) database.exec("ROLLBACK");
-    throw error;
-  }
-}
-
-function metadataMismatch(key: string, expected: string, actual: string): Error {
-  return new Error(
-    `SQL bot data identity mismatch for ${key}: expected ${JSON.stringify(expected)}, found ${JSON.stringify(actual)}.`,
-  );
-}
-
 function metadataFor(worldId: string, scope: BotDataScope): ReadonlyMap<string, string> {
   return new Map([
-    ["schema_version", String(SQL_BOT_DATA_SCHEMA_VERSION)],
     ["world_id", worldId],
     ["scope_kind", scope.kind],
     ["bot_id", scope.kind === "bot" ? scope.botId : ""],

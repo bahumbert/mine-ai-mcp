@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
 import type { BotDataScope } from "./bot-data-identity.js";
-import { closeSqlDatabase, SqlBotData } from "./sql-bot-data.js";
-import { persistentBotData } from "../test-support/bot-data.js";
+import { closeSqlDatabase, SQL_BOT_DATA_SCHEMA_VERSION, SqlBotData } from "./sql-bot-data.js";
+import { persistentBotData, persistentFile, recordChunk } from "../test-support/bot-data.js";
 import { BotDataLockError } from "./storage-diagnostics.js";
 import { queryBotData } from "../actions/query-bot-data/query-bot-data.js";
 
@@ -21,11 +23,6 @@ function temporarySqlBotData(t: TestContext, worldId = "temporary-world", scope:
   return data;
 }
 
-function persistentFile(data: SqlBotData): string {
-  if (data.location.kind !== "persistent") throw new Error("Expected persistent SQL bot data.");
-  return data.location.file;
-}
-
 /** A table every isolation test writes its one observation into. */
 function withObservations(data: SqlBotData): SqlBotData {
   data.transaction((database) => database.exec("CREATE TABLE observations (name TEXT PRIMARY KEY) STRICT"));
@@ -37,7 +34,9 @@ test("async call migration preserves historical replies and publishes execution 
   const original = storage.open("async-migration");
   const historical = JSON.stringify({ response: { format: "markdown", markdown: "Original physical evidence\nunchanged" } });
   original.transaction((db) => {
-    db.exec(`DROP TABLE action_responses;
+    // A file of today has no user_version: version 1 (the baseline step) is what migrates its old shape.
+    db.exec(`PRAGMA user_version = 0;
+      DROP TABLE action_responses;
       CREATE TABLE action_responses (
         request_id INTEGER PRIMARY KEY, responded_at TEXT NOT NULL,
         duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
@@ -213,7 +212,7 @@ test("opens an isolated in-memory representation for disposable work", (t) => {
   assert.throws(() => other.read("SELECT name FROM observations"), /no such table/);
   assert.deepEqual(data.read("SELECT key, value FROM sql_bot_data_metadata ORDER BY key"), [
     { key: "bot_id", value: "collector" },
-    { key: "schema_version", value: "1" },
+    { key: "schema_version", value: String(SQL_BOT_DATA_SCHEMA_VERSION) },
     { key: "scope_kind", value: "bot" },
     { key: "world_id", value: "world" },
   ]);
@@ -342,6 +341,80 @@ test("a checkpointer that falls back restores automatic checkpoints and says so 
   assert.equal(pragma(data, "wal_autocheckpoint"), 1000);
   const notices = lines.filter((line) => line.includes("WAL checkpointer stopped"));
   assert.deepEqual(notices, ["[minecraft-bot-data] WAL checkpointer stopped (worker exited with code 1); automatic checkpoints restored\n"]);
+});
+
+test("the bot connection's write transaction does not lock the world file", (t) => {
+  const data = persistentBotData(t).open("world-lock");
+
+  const answer = data.transaction(() => data.world.write((database) => database.exec("SELECT 1"), { name: "test" }));
+
+  assert.equal(answer.status, "written");
+});
+
+test("query_bot_data reads world.frontier_chunks and the TEMP views by their old names", async (t) => {
+  const data = persistentBotData(t).open("world-views", { kind: "bot", botId: "u-1" });
+  recordChunk(data, { chunkX: 3, chunkZ: -2, materials: ["birch_log"], biomes: [["forest", 64]], waterFraction: 0.25 });
+
+  const count = (sql: string) => queryBotData(data, { sql }).then((result) => result.rows);
+  assert.deepEqual(await count("SELECT COUNT(*) FROM world.frontier_chunks"), [[1]]);
+  assert.deepEqual(await count("SELECT chunk_x, chunk_z, is_frontier FROM frontier_chunks"), [[3, -2, 1]]);
+  assert.deepEqual(await count("SELECT material FROM frontier_chunk_materials"), [["birch_log"]]);
+  assert.deepEqual(await count("SELECT biome, sample_count FROM frontier_chunk_biomes"), [["forest", 64]]);
+  assert.deepEqual(await count("SELECT dominant_biome, materials FROM frontier_map_chunks"), [["forest", "birch_log"]]);
+  assert.deepEqual(await count("SELECT chunk_key FROM frontier_seen"), [["overworld|3|-2"]]);
+});
+
+test("a path with a space and a # attaches the right file", (t) => {
+  const storage = persistentBotData(t);
+  const odd = SqlBotData.create({
+    storage: { kind: "persistent", root: `${storage.root}/a b#c?d%e` },
+    identity: { worldId: "odd-path", scope: { kind: "shared" } },
+  });
+  storage.alsoClose(() => odd.close());
+  recordChunk(odd, { chunkX: 1, chunkZ: 1 });
+
+  assert.deepEqual(odd.read("SELECT chunk_key FROM world.frontier_chunks"), [{ chunk_key: "overworld|1|1" }]);
+});
+
+test("a refused bot file closes the world it had opened", (t) => {
+  const storage = persistentBotData(t);
+  const original = storage.open("refused-world");
+  const file = persistentFile(original);
+  original.close();
+  const future = new DatabaseSync(file);
+  future.exec("PRAGMA user_version = 99");
+  future.close();
+  const events: string[] = [];
+
+  assert.throws(
+    () =>
+      SqlBotData.create({
+        storage: { kind: "persistent", root: storage.root },
+        identity: { worldId: "refused-world", scope: { kind: "shared" } },
+        startWorldWalCheckpointer: () => ({ [Symbol.dispose]: () => void events.push("world checkpointer stopped") }),
+      }),
+    /BOT_DATA_TOO_NEW/,
+  );
+
+  assert.deepEqual(events, ["world checkpointer stopped"]);
+  const worldFile = path.join(path.dirname(path.dirname(file)), "world", "world-data.sqlite");
+  assert.equal(existsSync(`${worldFile}-wal`), false, "a closed world connection leaves no WAL behind");
+});
+
+test("the world checkpointer is stopped at close", (t) => {
+  const storage = persistentBotData(t);
+  const events: string[] = [];
+  const data = SqlBotData.create({
+    storage: { kind: "persistent", root: storage.root },
+    identity: { worldId: "world-checkpointer", scope: { kind: "shared" } },
+    startWalCheckpointer: () => ({ [Symbol.dispose]: () => void events.push("bot checkpointer stopped") }),
+    startWorldWalCheckpointer: () => ({ [Symbol.dispose]: () => void events.push("world checkpointer stopped") }),
+  });
+
+  data.close();
+  data.close();
+
+  assert.deepEqual(events, ["bot checkpointer stopped", "world checkpointer stopped"]);
 });
 
 test("closing a store disposes its checkpointer once and a later write from a new connection works", (t) => {

@@ -72,7 +72,7 @@ export const frontierMapBoundsQuery = defineSqlQuery({
   parameterNames: ["dimension"] as const,
   sql: `
     SELECT MIN(chunk_x) AS min_x, MAX(chunk_x) AS max_x, MIN(chunk_z) AS min_z, MAX(chunk_z) AS max_z
-    FROM main.frontier_chunks
+    FROM frontier_chunks
     WHERE dimension = ?
   `,
   parseRow: (row): FrontierMapBounds => ({
@@ -89,7 +89,7 @@ export const frontierMapWindowQuery = defineSqlQuery({
   parameterNames: ["dimension", "minChunkX", "maxChunkX", "minChunkZ", "maxChunkZ"] as const,
   sql: `
     SELECT chunk_x, chunk_z, surface_water_fraction, dominant_biome, is_frontier
-    FROM main.frontier_map_chunks
+    FROM frontier_map_chunks
     WHERE dimension = ?
       AND chunk_x BETWEEN ? AND ?
       AND chunk_z BETWEEN ? AND ?
@@ -108,7 +108,7 @@ export const frontierChunkExistsQuery = defineSqlQuery({
   id: "frontier-chunk-exists",
   produces: "Whether one chunk coordinate has already been observed in a dimension.",
   parameterNames: ["dimension", "chunkX", "chunkZ"] as const,
-  sql: "SELECT 1 AS is_observed FROM main.frontier_chunks WHERE dimension = ? AND chunk_x = ? AND chunk_z = ? LIMIT 1",
+  sql: "SELECT 1 AS is_observed FROM frontier_chunks WHERE dimension = ? AND chunk_x = ? AND chunk_z = ? LIMIT 1",
   parseRow: (row) => numeric(row, "is_observed") === 1,
 });
 

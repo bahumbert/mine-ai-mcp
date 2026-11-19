@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BotStatusSnapshot } from "./bot-status.js";
 import { refreshNearestFrontier } from "./nearest-frontier.js";
-import { temporaryBotData } from "../test-support/bot-data.js";
+import { recordChunk, temporaryBotData } from "../test-support/bot-data.js";
 
 const status: BotStatusSnapshot = {
   botId: "navigator",
@@ -49,15 +49,8 @@ test("refreshes the real bot status even when no frontier is known", (t) => {
 
 test("returns one typed nearest target from the canonical frontier view", (t) => {
   const data = temporaryBotData({ botId: "navigator", closeAfter: t });
+  recordChunk(data, { chunkX: 1, chunkZ: 0, firstSeenAt: "2026-08-21T07:59:00.000Z", scannedAt: "2026-08-21T07:59:01.000Z" });
   data.transaction((database) => {
-    database
-      .prepare(
-        `INSERT INTO frontier_chunks (
-          chunk_key, dimension, chunk_x, chunk_z,
-          first_observed_at, scanned_at, surface_water_fraction
-        ) VALUES ('overworld|1|0', 'overworld', 1, 0, ?, ?, 0)`,
-      )
-      .run("2026-08-21T07:59:00.000Z", "2026-08-21T07:59:01.000Z");
     database
       .prepare(
         `INSERT INTO bot_status (

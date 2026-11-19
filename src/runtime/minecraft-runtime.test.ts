@@ -333,6 +333,8 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "note_save",
       "note_read",
       "note_delete",
+      "memory_save",
+      "memory_forget",
       "protect_region",
       "unprotect_region",
       "place_block",
@@ -363,7 +365,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
     busy: false,
     activeAction: null,
     owner: "idle",
-    frontier: { observedChunks: 0, pendingChunks: 0, error: null },
+    frontier: { observedChunks: 0, pendingChunks: 0, error: null, legacyLeft: 0, legacyImportError: null },
     incidents: {
       samples: 0,
       recordingMs: 0,

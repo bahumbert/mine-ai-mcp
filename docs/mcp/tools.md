@@ -294,6 +294,24 @@ this bot's, or no longer exist, come back in `notDeleted`, the rest in `deleted`
 Deleting cannot be undone and uses the foreground task slot. Defined in
 [src/actions/note-delete/contract.ts](../../src/actions/note-delete/contract.ts).
 
+### `memory_save`
+
+Save one structured memory: `kind` (lowercase letters, digits and underscores, the caller's own word),
+optional `subject` (what it is about within its kind, up to 200 characters), `version` (the caller's version of its
+`data` shape, 1 or more), `data` (a JSON object, at most 16 KiB), `note` (one sentence for people, 1 to 2000
+characters) and `replace` (default false). The host adds the bot identity, UTC `savedAt`, dimension, feet position
+and `worldAgeTicks`. With `replace: true`, this bot's older memories of the same kind and subject are deleted in the
+same write and counted in `replaced`, so an update cannot lose the memory. The runtime knows no kinds: it stores what
+it is given in `main.memories`. Runs beside the foreground action. Defined in
+[src/actions/memory-save/contract.ts](../../src/actions/memory-save/contract.ts).
+
+### `memory_forget`
+
+Delete this bot's own memories by id (`memory_ids`, 1 to 500 positive integers, from `main.memories`). Another bot's
+memories are never deleted: ids that are not this bot's, or no longer exist, come back in `notForgotten`, the rest in
+`forgotten`. Forgetting cannot be undone. Runs beside the foreground action. Defined in
+[src/actions/memory-forget/contract.ts](../../src/actions/memory-forget/contract.ts).
+
 ### `protect_region`
 
 Protect a box of blocks in the current dimension from this bot's own digging and

@@ -147,7 +147,10 @@ test("events and their cursors survive a restart, including one predating the ev
   recordEvent(beforeRename, "collector", playerMessage("already read"));
   recordEvent(beforeRename, "collector", playerMessage("still unread"));
   readRecentEvents(beforeRename, "collector", 1);
-  beforeRename.transaction((database) => database.exec("ALTER TABLE event_read_state RENAME TO notification_state"));
+  // A file of today has no user_version: version 1 (the baseline step) is what renames the table back.
+  beforeRename.transaction((database) =>
+    database.exec("PRAGMA user_version = 0; ALTER TABLE event_read_state RENAME TO notification_state"),
+  );
   beforeRename.close();
 
   const migrated = openOld();

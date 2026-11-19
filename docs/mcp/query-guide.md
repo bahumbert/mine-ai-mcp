@@ -20,17 +20,22 @@ ORDER BY database_name, table_name, column_name;
 
 ## Queryable databases
 
-The bot-data connection presents two schemas:
+The bot-data connection presents three schemas, and the frontier views:
 
 | Schema      | Meaning                                                                                                                            |
 | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `main`      | The selected bot-owned or shared world memory, including observed chunks, storage containers, biome/material sets, water coverage, and frontier flags. |
+| `main`      | The selected bot-owned or shared world memory, including the chunks this bot saw (`frontier_seen`), storage containers and memories. |
+| `world`     | The world file, read-only: every chunk scan of the world by any bot (`world.frontier_chunks`, `world.frontier_chunk_materials`, `world.frontier_chunk_biomes`). |
 | `knowledge` | Disposable connected-version registry tables plus `action_queries`, the canonical read recipes registered by query-backed actions. |
+
+The frontier names `frontier_chunks`, `frontier_chunk_materials`, `frontier_chunk_biomes`, `frontier_map_chunks` and
+`frontier_navigation` are TEMP views over `main.frontier_seen` and the world scans: write them unqualified (they show the
+chunks this bot saw, biomes, materials, water coverage and frontier flags); `main.` does not find them.
 
 An unqualified temporary `data_dictionary` table combines the semantic bot-data
 dictionary with the knowledge schema discovered through SQLite introspection,
 and adds `database_name`. Queries should qualify tables when joining schemas,
-for example `main.frontier_chunk_materials` and `knowledge.blocks`. The host
+for example `main.observed_containers` and `knowledge.blocks`. The host
 owns the connection and its knowledge attachment; model SQL cannot attach
 another database or see storage paths.
 
@@ -77,7 +82,7 @@ Typical questions map naturally onto that loop:
   `knowledge.action_queries` to refine the map or inspect individual chunks.
 - “Have we seen the biome or material I need?” reads the frontier tables.
 - “Which remembered chunks lie on the unexplored boundary?” filters
-  `main.frontier_chunks` by `is_frontier = 1`.
+  `frontier_chunks` by `is_frontier = 1`.
 - “Where did we last see iron ingots?” filters
   `main.observed_container_items` by `item_name = 'iron_ingot'`; the row carries
   the location, quantity, observer, and observation time.
@@ -91,7 +96,7 @@ The model should not call SQL merely to repeat facts already present in its
 current observation, and the tool description should not prescribe an action
 after a query. SQL returns facts; the model decides what to do with them.
 
-The derived `main.frontier_map_chunks` view supplies one compact row per
+The derived `frontier_map_chunks` view supplies one compact row per
 remembered chunk: coordinates, frontier flag, water coverage, dominant biome,
 and sorted biome and material lists. The ASCII renderer uses nearby flagged
 chunks to mark their unobserved cardinal neighbours. This keeps the stored model
