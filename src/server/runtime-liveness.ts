@@ -1,3 +1,4 @@
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { observeExecution, type ExecutionEvent } from "../execution/execution-scope.js";
 import { processFaultSchema } from "./process-faults.js";
@@ -91,6 +92,35 @@ export const runtimeMessageSchema = z.discriminatedUnion("kind", [
   /** A promise the runtime left unhandled: the supervisor records it as a `process_fault` incident. */
   z.object({ kind: z.literal("fault"), fault: processFaultSchema }),
 ]);
+
+/**
+ * A JSON-RPC message on the link. Only the envelope is checked here: the SDK's own `JSONRPCMessageSchema` is strict and
+ * deep, and the SDK's protocol validates what it handles; a copy of every 4 MB `tools/list` reply is what the link avoids.
+ */
+export const jsonRpcMessageSchema = z.custom<JSONRPCMessage>(
+  (value) => typeof value === "object" && value !== null && (value as { jsonrpc?: unknown }).jsonrpc === "2.0",
+  "not a JSON-RPC 2.0 message",
+);
+
+/**
+ * What the brain's MCP client and the runtime say to each other over the supervisor's IPC channel (plan
+ * 2026-11-18-in-process-runtime, D1), beside the runtime's own {@link runtimeMessageSchema} messages. A session is one
+ * MCP connection; `mcp-part` carries one piece of a message over `LINK_PART_BYTES` (`ipc-transport.ts`).
+ */
+export const linkMessageSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("mcp-open"), session: z.string() }),
+  z.object({ kind: z.literal("mcp"), session: z.string(), message: jsonRpcMessageSchema }),
+  z.object({
+    kind: z.literal("mcp-part"),
+    session: z.string(),
+    id: z.string(),
+    index: z.number().int(),
+    count: z.number().int(),
+    data: z.string(),
+  }),
+  z.object({ kind: z.literal("mcp-close"), session: z.string() }),
+]);
+export type LinkMessage = z.infer<typeof linkMessageSchema>;
 
 /**
  * The heartbeat is sent only by a timer, never from an execution checkpoint.

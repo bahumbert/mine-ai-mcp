@@ -368,9 +368,10 @@ test("a runtime killed as unresponsive is started again; a second failure inside
   );
   const [scheduled] = events;
   assert.deepEqual(Object.keys(scheduled!), [
-    "event", "observedAt", "attempt", "of", "delayMs", "supervisorTickDelayMs", "maxTickDelayMs", "loadavg", "hostFreeMemMB",
+    "instanceId", "event", "observedAt", "attempt", "of", "delayMs", "supervisorTickDelayMs", "maxTickDelayMs", "loadavg", "hostFreeMemMB",
   ]);
-  assert.deepEqual(Object.keys(events[1]!), ["event", "observedAt", "attempt"]);
+  assert.deepEqual(Object.keys(events[1]!), ["instanceId", "event", "observedAt", "attempt"]);
+  assert.equal(scheduled!.instanceId, "restart-twice", "a line names its host: with the brain owning the hosts there is no host log per bot (spec D2)");
   assert.equal(scheduled!.of, 2);
   assert.equal((scheduled!.loadavg as number[]).length, 3);
   assert.ok((scheduled!.hostFreeMemMB as number) > 0);

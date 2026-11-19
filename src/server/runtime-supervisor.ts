@@ -1,118 +1,39 @@
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer, request as httpRequest, type ClientRequest, type ServerResponse } from "node:http";
-import os from "node:os";
-import { z } from "zod";
-import { writeIncidentArtifact, type IncidentReference, type IncidentRetention } from "../bot-data/incident-log.js";
-import {
-  INCIDENT_HISTORY_BYTES,
-  INCIDENT_HISTORY_MS,
-  IncidentRecorder,
-  type SourceIdentity,
-} from "../diagnostics/incident-recorder.js";
+import type { Request, Response } from "express";
+import { createServer, request as httpRequest, type Server as HttpServer } from "node:http";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { writeIncidentArtifact } from "../bot-data/incident-log.js";
+import { INCIDENT_HISTORY_BYTES, INCIDENT_HISTORY_MS, IncidentRecorder } from "../diagnostics/incident-recorder.js";
 import type { ProcessFault } from "./process-faults.js";
-import { decideRestart, NO_STREAK, readyAgain, type RestartDecision, type RestartStreak } from "./restart-policy.js";
+import { NO_STREAK, readyAgain } from "./restart-policy.js";
 import {
   RUNTIME_HEARTBEAT_MS,
-  RUNTIME_RESTART,
   RUNTIME_UNRESPONSIVE_MS,
   RUNTIME_STARTUP_MS,
   runtimeMessageSchema,
-  type RestartSettings,
-  type RuntimeActivity,
 } from "./runtime-liveness.js";
+import { answerFailure, failRuntime } from "./runtime-supervisor-failure.js";
+import { envelopeSchema, LinkHub } from "./runtime-supervisor-links.js";
+import {
+  printSupervisorLine,
+  requestContextOf,
+  TICK_HISTORY_MS,
+  type McpSupervisorOptions,
+  type ObservedFailureCode,
+  type PendingRequest,
+  type RuntimeState,
+  type SupervisorParts,
+  type SupervisorState,
+} from "./runtime-supervisor-state.js";
 
-const envelopeSchema = z.object({
-  id: z.union([z.string(), z.number()]).optional(),
-  method: z.string().optional(),
-  params: z.object({ name: z.string().optional() }).optional(),
-});
-interface PendingRequest {
-  readonly response: ServerResponse;
-  readonly upstream: ClientRequest;
-  readonly id: string | number | null;
-  readonly method: string | null;
-  readonly tool: string | null;
-  readonly path: string;
-  readonly httpMethod: string;
-}
-/** What the watchdog or the child's exit observed; a failed restart has a code of its own. */
-type ObservedFailureCode = "RUNTIME_UNRESPONSIVE" | "RUNTIME_EXITED";
-interface RuntimeFailure {
-  readonly actionId?: string;
-  readonly code: ObservedFailureCode | "RUNTIME_RESTART_FAILED";
-  readonly observedAt: string;
-  readonly message: string;
-  readonly incident: IncidentReference;
-  readonly activity: RuntimeActivity | null;
-  /** When the supervisor starts the runtime again (`at`: display only) or `null` when it stays down; last field. */
-  readonly restart: { readonly attempt: number; readonly of: number; readonly at: string } | null;
-}
-type RuntimeState =
-  | { kind: "starting" }
-  | { kind: "ready"; port: number }
-  | { kind: "failing" }
-  | { kind: "failed"; failure: RuntimeFailure };
-
-export interface McpSupervisorOptions {
-  readonly executable: string;
-  readonly args: readonly string[];
-  readonly host: string;
-  readonly port: number;
-  readonly instanceId: string;
-  readonly source: SourceIdentity;
-  readonly incidents: { directory: string; retention: IncidentRetention };
-  /**
-   * Silence allowed before `ready` and after it, the watchdog's interval (default {@link RUNTIME_HEARTBEAT_MS}) and the
-   * wait between SIGTERM and SIGKILL at close (default {@link RUNTIME_UNRESPONSIVE_MS}); for tests that cannot wait
-   * the real deadlines, since the runtime is a real child process no fake clock reaches.
-   */
-  readonly deadlines?: {
-    readonly startupMs: number;
-    readonly unresponsiveMs: number;
-    readonly heartbeatMs?: number;
-    readonly killGraceMs?: number;
-  };
-  /**
-   * How a killed runtime is started again (default {@link RUNTIME_RESTART}; the host passes its flags); `null` never
-   * restarts, which is not the same as leaving it out.
-   */
-  readonly restart?: RestartSettings | null;
-  /** Receives the failure and restart event lines, `[minecraft-supervisor] …` (default `console.error`), so tests read them. */
-  readonly log?: (line: string) => void;
-  /** How far back the supervisor's incident ring keeps rows (default {@link INCIDENT_HISTORY_MS}); a test shortens it to see rows age out. */
-  readonly incidentHistoryMs?: number;
-}
+export type { McpSupervisorOptions } from "./runtime-supervisor-state.js";
 
 /** The supervisor's incident ring budget: the age from the options, else production's. */
 const incidentHistoryBudget = (options: Pick<McpSupervisorOptions, "incidentHistoryMs">) => ({
   durationMs: options.incidentHistoryMs ?? INCIDENT_HISTORY_MS,
   bytes: INCIDENT_HISTORY_BYTES,
 });
-
-type HeartbeatMessage = Extract<z.infer<typeof runtimeMessageSchema>, { kind: "heartbeat" }>;
-/** What the supervisor changes while it runs; the steps below the supervisor take it explicitly. */
-interface SupervisorState {
-  readonly options: McpSupervisorOptions;
-  readonly recorder: IncidentRecorder;
-  runtime: RuntimeState;
-  lastHeartbeat: number;
-  observationResumedAt: number;
-  /** When the watchdog last ran, and how late that run was past its interval (the supervisor's own blind gap). */
-  lastWatchdogTick: number;
-  watchdogDelayMs: number;
-  stopping: boolean;
-  child: ChildProcess | null;
-  /** The failures in a row since the runtime last played `healthyMs` (see {@link decideRestart}). */
-  streak: RestartStreak;
-  /** The wait before a scheduled restart; the runtime is `failed` while it runs. */
-  restartTimer: NodeJS.Timeout | null;
-  /** The watchdog's lateness over the last {@link TICK_HISTORY_MS}, for the restart line. */
-  tickDelays: { readonly at: number; readonly delayMs: number }[];
-  activity: RuntimeActivity | null;
-  heartbeat: HeartbeatMessage | null;
-}
-const TICK_HISTORY_MS = 60_000;
 
 /** The supervisor's own incident recorder: artifacts go to the options' directory, history age from {@link incidentHistoryBudget}. */
 const supervisorIncidentRecorder = (options: McpSupervisorOptions) =>
@@ -156,115 +77,21 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
     heartbeat: null,
   };
 
-  const fail = async (code: ObservedFailureCode, message: string) => {
-    if (sup.stopping || sup.runtime.kind === "failed" || sup.runtime.kind === "failing") return;
-    sup.runtime = { kind: "failing" };
-    const observedAt = new Date().toISOString();
-    const { requestId, precedingRequestId } = requestContextOf(sup.activity);
-    const machine = tickDelaysAtFailure(sup); // Read before the capture: it is the supervisor's lateness at the failure.
-    const planned = planRestart(sup);
-    recorder.record("runtime_failure", {
-      code,
-      message,
-      pid: sup.child?.pid,
-      heartbeatAgeMs: performance.now() - sup.lastHeartbeat,
-      supervisorTickDelayMs: machine.supervisorTickDelayMs,
-      activity: sup.activity,
-      activityAgeMs: sup.activity === null ? null : Date.now() - sup.activity.observedAt,
-      pending: [...pending].map(({ id, method, tool, path, httpMethod }) => ({ id, method, tool, path, httpMethod })),
-    });
-    // Stop only the child we spawned. SIGKILL also covers an event loop that
-    // cannot process SIGTERM; it never asks that loop to perform its own rescue.
-    sup.child?.kill("SIGKILL");
-    const captured = await recorder.capture(
-      incidentTriggerOf(code),
-      requestId,
-      precedingRequestId,
-    );
-    const incident = incidentReferenceOf(captured, code, requestId, precedingRequestId);
-    const decision = sup.stopping ? null : planned; // A close during the capture schedules nothing, and the failure says so.
-    const outlook = restartOutlook(sup.options, decision);
-    const failure: RuntimeFailure = {
-      ...(sup.activity?.active.find((scope) => scope.owner.actionId)?.owner.actionId
-        ? { actionId: sup.activity.active.find((scope) => scope.owner.actionId)!.owner.actionId! } : {}),
-      code,
-      observedAt,
-      message: `${message} Failure observed at ${observedAt}; ${outlook.tail}`,
-      incident,
-      activity: sup.activity,
-      restart: outlook.restart,
-    };
-    for (const entry of pending) {
-      pending.delete(entry); // Its upstream error below is ours, not a second failure of the restarted runtime.
-      entry.upstream.destroy();
-      answerFailure(entry.response, entry.id, failure);
-    }
-    printSupervisorLine(sup, failure);
-    scheduleRestart(sup, code, decision, failure, machine, startChild);
+  const links = new LinkHub({
+    accepts: () => sup.runtime.kind === "ready",
+    log: (line) => printSupervisorLine(sup, { event: "link_problem", observedAt: new Date().toISOString(), message: line }),
+  });
+
+  const parts: SupervisorParts = {
+    sup,
+    pending,
+    links,
+    fail: (code, message) => failRuntime(parts, code, message),
+    startChild: () => startRuntimeChild(parts),
   };
 
   const app = createMcpExpressApp({ host: options.host, allowedHosts: ["127.0.0.1", "localhost", "[::1]"] });
-  app.use((request, response) => {
-    if (request.method === "GET" && request.path === "/diagnostics/runtime") {
-      response.json({ state: sup.runtime.kind, heartbeatAgeMs: performance.now() - sup.lastHeartbeat, activity: sup.activity, heartbeat: sup.heartbeat });
-      return;
-    }
-    const parsed = envelopeSchema.safeParse(request.body);
-    const envelope = parsed.success ? parsed.data : null;
-    if (sup.runtime.kind !== "ready") {
-      const failure = sup.runtime.kind === "failed" ? sup.runtime.failure : null;
-      if (failure && request.path === "/mcp" && envelope?.id !== undefined) {
-        answerFailure(response, envelope.id, failure);
-        return;
-      }
-      response.status(503).json({
-        ok: false,
-        runtime: { state: sup.runtime.kind, failure },
-        minecraft: { connected: false },
-        error: failure
-          ? `[${failure.code}] ${failure.message}`
-          : "Minecraft runtime is starting or saving its failure.",
-      });
-      return;
-    }
-    const body = request.body === undefined ? undefined : JSON.stringify(request.body);
-    const headers = { ...request.headers };
-    delete headers["transfer-encoding"];
-    if (body !== undefined) headers["content-length"] = String(Buffer.byteLength(body));
-    const upstream = httpRequest({
-      hostname: "127.0.0.1",
-      port: sup.runtime.port,
-      method: request.method,
-      path: request.originalUrl,
-      headers,
-    });
-    const entry: PendingRequest = {
-      upstream,
-      response,
-      id: envelope?.id ?? null,
-      method: envelope?.method ?? null,
-      tool: envelope?.params?.name ?? null,
-      path: request.path,
-      httpMethod: request.method,
-    };
-    pending.add(entry);
-    recorder.record("http_request", { id: entry.id, method: entry.method, tool: entry.tool, path: request.path });
-    upstream.on("response", (reply) => {
-      response.writeHead(reply.statusCode ?? 502, reply.headers);
-      reply.pipe(response);
-    });
-    upstream.on("error", (error) => {
-      if (!pending.has(entry)) return; // A cancelled HTTP request does not mean the runtime failed.
-      if (sup.runtime.kind === "failed") answerFailure(response, entry.id, sup.runtime.failure);
-      else if (sup.runtime.kind !== "failing" && !sup.stopping)
-        void fail("RUNTIME_EXITED", `Runtime transport failed: ${error.message}`);
-    });
-    response.once("close", () => {
-      pending.delete(entry);
-      upstream.destroy();
-    });
-    upstream.end(body);
-  });
+  app.use((request, response) => routeHttpRequest(parts, request, response));
   const server = createServer(app);
   // Actions and SSE have natural lifetimes; only lost event-loop liveness is timed.
   server.requestTimeout = 0;
@@ -275,56 +102,139 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
       resolve();
     });
   });
-  /** Starts the runtime child; a handler ignores any child but the current one (a killed one still exits later). */
-  const startChild = () => {
-    const started = spawn(options.executable, [...options.args], {
-      windowsHide: true,
-      stdio: ["ignore", "inherit", "inherit", "ipc"],
-    });
-    sup.child = started;
-    started.on("message", (raw: unknown) => handleRuntimeMessage(sup, started, raw));
-    started.once("error", (error) => {
-      if (started === sup.child) void fail("RUNTIME_EXITED", error.message);
-    });
-    started.once("exit", (code, signal) => {
-      if (started === sup.child) void fail("RUNTIME_EXITED", `Runtime exited: code=${code}, signal=${signal}.`);
-    });
+  parts.startChild();
+  const watchdog = startWatchdog(sup, parts.fail);
+  const close = () => (closing ??= stopSupervisor(parts, server, watchdog));
+  /** A session to the runtime over its IPC channel, for the brain's MCP client; refused while the runtime is not `ready`. */
+  const openLink = async (): Promise<Transport> => {
+    if (sup.runtime.kind !== "ready") throw new Error(linkRefusal(sup.runtime));
+    const link = links.open();
+    if (link === null) throw new Error("[RUNTIME_EXITED] the runtime's IPC channel is closed; its failure is being recorded: try again shortly.");
+    return link;
   };
-  startChild();
-  const watchdog = startWatchdog(sup, fail);
-  const stop = async () => {
-    sup.stopping = true;
-    clearInterval(watchdog);
-    if (sup.restartTimer !== null) clearTimeout(sup.restartTimer);
-    if (sup.child?.pid !== undefined && sup.child.exitCode === null && sup.child.signalCode === null) {
-      const stopped = new Promise<void>((resolve) => sup.child!.once("exit", () => resolve()));
-      sup.child.kill("SIGTERM");
-      // Normal disposal gets the same liveness allowance as execution. A
-      // cleanup loop must not keep the owned child alive after service stop.
-      const force = setTimeout(() => sup.child?.kill("SIGKILL"), options.deadlines?.killGraceMs ?? RUNTIME_UNRESPONSIVE_MS);
-      try {
-        await stopped;
-      } finally {
-        clearTimeout(force);
-      }
-    }
-    for (const entry of pending) {
-      entry.response.destroy();
-      entry.upstream.destroy();
-    }
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await recorder.flush();
-  };
-  const close = () => (closing ??= stop());
   return {
     server,
+    openLink,
     get child(): ChildProcess { return sup.child!; },
     /** For the supervisor process's own unhandled rejections (the runtime's arrive over IPC). */
     reportProcessFault: (fault: ProcessFault) => reportProcessFault(sup, fault, "supervisor"),
     close,
     [Symbol.asyncDispose]: close,
   };
+}
+
+/** One HTTP request: the diagnostics route, the saved failure while the runtime is not `ready`, else a proxy to the runtime. */
+function routeHttpRequest(parts: SupervisorParts, request: Request, response: Response): void {
+  const { sup, pending } = parts;
+  if (request.method === "GET" && request.path === "/diagnostics/runtime") {
+    response.json({ state: sup.runtime.kind, heartbeatAgeMs: performance.now() - sup.lastHeartbeat, activity: sup.activity, heartbeat: sup.heartbeat });
+    return;
+  }
+  const parsed = envelopeSchema.safeParse(request.body);
+  const envelope = parsed.success ? parsed.data : null;
+  if (sup.runtime.kind !== "ready") {
+    const failure = sup.runtime.kind === "failed" ? sup.runtime.failure : null;
+    if (failure && request.path === "/mcp" && envelope?.id !== undefined) {
+      answerFailure(response, envelope.id, failure);
+      return;
+    }
+    response.status(503).json({
+      ok: false,
+      runtime: { state: sup.runtime.kind, failure },
+      minecraft: { connected: false },
+      error: failure
+        ? `[${failure.code}] ${failure.message}`
+        : "Minecraft runtime is starting or saving its failure.",
+    });
+    return;
+  }
+  const body = request.body === undefined ? undefined : JSON.stringify(request.body);
+  const headers = { ...request.headers };
+  delete headers["transfer-encoding"];
+  if (body !== undefined) headers["content-length"] = String(Buffer.byteLength(body));
+  const upstream = httpRequest({
+    hostname: "127.0.0.1",
+    port: sup.runtime.port,
+    method: request.method,
+    path: request.originalUrl,
+    headers,
+  });
+  const entry: PendingRequest = {
+    upstream,
+    response,
+    id: envelope?.id ?? null,
+    method: envelope?.method ?? null,
+    tool: envelope?.params?.name ?? null,
+    path: request.path,
+    httpMethod: request.method,
+  };
+  pending.add(entry);
+  sup.recorder.record("http_request", { id: entry.id, method: entry.method, tool: entry.tool, path: request.path });
+  upstream.on("response", (reply) => {
+    response.writeHead(reply.statusCode ?? 502, reply.headers);
+    reply.pipe(response);
+  });
+  upstream.on("error", (error) => {
+    if (!pending.has(entry)) return; // A cancelled HTTP request does not mean the runtime failed.
+    if (sup.runtime.kind === "failed") answerFailure(response, entry.id, sup.runtime.failure);
+    else if (sup.runtime.kind !== "failing" && !sup.stopping)
+      void parts.fail("RUNTIME_EXITED", `Runtime transport failed: ${error.message}`);
+  });
+  response.once("close", () => {
+    pending.delete(entry);
+    upstream.destroy();
+  });
+  upstream.end(body);
+}
+
+/** Starts the runtime child; a handler ignores any child but the current one (a killed one still exits later). */
+function startRuntimeChild(parts: SupervisorParts): void {
+  const { sup, links } = parts;
+  const started = spawn(sup.options.executable, [...sup.options.args], {
+    windowsHide: true,
+    stdio: ["ignore", "inherit", "inherit", "ipc"],
+  });
+  sup.child = started;
+  links.attach(started);
+  started.on("message", (raw: unknown) => {
+    // Link frames of the current, ready child go to their link; everything else is the runtime's own report.
+    if (started === sup.child && sup.runtime.kind === "ready" && links.route(raw)) return;
+    handleRuntimeMessage(sup, started, raw);
+  });
+  started.once("error", (error) => {
+    if (started === sup.child) void parts.fail("RUNTIME_EXITED", error.message);
+  });
+  started.once("exit", (code, signal) => {
+    if (started === sup.child) void parts.fail("RUNTIME_EXITED", `Runtime exited: code=${code}, signal=${signal}.`);
+  });
+}
+
+/** Stops the supervisor: links closed, the child asked to end (SIGKILL after the grace), calls in flight cut, HTTP closed, incidents flushed. */
+async function stopSupervisor(parts: SupervisorParts, server: HttpServer, watchdog: NodeJS.Timeout): Promise<void> {
+  const { sup, pending, links } = parts;
+  sup.stopping = true;
+  links.closeAll();
+  clearInterval(watchdog);
+  if (sup.restartTimer !== null) clearTimeout(sup.restartTimer);
+  if (sup.child?.pid !== undefined && sup.child.exitCode === null && sup.child.signalCode === null) {
+    const stopped = new Promise<void>((resolve) => sup.child!.once("exit", () => resolve()));
+    sup.child.kill("SIGTERM");
+    // Normal disposal gets the same liveness allowance as execution. A
+    // cleanup loop must not keep the owned child alive after service stop.
+    const force = setTimeout(() => sup.child?.kill("SIGKILL"), sup.options.deadlines?.killGraceMs ?? RUNTIME_UNRESPONSIVE_MS);
+    try {
+      await stopped;
+    } finally {
+      clearTimeout(force);
+    }
+  }
+  for (const entry of pending) {
+    entry.response.destroy();
+    entry.upstream.destroy();
+  }
+  server.closeAllConnections();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await sup.recorder.flush();
 }
 
 /**
@@ -384,167 +294,10 @@ function handleRuntimeMessage(sup: SupervisorState, from: ChildProcess, raw: unk
   }
 }
 
-/** Answers one pending or later MCP call with the saved failure, as a JSON-RPC error over the channel the call came in on. */
-function answerFailure(response: ServerResponse, id: string | number | null, failure: RuntimeFailure): void {
-  if (response.writableEnded || response.destroyed) return;
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id,
-    error: { code: -32603, message: `[${failure.code}] ${failure.message}`, data: failure },
-  });
-  if (response.headersSent) {
-    if (String(response.getHeader("content-type")).includes("text/event-stream"))
-      response.end(`\n\nevent: message\ndata: ${body}\n\n`);
-    else response.destroy(new Error(failure.message));
-    // A completed JSON-RPC exchange uses HTTP 200 even when its result is an
-    // error. HTTP 503 makes the SDK discard the structured MCP error as a
-    // transport failure. Observational HTTP requests still receive 503.
-  } else response.writeHead(id === null ? 503 : 200, { "content-type": "application/json" }).end(body);
-}
-
-/** The receipt of the failure's incident: the saved artifact's, or one saying the supervisor could not write it. */
-function incidentReferenceOf(
-  captured: Awaited<ReturnType<IncidentRecorder["capture"]>>,
-  code: ObservedFailureCode,
-  requestId: number | null,
-  precedingRequestId: number | null,
-): IncidentReference {
-  if (captured.kind === "completed") return captured.reference;
-  return {
-    incidentId: "supervisor-write-failed",
-    trigger: incidentTriggerOf(code),
-    requestId,
-    precedingRequestId,
-    artifact: { kind: "failed", error: captured.kind === "failed" ? captured.error : "Capture was coalesced." },
-  };
-}
-
-/** The restart settings the supervisor runs with: the option, else production's; `null` (never restart) is kept as given. */
-const restartSettingsOf = (options: McpSupervisorOptions): RestartSettings | null =>
-  options.restart === undefined ? RUNTIME_RESTART : options.restart;
-
-/** One `[minecraft-supervisor] <json>` line to the option's `log` (default stderr). */
-function printSupervisorLine(sup: SupervisorState, payload: object): void {
-  (sup.options.log ?? console.error)(`[minecraft-supervisor] ${JSON.stringify(payload)}`);
-}
-
-/** The supervisor's lateness now and its largest over the last minute: whether the machine was starving it at the failure. */
-function tickDelaysAtFailure(sup: SupervisorState): { supervisorTickDelayMs: number; maxTickDelayMs: number } {
-  const since = performance.now() - TICK_HISTORY_MS;
-  const recent = sup.tickDelays.filter((tick) => tick.at >= since).map((tick) => tick.delayMs);
-  return { supervisorTickDelayMs: sup.watchdogDelayMs, maxTickDelayMs: Math.max(0, ...recent) };
-}
-
-/**
- * What the policy decides for a failure seen now (the streak moves with it), else `null` when the supervisor is
- * stopping or runs without restart settings. The delay is whole milliseconds: the line, the timer and `at` agree.
- */
-function planRestart(sup: SupervisorState): RestartDecision | null {
-  const settings = restartSettingsOf(sup.options);
-  if (sup.stopping || settings === null) return null;
-  const decision = decideRestart(sup.streak, performance.now(), settings, Math.random);
-  sup.streak = decision.streak;
-  return decision.kind === "restart" ? { ...decision, delayMs: Math.round(decision.delayMs) } : decision;
-}
-
-/**
- * The failure's `restart` field and the tail of its message: when the runtime starts again, that it stays down for
- * good, or (no decision: no restart option, or stopping) that it requires a restart. `at` is display only.
- */
-function restartOutlook(options: McpSupervisorOptions, decision: RestartDecision | null): { restart: RuntimeFailure["restart"]; tail: string } {
-  if (decision?.kind === "restart") {
-    const at = new Date(Date.now() + decision.delayMs).toISOString();
-    return {
-      restart: { attempt: decision.attempt, of: decision.of, at },
-      tail: `this runtime has been stopped; it starts again at ${at} (restart ${decision.attempt} of ${decision.of}).`,
-    };
-  }
-  if (decision?.kind === "give_up") {
-    const healthyMinutes = Number((restartSettingsOf(options)!.healthyMs / 60_000).toFixed(1));
-    return {
-      restart: null,
-      tail: `this runtime has been stopped and stays down after ${decision.of} restarts in a row without ${healthyMinutes} min of play: restart the host.`,
-    };
-  }
-  return { restart: null, tail: "this runtime has been stopped and requires a restart." };
-}
-
-/**
- * After a failure the supervisor is `failed` with that failure; for a `restart` decision a timer starts the runtime
- * again after the delay (calls meanwhile get the failure). A close, before or during the wait, starts nothing.
- */
-function scheduleRestart(
-  sup: SupervisorState,
-  code: ObservedFailureCode,
-  decision: RestartDecision | null,
-  failure: RuntimeFailure,
-  machine: { supervisorTickDelayMs: number; maxTickDelayMs: number },
-  startChild: () => void,
-): void {
-  sup.runtime = { kind: "failed", failure };
-  if (sup.stopping || decision?.kind !== "restart") return;
-  const scheduled = {
-    event: "restart_scheduled",
-    observedAt: new Date().toISOString(),
-    attempt: decision.attempt,
-    of: decision.of,
-    delayMs: decision.delayMs,
-    ...machine,
-    loadavg: os.loadavg(),
-    hostFreeMemMB: Math.round(os.freemem() / 1_048_576), // The OS the host runs in: WSL's under WSL.
-  };
-  const { event: _event, ...recorded } = scheduled;
-  sup.recorder.record("runtime_restart_scheduled", recorded);
-  printSupervisorLine(sup, scheduled);
-  sup.restartTimer = setTimeout(() => {
-    sup.restartTimer = null;
-    if (sup.stopping) return;
-    startAfterFailure(sup, code, failure, startChild);
-  }, decision.delayMs);
-  sup.restartTimer.unref();
-}
-
-/** The restart timer's turn: the runtime is `starting` with fresh liveness clocks, or the supervisor stays failed if the spawn throws. */
-function startAfterFailure(sup: SupervisorState, code: ObservedFailureCode, failure: RuntimeFailure, startChild: () => void): void {
-  const now = performance.now();
-  sup.recorder.record("runtime_restarted", { after: code, previousPid: sup.child?.pid });
-  sup.runtime = { kind: "starting" };
-  sup.lastHeartbeat = now;
-  sup.observationResumedAt = now;
-  sup.heartbeat = null;
-  sup.activity = null;
-  try {
-    startChild();
-  } catch (cause) {
-    // A spawn that throws must not leave the supervisor `failing` (it would answer 503 for ever) nor reject into the timer.
-    stayFailedAfterRestartFailed(sup, failure, cause);
-  }
-}
-
-/** The restart itself failed: the supervisor stays failed and every later call is answered with why the runtime is not back. */
-function stayFailedAfterRestartFailed(sup: SupervisorState, failure: RuntimeFailure, cause: unknown): void {
-  const observedAt = new Date().toISOString();
-  const reason = cause instanceof Error ? cause.message : String(cause);
-  const restartFailure: RuntimeFailure = {
-    ...failure,
-    code: "RUNTIME_RESTART_FAILED",
-    observedAt,
-    message: `Starting the runtime again after ${failure.code} failed: ${reason}. Failure observed at ${observedAt}; this runtime has been stopped and requires a restart of the host.`,
-    restart: null,
-  };
-  sup.recorder.record("runtime_restart_failed", { after: failure.code, reason });
-  sup.runtime = { kind: "failed", failure: restartFailure };
-  printSupervisorLine(sup, restartFailure);
-}
-
-/** The request an incident belongs to: the one running in the runtime's last activity, else the one that just closed. */
-function requestContextOf(activity: RuntimeActivity | null): { requestId: number | null; precedingRequestId: number | null } {
-  const requestId = activity?.active.find((scope) => scope.owner.requestId != null)?.owner.requestId ?? null;
-  return { requestId, precedingRequestId: requestId === null ? (activity?.precedingRequestId ?? null) : null };
-}
-
-function incidentTriggerOf(code: ObservedFailureCode): "runtime_unresponsive" | "runtime_exited" {
-  return code === "RUNTIME_UNRESPONSIVE" ? "runtime_unresponsive" : "runtime_exited";
+/** Why a link cannot be opened now: the saved failure, or that the runtime is not up yet. */
+function linkRefusal(runtime: Exclude<RuntimeState, { kind: "ready" }>): string {
+  if (runtime.kind === "failed") return `[${runtime.failure.code}] ${runtime.failure.message}`;
+  return `[RUNTIME_STARTING] the runtime is starting${runtime.kind === "failing" ? " again after a failure it is recording" : ""}: open the link again shortly.`;
 }
 
 /**

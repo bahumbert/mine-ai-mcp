@@ -1,4 +1,6 @@
+import { processIpcChannel, serveLinkSessions } from "./ipc-transport.js";
 import { reportRuntimeLiveness } from "./runtime-liveness.js";
+import { handleStopSignals } from "./runtime-stop-signals.js";
 import { reportFaultToStderrAndParent, reportUnhandledRejections } from "./process-faults.js";
 import { startFreezeWatch } from "../diagnostics/freeze-watch.js";
 import type { RuntimeBootstrap } from "./host.js";
@@ -9,25 +11,35 @@ if (!process.send) throw new Error("Start Mine AI MCP through startHost, not its
 const faults = reportUnhandledRejections((fault) => reportFaultToStderrAndParent("mine-ai-mcp runtime", fault));
 process.once("exit", () => faults[Symbol.dispose]());
 const reporting = reportRuntimeLiveness();
+/** The IPC channel to the supervisor as the link sees it; a send after the parent left is refused by `connected`, not thrown. */
+const parentChannel = processIpcChannel();
 process.once("disconnect", () => process.exit(1));
 process.once("exit", () => reporting[Symbol.dispose]());
 
 try {
   // Our parent serializes this typed bootstrap; it is not a public input boundary.
-  const { source, configuration, freezeDirectory }: RuntimeBootstrap = JSON.parse(process.argv[2]!);
+  const { source, configuration, freezeDirectory, embedded }: RuntimeBootstrap = JSON.parse(process.argv[2]!);
   const { startRuntimeHost } = await import("./runtime-host.js");
   // After the import: loading the modules blocks the loop for seconds (2.5 s measured, live 2026-10-11: four freeze files
   // with no markers at host start), and that is not a freeze of the running runtime.
   const freeze = startFreezeWatch({ dir: freezeDirectory, botName: configuration.instanceId });
   process.once("exit", () => freeze[Symbol.dispose]());
   const host = await startRuntimeHost(source, { ...configuration, listenHost: "127.0.0.1", listenPort: 0 });
+  // Before `ready`: the parent opens its sessions only after it, and every one is answered by this server.
+  const links = serveLinkSessions(
+    parentChannel,
+    () => host.createMcpSession(),
+    (line) => process.stderr.write(`[mine-ai-mcp] ${line}\n`),
+    host.links,
+  );
+  process.once("exit", () => links[Symbol.dispose]());
   const requestStop = (failure?: unknown) => {
     if (failure !== undefined) reportFailure(failure);
+    links[Symbol.dispose]();
     void host.close().catch(reportFailure);
   };
   host.server.on("error", requestStop);
-  process.once("SIGINT", () => requestStop());
-  process.once("SIGTERM", () => requestStop());
+  handleStopSignals(process, { embedded, isConnected: () => process.connected, requestStop: () => requestStop() });
   const address = host.server.address();
   if (!address || typeof address === "string") throw new Error("Minecraft MCP requires a TCP listener.");
   process.send?.({ kind: "ready", port: address.port });

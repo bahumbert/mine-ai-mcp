@@ -15,6 +15,8 @@ export interface RuntimeBootstrap {
   readonly configuration: HostOptions;
   /** Where the runtime's watch worker writes freeze-*.json when its main thread stalls: the supervisor's incident directory. */
   readonly freezeDirectory: string;
+  /** A brain's child (`startEmbeddedHost`, T4): the runtime ignores SIGINT/SIGTERM while its parent is connected. */
+  readonly embedded: boolean;
 }
 
 export interface Host extends AsyncDisposable {
@@ -35,7 +37,7 @@ export async function startHost(
     "host-incidents",
     encodeURIComponent(configuration.instanceId),
   );
-  const bootstrap: RuntimeBootstrap = { source, configuration, freezeDirectory: incidentDirectory };
+  const bootstrap: RuntimeBootstrap = { source, configuration, freezeDirectory: incidentDirectory, embedded: false };
   // Use the sibling in this installation, both from TypeScript and built JS.
   const runtimeFile = new URL(
     import.meta.url.endsWith(".ts") ? "./runtime-process.ts" : "./runtime-process.js",

@@ -7,6 +7,8 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { test, type TestContext } from "node:test";
 import mineflayer from "mineflayer";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { SqlBotData } from "../bot-data/index.js";
 import { plugin as toolPlugin } from "mineflayer-tool";
@@ -225,6 +227,25 @@ test("health publishes the bot's own slots and the calls an observer cannot othe
     { slot: 36, location: "hotbar", name: "cobblestone", count: 12, held: true, durability: null },
   ]);
   assert.deepEqual(health.minecraft.recentCalls, []);
+});
+
+test("a host hands out a fresh MCP server per link session that answers a tool call, and keeps its link counters", async (t) => {
+  const options = await configuration(t);
+  connectedBot(t);
+  await using host = await startRuntimeHost(source, options);
+  assert.deepEqual(host.links, { open: 0, pushed: 0 });
+  const first = host.createMcpSession();
+  const second = host.createMcpSession();
+  assert.notEqual(first, second);
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await first.connect(serverSide);
+  const client = new Client({ name: "link-session-test", version: "1.0.0" });
+  await client.connect(clientSide);
+  // Not `listTools`: the 43 tools' 3.5 MB list takes 7.4 s of this thread (measured 2026-11-19, WSL, load 3 on 8 CPUs).
+  const status = await client.callTool({ name: "view_status", arguments: { rationale: "A link session answers a call" } });
+  assert.notEqual(status.isError, true);
+  assert.match(JSON.stringify(status.content), /TestBot|position/iu);
+  await client.close();
 });
 
 test("a host with --chat-command-prefix serves the command lines it heard and whispers through send_message; one without has no such routes", async (t) => {

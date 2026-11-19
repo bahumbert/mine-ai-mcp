@@ -19,6 +19,8 @@ import type { HostOptions } from "./config.js";
 import { sendMessage } from "../actions/send-message/send-message.js";
 import { handleChatCommandRoute } from "./chat-commands-route.js";
 import { registerIncidentCaptureRoute } from "./incident-route.js";
+import type { Server as McpSessionServer } from "@modelcontextprotocol/sdk/server/index.js";
+import type { LinkStats } from "./ipc-transport.js";
 import { createMinecraftMcpServer } from "./mcp.js";
 import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
 
@@ -191,7 +193,64 @@ async function connectBot(configuration: HostOptions): Promise<ConnectedBot> {
 
 export interface RuntimeHost extends AsyncDisposable {
   readonly server: HttpServer;
+  /** What the brain's link sessions did (counted by `serveLinkSessions`; `/health` shows it from T9 on). */
+  readonly links: LinkStats;
+  /** A new MCP server over this runtime for one more session: what HTTP creates per client, handed to the link. */
+  createMcpSession(): McpSessionServer;
   close(): Promise<void>;
+}
+
+/** What the runtime's incident recorder keeps, and which source, instance and Minecraft server its incidents name. */
+function incidentOptions(source: SourceIdentity, configuration: HostOptions) {
+  return {
+    retention: configuration.incidentRetention,
+    provenance: {
+      source,
+      instanceId: configuration.instanceId,
+      minecraft: { host: configuration.minecraftHost, port: configuration.minecraftPort },
+    },
+  };
+}
+
+interface RuntimeHttpParts {
+  readonly bot: Bot;
+  readonly runtime: MinecraftRuntime;
+  readonly highlighter: ReturnType<typeof attachHighlighter>["highlighter"];
+  readonly configuration: HostOptions;
+  readonly createMcpSession: () => McpSessionServer;
+  readonly connected: () => boolean;
+}
+
+/** The HTTP server of the runtime with its MCP, health, incident, chat command and highlighter routes; not yet listening. */
+function serveRuntimeHttp(resources: AsyncDisposableStack, parts: RuntimeHttpParts): HttpServer {
+  const { bot, runtime, highlighter, configuration } = parts;
+  // Register the listener before the application: disposal must close MCP
+  // sessions (including SSE streams) before waiting for HTTP to drain.
+  const httpServer = resources.adopt(createServer(), async (server) => {
+    if (!server.listening) return;
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  });
+  const application = resources.adopt(
+    createMinecraftMcpHttpApplication({
+      host: configuration.listenHost,
+      createServer: parts.createMcpSession,
+      health: () => healthSnapshot(bot, runtime, configuration, { connected: parts.connected(), watching: highlighter.listening() }),
+      clientIdleTimeoutMs: configuration.debugExecuteJavaScript ? DEBUG_CONNECTION_TIMEOUT_MS : undefined,
+      log: (message) => process.stdout.write(`[mine-ai-mcp] ${message}\n`),
+    }),
+    (application) => application.close(),
+  );
+  httpServer.on("request", application.app);
+  registerIncidentCaptureRoute(application.app, runtime);
+  mountChatCommandRoutes(application.app, runtime, bot);
+  // The highlighter answers its own feed; anything it does not own falls
+  // through to the MCP routes untouched.
+  application.app.use((request, response, next) => {
+    const answer = highlighter.handle(request.method, request.originalUrl);
+    if (!answer) return next();
+    response.status(answer.status).json(answer.body);
+  });
+  return httpServer;
 }
 
 export async function startRuntimeHost(source: SourceIdentity, configuration: HostOptions): Promise<RuntimeHost> {
@@ -252,45 +311,22 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
       debugExecuteJavaScript: configuration.debugExecuteJavaScript,
       chatCommandPrefix: configuration.chatCommandPrefix,
       onDisconnect: (reason) => connectionEnded(new Error(reason)),
-      incidents: {
-        retention: configuration.incidentRetention,
-        provenance: {
-          source,
-          instanceId: configuration.instanceId,
-          minecraft: { host: configuration.minecraftHost, port: configuration.minecraftPort },
-        },
-      },
+      incidents: incidentOptions(source, configuration),
     }),
   );
   runtime = activeRuntime;
   bot.off("end", endedDuringStartup);
   assertConnected();
 
-  // Register the listener before the application: disposal must close MCP
-  // sessions (including SSE streams) before waiting for HTTP to drain.
-  const httpServer = resources.adopt(createServer(), async (server) => {
-    if (!server.listening) return;
-    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  });
-  const application = resources.adopt(
-    createMinecraftMcpHttpApplication({
-      host: configuration.listenHost,
-      createServer: () => createMinecraftMcpServer(activeRuntime, bot.username).server,
-      health: () => healthSnapshot(bot, activeRuntime, configuration, { connected, watching: highlighter.listening() }),
-      clientIdleTimeoutMs: configuration.debugExecuteJavaScript ? DEBUG_CONNECTION_TIMEOUT_MS : undefined,
-      log: (message) => process.stdout.write(`[mine-ai-mcp] ${message}\n`),
-    }),
-    (application) => application.close(),
-  );
-  httpServer.on("request", application.app);
-  registerIncidentCaptureRoute(application.app, activeRuntime);
-  mountChatCommandRoutes(application.app, activeRuntime, bot);
-  // The highlighter answers its own feed; anything it does not own falls
-  // through to the MCP routes untouched.
-  application.app.use((request, response, next) => {
-    const answer = highlighter.handle(request.method, request.originalUrl);
-    if (!answer) return next();
-    response.status(answer.status).json(answer.body);
+  const createMcpSession = () => createMinecraftMcpServer(activeRuntime, bot.username).server;
+  const links: LinkStats = { open: 0, pushed: 0 };
+  const httpServer = serveRuntimeHttp(resources, {
+    bot,
+    runtime: activeRuntime,
+    highlighter,
+    configuration,
+    createMcpSession,
+    connected: () => connected,
   });
 
   await once(httpServer.listen(configuration.listenPort, configuration.listenHost), "listening");
@@ -309,5 +345,5 @@ export async function startRuntimeHost(source: SourceIdentity, configuration: Ho
   );
   const lifetime = resources.move();
   const close = () => (stopPromise ??= lifetime.disposeAsync());
-  return { server: httpServer, close, [Symbol.asyncDispose]: close };
+  return { server: httpServer, links, createMcpSession, close, [Symbol.asyncDispose]: close };
 }
