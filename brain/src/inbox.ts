@@ -164,6 +164,21 @@ export class Inbox {
     };
   }
 
+  /** The lines of `speaker` that wait to be taken, oldest first (the chat tier has not read them: only the inbox knows them). */
+  waitingLines(speaker: string): readonly PlayerMessage[] {
+    const name = speaker.toLowerCase();
+    return this.bursts.find((burst) => burst.speaker === name)?.lines.slice() ?? [];
+  }
+
+  /** Removes the message of `speaker` that waits to be taken (a stop word overrules it); returns how many lines it held. A message being decided is not touched. */
+  dropWaitingFrom(speaker: string): number {
+    const name = speaker.toLowerCase();
+    const index = this.bursts.findIndex((burst) => burst.speaker === name);
+    if (index === -1) return 0;
+    const [burst] = this.bursts.splice(index, 1);
+    return burst!.lines.length;
+  }
+
   /** Whether a line of `speaker` waits to be taken or is being decided. */
   hasFrom(speaker: string): boolean {
     const name = speaker.toLowerCase();

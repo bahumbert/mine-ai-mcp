@@ -43,6 +43,9 @@ import { GAIN_SAMPLE_MS, NO_GAIN_MINUTES, watchGain, type GainWatch } from "./ga
 import { lastOfPlay, minutesByActivity, minutesByPurpose, type ActivityTime } from "./time-spent.ts";
 import { forgetOldActivityNotes } from "./activity-note-rotation.ts";
 import { WhoWasNamed } from "./who-was-named.ts";
+import { minutesAgo } from "./minutes-ago.ts";
+import { newWork, type Work } from "./work-on-stack.ts";
+import { isStopLine, stopLineIsMine } from "./stop-line.ts";
 
 /** The error the runtime client throws when the body restarted under a call (see McpBotRuntime). */
 const BODY_RESTARTED = "[BODY_RESTARTED]";
@@ -102,6 +105,8 @@ export interface AgentOptions {
   readonly everyone?: EveryoneLines;
   /** The brain's chat-tier decisions per speaker (spec 2026-11-18-chat-flood-bounds D3), shared by its agents. Absent: no bound. */
   readonly speakerBudget?: SpeakerBudget;
+  /** The owner's stop words (spec 2026-11-18-model-call-lanes D3): a line that is only one of them, and is hers, stops her in the poll that reads it. Absent or empty: only the chat tier's `stop` route stops. */
+  readonly stopWords?: readonly string[];
   /** The trade board shared by the agents of one process: a trade between two of them is made on the proposer's terms. Absent: every partner is outside the brain. */
   readonly tradeBoard?: TradeBoard;
   /** The server's Localized Chat, when the brain is told it runs: talk carries its range, and a call may be shouted. */
@@ -124,42 +129,6 @@ export interface AgentOptions {
   readonly knownNames?: readonly string[];
   /** Minutes without any target item gained before a step is stopped, and how often the inventory is looked at; tests shorten them. */
   readonly noGain?: { readonly minutes: number; readonly sampleMs: number };
-}
-
-/** One objective on the stack and what was done for it. */
-interface Work {
-  readonly objective: Objective;
-  /** When it was taken on: wall ms for the socialising routine (a talk ended since then is the one it came for), and the same moment monotonic for the conversation controller's ask stamps. */
-  readonly startedAt: number;
-  readonly startedAtMonotonic: number;
-  readonly steps: StepRecord[];
-  /** What was carried after each of `steps` (name:count, sorted; null when unknown); not shown to the model, so prompts do not change. */
-  readonly carried: (string | null)[];
-  taken: number;
-  badReplies: number;
-  sentBacks: number;
-  /** Aborts the step running now: the objective is set aside or stopped, the agent goes on. */
-  step: AbortController | null;
-  /** The last thing a skill said it started doing, and when a line about it was last asked for (an order's progress). */
-  lastFact: string;
-  spokenAt: number;
-  /** The skill whose steps failed last, and how many times in a row. */
-  failing: { skill: string; count: number };
-  /** Who the order came from by whisper: its progress and its end are whispered back to them (spec 2026-10-09, C). */
-  whisperTo: string | null;
-  /** Step key -> refusals since that step last ran (rule 2: three end the objective); counted by the mind, reset here. */
-  readonly refused: Map<string, number>;
-  /** The items its get_items and craft_item steps went out to obtain: not junk when a full inventory is cleared. */
-  readonly wanted: Set<string>;
-  /** Where a level_area around each player (lower-case name) was first aimed in this objective: later steps reuse it (run 13). */
-  readonly levelSites: Map<string, { readonly x: number; readonly y: number; readonly z: number }>;
-  /** The tool classes whose tool broke in this objective and was not made again: the next fetch makes it first (N7). */
-  readonly toolsLost: Set<string>;
-  /**
-   * What its time counts for: the objective's purpose, until one of its steps builds, improves a house or farms; from
-   * then on that (run 11, 2026-10-14: houses were labelled crafting, mining or woodcutting by the goal tier).
-   */
-  purpose: Activity | null;
 }
 
 /** A decision to run a step. */
@@ -185,10 +154,6 @@ function carriedOf(snapshot: BotSnapshot): string {
 
 /** Skills that are an end in themselves: an objective that runs one is for that work (its fetches included). */
 const ENDS: ReadonlyMap<Step["skill"], Activity> = new Map([["build", "building"], ["improve_house", "building"], ["farm", "farming"]]);
-
-function newWork(objective: Objective, whisperTo: string | null = null): Work {
-  return { objective, startedAt: Date.now(), startedAtMonotonic: monotonicNow(), steps: [], carried: [], taken: 0, badReplies: 0, sentBacks: 0, step: null, lastFact: "", spokenAt: monotonicNow(), failing: { skill: "", count: 0 }, whisperTo, refused: new Map(), wanted: new Set(), levelSites: new Map(), toolsLost: new Set(), purpose: objective.purpose };
-}
 
 /**
  * One character (ADR-008, ADR-011). Every message it hears goes to the chat tier, which answers in character and
@@ -406,8 +371,21 @@ export class Agent {
     // Only a line spoken to me answers an ask (owner 2026-10-29); the ones the code cannot tell are read by the chat tier (decideHeard).
     if (lineIsToMe(message, { self: persona.username.toLowerCase(), isMember: this.talks?.isMember(message.username) === true, named: this.namedIn(message) })) this.relations?.heardFrom(message.username);
     if (message.channel === "chat") everyone?.heard(message.username, message.message, persona.username, message.distance ?? null);
+    this.stopAtOnceOnStopWord(message);
     this.inbox.push(message);
     this.wakeChat?.();
+  }
+
+  /** A line that is only an owner's stop word, and is hers, ends the speaker's work at once, with no model call and no speaker token; the line still goes to the chat tier. */
+  private stopAtOnceOnStopWord(message: PlayerMessage): void {
+    const { persona, stopWords, log, journal } = this.options;
+    const named = this.namedIn(message);
+    if (!isStopLine(message.message, stopWords ?? [], named)) return;
+    const heard = this.isOtherAgent(message.username) ? this.talks?.isMember(message.username) === true : this.listensToPlayer(message.username);
+    if (!stopLineIsMine({ named, self: persona.username, channel: message.channel, heard, speakerHasOrder: this.openOrdersOf(message.username) > 0, talkedToOther: this.whoWasNamed.peek(message, monotonicNow()) !== undefined || this.whoWasNamed.lastNamedIsOther(this.inbox.waitingLines(message.username)) })) return;
+    this.stopAndRest(message.username);
+    log(`stop word from ${message.username}: stopped at once (${this.inbox.dropWaitingFrom(message.username)} earlier lines dropped)`);
+    journal?.({ kind: "stop", speaker: message.username, text: message.message, channel: message.channel });
   }
 
   /** The chat loop: one message at a time to the chat tier, once its speaker has paused for the burst window. */
@@ -489,6 +467,8 @@ export class Agent {
     // A trade proposed to the bot (or agreed with it) ends the pause of its own trading objectives.
     if (tradeId !== null) this.asks.resume();
     if (conversation !== undefined) this.spokeInConversation(decision, message.username);
+    // Its speaker went on during the trade decision (a stop word, say): the line answers a state that is gone, its order is not taken (the stop route below still stops).
+    if ((routed === "act" || routed === "later") && this.supersededBy(message, heard)) return void log("  superseded during the trade decision: no order taken");
     // A stop ends the speaker's work and the character's own goals only, the other players' queued orders stay, with or
     // without a request (owner, 2026-10-16, review R18, SF4: "a stop ends only the speaker's work").
     if (routed === "stop") this.stopAndRest(message.username);
@@ -591,14 +571,19 @@ export class Agent {
    * or a join, see {@link AgentOptions.otherAgents}).
    */
   private hears(message: PlayerMessage, named: readonly string[]): boolean {
-    const { persona } = this.options;
     const speaker = message.username.toLowerCase();
     const agent = this.isOtherAgent(message.username);
-    if (!agent && !(persona.listensTo.length === 0 || persona.listensTo.some((name) => name.toLowerCase() === speaker))) return false;
+    if (!agent && !this.listensToPlayer(message.username)) return false;
     // A line naming her makes its speaker a member: whether they already were is what a request of theirs is judged by.
     this.memberBeforeLine.set(speaker, this.talks?.isMember(message.username) === true);
     this.talks?.heard(message.username, message.message, named, message.channel, !agent && this.withinTalkRange(message));
     return !agent || this.talks?.isMember(message.username) === true;
+  }
+
+  /** Whether this character listens to the player: its `listensTo` is empty or holds them. */
+  private listensToPlayer(username: string): boolean {
+    const { listensTo } = this.options.persona;
+    return listensTo.length === 0 || listensTo.some((name) => name.toLowerCase() === username.toLowerCase());
   }
 
   /** Whether a player's line came from within talk range: its distance, else where the last look put them. */
@@ -1651,10 +1636,3 @@ export class Agent {
 
 /** A player heard this recently (ms) can be gone and chat with. */
 const PARTNER_HEARD_MS = 10 * 60_000;
-
-/** `14 min ago` (or `just now`) from an ISO time, for the situation the models read. */
-function minutesAgo(iso: string): string {
-  const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
-  if (!Number.isFinite(minutes)) return "some time ago";
-  return minutes < 1 ? "just now" : minutes < 120 ? `${minutes} min ago` : `${Math.round(minutes / 60)} h ago`;
-}

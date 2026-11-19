@@ -66,6 +66,7 @@ export function parseBrainArgs(args: string[] = process.argv.slice(2)) {
       "known-names": { type: "string" },
       "model-slots": { type: "string" },
       "chat-slots": { type: "string" },
+      "stop-words": { type: "string" },
       "speaker-chat-per-minute": { type: "string" },
       "speaker-chat-burst": { type: "string" },
       "start-gap": { type: "string" },

@@ -255,3 +255,38 @@ test("the burst window runs on the monotonic clock: a wall clock step between tw
   clocks.monotonic(2_000);
   assert.equal(inbox.next()?.lines, 2);
 });
+
+test("dropWaitingFrom removes only that speaker's untaken lines and counts them", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "one"));
+  inbox.push(line("Tom", "two"));
+  inbox.push(line("Bob", "hello"));
+  assert.equal(inbox.dropWaitingFrom("TOM"), 2, "the speaker's name is matched without case");
+  assert.equal(inbox.dropWaitingFrom("Tom"), 0, "nothing is left to drop");
+  assert.equal(inbox.hasFrom("Tom"), false);
+  clock.now += 2_000;
+  assert.equal(inbox.next()?.message.message, "hello", "Bob's waiting message is untouched");
+  assert.equal(inbox.next(), null);
+});
+
+test("waitingLines gives the speaker's untaken lines, oldest first, and nothing once taken", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "one"));
+  inbox.push(line("Bob", "hello"));
+  inbox.push(line("Tom", "two"));
+  assert.deepEqual(inbox.waitingLines("TOM").map((waiting) => waiting.message), ["one", "two"]);
+  clock.now += 2_000;
+  inbox.next();
+  assert.deepEqual(inbox.waitingLines("Tom"), []);
+});
+
+test("a line pushed after dropWaitingFrom starts a message of its own", () => {
+  const { clock, inbox } = inboxAt();
+  inbox.push(line("Tom", "get logs"));
+  inbox.dropWaitingFrom("Tom");
+  inbox.push(line("Tom", "stop"));
+  clock.now += 2_000;
+  const heard = inbox.next();
+  assert.equal(heard?.message.message, "stop");
+  assert.equal(heard?.lines, 1);
+});

@@ -109,6 +109,8 @@ export type BrainEvent =
     /** The conversation (id) the line belongs to, when it is in one. */
     readonly conversation?: string;
   }
+  /** A line that was only a stop word acted in the poll that read it, before the chat tier (spec 2026-11-18-model-call-lanes D3); the same line's `chat` event follows when the chat tier answers. */
+  | { readonly kind: "stop"; readonly speaker: string; readonly text: string; readonly channel: "chat" | "whisper" }
   /** A request not taken because its speaker already holds the most open requests (spec 2026-11-18-chat-flood-bounds D4). */
   | { readonly kind: "order_refused"; readonly speaker: string; readonly text: string; readonly reason: "open_orders"; readonly open: number; readonly max: number }
   /** A conversation (spec 2026-10-18-conversations-design): opened, a member joined or left, ended. */

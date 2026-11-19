@@ -11,11 +11,12 @@ import { TradeBoard } from "./relations/board.ts";
 import { ModelQueue, MODEL_QUEUE_FILE, startStaggered } from "./model-queue.ts";
 import { OtherAgents } from "./other-agents.ts";
 import { SpeakerBudget } from "./speaker-budget.ts";
+import { parseStopWords } from "./stop-line.ts";
 import { loadPersona, type Persona, type Tier } from "./persona.ts";
 import { McpBotRuntime } from "./runtime-client.ts";
 import { TillFacts } from "./farming/site.ts";
 
-const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--chat-slots <n>] [--speaker-chat-per-minute <n>] [--speaker-chat-burst <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
+const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--agent ...] [--chat-model <id>] [--action-model <id>] [--planner-model <id>] [--model-slots <n>] [--chat-slots <n>] [--stop-words <list>] [--speaker-chat-per-minute <n>] [--speaker-chat-burst <n>] [--start-gap <seconds>] [--start-when-free] [--other-agent <username>] [--other-agents-file <path>] [--max-conversations <n>]
 
   --agent            A persona file and the MCP endpoint of the bot host playing it (repeat for more agents).
                      The persona's username must match that host's --username.
@@ -35,6 +36,11 @@ const USAGE = `Usage: bun brain/src/main.ts --agent <persona.json>=<mcp url> [--
                      with 2 or more slots, else 0). Every other call runs on the rest; a reply may also use an idle slot.
                      Needs --model-slots, and fewer than the slots (else the brain refuses to start, [BAD_CHAT_SLOTS]).
                      Lanes order the calls of this one brain process.
+  --stop-words       Comma list of words (default: env MINE_AI_STOP_WORDS, else none): a line that is only one of them (the
+                     names it holds and its punctuation left out; "stop it" may be a word) stops the work of its speaker
+                     and the character's own goals in the poll that reads it, without a model call, when the line is the
+                     character's: it names her, or it is a whisper naming nobody, or its speaker has an order on her and
+                     did not lately talk to another character. The chat tier still answers the line.
   --speaker-chat-per-minute, --speaker-chat-burst
                      One player's lines can cost the whole brain at most this many chat-tier decisions: --speaker-chat-burst
                      at once (default 15), then --speaker-chat-per-minute a minute (default 6; 0 turns the bound off), however
@@ -177,6 +183,8 @@ async function main(): Promise<void> {
   const everyone = new EveryoneLines();
   const tradeBoard = new TradeBoard((line) => console.log(`${new Date().toISOString()} [board] ${line}`));
   const budget = new ConversationBudget(maxConversations(values["max-conversations"]));
+  const stopWords = parseStopWords(values["stop-words"] ?? env("MINE_AI_STOP_WORDS"));
+  if (stopWords.length > 0) console.log(`stop words: ${stopWords.map((word) => JSON.stringify(word)).join(", ")}`);
   const speakerBudget = new SpeakerBudget(speakerBudgetLimits(values["speaker-chat-per-minute"] ?? env("MINE_AI_SPEAKER_CHAT_PER_MINUTE"), values["speaker-chat-burst"] ?? env("MINE_AI_SPEAKER_CHAT_BURST")));
   if (values["start-when-free"] && slots === null) throw new Error("[BAD_START_ARG] --start-when-free needs --model-slots (or MODEL_SLOTS)");
   // <server dir>/bots/<bot>/brain.jsonl: the queue file goes in the server folder, where the monitor finds it from any bot.
@@ -211,6 +219,7 @@ async function main(): Promise<void> {
         soil,
         everyone,
         speakerBudget,
+        stopWords,
         tradeBoard,
         conversations: { budget, modelFree: () => queue.freeFor(persona.id), waitForModel: (ms, signal) => queue.freeWithin(persona.id, ms, AbortSignal.any([signal, shutdown.signal])) },
         ...(localizedChat !== undefined && { localizedChat }),

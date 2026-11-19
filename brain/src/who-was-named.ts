@@ -27,16 +27,38 @@ export class WhoWasNamed {
 
   /** `at`: when the message was heard, on the monotonic clock. Returns who the speaker was lately talking to when this line names nobody. */
   note(message: PlayerMessage, at: number): TalkedTo | undefined {
+    const { named, talkedTo } = this.read(message, at);
+    if (named !== undefined) this.lastNamed.set(message.username.toLowerCase(), { name: named, at });
+    return talkedTo;
+  }
+
+  /** What {@link note} would return for the line, recording nothing: the stop word asks it before the line is noted in `handle`. */
+  peek(message: PlayerMessage, at: number): TalkedTo | undefined {
+    return this.read(message, at).talkedTo;
+  }
+
+  /**
+   * Whether, of lines the chat tier has not read yet (oldest first), the newest one naming a character names another
+   * one and not this one: the speaker was talking to someone else. Records nothing.
+   */
+  lastNamedIsOther(lines: readonly PlayerMessage[]): boolean {
+    const named = lines.map((line) => this.charactersNamed(line)).findLast((characters) => characters.length > 0);
+    return named !== undefined && !named.some((name) => name.toLowerCase() === this.own.toLowerCase());
+  }
+
+  /** The characters (this one and the other agents) the line names as words, not its speaker. */
+  private charactersNamed(message: PlayerMessage): string[] {
     const speaker = message.username.toLowerCase();
-    const otherAgents = this.otherAgents();
-    const characters = [this.own, ...otherAgents];
-    const named = characters.filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
-    if (otherAgents.some((name) => name.toLowerCase() === speaker)) return undefined;
-    if (named.length > 0) {
-      this.lastNamed.set(speaker, { name: named[0]!, at });
-      return undefined;
-    }
+    return [this.own, ...this.otherAgents()].filter((name) => name.toLowerCase() !== speaker && message.message.toLowerCase().split(/[^\p{L}\p{N}_]+/u).includes(name.toLowerCase()));
+  }
+
+  /** The character the line names first (to be recorded), or who its speaker was lately talking to when it names nobody. */
+  private read(message: PlayerMessage, at: number): { readonly named?: string; readonly talkedTo?: TalkedTo } {
+    const speaker = message.username.toLowerCase();
+    const named = this.charactersNamed(message);
+    if (this.otherAgents().some((name) => name.toLowerCase() === speaker)) return {};
+    if (named.length > 0) return { named: named[0]! };
     const last = this.lastNamed.get(speaker);
-    return last !== undefined && last.name.toLowerCase() !== this.own.toLowerCase() && at - last.at <= TALKED_TO_MS ? { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } : undefined;
+    return last !== undefined && last.name.toLowerCase() !== this.own.toLowerCase() && at - last.at <= TALKED_TO_MS ? { talkedTo: { name: last.name, secondsAgo: Math.round((at - last.at) / 1_000) } } : {};
   }
 }

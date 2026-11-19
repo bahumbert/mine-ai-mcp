@@ -67,6 +67,11 @@ test("--chat-slots takes a value, absent by default", () => {
   assert.equal(parseBrainArgs(["--chat-slots", "2"]).values["chat-slots"], "2");
 });
 
+test("--stop-words takes a value, absent by default", () => {
+  assert.equal(parseBrainArgs(["--agent", "a.json=http://x/mcp"]).values["stop-words"], undefined);
+  assert.equal(parseBrainArgs(["--stop-words", "stop,stop it"]).values["stop-words"], "stop,stop it");
+});
+
 test("--speaker-chat-per-minute and --speaker-chat-burst take a value, absent by default", () => {
   assert.equal(parseBrainArgs(["--agent", "a.json=http://x/mcp"]).values["speaker-chat-per-minute"], undefined);
   const { values } = parseBrainArgs(["--speaker-chat-per-minute", "3", "--speaker-chat-burst", "9"]);
