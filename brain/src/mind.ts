@@ -32,6 +32,14 @@ export interface ChatLine {
 export const ROUTES = ["ignore", "talk", "stop", "act", "later"] as const;
 export type Route = (typeof ROUTES)[number];
 
+/**
+ * What a chat message is, as the chat tier read it (spec 2026-11-18-complaint-not-order): `request` asks its listeners
+ * to do or hand over something; `question` asks for an answer only; `complaint` objects to something without asking
+ * for anything; `remark` is anything else. Only a `request` is taken on ("act", "later").
+ */
+export const MESSAGE_TYPES = ["request", "question", "complaint", "remark"] as const;
+export type MessageType = (typeof MESSAGE_TYPES)[number];
+
 /** Where a request happens, as the chat tier read it: where the speaker stands, where she stands, a place named, or nowhere in particular. */
 export const PLACES = ["speaker", "you", "named", "none"] as const;
 export type Place = (typeof PLACES)[number];
@@ -115,6 +123,8 @@ export interface ChatDecision {
   readonly route: Route;
   /** For `act` and `later`: what the player asked, restated so it stands alone, e.g. "give Steve 5 oak logs". */
   readonly request: string;
+  /** What the chat tier read the message as; with a `stop` of any type but `request` the decision's `request` is "" (spec 2026-11-18-complaint-not-order). */
+  readonly type?: MessageType;
   /**
    * The kind of work asked, in the chat tier's own judgment (one of the activities, or "none"); only asked of a
    * character with preferences, so it weighs how it feels before it answers (ADR-015). Empty when not asked.

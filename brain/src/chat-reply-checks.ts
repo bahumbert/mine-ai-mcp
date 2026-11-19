@@ -1,8 +1,40 @@
 // The content checks a chat-tier reply must pass before it is read: a reply that contradicts the facts the prompt gave goes back.
-import type { ChatInput, Route } from "./mind.ts";
+import type { ChatInput, MessageType, Route } from "./mind.ts";
 
 /** A content check refusing a well-formed reply: it goes back with the reason, outside the format budget. */
 export class SendBack extends Error {}
+
+/**
+ * Why an "act" or "later" reply of this `type` goes back, or null when it may stand (spec 2026-11-18-complaint-not-order
+ * C1-C2, live run 13: a complaint read as an order): only a request is taken on. The text names the reading, not the
+ * field to change, so the model does not just retype it. Reads the reply's own field, never what the player wrote.
+ */
+export function typeSendBack(route: Route, type: MessageType | undefined): string | null {
+  if (type === undefined) return `"type" is required when "route" is "${route}"`;
+  if (type === "request") return null;
+  return `"type" is "${type}": a ${type} is not a request, so "act" and "later" are not routes for it; answer it ("talk"), or "stop" if they object to what you are doing`;
+}
+
+/**
+ * The type of a reply sent back for not being a request, held for the rest of the line as `firstReading` holds
+ * `spoken_to`: retyped "request" after being told why, it is the live failure's shape and takes no order (C3).
+ */
+export class MessageTypeHold {
+  private held: MessageType | null = null;
+
+  /** The held type; null until a reply was sent back for its type. */
+  get type(): MessageType | null {
+    return this.held;
+  }
+
+  /** Throws {@link SendBack} when an "act" or "later" reply of this type is not a request, and holds that type. */
+  check(route: Route, type: MessageType | undefined): void {
+    const notARequest = typeSendBack(route, type);
+    if (notARequest === null) return;
+    this.held = type ?? null;
+    throw new SendBack(notARequest);
+  }
+}
 
 /** What the chat tier's reply says about whom it speaks to, and what was read from the line and the history about it. */
 export interface ReplyFacts {

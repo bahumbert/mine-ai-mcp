@@ -4,7 +4,7 @@ import type { Activity } from "./activities.ts";
 import type { ActivityChance } from "./activity-draw.ts";
 import type { ChatTurn } from "./chat-model.ts";
 import type { ConversationKind, EndReason, PlannedLength } from "./conversation/state.ts";
-import type { Place, Route } from "./mind.ts";
+import type { MessageType, Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { RelationEvent, TradeEvent } from "./relations/types.ts";
 import type { ActivityTotal } from "./time-spent.ts";
@@ -106,6 +106,8 @@ export type BrainEvent =
     /** What the chat tier read besides the route: where the request happens, whether the line starts it now. */
     readonly place?: Place;
     readonly startsNow?: boolean;
+    /** What the chat tier read the message as (request, question, complaint, remark); absent in older journals (spec 2026-11-18-complaint-not-order). */
+    readonly type?: MessageType;
     /** The conversation (id) the line belongs to, when it is in one. */
     readonly conversation?: string;
   }

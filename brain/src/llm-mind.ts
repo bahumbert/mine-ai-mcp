@@ -6,13 +6,14 @@ import type { ChatModel, ChatTurn, CompleteOptions } from "./chat-model.ts";
 import type { MindTier, ModelCall } from "./brain-log.ts";
 import { tierCall, type LineFacts } from "./model-lanes.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, PLACES, ROUTES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type Place, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
-import { askFieldsInstructions, parseAsks, parseGistPartners, relationReplyFields, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { askFieldsInstructions, parseAsks, parseGistPartners, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
 import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { orderCapSendBack, speakerOrdersNote, unreadLinesNote } from "./chat-limit-notes.ts";
-import { checkReplyAgainstFacts, SendBack } from "./chat-reply-checks.ts";
+import { checkReplyAgainstFacts, MessageTypeHold, SendBack } from "./chat-reply-checks.ts";
+import { addressees, carriesTrade, chatDecisionOf, chatReplySchema, messageTypeInstructions, readListeners, speaksTo } from "./chat-reply.ts";
 import { describePreferences, feelings } from "./preference-feelings.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
 import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
@@ -74,45 +75,6 @@ export interface LocalizedChat {
   readonly foodCost?: number;
 }
 
-const chatReplySchema = z.object({
-  // Asked first in every reply; one without it is read as saying nothing about who (the check below then passes).
-  spoken_to: z.union([z.string(), z.array(z.string())]).default([]),
-  // What the message asks of its listeners, "" for a remark: a line to everyone that asks nothing is not answered when
-  // it does not name her (owner 2026-10-09; bench: "pareil, je vois plus les skins" amid others' chat read as to everyone).
-  asks: z.string().default(""),
-  // Named before "say" is written: told only to answer in the player's language, French lines got English answers
-  // (live 2026-10-07, real world and local).
-  language: z.string().default(""),
-  work: z.string().default(""),
-  say: z.string().default(""),
-  // The model's own judgment of its line, in its own language: true when the line says she starts right now (spec
-  // 2026-10-09-chat-handling, B: replaces an English regex over the line).
-  starts_now: z.boolean().optional(),
-  // Only offered when the server limits how far talk carries (Localized Chat): the line is shouted to everyone.
-  shout: z.boolean().optional(),
-  // Only offered inside a conversation: the line is a goodbye that ends it for her.
-  close: z.boolean().optional(),
-  // Only offered when relations are on: read by `relationReplyFields`, a malformed one is dropped.
-  trade: z.unknown().optional(),
-  // Only offered when relations are on: read by `relationReplyFields` (`parseAsks` / `parseMyRequest`), a malformed one is dropped.
-  asks_of: z.unknown().optional(),
-  asks_what: z.unknown().optional(),
-  my_request: z.unknown().optional(),
-  route: z.enum(ROUTES),
-  // Where the request happens; the code writes the coordinates itself.
-  place: z.enum(PLACES).optional(),
-  request: z.string().default(""),
-});
-
-/** Who a line speaks to, as the chat tier read it: names, "everyone" or "unclear", trimmed, without "@". */
-function addressees(to: string | readonly string[]): string[] {
-  return (typeof to === "string" ? to.split(",") : [...to]).map((name) => name.trim().replace(/^@/u, "")).filter((name) => name !== "");
-}
-
-/** Whether a line read as speaking to `to` is for this character: its name, everyone, or nobody in particular. */
-function speaksTo(to: readonly string[], username: string): boolean {
-  return to.length === 0 || to.some((name) => ["everyone", "unclear", "you"].includes(name.toLowerCase()) || name.toLowerCase() === username.toLowerCase());
-}
 const workReplySchema = z.object({ thought: z.string().default(""), step: z.unknown().optional(), done: z.string().optional(), give_up: z.string().optional() });
 // "for" is the kind of work the objective is for (spec 2026-10-09-activity-draw); one we do not know is no purpose.
 const goalReplySchema = z.object({ objective: z.string().trim().min(1), for: z.string().optional() });
@@ -162,6 +124,7 @@ export class LlmMind implements Mind {
     // it through).
     let firstReading: readonly string[] | null = null;
     let capSentBack = false;
+    const typeHold = new MessageTypeHold();
     const called = calledOthers(input);
     const answering = answeredElsewhere(input);
     // The claim is asked once per line: a reply sent back reads the line again, and a second claim is always false
@@ -170,13 +133,7 @@ export class LlmMind implements Mind {
     const claimEveryoneLine = (): boolean => (claimed ??= input.claimEveryoneLine?.() === true);
     return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk, input.relations?.tradeOn === true), request, signal, (json) => {
       const reply = chatReplySchema.parse(json);
-      const restated = reply.request.trim();
-      // Whoever says a line is not one it speaks to (live 2026-10-03: in a conversation with her, "no stop harvesting,
-      // this is important" was read as spoken to StarOr1, who said it, and ignored). Listed alone, nobody is left: no
-      // one in particular, so it may be for her.
-      const given = addressees(reply.spoken_to);
-      const listeners = given.filter((name) => name.toLowerCase() !== message.username.toLowerCase());
-      const to = given.length > 0 && listeners.length === 0 ? ["unclear"] : listeners;
+      const { given, listeners, to } = readListeners(reply.spoken_to, message.username);
       // Not addressed and no conversation going on: hers only when read as spoken to everyone around, and not when the
       // history shows it answering someone else (bench 2026-10-09: "yeah, restarting now" after Bob asked the speaker,
       // read as spoken to everyone). It must ask them something (owner 2026-10-09), or else (owner 2026-10-19, conv5:
@@ -200,7 +157,7 @@ export class LlmMind implements Mind {
         throw new SendBack(`"spoken_to" is ${JSON.stringify(to)}, which is not you: "route" must be "ignore"`);
       }
       checkReplyAgainstFacts(reply, input, { to, given, listeners, called, answering, canWait });
-      const atCap = capSentBack ? null : orderCapSendBack(reply.route, reply.trade !== undefined, input.speakerOrders, message.username); // sent back once (spec 2026-11-18-chat-flood-bounds D4)
+      const atCap = capSentBack ? null : orderCapSendBack(reply.route, carriesTrade(input, reply), input.speakerOrders, message.username); // sent back once (spec 2026-11-18-chat-flood-bounds D4)
       if (atCap !== null) {
         capSentBack = true;
         throw new SendBack(atCap);
@@ -210,20 +167,14 @@ export class LlmMind implements Mind {
       if (reply.route === "act" && reply.starts_now === false) {
         throw new SendBack(`"starts_now" is false, but "act" stops what you were doing and starts at once: write a "say" that starts now${canWait ? `, or use "later" if it must wait` : ""}, or answer "talk" if you cannot`);
       }
-      if ((reply.route === "act" || reply.route === "later") && restated === "") throw new SendBack(`"request" is required when "route" is "${reply.route}"`);
       const acts = reply.route === "act" || reply.route === "later";
-      return {
-        ...(to.length > 0 && { to }),
-        say: reply.say,
-        route: reply.route,
-        request: acts ? withPlace(restated, reply.place, input) : restated,
-        ...(input.persona.preferences !== undefined && { work: reply.work.trim() }),
-        // Shouting is for calling someone over, never inside a conversation (spec 2026-10-18).
-        ...(this.localizedChat !== undefined && !inTalk && reply.shout === true && { shout: true }),
-        ...(inTalk && reply.close === true && { close: true }),
-        ...(acts && reply.place !== undefined && { place: reply.place }),
-        ...(acts && reply.starts_now !== undefined && { startsNow: reply.starts_now }), ...relationReplyFields(input, reply),
-      };
+      // Only a request is taken on; a reply carrying a trade is decided by the trade path (C6).
+      if (acts && !carriesTrade(input, reply)) {
+        if (typeHold.type !== null) return { ...(to.length > 0 && { to }), say: "", route: "talk", request: "", type: typeHold.type, ...(input.persona.preferences !== undefined && { work: "none" }) };
+        typeHold.check(reply.route, reply.type);
+      }
+      if (acts && reply.request.trim() === "") throw new SendBack(`"request" is required when "route" is "${reply.route}"`);
+      return chatDecisionOf(input, reply, to, typeHold.type ?? reply.type, this.localizedChat !== undefined && !inTalk);
     }, { fromAgent: input.fromAgent === true, addressed: message.addressed || message.channel === "whisper" });
   }
 
@@ -509,7 +460,7 @@ export function chatSystemPrompt(persona: Persona, canWait = true, localizedChat
 What you can do: ${personaSkills(persona).map((skill) => skill.replaceAll("_", " ")).join(", ")}, and combine these
 step by step into bigger jobs.
 
-For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "asks": "...", "language": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "asks": "...", "language": "...", "work": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
+For each message you hear, reply with only a JSON object ${persona.preferences === undefined ? `{"spoken_to": [...], "asks": "...", "type": "...", "language": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}` : `{"spoken_to": [...], "asks": "...", "type": "...", "language": "...", "work": "...", "say": "...",${shoutField} "starts_now": true, "route": "...", "place": "...", "request": "..."}`}.
 - "spoken_to": first, who the message speaks to (its listeners, never the player who says it), read from the whole message and
   the recent chat: the names it addresses, wherever they are ("${persona.username}, ...", "... thanks ${persona.username}",
   "@Name"), several when its sentences speak to several; ["everyone"] when it speaks to all around ("anyone", "someone",
@@ -527,6 +478,7 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   talked to another character, is most likely for that one: ignore it unless it is plainly for everyone.
 - "asks": what the message asks of its listeners, in a few words (a question, a request, an order); "" when it asks
   nothing (a remark, news, agreeing, thanks).
+${messageTypeInstructions(persona.username)}
 - "language": the language the new message's own words are written in (e.g. "French", "English"); the recent chat
   and your own lines may be in another one (live 2026-10-07: an English line after French chat was named French).
 - "route":
@@ -535,7 +487,10 @@ For each message you hear, reply with only a JSON object ${persona.preferences =
   "talk" = just answer: greetings, questions, chit-chat, refusals, asking what they mean.
   "stop" = they want you to stop what you are doing, and only that (stop, halt, wait, enough). Any other request, even a
   short one (release that area, put it back, undo), is "act", never "stop".
-  "act" = you take on what they ask now, setting your current work aside (you resume it afterwards), so your reply
+  A complaint, a remark or news is never a request, even when you could guess something to do about it: answer it
+  ("talk": say sorry, explain, or ask what they want done), or "stop" when it objects to what you are doing now;
+  never make up a task from it.
+  "act" = you take on what they ask now (its "type" is "request"), setting your current work aside (you resume it afterwards), so your reply
   says you start now, never that you finish something first. Walking to someone, following, fetching and building are
   things you can do: "come here", "follow me", "get me 5 logs" are "act" even though your line answers them
   ("On my way!"); "talk" would start nothing.${canWait ? `
@@ -557,7 +512,8 @@ ${inConversation ? `- "close": optional, after "say": true when your line is you
   not your own plan), in one standalone sentence keeping every username, Minecraft id, number and named place the
   player gave, word for word (e.g. "give Steve 5 oak_log", "level the zone between the gold_block markers"); it also keeps
   whom the work is for, word for word when the speaker says it ("for yourself", "your own house", "for <name>"):
-  dropping it changes who gets the result; otherwise "".
+  dropping it changes who gets the result; otherwise "". With "stop",
+  only what the message asks besides stopping, word for word, "" when it asks only to stop.
 - "say": your chat line; "" to stay silent. Write it in "language", the message's language (a message in French
   gets a French line), whatever language you think in. Fit it to the route, in your own words, never claiming work is done.
   With "act" you start right away: never say you will finish something first or need a moment.${canWait ? ` Only "later" waits,
@@ -885,20 +841,6 @@ function othersChatting(input: Pick<ChatInput, "message" | "persona" | "history"
     if (line.speaker.toLowerCase() !== speaker && !others.some((name) => name.toLowerCase() === line.speaker.toLowerCase())) others.push(line.speaker);
   }
   return others;
-}
-
-/**
- * A request with where it happens written by the code, not the model: where the speaker stands (or that she cannot see
- * them), or where she stands. Any other place is the request's own words.
- */
-function withPlace(request: string, place: Place | undefined, input: ChatInput): string {
-  const { x, y, z } = input.snapshot.position;
-  if (place === "you") return `${request} (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand)`;
-  if (place !== "speaker") return request;
-  const speaker = input.snapshot.players.find((player) => player.username.toLowerCase() === input.message.username.toLowerCase());
-  const at = speaker?.position;
-  if (at === undefined || at === null) return `${request} (where ${input.message.username} is; you cannot see them from here)`;
-  return `${request} (at ${Math.floor(at.x)} ${Math.floor(at.y)} ${Math.floor(at.z)}, where ${input.message.username} stands)`;
 }
 
 function describeHistory(history: readonly ChatLine[]): string {

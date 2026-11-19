@@ -564,6 +564,12 @@ export function testPersona(overrides: Partial<Persona> = {}): Persona {
   };
 }
 
+/** Whether a scripted reply object routes "act" or "later". */
+function asksForOrder(reply: object): boolean {
+  const { route } = reply as { readonly route?: unknown };
+  return route === "act" || route === "later";
+}
+
 /** A chat model replying from a script, recording what it was sent. */
 export class ScriptedModel implements ChatModel {
   readonly requests: (readonly ChatTurn[])[] = [];
@@ -578,9 +584,13 @@ export class ScriptedModel implements ChatModel {
     return this;
   }
 
-  /** Queue replies, as objects (sent as JSON) or raw text. */
+  /**
+   * Queue replies, as objects (sent as JSON) or raw text. An object routing "act" or "later" with no `type` key is sent
+   * as a request (the chat tier holds those routes to one, spec 2026-11-18-complaint-not-order): a test that wants no
+   * type writes `type: undefined` (the key is present, so no default; JSON drops it). Raw text is sent as it is.
+   */
   reply(...replies: (string | object)[]): this {
-    this.replies.push(...replies.map((reply) => (typeof reply === "string" ? reply : JSON.stringify(reply))));
+    this.replies.push(...replies.map((reply) => (typeof reply === "string" ? reply : JSON.stringify(asksForOrder(reply) && !("type" in reply) ? { ...reply, type: "request" } : reply))));
     return this;
   }
 

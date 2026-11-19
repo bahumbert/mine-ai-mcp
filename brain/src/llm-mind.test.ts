@@ -7,7 +7,7 @@ import { calledNames, chatSystemPrompt, describeConversation, LlmMind, personaPr
 import { MAX_REFUSALS, type ChatInput, type GoalInput, type WorkInput } from "./mind.ts";
 import { describeStep, stepKey } from "./actions.ts";
 import { familiesOf, TEMPLATES } from "./building/templates.ts";
-import { FakeRuntime, scriptedMind, testPersona } from "./testing.ts";
+import { FakeRuntime, ScriptedModel, scriptedMind, testPersona } from "./testing.ts";
 
 const signal = new AbortController().signal;
 
@@ -39,9 +39,9 @@ function workInput(text: string, overrides: Partial<WorkInput> = {}): WorkInput 
 
 test("the chat tier reads a fenced JSON reply as an answer plus a route", async () => {
   const { chat, mind } = scriptedMind();
-  chat.reply("Sure!\n```json\n{\"say\":\"Right behind you!\",\"route\":\"act\",\"request\":\"follow Steve\"}\n```");
+  chat.reply("Sure!\n```json\n{\"say\":\"Right behind you!\",\"type\":\"request\",\"route\":\"act\",\"request\":\"follow Steve\"}\n```");
   const decision = await mind.chat(chatInput("yo Ayla stick with me", true), signal);
-  assert.deepEqual(decision, { say: "Right behind you!", route: "act", request: "follow Steve" });
+  assert.deepEqual(decision, { say: "Right behind you!", route: "act", request: "follow Steve", type: "request" });
   assert.match(chat.requests[0]?.[1]?.content ?? "", /Steve says in chat, naming you: "yo Ayla stick with me"/u);
 });
 
@@ -131,7 +131,7 @@ test("preferences reach the init prompt as feelings, never as a rule: her feelin
 test("with preferences, how a request is taken is the character's call; the work tier may pick the liked way; narration may show it", async () => {
   const preferences = { loves: "farming", likes: "building", dislikes: "mob_combat", hates: "mining" } as const;
   const chatPrompt = chatSystemPrompt(testPersona({ preferences }));
-  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(chatPrompt, /reply with only a JSON object \{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "type": "\.\.\.", "language": "\.\.\.", "work": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(chatPrompt, /- "work": first, the kind of work the message asks of you, one of building, reshaping ground, farming, [^\n]*fighting monsters/u);
   assert.match(chatPrompt, /and how you take it \(gladly,\n  grudgingly, bargaining, or declining\) is yours, in character, as your stance and whose requests come first allow, and how you feel about who asks./u);
   assert.doesNotMatch(chatSystemPrompt(testPersona()), /grudgingly|"work"/u);
@@ -317,7 +317,7 @@ test("\"later\" is offered only while working for someone else; said anyway, the
     { say: "On it!", route: "act", request: "build Steve a small house" },
   );
   const decision = await mind.chat({ ...chatInput("build me a house"), canWait: false }, signal);
-  assert.deepEqual(decision, { say: "On it!", route: "act", request: "build Steve a small house" });
+  assert.deepEqual(decision, { say: "On it!", route: "act", request: "build Steve a small house", type: "request" });
   assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"later" is not a route now/u);
 });
 
@@ -348,8 +348,8 @@ test("a character with preferences names the kind of work a request is before an
   });
   const { mind, chat } = scriptedMind();
   chat.reply({ work: "mining", say: "Ugh, stone... fine.", route: "act", request: "get Tom 20 stone" }, { say: "Sure!", route: "act", request: "get Tom 20 stone" });
-  assert.deepEqual(await mind.chat(input(testPersona({ preferences })), signal), { work: "mining", say: "Ugh, stone... fine.", route: "act", request: "get Tom 20 stone" });
-  assert.deepEqual(await mind.chat(input(testPersona()), signal), { say: "Sure!", route: "act", request: "get Tom 20 stone" });
+  assert.deepEqual(await mind.chat(input(testPersona({ preferences })), signal), { work: "mining", say: "Ugh, stone... fine.", route: "act", request: "get Tom 20 stone", type: "request" });
+  assert.deepEqual(await mind.chat(input(testPersona()), signal), { say: "Sure!", route: "act", request: "get Tom 20 stone", type: "request" });
 });
 
 test("the chat tier names who a line speaks to first; a line it reads as for others only is never taken on", async () => {
@@ -639,9 +639,123 @@ test("\"act\" whose own line does not start now goes back; later and talk are no
   assert.equal((await mind.chat(chatInput("Ayla, ready?"), signal)).route, "talk");
 });
 
+// A complaint is not an order (spec 2026-11-18-complaint-not-order, live run 13): "act" and "later" need the reply's own
+// "type" to be "request"; the checks read the reply's fields only.
+const COMPLAINT_ACT = { spoken_to: ["Ayla"], type: "complaint", say: "On it.", route: "act", request: "level 5 blocks around Steve", starts_now: true };
+const complaintLine = (): ChatInput => chatInput("Ayla, you're destroying someone else's house here");
+
+test("a complaint sent back from act answers as talk", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(COMPLAINT_ACT, { spoken_to: ["Ayla"], type: "complaint", say: "Sorry!", route: "talk", request: "" });
+  const decision = await mind.chat(complaintLine(), signal);
+  assert.deepEqual(decision, { to: ["Ayla"], say: "Sorry!", route: "talk", request: "", type: "complaint" });
+  assert.equal(chat.requests.length, 2);
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"type" is "complaint": a complaint is not a request, so "act" and "later" are not routes for it; answer it \("talk"\), or "stop" if they object to what you are doing/u);
+});
+
+test("a reply retyped request after a type send-back takes no order", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(COMPLAINT_ACT, { ...COMPLAINT_ACT, type: "request", say: "On it!" });
+  const decision = await mind.chat(complaintLine(), signal);
+  assert.deepEqual(decision, { to: ["Ayla"], say: "", route: "talk", request: "", type: "complaint" });
+  assert.equal(chat.requests.length, 2);
+});
+
+test("later with type remark goes back", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ ...COMPLAINT_ACT, type: "remark", route: "later", starts_now: false }, { spoken_to: ["Ayla"], type: "remark", say: "Thanks.", route: "talk", request: "" });
+  const decision = await mind.chat(chatInput("Ayla, that wall looks crooked"), signal);
+  assert.deepEqual([decision.route, decision.type, decision.request], ["talk", "remark", ""]);
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"type" is "remark": a remark is not a request/u);
+});
+
+test("an act without a type goes back; typed request it is taken", async () => {
+  const { chat, mind } = scriptedMind();
+  const order = { spoken_to: ["Ayla"], say: "On it.", route: "act", request: "collect 3 dirt", starts_now: true };
+  chat.reply({ ...order, type: undefined }, { ...order, type: "request" });
+  const decision = await mind.chat(chatInput("Ayla, get me 3 dirt"), signal);
+  assert.deepEqual([decision.route, decision.request, decision.type], ["act", "collect 3 dirt", "request"]);
+  assert.match(chat.requests[1]?.at(-1)?.content ?? "", /"type" is required when "route" is "act"/u);
+});
+
+test("a stop whose type is not a request carries no request", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["Ayla"], type: "complaint", say: "Sorry, stopping.", route: "stop", request: "repair the house" });
+  const decision = await mind.chat(complaintLine(), signal);
+  assert.deepEqual([decision.route, decision.request, decision.type], ["stop", "", "complaint"]);
+  assert.equal(chat.requests.length, 1);
+});
+
+test("a stop typed request keeps its request", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "Stopping.", route: "stop", request: "put the door back" });
+  const decision = await mind.chat(chatInput("Ayla, stop and put the door back"), signal);
+  assert.deepEqual([decision.route, decision.request, decision.type], ["stop", "put the door back", "request"]);
+});
+
+test("an act whose type is request passes unchanged", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "On it.", route: "act", request: "collect 3 dirt", starts_now: true });
+  const decision = await mind.chat(chatInput("Ayla, get me 3 dirt"), signal);
+  assert.deepEqual(decision, { to: ["Ayla"], say: "On it.", route: "act", request: "collect 3 dirt", startsNow: true, type: "request" });
+  assert.equal(chat.requests.length, 1);
+});
+
+test("a reply with a trade is not held to the type", async () => {
+  const { chat, mind } = scriptedMind();
+  const trade = { action: "accept", give: [{ item: "bread", count: 5 }], get: [{ item: "iron_ingot", count: 5 }], first: "me" };
+  chat.reply({ spoken_to: ["Ayla"], type: "remark", say: "Deal.", route: "act", request: "build a shelter", starts_now: true, trade });
+  const decision = await mind.chat(withRelations(true), signal);
+  assert.deepEqual([decision.route, decision.type, decision.trade?.action], ["act", "remark", "accept"]);
+  assert.equal(chat.requests.length, 1);
+});
+
+test("a trade the code does not accept does not exempt a complaint from the type check", async () => {
+  // Task review: a small model fills unused fields with null; the key being there is no trade.
+  for (const trade of [null, "none", {}]) {
+    for (const input of [chatInput("Ayla, you're destroying someone else's house"), withRelations(true)]) {
+      const { chat, mind } = scriptedMind();
+      chat.reply({ ...COMPLAINT_ACT, trade }, { spoken_to: ["Ayla"], type: "complaint", say: "Sorry!", route: "talk", request: "" });
+      const decision = await mind.chat(input, signal);
+      assert.deepEqual([decision.route, decision.request, decision.type], ["talk", "", "complaint"], JSON.stringify(trade));
+      assert.equal(chat.requests.length, 2);
+    }
+  }
+});
+
+test("a stop after a type send-back is used as it comes, with the first type and no request", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply(COMPLAINT_ACT, { spoken_to: ["Ayla"], type: "request", say: "Stopping.", route: "stop", request: "level 5 blocks around Steve" });
+  const decision = await mind.chat(complaintLine(), signal);
+  assert.deepEqual(decision, { to: ["Ayla"], say: "Stopping.", route: "stop", request: "", type: "complaint" });
+});
+
+test("an unaddressed line to nobody is left alone before the type is read", async () => {
+  const { chat, mind } = scriptedMind();
+  chat.reply({ spoken_to: ["unclear"], asks: "", type: "complaint", route: "act", request: "x", starts_now: true });
+  const decision = await mind.chat(chatInput("that house looks wrong", false), signal);
+  assert.equal(decision.route, "ignore");
+  assert.equal(chat.requests.length, 1);
+});
+
+test("the scripted model defaults type only for act and later without one", async () => {
+  const model = new ScriptedModel("x").reply({ route: "act" }, { route: "talk" }, { route: "act", type: undefined }, { route: "later", type: "remark" });
+  const types: unknown[] = [];
+  for (let call = 0; call < 4; call += 1) types.push((JSON.parse((await model.complete([])).text) as { type?: unknown }).type);
+  assert.deepEqual(types, ["request", undefined, undefined, "remark"]);
+});
+
+test("the chat prompt asks the message's type and says act needs a request", () => {
+  const prompt = chatSystemPrompt(testPersona());
+  assert.match(prompt, /"type"/u);
+  for (const value of ["request", "question", "complaint", "remark"]) assert.match(prompt, new RegExp(`  "${value}" = `, "u"), value);
+  assert.match(prompt, /never make up a task from it/u);
+  assert.match(prompt, /only what the message asks besides stopping/u);
+});
+
 test("the chat prompt explains place and starts_now, and no longer asks for coordinates in the request", () => {
   const prompt = chatSystemPrompt(testPersona());
-  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
+  assert.match(prompt, /\{"spoken_to": \[\.\.\.\], "asks": "\.\.\.", "type": "\.\.\.", "language": "\.\.\.", "say": "\.\.\.", "starts_now": true, "route": "\.\.\.", "place": "\.\.\.", "request": "\.\.\."\}/u);
   assert.match(prompt, /- "place": where the request happens/u);
   assert.match(prompt, /Never write\n  coordinates for "speaker" or "you" in "request": they are added for you/u);
   assert.doesNotMatch(prompt, /"for"/u);

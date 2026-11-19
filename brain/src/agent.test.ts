@@ -752,6 +752,46 @@ test("a stop at the end of a flood is read and stops the speaker's order", async
   assert.match(chat.requests.at(-1)?.[1]?.content ?? "", /Ayla stop"/u);
 });
 
+test("a complaint routed stop stops the speaker's order and takes none; an order after it is taken", async (t) => {
+  // Live run 13: "you're destroying someone else's house" was taken on as a levelling order; a stop that carried a
+  // guessed request would have been promoted to one by the agent (spec 2026-11-18-complaint-not-order C4).
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, events } = journaledAgent(t, runtime);
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "On it.", route: "act", request: "collect 16 oak_log", starts_now: true });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "Ayla, collect some wood"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  const objectivesBefore = events.filter((event) => event.kind === "objective").length;
+  chat.reply({ spoken_to: ["Ayla"], type: "complaint", say: "Sorry", route: "stop", request: "repair the house" });
+  await agent.handle(say("Steve", "Ayla, you're destroying someone else's house"));
+  await until(() => runtime.cancelled.length === 1);
+  assert.equal(agent.activity, "idle");
+  assert.equal(events.filter((event) => event.kind === "objective").length, objectivesBefore, "no objective from the complaint");
+  assert.deepEqual(events.filter((event) => event.kind === "chat").map((event) => event.kind === "chat" ? [event.route, event.type] : null), [["act", "request"], ["stop", "complaint"]]);
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "On it", route: "act", request: "get Steve 3 dirt", starts_now: true });
+  action.reply({ step: { skill: "collect_block", block: "dirt", count: 3 } });
+  await agent.handle(say("Steve", "Ayla, get me 3 dirt"));
+  await until(() => runtime.submitted.filter((call) => call.tool === "collect_block").length === 2);
+  assert.equal(events.filter((event) => event.kind === "objective").length, objectivesBefore + 1, "the order after it is taken");
+});
+
+test("a stop typed request with an empty request takes no order", async (t) => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 100_000;
+  const { agent, chat, action, events } = journaledAgent(t, runtime);
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "On it.", route: "act", request: "collect 16 oak_log", starts_now: true });
+  action.reply({ step: { skill: "collect_block", block: "oak_log", count: 16 } });
+  await agent.handle(say("Steve", "Ayla, collect some wood"));
+  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
+  const objectivesBefore = events.filter((event) => event.kind === "objective").length;
+  chat.reply({ spoken_to: ["Ayla"], type: "request", say: "Stopping.", route: "stop", request: "" });
+  await agent.handle(say("Steve", "Ayla, stop it"));
+  await until(() => runtime.cancelled.length === 1);
+  assert.equal(agent.activity, "idle");
+  assert.equal(events.filter((event) => event.kind === "objective").length, objectivesBefore);
+});
+
 /** A talk reply spoken as `say`, for the speaker-budget tests (the scripted replies go out in the order the calls come). */
 const talk = (spoken: string) => ({ spoken_to: ["Ayla"], say: spoken, route: "talk", request: "" });
 

@@ -431,7 +431,7 @@ export class Agent {
     await this.relations?.answered(decision, message.username);
     const { route } = decision;
     const request = route === "act" || route === "later" ? ` ${JSON.stringify(decision.request)}` : "";
-    log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}`);
+    log(`${message.username}: ${JSON.stringify(message.message)} -> ${route}${request}, say ${JSON.stringify(decision.say)}${decision.type === undefined ? "" : ` (${decision.type})`}`);
     // Whom it read the line as spoken to stays with the line: a follow-up is read in that light (live 2026-10-04:
     // "fix it now" after "Opus, Vex is going through the ocean" was taken by Vex).
     if (decision.to !== undefined) this.annotate(line, decision.to);
@@ -439,7 +439,7 @@ export class Agent {
     // next, with this one in the history (spec 2026-10-09-chat-handling, A).
     const superseded = this.supersededBy(message, heard);
     const talkId = conversation === undefined ? undefined : this.talks?.current?.id;
-    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, ...(heard !== undefined && heard.dropped > 0 && { dropped: heard.dropped }), ...(heard !== undefined && heard.heldMs >= 1_000 && { heldMs: heard.heldMs }), route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }) });
+    this.options.journal?.({ kind: "chat", speaker: message.username, text: message.message, channel: message.channel, lines: heard?.lines ?? 1, ...(heard !== undefined && heard.dropped > 0 && { dropped: heard.dropped }), ...(heard !== undefined && heard.heldMs >= 1_000 && { heldMs: heard.heldMs }), route, say: decision.say, superseded, ...(talkId !== undefined && { conversation: talkId }), ...(decision.to !== undefined && { to: decision.to }), ...(decision.place !== undefined && { place: decision.place }), ...(decision.startsNow !== undefined && { startsNow: decision.startsNow }), ...(decision.type !== undefined && { type: decision.type }) });
     if (superseded) {
       await this.dropSuperseded(decision, message.username, snapshot, seen);
       return;
