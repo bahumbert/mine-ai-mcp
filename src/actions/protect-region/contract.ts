@@ -1,7 +1,7 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { MAX_PROTECTED_REGIONS, MAX_REGION_SIDE } from "../../bot-data/protected-regions.js";
-import type { BlockCorner } from "../../world/protected-regions.js";
+import type { BlockCorner, ProtectedRegion } from "../../world/protected-regions.js";
 import { actionResultSchema } from "../action.js";
 
 export const PROTECT_REGION = "protect_region" as const;
@@ -88,6 +88,12 @@ export const protectedRegionSchema = z.strictObject({
   owner: z.string().min(1),
   label: z.string().min(1),
 });
+
+/** A stored region as a tool result: the box and its owner, without the holder bookkeeping (`heldBy`, `peer`). */
+export function regionResult(region: ProtectedRegion): z.input<typeof protectedRegionSchema> {
+  const { regionId, dimension, min, max, owner, label } = region;
+  return { regionId, dimension, min, max, owner, label };
+}
 
 export const protectRegionResultSchema = actionResultSchema({
   region: protectedRegionSchema.nullable(),

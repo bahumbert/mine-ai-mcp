@@ -284,7 +284,7 @@ test("a protected region refuses route digging and scaffolding in it, but not wa
   assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "nothing protected yet");
 
   // Read live: a region added after the policy was made applies to its next check.
-  regions = [{ regionId: 1, dimension: "overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 66, z: 2 }, owner: "Ayla", label: "small medieval house" }];
+  regions = [{ regionId: 1, dimension: "overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 66, z: 2 }, owner: "Ayla", label: "small medieval house", heldBy: "Ayla", peer: false }];
   const refusal = { kind: "prohibited", reason: "inside protected region #1 'small medieval house' (owner Ayla)" };
   assert.deepEqual(policy.evaluateBreak(stone, inside, world).decision, refusal);
   assert.deepEqual(policy.confirmBreak(stone, { x: 2, y: 66, z: 2 }, world), refusal);
@@ -298,6 +298,29 @@ test("a protected region refuses route digging and scaffolding in it, but not wa
 
   bot.game.dimension = "the_nether";
   assert.equal(policy.evaluateBreak(stone, inside, world).decision.kind, "penalized", "an overworld region stays in the overworld");
+});
+
+test("a region another bot holds is refused by name, never exempt as the bot's own build, and no escape opens it", () => {
+  const bot = createFakeBot({ username: "Ayla" }).bot;
+  // Tom's file holds a region made "for" Ayla: owner Ayla, held by Tom.
+  const forAyla: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 66, z: 2 }, owner: "Ayla", label: "Tom's build", heldBy: "Tom", peer: true };
+  const own: ProtectedRegion = { ...forAyla, regionId: 2, min: { x: 10, y: 64, z: 0 }, max: { x: 12, y: 66, z: 2 }, label: "mine", heldBy: "Ayla", peer: false };
+  setProtectedRegionsProvider(bot, () => [forAyla, own]);
+  const policy = createMovements(bot);
+  const stone = observed(bot, "stone");
+  const refusal = { kind: "prohibited", reason: "inside Tom's protected area 'Tom's build' (owner Ayla)" };
+  assert.deepEqual(policy.evaluateBreak(stone, { x: 1, y: 64, z: 1 }, world).decision, refusal, "named by its holder, with no id the model could release");
+  assert.deepEqual(createMovements(bot, { ignoreRegionsOwnedBy: "ayla" }).evaluateBreak(stone, { x: 1, y: 64, z: 1 }, world).decision, refusal, "owner Ayla does not make it Ayla's own");
+  assert.equal(createMovements(bot, { ignoreRegionsOwnedBy: "ayla" }).evaluateBreak(stone, { x: 11, y: 64, z: 1 }, world).decision.kind, "penalized", "her own region stays hers");
+
+  const escape = policy.ownRegionEscape;
+  assert.ok(escape);
+  assert.equal(escape.inside(1, 64, 1), false, "standing in a peer's region is not an own-region escape");
+  assert.equal(escape.inside(11, 64, 1), true, "standing in her own is");
+  escape.open();
+  assert.deepEqual(policy.evaluateBreak(stone, { x: 1, y: 64, z: 1 }, world).decision, refusal, "an opened escape still keeps the peer's region shut");
+  assert.equal(policy.evaluateBreak(stone, { x: 11, y: 64, z: 1 }, world).decision.kind, "penalized", "and opens her own");
+  escape.close();
 });
 
 test("a sealed pit's guard cells refuse route digging but not placing or walking", () => {

@@ -300,6 +300,8 @@ test("a pit cell inside a protected region is never chosen, the bot's own region
       max: { x: 3, y: 70, z: 3 },
       owner: "someone",
       label: "house",
+      heldBy: "TestBot",
+      peer: false,
     },
   ]);
   const digs: Vec3[] = [];

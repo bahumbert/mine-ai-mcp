@@ -12,8 +12,12 @@ import { readRecentEventsResultSchema } from "../actions/read-recent-events/cont
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
-import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
+import { PEER_REGION_REFRESH_MS } from "../bot-data/peer-regions.js";
+import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
+import { persistentBotData } from "../test-support/bot-data.js";
+import { type FakeHarness, type Listened, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
+import { readProtectedRegions } from "../world/protected-regions.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
@@ -658,4 +662,107 @@ test("with a chat command prefix the runtime keeps command lines in its ring and
   const read = runtime.actions.find((action) => action.name === "read_recent_events")!;
   const history = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
   assert.deepEqual(history.events.map(({ summary }) => summary), ["Tom: hello"]);
+});
+
+const tomsPlace = (x: number) => ({
+  dimension: "overworld", min: { x, y: 63, z: 0 }, max: { x: x + 5, y: 70, z: 5 },
+  owner: "Tom", label: `Tom's ${x}`, reason: "test", createdBy: "Tom",
+});
+
+/** A runtime bot on `clock` (installed by the test), over a persistent root where bot "Tom" already holds one region. */
+async function runtimeBesideTom(t: test.TestContext, clock: ReturnType<typeof createFakeClock>, storage: "persistent" | "temporary") {
+  // The runtime's own timers read the globals the test's clock installed.
+  const files = persistentBotData(t);
+  const tom = new ProtectedRegionStore(files.open("peer-runtime", { kind: "bot", botId: "Tom" }), "Tom");
+  tom.protect(tomsPlace(200));
+  const { bot } = createFakeBot({ username: "RuntimeBot", position: new Vec3(0, 64, 0), loadedColumns: [], clock });
+  bot.setMaxListeners(40);
+  const runtime = await createMinecraftRuntime(bot, {
+    botData: {
+      storage: storage === "persistent" ? { kind: "persistent", root: files.root } : { kind: "temporary" },
+      identity: { worldId: "peer-runtime", scope: { kind: "bot", botId: "RuntimeBot" } },
+    },
+    createCombatController: () => combatController,
+  });
+  return { bot, runtime, tom };
+}
+
+test("the provider returns own and peer regions as one array, the same array until a change", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot, runtime, tom } = await runtimeBesideTom(t, clock, "persistent");
+  try {
+    const first = readProtectedRegions(bot);
+    assert.deepEqual(first.map((region) => [region.heldBy, region.peer]), [["Tom", true]]);
+    assert.equal(readProtectedRegions(bot), first, "the guards read it per priced break: no new array per read");
+
+    const protect = runtime.actions.find((action) => action.name === "protect_region")!;
+    await runtime.run(protect, { corner_a: { x: 0, y: 63, z: 0 }, corner_b: { x: 3, y: 66, z: 3 }, label: "mine", reason: "test" });
+    const withOwn = readProtectedRegions(bot);
+    assert.deepEqual(withOwn.map((region) => [region.heldBy, region.peer]), [["RuntimeBot", false], ["Tom", true]], "own regions first, at once");
+    assert.equal(readProtectedRegions(bot), withOwn);
+
+    tom.protect(tomsPlace(300));
+    assert.equal(readProtectedRegions(bot), withOwn, "a peer's new region waits for the next refresh");
+    await clock.advance(PEER_REGION_REFRESH_MS + 100);
+    const refreshed = readProtectedRegions(bot);
+    assert.deepEqual(refreshed.map((region) => region.label), ["mine", "Tom's 200", "Tom's 300"]);
+    assert.equal(readProtectedRegions(bot), refreshed);
+    await clock.advance(PEER_REGION_REFRESH_MS);
+    assert.equal(readProtectedRegions(bot), refreshed, "nothing changed, so the same array");
+  } finally {
+    await runtime.close(); // before the clock is restored: closing clears the mocked interval
+  }
+});
+
+/** The intervals of the refresh's period armed and cleared through the global timers (the fake clock's own count misses them). */
+function watchRefreshInterval() {
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  const armed: unknown[] = [];
+  const cleared: unknown[] = [];
+  globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+    const handle = realSet(...args);
+    if (args[1] === PEER_REGION_REFRESH_MS) armed.push(handle);
+    return handle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((handle: Parameters<typeof clearInterval>[0]) => {
+    cleared.push(handle);
+    realClear(handle);
+  }) as typeof clearInterval;
+  return {
+    armed,
+    cleared,
+    [Symbol.dispose]() {
+      globalThis.setInterval = realSet;
+      globalThis.clearInterval = realClear;
+    },
+  };
+}
+
+test("close disposes the refresh", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  using intervals = watchRefreshInterval();
+  const { runtime } = await runtimeBesideTom(t, clock, "persistent");
+  assert.ok(intervals.armed.length > 0, "the refresh runs while the runtime is open");
+  assert.equal(intervals.cleared.length, 0, "nothing is cleared while it is open");
+  await runtime.close();
+  for (const handle of intervals.armed) assert.ok(intervals.cleared.includes(handle), "closing clears every interval of that period");
+});
+
+test("temporary storage has no peers and no refresh", async (t) => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  using intervals = watchRefreshInterval();
+  const persistent = await runtimeBesideTom(t, clock, "persistent");
+  const persistentIntervals = intervals.armed.length;
+  await persistent.runtime.close();
+  const { bot, runtime } = await runtimeBesideTom(t, clock, "temporary");
+  try {
+    assert.deepEqual(readProtectedRegions(bot), []);
+    assert.equal(intervals.armed.length - persistentIntervals, persistentIntervals - 1, "the refresh is the one interval a temporary runtime lacks");
+  } finally {
+    await runtime.close();
+  }
 });

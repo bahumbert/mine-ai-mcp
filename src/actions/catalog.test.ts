@@ -73,7 +73,7 @@ function published(t: { after(fn: () => void): void }, options: ActionCatalogOpt
     {
       bot: createFakeBot().bot,
       botData,
-      protectedRegions: new ProtectedRegionStore(botData),
+      protectedRegions: new ProtectedRegionStore(botData, "TestBot"),
       budgets: {} as never,
       frontier: {} as never,
       navigation: {} as never,

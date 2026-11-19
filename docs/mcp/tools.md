@@ -321,7 +321,9 @@ through and opening doors stay allowed. Give `corner_a` and `corner_b`, or `cent
 and `radius` (0-31); each side is at most 64 blocks and at most 64 regions exist.
 `owner` is whose build it is (a player's name; omitted, the bot's own).
 `build_structure` still works inside regions its own bot owns and refuses a request
-with cells in anyone else's (`[BUILD_PROTECTED_REGION]`). The same box for the same
+with cells in anyone else's (`[BUILD_PROTECTED_REGION]`). Every bot of the same world
+also respects the regions the other bots stored (read from their bot-data files every
+5 s, named "<bot>'s protected area" with no id), whoever the `owner` is. The same box for the same
 owner returns the existing region with `created: false`. Errors: `[REGION_TOO_LARGE]`,
 `[REGION_LIMIT_REACHED]`. Regions persist in `main.protected_regions`. Runs beside the
 foreground action. Defined in
@@ -330,7 +332,8 @@ foreground action. Defined in
 ### `unprotect_region`
 
 Remove one protected region by `region_id`, so routes may dig and place there again.
-Error: `[REGION_NOT_FOUND]`. Runs beside the foreground action. Defined in
+Errors: `[REGION_NOT_FOUND]`, and `[REGION_NOT_HELD]` for a region another bot stored
+(only that bot can remove it). Runs beside the foreground action. Defined in
 [src/actions/unprotect-region/contract.ts](../../src/actions/unprotect-region/contract.ts).
 
 ## Tools that move the bot across terrain

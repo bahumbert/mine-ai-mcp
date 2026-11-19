@@ -1,4 +1,5 @@
 import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
+import { regionProviderFor } from "../bot-data/shared-regions.js";
 import { setProtectedRegionsProvider } from "../world/protected-regions.js";
 import type { BlockHighlighter } from "@aibengineering/minecraft-block-highlighter";
 import type { Bot } from "mineflayer";
@@ -417,8 +418,8 @@ export async function createMinecraftRuntime(
   await using resources = new AsyncDisposableStack();
   const botData = resources.use(SqlBotData.create(options.botData));
   // One list per bot: routes read it through the provider, the region tools write it (ADR-012).
-  const protectedRegions = new ProtectedRegionStore(botData);
-  setProtectedRegionsProvider(bot, () => protectedRegions.list());
+  const protectedRegions = new ProtectedRegionStore(botData, bot.username);
+  setProtectedRegionsProvider(bot, regionProviderFor(protectedRegions, botData, options.botData.identity.scope, resources));
   const strongholdEyeFlights = resources.use(new StrongholdEyeFlights(bot));
   // Set once the incident observer exists: no action, so no stall, comes before the runtime is built.
   // The incident observer is built after the runner and reads it: the runner records through this until it exists.

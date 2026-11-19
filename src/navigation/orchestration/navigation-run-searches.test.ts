@@ -21,7 +21,7 @@ const attempts = (outcome: { evidence: { movementAttempts: Readonly<Partial<Reco
   Object.values(outcome.evidence.movementAttempts).reduce((total: number, count) => total + (count ?? 0), 0);
 
 /** A region over a one-cell cage at the origin: dirt walls two high on all eight sides, over a stone floor. */
-const CAGE: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: -1, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "house" };
+const CAGE: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: -1, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "house", heldBy: "Theo", peer: false };
 
 function cagedBot(regions: readonly ProtectedRegion[]): FakeBot {
   const { bot } = createFakeBot({ username: "Theo", position: new Vec3(0.5, 63, 0.5), carried: { dirt: 16 } });

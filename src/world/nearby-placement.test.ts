@@ -53,7 +53,7 @@ test("a flooded tunnel leads to the side room 6 blocks off, not to a flooded cel
 test("a spot inside a protected region is found when nothing outside has a free cell", () => {
   const bot = botIn(lake(5));
   setProtectedRegionsProvider(bot, () => [
-    { regionId: 1, dimension: "overworld", min: { x: 4, y: 40, z: -20 }, max: { x: 20, y: 80, z: 20 }, owner: "TestBot", label: "house" },
+    { regionId: 1, dimension: "overworld", min: { x: 4, y: 40, z: -20 }, max: { x: 20, y: 80, z: 20 }, owner: "TestBot", label: "house", heldBy: "TestBot", peer: false },
   ]);
   assert.deepEqual(findStandingSpot(bot), new Vec3(5, 62, 0));
 });
@@ -141,6 +141,8 @@ function craftingBotAmong(regionOwner: string, box: { min: [number, number, numb
       max: { x: box.max[0], y: box.max[1], z: box.max[2] },
       owner: regionOwner,
       label: "Finn_Perimeter",
+      heldBy: "TestBot",
+      peer: false,
     },
   ]);
   return { bot, clock };
@@ -166,7 +168,7 @@ test("a bot swimming beside the area whose free cells are all inside it is not t
   const cells = lake(1);
   const bot = createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 } }).bot;
   setProtectedRegionsProvider(bot, () => [
-    { regionId: 1, dimension: "overworld", min: { x: 1, y: 40, z: -20 }, max: { x: 20, y: 80, z: 20 }, owner: "Finn", label: "Finn_Perimeter" },
+    { regionId: 1, dimension: "overworld", min: { x: 1, y: 40, z: -20 }, max: { x: 20, y: 80, z: 20 }, owner: "Finn", label: "Finn_Perimeter", heldBy: "TestBot", peer: false },
   ]);
   const result = await placeCarriedBlockNearby(bot, "crafting_table", { takeBack: true });
   assert.deepEqual(result, {

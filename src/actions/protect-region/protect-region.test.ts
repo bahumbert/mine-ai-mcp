@@ -28,7 +28,7 @@ test("a region is given by two corners or by a centre and radius, never both or 
 
 test("protecting stores the region for this bot by default, again returns it, and unprotecting removes it", async (t) => {
   const { bot } = createFakeBot({ username: "Ayla" });
-  const regions = new ProtectedRegionStore(temporaryBotData({ closeAfter: t }));
+  const regions = new ProtectedRegionStore(temporaryBotData({ closeAfter: t }), "Ayla");
   const protect = createProtectRegionAction(bot, regions);
   const unprotect = createUnprotectRegionAction(regions);
   assert.equal(protect.execution.kind, "concurrent");

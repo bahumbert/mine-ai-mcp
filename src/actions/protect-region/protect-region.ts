@@ -10,6 +10,7 @@ import {
   protectRegionInputSchema,
   protectRegionOutcomes,
   protectRegionResultSchema,
+  regionResult,
   type ProtectRegionResult,
 } from "./contract.js";
 
@@ -49,7 +50,7 @@ export function createProtectRegionAction(bot: Bot, regions: ProtectedRegionStor
       switch (outcome.kind) {
         case "created":
         case "existing":
-          return { status: "succeeded", region: outcome.region, created: outcome.kind === "created" };
+          return { status: "succeeded", region: regionResult(outcome.region), created: outcome.kind === "created" };
         case "too_large":
           return { status: "failed", error: protectRegionOutcomes.tooLarge(outcome.side), region: null, created: false };
         case "limit_reached":

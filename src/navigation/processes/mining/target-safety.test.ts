@@ -92,7 +92,7 @@ test("a block inside a protected region is never a mining target, and the refusa
   setProtectedRegionsProvider(bot, () => []);
   assert.equal(evaluateMineTarget(bot, policy, target, world, 0).kind, "mineable");
   setProtectedRegionsProvider(bot, () => [
-    { regionId: 3, dimension: "overworld", min: { x: 0, y: 63, z: -1 }, max: { x: 2, y: 65, z: 1 }, owner: "Tom", label: "Tom's place" },
+    { regionId: 3, dimension: "overworld", min: { x: 0, y: 63, z: -1 }, max: { x: 2, y: 65, z: 1 }, owner: "Tom", label: "Tom's place", heldBy: "TestBot", peer: false },
   ]);
   assert.deepEqual(evaluateMineTarget(bot, policy, target, world, 0), {
     kind: "prohibited", reason: "inside protected region #3 'Tom's place' (owner Tom)",

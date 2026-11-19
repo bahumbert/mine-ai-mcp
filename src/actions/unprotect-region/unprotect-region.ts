@@ -1,6 +1,7 @@
 import type { ProtectedRegionStore } from "../../bot-data/protected-regions.js";
 import { describeProtectedRegion } from "../../world/protected-regions.js";
 import { defineAction } from "../action.js";
+import { regionResult } from "../protect-region/contract.js";
 import {
   parseUnprotectRegionRequest,
   UNPROTECT_REGION,
@@ -32,10 +33,15 @@ export function createUnprotectRegionAction(regions: ProtectedRegionStore) {
     formatResult: formatUnprotectRegionResult,
     execute: async (request, context): Promise<UnprotectRegionResult> => {
       context.signal?.throwIfAborted();
-      const region = regions.unprotect(request.regionId);
-      return region === null
-        ? { status: "failed", error: unprotectRegionOutcomes.notFound(request.regionId), region: null }
-        : { status: "succeeded", region };
+      const outcome = regions.unprotect(request.regionId);
+      switch (outcome.kind) {
+        case "removed":
+          return { status: "succeeded", region: regionResult(outcome.region) };
+        case "not_held":
+          return { status: "failed", error: unprotectRegionOutcomes.notHeld(request.regionId, outcome.region.heldBy), region: null };
+        case "not_found":
+          return { status: "failed", error: unprotectRegionOutcomes.notFound(request.regionId), region: null };
+      }
     },
   });
 }

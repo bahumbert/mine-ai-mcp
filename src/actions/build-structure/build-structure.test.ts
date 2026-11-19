@@ -158,7 +158,7 @@ test("a block Minecraft does not have is refused before anything moves", async (
 test("a structure is refused before any block is touched when a cell lies in a region someone else owns, and built in its own", async () => {
   const { bot, physics } = structureWorld();
   Object.assign(bot, { username: "Ayla" });
-  const region = (owner: string) => ({ regionId: 4, dimension: "overworld", min: { x: 3, y: 64, z: 0 }, max: { x: 5, y: 66, z: 2 }, owner, label: "Tom's place" });
+  const region = (owner: string) => ({ regionId: 4, dimension: "overworld", min: { x: 3, y: 64, z: 0 }, max: { x: 5, y: 66, z: 2 }, owner, label: "Tom's place", heldBy: "TestBot", peer: false });
   setProtectedRegionsProvider(bot, () => [region("Tom")]);
   const request = { cells: cells([[2, 64, 0], [3, 64, 0], [4, 64, 0]]), removeWrongBlocks: false };
   const refused = await buildStructure(bot, request, {}, physics);

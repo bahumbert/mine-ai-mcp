@@ -6,7 +6,8 @@ import { protectedRegionSchema } from "../protect-region/contract.js";
 export const UNPROTECT_REGION = "unprotect_region" as const;
 export const UNPROTECT_REGION_DESCRIPTION =
   "Remove one protected region by its region_id (from protect_region or main.protected_regions), so routes and " +
-  "collect_block may dig and place blocks there again. Runs beside the foreground action.";
+  "collect_block may dig and place blocks there again. Only regions this bot stored can be removed ([REGION_NOT_HELD] " +
+  "for another bot's). Runs beside the foreground action.";
 
 export const unprotectRegionInputSchema = z.strictObject({
   region_id: z.number().int().positive().describe("The region to remove."),
@@ -31,4 +32,6 @@ export const unprotectRegionAnnotations = {
 
 export const unprotectRegionOutcomes = {
   notFound: (regionId: number) => `[REGION_NOT_FOUND] There is no protected region #${regionId}.`,
+  notHeld: (regionId: number, heldBy: string) =>
+    `[REGION_NOT_HELD] Protected region #${regionId} was stored by ${heldBy}, not by this bot: only ${heldBy} can remove it.`,
 } as const;

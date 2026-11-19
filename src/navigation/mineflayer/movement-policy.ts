@@ -447,7 +447,7 @@ export function createMineflayerMovementPolicy(
   const ownRegionEscape: OwnRegionEscape | undefined = options.ignoreRegionsOwnedBy === undefined
     ? {
         inside: (x, y, z) => readProtectedRegions(bot).some((region) =>
-          sameOwner(region.owner, bot.username) && protectedRegionAt([region], bot.game.dimension, x, y, z) !== null),
+          !region.peer && sameOwner(region.owner, bot.username) && protectedRegionAt([region], bot.game.dimension, x, y, z) !== null),
         open: () => { ownRegionsOpen = true; },
         close: () => { ownRegionsOpen = false; },
       }

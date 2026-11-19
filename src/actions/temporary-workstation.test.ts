@@ -499,7 +499,7 @@ test("crafting in the middle of an area another player owns: the real placement 
   for (let x = -16; x <= 16; x += 1) for (let z = -16; z <= 16; z += 1) for (let y = 50; y <= 61; y += 1) cells[`${x},${y},${z}`] = "stone";
   const { bot } = createFakeBot({ cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 } });
   setProtectedRegionsProvider(bot, () => [
-    { regionId: 1, dimension: "overworld", min: { x: -13, y: 40, z: -13 }, max: { x: 13, y: 80, z: 13 }, owner: "Finn", label: "Finn_Perimeter" },
+    { regionId: 1, dimension: "overworld", min: { x: -13, y: 40, z: -13 }, max: { x: 13, y: 80, z: 13 }, owner: "Finn", label: "Finn_Perimeter", heldBy: "TestBot", peer: false },
   ]);
   const operations = workstationOperations(bot, {} as NavigationRuntime);
   const placement = await operations.place("crafting_table");

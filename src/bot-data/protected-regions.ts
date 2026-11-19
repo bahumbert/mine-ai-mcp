@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { sameOwner, type BlockCorner, type ProtectedRegion } from "../world/protected-regions.js";
-import type { SqlBotData, SqlBotDataRow } from "./sql-bot-data.js";
+import type { SqlBotData } from "./sql-bot-data.js";
 
 /** The route check walks every region for each break it prices, so the list stays short. */
 export const MAX_PROTECTED_REGIONS = 64;
@@ -22,6 +22,12 @@ export type ProtectOutcome =
   | { readonly kind: "too_large"; readonly side: number }
   | { readonly kind: "limit_reached" };
 
+export type UnprotectOutcome =
+  | { readonly kind: "removed"; readonly region: ProtectedRegion }
+  | { readonly kind: "not_found" }
+  /** Another bot stored it (a shared file written by several hosts): only that bot may remove it. */
+  | { readonly kind: "not_held"; readonly region: ProtectedRegion };
+
 const rowSchema = z.object({
   region_id: z.number().int().positive(),
   dimension: z.string().min(1),
@@ -33,9 +39,15 @@ const rowSchema = z.object({
   max_z: z.number().int(),
   owner: z.string().min(1),
   label: z.string().min(1),
+  created_by_bot_id: z.string().min(1),
 });
 
-function parseRegion(row: SqlBotDataRow): ProtectedRegion {
+/** The columns `parseRegion` reads, for the store's own file and for the read-only reads of the other bots' files. */
+export const PROTECTED_REGION_COLUMNS =
+  "region_id, dimension, min_x, min_y, min_z, max_x, max_y, max_z, owner, label, created_by_bot_id";
+
+/** A stored row as a region: `peer` when `ownBotId` did not store it. */
+export function parseRegion(row: Record<string, unknown>, ownBotId: string | null): ProtectedRegion {
   const parsed = rowSchema.parse(row);
   return Object.freeze({
     regionId: parsed.region_id,
@@ -44,6 +56,8 @@ function parseRegion(row: SqlBotDataRow): ProtectedRegion {
     max: { x: parsed.max_x, y: parsed.max_y, z: parsed.max_z },
     owner: parsed.owner,
     label: parsed.label,
+    heldBy: parsed.created_by_bot_id,
+    peer: ownBotId === null || parsed.created_by_bot_id !== ownBotId,
   });
 }
 
@@ -52,16 +66,31 @@ const sameCorner = (left: BlockCorner, right: BlockCorner) => left.x === right.x
 /**
  * The bot's protected regions, kept in memory: navigation asks about them for every break it prices, far too often
  * for a query. With the default per-bot data scope each database has one writer (its host), so reloading after each
- * write keeps the copy exact; hosts sharing one database (`--bot-data-scope shared`) see each other's regions only
- * after a restart (regions shared between bots wait for the Phase 5 store).
+ * write keeps the copy exact; hosts sharing one database (`--bot-data-scope shared`) see each other's regions at the
+ * next `refresh()`, and the ones they stored are `peer` regions here (the other bots' own files: `peer-regions.ts`).
  */
 export class ProtectedRegionStore {
   readonly #data: SqlBotData;
+  readonly #botId: string;
   #regions: readonly ProtectedRegion[];
+  /** `PRAGMA data_version` when the list was loaded: it moves only when another connection commits. */
+  #dataVersion: number;
 
-  constructor(data: SqlBotData) {
+  /** `botId`: the id this bot's regions carry in `created_by_bot_id`; any other row is a peer's. */
+  constructor(data: SqlBotData, botId: string) {
     this.#data = data;
+    this.#botId = botId;
+    this.#dataVersion = this.#readDataVersion();
     this.#regions = this.#load();
+  }
+
+  /** Reloads when another connection wrote since the last load (hosts sharing a file); true when it did. */
+  refresh(): boolean {
+    const version = this.#readDataVersion();
+    if (version === this.#dataVersion) return false;
+    this.#dataVersion = version;
+    this.#regions = this.#load();
+    return true;
   }
 
   list(): readonly ProtectedRegion[] {
@@ -98,21 +127,26 @@ export class ProtectedRegionStore {
     return { kind: "created", region };
   }
 
-  /** Removes one region; null when there is no such region. */
-  unprotect(regionId: number): ProtectedRegion | null {
-    const region = this.#regions.find((stored) => stored.regionId === regionId) ?? null;
-    if (region === null) return null;
+  /** Removes one region of this bot; a region another bot stored stays (`not_held`). */
+  unprotect(regionId: number): UnprotectOutcome {
+    const region = this.#regions.find((stored) => stored.regionId === regionId);
+    if (region === undefined) return { kind: "not_found" };
+    if (region.peer) return { kind: "not_held", region };
     this.#data.transaction((database) => {
       database.prepare("DELETE FROM protected_regions WHERE region_id = ?").run(regionId);
     }, { name: "unprotectRegion" });
     this.#regions = this.#load();
-    return region;
+    return { kind: "removed", region };
+  }
+
+  /** Read before each load, so a write landing between the two is seen at the next `refresh()`. */
+  #readDataVersion(): number {
+    return Number(this.#data.read("PRAGMA data_version")[0]?.data_version);
   }
 
   #load(): readonly ProtectedRegion[] {
     return Object.freeze(this.#data.read(`
-      SELECT region_id, dimension, min_x, min_y, min_z, max_x, max_y, max_z, owner, label
-      FROM protected_regions ORDER BY region_id
-    `).map(parseRegion));
+      SELECT ${PROTECTED_REGION_COLUMNS} FROM protected_regions ORDER BY region_id
+    `).map((row) => parseRegion(row, this.#botId)));
   }
 }
