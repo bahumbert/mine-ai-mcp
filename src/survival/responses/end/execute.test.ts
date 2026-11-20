@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
-import type { NavigationRuntime } from "../../../navigation/index.js";
+import { createNavigationRuntime, type NavigationRuntime } from "../../../navigation/index.js";
 import { TestEndCombat as EndCombat, attackedIds, onAttack } from "../../../test-support/combat.js";
 import {
   type FakeBotOptions,
@@ -53,6 +53,7 @@ for (const rate of [20, 10]) for (const kind of ["dragon", "crystal"] as const) 
 import { swingReadiness } from "../../weapons/swing-readiness.js";
 import { planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
 import { fightSwordAfter } from "../../../test-support/swing-handoff.js";
+import { observation as navigationObservation, planningStart } from "../../../test-support/navigation.js";
 
 for (const rate of [20, 10]) test(`a crystal melee swing leaves shared recovery for the next fight at ${rate} tps`, async () => {
   const cells: Record<string, string> = { "0,82,0": "bedrock" };
@@ -92,6 +93,46 @@ for (const rate of [20, 10]) test(`a crystal melee swing leaves shared recovery 
     assert.equal(server.gameTime - attackedAt, 13, "the next sword waits thirteen server ticks from the crystal swing");
     assert.deepEqual(attackedIds(server), [42, 7]);
   } finally { stopWatching(); }
+});
+
+test("crystal stance and return refuse a mid-height tower break and allow the pillar's scaffold", async () => {
+  const tower = new Vec3(0, 72, 0);
+  const scaffold = new Vec3(3, 75, 0);
+  const start = new Vec3(3.5, 76, 0.5);
+  const cells: Record<string, string> = { "0,82,0": "bedrock", "3,75,0": "cobblestone" };
+  for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++)
+    if (x * x + z * z <= 5) for (let y = 61; y <= 81; y++) cells[`${x},${y},${z}`] = "obsidian";
+  const { bot, clock, server, combat } = endScene({
+    position: start, groundY: 60, cells, carried: { cobblestone: 64, diamond_pickaxe: 1, iron_sword: 1 },
+    entities: { 42: { name: "end_crystal", position: new Vec3(0.5, 83, 0.5) } },
+  });
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee", "pillar");
+  await using runtime = createNavigationRuntime(bot);
+  const answers: string[][] = [];
+  const navigate: NavigationRuntime["navigate"] = async ({ goal, movements }) => {
+    const readBreak = (position: Vec3) => movements.evaluateBreak(
+      runtime.world.blockAt(position.x, position.y, position.z), position, runtime.world,
+    ).decision.kind;
+    answers.push([readBreak(tower), readBreak(scaffold)]);
+    assert.ok(observation.staircase);
+    const stance = observation.staircase.stance.offset(0.5, 0, 0.5);
+    const destination = answers.length === 1 ? stance : start;
+    const feet = bot.entity.position.floored();
+    const resolved = goal.resolve(navigationObservation(feet.x, feet.y, feet.z));
+    assert.equal(resolved.kind, "active");
+    assert.ok(resolved.isSatisfied(planningStart(destination.floored(), 0).node, runtime.world));
+    server.sendPosition(destination);
+    bot.entity.onGround = true;
+    return { status: "completed", elapsedMs: 0 };
+  };
+  const off = onAttack(server, id => { if (id === 42) combat.kill(id); });
+  try {
+    const result = await clock.settle(new EndCombat(bot, { ...runtime, navigate }, { needed: false } as FootingRecovery)
+      .crystal(42, new AbortController().signal, observation), SETTLE_LIMIT_MS);
+    assert.equal(result.outcome, "crystal_destroyed", result.reason ?? "");
+    assert.deepEqual(answers, [["prohibited", "penalized"], ["prohibited", "penalized"]]);
+  } finally { off(); }
 });
 
 /**
