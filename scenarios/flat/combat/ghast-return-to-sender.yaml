@@ -39,4 +39,5 @@ goal:
   goals:
     - { kind: health, who: FireballBot, health: 20 }
     - { kind: kill, who: FireballBot, target: ghast }
+    - { kind: survive, who: FireballBot, seconds: 1 }
     - { kind: completion, who: FireballBot }

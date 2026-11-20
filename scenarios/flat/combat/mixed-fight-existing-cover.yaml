@@ -38,4 +38,5 @@ goal:
   goals:
     - { kind: kill, who: CoverMixed, target: skeleton }
     - { kind: kill, who: CoverMixed, target: zombie }
+    - { kind: survive, who: CoverMixed, seconds: 1 }
     - { kind: completion, who: CoverMixed }

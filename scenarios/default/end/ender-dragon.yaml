@@ -33,3 +33,4 @@ goal:
   goals:
     - { kind: kill, target: ender_dragon }
     - { kind: survive, seconds: 1 }
+    - { kind: completion, who: DragonFighter }

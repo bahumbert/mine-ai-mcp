@@ -47,5 +47,8 @@ goal:
     - kind: health
       who: StepFightBot
       health: 12
+    - kind: survive
+      who: StepFightBot
+      seconds: 1
     - kind: completion
       who: StepFightBot

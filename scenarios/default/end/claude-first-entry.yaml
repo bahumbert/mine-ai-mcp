@@ -62,4 +62,10 @@ params:
     - [43, cooked_porkchop, 5, 0]
     - [44, stone_pickaxe, 1, 1]
     - [45, shield, 1, 0]
-goal: { kind: kill, target: ender_dragon, timeout: 2400 }
+goal:
+  kind: all
+  timeout: 2400
+  goals:
+    - { kind: kill, target: ender_dragon }
+    - { kind: survive, seconds: 1 }
+    - { kind: completion, who: DragonFighter }

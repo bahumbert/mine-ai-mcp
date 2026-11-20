@@ -39,4 +39,5 @@ goal:
   timeout: 65
   goals:
     - { kind: kill, who: HiddenBlazeBot, target: blaze }
+    - { kind: survive, who: HiddenBlazeBot, seconds: 1 }
     - { kind: completion, who: HiddenBlazeBot }

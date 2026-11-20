@@ -45,4 +45,10 @@ params:
     - [36, diamond_sword, 1, 780]
     - [37, diamond_pickaxe, 1, 585]
     - [45, shield, 1, 0]
-goal: { kind: kill, target: ender_dragon, timeout: 900 }
+goal:
+  kind: all
+  timeout: 900
+  goals:
+    - { kind: kill, target: ender_dragon }
+    - { kind: survive, seconds: 1 }
+    - { kind: completion, who: DragonFighter }
