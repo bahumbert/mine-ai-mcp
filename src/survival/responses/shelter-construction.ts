@@ -23,7 +23,16 @@ import {
   type StepFailure,
   waitForShelterTicks,
 } from "./shelter-build.js";
-import { diggable, enclosedInPlace, shelterFeet, shelterIntruder, SIDES, sidesByThreat, solid } from "./shelter-cells.js";
+import {
+  diggable,
+  enclosedInPlace,
+  floorHoldsCentre,
+  shelterFeet,
+  shelterIntruder,
+  SIDES,
+  sidesByThreat,
+  solid,
+} from "./shelter-cells.js";
 import { describeShelterRefusal } from "./shelter-refusal.js";
 
 /** How far down the bot digs: three cells put its head below anything that walks, and out of a skeleton's line. */
@@ -164,16 +173,7 @@ async function centerForShelterRing(build: ShelterBuild, feet: Vec3): Promise<St
   const { bot, options } = build;
   // A body straddling a cell edge occupies the wall's destination. The
   // server refuses that block even though the target itself is air.
-  const floor = bot.blockAt(feet.offset(0, -1, 0));
-  const supportedCenter = floor?.shapes.some(
-    ([minX, , minZ, maxX, maxY, maxZ]) =>
-      minX <= 0.5 &&
-      maxX >= 0.5 &&
-      minZ <= 0.5 &&
-      maxZ >= 0.5 &&
-      Math.abs(feet.y - 1 + maxY - bot.entity.position.y) < 0.001,
-  );
-  if (shelterBlocks(build) > 0 && !supportedCenter) {
+  if (shelterBlocks(build) > 0 && !floorHoldsCentre(bot, feet)) {
     return { kind: "failed", error: "The shelter cell has no solid floor to centre on", refusal: describeShelterRefusal(build, "no_floor") };
   }
   if (!constructionChanged(build, feet)) return null;
