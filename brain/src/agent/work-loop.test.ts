@@ -1,35 +1,64 @@
 // Tests of the work loop: objectives, step guards, repeat and failure rules, and a model that is unavailable.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock, flush } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { createFakeClock, flush, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { Agent } from "../agent.ts";
 import { INSTANT_TYPING } from "../body.ts";
 import type { BrainEvent } from "../brain-log.ts";
 import { CHAT_RETRY_MS } from "../model-wait.ts";
-import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
+import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import { planFollowStep } from "../skills/follow.ts";
-import { say, agentFor, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
+import { say, agentFor, clockedAgentFor, clockedJournaledAgent, others, steveAt, journaledAgent } from "./agent-fixtures.test.ts";
 
 function bodyCalls(runtime: FakeRuntime): string[] {
   return runtime.submitted.filter((call) => call.tool !== "send_message").map((call) => call.tool);
 }
 
-/** Orders asking, one after the other, for a craft that has no recipe (live 2026-10-10: it failed in six objectives). */
-function craftOrders(t: Parameters<typeof agentFor>[0]) {
+/**
+ * The clock moves in 1 ms slices while a test waits on it: the fake's duration is a count of 1 ms polls (one poll per
+ * slice), so a coarser slice stretches every duration, and the 30 ms gains and 120 ms window of these tests keep their
+ * real-time length only at 1 ms (the agent fixtures' `clockUntil` moves in 50 ms slices).
+ */
+const SLICE_MS = 1;
+
+/** `promise` on the installed clock, in 1 ms slices; `maxMs` of clock is a hang guard (an operation with no bound of its own). */
+function settleInSlices<T>(clock: FakeClock, promise: Promise<T>, maxMs = 20_000): Promise<T> {
+  return clock.settle(promise, maxMs, SLICE_MS);
+}
+
+/**
+ * Until `condition` holds on the installed clock, checked every 1 ms of clock; it fails once `maxMs` of clock have passed,
+ * as the `until` it replaces failed after its `timeoutMs`. (`until` counts real time: on the fake clock it never bounds the wait.)
+ */
+async function untilInSlices(clock: FakeClock, condition: () => boolean, maxMs = 2_000): Promise<void> {
+  let cancel = () => {};
+  try {
+    await settleInSlices(clock, new Promise<void>((resolve) => { cancel = clock.every(() => { if (condition()) resolve(); }, SLICE_MS); }), maxMs);
+  } finally {
+    cancel();
+  }
+}
+
+/**
+ * Orders asking, one after the other, for a craft that has no recipe (live 2026-10-10: it failed in six objectives).
+ * With a clock, the agent and its waits run on that installed mocked clock (`stop` ends the agent before it is disposed).
+ */
+function craftOrders(t: Parameters<typeof agentFor>[0], clock?: FakeClock) {
   const runtime = new FakeRuntime();
   runtime.failures.craft_item = "[ITEMS_NOT_CRAFTABLE] Minecraft has no crafting recipe for: cooked_beef.";
-  const tiers = agentFor(t, runtime);
+  const tiers = clock === undefined ? { ...agentFor(t, runtime), stop: async () => undefined } : clockedAgentFor(clock, runtime);
+  const settle = <T,>(promise: Promise<T>): Promise<T> => clock === undefined ? promise : settleInSlices(clock, promise);
   let said = 0;
   const order = async (request: string, ...steps: object[]) => {
     const before = tiers.action.requests.length;
     tiers.chat.reply({ say: "Okay!", route: "act", request }, { say: "Can't, sorry." });
     tiers.action.reply(...steps);
-    await tiers.agent.handle(say("Steve", request));
+    await settle(tiers.agent.handle(say("Steve", request)));
     said += 2;
-    await until(() => runtime.said.length === said);
+    await (clock === undefined ? until(() => runtime.said.length === said) : untilInSlices(clock, () => runtime.said.length === said));
     return tiers.action.requests.slice(before).map((request) => request.at(-1)?.content ?? "");
   };
-  return { order, runtime };
+  return { order, runtime, stop: tiers.stop };
 }
 
 const CRAFT = { step: { skill: "craft_item", item: "cooked_beef", count: 3 } };
@@ -315,22 +344,27 @@ test("a step that failed once is shown to the work tier (its own objective only)
 });
 
 test("a step that failed twice is refused every time, for any objective, until the 30 minutes are over", async (t) => {
-  const clocks = steppedClocks(t);
-  const { order, runtime } = craftOrders(t);
-  await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
-  // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
-  const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
-  assert.doesNotMatch(prompts[0] ?? "", /failed lately/u, "another objective's failure is guarded by key, not shown");
-  assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago \(refused now\)/u);
-  assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
-  assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
-  clocks.wall(-800);
-  clocks.monotonic(31 * 60_000);
-  const crafted = runtime.submitted.filter((call) => call.tool === "craft_item").length;
-  const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
-  assert.doesNotMatch(later[0] ?? "", /failed lately/u);
-  assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
-  assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, crafted + 1, "the step ran again, it was not refused");
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { order, runtime, stop } = craftOrders(t, clock);
+  try {
+    await order("cook 3 beef", CRAFT, { give_up: "No recipe." });
+    // Failed once for the first order: it runs (second failure); then refused, on every try, until the objective ends.
+    const prompts = await order("make me cooked beef then", CRAFT, CRAFT, CRAFT, CRAFT);
+    assert.doesNotMatch(prompts[0] ?? "", /failed lately/u, "another objective's failure is guarded by key, not shown");
+    assert.match(prompts[1] ?? "", /- craft 3 cooked_beef, failed 2 times, the last 1 minute ago \(refused now\)/u);
+    assert.match(prompts[2] ?? "", /"craft 3 cooked_beef" failed 2 times in the last 30 minutes.*refused: choose a different step, or give this objective up/u);
+    assert.equal(prompts.length, 4, "refused at every try until the third refusal ended the objective");
+    clock.stepWallClock(-800);
+    await clock.advance(31 * 60_000, 1_000);
+    const crafted = runtime.submitted.filter((call) => call.tool === "craft_item").length;
+    const later = await order("cook me 3 beef", CRAFT, { give_up: "No recipe." });
+    assert.doesNotMatch(later[0] ?? "", /failed lately/u);
+    assert.equal(later.length, 2, "forgotten after 30 minutes: it ran");
+    assert.equal(runtime.submitted.filter((call) => call.tool === "craft_item").length, crafted + 1, "the step ran again, it was not refused");
+  } finally {
+    await stop();
+  }
 });
 
 test("a step refused three times ends the objective as failed; the count restarts when the step is allowed and runs", async (t) => {
@@ -406,31 +440,42 @@ test("a step out to obtain items that gains none for the whole window is stopped
 });
 
 // Review V3: WSL resyncs its wall clock forward after the host wakes; the no-gain window must not read that as minutes.
-test("a 60 s wall clock step does not stop a step that keeps gaining", async (t) => {
+test("a 60 s wall clock step does not stop a step that keeps gaining", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_mob_drop = 300;
-  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
-  const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
-  const clocks = steppedClocks(t);
-  setTimeout(() => clocks.wall(60_000), 100);
-  t.after(() => clearInterval(gains));
-  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
-  action.reply(HUNT, { done: "got the ink" });
-  await agent.handle(say("Steve", "get me 8 ink sacs"));
-  await until(() => runtime.said.length >= 2, 5_000);
+  const { agent, chat, action, stop } = clockedAgentFor(clock, runtime, {}, QUICK_GAIN);
+  const gains = clock.every(() => runtime.addItem("ink_sac", 1), 30);
+  clock.after(100, () => clock.stepWallClock(60_000));
+  try {
+    chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+    action.reply(HUNT, { done: "got the ink" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 8 ink sacs")));
+    await untilInSlices(clock, () => runtime.said.length >= 2, 5_000);
+  } finally {
+    gains();
+    await stop();
+  }
   assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms: a clock step is not 60 s without a gain");
 });
 
-test("a fetch travelling to the place it saw the block gets nearer: that is progress for the no-gain stop (live 2026-10-10 run 9: Kenji's boat trip)", async (t) => {
+test("a fetch travelling to the place it saw the block gets nearer: that is progress for the no-gain stop (live 2026-10-10 run 9: Kenji's boat trip)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = farFetch(400);
-  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
+  const { agent, chat, action, stop } = clockedAgentFor(clock, runtime, {}, QUICK_GAIN);
   // 20 blocks nearer every 30 ms against a 120 ms window: no item rises for 400 ms, yet it is not stopped.
-  const walking = setInterval(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
-  t.after(() => clearInterval(walking));
-  chat.reply({ say: "Okay!", route: "act", request: "get 2 oak_log" }, { say: "Got them!" });
-  action.reply(FETCH, { done: "got the logs" });
-  await agent.handle(say("Steve", "get me 2 oak logs"));
-  await until(() => runtime.said.length === 2, 5_000);
+  const walking = clock.every(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
+  try {
+    chat.reply({ say: "Okay!", route: "act", request: "get 2 oak_log" }, { say: "Got them!" });
+    action.reply(FETCH, { done: "got the logs" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 2 oak logs")));
+    await untilInSlices(clock, () => runtime.said.length === 2, 5_000);
+  } finally {
+    walking();
+    await stop();
+  }
   assert.equal(runtime.cancelled.length, 0, "getting nearer is progress");
   assert.equal(runtime.submitted.filter((call) => call.tool === "collect_block").length, 2, "it arrived and gathered");
 });
@@ -446,7 +491,9 @@ test("a fetch travelling that gets no nearer is stopped after the window, as bef
   assert.match(action.requests[1]?.[1]?.content ?? "", /get 2 oak_log -> failed: nothing gained in 0\.002 minutes: 0 of 2 oak_log so far/u);
 });
 
-test("a step whose items keep increasing is not stopped, and a collect step is looked at too (any step has the silence limit)", async (t) => {
+test("a step whose items keep increasing is not stopped, and a collect step is looked at too (any step has the silence limit)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_mob_drop = 300;
   runtime.durations.collect_block = 300;
@@ -456,45 +503,55 @@ test("a step whose items keep increasing is not stopped, and a collect step is l
     statuses.calls += 1;
     return status();
   };
-  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
-  const gains = setInterval(() => runtime.addItem("ink_sac", 1), 30);
-  t.after(() => clearInterval(gains));
-  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
-  action.reply(HUNT, { done: "got the ink" });
-  await agent.handle(say("Steve", "get me 8 ink sacs"));
-  await until(() => runtime.said.length === 2, 5_000);
-  assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms against a 120 ms window: not stopped");
-  assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> done/u);
-  clearInterval(gains);
-  const sampled = statuses.calls;
-  runtime.durations.collect_block = 50;
-  chat.reply({ say: "Okay!", route: "act", request: "collect 1 dirt" }, { say: "Done!" });
-  action.reply({ step: { skill: "collect_block", block: "dirt", count: 1 } }, { done: "dirt" });
-  await agent.handle(say("Steve", "get me a dirt"));
-  await until(() => runtime.said.length === 4, 5_000);
-  assert.equal(runtime.cancelled.length, 0, "the collect step (about 300 ms, moving or not) is not cancelled");
-  assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
+  const { agent, chat, action, stop } = clockedAgentFor(clock, runtime, {}, QUICK_GAIN);
+  const cancelGains = clock.every(() => runtime.addItem("ink_sac", 1), 30);
+  try {
+    chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+    action.reply(HUNT, { done: "got the ink" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 8 ink sacs")));
+    await untilInSlices(clock, () => runtime.said.length === 2, 5_000);
+    assert.equal(runtime.cancelled.length, 0, "gaining every 30 ms against a 120 ms window: not stopped");
+    assert.match(action.requests[1]?.[1]?.content ?? "", /1\. hunt glow_squid for 8 ink_sac -> done/u);
+    cancelGains();
+    const sampled = statuses.calls;
+    runtime.durations.collect_block = 50;
+    chat.reply({ say: "Okay!", route: "act", request: "collect 1 dirt" }, { say: "Done!" });
+    action.reply({ step: { skill: "collect_block", block: "dirt", count: 1 } }, { done: "dirt" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me a dirt")));
+    await untilInSlices(clock, () => runtime.said.length === 4, 5_000);
+    assert.equal(runtime.cancelled.length, 0, "the collect step (about 300 ms, moving or not) is not cancelled");
+    assert.ok(sampled > 15, `the hunt was sampled (${sampled} calls)`);
+  } finally {
+    cancelGains();
+    await stop();
+  }
 });
 
-test("a step whose target never rises but another item does is not stopped; one where nothing rises still is", async (t) => {
+test("a step whose target never rises but another item does is not stopped; one where nothing rises still is", async () => {
   // Live 2026-10-10 run 8: "get 48 dark_oak_stairs" gathered 20 dark_oak_log for its planks and was stopped for no stairs.
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_mob_drop = 300;
-  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
-  const gains = setInterval(() => runtime.addItem("dark_oak_log", 1), 30);
-  t.after(() => clearInterval(gains));
-  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
-  action.reply(HUNT, { done: "got the ink" });
-  await agent.handle(say("Steve", "get me 8 ink sacs"));
-  await until(() => runtime.said.length === 2, 5_000);
-  assert.equal(runtime.cancelled.length, 0, "logs rising against a 120 ms window: the chain is progressing");
-  clearInterval(gains);
-  runtime.durations.collect_mob_drop = 100_000;
-  chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "No squid, sorry!" });
-  action.reply(HUNT, { give_up: "no squid" });
-  await agent.handle(say("Steve", "get me 8 ink sacs again"));
-  await until(() => runtime.said.length === 4, 5_000);
-  assert.equal(runtime.cancelled.length, 1, "nothing rose: stopped as before");
+  const { agent, chat, action, stop } = clockedAgentFor(clock, runtime, {}, QUICK_GAIN);
+  const gains = clock.every(() => runtime.addItem("dark_oak_log", 1), 30);
+  try {
+    chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "Got them!" });
+    action.reply(HUNT, { done: "got the ink" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 8 ink sacs")));
+    await untilInSlices(clock, () => runtime.said.length === 2, 5_000);
+    assert.equal(runtime.cancelled.length, 0, "logs rising against a 120 ms window: the chain is progressing");
+    gains();
+    runtime.durations.collect_mob_drop = 100_000;
+    chat.reply({ say: "Okay!", route: "act", request: "get 8 ink_sac" }, { say: "No squid, sorry!" });
+    action.reply(HUNT, { give_up: "no squid" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 8 ink sacs again")));
+    await untilInSlices(clock, () => runtime.said.length === 4, 5_000);
+    assert.equal(runtime.cancelled.length, 1, "nothing rose: stopped as before");
+  } finally {
+    gains();
+    await stop();
+  }
 });
 
 test("a step failing for a full inventory names the junk with its whole count (live 2026-10-10: 18 of 238 snowballs dropped per step)", async (t) => {
@@ -565,16 +622,22 @@ test("a step with no item target and no sign of life for the whole window is can
   assert.match(action.requests[1]?.[1]?.content ?? "", /collect 16 oak_log -> failed: the action gave no sign of life for 0\.002 minutes/u);
 });
 
-test("a step with no item target that keeps moving is alive: a sign of life resets the clock", async (t) => {
+test("a step with no item target that keeps moving is alive: a sign of life resets the clock", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.collect_block = 400;
-  const { agent, chat, action } = agentFor(t, runtime, {}, QUICK_GAIN);
-  const walking = setInterval(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
-  t.after(() => clearInterval(walking));
-  chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Got them!" });
-  action.reply(COLLECT, { done: "got the logs" });
-  await agent.handle(say("Steve", "collect logs"));
-  await until(() => runtime.said.length === 2, 5_000);
+  const { agent, chat, action, stop } = clockedAgentFor(clock, runtime, {}, QUICK_GAIN);
+  const walking = clock.every(() => { runtime.snapshot = { ...runtime.snapshot, position: { ...runtime.snapshot.position, x: runtime.snapshot.position.x + 20 } }; }, 30);
+  try {
+    chat.reply({ say: "Okay!", route: "act", request: "collect 16 oak_log" }, { say: "Got them!" });
+    action.reply(COLLECT, { done: "got the logs" });
+    await settleInSlices(clock, agent.handle(say("Steve", "collect logs")));
+    await untilInSlices(clock, () => runtime.said.length === 2, 5_000);
+  } finally {
+    walking();
+    await stop();
+  }
   assert.equal(runtime.cancelled.length, 0);
 });
 
@@ -769,20 +832,26 @@ test("a chat line is asked again for CHAT_RETRY_MS of monotonic time, whatever t
   await handling;
 });
 
-test("a step's journal ms is its monotonic time: a wall clock step back of 60 s in the step does not make it negative", async (t) => {
+test("a step's journal ms is its monotonic time: a wall clock step back of 60 s in the step does not make it negative", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
-  runtime.durations.collect_block = 300;
-  const clocks = steppedClocks(t);
-  const { agent, events, chat, action } = journaledAgent(t, runtime);
-  chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Done." });
-  action.reply(DIRT, { done: "collected 2 dirt" });
-  await agent.handle(say("Steve", "get me 2 dirt"));
-  await until(() => runtime.submitted.some((call) => call.tool === "collect_block"));
-  clocks.wall(-60_000);
-  clocks.monotonic(2_000);
-  await until(() => events.some((event) => event.kind === "step"));
-  const step = events.find((event) => event.kind === "step");
-  assert.ok(step?.kind === "step" && step.ms >= 2_000 && step.ms < 10_000, `ms ${step?.kind === "step" ? step.ms : "no step"}`);
+  // 2 s of monotonic time pass inside the step: the collect is 2000 one-millisecond polls from its submission.
+  runtime.durations.collect_block = 2_000;
+  const { agent, events, chat, action, stop } = clockedJournaledAgent(clock, runtime);
+  try {
+    chat.reply({ say: "On it.", route: "act", request: "collect 2 dirt" }, { say: "Done." });
+    action.reply(DIRT, { done: "collected 2 dirt" });
+    await settleInSlices(clock, agent.handle(say("Steve", "get me 2 dirt")));
+    await untilInSlices(clock, () => runtime.submitted.some((call) => call.tool === "collect_block"));
+    clock.stepWallClock(-60_000);
+    await clock.advance(2_000, SLICE_MS);
+    await untilInSlices(clock, () => events.some((event) => event.kind === "step"));
+    const step = events.find((event) => event.kind === "step");
+    assert.ok(step?.kind === "step" && step.ms >= 2_000 && step.ms < 10_000, `ms ${step?.kind === "step" ? step.ms : "no step"}`);
+  } finally {
+    await stop();
+  }
 });
 
 test("a follow ordered by a player counts their silence in monotonic time: a wall clock step of 11 minutes does not end it", async (t) => {

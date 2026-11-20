@@ -1,12 +1,17 @@
 // Tests of what the agent remembers: places, farms, notes of earlier runs, and the activity time the goal tier sees.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { createFakeClock, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { Body, INSTANT_TYPING } from "../body.ts";
 import { memoryNote, recall, type KnownFarm } from "../memory.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE, testPersona, until } from "../testing.ts";
 import { AgentMemory } from "./agent-memory.ts";
 import { say, agentFor, journaledAgent, clockedAgentFor, clockUntil } from "./agent-fixtures.test.ts";
+
+/** Moves the installed clock on to `ms` of monotonic time (the clock only goes forward: a case that starts again makes its own clock). */
+async function clockTo(clock: FakeClock, ms: number): Promise<void> {
+  await clock.advance(ms - clock.now(), 1_000);
+}
 
 test("a second shelter replaces the first: one hole is kept, and no place line names it", async () => {
   const runtime = new FakeRuntime();
@@ -28,9 +33,7 @@ test("a second shelter replaces the first: one hole is kept, and no place line n
 
 const BUILDER = { loves: "building", likes: "farming", dislikes: "mob_combat", hates: "mining" } as const;
 
-test("farm near time counts sampled intervals and leaves gaps and dimensions far or unknown", (t) => {
-  let atMs = 0;
-  t.mock.method(performance, "now", () => atMs);
+test("farm near time counts sampled intervals and leaves gaps and dimensions far or unknown", async () => {
   const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: -1, y: 63, z: -1 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", state: { planted: 8, ripe: 0, empty: 0 } };
   const cases = [
     { name: "two near readings within the gap count near", samples: [[0, 10], [1.5, 30]], near: 1.5, unknown: 0 },
@@ -43,34 +46,35 @@ test("farm near time counts sampled intervals and leaves gaps and dimensions far
     { name: "a gap at the limit counts near", samples: [[0, 10], [2, 30]], near: 2, unknown: 0 },
   ];
   for (const row of cases) {
-    atMs = 0;
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
     const runtime = new FakeRuntime();
     const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
     memory.learnFarm(farm);
     for (const [minutes, distance] of row.samples) {
-      atMs = minutes! * 60_000;
+      await clockTo(clock, minutes! * 60_000);
       memory.notePosition({ x: -8 + distance!, y: 200, z: -8 }, row.dimension ?? "overworld", minutes! * 60_000);
     }
     assert.deepEqual(memory.nearMinutes(farm), { near: row.near, unknown: row.unknown, since: row.samples.at(-1)![0] }, row.name);
   }
 });
 
-test("a tend restarts the tally, a restart and missing dimension give unknown, and trimmed tallies are dropped", async (t) => {
-  let atMs = 0;
-  t.mock.method(performance, "now", () => atMs);
+test("a tend restarts the tally, a restart and missing dimension give unknown, and trimmed tallies are dropped", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
   const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", pace: 0.1, state: { planted: 8, ripe: 0, empty: 0 } };
   memory.learnFarm(farm);
   memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 0);
-  atMs = 60_000;
+  await clockTo(clock, 60_000);
   memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 60_000);
   assert.equal(memory.nearMinutes(farm)?.near, 1);
   const tended = { ...farm, pace: undefined, tendedAt: "t1" };
   memory.learnFarm(tended);
   assert.deepEqual(memory.nearMinutes(memory.farms[0]!), { near: 0, unknown: 0, since: 0 });
   assert.equal(memory.farms[0]?.pace, 0.1, "replacement keeps the measured pace");
-  atMs = 210_000;
+  await clockTo(clock, 210_000);
   assert.deepEqual(memory.nearMinutes(memory.farms[0]!), { near: 0, unknown: 2.5, since: 2.5 }, "a long unsampled tail is unknown");
   const old = memory.farms[0]!;
   runtime.notes = [memoryNote({ kind: "farm", farm })];
@@ -85,38 +89,38 @@ test("a tend restarts the tally, a restart and missing dimension give unknown, a
   assert.equal(memory.nearMinutes(old), null, "a trimmed farm's tally is dropped");
 });
 
-test("a cancelled tend keeps all 25 near-minutes and the next reading continues that tally", (t) => {
-  let atMs = 0;
-  t.mock.method(performance, "now", () => atMs);
+test("a cancelled tend keeps all 25 near-minutes and the next reading continues that tally", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
   const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", pace: 0.1, paceFresh: true, state: { planted: 8, ripe: 0, empty: 0, stage: 3, ripeAge: 7 } };
   memory.learnFarm(farm);
   for (let minute = 0; minute <= 25; minute += 1) {
-    atMs = minute * 60_000;
-    memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+    await clockTo(clock, minute * 60_000);
+    memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", clock.now());
   }
   memory.learnFarm({ ...farm, paceFresh: false });
   const cancelled = memory.farms[0]!;
   assert.deepEqual(memory.nearMinutes(cancelled), { near: 25, unknown: 0, since: 25 });
   assert.equal(cancelled.paceFresh, false);
-  atMs += 60_000;
-  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+  await clock.advance(60_000, 1_000);
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", clock.now());
   assert.deepEqual(memory.nearMinutes(cancelled), { near: 26, unknown: 0, since: 26 });
   assert.equal(memory.nearMinutes(farm), null, "only the current farm object owns the tally");
 });
 
-test("a tend cannot reuse a position read before a long gap as a fresh near baseline", (t) => {
-  let atMs = 0;
-  t.mock.method(performance, "now", () => atMs);
+test("a tend cannot reuse a position read before a long gap as a fresh near baseline", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const memory = new AgentMemory({ runtime, log: () => undefined, persona: testPersona() }, new Body(runtime, () => undefined, INSTANT_TYPING));
   memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", 0);
-  atMs = 119_000;
+  await clockTo(clock, 119_000);
   const farm: KnownFarm = { crop: "wheat_seeds", size: 3, centre: { x: 0, y: 63, z: 0 }, madeAt: "t0", tendedAt: "t0", dimension: "overworld", state: { planted: 8, ripe: 0, empty: 0 } };
   memory.learnFarm(farm);
-  atMs += 60_000;
-  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", atMs);
+  await clock.advance(60_000, 1_000);
+  memory.notePosition({ x: 8, y: 64, z: 8 }, "overworld", clock.now());
   assert.deepEqual(memory.nearMinutes(farm), { near: 0, unknown: 1, since: 1 });
 });
 
