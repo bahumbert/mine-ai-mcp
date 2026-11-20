@@ -49,11 +49,13 @@ function traceTo(path: string | undefined, say: Say): Say {
 }
 
 /** Reads a proc file that may disappear while the corresponding process or thread exits. */
-function readProc(path: string): string {
+export function readProc(path: string, read: (file: string) => string = file => readFileSync(file, "utf8")): string {
   try {
-    return readFileSync(path, "utf8").trim();
+    return read(path).trim();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // ESRCH: the process or thread exited between the open and the read (plan 2026-11-18-unit-reds-a2 T9 step 4, 2026-11-20).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ESRCH") throw error;
     return "";
   }
 }

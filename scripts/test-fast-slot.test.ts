@@ -18,11 +18,13 @@ function procFields(pid: number): string[] {
 }
 
 /** Empty until an atomic checkpoint is published, or after a proc file disappears. */
-function readText(path: string): string {
+function readText(path: string, read: (file: string) => string = file => readFileSync(file, "utf8")): string {
   try {
-    return readFileSync(path, "utf8");
+    return read(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    // ESRCH: the process exited between the open and the read of its proc file (plan 2026-11-18-unit-reds-a2 T9; 2026-11-20 task 5 count: 9 of 59 copies).
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ESRCH") throw error;
     return "";
   }
 }
@@ -394,4 +396,11 @@ test("a reaper that cannot become a subreaper runs nothing and returns 1", async
   expect(code).toBe(1);
   expect(lines).toEqual(["test:fast: cannot become a subreaper: 22"]);
   expect(existsSync(join(fixture.dir, "started"))).toBe(false);
+});
+
+test("a proc file whose process exits between open and read reads as gone (ESRCH), and other read errors still throw", () => {
+  const exited = Object.assign(new Error("ESRCH: no such process, read"), { code: "ESRCH" });
+  expect(readText("/proc/4000000/stat", () => { throw exited; })).toBe("");
+  const denied = Object.assign(new Error("EACCES: permission denied, read"), { code: "EACCES" });
+  expect(() => readText("/proc/1/stat", () => { throw denied; })).toThrow("EACCES");
 });
