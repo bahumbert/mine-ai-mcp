@@ -29,6 +29,8 @@ client:
 params: { phase: full, crystal_strategy: mixed, call_gap_ticks: 20 }
 goal:
   kind: all
+  # Passing still spans at 20/10 tps: min 402, max 1151 ticks, n=8 (2026-11-20).
+  stillTicks: 2320
   timeout: 1200
   goals:
     - { kind: kill, target: ender_dragon }
