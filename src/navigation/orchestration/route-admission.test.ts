@@ -112,10 +112,13 @@ test("the admission sees planned edits", async () => {
 });
 
 test("a null provider or a null admission changes nothing", async () => {
+  // The search is cut into slices by compute time, so a slower run gets one more search_slice with the same outcome:
+  // the slice count is left out of the shape, every other kind stays in order (plan 2026-11-18-unit-reds-a2 T7, 2026-11-20).
   const shape = async (admission: Parameters<typeof runEast>[2]) => {
     const { events, outcome } = runEast(new FakeNavigationBot(), null, admission);
     const settled = await outcome;
-    return { outcome: settled.kind, kinds: events.map((event) => event.kind), steps: kinds(events, "step_completed").length };
+    const shaped = events.map((event) => event.kind).filter((kind) => kind !== "search_slice");
+    return { outcome: settled.kind, kinds: shaped, steps: kinds(events, "step_completed").length };
   };
   const bare = await shape({});
   assert.equal(bare.outcome, "completed");
