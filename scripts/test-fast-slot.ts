@@ -31,37 +31,39 @@ interface Finished {
   readonly signal: NodeJS.Signals | null;
 }
 
+interface SlotRun {
+  group: number | undefined;
+  cancelled: boolean;
+}
+
 /**
- * Runs `argv` in its own process group, with `stdio` inherited; a SIGINT or SIGTERM this process gets goes to the whole
- * group (the flock and its command, the command's shards).
+ * Runs `argv` in its own process group, with stdio inherited. The group is available to the slot run's signal handlers
+ * until its leader exits. Only the reaper knows when the command's descendants have finished.
  */
-function runGroup(argv: readonly string[], env: NodeJS.ProcessEnv): Promise<Finished> {
+function runGroup(argv: readonly string[], env: NodeJS.ProcessEnv, run: SlotRun): Promise<Finished> {
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), { env, stdio: "inherit", detached: true });
-    const forward = (signal: NodeJS.Signals) => (): void => {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, signal);
-      } catch {
-        // the group has already exited
-      }
-    };
-    const onInterrupt = forward("SIGINT");
-    const onTerminate = forward("SIGTERM");
-    process.on("SIGINT", onInterrupt);
-    process.on("SIGTERM", onTerminate);
-    const stop = (): void => {
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
-    };
+    run.group = child.pid;
     child.once("error", (error) => {
-      stop();
+      run.group = undefined;
       reject(error);
     });
     child.once("exit", (code, signal) => {
-      stop();
+      run.group = undefined;
       resolve({ code, signal });
     });
   });
+}
+
+/** Latches cancellation even between groups and forwards a signal to the group currently owned by this run. */
+function cancelRun(run: SlotRun, signal: NodeJS.Signals): void {
+  run.cancelled = true;
+  if (run.group === undefined) return;
+  try {
+    process.kill(-run.group, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
 }
 
 /** Whether a pid is running (signal 0: nothing is sent). `EPERM` means it runs under another user. */
@@ -90,10 +92,8 @@ function holderOf(lock: string): string {
 }
 
 /**
- * Runs `command` in the unit slot and returns its exit. A probe takes the lock without running anything: busy (75)
- * says `waiting for the unit slot, held by <holder>` and the run then queues on the lock with a blocking `flock`. The
- * command runs under that `flock`, so its own exit (even 75) is its result, never taken for a busy lock. Without
- * `flock` the command runs with no slot.
+ * Runs `command` in the unit slot until the subreaper has drained its descendants and released the lock.
+ * One pair of handlers forwards SIGINT and SIGTERM across the whole run, with exit 1 on cancellation.
  */
 export async function runInSlot(
   command: readonly string[],
@@ -101,10 +101,36 @@ export async function runInSlot(
   env: NodeJS.ProcessEnv,
   say: (line: string) => void,
 ): Promise<number> {
+  const run: SlotRun = { group: undefined, cancelled: false };
+  const onInterrupt = (): void => cancelRun(run, "SIGINT");
+  const onTerminate = (): void => cancelRun(run, "SIGTERM");
+  process.on("SIGINT", onInterrupt);
+  process.on("SIGTERM", onTerminate);
+  try {
+    const code = await runSlotCommand(command, lock, env, say, run);
+    return run.cancelled ? 1 : code;
+  } finally {
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
+  }
+}
+
+/** Probes the lock, then lets flock exec the reaper so it holds the lock through cleanup. */
+async function runSlotCommand(
+  command: readonly string[],
+  lock: string,
+  env: NodeJS.ProcessEnv,
+  say: (line: string) => void,
+  run: SlotRun,
+): Promise<number> {
+  const reaper = [process.execPath, join(import.meta.dir, "test-slot-reaper.ts"), "--", ...command];
   const flock = Bun.which("flock", { PATH: env.PATH ?? "" });
   if (flock === null) {
     say("test:fast: no flock here, running without the unit slot");
-    const alone = await runGroup(command, { ...env, MINE_AI_TEST_SLOT_HELD: "1" });
+    const standalone: NodeJS.ProcessEnv = { ...env, MINE_AI_TEST_SLOT_HELD: "1" };
+    delete standalone.MINE_AI_TEST_SLOT_PARENT;
+    if (run.cancelled) return 1;
+    const alone = await runGroup(reaper, standalone, run);
     return alone.code ?? 1;
   }
   try {
@@ -113,9 +139,9 @@ export async function runInSlot(
     say(`test:fast: cannot make the unit slot folder ${dirname(lock)}: ${(error as Error).message}`);
     return 1;
   }
-  const probe = await runGroup([flock, "--nonblock", "--conflict-exit-code", String(FLOCK_BUSY), lock, "true"], env);
-  if (probe.code === FLOCK_BUSY) say(`test:fast: waiting for the unit slot, held by ${holderOf(lock)}`);
-  else if (probe.code !== 0) {
+  const probe = await runGroup([flock, "--nonblock", "--conflict-exit-code", String(FLOCK_BUSY), lock, "true"], env, run);
+  if (run.cancelled) return 1;
+  if (probe.code !== 0 && probe.code !== FLOCK_BUSY) {
     say(`test:fast: flock failed (exit ${probe.code ?? probe.signal ?? "unknown"})`);
     return 1;
   }
@@ -125,8 +151,18 @@ export async function runInSlot(
     MINE_AI_TEST_SLOT_ASKED_NS: slotClockNs().toString(),
     MINE_AI_TEST_SLOT_PARENT: String(process.pid),
   };
-  const run = await runGroup([flock, lock, ...command], queued);
-  return run.code ?? 1;
+  const waiting = probe.code === FLOCK_BUSY ? `test:fast: waiting for the unit slot, held by ${holderOf(lock)}` : undefined;
+  if (run.cancelled) return 1;
+  const result = runGroup([flock, "--no-fork", lock, ...reaper], queued, run);
+  try {
+    // Once the requester announces it is waiting, its waiter must already exist even if the requester is killed.
+    if (waiting !== undefined) say(waiting);
+  } catch (error) {
+    cancelRun(run, "SIGTERM");
+    await result.catch(() => {});
+    throw error;
+  }
+  return (await result).code ?? 1;
 }
 
 /** Whether the run that asked for the slot still lives. */

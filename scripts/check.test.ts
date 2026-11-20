@@ -363,7 +363,7 @@ const SLOT_BYPASSES: { name: string; options: { slot: boolean; env: NodeJS.Proce
   { name: "MINE_AI_TEST_SLOT_HELD=1 (no nested lock)", options: { slot: true, env: { PATH: process.env.PATH, MINE_AI_TEST_SLOT_HELD: "1" } } },
 ];
 for (const { name, options } of SLOT_BYPASSES) {
-  test(`${name} runs the suite at once while a named run holds the slot, the holder still alive after`, async () => {
+  test(`${name} runs the suite at once while a named run holds the slot, the slot still held after`, async () => {
     const lock = slotLockFile();
     const holder = await holdSlot(lock);
     writeNamedHolder(lock, holder.pid);
@@ -371,7 +371,7 @@ for (const { name, options } of SLOT_BYPASSES) {
     const code = await runAllInSlot({ ...options, lock, say: (line) => lines.push(line), queued: ["sh", "-c", "exit 4"], here: () => 7 });
     expect(code).toBe(7);
     expect(lines).toEqual([]);
-    expect(() => process.kill(holder.pid, 0)).not.toThrow();
+    expect(Bun.spawnSync(["flock", "--nonblock", "--conflict-exit-code", "75", lock, "true"]).exitCode).toBe(75);
     holder.stop();
   });
 }
