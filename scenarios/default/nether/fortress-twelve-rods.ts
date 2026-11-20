@@ -1,4 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { huntCheckpointSchema } from "../../../src/actions/checkpoint-schemas.ts";
+import { COLLECT_MOB_DROP } from "../../../src/actions/hunt-mob/contract.ts";
+import type { LiveProgress } from "../../../src/session/async-actions.ts";
+import { AGE_PACKET_TICKS, waitForWorldAge } from "../../../src/world/world-age.ts";
+import { declareProductiveProgress } from "../../../tests/minecraft/drivers/productive-progress.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "../../../tests/minecraft/drivers/server-ticks.ts";
 import type { Bot, BotEvents } from "mineflayer";
 import { Vec3 } from "vec3";
 import {
@@ -11,7 +18,8 @@ import {
 import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-client.ts";
 import type { Runtime } from "../../src/runtime.ts";
 import { observe } from "./hazards/pit.ts";
-import { releaseThreats } from "./fortress-common.ts";
+import { confirmArrival, releaseThreats } from "./fortress-common.ts";
+import { isSafeHuntRefusal, judgeFortressHunt } from "./fortress-judge.ts";
 import { readReflexOutcomes } from "../../flat/combat/reflex.ts";
 import { z } from "zod";
 import { recordSourceIdentity } from "../../src/source-identity.ts";
@@ -23,7 +31,85 @@ const collectionSchema = z.strictObject({
   minimumDropsPerMinute: z.number().positive().optional(),
   camp_spawner: z.boolean().default(false),
   observe_for_ms: z.number().int().positive().default(720_000),
+  handBack: z.tuple([z.number(), z.number(), z.number()]),
 });
+
+/** The outer hunt's observing phase also covers camp return travel, whose own phase has precedence. */
+function isObservingHunt({ request }: LiveProgress): boolean {
+  if (request?.state.kind !== "running") return false;
+  const checkpoint = huntCheckpointSchema.safeParse(request.evidence?.checkpoint);
+  if (!checkpoint.success) return false;
+  const { phase, camp } = checkpoint.data;
+  if (phase !== "observing") return false;
+  return !camp || camp.phase === "waiting_away" || camp.phase === "waiting_at_spawner";
+}
+
+/** Verify observation credit against the live request just before a time packet can reset the watchdog. */
+export function declareFortressProgress(
+  actions: Pick<Runtime["asyncActions"], "status">,
+  bot: Bot,
+  publish: MineAiScenarioContext["progress"],
+  signal: AbortSignal,
+) {
+  let observedActionId: string | null = null;
+  const observer = declareProductiveProgress(bot, (reason) => {
+    if (reason === "observing") {
+      const active = actions.status().active;
+      if (!active || active.actionId !== observedActionId || !isObservingHunt(active)) return;
+    }
+    publish(reason);
+  }, signal);
+  return {
+    observeHunt(actionId: string | null) {
+      observedActionId = actionId;
+      observer.observing(actionId !== null);
+    },
+    [Symbol.dispose]: () => observer[Symbol.dispose](),
+  };
+}
+
+/** Retrieve the hunt before a hand-back, reading its live checkpoint on each server time packet. */
+export async function runFortressHunt(
+  { actions, asyncActions }: Pick<Runtime, "actions" | "asyncActions">,
+  bot: Bot,
+  input: { mob_name: string; drop_name: string; count: number; observe_for_ms?: number; camp_spawner?: boolean },
+  progress: ReturnType<typeof declareFortressProgress>,
+  signal: AbortSignal,
+) {
+  const died = new AbortController();
+  const huntSignal = AbortSignal.any([signal, died.signal]);
+  huntSignal.throwIfAborted();
+  const hunt = actions.find((action) => action.name === COLLECT_MOB_DROP);
+  if (!hunt) throw new Error("Fortress collection requires collect_mob_drop.");
+  const admission = asyncActions.submit(hunt, input, { submission_id: randomUUID() }, 1);
+  if (admission.state === "refused") throw new Error(admission.error);
+
+  const { actionId } = admission;
+  const death = () => died.abort(new Error("Fortress bot died during the hunt."));
+  bot.on("death", death);
+  let active = true;
+  let clockStopped = false;
+  try {
+    for (;;) {
+      const wait = await asyncActions.wait(actionId, 0, huntSignal);
+      if (wait.state === "settled") {
+        active = false;
+        return wait.output;
+      }
+      if (wait.state !== "pending") throw new Error(wait.error);
+      if (clockStopped) throw new Error("Fortress hunt world age stopped advancing.");
+      progress.observeHunt(isObservingHunt(wait.progress) ? actionId : null);
+      const slice = await waitForWorldAge(bot, AGE_PACKET_TICKS, {
+        signal: huntSignal, wallMs: Infinity, stallMs: DRIVER_CLOCK_STOPPED_MS,
+      });
+      clockStopped = slice === "stalled";
+    }
+  } finally {
+    bot.off("death", death);
+    progress.observeHunt(null);
+    if (active) asyncActions.cancel(actionId, "Fortress trial ended before the hunt settled.");
+  }
+}
 
 /** Report all reflex outcomes observed during the fortress trial. */
 async function reportReflexOutcomes(context: MineAiScenarioContext, runtime: Runtime) {
@@ -179,6 +265,16 @@ async function observeLastVolley(bot: Bot, signal: AbortSignal) {
     elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge };
 }
 
+/** Start one next action and require the server's arrival answer at the fixture's starting cell. */
+async function handBackAfterHunt(context: MineAiScenarioContext, runtime: Runtime, target: Vec3) {
+  const navigate = runtime.actions.find((action) => action.name === "navigate");
+  if (!navigate) throw new Error("Fortress hand-back requires navigate.");
+  const output = await runtime.run(navigate, { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z), range: 1 }, context.signal);
+  const status = output.result.status;
+  const arrived = status === "succeeded" && !context.signal.aborted && await confirmArrival(context, target, 2);
+  return { status, arrived, output };
+}
+
 /** The driver supplies the task; all combat, recovery, and movement remain production actions. */
 export const run: MineAiScenario = async (context) => {
   await recordSourceIdentity();
@@ -197,36 +293,36 @@ export const run: MineAiScenario = async (context) => {
   const { state, snapshot } = observation;
   const attempts: unknown[] = [];
   try {
-    const hunt = runtime.actions.find((a) => a.name === "collect_mob_drop")!;
-    const result = await runtime.run(
-      hunt,
+    using progress = declareFortressProgress(runtime.asyncActions, bot, context.progress, signal);
+    const result = await runFortressHunt(
+      runtime, bot,
       { mob_name: "blaze", drop_name: "blaze_rod", count: collection.drops, observe_for_ms: collection.observe_for_ms, camp_spawner: collection.camp_spawner },
-      signal,
+      progress, signal,
     );
     attempts.push(result);
     log(`FORTRESS HUNT ${JSON.stringify(result)}`);
     const volley = bot.inventory.count(rodId, null) >= collection.drops ? await observeLastVolley(bot, signal) : null;
-    const reflexCounts = await reportReflexOutcomes(context, runtime);
-    const elapsedMs = monotonicNow() - started;
     const gained = bot.inventory.count(rodId, null);
     const rate = judgeDrops({ gained, requested: collection.drops, startAge, endAge: bot.time?.age ?? null,
       minimumPerMinute: collection.minimumDropsPerMinute ?? 0 });
+    const quotaMet = rate.passed && volley?.end === "ticks";
+    const handBack = !quotaMet && !signal.aborted && bot.health > 0 && isSafeHuntRefusal(result.result)
+      ? await handBackAfterHunt({ ...context, signal }, runtime, new Vec3(...collection.handBack)) : null;
+    const reflexCounts = await reportReflexOutcomes(context, runtime);
+    const judgement = judgeFortressHunt({ alive: state.deaths === 0 && bot.health > 0, quotaMet, hunt: result.result, handBack });
 
     return {
-      status:
-        state.deaths === 0 &&
-        bot.health > 0 &&
-        rate.passed && volley?.end === "ticks"
-          ? "succeeded"
-          : "failed",
+      status: judgement.outcome ? "succeeded" : "failed",
       detail: JSON.stringify({
+        ...judgement,
         collection,
-        elapsedMs,
+        elapsedMs: monotonicNow() - started,
         elapsedTicks: rate.elapsedTicks,
         dropsPerMinute: rate.dropsPerMinute,
         rateFailure: rate.reason,
         volley,
         huntSucceeded: result.result.status === "succeeded",
+        handBack,
         deaths: state.deaths,
         minimumHealth: state.minimumHealth,
         shieldBlocks: state.shieldBlocks,
@@ -240,7 +336,7 @@ export const run: MineAiScenario = async (context) => {
     if (!died.signal.aborted) throw cause;
     return {
       status: "failed",
-      detail: JSON.stringify({ deaths: state.deaths, minimumHealth: state.minimumHealth, shieldBlocks: state.shieldBlocks,
+      detail: JSON.stringify({ outcome: null, reason: "The bot did not survive.", deaths: state.deaths, minimumHealth: state.minimumHealth, shieldBlocks: state.shieldBlocks,
         fireballs: state.fireballs, final: snapshot(), attempts }),
     };
   } finally {
