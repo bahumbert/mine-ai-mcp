@@ -6,6 +6,9 @@ import { Vec3 } from "vec3";
 import type { FakeCell, FakeHarness, ShotProjectile, Weather } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { createMeasureReader } from "./checks/combat-data-measure.ts";
+import { CONTRACT_STORAGE, SERVER_EDIT_WALL_MS, fakeBlockActions, fakeBodyPosition, serverBlockActions, serverBodyPosition } from "./subject-position.ts";
+
+export { blockArgument } from "./subject-position.ts";
 
 /** A cell or a point written in arena-local coordinates, as the fixtures and the checks write them. */
 export type LocalPoint = readonly [number, number, number];
@@ -26,7 +29,13 @@ export interface ContractSubject {
   /** Change a cell on the server's side (an op command on a real server); resolves once the client has the update. */
   setBlock(cell: Vec3, block: FakeCell): Promise<void>;
   /** Whether the server's cell matches the block, independently of client prediction. */
-  blockIs(cell: Vec3, block: string): Promise<boolean>;
+  blockIs(cell: Vec3, block: string, properties?: Readonly<Record<string, string | number | boolean>>): Promise<boolean>;
+  /** Teleport to exact world coordinates and wait for the matching forced move. */
+  teleportFeet(position: Vec3): Promise<void>;
+  /** Suspend the motion solver for the fixed-position probe and restore it on disposal. */
+  holdBodyStill(): Disposable;
+  /** Read feet and air from the server, independently of client motion and metadata. */
+  readBodyOnServer(): Promise<{ feet: Vec3; air: number }>;
   /** Whether the server still has the bot riding `vehicle`, whatever the client believes. */
   seatedOnServer(vehicle: Entity): Promise<boolean>;
   /** The world's spawn the server told the client (the `spawn_position` packet, `bot.spawnPoint`): a world position, in the world and not in the lane. The fake sends no such packet and answers its respawn point, which a night in a bed moves. */
@@ -93,10 +102,6 @@ const SHOT_COST: Readonly<Record<ProjectileName, number>> = { arrow: 3, small_fi
 
 /** The line a `tellraw` of the stored game time prints: this text, then the count. */
 const GAME_TIME_LINE = "contract-gametime ";
-/** The `storage` namespace that holds each bot's last `time query gametime` (one key per bot, so lanes never read each other's). */
-const GAME_TIME_STORAGE = "mine_ai:contract";
-/** Longest a server-side edit may take to reach the client (one round trip, a server behind by a second). */
-const SERVER_EDIT_WALL_MS = 3_000;
 /** An item entity spawned this close to where `/summon` put it is the summoned one (the server may nudge it a tick later). */
 const SUMMON_MATCH_DISTANCE = 0.5;
 /** The server's selector for the one entity the client sees at `entity`'s place (a mob that does not move). */
@@ -171,41 +176,10 @@ function createGameTimeQueries(bot: Bot) {
         };
         if (waiting.length === 0) bot.on("messagestr", onMessage as never);
         waiting.push(query);
-        bot.chat(`/execute store result storage ${GAME_TIME_STORAGE} ${key} int 1 run time query gametime`);
-        bot.chat(`/tellraw @s {"text":"${GAME_TIME_LINE}","extra":[{"nbt":"${key}","storage":"${GAME_TIME_STORAGE}"}]}`);
+        bot.chat(`/execute store result storage ${CONTRACT_STORAGE} ${key} int 1 run time query gametime`);
+        bot.chat(`/tellraw @s {"text":"${GAME_TIME_LINE}","extra":[{"nbt":"${key}","storage":"${CONTRACT_STORAGE}"}]}`);
       }),
   };
-}
-
-let blockQuerySequence = 0;
-
-/** Correlate a one-shot server block query, so a late reply cannot answer another question. */
-function queryServerBlock(bot: Bot, cell: Vec3, block: string): Promise<boolean> {
-  const key = `block_${bot.username}_${++blockQuerySequence}`;
-  const prefix = `contract-${key} `;
-  return new Promise<boolean>((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      bot.off("messagestr", onMessage as never);
-    };
-    const onMessage = (text: string) => {
-      if (text !== `${prefix}0` && text !== `${prefix}1`) return;
-      cleanup();
-      resolve(text === `${prefix}1`);
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`/block query: no answer after ${SERVER_EDIT_WALL_MS} ms (is the bot op? or the server stalled)`));
-    }, SERVER_EDIT_WALL_MS);
-    bot.on("messagestr", onMessage as never);
-    try {
-      bot.chat(`/execute store success storage ${GAME_TIME_STORAGE} ${key} int 1 run execute if block ${cell.x} ${cell.y} ${cell.z} ${block}`);
-      bot.chat(`/tellraw @s {"text":"${prefix}","extra":[{"nbt":"${key}","storage":"${GAME_TIME_STORAGE}"}]}`);
-    } catch (error) {
-      cleanup();
-      reject(error);
-    }
-  });
 }
 
 /** Steps of `settleWithin`: fine enough for a 2-tick bound, coarse enough for the real event loop. */
@@ -297,18 +271,9 @@ function serverTicksPassed(subject: Pick<ContractSubject, "bot" | "now" | "wait"
   return holdsWhileMoving(subject, () => moved() >= ticks, () => subject.bot.time.age, stallMs);
 }
 
-/** Block edits and reads share the fake's existing delayed server-answer boundary. */
-function fakeBlockActions(world: FakeHarness["world"], afterAnswer: <T>(run: () => T, what: string) => Promise<T>): Pick<ContractSubject, "setBlock" | "blockIs"> {
-  return {
-    setBlock: (cell, block) => afterAnswer(() => world.setCell(cell, block), "setBlock"),
-    // Real air/fire true and false at both rates: occupied-fire-dig (2026-11-17).
-    blockIs: (cell, block) => afterAnswer(() => world.blockAt(cell)?.name === block, "blockIs"),
-  };
-}
-
 /** The fake's subject: time is the harness clock (mocked, so code reading the globals sees it too). */
 export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): ContractSubject {
-  const { bot, clock, combat, entities, server, world } = harness;
+  const { bot, clock, combat, entities, server } = harness;
   const wait = (ms: number) => clock.advance(ms);
   const now = () => clock.now();
   /** `run` is the server's answer; the clock runs until it has (a server answering late or stalled), as the real subject waits for the client to hear it (`spawnedNear`, `heardWithin`, `commandUntil`), within the same wall bound. Resolves with what `run` returned. */
@@ -334,7 +299,8 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
       server.answer(() => server.resendTime());
       await clock.advance(50);
     },
-    ...fakeBlockActions(world, afterAnswer),
+    ...fakeBlockActions(harness, { now, wait }, afterAnswer),
+    ...fakeBodyPosition(harness, { now, wait }),
     seatedOnServer: async (vehicle) => server.ridersOf(vehicle.id).includes(bot.entity.id),
     // The fake sends no `spawn_position` (no measured answer to copy): its world spawn is the point it respawns her at (`fake-harness.ts`).
     worldSpawn: () => server.respawnPoint!.clone(),
@@ -382,14 +348,6 @@ export function fakeContractSubject(harness: FakeHarness, arena: ArenaFrame): Co
   };
 }
 
-/** A block as the `setblock` command writes it: `name[key=value,...]`. */
-export function blockArgument(block: FakeCell): string {
-  if (typeof block === "number") throw new Error(`a state id (${block}) has no command form: name the block`);
-  if (typeof block === "string") return block;
-  const properties = Object.entries(block.properties).map(([key, value]) => `${key}=${value}`);
-  return `${block.name}[${properties.join(",")}]`;
-}
-
 /** Arena-local cells a real-server subject writes (in its lane) to answer `seatedOnServer`: a probe the server sets only for a seated rider, then a sentinel. */
 const SEAT_PROBE_LOCAL: LocalPoint = [5, -60, 5];
 const SEAT_SENTINEL_LOCAL: LocalPoint = [5, -60, 4];
@@ -425,15 +383,6 @@ async function waitForMobPickup(bot: Bot, clock: Pick<ContractSubject, "now" | "
   }
 }
 
-/** Server block edits wait for the update; queries read the command result independently of prediction. */
-function serverBlockActions(bot: Bot): Pick<ContractSubject, "setBlock" | "blockIs"> {
-  return {
-    blockIs: (cell, block) => queryServerBlock(bot, cell, block),
-    setBlock: (cell, block) => commandUntil(bot, `setblock ${cell.x} ${cell.y} ${cell.z} ${blockArgument(block)}`, cell,
-      typeof block === "string" ? block : typeof block === "number" ? "" : block.name),
-  };
-}
-
 /** A real server's subject: wall time, and op commands sent as chat (the fixture's player is op). */
 export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubject {
   const at = (cell: Vec3) => `${cell.x} ${cell.y} ${cell.z}`;
@@ -451,7 +400,8 @@ export function serverContractSubject(bot: Bot, arena: ArenaFrame): ContractSubj
     now,
     serverTicks: (ticks, wallMs) => serverTicksPassed({ bot, now, wait }, ticks, wallMs),
     serverGameTime: gameTimeQueries.ask,
-    ...serverBlockActions(bot),
+    ...serverBlockActions(bot, (command, cell, name) => commandUntil(bot, command, cell, name)),
+    ...serverBodyPosition(bot, { now, wait }),
     // Sent and not awaited, like `setWeather`: the packet is what the check listens for.
     async resendTime() {
       // `time` keeps the day count (`/time set` is absolute); the value is up to 19 ticks stale, so the clock goes back that far for one tick.

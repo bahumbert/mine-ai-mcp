@@ -95,6 +95,21 @@ test("a head under water at the call is unknown even for a body that was dry bef
   assert.equal(airSupplyTicks(bot), null, "dry again, but a read at the call saw this body's head under water: wet is kept");
 });
 
+for (const rate of [20, 10]) test(`the source surface preserves dry air history until the standing eye enters it at ${rate} tps`, async () => {
+  const { bot, clock, packetMs, wet } = scene(rate);
+  bot.emit("login");
+  await clock.advance(3 * packetMs);
+  assert.equal(bot.time.age, 24_060);
+  wet(true);
+  bot.entity.position.y = 0.356;
+  bot.emit("physicsTick");
+  assert.equal(airSupplyTicks(bot), 300, "source surface below the eye preserves inferred full air");
+  bot.entity.position.y = 0.24;
+  bot.emit("physicsTick");
+  bot.entity.position.y = 0.356;
+  assert.equal(airSupplyTicks(bot), null, `a wet tick at ${clock.now()} ms/age ${bot.time.age} is remembered before metadata`);
+});
+
 test("a head under water at a read before the 40 ticks are over is kept as wet for the body, a new body starts again", async () => {
   const { bot, clock, packetMs, wet } = scene(20);
   bot.emit("login");

@@ -37,6 +37,36 @@ test("with the eye in air and the feet in water the air does not fall", async ()
   assert.equal(bot.entity.metadata[airIndex(bot)], undefined, "nothing was sent: the client knows no air yet");
 });
 
+for (const rate of [20, 10]) test(`controlled breath follows server feet before the client receives the move at ${rate} tps`, async () => {
+  const dry = POOL_FEET.offset(2, 0, 0);
+  const { bot, breath, clock, server } = createFakeBot({ position: dry, cells: POOL, server: { ticksPerSecond: rate } });
+  const oneTick = 1_000 / rate;
+  const baseline = bot.listenerCount("respawn");
+  server.setServerPosition(bot.entity.id, POOL_FEET);
+  {
+    using _position = breath.followServerFeet();
+    await clock.advance(oneTick);
+    assert.equal(server.gameTime, 24_001);
+    assert.deepEqual(bot.entity.position, dry, "no position packet reached the client yet");
+    assert.equal(breath.airSupply, 299, "the server already counts the submerged eye");
+    server.sendPosition(POOL_FEET);
+    assert.deepEqual(bot.entity.position, POOL_FEET);
+
+    bot.emit("respawn");
+    server.sendPosition(dry);
+    await clock.advance(oneTick);
+    assert.equal(server.gameTime, 24_002);
+    assert.equal(breath.airSupply, 300, "the old body's stored wet feet did not survive respawn");
+  }
+  assert.equal(bot.listenerCount("respawn"), baseline);
+  {
+    using _position = breath.followServerFeet();
+  }
+  await clock.advance(oneTick);
+  assert.equal(breath.airSupply, 300, "disposing the seam restores direct-placement air sampling");
+  assert.equal(bot.listenerCount("respawn"), baseline);
+});
+
 test("out of the water the air refills 4 a tick up to the full 300, and stops sending there", async () => {
   const { bot, clock, world, breath } = createFakeBot({ position: POOL_FEET, cells: POOL });
   await clock.advance(3_000);
@@ -54,6 +84,19 @@ test("out of the water the air refills 4 a tick up to the full 300, and stops se
   await clock.advance(1_000);
   assert.equal(sent, 0);
   assert.equal(breath.airSupply, 300);
+});
+
+test("an older fake body keeps its observed eye height in the legacy air sample", async () => {
+  const { bot, breath, clock, server, world } = createFakeBot({
+    version: "1.20.4", position: new Vec3(0.5, 62.4, 0.5), cells: { "0,63,0": "water" },
+  });
+  Reflect.set(bot.entity, "eyeHeight", 1.27);
+  await clock.advance(50);
+  assert.equal(server.gameTime, 24_001);
+  assert.equal(breath.airSupply, 299);
+  world.setCell(new Vec3(0, 63, 0), { name: "light", properties: { level: 5, waterlogged: true } });
+  await clock.advance(50);
+  assert.equal(breath.airSupply, 300, "the unqualified fake still reads the old level on the waterlogged cell");
 });
 
 test("the air does not go below 0: the drowning damage is the server's and not modelled", async () => {
@@ -115,7 +158,7 @@ test("a test that replaces bot.entity gets the air on the new entity", async () 
 });
 
 test("the eye in a flowing cell whose water ends below the eye is in air", async () => {
-  // `Entity.updateFluidOnEyes`: the eye, less 1/9, against the cell's own fluid height ((8 - level) / 9 for a flowing cell).
+  // `Entity.updateFluidOnEyes`: the eye against the cell's fluid height ((8 - level) / 9 for a flowing cell).
   const { bot, clock } = createFakeBot({ position: POOL_FEET, cells: { "0,64,0": "water", "0,65,0": { name: "water", properties: { level: 7 } } } });
   await clock.advance(500);
   assert.equal(bot.entity.metadata[airIndex(bot)], undefined);

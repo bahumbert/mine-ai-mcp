@@ -23,6 +23,7 @@ import { explosionKnockback } from "./checks/explosion-knockback.ts";
 import { shieldRaised } from "./checks/shield-raised.ts";
 import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
+import { eyeWaterSurface } from "./checks/eye-water-surface.ts";
 import { waterExtinguishesBurning } from "./checks/water-extinguishes-burning.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
 import { heldShooter } from "./checks/held-shooter.ts";
@@ -124,6 +125,8 @@ export interface ContractCheck {
   run(subject: ContractSubject): Promise<string | void>;
   /** Run on the bare bot, with no runtime of ours to act on it (`client-host.ts --without-runtime`). */
   readonly withoutRuntime?: boolean;
+  /** Override the fixture's normal fake rate when the same answer must hold at several rates. */
+  readonly fakeTickRates?: readonly number[];
   /**
    * Set when the subject changes something the whole server has (a game rule, the weather) while the check runs: the YAML is tagged
    * `exclusive` so the scenario gets a server of its own and never a lane of a shared one, where every other lane would see the change. The value is the reason.
@@ -167,6 +170,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,
+  eyeWaterSurface,
   waterExtinguishesBurning,
   bedSleepAndWake,
   bedRefusedMonsterNear,

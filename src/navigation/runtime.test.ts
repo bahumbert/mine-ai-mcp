@@ -5,10 +5,12 @@ import type { BlockPosition } from "./world/world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { RouteOutcomes } from "./route-outcomes.js";
 import { createNavigationRuntime } from "./runtime.js";
+import { installNativeDigClock } from "./mineflayer/native-dig-clock.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeClock, createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { useNativeDigging } from "../test-support/fake-bot/native-digging.js";
 import { DEFAULT_NAVIGATION_POLICY } from "../survival/policy/contract.js";
 import { setNavigationPolicyProvider } from "../survival/state/navigation-policy.js";
 
@@ -408,6 +410,91 @@ test("an in-place break asked of a closed runtime is refused as closed (review 2
     navigation.breakBlockInPlace({ position: { x: 1, y: 64, z: 0 }, movements: createMovementPolicy() } as never),
     /closed/,
   );
+});
+
+test("the live break estimate reads submergedAtEyes on either side of a source surface", async () => {
+  const position = new Vec3(1, 64, 0);
+  const { bot } = createFakeBot({ position: new Vec3(0.5, 64.356, 0.5), cells: { "0,65,0": "water", "1,64,0": "stone" } });
+  const navigation = createNavigationRuntime(bot);
+  const submerged: boolean[] = [];
+  const movements = createMovementPolicy({
+    digTimeEstimator: { estimate: (_block, _tool, context) => { submerged.push(context.submergedAtEyes); return 1; } },
+  });
+  try {
+    const stop = AbortSignal.abort(new Error("stop after pricing the break"));
+    await assert.rejects(navigation.breakBlockInPlace({ position, movements, signal: stop }), /stop after pricing the break/);
+    bot.entity.position.y = 64.24;
+    const wet = await navigation.breakBlockInPlace({ position, movements });
+    assert.equal(wet.status, "failed");
+    assert.match(wet.reason, /Underwater stance unavailable.*owned=false/);
+    assert.equal(bot.blockAt(position)?.name, "stone");
+    assert.deepEqual(submerged, [false, true]);
+  } finally {
+    await navigation.close();
+  }
+});
+
+test("a grounded dive's arrival can swing only with enough air for the work and verified ascent", async () => {
+  for (const air of [90, 250]) {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const feet = new Vec3(0.5, 64, 0.5);
+    const target = new Vec3(1, 64, 0);
+    const harness = createFakeBot({ clock, position: feet, groundY: 63,
+      cells: { "0,64,0": "water", "0,65,0": "water", "1,64,0": "dirt" } });
+    const { bot, breath, server } = harness;
+    useNativeDigging(harness);
+    installNativeDigClock(bot);
+    const navigation = createNavigationRuntime(bot);
+    // Admit the route first, then spend air before its first piece of work.
+    breath.setAirSupply(280);
+    // Bare-handed dirt in the submerged fixture takes 75 ticks in the native dig clock.
+    const movements = createMovementPolicy({ digTimeEstimator: { estimate: () => 75 } });
+    const stop = new AbortController();
+    let receipt: Awaited<ReturnType<typeof navigation.breakBlockInPlace>> | undefined;
+    let refusal: unknown;
+    const trace: string[] = [];
+    navigation.onEvent(({ kind }) => trace.push(kind));
+    try {
+      const run = navigation.navigate({ movements, goal: exactBlockGoal(feet.floored()), signal: stop.signal,
+        async onArrival({ signal }) {
+          trace.push(`arrival with ${air} air at ${bot.entity.position}, onGround=${bot.entity.onGround}`);
+          assert.deepEqual(bot.entity.position, feet);
+          const backstop = navigation.diveBackstop?.();
+          assert.ok(typeof backstop === "number" && backstop < 300, "the stance has a verified ascent");
+          breath.setAirSupply(air);
+          try {
+            receipt = await navigation.breakBlockInPlace({ position: target, movements, signal });
+          } catch (error) {
+            refusal = error;
+          } finally {
+            stop.abort(new Error("arrival proof complete"));
+          }
+          return { kind: "completed" };
+        },
+      });
+      await clock.settle(run.catch((error) => { if (error !== stop.signal.reason) throw error; }), 6_000)
+        .catch((error) => { throw new Error(`${error}\n${trace.join("\n")}`); });
+      const swings = server.packets.flatMap(({ name, data }) => {
+        if (name !== "block_dig") return [];
+        const { status, location } = data as { status: number; location: Vec3 };
+        return status === 0 ? [location] : [];
+      });
+      if (air === 90) {
+        assert.equal(refusal, "Planned breathing stop");
+        assert.equal(receipt, undefined);
+        assert.deepEqual(swings, []);
+        assert.equal(bot.blockAt(target)?.name, "dirt");
+      } else {
+        assert.equal(refusal, undefined);
+        assert.deepEqual(receipt, { status: "broken" });
+        assert.deepEqual(swings, [target]);
+        assert.equal(bot.blockAt(target)?.name, "air");
+      }
+    } finally {
+      await clock.settle(navigation.close(), 5_000);
+    }
+  }
 });
 
 // Plan 2026-10-27-p1-monotonic-clock T4: the runtime's route-level `elapsedMs` (navigateAroundDragonBreath) was a wall difference.

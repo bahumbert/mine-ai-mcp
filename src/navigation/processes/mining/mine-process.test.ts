@@ -1022,12 +1022,12 @@ test("a dry-eyed body in water over a solid floor lands on it before the dig in 
     isInWater: true,
     physics: true,
   });
-  let groundedAtDig: boolean | undefined;
+  let stanceAtDig: { grounded: boolean; y: number } | undefined;
   const result = await runMine(scene, {
     canMine: () => ({ kind: "mineable", routeMayBreak: false }),
-    isSatisfied: () => groundedAtDig !== undefined,
+    isSatisfied: () => stanceAtDig !== undefined,
     breakInPlace: async () => {
-      groundedAtDig = scene.bot.entity.onGround;
+      stanceAtDig = { grounded: scene.bot.entity.onGround, y: scene.bot.entity.position.y };
       scene.world.setCell(target, "air");
       return { status: "broken" };
     },
@@ -1036,7 +1036,7 @@ test("a dry-eyed body in water over a solid floor lands on it before the dig in 
     },
   });
   assert.equal(result.status, "satisfied");
-  assert.equal(groundedAtDig, true, "the dig waited for the floor: off the ground it is x5 slower");
+  assert.deepEqual(stanceAtDig, { grounded: true, y: 64 }, "the dig waited for the floor: off the ground it is x5 slower");
 });
 
 test("incidental inventory gain cannot satisfy an unbroken exact target", async () => {
@@ -2125,7 +2125,7 @@ test("a swimmer waiting to settle while physics has stopped gives up on the arri
   const feet = new Vec3(0.5, 64, 0.5);
   using scene = mineScene({
     blocks: [target],
-    // The eye cell: the eyes rule reads whole cells.
+    // At this stance the eyes are below the source's surface in the upper cell.
     water: [feet.offset(0, 1.62, 0).floored()],
     feet,
     onGround: false,

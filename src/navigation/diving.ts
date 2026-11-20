@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { airSupplyTicks } from "../world/air-supply.js";
-import { botEyesInWater } from "../world/eyes-in-water.js";
+import { botEyesInWater, standingEyesInWater } from "../world/eyes-in-water.js";
 import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
 import { serverPacedSignal, type ServerPacedSignal } from "../world/server-paced.js";
@@ -240,7 +240,7 @@ export class Diving {
   committed(plan: Pick<RoutePlan, "steps">): void {
     const session = this.#session;
     if (!session) return;
-    if (plan.steps.some(({ to }) => botEyesInWater(this.bot, new Vec3(to.x + 0.5, to.y, to.z + 0.5)) && swimAscent(this.#read, to))) {
+    if (plan.steps.some(({ to }) => standingEyesInWater(this.bot, new Vec3(to.x + 0.5, to.y, to.z + 0.5)) && swimAscent(this.#read, to))) {
       session.owned = true;
     }
   }
@@ -289,7 +289,7 @@ export class Diving {
         const origin = this.bot.entity.position.clone();
         // A request beginning underwater must hold depth while its first search runs.
         session.owned = session.owned || (options.movements.allowSwimming && air !== null && swimAscent(this.#read, origin.floored()) !== null &&
-          botEyesInWater(this.bot, origin));
+          botEyesInWater(this.bot));
         const movements: MovementPolicy = { ...options.movements,
           get scaffold() { return options.movements.scaffold; },
           ...(air !== null && options.movements.allowSwimming ? { dive: { origin, airTicks: air } } : {}),

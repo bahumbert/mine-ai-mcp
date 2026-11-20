@@ -65,6 +65,20 @@ test("a dive declaration and its watcher end on success, cancellation, and excep
   assert.equal(left("physicsTick"), 0);
 });
 
+test("an underwater crouching origin claims the dive before the first search", async () => {
+  const { world, bot } = fixture();
+  bot.entity.position.y = 62.4;
+  const pose = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("pose");
+  Reflect.set(bot.entity.metadata, pose, 5);
+  Reflect.set(bot.entity, "eyeHeight", 1.27);
+  const diving = new Diving(bot, world);
+  const options = { movements: createMovementPolicy(), goal: exactBlockGoal({ x: 0, y: 61, z: 0 }) };
+  await diving.run(options, async () => {
+    assert.equal(diving.owned, true, "the current crouching eyes are submerged even though standing eyes would be dry");
+    return { status: "completed", elapsedMs: 0 };
+  });
+});
+
 /** The return-to-air admission a request carries: from where the body is, with the air it has left (T6 2026-10-21). */
 function returnAdmission(request: Parameters<Parameters<Diving["run"]>[1]>[0]) {
   const dive = request.movements.dive;
