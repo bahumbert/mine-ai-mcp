@@ -6,14 +6,19 @@ import { excavateGoal } from "./excavate.js";
 import { MemoryWorld as GoalTestWorld } from "../world/memory-world.js";
 import type { NavigationObservation, Position3 } from "../world/world.js";
 import type { ResolvedGoal } from "./goal.js";
+import * as goals from "./index.js";
 import {
   DESCENT_TICKS_PER_BLOCK,
   HORIZONTAL_TICKS_PER_BLOCK,
+  advanceGoal,
   anyGoal,
   exactBlockGoal,
   itemPickupGoal,
   nearEntityGoal,
   nearGoal,
+  nearXzGoal,
+  occupyGoal,
+  safeFromEntitiesGoal,
 } from "./index.js";
 
 const goalTestWorld = new GoalTestWorld();
@@ -112,6 +117,63 @@ function active(goal: ResolvedGoal): Extract<ResolvedGoal, { kind: "active" }> {
   if (goal.kind !== "active") throw new Error(`The goal resolved as invalid: ${goal.observation}`);
   return goal;
 }
+
+test("endpoints are the integer cells the goal accepts", () => {
+  const target = { x: 5, y: -60, z: 7 };
+  for (const [range, count] of [[0, 1], [1, 7], [1.5, 19], [2, 33], [3, 123]] as const) {
+    const goal = active(nearGoal(target, range).resolve(observation()));
+    const endpoints = goal.endpoints?.(343);
+    assert.ok(endpoints, `range ${range} must enumerate endpoints`);
+    assert.equal(endpoints.satisfies, goal.isSatisfied);
+    assert.equal(endpoints.cells.length, count);
+    const accepted: Position3[] = [];
+    for (let x = 2; x <= 8; x++) for (let y = -63; y <= -57; y++) for (let z = 4; z <= 10; z++) {
+      const feet = { x, y, z };
+      if (goal.isSatisfied(node(feet), goalTestWorld)) accepted.push(feet);
+    }
+    assert.deepEqual(endpoints.cells, accepted);
+  }
+});
+
+test("endpoint enumeration declines an oversized cube before testing any cell", () => {
+  for (const range of [4, 10_000]) {
+    let reads = 0;
+    const target = { get x() { assert.ok(++reads <= 2, "the oversized cube must never build a cell"); return 5; }, y: -60, z: 7 };
+    const resolved = active(nearGoal(target, range).resolve(observation()));
+    let tested = 0;
+    const goal = { ...resolved, isSatisfied: () => { tested++; return true; } };
+    assert.equal(goal.endpoints?.(343), null);
+    assert.equal(tested, 0);
+  }
+});
+
+test("capped enumeration declines a fractional centre while uncapped offsets keep their order", () => {
+  const target = { x: 5.5, y: -60, z: 7 };
+  assert.equal(active(nearGoal(target, 1).resolve(observation())).endpoints?.(343), null);
+  assert.equal(active(exactBlockGoal(target).resolve(observation())).endpoints?.(343), null);
+  assert.equal(goals.cellsWithin(target, 1, 343), null);
+  assert.deepEqual(goals.cellsWithin(target, 1), [
+    { x: 4.5, y: -60, z: 7 },
+    { x: 5.5, y: -61, z: 7 },
+    { x: 5.5, y: -60, z: 6 },
+    target,
+    { x: 5.5, y: -60, z: 8 },
+    { x: 5.5, y: -59, z: 7 },
+    { x: 6.5, y: -60, z: 7 },
+  ]);
+});
+
+test("only exact and near goals enumerate endpoints with their own predicate", () => {
+  const target = { x: 5, y: -60, z: 7 };
+  const exact = exactBlockGoal(target);
+  const resolved = active(exact.resolve(observation()));
+  assert.deepEqual(resolved.endpoints?.(1), { satisfies: resolved.isSatisfied, cells: [target] });
+  assert.equal(resolved.endpoints?.(0), null);
+  for (const goal of [nearXzGoal(target, 1), advanceGoal(target, { x: 1, z: 0 }, 1), occupyGoal(target, 2),
+    anyGoal([exact]), safeFromEntitiesGoal([], 1)]) {
+    assert.equal(active(goal.resolve(observation())).endpoints, undefined);
+  }
+});
 
 test("goal constructors preserve satisfaction and admissible distance", () => {
   const at = node({ x: 2, y: 63, z: 0 });

@@ -31,6 +31,10 @@ export const JUMP_APEX = 1.25;
 /** Spacing of the bodies judged along one movement, in blocks. */
 const SAMPLE_SPACING = 0.25;
 
+/** A single endpoint proof can read at most this many ray cells, including the start's waiver checks. */
+const MAX_PROOF_READS = 20_000;
+const REFUSAL_SUFFIX = "no committed route keeps cover. The reflex still protects the body; choose the next action.";
+
 export interface CoverObligation {
   readonly requestId: string;
   readonly generation: number;
@@ -111,6 +115,16 @@ interface Judged {
   readonly cell: BlockPosition;
 }
 
+type SightVerdict = "seen" | "hidden" | "unknown";
+type EndpointRefutation = NonNullable<RouteAdmission["refuteEndpoints"]>;
+
+/** The cheap proof leaves uncertain geometry to the normal search and replay. */
+function uncertainForProof(block: ReturnType<WorldView["blockAt"]>): boolean {
+  if (block.kind === "unloaded") return true;
+  const { traits, geometry, collisionShapes } = block;
+  return traits.liquid !== null || traits.waterlogged || traits.openable || (!geometry.fullCube && collisionShapes.length > 0);
+}
+
 /**
  * The world as an eye ray meets it. A cell nobody has loaded hides nothing and makes the body exposed, wherever on the ray
  * it lies (a known wall beyond it does not certify cover). A door the route opens is judged as open air: the overlay
@@ -119,16 +133,28 @@ interface Judged {
 class Sight {
   readonly #view: WorldView;
   readonly #ray: BlockRaycaster;
-  #touchedUnknown = false;
+  #remainingReads: number | null;
+  #touchedUncertain = false;
 
-  constructor(view: WorldView, readonly size: { readonly width: number; readonly height: number }, opened: ReadonlySet<number>) {
+  constructor(view: WorldView, readonly size: { readonly width: number; readonly height: number }, opened: ReadonlySet<number>, maxReads?: number) {
     this.#view = view;
+    this.#remainingReads = maxReads ?? null;
     this.#ray = worldViewRaycaster((x, y, z) => {
+      if (this.#remainingReads !== null && --this.#remainingReads < 0) return null;
       if (opened.has(packKey(x, y, z))) return NO_OBSTACLE;
-      const boxes = obstaclesOf(view.blockAt(x, y, z));
-      if (boxes === null) this.#touchedUnknown = true;
+      const block = view.blockAt(x, y, z);
+      if (maxReads !== undefined && uncertainForProof(block)) {
+        this.#touchedUncertain = true;
+        return null;
+      }
+      const boxes = obstaclesOf(block);
+      if (boxes === null) this.#touchedUncertain = true;
       return boxes ?? NO_OBSTACLE;
     });
+  }
+
+  get exhausted(): boolean {
+    return this.#remainingReads !== null && this.#remainingReads < 0;
   }
 
   at(cell: BlockPosition, lift = 0, x = cell.x + 0.5, z = cell.z + 0.5): Judged {
@@ -136,15 +162,24 @@ class Sight {
   }
 
   /** The shooter judges the body exposed: in its range, and its eye (or a shoulder of it) sees it; an unknown cell of the body is exposed. */
-  exposes(obligation: CoverObligation, { body }: Judged): boolean {
-    if (body.position.distanceTo(obligation.body.position) > obligation.safeRange) return false;
+  exposes(obligation: CoverObligation, judged: Judged): boolean {
+    return this.proves(obligation, judged) !== "hidden";
+  }
+
+  /** Sight counts as proof only when the body and rays used to judge it are known. */
+  proves(obligation: CoverObligation, { body }: Judged): SightVerdict {
+    if (body.position.distanceTo(obligation.body.position) > obligation.safeRange) return "hidden";
     const x = Math.floor(body.position.x);
     const z = Math.floor(body.position.z);
     const y = Math.floor(body.position.y);
-    if ([y, y + 1].some((cell) => this.#view.blockAt(x, cell, z).kind === "unloaded")) return true;
-    this.#touchedUnknown = false;
+    for (const height of [y, y + 1]) {
+      const block = this.#view.blockAt(x, height, z);
+      if (block.kind === "unloaded" || (this.#remainingReads !== null && uncertainForProof(block))) return "unknown";
+    }
+    this.#touchedUncertain = false;
     const seen = shooterSeesBody(this.#ray, obligation.body, body);
-    return seen || this.#touchedUnknown;
+    if (this.exhausted || this.#touchedUncertain) return "unknown";
+    return seen ? "seen" : "hidden";
   }
 
   first(obligations: readonly CoverObligation[], judged: readonly Judged[]): { obligation: CoverObligation; judged: Judged } | null {
@@ -152,6 +187,35 @@ class Sight {
       for (const obligation of obligations) if (this.exposes(obligation, candidate)) return { obligation, judged: candidate };
     return null;
   }
+}
+
+/** Both admission checks waive each shooter from whom the start has already lost cover. */
+function owedAtStart(sight: Sight, start: BlockPosition, obligations: readonly CoverObligation[]): readonly CoverObligation[] {
+  const root = sight.at(start);
+  return obligations.filter((obligation) => !sight.exhausted && !sight.exposes(obligation, root));
+}
+
+/** A different owed shooter can witness each endpoint. Stop on the first endpoint with no certain witness. */
+function refuteEndpoints(sight: Sight, { start, endpoints }: Parameters<EndpointRefutation>[0], obligations: readonly CoverObligation[]): string | null {
+  const owed = owedAtStart(sight, start, obligations);
+  if (owed.length === 0 || sight.exhausted) return null;
+  const root = sight.at(start).body.position;
+  const witnesses = new Set<CoverObligation>();
+  let nearest: { judged: Judged; obligation: CoverObligation; distanceSquared: number } | undefined;
+  for (const cell of endpoints) {
+    const judged = sight.at(cell);
+    const obligation = owed.find((shooter) => !sight.exhausted && sight.proves(shooter, judged) === "seen");
+    if (!obligation || sight.exhausted) return null;
+    witnesses.add(obligation);
+    const distanceSquared = root.distanceSquared(judged.body.position);
+    if (!nearest || distanceSquared < nearest.distanceSquared) nearest = { judged, obligation, distanceSquared };
+  }
+  if (!nearest) return null;
+  const names = new Set(owed.filter((obligation) => witnesses.has(obligation)).map(shooterLabel));
+  const { x, y, z } = nearest.judged.cell;
+  const distance = nearest.judged.body.position.distanceTo(nearest.obligation.body.position).toFixed(1);
+  return `${COVER_REFUSED_CODE} every end of this route (${endpoints.length} cells) is in sight of ${[...names].join(", ")}; ` +
+    `the nearest, ${x} ${y} ${z}, is ${distance} blocks from ${shooterLabel(nearest.obligation)}; ${REFUSAL_SUFFIX}`;
 }
 
 /** Every body a movement puts the player in: its cells, and a body every 0.25 blocks between them, raised at a jump's apex. */
@@ -175,16 +239,19 @@ function movementBodies(sight: Sight, step: PlannedStep): readonly Judged[] {
   return [...cells, ...samples];
 }
 
+/** The shooter as named in a refusal. */
+function shooterLabel(obligation: CoverObligation): string {
+  return `${obligation.name}#${obligation.threatId}`;
+}
+
 function refusal(step: number, steps: number, judged: Judged, obligation: CoverObligation): string {
   const { x, y, z } = judged.cell;
   const distance = judged.body.position.distanceTo(obligation.body.position).toFixed(1);
-  return `${COVER_REFUSED_CODE} step ${step}/${steps} at ${x} ${y} ${z} is in sight of ${obligation.name}#${obligation.threatId} at ${distance} blocks; ` +
-    "no committed route keeps cover. The reflex still protects the body; choose the next action.";
+  return `${COVER_REFUSED_CODE} step ${step}/${steps} at ${x} ${y} ${z} is in sight of ${shooterLabel(obligation)} at ${distance} blocks; ` + REFUSAL_SUFFIX;
 }
 
 function unmodelled(step: number, steps: number, kind: string): string {
-  return `${COVER_REFUSED_CODE} step ${step}/${steps} uses the movement "${kind}", which cannot be checked for cover; no committed route keeps cover. ` +
-    "The reflex still protects the body; choose the next action.";
+  return `${COVER_REFUSED_CODE} step ${step}/${steps} uses the movement "${kind}", which cannot be checked for cover; ${REFUSAL_SUFFIX}`;
 }
 
 /**
@@ -192,12 +259,15 @@ function unmodelled(step: number, steps: number, kind: string): string {
  * every body the player will be in out of each shooter's sight. A shooter that already sees the start is waived for this
  * check (that cover is lost and the reflex decides), the others are still judged.
  */
-export function coverAdmission(bot: Bot, obligations: readonly CoverObligation[]): RouteAdmission {
+export function coverAdmission(bot: Bot, obligations: readonly CoverObligation[], maxProofReads = MAX_PROOF_READS): RouteAdmission & { refuteEndpoints: EndpointRefutation } {
   const size = entityDimensions(bot, bot.entity);
   return {
+    refuteEndpoints(plan, world) {
+      return refuteEndpoints(new Sight(world, size, new Set(), maxProofReads), plan, obligations);
+    },
     check(plan, world) {
       const begin = new Sight(world, size, new Set());
-      const owed = obligations.filter((obligation) => !begin.exposes(obligation, begin.at(plan.start)));
+      const owed = owedAtStart(begin, plan.start, obligations);
       if (owed.length === 0) return null;
       const replay = new Replay(world, size);
       for (const [index, step] of plan.steps.entries()) {

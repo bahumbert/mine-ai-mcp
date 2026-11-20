@@ -31,14 +31,27 @@ import type { Goal, GoalEndPredicate, PlanningNode, ResolvedGoal } from "./goal.
 type Distance = (position: BlockPosition) => number;
 type Satisfaction = (position: BlockPosition) => boolean;
 
-function staticGoal(name: string, distance: Distance, isSatisfied: Satisfaction): Goal {
+/** Resolve a static target with an optional enumeration tied to its own predicate. */
+function staticGoal(
+  name: string,
+  distance: Distance,
+  satisfiesPosition: Satisfaction,
+  enumerate?: (limit: number) => readonly BlockPosition[] | null,
+): Goal {
   return {
-    resolve: () => ({
-      kind: "active",
-      revision: name,
-      heuristic: (node) => distance(node.feet),
-      isSatisfied: (node) => isSatisfied(node.feet),
-    }),
+    resolve() {
+      const isSatisfied = (node: PlanningNode) => satisfiesPosition(node.feet);
+      return {
+        kind: "active",
+        revision: name,
+        heuristic: (node) => distance(node.feet),
+        isSatisfied,
+        ...(enumerate && { endpoints(limit: number) {
+          const cells = enumerate(limit);
+          return cells === null ? null : { satisfies: isSatisfied, cells };
+        } }),
+      };
+    },
   };
 }
 
@@ -126,6 +139,25 @@ function spatialDistance(left: BlockPosition, right: BlockPosition): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+/** Whether this centre can anchor an enumeration of integer feet cells. */
+function isBlockCentre({ x, y, z }: BlockPosition): boolean {
+  return Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z);
+}
+
+/** Cells within `range` of `centre`, in x, y, z order. A limit requires an integer centre and bounds the whole cube. */
+export function cellsWithin(centre: BlockPosition, range: number): readonly BlockPosition[];
+export function cellsWithin(centre: BlockPosition, range: number, limit?: number): readonly BlockPosition[] | null;
+export function cellsWithin(centre: BlockPosition, range: number, limit?: number): readonly BlockPosition[] | null {
+  const reach = Math.ceil(range);
+  if (limit !== undefined && (!isBlockCentre(centre) || (2 * reach + 1) ** 3 > limit)) return null;
+  const cells: BlockPosition[] = [];
+  for (let dx = -reach; dx <= reach; dx += 1)
+    for (let dy = -reach; dy <= reach; dy += 1)
+      for (let dz = -reach; dz <= reach; dz += 1)
+        cells.push({ x: centre.x + dx, y: centre.y + dy, z: centre.z + dz });
+  return cells.filter((cell) => spatialDistance(centre, cell) <= range);
+}
+
 function targetName(kind: string, target: BlockPosition, range?: number): string {
   const suffix = range === undefined ? "" : `:${range}`;
   return `${kind}:${target.x},${target.y},${target.z}${suffix}`;
@@ -137,6 +169,7 @@ export function exactBlockGoal(target: BlockPosition): Goal {
     name,
     (position) => ticksToReach(position, target),
     (position) => spatialDistance(position, target) === 0,
+    (limit) => limit >= 1 && isBlockCentre(target) ? [target] : null,
   );
 }
 
@@ -146,6 +179,7 @@ export function nearGoal(target: BlockPosition, range: number): Goal {
     name,
     (position) => ticksToReach(position, target, range),
     (position) => spatialDistance(position, target) <= range,
+    (limit) => cellsWithin(target, range, limit),
   );
 }
 

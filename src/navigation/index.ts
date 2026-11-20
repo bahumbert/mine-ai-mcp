@@ -63,6 +63,7 @@ export {
   HORIZONTAL_TICKS_PER_BLOCK,
   advanceGoal,
   anyGoal,
+  cellsWithin,
   customGoal,
   exactBlockGoal,
   itemPickupGoal,

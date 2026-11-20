@@ -5,7 +5,8 @@ import { z } from "zod";
 import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import { createNavigateAction } from "../../actions/navigate/navigate.js";
-import { createNavigationRuntime, type NavigationEvent, type NavigationRuntime } from "../../navigation/index.js";
+import type { NavigateRequest } from "../../actions/navigate/contract.js";
+import { cellsWithin, createNavigationRuntime, obstaclesOf, worldViewRaycaster, type BlockPosition, type NavigationEvent, type NavigationRuntime, type WorldView } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
 import { BodyAbort } from "../../session/abort.js";
 import { attackedIds, createTestCombatController, engagingCombat } from "../../test-support/combat.js";
@@ -14,6 +15,8 @@ import { watch } from "../../test-support/pending.js";
 import { observation } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../../navigation/goals/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
+import { entityDimensions } from "../../world/entity-dimensions.js";
+import { shooterSeesBody, type EntityBody } from "../../world/entity-geometry.js";
 import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
 import { ReflexDriver } from "../control/driver.js";
 import { attachSurvivalReceipts } from "../evidence/receipts.js";
@@ -3020,10 +3023,10 @@ function coverWalk(ticksPerSecond: number, shooter: "skeleton" | "enderman" = "s
     /** The routes the request asked of navigation once an evade had interrupted it. */
     resumedCalls: () => navigateCalls.slice(Math.max(0, navigateCalls.findIndex((call) => call.activeResponse === "evade"))).filter((call) => call.activeResponse === null),
     /** The wall of the test, quickly: the settings the evade needs, the request, and the clock run until it ends. */
-    async walk(goal: { x: number; y: number; z: number }, limitMs = 90_000) {
+    async walk(goal: { x: number; y: number; z: number }, limitMs = 90_000, options: Partial<Pick<NavigateRequest, "dig" | "scaffold">> = {}) {
       await fixture.controller.policy.edit({ operation: "set", expected_revision: fixture.controller.policy.snapshot().revision,
         changes: { combat: { hide: "never", evade_safe_range: COVER_SAFE_RANGE } }, lifetime: { kind: "session" }, reason: "Exercise the cover obligation" });
-      return fixture.clock.settle(fixture.runner.run(navigate, goal), limitMs);
+      return fixture.clock.settle(fixture.runner.run(navigate, { ...goal, ...options }), limitMs);
     },
     async [Symbol.asyncDispose]() {
       stopAiming();
@@ -3044,6 +3047,34 @@ function refusedAfterAStep(events: readonly NavigationEvent[], from: number): bo
 }
 
 const refusals = (events: readonly NavigationEvent[]) => events.filter((event) => event.kind === "route_refused");
+
+/** Check a cell centre independently of the admission, including whether its sight rays were loaded. */
+function coverSightAt(world: WorldView, cell: BlockPosition, shooter: EntityBody, size: Omit<EntityBody, "position">) {
+  let loaded = [cell.y, cell.y + 1].every((y) => world.blockAt(cell.x, y, cell.z).kind === "loaded");
+  const ray = worldViewRaycaster((x, y, z) => {
+    const boxes = obstaclesOf(world.blockAt(x, y, z));
+    if (boxes === null) loaded = false;
+    return boxes;
+  });
+  const position = new Vec3(cell.x + 0.5, cell.y, cell.z + 0.5);
+  const seen = shooterSeesBody(ray, shooter, { position, ...size });
+  return { loaded, seen, distance: position.distanceTo(shooter.position) };
+}
+
+/** Judge the actual root and range-one endpoints using the live world at the first cover receipt. */
+function coverEndpointPremise(fixture: ReturnType<typeof coverWalk>, goal: BlockPosition) {
+  const { bot, navigation: { world } } = fixture;
+  const entity = bot.entities[COVER_SHOOTER]!;
+  const shooter = { position: entity.position, ...entityDimensions(bot, entity) };
+  const size = entityDimensions(bot, bot.entity);
+  const { x, y, z } = bot.entity.position.floored();
+  const start = { x, y, z };
+  const endpoints = cellsWithin(goal, 1)!.map((cell) => {
+    const feet = world.blockAt(cell.x, cell.y, cell.z);
+    return { cell, floor: feet.kind === "loaded" && feet.geometry.fullCube, ...coverSightAt(world, cell, shooter, size) };
+  });
+  return { start, root: coverSightAt(world, start, shooter, size), endpoints, eventIndex: fixture.events.length };
+}
 
 for (const ticksPerSecond of [20, 10]) {
   test(`a resumed navigate takes the covered detour after a cover evade (${ticksPerSecond} tps)`, async () => {
@@ -3104,6 +3135,53 @@ for (const ticksPerSecond of [20, 10]) {
       assert.equal(refusals(fixture.events).length, 1);
       assert.ok(refusedAfterAStep(fixture.events, changedAt), "the refusal came at a step boundary after a step completed, not at the commit");
     });
+
+  test(`a resumed navigate with every endpoint in sight is refused before its search (${ticksPerSecond} tps)`, async () => {
+    await using fixture = coverWalk(ticksPerSecond);
+    using _clock = fixture.clock.install();
+    const goal = { x: 12, y: 64, z: 3 };
+    const observed: ReturnType<typeof coverEndpointPremise>[] = [];
+    const stop = fixture.driver.onTransition((event) => {
+      if (event.kind !== "outcome" || event.reflex !== "hostile_reflex") return;
+      const receipt = encounterReceipts(fixture.data).at(-1);
+      if (receipt?.ends?.some((end: { id: number; basis: string }) => end.id === COVER_SHOOTER && end.basis === "cover"))
+        observed.push(coverEndpointPremise(fixture, goal));
+    });
+    try {
+      const output = await fixture.walk(goal, undefined, { dig: false, scaffold: false });
+      assert.equal(observed.length, 1, "one cover receipt");
+      const { start, root, endpoints, eventIndex } = observed[0]!;
+      assert.deepEqual(start, { x: 8, y: 64, z: 2 }, "the resumed root is the lee cell");
+      assert.ok(root.loaded && !root.seen && root.distance <= COVER_SAFE_RANGE, JSON.stringify(root));
+      assert.equal(endpoints.length, 7);
+      assert.ok(endpoints.every(({ floor, loaded, seen, distance }) => floor || (loaded && seen && distance <= COVER_SAFE_RANGE)),
+        JSON.stringify(endpoints));
+
+      const resumed = fixture.events.slice(eventIndex).filter((event) => event.kind === "run_started");
+      assert.equal(resumed.length, 1);
+      const events = fixture.events.filter((event) => event.runId === resumed[0]!.runId);
+      assert.equal(events.filter((event) => event.kind === "search_started" || event.kind === "route_committed").length, 0);
+      assert.equal(output.result.status, "failed", JSON.stringify(output.result));
+      assert.match("error" in output.result ? output.result.error : "", /\[COVER_ROUTE_REFUSED\].*skeleton#7/);
+      assert.equal(refusals(events).length, 1);
+      assert.equal(refusals(events)[0]!.planId, null);
+      assert.equal(fixture.watching.exposedTicks, 0);
+
+      const eventCount = fixture.events.length;
+      await fixture.clock.advance(2_001);
+      assert.equal(fixture.events.length, eventCount, "the retired run's old compute bound cannot publish more events");
+
+      const from = fixture.bot.entity.position.clone();
+      const next = { x: 8, y: 64, z: -2 };
+      assert.ok(from.floored().distanceTo(new Vec3(next.x, next.y, next.z)) > 1);
+      const result = await fixture.walk(next, undefined, { dig: false, scaffold: false });
+      assert.equal(result.result.status, "succeeded", JSON.stringify(result.result));
+      assert.ok(fixture.bot.entity.position.distanceTo(from) > 1);
+      assert.deepEqual(fixture.observer.coverObligations(), []);
+    } finally {
+      stop();
+    }
+  });
 
   test(`a requested engagement's approach is never refused (${ticksPerSecond} tps)`, async () => {
     await using fixture = coverWalk(ticksPerSecond, "skeleton", true);

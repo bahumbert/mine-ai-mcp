@@ -1,20 +1,25 @@
-// route admission: a caller's veto over a route at its commit and at each step boundary (plan 2026-11-18-evade-resume-bound T2).
+// Route admission before search, at commit and at step boundaries.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { Vec3 } from "vec3";
-import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, listenersAddedSince, type FakeClock } from "../../test-support/fake-bot/index.js";
 import { exactBlockGoal } from "../goals/index.js";
+import { MineflayerBot, mineflayerBotSurface } from "../mineflayer/bot.js";
 import type { PlannedStep } from "../movements/movement.js";
 import { createNavigationRuntime } from "../runtime.js";
 import { createMovementPolicy } from "../movements/policy.js";
 import type { RouteAdmission } from "../route-admission.js";
 import type { NavigationEvent } from "../telemetry/index.js";
 import type { BlockPosition } from "../world/world.js";
-import { createNavigator } from "./navigator.js";
-import { walking } from "./navigation-run-fixtures.test.js";
+import { createNavigator, type NavigationRequest } from "./navigator.js";
+import { EARLY_COMMIT, walking } from "./navigation-run-fixtures.test.js";
 
-const EAST = exactBlockGoal({ x: 5, y: 63, z: 0 });
+const EAST_CELL = { x: 5, y: 63, z: 0 };
+const EAST = exactBlockGoal(EAST_CELL);
+const EAST_REVISION = "block:5,63,0";
+const NO_EDITS = createMovementPolicy({ ...walking(), allowPlacing: false, allowDigging: false });
+const ENDPOINT_REFUSAL = "every endpoint is seen";
 
 type CheckedPlan = Parameters<RouteAdmission["check"]>[0];
 
@@ -51,13 +56,192 @@ test("a refused route ends the run with route_refused after one search", async (
   assert.equal(failure.observation, "refused at step 2");
   assert.equal(kinds(events, "route_refused").length, 1);
   const refused = kinds(events, "route_refused")[0];
-  assert.ok(refused?.kind === "route_refused" && refused.observation === "refused at step 2" && refused.planId.length > 0);
+  assert.ok(refused?.kind === "route_refused" && refused.observation === "refused at step 2" && refused.planId !== null && refused.planId.length > 0);
+  assert.equal(refused.goalRevision, EAST_REVISION);
   assert.equal(kinds(events, "route_committed").length, 0);
   assert.equal(kinds(events, "search_started").length, 1);
   assert.equal(kinds(events, "step_started").length, 0);
   assert.deepEqual(bot.current, observation(), "the body did not move");
   assert.equal(seen.length, 1, "one check, at the commit");
   assert.equal(navigator.active, null);
+});
+
+/** An admission that records the two ways navigation can ask about a route. */
+function recordAdmission(reason: string | null = ENDPOINT_REFUSAL) {
+  const proofs: Parameters<NonNullable<RouteAdmission["refuteEndpoints"]>>[0][] = [];
+  const checks: CheckedPlan[] = [];
+  return {
+    proofs, checks,
+    admission: {
+      refuteEndpoints: (plan: (typeof proofs)[number]) => { proofs.push(plan); return reason; },
+      check: (plan: CheckedPlan) => { checks.push(plan); return reason; },
+    },
+  };
+}
+
+/** Exercise navigation with the actual position hold and shared fake physics. */
+function heldEast(clock: FakeClock, startX = 0, afterRelease?: () => void) {
+  const { bot } = createFakeBot({ clock, simulatePhysics: true, position: new Vec3(startX + 0.5, 63, 0.5), groundY: 62 });
+  const world = flatWorld();
+  const port = new MineflayerBot(mineflayerBotSurface(bot), world);
+  let releases = 0;
+  const holdPosition = port.holdPosition.bind(port);
+  port.holdPosition = (view) => {
+    const release = holdPosition(view);
+    return () => { release(); releases++; afterRelease?.(); };
+  };
+  const events: NavigationEvent[] = [];
+  const navigator = createNavigator({ world, bot: port, telemetry: onEvent((event) => events.push(event)) });
+  const added = listenersAddedSince(bot);
+  const start = (request: Partial<NavigationRequest> = {}) => {
+    const run = navigator.startRun({ goal: EAST, policy: NO_EDITS, ...request });
+    assert.equal(run.kind, "started");
+    return run.handle;
+  };
+  return { bot, world, events, navigator, added, start, releases: () => releases };
+}
+
+/** Verify one settlement and that the hold and its callbacks stay gone after the old deadline. */
+async function assertEndpointCleanup(clock: FakeClock, fixture: ReturnType<typeof heldEast>) {
+  const { bot, world, navigator, events, added, releases } = fixture;
+  assert.equal(navigator.active, null);
+  assert.equal(world.listenerCount, 0);
+  for (const event of new Set([...bot.eventNames().map(String), "physicsTick"])) assert.equal(added(event), 0, event);
+  assert.equal(Object.values(bot.controlState).some(Boolean), false);
+  assert.equal(releases(), 1);
+  const eventCount = events.length;
+  assert.equal(kinds(events, "run_settled").length, 1);
+  await clock.advance(30_000);
+  assert.equal(events.length, eventCount);
+  assert.equal(releases(), 1);
+  assert.equal(Object.values(bot.controlState).some(Boolean), false);
+}
+
+test("a fresh navigate after the endpoint refusal moves and succeeds", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const fixture = heldEast(clock);
+  const { bot, events, navigator, added, start } = fixture;
+  const { proofs, checks, admission } = recordAdmission();
+  navigator.setRouteAdmissionProvider(() => ({ ...admission, refuteEndpoints: (plan) => {
+    assert.equal(added("physicsTick"), 1, "the proof runs under the position hold");
+    return admission.refuteEndpoints(plan);
+  } }));
+  const settled = await clock.settle(start().outcome, 20_000);
+  for (const kind of ["search_started", "search_slice", "route_committed", "step_started"] as const)
+    assert.equal(kinds(events, kind).length, 0, kind);
+  assert.equal(settled.evidence.searches, 0);
+  const failure = refusal(settled);
+  assert.equal(failure.reason, "route_refused");
+  assert.equal(failure.observation, ENDPOINT_REFUSAL);
+  const refused = kinds(events, "route_refused");
+  assert.equal(refused.length, 1);
+  const event = refused[0];
+  assert.ok(event?.kind === "route_refused");
+  assert.equal(event.planId, null);
+  assert.equal(event.goalRevision, EAST_REVISION);
+  assert.equal(event.observation, ENDPOINT_REFUSAL);
+  assert.deepEqual(proofs, [{ start: { x: 0, y: 63, z: 0 }, endpoints: [EAST_CELL] }]);
+  assert.equal(checks.length, 0);
+  assert.deepEqual(bot.entity.position, new Vec3(0.5, 63, 0.5));
+  const lifecycle = ["run_started", "route_refused", "cleanup_completed", "run_settled"];
+  assert.deepEqual(events.map(({ kind }) => kind).filter((kind) => lifecycle.includes(kind)), lifecycle);
+  await assertEndpointCleanup(clock, fixture);
+
+  navigator.setRouteAdmissionProvider(() => null);
+  const next = await clock.settle(start().outcome, 20_000);
+  assert.equal(next.kind, "completed");
+  assert.ok(kinds(events, "step_completed").length > 0);
+  assert.equal(Math.floor(bot.entity.position.x), EAST_CELL.x);
+  assert.equal(added("physicsTick"), 0);
+
+  let reads = 0;
+  const from = events.length;
+  navigator.setRouteAdmissionProvider(() => { reads++; return admission; });
+  assert.equal((await clock.settle(start().outcome, 20_000)).kind, "completed", "the goal is already satisfied");
+  assert.equal(reads, 0);
+  assert.equal(kinds(events.slice(from), "search_started").length, 0);
+  assert.equal(kinds(events.slice(from), "route_refused").length, 0);
+});
+
+test("an uncertain proof or a provider without refuteEndpoints searches as today", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { events, navigator, start } = heldEast(clock);
+  for (const canRefute of [true, false]) {
+    const from = events.length;
+    const { admission, proofs, checks } = recordAdmission(null);
+    navigator.setRouteAdmissionProvider(() => canRefute ? admission : { check: admission.check });
+    const outcome = await clock.settle(start({ goal: canRefute ? EAST : exactBlockGoal({ ...EAST_CELL, x: 0 }) }).outcome, 20_000);
+    const runEvents = events.slice(from);
+    assert.equal(outcome.kind, "completed");
+    assert.equal(proofs.length, canRefute ? 1 : 0);
+    assert.ok(checks.length > 0);
+    assert.equal(kinds(runEvents, "search_started").length, 1);
+    assert.ok(kinds(runEvents, "step_completed").length > 0);
+    assert.equal(kinds(runEvents, "route_refused").length, 0);
+  }
+});
+
+for (const exit of ["immediate cancel", "abort on release", "proof throws", "release throws"] as const) {
+  test(`${exit} settles the endpoint check and releases the position hold`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const abort = new AbortController();
+    const fixture = heldEast(clock, 0, () => {
+      if (exit === "abort on release") abort.abort("hold released");
+      if (exit === "release throws") throw new Error(exit);
+    });
+    const { navigator, events, start, added } = fixture;
+    const { admission, proofs } = recordAdmission();
+    navigator.setRouteAdmissionProvider(() => exit !== "proof throws" ? admission : {
+      ...admission, refuteEndpoints() { throw new Error(exit); },
+    });
+    const started = start({ signal: abort.signal });
+    assert.equal(added("physicsTick"), 1);
+    if (exit === "immediate cancel") started.cancel();
+    const outcome = await clock.settle(started.outcome, 20_000);
+    if (exit === "immediate cancel" || exit === "abort on release") {
+      assert.equal(outcome.kind, "stopped");
+      assert.equal(proofs.length, exit === "immediate cancel" ? 0 : 1);
+    } else {
+      assert.equal(outcome.kind, "failed");
+      assert.equal(outcome.failure.kind, "internal_error");
+      assert.match(outcome.failure.message, new RegExp(exit));
+    }
+    assert.equal(kinds(events, "route_refused").length, 0);
+    assert.equal(kinds(events, "search_started").length, 0);
+    await assertEndpointCleanup(clock, fixture);
+  });
+}
+
+test("a plan-ahead search never asks", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { admission, proofs } = recordAdmission(null);
+  const { events, navigator, start } = heldEast(clock, -5);
+  navigator.setRouteAdmissionProvider(() => admission);
+  const outcome = await clock.settle(start({ searchLimits: EARLY_COMMIT }).outcome, 20_000);
+  assert.equal(outcome.kind, "completed");
+  assert.ok(events.some((event) => event.kind === "search_started" && event.reason === "segment_continuation"));
+  assert.deepEqual(proofs, [{ start: { x: -5, y: 63, z: 0 }, endpoints: [EAST_CELL] }]);
+});
+
+test("calculation fallback can search for a goal restored after it first changed during the yield", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot, events, start } = heldEast(clock);
+  let target = 1;
+  const started = start({
+    goal: { resolve: (at) => exactBlockGoal({ ...EAST_CELL, x: target }).resolve(at) },
+    onCalculationFailure: () => { target = 1; return { kind: "continue" }; },
+  });
+  queueMicrotask(() => { target = 20; });
+  const outcome = await clock.settle(started.outcome, 20_000);
+  assert.equal(outcome.kind, "completed", JSON.stringify(outcome));
+  assert.equal(Math.floor(bot.entity.position.x), 1);
+  const goals = events.flatMap((event) => event.kind === "search_started" ? [event.goal] : []);
+  assert.deepEqual(goals, ["block:20,63,0", "block:1,63,0"]);
 });
 
 test("a step-boundary refusal stops after the current step", async () => {

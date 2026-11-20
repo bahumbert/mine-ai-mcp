@@ -36,6 +36,14 @@ export type ResolvedGoal =
       progress?(node: PlanningNode): number;
       /** Search supplies predicted edits; arrival supplies the observed world. */
       isSatisfied(node: PlanningNode, world: WorldView): boolean;
+      /**
+       * Every integer feet cell `satisfies` accepts, or null for an unbounded set, a cube over `limit`,
+       * or a fractional centre. `satisfies` is the goal's own `isSatisfied` function object.
+       */
+      endpoints?(limit: number): {
+        readonly satisfies: (node: PlanningNode, world: WorldView) => boolean;
+        readonly cells: readonly BlockPosition[];
+      } | null;
       /** Work priced alongside travel; only the physical search root receives an actual pose. */
       finish?(
         state: PlanningState,
