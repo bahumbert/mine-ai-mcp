@@ -9,8 +9,10 @@ import { SERVER_ANSWER_TICKS, serverPacedWallMs, waitForWorldAge } from "../worl
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
-import type { BlockPosition, WorldView } from "./world/world.js";
-import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, SWIM_HORIZONTAL_TICKS, type SwimAscent, openWaterSurface, swimAscent, swimTravelTicks } from "./world/swimming.js";
+import { type BlockPosition, type WorldView, blockKey, samePosition } from "./world/world.js";
+import { DIVE_BACKSTOP_TICKS, DIVE_RESERVE_TICKS, SWIM_DOWN_TICKS, SWIM_EXIT_RADIUS, SWIM_HORIZONTAL_TICKS,
+  SWIM_START_TICKS, SWIM_UP_TICKS, type SwimAscent, type SwimCellReader, type SwimStroke,
+  openWaterSurface, swimAscent, swimCellsOf, swimExitPath, swimTravelTicks } from "./world/swimming.js";
 import type { RoutePlan } from "./movements/movement.js";
 
 const BREATHING_STOP = "Planned breathing stop";
@@ -18,6 +20,7 @@ const BREATHING_STOP = "Planned breathing stop";
 const RETURN_DIED = "died during the return to air";
 interface DiveSession {
   readonly cancelled: AbortController;
+  readonly lifetime: AbortSignal;
   owned: boolean;
   returning: boolean;
   stop: AbortController;
@@ -28,8 +31,16 @@ interface DiveSession {
   lastBreathable: Vec3 | null;
   /** The run ended with its goal reached: the body is where it was asked to be, whatever the water. */
   completed: boolean;
-  /** The ascent's next cell observed on the preceding backstop read in this leg. */
-  ascentStroke: BlockPosition | null;
+  ascentStroke: ObservedAscentStroke | null;
+}
+
+/** The stroke and world geometry observed on the preceding backstop read in this leg. */
+interface ObservedAscentStroke {
+  readonly feet: Vec3;
+  readonly next: BlockPosition;
+  readonly ticks: number;
+  readonly worldRevision: number;
+  alternatives: readonly SwimStroke[] | null;
 }
 
 const FULL_AIR_TICKS = 300;
@@ -47,14 +58,11 @@ const SWIM_BACK_MAXIMUM_TICKS = 300;
 const SWIM_BACK_MINIMUM_TICKS = 40;
 
 /**
- * Credit progress only along the remembered first stroke; price distance off it. The body is read at the middle of its
+ * Credit progress along the planner's first stroke; price distance off it. The body is read at the middle of its
  * cell on x and z and at its feet level on y (a body's `position.y` is its feet); drift off the line is priced by
  * distance, never a zero test (T30a, 2026-11-18).
  */
-function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, previous: BlockPosition | null): number {
-  const stroke = ascent.path[0];
-  if (!stroke || previous?.x !== stroke.cell.x || previous.y !== stroke.cell.y || previous.z !== stroke.cell.z)
-    return ascent.ticks;
+function remainingStrokeTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, stroke: SwimStroke): number {
   const direction = new Vec3(stroke.cell.x - feet.x, stroke.cell.y - feet.y, stroke.cell.z - feet.z);
   const offset = bot.entity.position.minus(feet.offset(0.5, 0, 0.5));
   const projection = offset.dot(direction);
@@ -63,6 +71,107 @@ function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, previous
     return ascent.ticks - projection * stroke.ticks + sideways * SWIM_HORIZONTAL_TICKS;
   const extra = Math.hypot(Math.min(0, projection), sideways, Math.max(0, projection - 1));
   return ascent.ticks + extra * SWIM_HORIZONTAL_TICKS;
+}
+
+// The same axis neighbours and stroke prices as the swim paths, searched by ticks instead of hops.
+const SWIM_STEPS = [-1, 1].flatMap(step => [
+  { x: step, y: 0, z: 0, ticks: SWIM_HORIZONTAL_TICKS },
+  { x: 0, y: 0, z: step, ticks: SWIM_HORIZONTAL_TICKS },
+  { x: 0, y: step, z: 0, ticks: step > 0 ? SWIM_UP_TICKS : SWIM_DOWN_TICKS },
+]);
+
+/** A swim path needs the loaded feet and head cells clear at each step. */
+function swimmerFits(cells: SwimCellReader, { x, y, z }: BlockPosition): boolean {
+  const body = cells(x, y, z);
+  const head = cells(x, y + 1, z);
+  return (body === "water" || body === "air") && (head === "water" || head === "air");
+}
+
+/** Beyond the breath search's radius, an open column keeps the existing second start charge for the rise. */
+function openColumnEscapeTicks(cells: SwimCellReader, cell: BlockPosition, top: number, spent: number, limit: number): number {
+  const climb = Math.floor((limit - spent - SWIM_START_TICKS) / SWIM_UP_TICKS);
+  if (cell.y + climb <= top || swimExitPath(cells, cell, [], 0) === null) return Infinity;
+  let head = cell.y + 1;
+  while (head <= cell.y + climb && cells(cell.x, head, cell.z) === "water") head++;
+  if (head - 1 <= top || cells(cell.x, head, cell.z) !== "air") return Infinity;
+  return spent + SWIM_START_TICKS + (head - 1 - cell.y) * SWIM_UP_TICKS;
+}
+
+interface SwimFrontier {
+  readonly byTicks: (Vec3[] | undefined)[];
+  readonly shortest: Map<number, number>;
+}
+
+/** Enqueue only improving, traversable strokes within the planner's breath search radius and price. */
+function queueSwimSteps(cells: SwimCellReader, feet: Vec3, frontier: SwimFrontier, cell: Vec3, spent: number, limit: number): void {
+  for (const step of SWIM_STEPS) {
+    const ticks = spent + step.ticks;
+    if (ticks > limit) continue;
+    const next = cell.offset(step.x, step.y, step.z);
+    if (Math.max(Math.abs(next.x - feet.x), Math.abs(next.y - feet.y), Math.abs(next.z - feet.z)) > SWIM_EXIT_RADIUS) continue;
+    const key = blockKey(next);
+    if (ticks >= (frontier.shortest.get(key) ?? Infinity) || !swimmerFits(cells, next)) continue;
+    frontier.shortest.set(key, ticks);
+    (frontier.byTicks[ticks] ??= []).push(next);
+  }
+}
+
+/** Search by the complete breath price. Visiting the origin again would double back through the same stroke. */
+function escapeTicksThrough(cells: SwimCellReader, feet: Vec3, first: Vec3, firstTicks: number, limit: number): number {
+  const start = SWIM_START_TICKS + firstTicks;
+  if (start > limit || !swimmerFits(cells, first)) return Infinity;
+  const frontier: SwimFrontier = { byTicks: [], shortest: new Map([[blockKey(feet), 0], [blockKey(first), start]]) };
+  frontier.byTicks[start] = [first];
+  let columnEscape = Infinity;
+  for (let spent = start; spent <= limit && spent < columnEscape; spent++) {
+    for (const cell of frontier.byTicks[spent] ?? []) {
+      if (frontier.shortest.get(blockKey(cell)) !== spent) continue;
+      if (cells(cell.x, cell.y + 1, cell.z) === "air") return spent;
+      columnEscape = Math.min(columnEscape, openColumnEscapeTicks(cells, cell, feet.y + SWIM_EXIT_RADIUS, spent, limit));
+      queueSwimSteps(cells, feet, frontier, cell, spent, Math.min(limit, columnEscape - 1));
+    }
+  }
+  return columnEscape;
+}
+
+/** Only an escape with the same complete cell price can contribute a different first stroke (T30b, 2026-11-20). */
+function equalEscapeStrokes(read: WorldView["blockAt"], feet: Vec3, primary: SwimStroke, limit: number): SwimStroke[] {
+  const cells = swimCellsOf(read);
+  const alternatives: SwimStroke[] = [];
+  for (const { x, y, z, ticks } of SWIM_STEPS) {
+    const cell = feet.offset(x, y, z);
+    if (!samePosition(cell, primary.cell) && escapeTicksThrough(cells, feet, cell, ticks, limit) === limit) alternatives.push({ cell, ticks });
+  }
+  return alternatives;
+}
+
+/** Price alternate approaches from the actual body while keeping the remainder of each tied escape fixed. */
+function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, stroke: SwimStroke, alternatives: readonly SwimStroke[]): number {
+  let remaining = remainingStrokeTicks(bot, feet, ascent, stroke);
+  const position = bot.entity.position;
+  for (const { cell, ticks } of alternatives) {
+    const verticalPrice = cell.y === feet.y ? SWIM_HORIZONTAL_TICKS : ticks;
+    const approach = Math.hypot((cell.x + 0.5 - position.x) * SWIM_HORIZONTAL_TICKS,
+      (cell.y - position.y) * verticalPrice, (cell.z + 0.5 - position.z) * SWIM_HORIZONTAL_TICKS);
+    remaining = Math.min(remaining, ascent.ticks - ticks + approach);
+  }
+  return remaining;
+}
+
+/** Death and respawn forget the stroke. Column packets can change escapes without changing the world's block revision. */
+function watchAscentStroke(bot: Bot, session: DiveSession): Disposable {
+  const forget = () => { session.ascentStroke = null; };
+  const forgetAlternatives = () => { if (session.ascentStroke) session.ascentStroke.alternatives = null; };
+  bot.on("death", forget);
+  bot.on("respawn", forget);
+  bot.on("chunkColumnLoad", forgetAlternatives);
+  bot.on("chunkColumnUnload", forgetAlternatives);
+  return { [Symbol.dispose]: () => {
+    bot.off("death", forget);
+    bot.off("respawn", forget);
+    bot.off("chunkColumnLoad", forgetAlternatives);
+    bot.off("chunkColumnUnload", forgetAlternatives);
+  } };
 }
 
 /** Remember the last air pocket and request a breathing stop before an owned dive spends its ascent reserve. */
@@ -103,10 +212,21 @@ export class Diving {
     }
     const feet = this.bot.entity.position.floored();
     const ascent = swimAscent(this.#read, feet);
+    const stroke = ascent?.path[0];
     const previous = session.ascentStroke;
-    session.ascentStroke = session.cancelled.signal.aborted ? null : ascent?.path[0]?.cell ?? null;
-    if (!ascent) return FULL_AIR_TICKS; // The admission premise disappeared: request immediate rescue.
-    return remainingAscentTicks(this.bot, feet, ascent, previous) + DIVE_BACKSTOP_TICKS;
+    if (!ascent || !stroke || session.lifetime.aborted) {
+      session.ascentStroke = null;
+      // If the admission premise disappeared, request immediate rescue.
+      return ascent ? ascent.ticks + DIVE_BACKSTOP_TICKS : FULL_AIR_TICKS;
+    }
+    const sameStroke = previous && previous.feet.equals(feet) && samePosition(previous.next, stroke.cell);
+    const worldRevision = this.world.revision;
+    const verified = sameStroke && previous.ticks === ascent.ticks && previous.worldRevision === worldRevision
+      ? previous.alternatives : null;
+    session.ascentStroke = { feet, next: stroke.cell, ticks: ascent.ticks, worldRevision,
+      alternatives: verified ?? equalEscapeStrokes(this.#read, feet, stroke, ascent.ticks) };
+    const ticks = sameStroke ? remainingAscentTicks(this.bot, feet, ascent, stroke, verified ?? []) : ascent.ticks;
+    return ticks + DIVE_BACKSTOP_TICKS;
   }
 
   committed(plan: Pick<RoutePlan, "steps">): void {
@@ -136,20 +256,19 @@ export class Diving {
 
   async run(options: NavigateOptions, navigate: Navigate) {
     if (this.#session) throw new Error("Navigation already owns a dive session.");
+    const cancelled = new AbortController();
+    const lifetime = AbortSignal.any([cancelled.signal, ...(options.signal ? [options.signal] : [])]);
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled: new AbortController(), completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false, ascentStroke: null };
+      cancelled, lifetime, completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false, ascentStroke: null };
     this.#session = session;
-    const lifetime = AbortSignal.any([session.cancelled.signal, ...(options.signal ? [options.signal] : [])]);
+    using _strokeWatcher = watchAscentStroke(this.bot, session);
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
       ...(options.stopSignal ? [options.stopSignal] : [])]) };
     const started = monotonicNow();
     let previousStop = "";
     let repeatedStops = 0;
     const tick = () => observeDiveTick(this.bot, this.#read, session);
-    const forgetStroke = () => { session.ascentStroke = null; };
     this.bot.on("physicsTick", tick);
-    this.bot.on("death", forgetStroke);
-    this.bot.on("respawn", forgetStroke);
     if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
     try {
       await this.#observeAir(options, session, lifetime);
@@ -205,8 +324,6 @@ export class Diving {
       throw error;
     } finally {
       this.bot.off("physicsTick", tick);
-      this.bot.off("death", forgetStroke);
-      this.bot.off("respawn", forgetStroke);
       session.ascentStroke = null;
       if (session.returning && !session.cancelled.signal.aborted) this.bot.setControlState("jump", false);
       await this.#swimBackToAir(session, options, navigate);
