@@ -1,6 +1,8 @@
 /** Arrangement checks and observed combat evidence shared by the fortress trials. */
 import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
+import { waitServerTicks } from "../../../tests/minecraft/drivers/server-ticks.ts";
 import type { Entity } from "prismarine-entity";
+import type { Vec3 } from "vec3";
 import { z } from "zod";
 import { declaredEntitiesArranged, standStill, wearArmor } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
@@ -59,6 +61,27 @@ export async function releaseThreats(context: MineAiScenarioContext): Promise<vo
   } finally {
     bot.off("messagestr", message);
     context.signal.removeEventListener("abort", abort);
+  }
+}
+
+/**
+ * Ask the server whether the bot stands within `radius` blocks of `exit`: the server's own answer, not the client's
+ * position. True when the answer arrives within 40 server ticks; false otherwise. The listener is removed on every exit.
+ */
+export async function confirmArrival(context: MineAiScenarioContext, exit: Vec3, radius: number): Promise<boolean> {
+  const { bot } = context;
+  let arrived = false;
+  const arrival = (text: string) => {
+    if (text.includes("fortress_arrived")) arrived = true;
+  };
+  bot.on("messagestr", arrival);
+  try {
+    const { x, y, z } = exit;
+    bot.chat(`/execute as ${bot.username} at @s if entity @s[x=${x},y=${y},z=${z},distance=..${radius}] run say fortress_arrived`);
+    await waitServerTicks(bot, 40, { signal: context.signal, until: () => arrived });
+    return arrived;
+  } finally {
+    bot.off("messagestr", arrival);
   }
 }
 

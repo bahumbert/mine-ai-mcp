@@ -3,9 +3,9 @@ import { COLLECT_MOB_DROP, NAVIGATE } from "@aibengineering/mine-ai-mcp";
 import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
-import { fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
+import { confirmArrival, fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
 import { observeIdleWindow } from "../../flat/combat/idle-reflex-window.ts";
-import { judgeWithdrawal } from "./withdrawal-judge.ts";
+import { judgeWithdrawal, requestOf } from "./withdrawal-judge.ts";
 
 export const run: MineAiScenario = async (context) => {
   const params = fortressParamsSchema.parse(context.scenario.params);
@@ -25,12 +25,15 @@ export const run: MineAiScenario = async (context) => {
       const returned = await runtime.run(navigate, { x, y, z, range: 1 }, context.signal);
       const positionAtWalkEnd = context.bot.entity.position.clone();
       context.log(`RETURN ${JSON.stringify(returned.result)}`);
+      const exit = new Vec3(x + 0.5, y, z + 0.5);
+      // The server's answer decides the arrival, before the window starts.
+      const arrivedOnServer = returned.result.status === "succeeded" ? await confirmArrival(context, exit, 2) : null;
       // Five seconds of server ticks keeps the runtime active for delayed fireballs/contact.
       await observeIdleWindow(context.bot, 100, () => evidence.snapshot().deaths > 0, context.signal);
       const final = evidence.snapshot();
       const { atExit, passed } = judgeWithdrawal({
         positionAtWalkEnd, positionAfterWindow: context.bot.entity.position.clone(),
-        exit: new Vec3(x + 0.5, y, z + 0.5), final, returned,
+        exit, arrivedOnServer, requests: [requestOf(returned)], final, returned,
       });
       return {
         status: passed && final.rods >= 1 ? "succeeded" : "failed",

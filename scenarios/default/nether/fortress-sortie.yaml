@@ -49,6 +49,5 @@ goal:
   goals:
     - { kind: survive, who: FortressBot, seconds: 1 }
     - { kind: health, who: FortressBot }
-    - { kind: reach, who: FortressBot, pos: [-451.5, 60, 270.5], radius: 2 }
     - { kind: hasItem, who: FortressBot, item: blaze_rod, count: 1 }
     - { kind: completion, who: FortressBot }
