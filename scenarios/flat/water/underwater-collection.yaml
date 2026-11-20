@@ -1,5 +1,5 @@
 name: underwater-collection
-description: A collect of sand lying under water is refused by the never-mine-under-water rule, and no sand is mined.
+description: A collect of sand lying under water is refused because it cannot be drained from dry ground with the carried blocks, and no sand is mined.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
@@ -18,9 +18,10 @@ client:
   args: ["../../src/client-host.ts", "./underwater.ts"]
 params:
   collect: 1
-  # Never mine under water (owner 2026-10-02): the sand under the pond is refused, and none is mined.
+  # Never mine under water (owner 2026-10-02): the sand under the pond has no dry ground beside it to drain it from
+  # with the carried blocks, so it is refused and none is mined.
   reject: true
-  refusal: ["[TARGETS_UNDER_WATER]", "never mines under water"]
+  refusal: ["[TARGETS_UNDER_WATER]", "none can be drained first from dry ground"]
 
 goal:
   kind: all
