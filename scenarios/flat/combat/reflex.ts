@@ -6,6 +6,7 @@ import {
 import { z } from "zod";
 import type { Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { pollServerWindow } from "./idle-reflex-window.ts";
 
 const encounterSchema = z.object({
   response: z.enum(["fight", "evade", "hide", "deflect"]),
@@ -146,7 +147,7 @@ export async function waitForIdle(context: MineAiScenarioContext, runtime: Runti
  */
 // @function-metrics size=6 branches=3 fan-out=7 depth=4 interface=3 fan-in=3
 export async function readEncounters(
-  context: MineAiScenarioContext,
+  context: Pick<MineAiScenarioContext, "signal">,
   runtime: Runtime,
   ignoreOutcomes: readonly string[] = [],
 ): Promise<readonly Encounter[]> {
@@ -155,7 +156,7 @@ export async function readEncounters(
 
 /** Read each published hostile-reflex outcome without treating limits as encounters. */
 export async function readReflexOutcomes(
-  context: MineAiScenarioContext,
+  context: Pick<MineAiScenarioContext, "signal">,
   runtime: Runtime,
   ignoreOutcomes: readonly string[] = [],
 ): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] }> {
@@ -214,9 +215,8 @@ export function parseReflexOutcome(value: unknown): ReflexOutcome | null {
  * the events matters for a crowd, where the bot goes briefly idle between one
  * kill and naming the next target.
  */
-// @function-metrics size=9 branches=3 fan-out=5 depth=5 interface=4 fan-in=2
 export async function awaitEncounters(
-  context: MineAiScenarioContext,
+  context: Pick<MineAiScenarioContext, "bot" | "signal">,
   runtime: Runtime,
   count: number,
   ticks: number,
@@ -224,17 +224,19 @@ export async function awaitEncounters(
 ): Promise<readonly Encounter[]> {
   // Events arrive oldest-first, so this stays in the order they happened.
   const seen: Encounter[] = [];
-  for (let waited = 0; waited < ticks; waited += 5) {
+  const readSettled = async () => {
     context.signal.throwIfAborted();
-    if (!runtime.status().busy) {
+    if (runtime.status().busy) return false;
+    try {
       seen.push(...(await readEncounters(context, runtime, ignoreOutcomes)));
-      if (seen.length >= count) return seen;
+    } finally {
+      context.signal.throwIfAborted();
     }
-    await context.bot.waitForTicks(5);
-  }
-  // A kill can finish during that final sleep. Read its settled evidence before
-  // reporting an empty log and closing a physically successful runtime.
-  if (!runtime.status().busy) seen.push(...(await readEncounters(context, runtime, ignoreOutcomes)));
+    return seen.length >= count;
+  };
+  const { ended } = await pollServerWindow(context.bot, ticks, readSettled, context.signal);
+  // A kill can finish during the last wait. Read its settled evidence before closing the runtime.
+  if (ended === "ticks") await readSettled();
   return seen;
 }
 
@@ -247,16 +249,27 @@ export async function awaitEncounters(
  * somewhere a long way from the cause - which is exactly how the first attempt
  * at the hide fixture behaved.
  */
-// @function-metrics size=8 branches=2 fan-out=5 depth=2 interface=3 fan-in=2
-export async function hurt(context: MineAiScenarioContext, target: number): Promise<boolean> {
-  const { bot } = context;
-  bot.chat(`/damage @s ${Math.max(1, Math.round(bot.health - target))} minecraft:magic`);
-  for (let waited = 0; waited < 100; waited += 1) {
-    context.signal.throwIfAborted();
-    if (bot.health <= target) return true;
-    await bot.waitForTicks(1);
+export async function hurt(context: Pick<MineAiScenarioContext, "bot" | "signal">, target: number): Promise<boolean> {
+  const { bot, signal } = context;
+  signal.throwIfAborted();
+  // Arranged-health fixtures freeze game time, but the damage command still answers with a health packet.
+  const wounded = new AbortController();
+  const confirmed = Symbol("wounded health observed");
+  const health = () => {
+    if (bot.health <= target) wounded.abort(confirmed);
+  };
+  bot.on("health", health);
+  try {
+    bot.chat(`/damage @s ${Math.max(1, Math.round(bot.health - target))} minecraft:magic`);
+    const { ended } = await pollServerWindow(bot, 100, async () => bot.health <= target, AbortSignal.any([signal, wounded.signal]));
+    return ended === "poll" || bot.health <= target;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error === confirmed) return true;
+    throw error;
+  } finally {
+    bot.off("health", health);
   }
-  return false;
 }
 
 // @function-metrics size=2 branches=0 fan-out=1 depth=2 interface=3 fan-in=1

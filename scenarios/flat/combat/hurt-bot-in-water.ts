@@ -5,6 +5,7 @@ import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { describe, hurt, readEncounters, type Encounter } from "./reflex.ts";
+import { pollServerWindow } from "./idle-reflex-window.ts";
 
 const paramsSchema = z.strictObject({
   hurtTo: z.number().int().positive(),
@@ -29,13 +30,18 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
       return { status: "failed", detail: `Arrangement could not establish ${params.hurtTo} health.` };
     const seen: Encounter[] = [];
     let slowestReadMs = 0;
-    for (let tick = 0; tick < params.waitTicks && !died; tick += 5) {
-      context.signal.throwIfAborted();
+    const readResponse = async () => {
+      if (died) return true;
       const started = monotonicNow();
       seen.push(...(await readEncounters(context, runtime)));
       slowestReadMs = Math.max(slowestReadMs, monotonicNow() - started);
-      if (seen.some((encounter) => encounter.response !== "hide")) break;
-      await bot.waitForTicks(5);
+      return died || seen.some((encounter) => encounter.response !== "hide");
+    };
+    const { ended } = await pollServerWindow(bot, params.waitTicks, readResponse, context.signal);
+    if (ended === "ticks") {
+      context.signal.throwIfAborted();
+      await readResponse();
+      context.signal.throwIfAborted();
     }
     const hid = seen.filter((encounter) => encounter.response === "hide");
     const answered = seen.filter((encounter) => encounter.response !== "hide");

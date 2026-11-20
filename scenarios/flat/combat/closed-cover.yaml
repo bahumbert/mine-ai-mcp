@@ -35,7 +35,10 @@ client:
   args: ["../../src/client-host.ts", "./closed-cover.ts"]
 goal:
   kind: all
-  timeout: 65
+  # Twice the longest trial, 777 ticks (t00419, 20 tps), rounded up to 78 game seconds.
+  timeout: 78
+  # Twice the longest still span, 729 ticks (t00415 at 20 tps, t00407 at 10 tps), rounded up to 20 ticks.
+  stillTicks: 1460
   goals:
     - { kind: health, who: CoverBot, health: 20 }
     - { kind: blockAt, who: CoverBot, pos: [0, -58, 0], block: nether_bricks }

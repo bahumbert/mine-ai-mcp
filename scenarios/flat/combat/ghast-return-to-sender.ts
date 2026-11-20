@@ -1,9 +1,10 @@
 import type { ClientCompletion } from "mine-labs/client";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { openRuntime } from "../../src/runtime.ts";
+import { observeIdleWindow } from "./idle-reflex-window.ts";
 
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
-  const { bot } = context;
+  const { bot, signal } = context;
   const runtime = await openRuntime(context, "ghast-return-to-sender");
   const origin = bot.entity.position.clone();
 
@@ -12,17 +13,13 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const died = (entity: Parameters<typeof bot.attack>[0]) => {
     if (entity.name === "ghast") ghastDied = true;
   };
+  const moved = (entity: Parameters<typeof bot.attack>[0]) => {
+    if (entity.name === "fireball" && entity.isValid && entity.velocity.x > 0) reflected = true;
+  };
   bot.on("entityDead", died);
+  bot.on("entityMoved", moved);
   try {
-    for (let tick = 0; tick < 600; tick += 1) {
-      context.signal.throwIfAborted();
-      await bot.waitForTicks(1);
-      const ball = Object.values(bot.entities).find((entity) => entity.name === "fireball" && entity.isValid);
-      if (ball) {
-        reflected ||= ball.velocity.x > 0;
-      }
-      if (ghastDied || bot.health < 20 || bot.entity.position.y < origin.y - 0.5) break;
-    }
+    await observeIdleWindow(bot, 600, () => ghastDied || bot.health < 20 || bot.entity.position.y < origin.y - 0.5, signal);
     const stayed = bot.entity.position.distanceTo(origin) < 0.5;
     return {
       status: ghastDied && reflected && stayed && bot.health === 20 ? "succeeded" : "failed",
@@ -30,6 +27,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     };
   } finally {
     bot.off("entityDead", died);
+    bot.off("entityMoved", moved);
     await runtime.close();
   }
 }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { hurt } from "./reflex.ts";
+import { observeIdleWindow } from "./idle-reflex-window.ts";
 
 const paramsSchema = z.strictObject({
   hurtTo: z.number().int().positive(),
@@ -23,10 +24,7 @@ export const run: MineAiScenario = async (context) => {
   try {
     if (!(await hurt(context, params.hurtTo)))
       return { status: "failed", detail: "Arrangement did not establish wounded health." };
-    for (let tick = 0; tick < params.waitTicks && !died; tick++) {
-      context.signal.throwIfAborted();
-      await context.bot.waitForTicks(1);
-    }
+    await observeIdleWindow(context.bot, params.waitTicks, () => died, context.signal);
     const [x, y, z] = params.navigateTo;
     const output = await runtime.run(
       runtime.actions.find((action) => action.name === NAVIGATE)!,
