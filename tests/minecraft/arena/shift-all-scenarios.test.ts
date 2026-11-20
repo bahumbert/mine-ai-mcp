@@ -60,6 +60,20 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
 
 const all = await loadAllScenarios();
 
+test("both resume scenes shift the actor and use no lee tag selector", () => {
+  const base = laneOf(3);
+  const lane = { ...base, offset: { x: 64, z: base.offset.z },
+    cell: { ...base.cell, minX: base.cell.minX + 64, maxX: base.cell.maxX + 64 } };
+  for (const name of ["detour", "no-cover"] as const) {
+    const entry = all.find(item => item.file === `scenarios/combat/evade-stationary-shooter-${name}.yaml`);
+    assert.ok(entry, name);
+    const result = shiftScenario(settingsOf(entry.scenario, FRESH_SERVER_GAMERULES).scenario, lane);
+    assert.ok(result.ok, result.ok ? "" : result.reason);
+    assert.ok(result.scenario.players[0]!.name.startsWith("Actor"));
+    assert.ok(result.scenario.tick.every(command => !command.includes("evade_resume_lee")));
+  }
+});
+
 test("the census reads the scenarios of both directories", () => {
   assert.ok(all.length >= 91, `only ${all.length} scenario files found`);
   assert.ok(all.some(({ file }) => file.startsWith("contract/scenarios/")));

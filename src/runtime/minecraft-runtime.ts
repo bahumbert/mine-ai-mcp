@@ -44,7 +44,7 @@ import { monotonicNow } from "../utils/index.js";
 import { serverTickPace } from "../world/server-tick-pace.js";
 import { swingReadiness } from "../survival/weapons/swing-readiness.js";
 import { ReflexDriver } from "../survival/control/driver.js";
-import type { SurvivalStatus } from "../survival/evidence/contract.js";
+import type { SurvivalReceipt, SurvivalStatus } from "../survival/evidence/contract.js";
 import { attachSurvivalReceipts } from "../survival/evidence/receipts.js";
 import { SurvivalObserver } from "../survival/evidence/status.js";
 import { attachEndermanGazeControl } from "../survival/guards/enderman-gaze.js";
@@ -74,6 +74,7 @@ import { snapshotTools } from "../world/tool-tiers.js";
 
 export interface MinecraftRuntimeOptions {
   readonly botData: SqlBotDataOptions;
+  readonly onSurvivalReceipt?: (receipt: SurvivalReceipt) => void;
   readonly highlighter?: BlockHighlighter;
   readonly debugExecuteJavaScript?: boolean;
   readonly onDisconnect?: (reason: string) => void;
@@ -422,6 +423,11 @@ function incidentDirectory(options: MinecraftRuntimeOptions, botData: SqlBotData
   return directory;
 }
 
+/** A diagnostic observer cannot interrupt receipt publication or mutate its evidence. */
+function notifySurvivalReceipt(observer: MinecraftRuntimeOptions["onSurvivalReceipt"], receipt: SurvivalReceipt): void {
+  if (observer) { try { observer(structuredClone(receipt)); } catch { /* Diagnostics cannot interrupt survival. */ } }
+}
+
 /** Own every long-lived facility attached to one connected Minecraft bot. */
 export async function createMinecraftRuntime(bot: Bot, options: MinecraftRuntimeOptions): Promise<MinecraftRuntime> {
   await using resources = new AsyncDisposableStack();
@@ -483,9 +489,8 @@ export async function createMinecraftRuntime(bot: Bot, options: MinecraftRuntime
   bodyIncidents.physicsStalled = incidents.physicsStalled;
   bodyIncidents.reflexLimit = incidents.reflexLimit;
   resources.use(
-    attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation, (receipt) =>
-      incidents.recorder.record("survival_receipt", { receipt }),
-    ),
+    attachSurvivalReceipts(bot, botData, runner, reflexes, combat, survival, navigation,
+      (receipt) => { incidents.recorder.record("survival_receipt", { receipt }); notifySurvivalReceipt(options.onSurvivalReceipt, receipt); }),
   );
   resources.defer(observeReflexActivity(reflexes, combat, runner));
   resources.defer(

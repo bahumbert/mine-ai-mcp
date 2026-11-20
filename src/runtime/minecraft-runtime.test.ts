@@ -14,7 +14,7 @@ import * as incidentLog from "../bot-data/incident-log.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
-import { type FakeHarness, type Listened, createFakeBot, listenersAddedSince } from "../test-support/fake-bot/index.js";
+import { type FakeHarness, type Listened, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
@@ -22,6 +22,82 @@ const { spyOn } = require("bun:test") as {
   spyOn(target: typeof incidentLog, method: "writeIncidentArtifact"): { mockImplementation(implementation: typeof incidentLog.writeIncidentArtifact): { mockRestore(): void } };
   spyOn(target: typeof fs, method: "rm"): { mockImplementation(implementation: typeof fs.rm): { mockRestore(): void } };
 };
+
+test("the optional survival receipt observer cannot mutate or interrupt incident recording", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-combat-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const listeners = new Set<(event: CombatDecision) => void>();
+  const received: string[] = [];
+  const runtime = await createMinecraftRuntime(runtimeBot(), {
+    incidents: { directory },
+    botData: { storage: { kind: "temporary" }, identity: { worldId: "receipt-observer", scope: { kind: "bot", botId: "runtime-bot" } } },
+    createCombatController: () => ({ ...combatController, onDecision: (listener) => { listeners.add(listener); return () => listeners.delete(listener); } }),
+    onSurvivalReceipt: (receipt) => { received.push(receipt.source); receipt.source = "changed"; throw new Error("observer"); },
+  });
+  try {
+    for (const listener of listeners) listener({ kind: "retarget", from: 7, to: 8 });
+    assert.deepEqual(received, ["combat"]);
+    const capture = await runtime.captureIncident();
+    assert.equal(capture.kind, "completed");
+    if (capture.kind !== "completed" || capture.reference.artifact.kind !== "written") throw new Error("Missing incident");
+    const content = await readFile(capture.reference.artifact.path, "utf8");
+    assert.match(content, /"source":"combat"/);
+    assert.doesNotMatch(content, /"source":"changed"/);
+  } finally { await runtime.close(); }
+  assert.equal(listeners.size, 0);
+});
+
+test("the optional survival receipt observer sees the claim and the durable outcome", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-hunger-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock, username: "ReceiptBot", food: 6, carried: { cooked_beef: 1 } });
+  bot.foodSaturation = 0;
+  bot.setMaxListeners(40);
+  const seen: string[] = [];
+  let observedOutcome!: () => void;
+  const outcomeReceipt = new Promise<void>(resolve => { observedOutcome = resolve; });
+  const runtime = await createMinecraftRuntime(bot, {
+    incidents: { directory },
+    botData: { storage: { kind: "temporary" }, identity: { worldId: "receipt-reflex", scope: { kind: "bot", botId: "ReceiptBot" } } },
+    onSurvivalReceipt: receipt => {
+      if (receipt.source !== "hunger_reflex") return;
+      seen.push(receipt.kind);
+      if (receipt.kind === "outcome") observedOutcome();
+      receipt.status.vitals.health = -999;
+      receipt.evidence = { changed: true };
+      throw new Error("observer failure");
+    },
+  });
+  try {
+    await clock.settle(outcomeReceipt, 5000);
+    assert.ok(seen.indexOf("claim") >= 0 && seen.indexOf("outcome") > seen.indexOf("claim"), JSON.stringify(seen));
+    const read = runtime.actions.find(action => action.name === "read_recent_events")!;
+    const events = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
+    const outcomes = events.events.filter(event => event.type === "survival_outcome" && event.payload.source === "hunger_reflex");
+    assert.equal(outcomes.length, 1);
+    const outcome = outcomes[0];
+    assert.ok(outcome && outcome.type === "survival_outcome");
+    assert.notEqual(outcome.payload.status.vitals.health, -999, "observer mutation cannot reach the durable nested status");
+    assert.notDeepEqual(outcome.payload.evidence, { changed: true });
+    const capture = await runtime.captureIncident();
+    assert.equal(capture.kind, "completed");
+    if (capture.kind !== "completed" || capture.reference.artifact.kind !== "written") throw new Error("Missing incident");
+    const records = (await readFile(capture.reference.artifact.path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const hunger = records.filter(record => record.kind === "survival_receipt" && record.receipt.source === "hunger_reflex");
+    assert.ok(hunger.some(record => record.receipt.kind === "outcome"));
+    assert.ok(hunger.some(record => record.receipt.kind === "claim"));
+    assert.ok(hunger.every(record => record.receipt.status.vitals.health !== -999));
+    assert.ok(hunger.every(record => !record.receipt.evidence.changed));
+    assert.equal(runtime.status().busy, false);
+    const next = runtime.actions.find(action => action.name === "raw_action")!;
+    assert.equal((await clock.settle(runtime.run(next, { operation: "control", state: "jump", ticks: 1 }), 5000)).result.status, "succeeded");
+  } finally { await runtime.close(); }
+  const afterClose = seen.length;
+  await clock.advance(5000);
+  assert.equal(seen.length, afterClose, "no receipts arrive after runtime disposal");
+});
 
 // check-reads: src/**/*.ts
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */

@@ -8,6 +8,10 @@ import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import type { PlannedOperation, PlannedStep } from "../../navigation/movements/movement.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { movementStep } from "../../test-support/navigation.js";
+import { obstaclesOf, worldViewRaycaster } from "../../navigation/index.js";
+import { shooterSeesBody } from "../../world/entity-geometry.js";
+import { canReleaseOnObservedGround, standsOnDryGround } from "../../navigation/world/block-geometry.js";
+import { cellsWithin } from "../../navigation/goals/index.js";
 import { COVER_REFUSED_CODE, CoverObligations, coverAdmission, JUMP_APEX, type CoverObligation } from "./cover-obligation.js";
 
 const SHOOTER = 7;
@@ -76,6 +80,67 @@ function check(harness: Scene, obligations: readonly CoverObligation[], steps: r
 }
 
 const REFUSAL = new RegExp(`^\\${COVER_REFUSED_CODE.slice(0, -1)}\\] step \\d+/\\d+ at -?\\d+ -?\\d+ -?\\d+ is in sight of skeleton#\\d+ at \\d+\\.\\d blocks; no committed route keeps cover\\. The reflex still protects the body; choose the next action\\.$`);
+
+test("the two scene layouts: a covered route exists in detour, none in no-cover", () => {
+  for (const wallEnd of [14, 2]) {
+    const harness = createFakeBot({ position: new Vec3(4.5, -60, 0.5), groundY: -61,
+      entities: { [SHOOTER]: { name: "skeleton", position: new Vec3(-5.5, -60, 0.5) } } });
+    const world = new MemoryWorld();
+    const grass = harness.bot.registry.blocksByName.grass_block!.defaultState;
+    const bedrock = harness.bot.registry.blocksByName.bedrock!.defaultState;
+    for (let x = -9; x <= 12; x++) for (let z = -5; z <= 16; z++) for (let y = -61; y <= -55; y++) {
+      const wall = x === 3 && z >= -2 && z <= wallEnd && y >= -60 && y <= -58;
+      world.load(feet(x, y, z), { stateId: wall ? bedrock : y === -61 ? grass : 0 });
+    }
+    const entity = harness.bot.entities[SHOOTER]!;
+    const shooter = { position: entity.position, width: entity.width, height: entity.height };
+    const owe: CoverObligation = { requestId: "request-1", generation: 0, threatId: SHOOTER, name: "skeleton", body: shooter, safeRange: 36 };
+    let unknown = false;
+    const ray = worldViewRaycaster((x, y, z) => {
+      const block = world.blockAt(x, y, z);
+      if (block.kind !== "loaded") unknown = true;
+      return obstaclesOf(block);
+    });
+    const seen = (position: Vec3) => {
+      unknown = false;
+      const result = shooterSeesBody(ray, shooter, { position, width: harness.bot.entity.width, height: harness.bot.entity.height });
+      assert.equal(unknown, false, `loaded rays at ${position}`);
+      return result;
+    };
+    const lee = new Vec3(4.6, -60, wallEnd === 14 ? -1.5 : 2.5);
+    const recorded = wallEnd === 14 ? [[4.601, -1.459], [4.601, -1.436]] : [[4.544, 2.748], [4.605, 2.447]];
+    const positions = [lee, lee.offset(-0.4, 0, 0), lee.offset(0.4, 0, 0), lee.offset(0, 0.4, 0),
+      lee.offset(0, 0, -0.4), lee.offset(0, 0, 0.4), ...recorded.map(([x, z]) => new Vec3(x!, -60, z!)),
+      new Vec3(5, -60, 0), new Vec3(8, -60, 0), new Vec3(5.5, -60, 0.5), new Vec3(8.5, -60, 0.5)];
+    for (const position of positions) assert.equal(seen(position), false, `covered ${position}`);
+    const outside = new Vec3(4.31, -60, wallEnd === 14 ? -2.10 : 3.05);
+    assert.ok(outside.distanceTo(lee) > 0.4);
+    assert.equal(canReleaseOnObservedGround(world, { position: outside, velocity: { x: 0, y: 0, z: 0 }, onGround: true }), true);
+    assert.equal(seen(outside), true, "reachable exposed feet outside the lee");
+    const startZ = wallEnd === 14 ? -2 : 2;
+    const route = Array.from({ length: 12 - startZ }, (_, i) => step("walk", feet(4, -60, startZ + i), feet(4, -60, startZ + i + 1)));
+    const result = coverAdmission(harness.bot, [owe]).check({ start: feet(4, -60, startZ), steps: route }, world);
+    if (wallEnd === 14) assert.equal(result, null);
+    else {
+      const candidates = cellsWithin(feet(4, -60, 12), 1);
+      assert.equal(candidates.length, 7);
+      assert.equal(standsOnDryGround(world.blockAt.bind(world), feet(4, -61, 12)), false, "the lower goal cell is solid floor");
+      assert.equal(standsOnDryGround(world.blockAt.bind(world), feet(4, -59, 12)), false, "the upper goal cell has no support");
+      for (const [x, z] of [[4, 12], [3, 12], [5, 12], [4, 11], [4, 13]])
+        for (const dx of [0, 0.5, 0.999]) for (const dz of [0, 0.5, 0.999])
+          assert.equal(seen(new Vec3(x! + dx, -60, z! + dz)), true, `destination ${x},${z} + ${dx},${dz}`);
+      assert.match(result ?? "", /\[COVER_ROUTE_REFUSED\]/);
+      const refusedStep = /step (\d+)\/\d+ at (-?\d+) (-?\d+) (-?\d+)/u.exec(result!);
+      assert.ok(refusedStep);
+      const refused = route[Number(refusedStep[1]) - 1]!;
+      assert.deepEqual(refused.to, feet(Number(refusedStep[2]), Number(refusedStep[3]), Number(refusedStep[4])));
+      assert.equal(seen(new Vec3(refused.to.x + 0.5, refused.to.y, refused.to.z + 0.5)), true);
+      const wider = [step("walk", feet(4, -60, 2), feet(5, -60, 2)),
+        ...Array.from({ length: 10 }, (_, i) => step("walk", feet(5, -60, i + 2), feet(5, -60, i + 3)))];
+      assert.match(coverAdmission(harness.bot, [owe]).check({ start: feet(4, -60, 2), steps: wider }, world) ?? "", /\[COVER_ROUTE_REFUSED\]/);
+    }
+  }
+});
 
 test("a covered detour is admitted and every body stays covered", () => {
   const harness = scene();

@@ -25,6 +25,8 @@ const MINECRAFT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), ".
 const SIDEWAYS = arenaFrame({ x: 64, z: 1536 });
 /** Physical waits have their own tests (boat cancellation) or real-server scenario (cleanup preemption); coordinates use arenaPoint. */
 const OWN_TEST = new Set(["cancel-mid-ride.ts", "cancel-after-get-off.ts", "life-saving-cleanup.ts", "lava-pool-region.ts", "hostile-boat.ts", "combat-margin.ts", "zombie-hit-formula.ts", "pacing-target.ts", "mining-body-edge.ts"]);
+/** The real-driver framed receipt and command fixture in evade-flight-resume.test.ts owns these physical modes. */
+const RESUME_FIXTURE = new Set(["scenarios/combat/evade-stationary-shooter-detour.yaml", "scenarios/combat/evade-stationary-shooter-no-cover.yaml"]);
 /** Wall-clock waits of a driver's params, cut to nothing: the census reads what the driver asks, not how long it waits. */
 const NO_WAIT_PARAMS = { walkMs: 1, silentMs: 0 };
 
@@ -200,7 +202,11 @@ await Promise.all(
 /** The drivers that took coordinates from their params in at least one run, so the comparison above was not empty for them. */
 const driversThatMoved = new Set<string>();
 
-for (const { file, driver, run, name } of scenarios.filter(({ driver }) => !OWN_TEST.has(path.basename(driver)))) {
+test("both resume YAMLs are handed to the framed resume fixture", () => {
+  assert.deepEqual(scenarios.filter(({ name }) => RESUME_FIXTURE.has(name)).map(({ name }) => name).sort(), [...RESUME_FIXTURE].sort());
+});
+
+for (const { file, driver, run, name } of scenarios.filter(({ driver, name }) => !OWN_TEST.has(path.basename(driver)) && !RESUME_FIXTURE.has(name))) {
   test(`${name}: ${path.basename(driver)} asks for the zero run's cells moved into the lane`, async () => {
     const atZero = await recordDriverRun(run, file, arenaFrame(ZERO_ARENA));
     const inLane = await recordDriverRun(run, file, SIDEWAYS);
