@@ -40,7 +40,8 @@ interface ObservedAscentStroke {
   readonly next: BlockPosition;
   readonly ticks: number;
   readonly worldRevision: number;
-  alternatives: readonly SwimStroke[] | null;
+  readonly alternatives: readonly SwimStroke[];
+  dirty: boolean;
 }
 
 const FULL_AIR_TICKS = 300;
@@ -161,16 +162,16 @@ function remainingAscentTicks(bot: Bot, feet: Vec3, ascent: SwimAscent, stroke: 
 /** Death and respawn forget the stroke. Column packets can change escapes without changing the world's block revision. */
 function watchAscentStroke(bot: Bot, session: DiveSession): Disposable {
   const forget = () => { session.ascentStroke = null; };
-  const forgetAlternatives = () => { if (session.ascentStroke) session.ascentStroke.alternatives = null; };
+  const markDirty = () => { if (session.ascentStroke) session.ascentStroke.dirty = true; };
   bot.on("death", forget);
   bot.on("respawn", forget);
-  bot.on("chunkColumnLoad", forgetAlternatives);
-  bot.on("chunkColumnUnload", forgetAlternatives);
+  bot.on("chunkColumnLoad", markDirty);
+  bot.on("chunkColumnUnload", markDirty);
   return { [Symbol.dispose]: () => {
     bot.off("death", forget);
     bot.off("respawn", forget);
-    bot.off("chunkColumnLoad", forgetAlternatives);
-    bot.off("chunkColumnUnload", forgetAlternatives);
+    bot.off("chunkColumnLoad", markDirty);
+    bot.off("chunkColumnUnload", markDirty);
   } };
 }
 
@@ -220,12 +221,19 @@ export class Diving {
       return ascent ? ascent.ticks + DIVE_BACKSTOP_TICKS : FULL_AIR_TICKS;
     }
     const sameStroke = previous && previous.feet.equals(feet) && samePosition(previous.next, stroke.cell);
+    const continuing = sameStroke && previous.ticks === ascent.ticks ? previous : null;
     const worldRevision = this.world.revision;
-    const verified = sameStroke && previous.ticks === ascent.ticks && previous.worldRevision === worldRevision
-      ? previous.alternatives : null;
-    session.ascentStroke = { feet, next: stroke.cell, ticks: ascent.ticks, worldRevision,
-      alternatives: verified ?? equalEscapeStrokes(this.#read, feet, stroke, ascent.ticks) };
-    const ticks = sameStroke ? remainingAscentTicks(this.bot, feet, ascent, stroke, verified ?? []) : ascent.ticks;
+    let verified: readonly SwimStroke[];
+    if (continuing && !continuing.dirty && continuing.worldRevision === worldRevision) {
+      verified = continuing.alternatives;
+    } else {
+      const alternatives = equalEscapeStrokes(this.#read, feet, stroke, ascent.ticks);
+      // A refresh can confirm a stroke already seen. A newly found stroke still needs another read (T30e, 2026-11-20).
+      verified = continuing ? alternatives.filter(({ cell, ticks }) => continuing.alternatives.some(prior =>
+        prior.ticks === ticks && samePosition(prior.cell, cell))) : [];
+      session.ascentStroke = { feet, next: stroke.cell, ticks: ascent.ticks, worldRevision, alternatives, dirty: false };
+    }
+    const ticks = sameStroke ? remainingAscentTicks(this.bot, feet, ascent, stroke, verified) : ascent.ticks;
     return ticks + DIVE_BACKSTOP_TICKS;
   }
 

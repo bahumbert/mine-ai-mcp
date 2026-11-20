@@ -9,7 +9,7 @@ import { MineflayerWorldView } from "./mineflayer/world.js";
 import { MemoryWorld } from "./world/memory-world.js";
 import { createMovementPolicy } from "./movements/policy.js";
 import { exactBlockGoal } from "./goals/index.js";
-import { DIVE_BACKSTOP_TICKS, SWIM_HORIZONTAL_TICKS, admitsDive, swimAscent } from "./world/swimming.js";
+import { DIVE_BACKSTOP_TICKS, SWIM_HORIZONTAL_TICKS, admitsDive, swimAscent, swimCellsOf } from "./world/swimming.js";
 import { attachBreathReflex } from "../survival/reflexes/breath.js";
 import type { NavigateOptions, NavigationResult } from "./navigate.js";
 
@@ -747,6 +747,164 @@ function breathSense(bot: Bot, diving: Diving) {
   return { sense, reflex };
 }
 
+/** Check the floor at a fixed pose without rounding away a threshold crossing. */
+function assertBackstopFloor(diving: Diving, expected: number, read: string): void {
+  const floor = diving.backstop();
+  assert.ok(floor !== null && Math.abs(floor - expected) < 0.01, `${read}: floor ${floor}, expected ${expected}`);
+}
+
+/** Read the trace's last siphon pose, with the swimmer heading west. */
+function positionWestbound(bot: Bot): void {
+  bot.entity.position.set(-0.768813, -59, 1.492926);
+  bot.entity.velocity.set(-0.067116, 0, 0);
+}
+
+const OFF_ROUTE_CELL = { x: 3, y: -61, z: 3 };
+
+/** Check that the dive removes every watcher, with no delayed release after the old bounds. */
+async function assertDiveCleanup(diving: Diving, { clock, left }: ReturnType<typeof pond>, states: string[]): Promise<void> {
+  for (const event of ["physicsTick", "death", "respawn", "chunkColumnLoad", "chunkColumnUnload"] as const)
+    assert.equal(left(event), 0, event);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  await clock.advance(60_000);
+  assert.equal(diving.backstop(), null);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+  assert.deepEqual(states, ["released"]);
+}
+
+/** Run synchronous reads inside one owned equal-exit dive, without advancing either clock between them. */
+async function withEqualSiphonDive(rate: 20 | 10 | "stopped",
+  probe: (scene: ReturnType<typeof siphonFixture>, diving: Diving) => void | Promise<void>): Promise<void> {
+  const scene = siphonFixture(rate === 10 ? 10 : 20, "equal");
+  const { bot, world, harness, clock } = scene;
+  scene.load(OFF_ROUTE_CELL, "stone");
+  using _timers = clock.install();
+  await clock.advance(50);
+  if (rate === "stopped") harness.server.stop();
+  const age = bot.time.age;
+  const states: string[] = [];
+  const diving = new Diving(bot, world, state => states.push(state));
+  const goal = exactBlockGoal({ x: 0, y: -57, z: 1 });
+  const result = await diving.run({ movements: createMovementPolicy(), goal }, async () => {
+    assert.equal(diving.owned, true);
+    assert.equal(diving.backstop(), 69, "the first read keeps the full cell price");
+    positionWestbound(bot);
+    await probe(scene, diving);
+    assert.equal(clock.now(), 50, "every read uses fake time 50 ms");
+    assert.equal(bot.time.age, age, "every read uses the same world age");
+    return { status: "completed", elapsedMs: 0 };
+  });
+  assert.equal(result.status, "completed");
+  await assertDiveCleanup(diving, scene, states);
+}
+
+/** Produce a new unrelated invalidation before each first-read probe. */
+function unrelatedSiphonChanges({ bot, world, load }: ReturnType<typeof siphonFixture>,
+  change: "block update" | "chunkColumnLoad" | "chunkColumnUnload"): () => void {
+  let kind: Kind = "air";
+  return () => {
+    const revision = world.revision;
+    if (change === "block update") {
+      load(OFF_ROUTE_CELL, kind);
+      kind = kind === "air" ? "stone" : "air";
+      assert.equal(world.revision, revision + 1);
+    } else {
+      bot.emit(change, new Vec3(32, 0, 32));
+      assert.equal(world.revision, revision);
+    }
+  };
+}
+
+for (const rate of [20, 10, "stopped"] as const) for (const change of ["block update", "chunkColumnLoad", "chunkColumnUnload"] as const) {
+  test(`the first read after a distant ${change} keeps a verified west floor at ${rate} tps`, () =>
+    withEqualSiphonDive(rate, (scene, diving) => {
+      unrelatedSiphonChanges(scene, change)();
+      const { x, y, z } = scene.bot.entity.position;
+      const west = 8 + 16 * Math.hypot(x + 1.5, y + 59, z - 1.5) + 2 * 10 + 25;
+      assertBackstopFloor(diving, west, change);
+    }));
+
+  test(`the first read after a distant ${change} uses the west breath thresholds at ${rate} tps`, () =>
+    withEqualSiphonDive(rate, async (scene, diving) => {
+      const invalidate = unrelatedSiphonChanges(scene, change);
+      const { sense, reflex } = breathSense(scene.bot, diving);
+      await using _reflex = reflex;
+      const observations = [73, 65, 64, 63].map(air => {
+        scene.breath.setAirSupply(air);
+        invalidate();
+        return [air, sense()?.kind ?? null];
+      });
+      assert.deepEqual(observations, [[73, null], [65, null], [64, "observed"], [63, "observed"]]);
+    }));
+}
+
+test("a credited west exit loses credit immediately when blocked and earns it back on its second open read", () =>
+  withEqualSiphonDive(20, async ({ bot, breath, load }, diving) => {
+    const { sense, reflex } = breathSense(bot, diving);
+    await using _reflex = reflex;
+    const westHead = { x: -2, y: -58, z: 1 };
+    assertBackstopFloor(diving, 64.6995, "credited west");
+    load(westHead, "stone");
+    assertBackstopFloor(diving, 73.3025, "first blocked read");
+    load(westHead, "water");
+    assertBackstopFloor(diving, 73.3025, "first reopened read");
+    assertBackstopFloor(diving, 64.6995, "second reopened read");
+    breath.setAirSupply(73);
+    load(westHead, "stone");
+    assert.equal(sense()?.kind, "observed", "the sensor's own first blocked read fires at 73 air");
+  }));
+
+test("a north exit replacing a credited west exit earns credit on its second read", () =>
+  withEqualSiphonDive(20, ({ bot, world, load }, diving) => {
+    const read = world.blockAt.bind(world);
+    const feet = bot.entity.position.floored();
+    const westHead = { x: -2, y: -58, z: 1 };
+    const east = swimAscent(read, feet);
+    assert.equal(east?.ticks, 44);
+    assert.deepEqual(east?.path[0]?.cell, { x: 0, y: -59, z: 1 });
+    assertBackstopFloor(diving, 64.6995, "credited west");
+    load(westHead, "stone");
+    for (let y = -59; y <= -56; y++) load({ x: -1, y, z: 0 }, y === -56 ? "air" : "water");
+    assert.deepEqual(swimAscent(read, feet), east, "the east primary and its price are unchanged");
+    assert.equal(swimCellsOf(read)(westHead.x, westHead.y, westHead.z), "solid");
+    const north = swimAscent((x, y, z) => x === 0 && y === -58 && z === 1 ? read(-1, -57, 1) : read(x, y, z), feet);
+    assert.equal(north?.ticks, 44);
+    assert.deepEqual(north?.path, [
+      { cell: { x: -1, y: -59, z: 0 }, ticks: 16 },
+      { cell: { x: -1, y: -58, z: 0 }, ticks: 10 },
+      { cell: { x: -1, y: -57, z: 0 }, ticks: 10 },
+    ]);
+    bot.entity.position.set(-0.5, -59, 1.231187);
+    bot.entity.velocity.set(0, 0, -0.067116);
+    assert.ok(bot.entity.position.floored().equals(feet));
+    assertBackstopFloor(diving, 73.3010, "first replacement read");
+    assertBackstopFloor(diving, 64.6990, "second replacement read");
+  }));
+
+test("the same exit cells start a fresh alternative history when the full ascent price rises", () =>
+  withEqualSiphonDive(20, ({ bot, world, load }, diving) => {
+    const read = world.blockAt.bind(world);
+    const feet = bot.entity.position.floored();
+    const east = swimAscent(read, feet);
+    const readWithoutEast = (x: number, y: number, z: number) => x === 0 && y === -58 && z === 1 ? read(-1, -57, 1) : read(x, y, z);
+    const west = swimAscent(readWithoutEast, feet);
+    assert.equal(east?.ticks, 44);
+    assert.equal(west?.ticks, 44);
+    assert.deepEqual(east?.path[0]?.cell, { x: 0, y: -59, z: 1 });
+    assert.deepEqual(west?.path[0]?.cell, { x: -2, y: -59, z: 1 });
+    assertBackstopFloor(diving, 64.6995, "credited west");
+    for (const x of [-4, -3, -2, 0]) load({ x, y: -56, z: 1 }, "water");
+    load({ x: 0, y: -55, z: 1 }, "air");
+    const raisedEast = swimAscent(read, feet);
+    const raisedWest = swimAscent(readWithoutEast, feet);
+    assert.equal(raisedEast?.ticks, 54);
+    assert.equal(raisedWest?.ticks, 54);
+    assert.deepEqual(raisedEast?.path[0], east?.path[0]);
+    assert.deepEqual(raisedWest?.path[0], west?.path[0]);
+    assertBackstopFloor(diving, 83.3025, "first raised-surface read");
+    assertBackstopFloor(diving, 74.6995, "second raised-surface read");
+  }));
+
 for (const rate of [20, 10, "stopped"] as const) for (const direction of ["toward", "away", "sideways", "turn"] as const)
   test(`the backstop prices only the current ${direction} stroke at ${rate} tps`, async () => {
     const { bot, world, clock, harness, breath, left } = strokeFixture(rate === 10 ? 10 : 20, direction === "turn");
@@ -817,20 +975,12 @@ for (const rate of [20, 10, "stopped"] as const) test(`a body resting on the flo
   assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
 });
 
-for (const rate of [20, 10, "stopped"] as const) test(`the west escape sets the backstop at both siphon positions with equal exits at ${rate} tps`, async () => {
-  const { bot, world, clock, harness, breath, left } = siphonFixture(rate === 10 ? 10 : 20, "equal");
-  using _timers = clock.install();
-  await clock.advance(50);
-  if (rate === "stopped") harness.server.stop();
-  const age = bot.time.age;
-  const diving = new Diving(bot, world);
-  const { sense, reflex } = breathSense(bot, diving);
-  await using _reflex = reflex;
-  const goal = exactBlockGoal({ x: -3, y: -57, z: 1 });
-  await diving.run({ movements: createMovementPolicy(), goal }, async () => {
+for (const rate of [20, 10, "stopped"] as const) test(`the west escape sets the backstop at both siphon positions with equal exits at ${rate} tps`, () =>
+  withEqualSiphonDive(rate, async ({ bot, world, breath }, diving) => {
+    const { sense, reflex } = breathSense(bot, diving);
+    await using _reflex = reflex;
     const ascent = swimAscent((x, y, z) => world.blockAt(x, y, z), bot.entity.position.floored());
     assert.deepEqual(ascent?.path[0]?.cell, { x: 0, y: -59, z: 1 }, "the planner still breaks the tie eastward");
-    assert.equal(diving.backstop(), 69, "the first read keeps the full cell price");
     for (const x of [-0.769, -0.979]) for (const y of [-59, -58.965]) {
       bot.entity.position.set(x, y, 1.493);
       bot.entity.velocity.set(-0.067, -0.005, 0);
@@ -850,13 +1000,7 @@ for (const rate of [20, 10, "stopped"] as const) test(`the west escape sets the 
       bot.entity.velocity.set(0, 0, 0);
       assert.equal(diving.backstop(), floor, "a verified escape stays viable when velocity is zero");
     }
-    assert.equal(clock.now(), 50, "the reads use the same fake time and world age");
-    assert.equal(bot.time.age, age);
-    return { status: "completed", elapsedMs: 0 };
-  });
-  assert.equal(left("physicsTick") + left("death") + left("respawn"), 0);
-  assert.equal(clock.pendingGlobalTimers(), 0);
-});
+  }));
 
 for (const westExit of ["blocked", "unloaded", "longer"] as const)
   test(`a west exit that is ${westExit} keeps the east stroke price until a full equal-cost route is verified`, async () => {
@@ -922,9 +1066,9 @@ for (const cancellation of ["caller abort", "takeover"] as const)
   });
 
 /** At x=0 the west exit crosses a chunk seam. Prismarine's setColumn/unloadColumn events update chunk visibility alone. */
-test("a newly loaded column grants escape credit only after it was seen and an unload clears it", async () => {
+for (const read of ["floor", "breath sense"] as const) test(`a loaded west column must earn ${read} credit again after an unload`, async () => {
   const scene = pond(new Vec3(0.021, 60, 1.5), false, { mocked: true });
-  const { bot, harness, breath, clock, left } = scene;
+  const { bot, harness, breath, clock } = scene;
   using _timers = clock.install();
   for (let x = 0; x <= 2; x++) for (let y = 59; y <= 63; y++) for (let z = 0; z <= 2; z++) {
     const kind = z !== 1 || x === 2 || y === 59 ? "stone" : x === 0 && y >= 62 ? "stone" : y <= 62 ? "water" : "air";
@@ -938,10 +1082,11 @@ test("a newly loaded column grants escape credit only after it was seen and an u
   Object.assign(bot.world, { getColumn: (x: number, z: number) => x === -1 && z === 0
     ? (westLoaded ? west.world.getColumn(x, z) : undefined) : harness.world.getColumn(x, z) });
   const world = new MineflayerWorldView(bot);
-  const diving = new Diving(bot, world);
+  const states: string[] = [];
+  const diving = new Diving(bot, world, state => states.push(state));
   const { sense, reflex } = breathSense(bot, diving);
   await using _reflex = reflex;
-  breath.hold(65);
+  breath.hold(73);
   await clock.advance(50);
   Reflect.set(bot.entity, "isInWater", true);
   bot.entity.velocity.x = -0.067;
@@ -950,25 +1095,36 @@ test("a newly loaded column grants escape credit only after it was seen and an u
   try {
     await diving.run({ movements: createMovementPolicy(), goal }, async () => {
       assert.equal(diving.backstop(), 69);
-      assert.ok(Math.abs(diving.backstop()! - 76.664) < 0.01);
+      assertBackstopFloor(diving, 76.664, "west column initially unavailable");
       westLoaded = true;
       bot.emit("chunkColumnLoad", corner);
       assert.equal(world.revision, 0, "a chunk packet leaves the block revision unchanged");
-      assert.equal(sense()?.kind, "observed", "the first read after loading does not grant credit");
-      assert.ok(Math.abs(diving.backstop()! - 61.336) < 0.01);
+      if (read === "floor") {
+        assertBackstopFloor(diving, 76.664, "first loaded read");
+        assertBackstopFloor(diving, 61.336, "second loaded read");
+      } else {
+        assert.equal(sense()?.kind, "observed", "the first read after loading does not grant credit");
+        assert.equal(sense(), null, "the second loaded read earns credit");
+      }
       westLoaded = false;
       bot.emit("chunkColumnUnload", corner);
-      assert.equal(sense()?.kind, "observed", "an unloaded route immediately loses credit");
+      if (read === "floor") assertBackstopFloor(diving, 76.664, "first unloaded read");
+      else assert.equal(sense()?.kind, "observed", "an unloaded route immediately loses credit");
       westLoaded = true;
       bot.emit("chunkColumnLoad", corner);
-      assert.equal(sense()?.kind, "observed", "loading the same column again starts fresh");
-      assert.equal(sense(), null, "the next reading can use the verified route");
+      if (read === "floor") {
+        assertBackstopFloor(diving, 76.664, "first reloaded read");
+        assertBackstopFloor(diving, 61.336, "second reloaded read");
+      } else {
+        assert.equal(sense()?.kind, "observed", "loading the same column again starts fresh");
+        assert.equal(sense(), null, "the next reading can use the verified route");
+      }
       return { status: "completed", elapsedMs: 0 };
     });
   } finally {
     world.close();
   }
-  assert.equal(left("chunkColumnLoad") + left("chunkColumnUnload") + left("death") + left("respawn") + left("physicsTick"), 0);
+  await assertDiveCleanup(diving, scene, states);
 });
 
 /** East-first search wins on hop count. Each board has a distinct way to air on the west or upward side. */
