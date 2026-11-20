@@ -1,15 +1,15 @@
 import { monotonicNow } from "../../../../src/utils/monotonic-clock.ts";
 import type { BotEvents } from "mineflayer";
-import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import { observeIdleWindow } from "../../../flat/combat/idle-reflex-window.ts";
 import { readReflexOutcomes } from "../../../flat/combat/reflex.ts";
 import { declaredEntitiesArranged, openRuntime, standStill, wearArmor } from "../../../src/runtime.ts";
-import type { MineAiScenario } from "../../../src/scenario-client.ts";
+import type { MineAiScenario, MineAiScenarioContext } from "../../../src/scenario-client.ts";
 import { observe } from "./pit.ts";
 import { isAngry } from "./observe.ts";
 import { judgeTraverse } from "./basalt-judge.ts";
+import { awaitGhastCharge, watchGhastCharge } from "./basalt-charge.ts";
 
 const paramsSchema = z.strictObject({
   trial: z.enum(["traverse", "wounded_gaze"]).default("traverse"),
@@ -154,77 +154,46 @@ function trackCrossfire(
   };
 }
 
-/** The declared ghast's `is_charging` flag, watched from before the NoAI release: `latchedAge` is the server age of the first update that sets it. */
-interface GhastCharge {
-  readonly ghast: Entity;
-  latchedAge: number | null;
-  readonly samples: { age: number | null; dy: number; distance: number }[];
-  stop(): void;
+/** The native charge is the server's answer to the isolated ghast release. */
+async function releaseBasaltGhast({ bot, signal, log }: MineAiScenarioContext) {
+  signal.throwIfAborted();
+  const watch = watchGhastCharge(bot);
+  try {
+    if (!watch.ghast.uuid) throw new Error("The declared ghast has no UUID.");
+    const ghastReleaseAge = bot.time.age;
+    bot.chat(`/data merge entity ${watch.ghast.uuid} {NoAI:0b}`);
+    log(`Ghast release sent at server age ${ghastReleaseAge}`);
+    const charged = await awaitGhastCharge(bot, watch, ghastReleaseAge, signal, log);
+    const chargeAge = watch.end?.kind === "charged" ? watch.end.age : null;
+    return { ...charged, ghastReleaseAge, chargeAge };
+  } finally {
+    watch.stop();
+  }
 }
 
-/**
- * Server ticks a ghast may take to charge after the NoAI release: 2 x the worst charge measured (260 ticks at 10 tps,
- * t00067 of the a7 T4 proof), rounded up to 20. Measured over 40 runs at both rates before the bound: 0-40 ticks at
- * 20 tps (36 runs), 0-36 at 10 tps (13 runs), 260 at 10 tps (one run); censored: one 10 tps run that did not charge
- * within 80 ticks (t00047, dy 4.65-4.70 outside the band). After the spawn moved to y 101: 10 tps 10 runs (0-40),
- * 20 tps 5 runs (0-40), no run over 260, so the bound is unchanged. A run that reaches the bound fails with its own text.
- */
-const GHAST_CHARGE_TICKS = 520;
-
-/** Arm the charge watch before the release: a ghast that charges is seen by its update, or already charging at arming. */
-function watchGhastCharge(bot: Bot): GhastCharge {
-  const ghast = Object.values(bot.entities).find((entity) => entity.name === "ghast");
-  if (!ghast) throw new Error("The declared ghast is not in the basalt arena.");
-  const index = bot.registry.entitiesByName.ghast?.metadataKeys?.indexOf("is_charging") ?? -1;
-  if (index < 0) throw new Error("minecraft-data has no is_charging metadata key for the ghast.");
-  const charging = (entity: Entity) => {
-    const value: unknown = entity.metadata[index];
-    return value === true;
+/** Arm before release and retain only a fireball spawned while the navigate request is pending. */
+function watchWalkFireball(bot: Bot) {
+  const watch = {
+    walking: false,
+    id: null as number | null,
+    [Symbol.dispose]: () => { bot.off("entitySpawn", spawn); },
   };
-  const onUpdate: BotEvents["entityUpdate"] = (entity) => {
-    if (entity.id === ghast.id && watch.latchedAge === null && charging(entity)) watch.latchedAge = bot.time.age;
+  const spawn: BotEvents["entitySpawn"] = (entity) => {
+    if (watch.walking && entity.name === "fireball") watch.id ??= entity.id;
   };
-  // Time packets come every 20 server ticks: one sample per 20 ticks of the wait, for a trial that never charges.
-  const onTime: BotEvents["time"] = () => {
-    const distance = bot.entity.position.distanceTo(ghast.position);
-    watch.samples.push({ age: bot.time.age, dy: Math.abs(ghast.position.y - bot.entity.position.y), distance });
-  };
-  const watch: GhastCharge = {
-    ghast,
-    latchedAge: charging(ghast) ? bot.time.age : null,
-    samples: [],
-    stop: () => {
-      bot.off("entityUpdate", onUpdate);
-      bot.off("time", onTime);
-    },
-  };
-  bot.on("entityUpdate", onUpdate);
-  bot.on("time", onTime);
+  bot.on("entitySpawn", spawn);
   return watch;
 }
 
-/** Wait for the watched ghast to charge: its ticks from the release, or the failure text when the bound passes first. */
-async function awaitGhastCharge(
-  bot: Bot,
-  watch: GhastCharge,
-  releaseAge: number | null,
-  signal: AbortSignal,
-  log: Parameters<MineAiScenario>[0]["log"],
-): Promise<{ chargeTicks: number | null } | { failure: string }> {
-  await observeIdleWindow(bot, GHAST_CHARGE_TICKS, () => watch.latchedAge !== null, signal);
-  if (watch.latchedAge === null) {
-    const dy = Math.abs(watch.ghast.position.y - bot.entity.position.y);
-    const distance = bot.entity.position.distanceTo(watch.ghast.position);
-    return {
-      failure: JSON.stringify({
-        error: `ghast did not charge within ${GHAST_CHARGE_TICKS} server ticks (dy ${dy.toFixed(1)}, distance ${distance.toFixed(1)})`,
-        chargeSamples: watch.samples,
-      }),
-    };
+/** Open the shot window for the navigate request, including any interruption it resumes from. */
+async function walkBasalt(runtime: Runtime, shot: ReturnType<typeof watchWalkFireball>, signal: AbortSignal) {
+  const action = runtime.actions.find((candidate) => candidate.name === "navigate")!;
+  shot.walking = true;
+  try {
+    return await runtime.run(action, { x: 36, y: 101, z: 0, range: 1 }, signal);
+  } finally {
+    shot.walking = false;
   }
-  const chargeTicks = releaseAge === null ? null : Math.max(0, watch.latchedAge - releaseAge);
-  log(`Ghast charge latched at server age ${watch.latchedAge}: chargeTicks ${chargeTicks}`);
-  return { chargeTicks };
 }
 
 export const run: MineAiScenario = async (context) => {
@@ -239,18 +208,21 @@ export const run: MineAiScenario = async (context) => {
   });
   const track = trackCrossfire(bot, runtime, provokedId, started);
   const { state } = track;
-  let charge: GhastCharge | null = null;
   try {
-    // The traverse waits for the ghast to charge before the walk: the watch is armed before the release, which is logged after it.
-    charge = params.trial === "traverse" ? watchGhastCharge(bot) : null;
-    if (charge) log(`Ghast charge watch armed at server age ${bot.time.age}`);
-    const releaseAge = bot.time.age;
-    bot.chat("/execute as @e[type=!minecraft:player,distance=..40] run data merge entity @s {NoAI:0b}");
-    log(`Ghast release sent at server age ${releaseAge}`);
-    const charged = charge ? await awaitGhastCharge(bot, charge, releaseAge, signal, log) : { chargeTicks: null };
+    using shot = watchWalkFireball(bot);
+    // The melee control inherits the traverse params but declares no bow.
+    const player = context.scenario.players.find(({ name }) => name === bot.username);
+    const stagedRelease = params.trial === "traverse" && player?.inventory?.some(({ item }) => item === "bow") === true;
+    const charged = stagedRelease ? await releaseBasaltGhast(context) : {
+      chargeTicks: null, chargeAge: null, ghastReleaseAge: null,
+    };
     if ("failure" in charged) return { status: "failed", detail: charged.failure };
-    const action = runtime.actions.find((a) => a.name === "navigate")!;
-    const travel = await runtime.run(action, { x: 36, y: 101, z: 0, range: 1 }, signal);
+    signal.throwIfAborted();
+    const otherReleaseAge = bot.time.age;
+    const alreadyReleased = stagedRelease ? ",type=!minecraft:ghast" : "";
+    bot.chat(`/execute as @e[type=!minecraft:player${alreadyReleased},distance=..40] run data merge entity @s {NoAI:0b}`);
+    log(`Basalt mob release sent at server age ${otherReleaseAge}`);
+    const travel = await walkBasalt(runtime, shot, signal);
     const positionAtWalkEnd = bot.entity.position.clone();
     // Observe damage after arrival or handoff, and independently verify a claimed shelter.
     // The shelter is sampled on each body tick of the 40-server-tick window, not on client ticks.
@@ -259,10 +231,11 @@ export const run: MineAiScenario = async (context) => {
     const positionAfterWindow = bot.entity.position.clone();
     const handoff = reflex.encounters.findLast((response) => response.interrupted?.action === "navigate");
     const required =
-      params.trial === "wounded_gaze"
-        ? ["magma_cube", "enderman", "ghast"]
-        : ["magma_cube", "enderman", "ghast", "fireball"];
-    const exercised = required.every((name) => state.seen.has(name));
+      params.trial === "traverse" && !stagedRelease
+        ? ["magma_cube", "enderman", "ghast", "fireball"]
+        : ["magma_cube", "enderman", "ghast"];
+    const exercised = required.every((name) => state.seen.has(name)) &&
+      (!stagedRelease || shot.id !== null);
     const { arrived, finalDistance, outcome, sheltered, blastHandoff, passed } = judgeTraverse({
       travel, positionAtWalkEnd, positionAfterWindow, handoff, shelter, state, exercised,
       health: bot.health, onGround: bot.entity.onGround, dimension: bot.game.dimension,
@@ -273,7 +246,9 @@ export const run: MineAiScenario = async (context) => {
         arrived,
         finalDistance,
         outcome,
-        chargeTicks: charged.chargeTicks,
+        ...charged,
+        otherReleaseAge,
+        walkFireballId: shot.id,
         sheltered,
         blastHandoff,
         ...shelter,
@@ -295,7 +270,6 @@ export const run: MineAiScenario = async (context) => {
   } finally {
     log(`Crossfire trace: ${JSON.stringify({ samples: state.samples, damage: state.damage })}`);
     stopNavigation();
-    charge?.stop();
     track.stop();
     await runtime.close();
   }
