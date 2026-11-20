@@ -7,6 +7,7 @@ import type { ActionRunnerOptions } from "../../session/action-runner.js";
 import { type FakeClock, type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
 import { type WaterFixtureOptions, waterFixture } from "../../test-support/water.js";
 import { LETHAL_REFLEX_RETRY_TICKS, type SurvivalTransition } from "../control/contract.js";
+import { watchAirHistory } from "../../world/air-supply.js";
 import { attachBreathReflex } from "./breath.js";
 
 /** One bubble of the air bar is this many ticks on the server's meter. */
@@ -514,5 +515,30 @@ test("the air rising is progress, and a dug block is progress", async (t) => {
     await clock.advance(50);
   }
   assert.equal(outcomes.length, 0, "a rise at 3 s and a dug block at 7 s keep a 5 s window open for 12 s");
+  await control[Symbol.asyncDispose]();
+});
+
+// A bot that never went under water has full air the server never sent (plan 2026-11-18-scenario-reds-part5 T31a): the reflex senses
+// it as a breathing body, while the same absent metadata on a bot that was wet stays unknown.
+for (const body of ["untracked", "tracked dry", "tracked wet"] as const) test(`absent own air is ${body === "tracked dry" ? "full" : "unknown"} to the reflex: ${body}`, async (t) => {
+  const fixture = diver(t);
+  const { bot, clock, harness } = fixture;
+  Reflect.set(bot.entity, "metadata", []);
+  if (body !== "untracked") watchAirHistory(bot);
+  bot.emit("login");
+  if (body === "tracked wet") {
+    // The server holds the meter and sends nothing of it (the fake's own loss is reported at once, so it is held and cleared).
+    harness.breath.hold(300);
+    harness.world.setCell(new Vec3(0, 65, 0), "water");
+    await clock.advance(50);
+    bot.emit("physicsTick");
+    harness.world.setCell(new Vec3(0, 65, 0), "air");
+    Reflect.set(bot.entity, "metadata", []);
+  }
+  await clock.advance(3_000);
+  const control = attachBreathReflex(bot, fixture.reflex);
+  await clock.advance(500);
+  assert.equal(fixture.reflex.snapshot()[0]?.missing, body === "tracked dry" ? null : "own_air_metadata");
+  assert.equal(fixture.reflex.runner.status().owner, "idle", "no response from a body that is not in water");
   await control[Symbol.asyncDispose]();
 });

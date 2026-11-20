@@ -7,6 +7,7 @@ import { BOT_PHYSICS_OPTIONS, assertBotPluginsLoaded, loadBotPlugins } from "@ai
 import { SERVER_ANSWER_TICKS, waitForWorldAge } from "../../src/world/world-age.ts";
 import { observeScenarioPlayerPreparation } from "./player-preparation.ts";
 import { watchServerTags } from "../../src/world/server-tags.ts";
+import { watchAirHistory } from "../../src/world/air-supply.ts";
 
 type PreparationSession = Pick<NodeClientSession, "scenario" | "signal" | "ready" | "arranged">;
 
@@ -80,6 +81,7 @@ export function createScenarioBot(session: NodeClientSession): Bot {
     physicsEnabled: false,
   });
   watchServerTags(bot);
+  watchAirHistory(bot);
   // Match the MCP host's allowance for runtime observers.
   bot.setMaxListeners(40);
   bot.on("error", (error) => session.log(`bot error: ${error.message}`));

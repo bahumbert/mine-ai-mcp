@@ -24,6 +24,7 @@ import { registerIncidentCaptureRoute } from "./incident-route.js";
 import { createMinecraftMcpServer } from "./mcp.js";
 import { joinAsNeoForgeClient, readNeoForgeComponents } from "./neoforge-client.js";
 import { watchServerTags } from "../world/server-tags.js";
+import { watchAirHistory } from "../world/air-supply.js";
 
 const DEBUG_CONNECTION_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 /** `send_message` itself gives up on the echo after 5 s; this bounds a call that never settles at all. */
@@ -114,6 +115,7 @@ function createWatchedBot(configuration: HostOptions): Bot {
     ...BOT_PHYSICS_OPTIONS,
   });
   watchServerTags(bot);
+  watchAirHistory(bot);
   watchHeightHints(bot);
   return bot;
 }

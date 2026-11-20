@@ -231,7 +231,8 @@ export class Diving {
   /** The air the server has not reported yet, observed before the first route is planned. */
   async #observeAir(options: NavigateOptions, session: DiveSession, lifetime: AbortSignal): Promise<void> {
     // Servers omit unchanged default air metadata on login. Observe the first
-    // shallow head immersion before admitting any dive; never invent full air.
+    // shallow head immersion before admitting any dive; full air is inferred only by
+    // `air-supply.ts` (a body never under water since it spawned), never here.
     // This stays within one block of an already verified breathable surface.
     const initialSurface = openWaterSurface(this.#read, this.bot.entity.position.floored());
     if (!options.movements.allowSwimming || airSupplyTicks(this.bot) !== null) return;
