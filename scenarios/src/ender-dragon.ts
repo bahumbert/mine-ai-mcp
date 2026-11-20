@@ -10,7 +10,11 @@ import { openRuntime, wearArmor } from "./runtime.ts";
 import type { MineAiScenario, MineAiScenarioPreparation } from "./scenario-client.ts";
 import { recordSourceIdentity } from "./source-identity.ts";
 import { createCombatController } from "../../src/survival/control/combat/controller.ts";
+import { carriedCount } from "../../src/world/inventory-count.ts";
 import { waitForServerPaced } from "../../src/world/server-paced.ts";
+import { SERVER_ANSWER_TICKS } from "../../src/world/world-age.ts";
+import { declareProductiveProgress } from "../../tests/minecraft/drivers/productive-progress.ts";
+import { waitServerTicks } from "../../tests/minecraft/drivers/server-ticks.ts";
 
 const paramsSchema = z.object({
   phase: z.enum(["crystals", "perch", "full"]).default("full"),
@@ -22,6 +26,54 @@ const paramsSchema = z.object({
 export type EndActionCall = (name: string, input: unknown) => ReturnType<Awaited<ReturnType<typeof openRuntime>>["run"]>;
 type CrystalStrategy = z.infer<typeof paramsSchema>["crystal_strategy"];
 type CrystalApproach = z.infer<typeof paramsSchema>["crystal_approach"];
+/** Total material the next staircase attempt needs to carry, with the refused attempt's count. */
+export interface CrystalShortfall { readonly name: string; readonly needed: number; readonly carried: number }
+type CrystalRefill = (shortfall: CrystalShortfall | null) => Promise<void>;
+
+/** Read the material and carried total requested by a staircase refusal. */
+export function parseShortfall(error: string): CrystalShortfall | null {
+  if (!error.startsWith("[CRYSTAL_STAIRCASE_SHORTFALL]")) return null;
+  const match = /: (\d+) (\w+) blocks still needed; carrying (\d+)\./u.exec(error);
+  return match ? { needed: Number(match[1]), name: match[2]!, carried: Number(match[3]) } : null;
+}
+
+/** Success requires a living player still present in the dimension we observed. */
+export function requireLiveEndPlayer(bot: Bot): void {
+  if (bot.health <= 0) throw new Error("Player died during End scenario");
+  if (bot.game.dimension !== "the_end") throw new Error("Player left the End during the scenario");
+}
+
+/** Confirm the objective has stayed gone for 40 server ticks with the fighter alive in the End. */
+export async function confirmEndObjective(bot: Bot, signal: AbortSignal, restored?: () => boolean): Promise<boolean> {
+  const result = await waitServerTicks(bot, SERVER_ANSWER_TICKS, { signal, until: () => {
+    requireLiveEndPlayer(bot);
+    return restored?.() ?? false;
+  } });
+  if (result === "moved") return true;
+  if (result === "until") return false;
+  throw new Error(`End objective confirmation ${result}`);
+}
+
+/** Confirm continuous crystal absence, including a spawn between two world-age looks. */
+async function confirmCrystalAbsence(bot: Bot, signal: AbortSignal): Promise<void> {
+  const hasCrystals = () => {
+    requireLiveEndPlayer(bot);
+    return Object.values(bot.entities).some(entity => entity.isValid && entity.name === "end_crystal");
+  };
+  let reappeared = false;
+  const onSpawn = (entity: Bot["entity"]) => { if (entity.name === "end_crystal") reappeared = true; };
+  bot.on("entitySpawn", onSpawn);
+  try {
+    for (;;) {
+      const clear = await waitServerTicks(bot, Infinity, { signal, until: () => !hasCrystals() });
+      if (clear !== "until") throw new Error(`Waiting for crystals to disappear ${clear}`);
+      reappeared = false;
+      if (await confirmEndObjective(bot, signal, () => hasCrystals() || reappeared)) return;
+    }
+  } finally {
+    bot.off("entitySpawn", onSpawn);
+  }
+}
 
 /** Native island boundary, also used by the retained defense regression. */
 export const prepare: MineAiScenarioPreparation = async context => {
@@ -56,15 +108,26 @@ export function crystalIsCaged(bot: Bot, crystal: Bot["entity"]): boolean {
   return caged;
 }
 
+/** Give this refusal one retry if no inventory changed, preserving the action's explanation on failure. */
+async function refillForCrystal(bot: Bot, refill: CrystalRefill | undefined, shortfall: CrystalShortfall,
+  refusal: string, unfilledRefusal: string | null): Promise<string | null> {
+  if (!refill || refusal === unfilledRefusal) throw new Error(refusal);
+  const carried = carriedCount(bot, shortfall.name);
+  await refill(shortfall);
+  return carriedCount(bot, shortfall.name) > carried ? null : refusal;
+}
+
 /** Shared by crystal-only and full fights. Replay callers can resupply before each tower. */
 export async function clearCrystals(bot: Bot, call: EndActionCall, strategy: CrystalStrategy,
-  beforeCrystal?: () => Promise<void>, signal?: AbortSignal, approach: CrystalApproach = "staircase"): Promise<void> {
+  beforeCrystal?: CrystalRefill, signal?: AbortSignal, approach: CrystalApproach = "staircase"): Promise<void> {
   const targets = Object.values(bot.entities).filter(e => e.isValid && e.name === "end_crystal")
     .map(entity => ({ entity, caged: crystalIsCaged(bot, entity) }));
   if (targets.length !== 10) throw new Error("Expected ten observed crystals, found " + targets.length);
   targets.sort((a, b) => (strategy === "mixed" ? Number(a.caged) - Number(b.caged) : 0) || a.entity.position.y - b.entity.position.y);
   for (const { entity, caged } of targets) {
-    await beforeCrystal?.();
+    signal?.throwIfAborted();
+    await beforeCrystal?.(null);
+    let unfilledRefusal: string | null = null;
     const weapon = strategy === "mixed" ? (caged ? "melee" : "bow") : strategy;
     for (;;) {
       signal?.throwIfAborted();
@@ -75,6 +138,12 @@ export async function clearCrystals(bot: Bot, call: EndActionCall, strategy: Cry
       // A failed descent does not resurrect the crystal. The action retains
       // its native destruction observation independently of route success.
       if (receipt.combat.outcome === "crystal_destroyed" || output.request?.evidence?.completion.observed === true) break;
+      const refusal = receipt.status === "failed" ? receipt.error : undefined;
+      const shortfall = refusal ? parseShortfall(refusal) : null;
+      if (refusal && shortfall) {
+        unfilledRefusal = await refillForCrystal(bot, beforeCrystal, shortfall, refusal, unfilledRefusal);
+        continue;
+      }
       if (receipt.combat.outcome === "shot_missed") continue;
       if (receipt.status !== "succeeded") {
         await bot.waitForTicks(20);
@@ -85,14 +154,14 @@ export async function clearCrystals(bot: Bot, call: EndActionCall, strategy: Cry
   }
 }
 
-/** One preparation/attack caller for fresh perch fights and complete runs. */
-export async function fightPerches(bot: Bot, call: EndActionCall, signal: AbortSignal): Promise<void> {
+/** One preparation/attack caller for fresh perch fights and complete runs, returning the observed dead dragon. */
+export async function fightPerches(bot: Bot, call: EndActionCall, signal: AbortSignal): Promise<Bot["entity"]> {
   let prepared = false;
   for (;;) {
     signal.throwIfAborted();
     const dragon = Object.values(bot.entities).find(e => e.isValid && e.name === "ender_dragon");
     if (!dragon) { await bot.waitForTicks(20); continue; }
-    if (entityHealth(bot, dragon) === 0) return;
+    if (entityHealth(bot, dragon) === 0) return dragon;
     if (!prepared) {
       const receipt = endCombatActionResultSchema.parse((await call("prepare_dragon_perch", { entity_id: dragon.id })).result);
       if (receipt.status === "cancelled" && receipt.interruptedBy?.kind === "preempted" && receipt.interruptedBy.by === "recover_footing") continue;
@@ -106,6 +175,8 @@ export async function fightPerches(bot: Bot, call: EndActionCall, signal: AbortS
       // resumes between later requests rather than replacing this window.
     }
     const receipt = endCombatActionResultSchema.parse((await call("attack_dragon_perch", { entity_id: dragon.id })).result);
+    signal.throwIfAborted();
+    if (receipt.combat.outcome === "dragon_died") return dragon;
     if (receipt.status === "cancelled" && receipt.interruptedBy?.kind === "preempted" && receipt.interruptedBy.by === "recover_footing") continue;
     if (receipt.combat.reason?.startsWith("[PERCH_PASSAGE_CLOUDED]")) {
       prepared = false;
@@ -113,19 +184,28 @@ export async function fightPerches(bot: Bot, call: EndActionCall, signal: AbortS
       continue;
     }
     if (receipt.status !== "succeeded") { prepared = false; await bot.waitForTicks(20); continue; }
-    if (receipt.combat.outcome === "dragon_died") return;
   }
 }
 
-/** World goals own success. Retry action failures until death, cancellation or
- * the scenario deadline; a stalled damage chart is evidence, not an exit. */
+/** Retain only perch decision evidence, alongside the call that produced it. */
+function recordPerchDecisions(combat: ReturnType<typeof createCombatController>, artifacts: string,
+  call: () => { ms: number; callSequence: number; action: string | null }): () => void {
+  return combat.onDecision(event => {
+    if (event.kind !== "response" || !event.evidence || typeof event.evidence !== "object" ||
+        Array.isArray(event.evidence) || !("boundary" in event.evidence) || event.evidence.boundary !== "dragon_perch") return;
+    appendFileSync(path.join(artifacts, "perch-decisions.jsonl"), JSON.stringify({ ...call(), ...event.evidence }) + "\n");
+  });
+}
+
+/** Report completion after observing the objective with a surviving End fighter. */
 export const run: MineAiScenario = async context => {
-  await recordSourceIdentity();
   const { bot, log } = context;
-  const params = paramsSchema.parse(context.scenario.params ?? {});
-  const artifacts = process.env.MINE_LABS_ARTIFACTS_DIR!;
   const stop = new AbortController();
   const signal = AbortSignal.any([context.signal, stop.signal]);
+  using _progress = declareProductiveProgress(bot, context.progress, signal);
+  await recordSourceIdentity();
+  const params = paramsSchema.parse(context.scenario.params ?? {});
+  const artifacts = process.env.MINE_LABS_ARTIFACTS_DIR!;
   const startedAt = monotonicNow();
   let callSequence = 0;
   let currentAction: string | null = null;
@@ -133,12 +213,8 @@ export const run: MineAiScenario = async context => {
   await using runtime = await openRuntime(context, "ender-dragon", {
     createCombatController: (...args) => {
       const combat = createCombatController(...args);
-      stopDiagnostics = combat.onDecision(event => {
-        if (event.kind !== "response" || !event.evidence || typeof event.evidence !== "object" ||
-            Array.isArray(event.evidence) || !("boundary" in event.evidence) || event.evidence.boundary !== "dragon_perch") return;
-        appendFileSync(path.join(artifacts, "perch-decisions.jsonl"),
-          JSON.stringify({ ms: monotonicNow() - startedAt, callSequence, action: currentAction, ...event.evidence }) + "\n");
-      });
+      stopDiagnostics = recordPerchDecisions(combat, artifacts,
+        () => ({ ms: monotonicNow() - startedAt, callSequence, action: currentAction }));
       return combat;
     },
   });
@@ -177,13 +253,14 @@ export const run: MineAiScenario = async context => {
   };
   try {
     if (params.phase !== "perch") await clearCrystals(bot, call, params.crystal_strategy, undefined, signal, params.crystal_approach);
-    if (params.phase !== "crystals") {
+    if (params.phase === "crystals") await confirmCrystalAbsence(bot, signal);
+    else {
       stage = "perch";
       await fightPerches(bot, call, signal);
+      await confirmEndObjective(bot, signal);
     }
-    // Keep observation alive through native removal; the runner stops this
-    // client as soon as its independently observed world goal is satisfied.
-    while (!context.signal.aborted) { signal.throwIfAborted(); await bot.waitForTicks(1); }
+    signal.throwIfAborted();
+    requireLiveEndPlayer(bot);
     return { status: "succeeded" };
   } catch (error) {
     if (!context.signal.aborted) {

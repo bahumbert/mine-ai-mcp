@@ -4,13 +4,22 @@ import { spawnSync } from "node:child_process";
 import { getEventListeners } from "node:events";
 import { mkdtempDisposable } from "node:fs/promises";
 import test from "node:test";
+import { scenarioDefinitionSchema } from "mine-labs";
 import { z } from "zod";
 import { defineAction } from "../../src/actions/action.ts";
-import { createFakeBot, createFakeClock, listenersAddedSince, NEW_LIFE_SETTLE_MS } from "../../src/test-support/fake-bot/index.ts";
+import { outcomes as collectionOutcomes } from "../../src/actions/collect-block/contract.ts";
+import { endCombatActionResult, interruptedEndCombatResult } from "../../src/actions/end-combat-result.ts";
+import { BodyAbort } from "../../src/session/abort.ts";
+import { createFakeBot, createFakeClock, itemOf, listenersAddedSince, NEW_LIFE_SETTLE_MS } from "../../src/test-support/fake-bot/index.ts";
 import { watch } from "../../src/test-support/pending.ts";
+import { carriedCount } from "../../src/world/inventory-count.ts";
 import { ServerPacedExpired } from "../../src/world/server-paced.ts";
+import { DRIVER_CLOCK_STOPPED_MS } from "../../tests/minecraft/drivers/server-ticks.ts";
+import { run as runBow } from "./dragon-bow.ts";
 import * as driver from "./dragon-first-entry.ts";
+import { run as runDragon } from "./ender-dragon.ts";
 import type { Runtime } from "./runtime.ts";
+import type { MineAiScenario } from "./scenario-client.ts";
 
 const action = defineAction({
   name: "first_entry_test", description: "Wait for cancellation", execution: { kind: "information" },
@@ -31,9 +40,9 @@ function waitingRuntime() {
 }
 
 /** World age, entity removal and health packets use the shared fake's measured contracts. */
-function trial(rate = 20, timePacketYet = true) {
+function trial(rate = 20, timePacketYet = true, dimension = "overworld") {
   const clock = createFakeClock({ mode: "mocked" });
-  const harness = createFakeBot({ clock, server: { startAge: 1_000, ticksPerSecond: rate, timePacketYet } });
+  const harness = createFakeBot({ clock, dimension, server: { startAge: 1_000, ticksPerSecond: rate, timePacketYet } });
   const added = listenersAddedSince(harness.bot);
   const clientAdded = listenersAddedSince(harness.bot._client);
   return { ...harness, assertClean: async (signal: AbortSignal) => {
@@ -233,20 +242,39 @@ const driverCases = [
   ...[20, 10].flatMap(rate => ["ready", "ticks", "cancel", "settle-cancel"].map(mode => ({ mode, rate }))),
   { mode: "stalled", rate: 20 }, { mode: "unobserved", rate: 20 },
 ];
-for (const { mode, rate } of driverCases) {
-  const name = `driver admission ${mode} at ${rate} tps preserves budgets and cleanup`;
+
+/** Keep Bun's module replacements out of the rest of the suite. */
+function isolatedDriverTest(name: string, exercise: () => Promise<void>): void {
   test(name, async () => {
-  if (process.env.FIRST_ENTRY_CANCEL_CHILD !== "1") {
-    // A child keeps Bun's module replacements out of other scenario tests.
+    if (process.env.FIRST_ENTRY_CANCEL_CHILD === "1") return await exercise();
     const result = spawnSync(process.execPath, ["test", "--timeout", "30000", import.meta.filename,
       "--test-name-pattern", `^${name}$`], {
       encoding: "utf8", env: { ...process.env, FIRST_ENTRY_CANCEL_CHILD: "1" },
-      timeout: 30_000, // limit: isolated cancellation child measured 0.82–0.87 s, n=3; Bun's standard hang bound.
+      timeout: 30_000, // limit: all five child groups took 4.87 s together on 2026-11-20; standard Bun hang bound.
     });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
-    return;
-  }
+  });
+}
+
+/** Keep the case name and original failure while sharing child startup across fake clocks. */
+function isolatedDriverCases<Case>(name: string, cases: readonly Case[], exercise: (sample: Case) => Promise<void>): void {
+  isolatedDriverTest(name, async () => {
+    const previousArtifacts = process.env.MINE_LABS_ARTIFACTS_DIR;
+    for (const sample of cases) {
+      try {
+        await exercise(sample);
+      } catch (cause) {
+        throw new Error(`${name} ${JSON.stringify(sample)}`, { cause });
+      } finally {
+        if (previousArtifacts === undefined) delete process.env.MINE_LABS_ARTIFACTS_DIR;
+        else process.env.MINE_LABS_ARTIFACTS_DIR = previousArtifacts;
+      }
+    }
+  });
+}
+
+isolatedDriverCases("driver admission preserves budgets and cleanup", driverCases, async ({ mode, rate }) => {
   const { mock } = await import("bun:test");
   const { bot, clock, server, assertClean } = trial(rate, mode !== "unobserved");
   using _timers = clock.install();
@@ -322,5 +350,285 @@ for (const { mode, rate } of driverCases) {
   }
   assert.equal(closed, 1);
   await assertClean(controller.signal);
-  });
+});
+
+const endActions = ["view_status", "set_survival_policy", "drop_item", "collect_block", "navigate",
+  "destroy_end_crystal", "prepare_dragon_perch", "attack_dragon_perch", "shoot_dragon"];
+
+/** Substitute the runtime's slow action boundary, using the real driver, clock, and entity observations. */
+async function endTrial(rate = 20, dimension = "the_end", source: Promise<void> = Promise.resolve()) {
+  const { mock } = await import("bun:test");
+  const h = trial(rate, true, dimension);
+  const artifacts = await mkdtempDisposable("/dev/shm/end-driver-");
+  const timers = h.clock.install();
+  process.env.MINE_LABS_ARTIFACTS_DIR = artifacts.path;
+  const controller = new AbortController();
+  const progress: string[] = [];
+  let closed = 0;
+  mock.module("./source-identity.ts", () => ({ recordSourceIdentity: () => source }));
+  return { ...h, controller, progress,
+    async [Symbol.asyncDispose]() { timers[Symbol.dispose](); await artifacts.remove(); },
+    spawnTower(x: number) { return h.entities.spawn({ name: "end_crystal", position: { x, y: 70, z: 0 } }); },
+    async assertClosed() { assert.equal(closed, 1); await h.assertClean(controller.signal); },
+    start(run: MineAiScenario, phase: "crystals" | "perch" | "full", respond: (name: string, input: unknown) => unknown,
+      isBusy = () => false) {
+      mock.module("./runtime.ts", () => ({ openRuntime: async () => ({
+        actions: endActions.map(name => ({ ...action, name })), status: () => ({ busy: isBusy() }),
+        run: async ({ name }: typeof action, input: unknown) => ({ action: name, durationMs: 0, ...await respond(name, input) as object }),
+        captureIncident: async () => ({}), flushIncidents: async () => {},
+        [Symbol.asyncDispose]: async () => { closed++; },
+      }) }));
+      return run({ bot: h.bot, signal: controller.signal, log() {}, progress: reason => { progress.push(reason); },
+        scenario: scenarioDefinitionSchema.parse({ players: [{ name: h.bot.username, pos: [0, 70, 0] }],
+          params: { phase, call_gap_ticks: 0 }, goal: { kind: "completion" } }),
+        get navigation(): never { throw new Error("the action boundary owns navigation"); },
+        get pathfinder(): never { throw new Error("the action boundary owns pathfinding"); },
+      });
+    },
+  };
 }
+
+/** Action receipts and server packets are independent evidence. */
+function endReceipt(outcome: string) {
+  return { result: { status: "succeeded", combat: { outcome, attacks: 0, healthBefore: null, healthAfter: null, reason: null } } };
+}
+
+/** Replay setup can add inventory or arrange a tower before the fight. */
+function firstEntrySetup(name: string) {
+  return { result: { status: "succeeded" }, ...(name === "view_status" ? { survivalPolicy: { revision: 1 } } : {}) };
+}
+
+isolatedDriverCases("first entry fills to 70 after partial pickup", [[20, 64, [6, 3]], [10, 34, [32, 7]]] as const, async ([rate, start, requests]) => {
+  await using h = await endTrial(rate);
+  const towers = Array.from({ length: 10 }, (_, i) => h.spawnTower(i * 5));
+  h.inventory.updateSlot(9, itemOf(h.bot.registry, "end_stone", start));
+  const requested: unknown[] = [];
+  const visited: number[] = [];
+  let retriedWith: number | undefined;
+  const reason = `[CRYSTAL_STAIRCASE_SHORTFALL] Tower at (0, 70, 0): 70 end_stone blocks still needed; carrying ${start}. Gather at least ${70 - start} more end_stone and retry this crystal.`;
+  const pending = h.start(driver.run, "full", async (name, input) => {
+    // The live staging route spent one freshly collected block before the retry.
+    if (name === "navigate" && visited.length === 1) {
+      const stack = h.bot.inventory.items().find(item => item.name === "end_stone" && item.count > 1)!;
+      h.inventory.updateSlot(stack.slot, itemOf(h.bot.registry, "end_stone", stack.count - 1));
+    }
+    if (name === "collect_block") {
+      const { count } = input as { count: number };
+      const first = requested.length === 0;
+      requested.push(input);
+      const gained = first ? 70 - start - requests[1] : requests[1];
+      const pickedUp = new Promise<void>(resolve => h.bot.once("playerCollect", () => resolve()));
+      h.entities.spawn({ name: "item", position: h.bot.entity.position, item: { name: "end_stone", count: gained }, pickupDelayTicks: 10 });
+      await pickedUp;
+      const brokenAt = Array.from({ length: count }, (_, x) => ({ x, y: 63, z: 0, distanceFromStart: x + 1 }));
+      const collected = { requested: count, gained, gainedByItem: { end_stone: gained }, blocksBroken: count, brokenAt };
+      return { result: first
+        ? { status: "partial", error: collectionOutcomes.dropAttemptsExhausted(count, gained, count), collected }
+        : { status: "succeeded", collected } };
+    }
+    if (name !== "destroy_end_crystal") return firstEntrySetup(name);
+    const { entity_id } = input as { entity_id: number };
+    visited.push(entity_id);
+    if (visited.length === 1) return { result: { ...endReceipt("stopped").result, status: "failed", error: reason,
+      combat: { ...endReceipt("stopped").result.combat, reason } } };
+    if (visited.length === 2) retriedWith = carriedCount(h.bot, "end_stone");
+    else h.controller.abort(new Error("advanced to the next tower"));
+    h.entities.remove(entity_id);
+    return endReceipt("crystal_destroyed");
+  });
+  const advanced = assert.rejects(pending, /advanced to the next tower/u);
+  const pickupMs = 10_000 / rate;
+  await h.clock.advance(pickupMs - 1);
+  assert.equal(h.bot.time.age, 1_000);
+  assert.equal(carriedCount(h.bot, "end_stone"), start, "stock is unchanged before the fake server's pickup");
+  await h.clock.settle(advanced, 6_000);
+  assert.deepEqual(requested, requests.map(count => ({ block_name: "end_stone", count })));
+  assert.equal(retriedWith, 70, "the retried action sees the receipt's requested total in the inventory");
+  assert.deepEqual(visited, [towers[0]!.id, towers[0]!.id, towers[1]!.id]);
+  await h.assertClosed();
+});
+
+const progressCases = [["shared", runDragon, 20], ["first-entry", driver.run, 20],
+  ["bow", runBow, 20], ["bow", runBow, 10], ["bow", runBow, "stalled"]] as const;
+isolatedDriverCases("End drivers report a server hit and release their observer at exit", progressCases, async ([label, run, rate]) => {
+  const source = Promise.withResolvers<void>();
+  await using h = await endTrial(rate === "stalled" ? 20 : rate, "the_end", source.promise);
+  const dragon = h.entities.spawn({ name: "ender_dragon", position: { x: 0, y: 70, z: 0 }, metadata: { 9: 200 } });
+  let busy = label === "bow", shots = 0;
+  const pending = h.start(run, "perch", name => {
+    assert.equal(name, "shoot_dragon");
+    shots++;
+    h.combat.kill(dragon.id);
+    return { result: endCombatActionResult({ outcome: "dragon_died", attacks: 0, healthBefore: 199, healthAfter: 0, reason: null }) };
+  }, () => busy);
+  h.combat.hurt(dragon.id, h.bot.entity.id, 1);
+  await h.clock.advance(100);
+  assert.deepEqual(h.progress, ["hit"], "the driver watches for confirmed hits while recording its source");
+  source.resolve();
+  if (label !== "bow") {
+    const reason = new Error("stop after recording the hit");
+    const cancelled = assert.rejects(pending, error => error === reason);
+    h.controller.abort(reason);
+    await h.clock.settle(cancelled, 0);
+  } else if (rate === "stalled") {
+    h.server.stop();
+    const state = watch(pending);
+    const failed = assert.rejects(pending, /Bow fighter waiting for the body stalled/u);
+    await h.clock.advance(DRIVER_CLOCK_STOPPED_MS - 1);
+    assert.equal(h.bot.time.age, 1_000);
+    assert.equal(state.over, false);
+    await h.clock.settle(failed, 1);
+    assert.equal(shots, 0);
+    h.server.resume();
+  } else {
+    const packetMs = 20_000 / rate;
+    await h.clock.advance(packetMs - h.clock.now());
+    assert.equal(h.bot.time.age, 1_020);
+    assert.equal(shots, 0);
+    busy = false;
+    assert.equal((await h.clock.settle(pending, 50)).status, "succeeded");
+    assert.equal(shots, 1);
+    await h.clock.advance(packetMs);
+  }
+  const other = h.entities.spawn({ name: "ender_dragon", position: { x: 0, y: 70, z: 0 } });
+  h.combat.hurt(other.id, h.bot.entity.id, 1);
+  assert.deepEqual(h.progress, ["hit"]);
+  await h.clock.advance(100);
+  await h.assertClosed();
+});
+
+const dragonConfirmCases = [
+  ["shared", runDragon, 20, "survives"], ["shared", runDragon, 10, "survives"],
+  ["first-entry", driver.run, 20, "survives"], ["first-entry", driver.run, 10, "survives"],
+  ["shared", runDragon, 20, "preempted"], ["shared", runDragon, 20, "dead"],
+  ["shared", runDragon, 20, "left"], ["shared", runDragon, 20, "stalled"], ["shared", runDragon, 20, "cancelled"],
+  ["shared", runDragon, 20, "unloaded"],
+] as const;
+isolatedDriverCases("dragon confirmation keeps the live End fighter until the objective is settled", dragonConfirmCases, async ([label, run, rate, exit]) => {
+    await using h = await endTrial(rate);
+    if (label === "first-entry") for (let i = 0; i < 10; i++) h.spawnTower(i * 5);
+    const dragon = h.entities.spawn({ name: "ender_dragon", position: { x: 0, y: 70, z: 0 } });
+    let attacks = 0;
+    const pending = h.start(run, "perch", (name, input) => {
+      if (name === "destroy_end_crystal") {
+        h.entities.remove((input as { entity_id: number }).entity_id);
+        return endReceipt("crystal_destroyed");
+      }
+      if (name === "prepare_dragon_perch") return endReceipt("perch_ready");
+      if (name !== "attack_dragon_perch") return firstEntrySetup(name);
+      assert.equal(++attacks, 1, "the confirmed death must not prompt another dragon attack");
+      if (exit === "unloaded") {
+        h.entities.remove(dragon.id);
+        return { result: endCombatActionResult({ outcome: "stopped", attacks: 0, healthBefore: 200, healthAfter: null, reason: "Dragon left observation" }) };
+      }
+      h.combat.kill(dragon.id);
+      const combat = { outcome: "dragon_died" as const, attacks: 0, healthBefore: 200, healthAfter: 0, reason: null };
+      const footing = new BodyAbort({ kind: "preempted", by: "recover_footing" }, "footing");
+      return { result: exit === "preempted" ? interruptedEndCombatResult(combat, footing) : endCombatActionResult(combat) };
+    });
+    const state = watch(pending);
+    await h.clock.advance(0);
+    assert.equal(attacks, 1);
+    assert.equal(state.over, false, "a death witness starts confirmation and cannot complete the run immediately");
+    const packetMs = 20_000 / rate;
+    if (exit === "survives" || exit === "preempted") {
+      if (label === "first-entry") {
+        assert.equal(dragon.isValid, true, "death precedes the server removal packet");
+        // The shared fake removes the dead entity after the 19-tick animation.
+        await h.clock.advance(19_000 / rate + 50);
+        assert.equal(dragon.isValid, false);
+      }
+      const confirmationAge = h.bot.time.age;
+      const lowerPacketMs = (confirmationAge + 40 - 1_000) * 1_000 / rate;
+      await h.clock.advance(lowerPacketMs - h.clock.now());
+      assert.equal(h.bot.time.age, confirmationAge + 40);
+      assert.equal(state.over, false, "a cached +40 age may include ticks before death/removal was observed");
+      await h.clock.advance(packetMs + 100);
+      assert.equal(h.bot.time.age, confirmationAge + 60);
+      assert.equal(state.over, true, "the death witness survives the footing handoff without another attack");
+      assert.equal((await pending).status, "succeeded");
+      assert.equal(attacks, 1);
+    } else if (exit === "cancelled" || exit === "unloaded") {
+      if (exit === "unloaded") {
+        await h.clock.advance(packetMs * 3);
+        assert.equal(state.over, false, "unloading a dragon is no death evidence");
+      }
+      const reason = new Error("cancel dragon confirmation");
+      const cancelled = assert.rejects(pending, error => error === reason);
+      h.controller.abort(reason);
+      await h.clock.settle(cancelled, exit === "unloaded" ? packetMs : 0);
+      await h.clock.advance(packetMs);
+    } else {
+      if (exit === "dead") h.combat.setHealth(0);
+      // Mineflayer game.js applies the new dimension from respawn before clients can read it.
+      if (exit === "left") h.bot.game.dimension = "overworld";
+      if (exit === "stalled") {
+        h.server.stop();
+        await h.clock.advance(DRIVER_CLOCK_STOPPED_MS - 1);
+        assert.equal(state.over, false);
+        assert.equal(h.bot.time.age, 1_000);
+        await h.clock.advance(1);
+        h.server.resume();
+      }
+      const result = await h.clock.settle(pending, packetMs);
+      assert.equal(result.status, "failed");
+      assert.match(result.detail!, exit === "dead" ? /died/u : exit === "stalled" ? /stalled/u : /left the End/u);
+      await h.clock.advance(exit === "dead" ? NEW_LIFE_SETTLE_MS : packetMs);
+    }
+    await h.assertClosed();
+});
+
+const crystalConfirmationCases = [
+  ["absence", 20], ["absence", 10], ["reappears", 20], ["reappears", 10],
+  ["stalled", 20], ["dead", 20], ["cancelled", 20], ["outside the End", 20],
+] as const;
+isolatedDriverCases("crystal objective settles and cleans up once", crystalConfirmationCases, async ([exit, rate]) => {
+    await using h = await endTrial(rate, exit === "outside the End" ? "overworld" : "the_end");
+    for (let i = 0; i < 10; i++) h.spawnTower(i * 5);
+    if (exit === "stalled") h.server.stop();
+    const pending = h.start(runDragon, "crystals", (_name, input) => {
+      h.entities.remove((input as { entity_id: number }).entity_id);
+      return endReceipt("crystal_destroyed");
+    });
+    const state = watch(pending);
+    await h.clock.advance(0);
+    const packetMs = 20_000 / rate;
+    if (exit === "absence" || exit === "reappears") {
+      if (exit === "reappears") {
+        await h.clock.advance(packetMs);
+        assert.equal(h.bot.time.age, 1_020);
+        const crystal = h.spawnTower(0);
+        // A packet between clock looks still interrupts the continuous absence.
+        h.entities.remove(crystal.id);
+        assert.equal(state.over, false);
+      }
+      const baseAge = exit === "reappears" ? 1_020 : 1_000;
+      await h.clock.advance(packetMs * 2);
+      assert.equal(h.bot.time.age, baseAge + 40);
+      assert.equal(state.over, false, "the last cached age may predate the absence by one packet");
+      await h.clock.advance(packetMs + 100);
+      assert.equal(h.bot.time.age, baseAge + 60);
+      assert.equal(state.over, true, "three time packets confirm at least 40 server ticks without crystals");
+      assert.equal((await pending).status, "succeeded");
+    } else if (exit === "cancelled") {
+      const reason = new Error("cancel crystal observation");
+      const cancelled = assert.rejects(pending, error => error === reason);
+      h.controller.abort(reason);
+      await h.clock.advance(0);
+      assert.equal(state.over, true, "cancel releases the absence observation immediately");
+      await cancelled;
+    } else {
+      if (exit === "dead") h.combat.setHealth(0);
+      if (exit === "stalled") {
+        await h.clock.advance(DRIVER_CLOCK_STOPPED_MS - 1);
+        assert.equal(state.over, false);
+        assert.equal(h.bot.time.age, 1_000);
+      }
+      await h.clock.advance(exit === "dead" ? NEW_LIFE_SETTLE_MS : 1);
+      assert.equal(state.over, true, "completion requires a living player in the End and a ticking server");
+      const result = await pending;
+      assert.equal(result.status, "failed");
+      assert.match(result.detail!, exit === "dead" ? /died/u : exit === "stalled" ? /stalled/u : /left the End/u);
+    }
+    await h.assertClosed();
+});

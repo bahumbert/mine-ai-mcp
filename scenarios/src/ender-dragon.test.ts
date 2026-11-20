@@ -4,7 +4,7 @@ import { getEventListeners } from "node:events";
 import { scenarioDefinitionSchema } from "mine-labs";
 import { createFakeBot, createFakeClock, listenersAddedSince } from "../../src/test-support/fake-bot/index.ts";
 import { watch } from "../../src/test-support/pending.ts";
-import { clearCrystals, fightPerches, prepare, type EndActionCall } from "./ender-dragon.ts";
+import { clearCrystals, fightPerches, parseShortfall, prepare, type EndActionCall } from "./ender-dragon.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
 /** Preparation never uses navigation or pathfinder telemetry. Entity answers use the shared spawn/remove handlers. */
@@ -91,9 +91,37 @@ for (const phase of ["crystals", "perch"] as const) {
 }
 
 function output(outcome: string, status: "succeeded" | "failed" = "succeeded", reason: string | null = null) {
-  return { action: "end_test", durationMs: 0, result: { status, ...(status === "failed" ? { error: "missed" } : {}),
+  return { action: "end_test", durationMs: 0, result: { status, ...(status === "failed" ? { error: reason ?? "missed" } : {}),
     combat: { outcome, attacks: 0, healthBefore: null, healthAfter: null, reason } } } as Awaited<ReturnType<EndActionCall>>;
 }
+
+const shortfallText = '[CRYSTAL_STAIRCASE_SHORTFALL] Tower at (1, 70, 2): 70 end_stone blocks still needed; carrying 64. Gather at least 6 more end_stone and retry this crystal. Existing staircase blocks will be reused. Alternatively, approach "pillar" scaffolds straight up beside the tower with about 20 carried scaffold blocks.';
+
+test("the crystal refill reads the requested total and material from the staircase receipt alone", () => {
+  assert.deepEqual(parseShortfall(shortfallText), { name: "end_stone", needed: 70, carried: 64 });
+  assert.equal(parseShortfall(shortfallText.replace("CRYSTAL_STAIRCASE_SHORTFALL", "PERCH_PASSAGE_CLOUDED")), null);
+});
+
+test("crystal shortfall fails on the same refusal after a refill gained nothing", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot, entities } = createFakeBot({ clock, carried: { end_stone: 64 } });
+  const towers = Array.from({ length: 10 }, (_, i) => entities.spawn({ name: "end_crystal", position: { x: i * 5, y: 70, z: 0 } }));
+  const refills: unknown[] = [];
+  let attempts = 0;
+  const call: EndActionCall = async (_name, input) => {
+    assert.equal((input as { entity_id: number }).entity_id, towers[0]!.id);
+    assert.ok(++attempts <= 2, "the same shortfall reached a third action call");
+    return output("stopped", "failed", shortfallText);
+  };
+  const pending = clearCrystals(bot, call, "melee", async shortfall => {
+    refills.push(shortfall);
+  });
+  await clock.settle(assert.rejects(pending, error => error instanceof Error && error.message === shortfallText), 10_000);
+  assert.equal(attempts, 2);
+  assert.deepEqual(refills, [null, { name: "end_stone", needed: 70, carried: 64 }]);
+  assert.equal(clock.pendingGlobalTimers(), 0);
+});
 
 for (const strategy of ["mixed", "bow", "melee"] as const) {
   test(`crystal sequence ${strategy} classifies cages, preserves explicit methods and retries a missed shot`, async () => {

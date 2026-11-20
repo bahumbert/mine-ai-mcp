@@ -4,14 +4,17 @@ import path from "node:path";
 import { z } from "zod";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
+import { MAX_COLLECT_BLOCKS } from "../../src/actions/collect-block/contract.ts";
 import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import { dragonPhase, entityHealth } from "../../src/world/end-fight.ts";
+import { carriedCount } from "../../src/world/inventory-count.ts";
 import { serverPacedSignal, waitForServerPaced } from "../../src/world/server-paced.ts";
 import { SERVER_ANSWER_TICKS } from "../../src/world/world-age.ts";
+import { declareProductiveProgress } from "../../tests/minecraft/drivers/productive-progress.ts";
 import { openRuntime, type Runtime } from "./runtime.ts";
 import type { MineAiScenario, MineAiScenarioPreparation } from "./scenario-client.ts";
 import { recordSourceIdentity } from "./source-identity.ts";
-import { clearCrystals, fightPerches } from "./ender-dragon.ts";
+import { clearCrystals, confirmEndObjective, fightPerches, type CrystalShortfall, type EndActionCall } from "./ender-dragon.ts";
 import { recordedLoadoutSchema, restoreRecordedLoadout } from "./recorded-loadout.ts";
 
 const paramsSchema = z.object({
@@ -114,20 +117,31 @@ async function callFirstEntryAction(name: string, input: unknown, options: First
   return output;
 }
 
+/** Collect what the tower requested, stopping if a collection leaves the inventory unchanged. */
+async function refillStaircase(bot: Bot, call: EndActionCall, { name, needed }: CrystalShortfall): Promise<void> {
+  let carried = carriedCount(bot, name);
+  while (carried < needed) {
+    await call("collect_block", { block_name: name, count: Math.min(MAX_COLLECT_BLOCKS, needed - carried) });
+    const after = carriedCount(bot, name);
+    if (after <= carried) return;
+    carried = after;
+  }
+}
+
 /** A small scripted caller: mine carried scaffolding, clear towers, then prepare/attack perches. */
 export const run: MineAiScenario = async (context) => {
-  await recordSourceIdentity();
   const { bot, log } = context;
+  const stop = new AbortController();
+  const signal = AbortSignal.any([context.signal, stop.signal]);
+  using _progress = declareProductiveProgress(bot, context.progress, signal);
+  await recordSourceIdentity();
   const staging = bot.entity.position.floored();
-  const scaffoldCount = () => bot.inventory.items().filter(i => i.name === "end_stone").reduce((n, i) => n + i.count, 0);
   const artifacts = process.env.MINE_LABS_ARTIFACTS_DIR!;
   // A separate directory per trial plus a larger cap keeps the first failure's
   // physical window. No later death/recovery loop can prune it from this run.
   await using runtime = await openRuntime(context, `dragon-first-entry-${context.scenario.world.seed}`, {
     incidents: { retention: { days: 5, maxBytes: 512 * 1024 * 1024 } },
   });
-  const stop = new AbortController();
-  const signal = AbortSignal.any([context.signal, stop.signal]);
   using observation = observeFirstEntry(bot, artifacts, log, stop);
   const { state, snapshot } = observation;
   const call = (name: string, input: unknown) => callFirstEntryAction(name, input, {
@@ -149,19 +163,15 @@ export const run: MineAiScenario = async (context) => {
       reason: "Reproduce Claude's first End fight: defend against endermen without pursuing or hiding." });
     await requireCall("drop_item", { items: junk.map(item_name => ({ item_name })), in_a_hole: true });
     state.stage = "crystals";
-    await clearCrystals(bot, call, "melee", async () => {
-      while (scaffoldCount() < 64) {
-        const before = scaffoldCount();
-        await requireCall("collect_block", { block_name: "end_stone", count: Math.min(32, 64 - before) });
-        if (scaffoldCount() <= before) throw new Error("End-stone resupply made no inventory progress");
-      }
-      await requireCall("navigate", { x: staging.x, y: staging.y, z: staging.z, range: 1, build: true });
-    });
+    await clearCrystals(bot, call, "melee", async shortfall => {
+      // Return to staging before a new tower. A return after resupply could spend the blocks the retry needs.
+      if (shortfall) await refillStaircase(bot, requireCall, shortfall);
+      else await requireCall("navigate", { x: staging.x, y: staging.y, z: staging.z, range: 1, build: true });
+    }, signal);
     state.stage = "perches";
-    await fightPerches(bot, call, signal);
-    const dragon = Object.values(bot.entities).find(e => e.isValid && e.name === "ender_dragon");
+    const dragon = await fightPerches(bot, call, signal);
     await awaitDragonRemoval(bot, dragon, signal);
-    if (dragon?.isValid || bot.health <= 0 || state.deaths) throw new Error("Native death/removal and player survival were not both observed");
+    await confirmEndObjective(bot, signal);
     const result = { status: "succeeded" as const, detail: JSON.stringify({ deaths: state.deaths, lowestHealth: state.lowestHealth, calls: state.calls, final: snapshot() }) };
     writeFileSync(path.join(artifacts, "fight-result.json"), JSON.stringify(result, null, 2));
     return result;
