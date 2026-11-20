@@ -203,6 +203,14 @@ export const huntMobOutcomes = {
   shieldNotPermitted: (mob: string) =>
     `[HUNT_NO_SHIELD] Refused before approaching: ${mob} is a hostile mob and, though a shield is carried, the combat policy forbids shield use, so the fight would be unshielded. ` +
     `Permit shields with set_survival_policy, or repeat this request with allow_without_shield: true to accept unblocked hits from this species.`,
+  /**
+   * A shield that was carried when the hunt began and is gone at a later check. The hunt has started, so the
+   * refusal says so and names the drops it already carries; the admission text would send the model back to
+   * the start of a hunt that is past it.
+   */
+  shieldGone: (carried: number, count: number) =>
+    `[HUNT_NO_SHIELD] Refused to go on: no shield remains after the hunt began; ${carried} of ${count} carried; ` +
+    `allow_without_shield: true accepts unblocked hits.`,
   unknownMob: (mob: string) => `[UNKNOWN_HUNT_MOB] Minecraft has no entity registry entry named ${mob}.`,
   unknownDrop: (drop: string, similar: readonly string[] = [], mobAnswer: string | null = null) =>
     mobAnswer !== null

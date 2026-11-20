@@ -30,7 +30,7 @@ import {
   type ObservedItemEntity,
 } from "../../world/item-pickup.js";
 import { defineAction, type ActionContext } from "../action.js";
-import { shieldRefusal } from "./shield-gate.js";
+import { shieldChecksOf } from "./shield-gate.js";
 import {
   huntMobAnnotations,
   huntMobOutcomes,
@@ -683,7 +683,7 @@ function beginHuntMob(
     // Check admission, every target approach, and contact after drop collection.
     // One pursuit can fight several loaded targets before this function returns.
     let shieldRequired: string | null = null;
-    const checkShield = () => (shieldRequired = shieldRefusal(bot, request, dependencies.shieldPermitted));
+    const checkShield = shieldChecksOf(bot, request, dependencies.shieldPermitted, () => huntEvidence(observation).gained, (refusal) => (shieldRequired = refusal));
     const unshielded = checkShield();
     if (unshielded) return stoppedResult(unshielded, observation, "shield_required");
     const missingSpawner = camp?.unavailable();

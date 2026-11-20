@@ -23,11 +23,38 @@ import { huntMobOutcomes, type HuntMobRequest } from "./contract.js";
  * into the off-hand when the fight starts. A policy that forbids shields makes
  * a carried one ornamental, so that is refused on the same terms.
  */
-export function shieldRefusal(bot: Bot, request: HuntMobRequest, shieldPermitted: () => boolean): string | null {
+export function shieldRefusal(
+  bot: Bot,
+  request: HuntMobRequest,
+  shieldPermitted: () => boolean,
+  laterCheck: { readonly dropsCarried: number } | null = null,
+): string | null {
   if (request.allowWithoutShield || !isHostileSpecies(bot, request.mobName)) return null;
   if (!readCombatItems(bot).some((item) => hasItemFamily(bot, item.name, "shield")))
-    return huntMobOutcomes.shieldNotCarried(request.mobName, shieldFacts(bot, request.mobName));
+    return laterCheck
+      ? huntMobOutcomes.shieldGone(laterCheck.dropsCarried, request.count)
+      : huntMobOutcomes.shieldNotCarried(request.mobName, shieldFacts(bot, request.mobName));
   return shieldPermitted() ? null : huntMobOutcomes.shieldNotPermitted(request.mobName);
+}
+
+/**
+ * The shield check one run of the hunt hands its pursuit as preflight, reporting each verdict to `record`. The
+ * first call is the admission gate; each later call is a leg of a hunt under way, so a shield lost since the hunt
+ * began is named as such, with the drops already carried.
+ */
+export function shieldChecksOf(
+  bot: Bot,
+  request: HuntMobRequest,
+  shieldPermitted: () => boolean,
+  dropsCarried: () => number,
+  record: (refusal: string | null) => void,
+): () => string | null {
+  let calls = 0;
+  return () => {
+    const refusal = shieldRefusal(bot, request, shieldPermitted, calls++ > 0 ? { dropsCarried: dropsCarried() } : null);
+    record(refusal);
+    return refusal;
+  };
 }
 
 /** Recipe and damage facts available before approaching a hostile species. */

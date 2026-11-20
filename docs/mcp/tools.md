@@ -630,7 +630,7 @@ registry's own category, so it covers the species whose narrower `type` field
 misreads them - hoglins, phantoms, slimes, magma cubes, ghasts - alongside the
 obvious skeletons and creepers; passive quarry is never gated. The refusal is
 `HUNT_NO_SHIELD` with termination `shield_required`, and it is re-checked on
-every leg, so a shield that breaks mid-hunt stops the next one. Passing
+every leg, so a shield that breaks mid-hunt stops the next one, and that refusal reads `Refused to go on: no shield remains after the hunt began` with the drops already carried. Passing
 `allow_without_shield: true` admits the same request as a deliberate choice to
 take unblocked hits; it is not a fallback to retry the refusal with.
 The walk to the chosen mob is the hunt's own navigation process: it selects the

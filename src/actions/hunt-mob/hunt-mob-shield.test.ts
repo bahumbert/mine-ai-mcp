@@ -6,6 +6,7 @@ import test from "node:test";
 import type { NavigationRuntime } from "../../navigation/index.js";
 import { SurvivalPolicyState } from "../../survival/state/survival-policy.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
+import { itemOf } from "../../test-support/fake-bot/index.js";
 import { parseHuntMobRequest, type HuntMobRequest } from "./contract.js";
 import { huntMob, huntMobDependencies } from "./hunt-mob.js";
 import { shieldRefusal } from "./shield-gate.js";
@@ -51,6 +52,7 @@ for (const mobName of ["skeleton", "hoglin"])
     assert.equal(result.status, "failed");
     assert.equal(result.termination, "shield_required");
     assert.match(result.error, /HUNT_NO_SHIELD/);
+    assert.match(result.error, /Refused before approaching/, "a hunt that has not begun gets the admission text");
     assert.match(result.error, /allow_without_shield: true/, "the refusal names the parameter that overrides it");
     assert.equal(pursued, 0, "the refusal precedes the approach");
     assert.equal(result.hunt.targetsEngaged, 0);
@@ -177,6 +179,8 @@ test("a shield lost mid-hunt refuses the next leg rather than the drop already c
   assert.equal(result.status, "partial", "the drop already collected is not erased by the refusal");
   assert.equal(result.hunt.gained, 1);
   assert.equal(result.hunt.targetDeathsObserved, 1, "the leg fought while shielded still happened");
+  // The next leg is a resumed run, whose first check is an admission check: the text says the hunt has not begun.
+  assert.match(stopText(result), /Refused before approaching/);
 });
 
 for (const loss of ["broken", "forbidden"] as const) {
@@ -213,6 +217,11 @@ for (const loss of ["broken", "forbidden"] as const) {
     assert.equal(result.termination, "shield_required");
     assert.equal(result.status, "partial");
     assert.match(result.error ?? "", /HUNT_NO_SHIELD/);
+    // A shield lost after the hunt began is named as lost; a policy that forbids shields keeps its own refusal.
+    assert.match(
+      result.error ?? "",
+      loss === "broken" ? /no shield remains after the hunt began/ : /the combat policy forbids shield use/,
+    );
     assert.equal(result.hunt.gained, 1);
     assert.equal(result.hunt.targetDeathsObserved, 1);
     assert.equal(result.hunt.targetsEngaged, 1);
@@ -233,6 +242,73 @@ test("a shield lost while gathering drops at contact is checked again before eng
   });
   assert.equal(result.termination, "shield_required");
   assert.equal(result.hunt.targetsEngaged, 0);
+});
+
+/** The stop text of a hunt that did not succeed. */
+function stopText(result: Awaited<ReturnType<typeof huntMob>>): string {
+  if (result.status === "succeeded") throw new Error("expected a stop");
+  return result.error ?? "";
+}
+
+/**
+ * Two skeletons in sight, the nearer killed by the leg that collects its drop, so the next leg of the same run
+ * checks the shield. `afterKill` runs on that drop, and `shieldPermitted` answers the policy.
+ */
+function huntLosingShieldOnKill(afterKill: (bot: Bot) => void, shieldPermitted: () => boolean = () => true) {
+  const inventory = { count: 0 };
+  const type = minecraftData("1.21.4").entitiesByName.skeleton.id;
+  const bot = carryingShield(
+    huntBot([mob(7, type, "skeleton", 3, "Hostile mobs"), mob(8, type, "skeleton", 5, "Hostile mobs")], inventory),
+  );
+  return huntMob(bot, { ...huntRequest("skeleton"), count: 2, observeForMs: 5_000 }, {}, {
+    ...dependencies(bot, inventory, [died(2, 3)]),
+    shieldPermitted,
+    collectDropAfterDeath: async () => {
+      inventory.count += 1;
+      afterKill(bot);
+      return { kind: "collected" };
+    },
+  });
+}
+
+test("a shield lost after the hunt began is named as lost, with the drops carried", async () => {
+  const result = await huntLosingShieldOnKill(loseShield);
+
+  assert.equal(result.termination, "shield_required");
+  assert.match(
+    stopText(result),
+    /^\[HUNT_NO_SHIELD\] Refused to go on: no shield remains after the hunt began; 1 of 2 carried; allow_without_shield: true accepts unblocked hits\./,
+  );
+});
+
+/** Put a shield in the off-hand slot, or take the one there out, as the server's `set_slot` would (slot 45). */
+function setOffHandShield(bot: Bot, carried: boolean): void {
+  const offHand = 45;
+  const inventory = harnesses.get(bot)!.inventory;
+  (inventory.updateSlot as (slot: number, item: unknown) => void).call(
+    inventory,
+    offHand,
+    carried ? itemOf(bot.registry, "shield") : null,
+  );
+}
+
+test("a spare shield in the inventory lets the hunt go on after the off-hand one is gone", async () => {
+  const inventory = { count: 0 };
+  const type = minecraftData("1.21.4").entitiesByName.skeleton.id;
+  const bot = huntBot([mob(7, type, "skeleton", 3, "Hostile mobs"), mob(8, type, "skeleton", 5, "Hostile mobs")], inventory);
+  setOffHandShield(bot, true);
+  shields(bot).count = 1; // the spare, in the main inventory
+  const result = await huntMob(bot, { ...huntRequest("skeleton"), count: 2, observeForMs: 5_000 }, {}, {
+    ...dependencies(bot, inventory, [died(2, 3), died(2, 5)]),
+    collectDropAfterDeath: async () => {
+      inventory.count += 1;
+      setOffHandShield(bot, false);
+      return { kind: "collected" };
+    },
+  });
+
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.hunt.gained, 2);
 });
 
 test("the default request does not opt out of the shield gate", () => {
