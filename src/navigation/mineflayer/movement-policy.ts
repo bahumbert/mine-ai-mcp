@@ -102,6 +102,11 @@ const AVOID_BLOCKS = ["fire", "soul_fire", "lava", "bubble_column"] as const;
 type WorldBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 type InventoryItem = ReturnType<Bot["inventory"]["items"]>[number];
 
+/** Packed cell keys read through `has` only; a `ReadonlySet<number>` is one. */
+export interface CellKeys {
+  has(key: number): boolean;
+}
+
 export interface MineflayerMovementPolicyOptions {
   readonly protectedBlockNames?: readonly string[];
   readonly protectedScaffoldNames?: readonly string[];
@@ -125,7 +130,7 @@ export interface MineflayerMovementPolicyOptions {
   /** What one break costs beyond its dig time. Defaults to `TERRAIN_BREAK_PENALTY`. */
   readonly breakPenalty?: number;
   /** Cells a route may never dig, as packed keys: the blocks of a structure being built. */
-  readonly protectedCells?: ReadonlySet<number>;
+  readonly protectedCells?: CellKeys;
   /**
    * The owner whose protected regions this caller may dig and scaffold in: a build working on its own house (ADR-012).
    * Every other region refuses both.

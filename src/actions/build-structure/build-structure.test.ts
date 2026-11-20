@@ -188,21 +188,43 @@ test("cells may ask a half and an axis, and one cell asked two ways is refused",
   assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 1, y: 64, z: 1, block_name: "oak_log", axis: "w" }] }));
 });
 
-test("cells kept from earlier parts are never dug by the routes of this one", async () => {
-  const { bot, physics, protectedSets } = structureWorld();
-  const request = parseBuildStructureRequest({
-    blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }],
-    keep: [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }],
+test("with kept parts, a later route protects the cells this attempt placed", async () => {
+  const { bot, physics, placements, protectedSets } = structureWorld();
+  const blocks = [
+    { x: 10, y: 64, z: 0, block_name: "cobblestone" },
+    { x: 20, y: 64, z: 0, block_name: "cobblestone" },
+  ];
+  const keep = [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }];
+  const keptKeys = keep.map(({ x, y, z }) => packKey(x, y, z));
+  const request = parseBuildStructureRequest({ blocks, keep });
+  assert.deepEqual(request.keep, keep);
+  assert.equal(parseBuildStructureRequest({ blocks, keep: [] }).keep, undefined);
+  assert.throws(() => parseBuildStructureRequest({ blocks, keep: Array.from({ length: 2049 }, (_, x) => ({ x, y: 64, z: 0 })) }));
+
+  let checkedSecondLeg = false;
+  const result = await buildStructure(bot, request, {}, {
+    ...physics,
+    route: (options) => physics.route({
+      ...options,
+      goal: {
+        resolve: (observation) => {
+          const goal = options.goal.resolve(observation);
+          if (goal.kind === "active" && goal.revision === "any(near:20,64,0:4)") {
+            assert.deepEqual(placements, ["10,64,0"]);
+            assert.ok(keptKeys.every((key) => protectedSets[0]?.has(key)), "the earlier parts remain protected");
+            assert.equal(protectedSets[0]?.has(packKey(10, 64, 0)), true, "the next route protects the cell just placed");
+            checkedSecondLeg = true;
+          }
+          return goal;
+        },
+      },
+    }),
   });
-  assert.deepEqual(request.keep, [{ x: 5, y: 64, z: 0 }, { x: 5, y: 65, z: 0 }]);
-  const result = await buildStructure(bot, request, {}, physics);
   assert.equal(result.status, "succeeded");
-  assert.ok(protectedSets.length > 0);
+  assert.ok(checkedSecondLeg, "the route evaluated a second leg");
   for (const cells of protectedSets) {
-    assert.ok(cells.has(packKey(5, 64, 0)) && cells.has(packKey(5, 65, 0)), "every route keeps the earlier parts");
+    assert.ok(keptKeys.every((key) => cells.has(key)), "every route keeps the earlier parts");
   }
-  assert.equal(parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: [] }).keep, undefined);
-  assert.throws(() => parseBuildStructureRequest({ blocks: [{ x: 2, y: 64, z: 0, block_name: "cobblestone" }], keep: Array.from({ length: 2049 }, (_, x) => ({ x, y: 64, z: 0 })) }));
 });
 
 test("the result says how much scaffold the routes placed, took down and left", () => {
