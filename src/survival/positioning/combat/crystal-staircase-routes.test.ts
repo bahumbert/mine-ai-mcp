@@ -3,15 +3,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createMovements, createNavigationRuntime, exactBlockGoal, liveBlockReader, packKey,
-  type BlockPosition, type MovementPolicy, type NavigationRuntime } from "../../../navigation/index.js";
+  type BlockPosition, type Goal, type MovementPolicy, type NavigationRuntime } from "../../../navigation/index.js";
 import { createMovementCatalogue } from "../../../navigation/movements/catalogue.js";
 import { BuildTargeting, type BuildRequest, type CellKeys } from "../../../navigation/processes/building/build-process.js";
 import { IncrementalSearch } from "../../../navigation/search/search.js";
-import { createFakeBot, createFakeClock, type FakeCell } from "../../../test-support/fake-bot/index.js";
+import { closeShelter, FIRST_ASCENT, fixtureCell, MISSING_TREADS } from "../../../test-support/crystal-shelter-scene.js";
+import { createFakeBot, createFakeClock } from "../../../test-support/fake-bot/index.js";
 import { confirmFakeDigs } from "../../../test-support/life-saving-placements.js";
 import { observation, planningStart, WELL_FED } from "../../../test-support/navigation.js";
 import { cloudExposure, readDragonCloudHazards } from "../../../world/dragon-hazards.js";
 import { DEFAULT_SURVIVAL_POLICY } from "../../policy/contract.js";
+import { enclosedInPlace, shelterFeet } from "../../responses/shelter-cells.js";
 import * as staircase from "./crystal-staircase.js";
 import fixture from "./first-entry-64510673-tower.fixture.json" with { type: "json" };
 
@@ -20,45 +22,37 @@ type SavedTower = { readonly position: BlockPosition; readonly crystal: BlockPos
 
 // The two qualified cut searches each exhaust their frontier in 264 visits.
 const CAP = 2 * 264;
-const FIRST_ASCENT = new Vec3(-46, 79, -3);
-const MISSING_TREADS = [
-  new Vec3(-43, 83, -5), new Vec3(-42, 84, -5), new Vec3(-41, 85, -5),
-  new Vec3(-40, 86, -5), new Vec3(-40, 85, -5), new Vec3(-40, 86, -4),
-];
-
-/** Keep the saved world's state properties when loading it into the shared fake. */
-function fixtureCell(state: string): FakeCell {
-  const [name, properties] = state.split("[");
-  if (properties === undefined) return name!;
-  return { name: name!, properties: Object.fromEntries(properties.slice(0, -1).split(",").map(prop => prop.split("="))) };
-}
 
 /** A fresh bot standing on the saved staircase, with the recorded blocks and the right supplies. */
-function towerScene(saved: SavedTower = fixture) {
+function towerScene(saved: SavedTower = fixture, ticksPerSecond = 20) {
   const scene = createFakeBot({
     cells: Object.fromEntries(Object.entries(saved.cells).map(([key, state]) => [key, fixtureCell(state)])),
     position: new Vec3(saved.position.x, saved.position.y, saved.position.z),
     dimension: "the_end", groundY: null, carried: { end_stone: 64, stone_pickaxe: 1 },
-    simulatePhysics: true, clock: createFakeClock({ mode: "mocked" }),
+    simulatePhysics: true, clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond },
   });
   const plan = staircase.planCrystalStaircase(scene.bot, new Vec3(saved.crystal.x, saved.crystal.y, saved.crystal.z));
   return { ...scene, plan };
 }
 
 /** Pause the saved build goal after giving up its named lower targets, as in the qualification probe. */
-function startWorkSearch(scene: Scene, policy: (protectedCells: CellKeys) => MovementPolicy, refused = 0) {
+function startWorkSearch(scene: Scene, policy: (protectedCells: CellKeys) => MovementPolicy, refused = 0,
+  { goalOverride, feet = fixture.feet, digsInSight = false }: { goalOverride?: Goal; feet?: BlockPosition; digsInSight?: boolean } = {}) {
   const { bot, plan } = scene;
-  const targeting = new BuildTargeting(bot, { cells: plan.cells, removeWrongBlocks: true } as BuildRequest);
+  // `digsInSight`: a diggable target is workable from any stand; the search measured here is the route, and the line of
+  // sight of a real dig (`canSeeClearance`) is exercised by the build cases below.
+  const targeting = new BuildTargeting(bot, { cells: plan.cells, removeWrongBlocks: true,
+    ...(digsInSight && { canSeeDig: () => true }) } as Partial<BuildRequest> as BuildRequest);
   for (const target of targeting.targets().slice(0, refused)) targeting.refuse(target, "lower work refused", "route");
-  const { x, y, z } = fixture.feet;
+  const { x, y, z } = feet;
   const observedStart = { ...observation(x, y, z), position: bot.entity.position.clone() };
-  const goal = targeting.goal().resolve(observedStart);
+  const goal = (goalOverride ?? targeting.goal()).resolve(observedStart);
   assert.equal(goal.kind, "active");
   const catalogue = createMovementCatalogue();
   let batches = 0;
   return new IncrementalSearch({
     id: "retained staircase",
-    start: planningStart(fixture.feet, 0), goal, observedStart,
+    start: planningStart(feet, 0), goal, observedStart,
     now: () => batches / 30,
     limits: { primaryTimeoutMs: 500, failureTimeoutMs: 2_000 },
     context: {
@@ -108,9 +102,10 @@ test("the last target alone never schedules a tower break", () => {
 });
 
 /** Run construction against the real navigation runtime and the shared server's placement answers. */
-function build(scene: Scene, navigation: NavigationRuntime, signal = new AbortController().signal, policy = DEFAULT_SURVIVAL_POLICY) {
+function build(scene: Scene, navigation: NavigationRuntime, signal = new AbortController().signal, policy = DEFAULT_SURVIVAL_POLICY,
+  startEnclosed?: () => boolean) {
   return scene.clock.settle(
-    staircase.buildCrystalStaircase(scene.bot, navigation, policy, scene.plan, signal), 45_000,
+    staircase.buildCrystalStaircase(scene.bot, navigation, policy, scene.plan, signal, startEnclosed), 45_000,
   );
 }
 
@@ -337,3 +332,163 @@ for (const displaced of ["before build", "after placement", "before placement", 
     }
   });
 }
+
+type Leg = { readonly leave: boolean; readonly allowDigging: boolean; readonly work: boolean };
+
+/** Wrap `navigate` to record each leg: an exit leg is a goal named `leave:`, a work leg carries `onArrival`. */
+function recordLegs(runtime: NavigationRuntime, legs: Leg[], onLeg?: (leg: Leg) => void): NavigationRuntime {
+  const navigate: NavigationRuntime["navigate"] = options => {
+    const work = options.onArrival !== undefined;
+    const resolved = work ? null : options.goal.resolve(observation(0, 0, 0));
+    const leg = { work, allowDigging: options.movements.allowDigging,
+      leave: resolved?.kind === "active" && resolved.revision.startsWith("leave:") };
+    legs.push(leg);
+    onLeg?.(leg);
+    return runtime.navigate(options);
+  };
+  return { ...runtime, navigate };
+}
+
+test("an attempt that starts in a closed cell steps out of it: the exit leg finds a way where the no-dig work search finds none", () => {
+  const scene = towerScene();
+  closeShelter(scene);
+  const feet = shelterFeet(scene.bot);
+  const shut = startWorkSearch(scene, protectedCells => staircase.crystalWorkRoutePolicy(scene.bot, scene.plan, protectedCells), 0,
+    { feet, digsInSight: true }).advance({ maximumExpansions: CAP, maximumMilliseconds: Infinity });
+  assert.equal(shut.kind, "no_path");
+  assert.ok(shut.evidence.visited < 5, `the work search is shut in at the start after ${shut.evidence.visited} visits`);
+  const exit = startWorkSearch(scene, protectedCells => staircase.crystalWorkRoutePolicy(scene.bot, scene.plan, protectedCells,
+    { allowDigging: true }), 0, { feet, digsInSight: true, goalOverride: staircase.leaveCellGoal(feet, scene.plan.box) })
+    .advance({ maximumExpansions: CAP, maximumMilliseconds: Infinity });
+  assert.ok(exit.kind === "complete" || exit.kind === "segment_ready", `the exit leg ends ${exit.kind} after ${exit.evidence.visited} visits`);
+  assert.ok(exit.evidence.visited < CAP);
+  // T10: the level bound of `leaveCellGoal`: the cell under the start (the pit a dig straight down opens) is no way out.
+  const goal = staircase.leaveCellGoal(feet, scene.plan.box).resolve(observation(feet.x, feet.y, feet.z));
+  assert.equal(goal.kind, "active");
+  const world = { revision: 0, subscribe: () => () => {}, blockAt: liveBlockReader(scene.bot) };
+  const accepts = (dy: number) => goal.kind === "active" && goal.isSatisfied(planningStart({ x: feet.x + 1, y: feet.y + dy, z: feet.z }, 0).node, world);
+  assert.deepEqual([accepts(-1), accepts(0), accepts(1)], [false, true, true]);
+});
+
+// T13 and T4: the exit leg is a dig the server answers, cancelled and run at both rates.
+for (const ticksPerSecond of [20, 10]) {
+  // The old code's receipt for this scene (the exit leg switched off): "[CRYSTAL_STAIRCASE_INCOMPLETE] 1 cells remain;
+  // refused at {"x":-46,"y":79,"z":-3}: no path found after 0 ms compute; visited 1 nodes, generated 1; ... shut in at the
+  // start: 10 not dug because this request has digging off; ...".
+  test(`an attempt that starts in a closed cell breaks only its shell and the planned block, then digs that block and keeps the tower at ${ticksPerSecond} tps`, async () => {
+    const scene = towerScene(fixture, ticksPerSecond);
+    const { bot, clock, plan, server } = scene;
+    const { shell, wrong } = closeShelter(scene);
+    confirmFakeDigs(scene);
+    using _timers = clock.install();
+    await using navigation = createNavigationRuntime(bot);
+    const broken: Vec3[] = [];
+    using listeners = new DisposableStack();
+    listeners.defer(server.onPacket("block_dig", data => {
+      const packet = data as DigPacket;
+      if (packet.status === 2) broken.push(packet.location);
+    }));
+    const tower = plan.tower.map(position => bot.blockAt(position)?.stateId);
+    const result = await build(scene, navigation, undefined, undefined, () => enclosedInPlace(bot));
+    assert.equal(result, null, "the way out of the closed cell lets the work legs run");
+    assert.equal(bot.blockAt(wrong)?.name, "air");
+    assert.deepEqual(plan.tower.map(position => bot.blockAt(position)?.stateId), tower);
+    assert.ok(broken.some(cell => shell.some(part => part.equals(cell))), "the exit leg broke a side of the shell");
+    for (const cell of broken) assert.ok([...shell, wrong].some(part => part.equals(cell)), `broken ${cell} is a shell cell or the planned block`);
+  });
+}
+
+test("an abort during the exit leg leaves nothing active, and a fresh call leaves the cell and completes", async () => {
+  const scene = towerScene();
+  const { bot, clock, server } = scene;
+  closeShelter(scene);
+  confirmFakeDigs(scene);
+  using _timers = clock.install();
+  await using navigation = createNavigationRuntime(bot);
+  const stop = new AbortController();
+  using listeners = new DisposableStack();
+  const digs: number[] = [];
+  listeners.defer(server.onPacket("block_dig", data => {
+    const status = (data as DigPacket).status;
+    digs.push(status);
+    if (status === 0 && digs.length === 1) queueMicrotask(() => stop.abort(new Error("exit dig interrupted")));
+  }));
+  await assert.rejects(build(scene, navigation, stop.signal, undefined, () => enclosedInPlace(bot)), /exit dig interrupted/);
+  assert.equal(navigation.active, false);
+  assert.deepEqual(digs, [0, 1], "the dig was started then cancelled: nothing half-dug");
+  assert.equal(await build(scene, navigation, undefined, undefined, () => enclosedInPlace(bot)), null);
+});
+
+test("an exit leg that stops gives a receipt naming the cell and the next step, and the next call gives it again with no work leg run", async () => {
+  const scene = towerScene();
+  const { bot, clock } = scene;
+  closeShelter(scene);
+  using _timers = clock.install();
+  await using runtime = createNavigationRuntime(bot);
+  const legs: Leg[] = [];
+  const recorded = recordLegs(runtime, legs);
+  const refusing: NavigationRuntime = { ...recorded, navigate: options => {
+    const goal = options.goal.resolve(observation(0, 0, 0));
+    return goal.kind === "active" && goal.revision.startsWith("leave:") ? Promise.resolve({ status: "stopped", reason: "No way out found.", elapsedMs: 0 } as const)
+      : recorded.navigate(options);
+  } };
+  const receipt = /CRYSTAL_STAIRCASE_INCOMPLETE.*way out of the closed cell at .*failed: No way out found\. Open a side of the cell or choose another approach\./;
+  assert.match(await build(scene, refusing, undefined, undefined, () => enclosedInPlace(bot)) ?? "", receipt);
+  assert.match(await build(scene, refusing, undefined, undefined, () => enclosedInPlace(bot)) ?? "", receipt);
+  assert.equal(legs.some(leg => leg.work), false);
+  assert.equal(enclosedInPlace(bot), true, "the bot is still shut in");
+});
+
+test("a stopped server ends the exit leg's dig with a bounded receipt", async () => {
+  const scene = towerScene();
+  const { bot, clock, server } = scene;
+  closeShelter(scene);
+  confirmFakeDigs(scene);
+  using _timers = clock.install();
+  await using navigation = createNavigationRuntime(bot);
+  server.stop();
+  const result = await build(scene, navigation, undefined, undefined, () => enclosedInPlace(bot));
+  assert.match(result ?? "", /CRYSTAL_STAIRCASE_INCOMPLETE/);
+  assert.equal(navigation.active, false);
+});
+
+for (const [name, closed, dig, expected] of [
+  ["a closed start with digging off", true, false, /not dug because this request has digging off/],
+  ["a free start", false, true, null],
+] as const) test(`${name} gets no exit leg and its work legs dig nothing`, async () => {
+  const scene = towerScene();
+  const { bot, clock } = scene;
+  if (closed) closeShelter(scene);
+  using _timers = clock.install();
+  await using runtime = createNavigationRuntime(bot);
+  const legs: Leg[] = [];
+  const policy = { ...DEFAULT_SURVIVAL_POLICY, combat: { ...DEFAULT_SURVIVAL_POLICY.combat, terrain: { dig, place: true } } };
+  assert.equal(enclosedInPlace(bot), closed);
+  const result = await build(scene, recordLegs(runtime, legs), undefined, policy, () => enclosedInPlace(bot));
+  if (expected) assert.match(result ?? "", expected); else assert.equal(result, null);
+  assert.equal(legs.some(leg => leg.leave), false);
+  assert.ok(legs.every(leg => !leg.allowDigging));
+});
+
+for (const ticksPerSecond of [20, 10]) test(`after the exit leg a cloud over the first ascent keeps every later search under the cap at ${ticksPerSecond} tps`, async () => {
+  const scene = towerScene(fixture, ticksPerSecond);
+  const { bot, clock } = scene;
+  closeShelter(scene);
+  confirmFakeDigs(scene);
+  spawnCloud(scene);
+  using _timers = clock.install();
+  await using runtime = createNavigationRuntime(bot);
+  const legs: Leg[] = [];
+  let afterExit = false, laterVisits = 0;
+  const off = runtime.onEvent(event => {
+    if (event.kind === "search_slice" && afterExit) laterVisits = Math.max(laterVisits, event.visited);
+  });
+  const recorded = recordLegs(runtime, legs, leg => { if (!leg.leave && legs.some(earlier => earlier.leave)) afterExit = true; });
+  try {
+    await build(scene, recorded, undefined, undefined, () => enclosedInPlace(bot));
+    assert.equal(legs.filter(leg => leg.leave).length, 1);
+    assert.equal(legs.find(leg => leg.leave)?.allowDigging, true);
+    assert.ok(legs.some(leg => leg.work) && legs.filter(leg => leg.work).every(leg => !leg.allowDigging));
+    assert.ok(laterVisits > 0 && laterVisits < CAP, `the work legs after the exit leg reached ${laterVisits} visits`);
+  } finally { off(); }
+});

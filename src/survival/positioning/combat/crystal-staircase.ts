@@ -2,7 +2,7 @@ import { crystalBlastCovered, crystalMeleeAimFrom, crystalMeleeReach } from "./c
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { BUILD_REACH, BuildProgress, build, keptWith, type BuildCell, type BuildRequest, type BuildResult, type CellKeys } from "../../../navigation/processes/building/build-process.js";
-import { createMovements, nearGoal, observeMineflayerBlock, packKey, type BlockPosition, type MovementPolicy, type NavigationRuntime } from "../../../navigation/index.js";
+import { createMovements, customGoal, nearGoal, observeMineflayerBlock, packKey, type BlockPosition, type Goal, type MovementPolicy, type NavigationRuntime } from "../../../navigation/index.js";
 import { DIG_REACH } from "../../../navigation/movements/excavation.js";
 import { GEOMETRY_FULL_CUBE, navigationFeet } from "../../../navigation/world/block-geometry.js";
 import { isAir } from "../../../world/block-classification.js";
@@ -214,9 +214,12 @@ function feetOf(bot: Bot): BlockPosition {
 
 const OUTSIDE_WORK_BOX = "Outside the staircase's work box";
 
-/** Inside `plan.box`: no digging, no scaffold, no standing outside the box; the work legs' policy. */
-export function crystalWorkRoutePolicy(bot: Bot, plan: CrystalStaircase, protectedCells: CellKeys): MovementPolicy {
-  const base = createMovements(bot, { allowDigging: false, scaffolding: false, protectedCells });
+/** Inside `plan.box`: no scaffold, no standing outside the box; the work legs' policy. It digs nothing unless the
+ * caller passes `allowDigging` (the one exit leg out of a closed cell does; a whole route with it measured 1,717-2,524
+ * visits against 264 without). */
+export function crystalWorkRoutePolicy(bot: Bot, plan: CrystalStaircase, protectedCells: CellKeys,
+  { allowDigging = false }: { readonly allowDigging?: boolean } = {}): MovementPolicy {
+  const base = createMovements(bot, { allowDigging, scaffolding: false, protectedCells });
   return {
     ...base,
     get scaffold() { return base.scaffold; },
@@ -225,6 +228,14 @@ export function crystalWorkRoutePolicy(bot: Bot, plan: CrystalStaircase, protect
         : { kind: "prohibited", reason: OUTSIDE_WORK_BOX };
     },
   };
+}
+
+/** Any feet cell inside the box, level with `start` or above it, other than `start`: the exit leg ends as soon as the
+ * body leaves its cell. A cell below is no way out: the cheapest dig from a closed cell is straight down, into a pit
+ * that is shut in again (first red run of the exit leg: 9 cells shut in at the start, one level lower). */
+export function leaveCellGoal(start: BlockPosition, box: WorkBox): Goal {
+  return customGoal(`leave:${start.x},${start.y},${start.z}`, ({ feet }) =>
+    insideBox(box, feet) && feet.y >= start.y && (feet.x !== start.x || feet.y !== start.y || feet.z !== start.z));
 }
 
 /** Carried blocks from the policy's scaffold list against what a pillar to the stance needs. */
@@ -268,9 +279,11 @@ export function staircaseShortfall(bot: Bot, plan: CrystalStaircase): string | n
   return null;
 }
 
-/** Same re-auditing builder as build_structure, under the combat body's owner. */
+/** Same re-auditing builder as build_structure, under the combat body's owner. An attempt that starts inside a closed
+ * cell first steps out of it, digging within the box as the policy permits; the work legs dig nothing. */
 export async function buildCrystalStaircase(bot: Bot, navigation: NavigationRuntime,
-  policy: Readonly<SurvivalPolicy>, plan: CrystalStaircase, signal: AbortSignal): Promise<string | null> {
+  policy: Readonly<SurvivalPolicy>, plan: CrystalStaircase, signal: AbortSignal,
+  startEnclosed?: () => boolean): Promise<string | null> {
   const needsBlocks = plan.cells.some(cell => cell.blockName !== "air" &&
     bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName);
   if (needsBlocks && (!policy.combat.terrain.place || !policy.navigation.scaffold_blocks.includes("end_stone")))
@@ -300,6 +313,13 @@ export async function buildCrystalStaircase(bot: Bot, navigation: NavigationRunt
       signal.throwIfAborted();
       if (foot.status === "stopped")
         return `[CRYSTAL_STAIRCASE_INCOMPLETE] The way to the staircase's foot failed: ${foot.reason} Reach the foot at ${plan.foot} before retrying this crystal.`;
+    } else if (policy.combat.terrain.dig && startEnclosed?.()) {
+      const cell = feetOf(bot);
+      const out = await navigation.navigate({ goal: leaveCellGoal(cell, plan.box), signal,
+        movements: crystalWorkRoutePolicy(bot, plan, keptWith(planKeys, towerKeys), { allowDigging: true }) });
+      signal.throwIfAborted();
+      if (out.status === "stopped")
+        return `[CRYSTAL_STAIRCASE_INCOMPLETE] The way out of the closed cell at ${JSON.stringify(cell)} failed: ${out.reason} Open a side of the cell or choose another approach.`;
     }
     const placedBefore = progress.placed;
     const result = await build(bot, request, false, progress);

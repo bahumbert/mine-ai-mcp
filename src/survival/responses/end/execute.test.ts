@@ -13,6 +13,9 @@ import {
 import { addItemsToServerTag } from "../../../test-support/datapack-tags.js";
 import type { FootingRecovery } from "../footing.js";
 import { enclosedInPlace } from "../hide.js";
+import { closeShelter, fixtureCell, SHELTERED } from "../../../test-support/crystal-shelter-scene.js";
+import { confirmFakeDigs } from "../../../test-support/life-saving-placements.js";
+import towerFixture from "../../positioning/combat/first-entry-64510673-tower.fixture.json" with { type: "json" };
 import { DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
 
 import { PerchObservation } from "../../perception/combat/perch.js";
@@ -133,6 +136,58 @@ test("crystal stance and return refuse a mid-height tower break and allow the pi
     assert.equal(result.outcome, "crystal_destroyed", result.reason ?? "");
     assert.deepEqual(answers, [["prohibited", "penalized"], ["prohibited", "penalized"]]);
   } finally { off(); }
+});
+
+/** The saved first-entry tower with its bot shut in its own shelter (`closeShelter`), one crystal melee call against it. */
+function shelteredCrystalScene(ticksPerSecond: number) {
+  const cells = Object.fromEntries(Object.entries(towerFixture.cells).map(([key, state]) => [key, fixtureCell(state)]));
+  const crystal = new Vec3(towerFixture.crystal.x, towerFixture.crystal.y, towerFixture.crystal.z);
+  const scene = endScene({ cells, position: SHELTERED, groundY: null, simulatePhysics: true, server: { ticksPerSecond },
+    carried: { end_stone: 64, stone_pickaxe: 1 }, entities: { 42: { name: "end_crystal", position: crystal } } });
+  closeShelter({ ...scene, plan: planCrystalStaircase(scene.bot, crystal) });
+  confirmFakeDigs(scene);
+  return scene;
+}
+
+for (const rate of [20, 10]) test(`a crystal approach that starts in the bot's own closed shelter takes an exit leg with digging, then work legs that dig nothing at ${rate} tps`, async () => {
+  const { bot, clock } = shelteredCrystalScene(rate);
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee");
+  await using runtime = createNavigationRuntime(bot);
+  const legs: { leave: boolean; allowDigging: boolean; work: boolean }[] = [];
+  const caller = new AbortController();
+  const navigate: NavigationRuntime["navigate"] = options => {
+    const work = options.onArrival !== undefined;
+    const goal = work ? null : options.goal.resolve(navigationObservation(0, 0, 0));
+    if (legs.length >= 2 && legs.some(leg => leg.work)) caller.abort(new Error("enough legs seen"));
+    legs.push({ work, allowDigging: options.movements.allowDigging, leave: goal?.kind === "active" && goal.revision.startsWith("leave:") });
+    return runtime.navigate(options);
+  };
+  // `needed: false`: no footing recovery is pending; the crystal call under test never reads it before the approach.
+  const end = new EndCombat(bot, { ...runtime, navigate }, { needed: false } as FootingRecovery);
+  await clock.settle(end.crystal(42, caller.signal, observation), 45_000).catch(error => {
+    if (!caller.signal.aborted) throw error;
+  });
+  assert.equal(legs[0]?.leave, true, `the first leg is the exit leg: ${JSON.stringify(legs)}`);
+  assert.equal(legs[0]?.allowDigging, true);
+  assert.ok(legs.some(leg => leg.work));
+  assert.ok(legs.filter(leg => leg.work).every(leg => !leg.allowDigging));
+});
+
+test("a reflex taking the caller's signal during the crystal approach's exit dig leaves no navigation running", async () => {
+  const { bot, clock, server } = shelteredCrystalScene(20);
+  using _timers = clock.install();
+  using observation = new CrystalObservation(bot, 42, "melee");
+  await using runtime = createNavigationRuntime(bot);
+  const caller = new AbortController();
+  using listeners = new DisposableStack();
+  listeners.defer(server.onPacket("block_dig", data => {
+    if ((data as { status: number }).status === 0) queueMicrotask(() => caller.abort(new Error("reflex took the body")));
+  }));
+  await clock.settle(new EndCombat(bot, runtime, { needed: false } as FootingRecovery).crystal(42, caller.signal, observation), 45_000)
+    .catch(error => { if (!caller.signal.aborted) throw error; });
+  assert.equal(caller.signal.aborted, true);
+  assert.equal(runtime.active, false);
 });
 
 /**

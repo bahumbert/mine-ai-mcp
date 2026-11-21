@@ -901,7 +901,7 @@ export class EndCombat {
       watch();
       if (stop.signal.aborted) return { kind: "changed" };
       const failure = await this.phase("approach", () => buildCrystalStaircase(this.bot, this.navigation,
-        this.policy(), observation.staircase!, AbortSignal.any([signal, stop.signal])));
+        this.policy(), observation.staircase!, AbortSignal.any([signal, stop.signal]), () => enclosedInPlace(this.bot)));
       return failure ? { kind: "failed", reason: failure } : { kind: "arrived" };
     } catch (error) {
       signal.throwIfAborted();
