@@ -38,7 +38,7 @@ import { endsStrandedUnderWater } from "./stranded-segment.js";
 import { countStartRefusals } from "./start-refusals.js";
 import { NodeStore } from "./node-store.js";
 import { OpenSet } from "./open-set.js";
-import { routeDetour, searchRegion } from "./region.js";
+import { regionClipFor, regionEvidence, searchRegion } from "./region.js";
 
 export type { SearchEvidence } from "./search-result.js";
 export type SearchUpdate =
@@ -360,6 +360,8 @@ function attemptSegment(
 export class IncrementalSearch {
   readonly #options: SearchOptions;
   readonly #region: ReturnType<typeof searchRegion>;
+  /** The bound on the explored region, when the limits ask for one and the goal has a region; none under a radius. */
+  readonly #clip: ReturnType<typeof regionClipFor>;
   readonly #now: () => number;
   /** The goal with its heuristic scaled by the policy's weight; nothing reads `options.goal` after construction. */
   readonly #goal: SearchOptions["goal"];
@@ -390,6 +392,7 @@ export class IncrementalSearch {
   constructor(options: SearchOptions) {
     this.#options = options;
     this.#region = searchRegion(options.goal, options.start.node.feet);
+    this.#clip = regionClipFor(this.#region, options.start.node.feet, options.limits);
     this.#now = options.now ?? performance.now.bind(performance);
     // Goals report ticks, the same unit as costs, so nothing is converted here.
     // They used to report blocks and be scaled by the cheapest per-block edge,
@@ -504,12 +507,11 @@ export class IncrementalSearch {
       };
     }
     const { world, policy } = this.#options.context;
-    return {
-      kind: "no_path",
-      closest: this.#closestEvidence(),
-      evidence: { ...this.#evidence(), startRefusals: countStartRefusals(world, policy, this.#store.feet(this.#root)) },
-      checkpoint: this.#slice.checkpoint,
-    };
+    const evidence = { ...this.#evidence(), startRefusals: countStartRefusals(world, policy, this.#store.feet(this.#root)) };
+    // The frontier ran dry after the region refused cells: no partial route is cut toward the closest node (spec O1).
+    if (this.#clip && this.#clip.refused > 0)
+      return { kind: "limit", limit: this.#clip.limit(this.#closestEvidence()), evidence, checkpoint: this.#slice.checkpoint };
+    return { kind: "no_path", closest: this.#closestEvidence(), evidence, checkpoint: this.#slice.checkpoint };
   }
 
   /**
@@ -602,6 +604,11 @@ export class IncrementalSearch {
     return false;
   }
 
+  /** Clip generated nodes outside the goal's region, after the radius clip; a refusal is counted for the limit. */
+  #withinRegion(x: number, y: number, z: number): boolean {
+    return this.#clip === null || this.#clip.admits({ x, y, z });
+  }
+
   /** Ask the catalogue for every transition out of `current`; queue the ones that improve on a known arrival. */
   #expand(current: number): void {
     const { context } = this.#options;
@@ -611,7 +618,7 @@ export class IncrementalSearch {
     const digContext = digContextAt(this.#options.context, state);
     const actualStart = current === this.#root ? this.#options.observedStart : undefined;
     const finish = this.#goal.finish?.(state, context, digContext, actualStart);
-    if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z)) {
+    if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z) && this.#withinRegion(finish.to.x, finish.to.y, finish.to.z)) {
       const cost = store.cost[current]! + finish.cost;
       // A terminal excavation changes the world without changing feet. It
       // competes in the queue, but is not another arrival at that feet cell.
@@ -637,7 +644,7 @@ export class IncrementalSearch {
       const x = movements.toX[index]!;
       const y = movements.toY[index]!;
       const z = movements.toZ[index]!;
-      if (!this.#withinRadius(x, y, z)) continue;
+      if (!this.#withinRadius(x, y, z) || !this.#withinRegion(x, y, z)) continue;
       const key = packKey(x, y, z);
       const cost = store.cost[current]! + movements.cost[index]!;
       if (this.#arrivals.dominated(key, movements.remainingScaffolds[index]!, cost)) continue;
@@ -668,10 +675,7 @@ export class IncrementalSearch {
     return {
       queued: this.#open.size, visited: this.#visited, farthestVisited: this.#farthestVisited, generated: this.#generated,
       slices: this.#slices, computeMs: this.#computeMs,
-      ...(this.#region && { region: {
-        straight: Math.min(...this.#region.parts.map((part) => part.straight)), allowance: null, refused: 0,
-        ...(plan && { detour: routeDetour(this.#region, this.#options.start.node.feet, plan.steps.map((step) => step.to)).detour }),
-      } }),
+      ...(this.#region && { region: regionEvidence(this.#region, this.#clip, this.#options.start.node.feet, plan?.steps.map((step) => step.to)) }),
     };
   }
 

@@ -18,6 +18,7 @@ import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { MemoryWorld } from "../world/memory-world.js";
 import { blockKey, type NavigationObservation } from "../world/world.js";
 import type { SearchLimits } from "./search-result.js";
+import { searchRegion } from "./region.js";
 import { IncrementalSearch, type SearchUpdate } from "./search.js";
 
 type ActiveGoal = Extract<ResolvedGoal, { kind: "active" }>;
@@ -256,6 +257,192 @@ function destination(cell: { x: number; y: number; z: number }): ActiveGoal {
   if (goal.kind !== "active") throw new Error(goal.observation);
   return goal;
 }
+
+/** SYNTHETIC unit edge: the 4 ticks a sideways block costs (`goals/index.ts` estimate). */
+const UNIT_EDGE = 4;
+/** SYNTHETIC costly edge: the 2,511 ticks of one obsidian pickaxe dig (`reports/2026-11-20-crystal-staircase-search-timeout.md`). */
+const COSTLY_EDGE = 2511;
+
+/** A grid graph over [-half, half]²: unit moves priced by `price(from, to)`, or absent when it answers null. */
+function gridCatalogue(half: number, price: (from: { x: number; z: number }, to: { x: number; z: number }) => number | null): MovementCatalogue {
+  return stubCatalogue((state) => {
+    const { x, z } = state.node.feet;
+    return ([[1, 0], [-1, 0], [0, 1], [0, -1]] as const).flatMap(([dx, dz]) => {
+      const to = { x: x + dx, z: z + dz };
+      const cost = Math.abs(to.x) <= half && Math.abs(to.z) <= half ? price({ x, z }, to) : null;
+      return cost === null ? [] : [graphMovement(state, to.x, to.z, cost)];
+    });
+  });
+}
+
+/** The cells of the grid whose detour sum is within the bound of the goal's part: what a search under the bound may visit at most. */
+function cellsInRegion(half: number, goal: ActiveGoal, bound: { stretch: number; margin: number }): number {
+  const region = searchRegion(goal, ORIGIN)!;
+  const [part] = region.parts;
+  let count = 0;
+  for (let x = -half; x <= half; x += 1) for (let z = -half; z <= half; z += 1) {
+    const cell = { x, y: 63, z };
+    if (Math.hypot(x, 0, z) + part!.distance(cell) <= bound.stretch * part!.straight + bound.margin) count += 1;
+  }
+  return count;
+}
+
+const SEALED_FROM = (goal: { x: number; z: number }) => (_from: { x: number; z: number }, to: { x: number; z: number }) =>
+  to.x === goal.x && to.z === goal.z ? null : UNIT_EDGE;
+
+test("a goal past a costly edge is reached inside the region", () => {
+  const goal = destination({ x: 8, y: 63, z: 0 });
+  const catalogue = gridCatalogue(20, (from, to) => to.x !== 8 || to.z !== 0 ? UNIT_EDGE : from.x === 7 && from.z === 0 ? COSTLY_EDGE : null);
+  const bound = { stretch: 2, margin: 4 };
+  const inside = cellsInRegion(20, goal, bound);
+  const budget = { maximumExpansions: inside * 4, maximumMilliseconds: Infinity };
+  const bounded = expect(searchOver(goal, catalogue, { id: "costly-bounded", limits: { region: bound } }).advance(budget), "complete");
+  assert.ok(bounded.evidence.visited <= inside, `visited ${bounded.evidence.visited} of ${inside} region cells`);
+  assert.ok(bounded.plan.steps.some((step) => step.cost.total === COSTLY_EDGE), "the route crosses the costly edge");
+  assert.equal(bounded.evidence.region?.allowance, 20);
+  const unbounded = searchOver(goal, catalogue, { id: "costly-unbounded", limits: { region: null } }).advance(budget);
+  assert.equal(unbounded.kind, "progress", "the same expansions without the bound do not reach the goal");
+});
+
+test("a sealed goal ends as a region limit", () => {
+  const goal = destination({ x: 8, y: 63, z: 0 });
+  const bound = { stretch: 2, margin: 4 };
+  const inside = cellsInRegion(20, goal, bound);
+  const update = searchOver(goal, gridCatalogue(20, SEALED_FROM({ x: 8, z: 0 })), { id: "sealed", limits: { region: bound } })
+    .advance({ maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "limit");
+  if (update.kind !== "limit" || update.limit.kind !== "region") throw new Error(JSON.stringify(update.kind));
+  assert.deepEqual({ straight: update.limit.straight, limit: update.limit.limit, part: update.limit.part },
+    { straight: 8, limit: 20, part: 0 });
+  assert.ok(update.limit.observed > 20, `the largest refused sum ${update.limit.observed} is over the allowance`);
+  assert.ok(update.evidence.visited <= inside);
+  assert.ok(update.evidence.startRefusals, "a region limit carries the start refusals a no_path has");
+  assert.ok(update.evidence.region && update.evidence.region.refused > 0 && update.evidence.region.allowance === 20);
+});
+
+test("a region that refused nothing still ends as no_path", () => {
+  // A 3-cell dead end well inside the region: nothing is ever refused.
+  const update = searchOver(destination({ x: 8, y: 63, z: 0 }), gridCatalogue(1, SEALED_FROM({ x: 8, z: 0 })),
+    { id: "dead-end", limits: { region: { stretch: 100, margin: 100 } } }).advance({ maximumMilliseconds: Infinity });
+  assert.equal(update.kind, "no_path");
+  assert.equal(update.evidence.region?.refused, 0);
+});
+
+test("the region's edge is inclusive", () => {
+  // Up one, east along row 1, down to the goal: the largest sum is the detour D.
+  const goal = destination({ x: 8, y: 63, z: 0 });
+  const path = [[0, 0], [0, 1], ...Array.from({ length: 8 }, (_, i) => [i + 1, 1] as const), [8, 0]] as const;
+  const catalogue = stubCatalogue((state) => {
+    const next = path[path.findIndex(([x, z]) => x === state.node.feet.x && z === state.node.feet.z) + 1];
+    return next ? [graphMovement(state, next[0], next[1], 1)] : [];
+  });
+  const [part] = searchRegion(goal, ORIGIN)!.parts;
+  const detour = Math.max(...path.map(([x, z]) => Math.hypot(x, 0, z) + part!.distance({ x, y: 63, z })));
+  const margin = detour - part!.straight;
+  assert.equal(part!.straight + margin, detour, "the test's allowance is exactly D");
+  const unbounded = expect(searchOver(goal, catalogue, { id: "edge-null", limits: { region: null } })
+    .advance({ maximumMilliseconds: Infinity }), "complete");
+  const atEdge = expect(searchOver(goal, catalogue, { id: "edge-on", limits: { region: { stretch: 1, margin } } })
+    .advance({ maximumMilliseconds: Infinity }), "complete");
+  assert.deepEqual(atEdge.plan.steps.map((step) => step.id), unbounded.plan.steps.map((step) => step.id));
+  assert.equal(atEdge.plan.totalCost, unbounded.plan.totalCost);
+  const under = searchOver(goal, catalogue, { id: "edge-under", limits: { region: { stretch: 1, margin: margin - 1 } } })
+    .advance({ maximumMilliseconds: Infinity });
+  assert.equal(under.kind === "limit" && under.limit.kind, "region");
+});
+
+/** An active goal accepting the feet cells (x, 63, 0) for each x of `targets`, with one region part per target. */
+function unionOf(targets: readonly number[], finish?: ActiveGoal["finish"]): ActiveGoal {
+  const isSatisfied = (node: PlanningNode) => node.feet.z === 0 && targets.includes(node.feet.x);
+  const distanceTo = (x: number) => (cell: { x: number; y: number; z: number }) => Math.hypot(cell.x - x, cell.y - 63, cell.z);
+  return {
+    ...goalOf("union", (node) => UNIT_EDGE * Math.min(...targets.map((x) => Math.abs(node.feet.x - x) + Math.abs(node.feet.z))), isSatisfied),
+    ...(finish && { finish }),
+    region: () => ({ satisfies: isSatisfied, parts: targets.map((x) => ({ straight: Math.abs(x), distance: distanceTo(x) })) }),
+  };
+}
+
+test("a union reaches a far branch past a sealed near one", () => {
+  // Near part at 3 (nothing enters it), far part at 20 through row 1.
+  const catalogue = gridCatalogue(25, (from, to) => to.z === 0 && to.x === 3 ? null : to.z < 0 || to.z > 1 ? null : to.z === 0 && from.z === 0 && to.x > from.x && to.x < 20 ? null : UNIT_EDGE);
+  const bound = { stretch: 2, margin: 2 };
+  const reached = expect(searchOver(unionOf([3, 20]), catalogue, { id: "union-open", limits: { region: bound } })
+    .advance({ maximumMilliseconds: Infinity }), "complete");
+  assert.equal(reached.plan.end.x, 20);
+  assert.equal(reached.evidence.region?.allowance, 8, "the allowance reported is the nearest part's: 2 x 3 + 2");
+  // Both sealed: the limit describes part 0, the part with the smallest straight distance.
+  const sealed = searchOver(unionOf([3, 20]), gridCatalogue(25, (_from, to) => to.z === 0 && (to.x === 3 || to.x === 20) ? null : UNIT_EDGE),
+    { id: "union-sealed", limits: { region: bound } }).advance({ maximumMilliseconds: Infinity });
+  assert.equal(sealed.kind, "limit");
+  if (sealed.kind !== "limit" || sealed.limit.kind !== "region") throw new Error(sealed.kind);
+  assert.deepEqual({ part: sealed.limit.part, limit: sealed.limit.limit, straight: sealed.limit.straight }, { part: 0, limit: 8, straight: 3 });
+});
+
+test("maximumRadius set means no region, and the radius keeps its own limit", () => {
+  const goal = destination({ x: 8, y: 63, z: 0 });
+  // Up one, east along row 1, down to the goal: past the allowance of 8 (stretch 1, margin 0), inside radius 30.
+  const path = [[0, 0], [0, 1], ...Array.from({ length: 8 }, (_, i) => [i + 1, 1] as const), [8, 0]] as const;
+  const corridor = stubCatalogue((state) => {
+    const next = path[path.findIndex(([x, z]) => x === state.node.feet.x && z === state.node.feet.z) + 1];
+    return next ? [graphMovement(state, next[0], next[1], 1)] : [];
+  });
+  const both = { maximumRadius: 30, region: { stretch: 1, margin: 0 } };
+  const done = expect(searchOver(goal, corridor, { id: "radius-and-region", limits: both }).advance({ maximumMilliseconds: Infinity }), "complete");
+  assert.equal(done.evidence.region?.allowance, null, "no clip was built");
+  assert.equal(done.evidence.region?.refused, 0);
+  // The only edge leaves radius 4: nothing is left to cut a partial from, so the radius limit is what ends it.
+  const clipped = searchOver(destination({ x: 60, y: 63, z: 0 }), stubCatalogue((state) => [graphMovement(state, state.node.feet.x + 5, 0, 1)]),
+    { id: "radius-first", limits: { maximumRadius: 4, region: { stretch: 1, margin: 0 } } }).advance({ maximumMilliseconds: Infinity });
+  assert.equal(clipped.kind === "limit" && clipped.limit.kind, "radius");
+});
+
+test("a finish outside the region is not queued", () => {
+  const finishAt = (x: number): ActiveGoal["finish"] => (state) => state.node.feet.x === 0 ? graphMovement(state, x, 0, 1) : null;
+  const bound = { stretch: 1, margin: 2 };
+  // Part at 4: allowance 6. A finish landing on x = 5 sums 5 + 1 = 6 (inside); on x = 6 it sums 6 + 2 = 8 (outside).
+  const inside = expect(searchOver(unionOf([4], finishAt(5)), stubCatalogue(() => []), { id: "finish-in", limits: { region: bound } })
+    .advance({ maximumMilliseconds: Infinity }), "complete");
+  assert.equal(inside.plan.end.x, 5);
+  const outside = searchOver(unionOf([4], finishAt(6)), stubCatalogue(() => []), { id: "finish-out", limits: { region: bound } })
+    .advance({ maximumMilliseconds: Infinity });
+  assert.equal(outside.kind === "limit" && outside.limit.kind, "region");
+  assert.equal(outside.evidence.region?.refused, 1);
+});
+
+test("a primary-timeout partial stays inside the region", () => {
+  const goal = destination({ x: 40, y: 63, z: 0 });
+  const clock = perExpansionClock(gridCatalogue(5 + 40, () => UNIT_EDGE));
+  const bound = { stretch: 1, margin: 0 };
+  const update = expect(searchOver(goal, clock.catalogue,
+    { id: "primary-region", limits: { primaryTimeoutMs: clock.atExpansion(20), region: bound }, now: clock.now })
+    .advance({ maximumExpansions: 1000, maximumMilliseconds: Infinity }), "segment_ready");
+  const [part] = searchRegion(goal, ORIGIN)!.parts;
+  for (const step of update.plan.steps) assert.ok(Math.hypot(step.to.x, 0, step.to.z) + part!.distance(step.to) <= 40, step.id);
+  assert.ok(update.evidence.region!.refused > 0, "cells off the line were refused while the partial was cut");
+  assert.equal(update.evidence.region!.allowance, 40);
+});
+
+test("the search refuses a bound that is not a stretch of at least 1 and a margin of at least 0", () => {
+  for (const region of [{ stretch: 0.5, margin: 1 }, { stretch: NaN, margin: 1 }, { stretch: Infinity, margin: 1 },
+    { stretch: 2, margin: -1 }, { stretch: 2, margin: NaN }, { stretch: 2, margin: Infinity }])
+    assert.throws(() => searchOver(destination({ x: 8, y: 63, z: 0 }), stubCatalogue(() => []), { limits: { region } }), RangeError, JSON.stringify(region));
+  assert.doesNotThrow(() => searchOver(destination({ x: 8, y: 63, z: 0 }), stubCatalogue(() => []), { limits: { region: { stretch: 1, margin: 0 } } }),
+    "the smallest legal bound builds");
+});
+
+test("a bound whose allowance overflows builds no clip, so the search is unbounded", () => {
+  const update = searchOver(destination({ x: 8, y: 63, z: 0 }), gridCatalogue(12, () => UNIT_EDGE),
+    { id: "overflow", limits: { region: { stretch: Number.MAX_VALUE, margin: 1 } } }).advance({ maximumExpansions: 50, maximumMilliseconds: Infinity });
+  assert.equal(update.evidence.region?.allowance, null);
+  assert.equal(update.evidence.region?.refused, 0);
+});
+
+test("a goal without a region is never clipped", () => {
+  const update = expect(searchOver(goalOf("custom", () => 0, (node) => node.feet.x === 6),
+    gridCatalogue(10, () => UNIT_EDGE), { id: "no-region", limits: { region: { stretch: 1, margin: 0 } } })
+    .advance({ maximumMilliseconds: Infinity }), "complete");
+  assert.equal(update.evidence.region, undefined);
+});
 
 test("a radius keeps every route that stays inside it, and a useful prefix of one that cannot", () => {
   // A branch that leaves the radius must not discard the valid route beside it.

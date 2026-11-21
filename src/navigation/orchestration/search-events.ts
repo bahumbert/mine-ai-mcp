@@ -20,9 +20,9 @@ export function searchFinishedEvent(
       update.kind === "no_path"
         ? "frontier"
         : update.kind === "limit"
-          ? update.limit.kind === "radius"
-            ? "radius"
-            : "compute_time"
+          ? update.limit.kind === "search_time"
+            ? "compute_time"
+            : update.limit.kind
           : null,
     limit: update.kind === "limit" ? update.limit : null,
     interpretation:

@@ -33,6 +33,11 @@ export interface SearchLimits {
    * here". Ordinary navigation leaves it unset.
    */
   readonly maximumRadius?: number;
+  /**
+   * Cells whose detour sum exceeds stretch x straight + margin for every goal part are not explored; null: no bound.
+   * Ignored when `maximumRadius` is set: a caller with its own spatial policy keeps it.
+   */
+  readonly region?: { readonly stretch: number; readonly margin: number } | null;
 }
 
 export interface SearchProgressNodeEvidence {
