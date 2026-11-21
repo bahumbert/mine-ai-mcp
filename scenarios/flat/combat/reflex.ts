@@ -160,9 +160,21 @@ export async function readReflexOutcomes(
   runtime: Runtime,
   ignoreOutcomes: readonly string[] = [],
 ): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] }> {
+  const { encounters, limits, failures } = await readOrderedReflexOutcomes(context, runtime, ignoreOutcomes);
+  return { encounters, limits, failures };
+}
+
+/** The same read, plus every outcome in the order the events were recorded (the three lists cannot say which came first). */
+export async function readOrderedReflexOutcomes(
+  context: Pick<MineAiScenarioContext, "signal">,
+  runtime: Runtime,
+  ignoreOutcomes: readonly string[] = [],
+): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[]; ordered: ReflexOutcome[] }> {
   const readEvents = runtime.actions.find((action) => action.name === READ_RECENT_EVENTS);
   if (!readEvents) throw new Error("The reflex scenarios require the recent-events action.");
-  const seen: { encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] } = { encounters: [], limits: [], failures: [] };
+  // `ordered` keeps every outcome in the order the events were recorded: the three lists alone cannot say which came first.
+  const seen: { encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[]; ordered: ReflexOutcome[] } =
+    { encounters: [], limits: [], failures: [], ordered: [] };
   for (;;) {
     const output = await runtime.run(readEvents, { limit: 100 }, context.signal);
     if (output.result.status !== "succeeded") throw new Error(output.result.error);
@@ -171,6 +183,7 @@ export async function readReflexOutcomes(
       if (event.type !== "survival_outcome" || event.payload.source !== "hostile_reflex") continue;
       const outcome = parseReflexOutcome(event.payload.evidence);
       if (!outcome) continue;
+      if (outcome.kind !== "encounter" || !ignoreOutcomes.includes(outcome.outcome)) seen.ordered.push(outcome);
       if (outcome.kind === "limit") seen.limits.push(outcome);
       else if (outcome.kind === "failed") seen.failures.push(outcome);
       else {

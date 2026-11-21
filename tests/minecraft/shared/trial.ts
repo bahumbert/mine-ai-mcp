@@ -6,7 +6,7 @@ import type { ScenarioServerConfig } from "./config.ts";
 import type { MutexQueueMarks } from "./pool.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
-const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
+export const DEFAULT_GOAL_TIMEOUT_SECONDS = 120;
 /** Spec 2026-11-15-scenario-ticks open choice 1: twice the nominal game duration, plus the existing wall slack. */
 export const TRIAL_TICK_SLACK_FACTOR = 2;
 const WORLD_FLOOR_Y = -64;
