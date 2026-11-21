@@ -43,6 +43,8 @@ export class MineTargeting {
   #water: WaterRecovery = { kind: "none" };
   readonly #blockBlacklist = new Set<string>();
   readonly #blockStances = new Map<string, ReadonlySet<string>>();
+  /** Why the last stance of each block target was refused, for the scan's refusal once none is left. */
+  readonly #stanceRefusals = new Map<string, string>();
   readonly #casts: CastTargets;
   /** Sources beside a target already poured on once; a second look seals them. */
   readonly #touchingCasts = new Set<string>();
@@ -150,10 +152,12 @@ export class MineTargeting {
     this.lastReason = reason;
   }
 
-  excludeBlockStance(target: MineBlockTarget, feet: BlockPosition): void {
+  /** Refuse one stance of the target, not the block: the scan keeps it while another working cell is left. */
+  excludeBlockStance(target: MineBlockTarget, feet: BlockPosition, reason?: string): void {
     const key = cellKey(target.position);
     this.#blockStances.set(key, new Set([...this.#blockStances.get(key) ?? [], cellKey(feet)]));
-    this.lastReason = `the target at ${cellKey(target.position)} is occluded from ${cellKey(feet)}`;
+    this.lastReason = reason ?? `the target at ${key} is occluded from ${cellKey(feet)}`;
+    this.#stanceRefusals.set(key, this.lastReason);
     this.#refreshedAtMs = Number.NEGATIVE_INFINITY;
   }
 
@@ -255,6 +259,7 @@ export class MineTargeting {
     const scanResult = scanMineTargets(this.bot, this.request, {
       blockCells: this.#blockBlacklist,
       blockStances: this.#blockStances,
+      stanceRefusals: this.#stanceRefusals,
       dropEntities: this.#dropBlacklist,
     });
     const found = [...scanResult.targets];

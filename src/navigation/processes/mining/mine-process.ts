@@ -6,13 +6,13 @@
  * this process owns quantities, target observation, and lava preparation.
  */
 import type { Bot } from "mineflayer";
-import { asVec3, cellKey, waitForTicksOrCancel } from "../../../utils/index.js";
+import { asVec3, cellIntersectsBody, cellKey, waitForTicksOrCancel } from "../../../utils/index.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import type { useItemAt } from "../../../world/item-use.js";
 import { isLiquidSource, sourceInSight } from "../../../world/liquid.js";
 import type { PlaceIntoCell } from "../../../world/placement.js";
 import {
-  describeCalculationFailure, type BlockPosition, type BreakBlockInPlace,
+  describeCalculationFailure, type BlockPosition, type BreakBlockInPlace, type BreakBlockInPlaceResult,
   type MovementPolicy, type Navigate, type NavigationResult,
 } from "../../index.js";
 import { liveBlockReader } from "../../mineflayer/world.js";
@@ -217,17 +217,25 @@ async function sealLavaFaces(
   request: MineRequest,
   position: BlockPosition,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<SealRefusal | null> {
   for (const cell of lavaClosuresOf(bot, position)) {
     signal?.throwIfAborted();
     const placed = await request.placeInto(bot, cell, { ...(signal && { signal }) });
     signal?.throwIfAborted();
     if (placed.kind === "failed") {
       const what = bot.blockAt(asVec3(cell))?.name === "lava" ? "the lava" : "the floor over lava";
-      return `${what} at ${cellKey(cell)} could not be closed: ${placed.error}`;
+      // The bot's own body in the cell is this stance's fault, not the block's; another body leaves the block refused.
+      const ownBody = placed.cause === "entity" && cellIntersectsBody(cell, bot.entity);
+      return { reason: `${what} at ${cellKey(cell)} could not be closed: ${placed.error}`, ownBody };
     }
   }
   return null;
+}
+
+/** Why a lava face would not close, and whether the bot's own body held the cell. */
+interface SealRefusal {
+  readonly reason: string;
+  readonly ownBody: boolean;
 }
 
 /**
@@ -266,11 +274,44 @@ async function castTouchingSources(
   return !outcome.formationsAnswered || outcome.obsidianFormed > 0 || !outcome.waterRecovered;
 }
 
+/**
+ * After the drain or the seal changed the world, whether this step ends before the swing. The target must still be the
+ * block the step set out to break, the body must still stand on one of its working cells (else the next pass
+ * re-arrives), and the live eye must still see it: a dig this stance cannot make refuses the stance, not the block,
+ * and spends no seal block (t00780: three seals after a plug that hid the only ray).
+ */
+function stepEndsBeforeSwing(bot: Bot, request: MineRequest, targeting: MineTargeting, target: MineBlockTarget): boolean {
+  const block = bot.blockAt(asVec3(target.position));
+  const feet = bot.entity.position.floored();
+  if (block === null || !request.matches(block) ||
+    !workingCells(bot, target, request.movements).some((cell) => cellKey(cell) === cellKey(feet))) {
+    targeting.refresh();
+    return true;
+  }
+  if (targetInSight(bot, bot.entity.position.offset(0, STANDING_EYE_HEIGHT, 0), target.position)) return false;
+  targeting.excludeBlockStance(target, feet);
+  return true;
+}
+
+/** A swing that failed: the support re-reads, the stance is refused, anything else refuses the block. */
+function refuseFailedSwing(
+  bot: Bot,
+  targeting: MineTargeting,
+  target: MineBlockTarget,
+  swing: Extract<BreakBlockInPlaceResult, { status: "failed" }>,
+): void {
+  if (swing.cause === "support") {
+    targeting.lastReason = swing.reason;
+    targeting.refresh();
+  } else if (swing.cause === "stance") targeting.excludeBlockStance(target, bot.entity.position.floored(), swing.reason);
+  else targeting.blacklist(target, swing.reason);
+}
+
 async function breakTargetInPlace(
   bot: Bot,
   request: MineRequest,
   targeting: MineTargeting,
-  target: MineTarget,
+  target: MineBlockTarget,
   signal?: AbortSignal,
 ): Promise<void> {
   signal?.throwIfAborted();
@@ -284,29 +325,30 @@ async function breakTargetInPlace(
   if (refreshDependentStance(bot, targeting, target.position)) return;
   if (water !== null) {
     const world = { blockAt: liveBlockReader(bot), revision: 0, subscribe: () => () => {} };
-    if (target.kind === "block" && target.drained && hasWetFace(world, target.position)) {
+    if (target.drained && hasWetFace(world, target.position)) {
       targeting.blacklist(target, `${IN_WATER_PREFIX}the drain failed: ${water}`);
       return;
     }
     // Preparation can move the bot in a current. Reject the stance we tried,
     // not the lower cell it sank into while the water was being isolated.
-    if (target.kind === "block") targeting.excludeBlockStance(target, workingFeet);
-    targeting.lastReason = water;
+    targeting.excludeBlockStance(target, workingFeet, water);
     return;
   }
+  if (stepEndsBeforeSwing(bot, request, targeting, target)) return;
   const seal = await sealLavaFaces(bot, request, target.position, signal);
   signal?.throwIfAborted();
   if (refreshDependentStance(bot, targeting, target.position)) return;
   if (seal !== null) {
-    targeting.blacklist(target, seal);
+    if (seal.ownBody) targeting.excludeBlockStance(target, bot.entity.position.floored(), seal.reason);
+    else targeting.blacklist(target, seal.reason);
     return;
   }
+  if (stepEndsBeforeSwing(bot, request, targeting, target)) return;
   const swing = await request.breakInPlace({ movements: request.movements, position: target.position, retainSupport: true, signal });
+  // A swing that answers a refusal as the bot dies must not record one: the abort ends the step first.
+  signal?.throwIfAborted();
   if (swing.status === "failed") {
-    if (swing.cause === "support") {
-      targeting.lastReason = swing.reason;
-      targeting.refresh();
-    } else targeting.blacklist(target, swing.reason);
+    refuseFailedSwing(bot, targeting, target, swing);
     return;
   }
   targeting.refresh();
@@ -352,7 +394,7 @@ async function sealAndBreakInReach(
   const target = targeting
     .targets()
     .find(
-      (candidate) =>
+      (candidate): candidate is MineBlockTarget =>
         candidate.kind === "block" &&
         (!candidate.routeMayBreak || currentNeedsPreparation) &&
         workingCells(bot, candidate, request.movements).some((cell) => cellKey(cell) === cellKey(feet)) &&

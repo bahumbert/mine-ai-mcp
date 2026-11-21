@@ -35,7 +35,16 @@ export type Excavation =
       readonly breakTicks: number;
       readonly breakPenalty: number;
     }
-  | { readonly kind: "unavailable"; readonly reason: string };
+  | {
+      readonly kind: "unavailable";
+      readonly reason: string;
+      /**
+       * `stance`: the refusal holds only from the standing position (sight, reach, a body hazard, an unstable column under
+       * the feet), so the caller refuses that stance, not the block. No cause: it holds from every cell (the block is not
+       * loaded, digging is off, a break is prohibited).
+       */
+      readonly cause?: "stance";
+    };
 
 type PricedExcavation =
   | { readonly kind: "priced"; readonly digs: readonly Dig[] }
@@ -351,6 +360,7 @@ export function prepareExcavationDigs(
   if (footprint.some(({ x, z }) => hasUnstableFallingSupport(blockAt, x, feet.y - 1, z))) {
     return {
       kind: "unavailable",
+      cause: "stance",
       reason: "The falling-block column beneath the mining stance has no observed stable support.",
     };
   }
@@ -371,11 +381,12 @@ export function prepareExcavationDigs(
       const hidden = remaining[0]!.position;
       return {
         kind: "unavailable",
+        cause: "stance",
         reason: `The required dig at ${blockLabel(hidden)} cannot be seen within reach from this position.`,
       };
     }
     const hazard = excavationBodyHazard(blockAt, standing, dig.position, cleared);
-    if (hazard) return { kind: "unavailable", reason: hazard };
+    if (hazard) return { kind: "unavailable", cause: "stance", reason: hazard };
     remaining.splice(index, 1);
     cleared.push(packKey(dig.position.x, dig.position.y, dig.position.z));
     // Whatever falling column still stands directly above this dig lands in

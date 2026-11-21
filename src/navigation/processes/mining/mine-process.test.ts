@@ -12,8 +12,9 @@ import { createMovementPolicy } from "../../movements/policy.js";
 import { createMineflayerMovementPolicy } from "../../mineflayer/movement-policy.js";
 import { footprintColumns } from "../../../world/player-physics.js";
 import { waterStancesHeld } from "../../steering/hold-water-position.js";
+import { WORKING_OFFSETS } from "./drowned-target.js";
 import { DROP_PICKUP_TIMEOUT_MS } from "./mine-drops.js";
-import { mine, type MineRequest, type MineScan } from "./mine-process.js";
+import { mine, type MineRequest, type MineScan, type MineTarget } from "./mine-process.js";
 import { MineTargeting } from "./mine-targeting.js";
 import { standsOnBlock } from "./target-safety.js";
 
@@ -2259,5 +2260,417 @@ test("a coal swing refused for the sand column over the body replans from the ob
     assert.equal(waterStancesHeld(bot), 0, "no stance hold outlives the run (checked before close() could release it)");
   } finally {
     await clock.settle(navigation.close(), 5_000);
+  }
+});
+
+/**
+ * D39/D40: a dig or seal that only this stance cannot do refuses the stance, after a re-read of the target, the body and
+ * the sight line; the block stays a target. The target is beside the working cell west of it, a source face east of it.
+ */
+const STANCE_TARGET = new Vec3(1, 64, 0);
+const STANCE_FACE = new Vec3(2, 64, 0);
+const STANCE_CELL = new Vec3(0, 64, 0);
+const STANCE_RATES = [[20, false], [10, false], [20, true]] as const;
+const HIDDEN_DIG = "The required dig at 1,64,0 cannot be seen within reach from this position.";
+const drainableTarget: MineRequest["canMine"] = () => ({ kind: "mineable", routeMayBreak: false, drained: { wetStances: [] } });
+const dryStanceTarget: MineRequest["canMine"] = () => ({ kind: "mineable", routeMayBreak: false });
+const plainStance = (feet: Vec3) => ({ feet, remainingScaffolds: 0, overlayId: "overlay:0" });
+
+/** What the goal the route is handed says about each cell: whether standing there would finish the work. */
+function acceptedStances(scene: MineScene, goal: Parameters<MineRequest["route"]>[0]["goal"], cells: readonly Vec3[]): boolean[] {
+  const resolved = goal.resolve({ position: scene.bot.entity.position, entities: new Map() } as never);
+  assert.equal(resolved.kind, "active", "the target is still in the goal");
+  if (resolved.kind !== "active") throw new Error("the target left the goal");
+  return cells.map((feet) => resolved.isSatisfied(plainStance(feet), goalTestWorld));
+}
+
+/** A plug that lands: the cell becomes cobblestone, then `afterPlug` changes what the server did next. */
+function pluggingInto(scene: MineScene, plugs: string[], afterPlug: (cell: Vec3) => void): MineRequest["placeInto"] {
+  return async (_bot, position) => {
+    const cell = cellAt(position);
+    plugs.push(cell.toString());
+    scene.world.setCell(cell, "cobblestone");
+    afterPlug(cell);
+    return { kind: "placed", block: scene.bot.blockAt(cell)! };
+  };
+}
+
+/** The lava face south of the target: the seal's cell. The second working cell is the one north of it. */
+const STANCE_LAVA = new Vec3(1, 64, 1);
+const OTHER_STANCE = new Vec3(1, 64, -1);
+
+/** The drain tests' scene: the target, a water source face east of it and a lava face south of it, at a server rate. */
+function drainScene(rate: number, stopped: boolean, extra: Partial<SceneOptions> = {}): MineScene {
+  const scene = mineScene({ blocks: [STANCE_TARGET], water: [STANCE_FACE], lava: [STANCE_LAVA], feet: STANCE_CELL.offset(0.5, 0, 0.5), ...extra });
+  scene.server.setTickRate(rate);
+  if (stopped) scene.server.stop();
+  return scene;
+}
+
+/**
+ * The server's answer to a ray at a hidden block: it hits what hides it, and `visibleBlockAim` refuses a hit anywhere else
+ * (`block-visibility.ts`). An eye's own cells cannot be filled, so the occluder is answered here, not laid by `setCell`.
+ */
+function hideTargetBehind(scene: MineScene, occluder: Vec3): void {
+  scene.bot.world.raycast = () => scene.bot.blockAt(occluder) as never;
+}
+
+for (const [rate, stopped] of STANCE_RATES)
+  test(`a drain that plugs the only ray refuses the live stance after a re-read, spends no seal and keeps the target (t00780, ${rate} tps, stopped ${stopped})`, async () => {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: pluggingInto(scene, plugs, (plug) => hideTargetBehind(scene, plug)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], "the drain's plug is the only block placed: the lava face is not sealed for a dig this stance cannot make");
+    assert.equal(swings, 0);
+    assert.deepEqual(seen, [false, true], "the live feet cell is refused and the target stays in the goal for another cell");
+    assert.equal(result.status, "satisfied");
+    assert.match(result.reason ?? "", /is occluded from 0,64,0/);
+  });
+
+test("a seal that hides the only ray refuses the live stance and the swing is never made", async () => {
+  for (const [rate, stopped] of STANCE_RATES) {
+    using scene = drainScene(rate, stopped, { water: [] });
+    const placed: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: pluggingInto(scene, placed, (cell) => hideTargetBehind(scene, cell)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(placed, [STANCE_LAVA.toString()], `${rate} tps, stopped ${stopped}`);
+    assert.equal(swings, 0, "the re-read after the seal ends the step before the swing");
+    assert.deepEqual(seen, [false, true]);
+  }
+});
+
+test("a body moved during the drain refuses no stance; one moved to another working cell refuses that cell", async () => {
+  for (const [rate, stopped] of STANCE_RATES) for (const [name, moved, expected, refused] of [
+    ["not a working cell", new Vec3(5.5, 64, 5.5), [true, true], false],
+    ["another working cell", OTHER_STANCE.offset(0.5, 0, 0.5), [true, false], true],
+  ] as const) {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    const offered: string[] = [];
+    let swings = 0;
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      isSatisfied: () => seen.length > 0,
+      onTargets: (targets) => offered.push(...targets.map((target) => (target.kind === "block" ? [...target.excludedStances].join(";") : ""))),
+      placeInto: pluggingInto(scene, plugs, (plug) => {
+        scene.bot.entity.position = moved.clone();
+        hideTargetBehind(scene, plug);
+      }),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, OTHER_STANCE]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    const label = `${name} (${rate} tps, stopped ${stopped})`;
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], label);
+    assert.equal(swings, 0, label);
+    assert.deepEqual(seen, expected, label);
+    if (refused) assert.match(result.reason ?? "", /is occluded from 1,64,-1/, label);
+    else {
+      assert.doesNotMatch(result.reason ?? "", /occluded/, label);
+      assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], `${label}: no stance was refused`);
+    }
+  }
+});
+
+test("a target removed, replaced or unloaded between the drain and the seal ends the step with no refusal and no swing", async () => {
+  for (const [rate, stopped] of STANCE_RATES) for (const after of ["air", "dirt", "void"] as const) {
+    using scene = drainScene(rate, stopped);
+    const plugs: string[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: drainableTarget,
+      placeInto: pluggingInto(scene, plugs, () => scene.world.setCell(STANCE_TARGET, after)),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: noRouteNeeded,
+    });
+    const label = `${after} (${rate} tps, stopped ${stopped})`;
+    assert.deepEqual(plugs, [STANCE_FACE.toString()], `${label}: no seal for a target that is gone`);
+    assert.equal(swings, 0, label);
+    assert.doesNotMatch(result.reason ?? "", /occluded|cannot be seen/, label);
+    assert.equal(result.status, "no_targets", label);
+  }
+});
+
+test("a seal cell that overlaps the bot's own body refuses the live stance; another body in the cell blacklists the target", async () => {
+  const lava = new Vec3(1, 64, 1);
+  const overlapped = "Placement cell (1, 64, 1) overlaps the bot's own body.";
+  const occupied = "Placement cell (1, 64, 1) overlaps player Steve at (1.5, 64, 1.5): ask Steve to step out.";
+  // The body straddles x 0.6-1.2, z 0.6-1.2, so the lava cell overlaps it; the other bot stands apart from the lava.
+  {
+    using own = mineScene({ blocks: [STANCE_TARGET], lava: [lava], feet: new Vec3(0.9, 64, 0.9) });
+    let seen: boolean[] = [];
+    let swings = 0;
+    await runMine(own, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      placeInto: async () => ({ kind: "failed", error: overlapped, cause: "entity" }),
+      breakInPlace: async () => { swings += 1; return { status: "broken" }; },
+      route: async ({ goal }) => {
+        seen = acceptedStances(own, goal, [STANCE_CELL, new Vec3(1, 64, -1)]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(seen, [false, true], "the body's own cell is refused, the target stays");
+    assert.equal(swings, 0);
+  }
+  {
+    using other = mineScene({ blocks: [STANCE_TARGET], lava: [lava], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const result = await runMine(other, {
+      canMine: dryStanceTarget,
+      placeInto: async () => ({ kind: "failed", error: occupied, cause: "entity" }),
+      breakInPlace: async () => { throw new Error("a seal that failed must not be followed by a swing"); },
+      route: noRouteNeeded,
+    });
+    assert.equal(result.status, "unreachable");
+    assert.match(result.reason ?? "", /could not be closed: Placement cell \(1, 64, 1\) overlaps player Steve/);
+  }
+});
+
+test("a swing refused for the stance refuses the live cell, a policy refusal blacklists, a support one re-reads", async () => {
+  const refusal = (cause: "stance" | "policy" | "support" | undefined) =>
+    ({ status: "failed", reason: `the ${cause ?? "plain"} refusal`, ...(cause && { cause }) }) as const;
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    let seen: boolean[] = [];
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => seen.length > 0,
+      breakInPlace: async () => refusal("stance"),
+      route: async ({ goal }) => {
+        seen = acceptedStances(scene, goal, [STANCE_CELL, new Vec3(1, 64, 1)]);
+        return { status: "completed", elapsedMs: 0 };
+      },
+    });
+    assert.deepEqual(seen, [false, true]);
+    assert.match(result.reason ?? "", /the stance refusal/);
+  }
+  for (const cause of ["policy", undefined] as const) {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const result = await runMine(scene, { canMine: dryStanceTarget, breakInPlace: async () => refusal(cause), route: noRouteNeeded });
+    assert.equal(result.status, "unreachable", String(cause));
+    assert.match(result.reason ?? "", /the (policy|plain) refusal/);
+  }
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => scene.bot.blockAt(STANCE_TARGET)?.name === "air",
+      breakInPlace: async (options) => {
+        swings += 1;
+        if (swings === 1) return refusal("support");
+        scene.world.setCell(cellAt(options.position), "air");
+        return { status: "broken" };
+      },
+      route: noRouteNeeded,
+    });
+    assert.equal(swings, 2, "the support refusal re-reads and the same stance digs again");
+    assert.equal(result.status, "satisfied");
+    assert.deepEqual(result.broken, [STANCE_TARGET]);
+  }
+});
+
+// A guard, not a red proof: the old code also rejects an abort raised in the plug (`throwIfAborted` after the drain).
+test("an abort at the plug or in the swing rejects with no swing after the plug and no exclusion; the next call reads the world fresh", async () => {
+  using scene = drainScene(20, false);
+  const dead = new AbortController();
+  const worldRay = scene.bot.world.raycast;
+  const offered: string[] = [];
+  let swings = 0;
+  const observed = { onTargets: (targets: readonly MineTarget[]) => offered.push(...targets.map((target) => (target.kind === "block" ? [...target.excludedStances].join(";") : ""))) };
+  await assert.rejects(
+    runMine(scene, {
+      canMine: drainableTarget,
+      signal: dead.signal,
+      ...observed,
+      placeInto: pluggingInto(scene, [], (plug) => {
+        hideTargetBehind(scene, plug);
+        dead.abort(new Error("the bot died"));
+      }),
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: HIDDEN_DIG }; },
+      route: noRouteNeeded,
+    }),
+    /the bot died/,
+  );
+  assert.equal(swings, 0);
+  assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], "no stance was refused after the abort");
+
+  // An abort that lands in the swing, which answers a stance refusal: the refusal is not recorded.
+  scene.bot.world.raycast = worldRay;
+  const dying = new AbortController();
+  offered.length = 0;
+  await assert.rejects(
+    runMine(scene, {
+      canMine: dryStanceTarget,
+      signal: dying.signal,
+      ...observed,
+      placeInto: pluggingInto(scene, [], () => {}),
+      breakInPlace: async () => { dying.abort(new Error("died in the swing")); return { status: "failed", reason: HIDDEN_DIG, cause: "stance" }; },
+      route: noRouteNeeded,
+    }),
+    /died in the swing/,
+  );
+  assert.deepEqual(offered.filter((avoid) => avoid !== ""), [], "no stance was refused after the abort in the swing");
+
+  // The plug stays in the world; a new call reads it and credits only what it sees break.
+  scene.bot.world.raycast = worldRay;
+  assert.equal(scene.bot.blockAt(STANCE_FACE)?.name, "cobblestone");
+  const next = await runMine(scene, {
+    canMine: dryStanceTarget,
+    isSatisfied: () => scene.bot.blockAt(STANCE_TARGET)?.name === "air",
+    breakInPlace: breakingInPlace(scene, () => {}),
+    route: noRouteNeeded,
+  });
+  assert.equal(next.status, "satisfied");
+  assert.deepEqual(next.broken, [STANCE_TARGET]);
+});
+
+test("a scan refuses a target whose every working stance was refused, but keeps one the route may break", () => {
+  for (const [routeMayBreak, kept] of [[false, 0], [true, 1]] as const) {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const targeting = new MineTargeting(scene.bot, request(scene, { exactTarget: STANCE_TARGET, canMine: () => ({ kind: "mineable", routeMayBreak }) }));
+    const first = targeting.targets()[0];
+    assert.ok(first?.kind === "block");
+    for (const offset of WORKING_OFFSETS) {
+      targeting.excludeBlockStance(first, cellAt({ x: STANCE_TARGET.x + offset.x, y: STANCE_TARGET.y + offset.y, z: STANCE_TARGET.z + offset.z }), "the swing refused it");
+    }
+    assert.equal(targeting.refresh().length, kept, `routeMayBreak ${routeMayBreak}`);
+    assert.deepEqual([...targeting.rejections.keys()], routeMayBreak ? [] : ["every working stance was refused: the swing refused it"]);
+    assert.equal(targeting.blacklisted, 0, "refused for the scan, not blacklisted");
+  }
+});
+
+test("a target with no open working cell at all is refused in the scan with its own text, and no search is asked for it", async () => {
+  using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+  // Every working cell's head is in a chunk the server has not sent: `workingCells` offers none.
+  for (const offset of WORKING_OFFSETS) scene.world.setCell(new Vec3(STANCE_TARGET.x + offset.x, STANCE_TARGET.y + offset.y + 1, STANCE_TARGET.z + offset.z), "void");
+  const result = await runMine(scene, { canMine: dryStanceTarget, route: noRouteNeeded });
+  assert.equal(result.status, "unreachable");
+  assert.match(result.reason ?? "", /1 loaded matching block\(s\) cannot be mined: no working stance beside it is open/);
+});
+
+test("exhaustion of a lone target's stances ends an exploring request like any rejected target: unreachable, no branch search", async () => {
+  using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+  const moves: Vec3[] = [];
+  const result = await runMine(scene, {
+    canMine: dryStanceTarget,
+    explore: true,
+    breakInPlace: async () => ({ status: "failed", reason: "no face in view", cause: "stance" }),
+    route: toNextAcceptedCell(scene, [STANCE_TARGET], moves),
+  });
+  assert.equal(result.status, "unreachable");
+  assert.match(result.reason ?? "", /every working stance was refused: no face in view/);
+});
+
+/**
+ * New end state: a target with its stance refused and a block over it. The real goal, rescan and route (the real
+ * navigation on the fake) take another working cell, or, once the target is dry, its excavate route, and the dig lands.
+ */
+for (const dry of [false, true])
+  test(`a stance-refused target is broken from its next approach (${dry ? "dry, the route may break it" : "another working cell"})`, async () => {
+    const target = new Vec3(2, 64, 0);
+    const floor = Array.from({ length: 9 * 7 }, (_, index) => new Vec3((index % 9) - 3, 63, Math.floor(index / 9) - 3));
+    using scene = mineScene({ blocks: [target], solids: [...floor, new Vec3(2, 65, 0)], physics: true, feet: new Vec3(0.5, 64, 0.5) });
+    const navigation = createNavigationRuntime(scene.bot);
+    const refused: string[] = [];
+    let mayBreak = false;
+    try {
+      const result = await runMine(scene, {
+        canMine: () => ({ kind: "mineable", routeMayBreak: mayBreak }),
+        movements: createMovementPolicy({ digTimeEstimator: { estimate: () => 1 } }),
+        isSatisfied: () => scene.bot.blockAt(target)?.name === "air",
+        route: (options) => navigation.navigate({ ...options }),
+        breakInPlace: async (options) => {
+          if (refused.length > 0) return navigation.breakBlockInPlace(options);
+          refused.push(scene.bot.entity.position.floored().toString());
+          mayBreak = dry;
+          return { status: "failed", reason: "No face of the block is in view from here.", cause: "stance" };
+        },
+      });
+      assert.equal(result.status, "satisfied");
+      assert.equal(refused.length, 1, "the refused stance was asked once");
+      assert.equal(scene.bot.blockAt(target)?.name, "air");
+      assert.ok(scene.server.packets.some((packet) => packet.name === "block_dig"), "a dig packet was sent");
+      // A target the route may break is dug by the route's own excavation, which owns its stance; otherwise by the next cell.
+      if (!dry) assert.notEqual(scene.bot.entity.position.floored().toString(), refused[0], "another working cell dug it");
+    } finally {
+      await scene.clock.settle(navigation.close(), 5_000);
+    }
+  });
+
+/** A route that walks the body to the first working cell its goal still accepts, as the real route does. */
+function toNextAcceptedCell(scene: MineScene, targets: readonly Vec3[], moves: Vec3[]): MineRequest["route"] {
+  return async ({ goal, onArrival }) => {
+    const cells = targets.flatMap((target) => WORKING_OFFSETS.map((o) => new Vec3(target.x + o.x, target.y + o.y, target.z + o.z)));
+    const accepted = acceptedStances(scene, goal, cells);
+    const cell = cells.find((_, index) => accepted[index]);
+    assert.ok(cell, "the goal always holds a working cell: an empty goal never reaches the search");
+    moves.push(cell);
+    scene.bot.entity.position = cell.offset(0.5, 0, 0.5);
+    await onArrival?.(arrival(scene));
+    return { status: "completed", elapsedMs: 0 };
+  };
+}
+
+test("every working stance refused in turn leaves the scan: a second target is mined, a lone one ends the request", async () => {
+  const other = new Vec3(-4, 64, 0);
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const moves: Vec3[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      breakInPlace: async () => { swings += 1; return { status: "failed", reason: "no face in view", cause: "stance" }; },
+      route: toNextAcceptedCell(scene, [STANCE_TARGET], moves),
+    });
+    assert.equal(result.status, "unreachable");
+    assert.match(result.reason ?? "", /every working stance was refused: no face in view/);
+    // One refused dig per working cell at most. The cell on top of the target is the scan's temporary exclusion (only
+    // while the body stands on it, 2026-11-15), so each refusal may be followed by one step-off visit there.
+    assert.ok(swings <= WORKING_OFFSETS.length, `${swings} swings: one refusal per working cell at most`);
+    assert.ok(moves.length <= 2 * WORKING_OFFSETS.length, `${moves.length} moves ${moves.join(" ")}`);
+  }
+  {
+    using scene = mineScene({ blocks: [STANCE_TARGET, other], feet: STANCE_CELL.offset(0.5, 0, 0.5) });
+    const moves: Vec3[] = [];
+    let swings = 0;
+    const result = await runMine(scene, {
+      canMine: dryStanceTarget,
+      isSatisfied: () => scene.bot.blockAt(other)?.name === "air",
+      breakInPlace: async ({ position }) => {
+        swings += 1;
+        if (!cellAt(position).equals(other)) return { status: "failed", reason: "no face in view", cause: "stance" };
+        scene.world.setCell(other, "air");
+        return { status: "broken" };
+      },
+      route: toNextAcceptedCell(scene, [STANCE_TARGET, other], moves),
+    });
+    assert.equal(result.status, "satisfied");
+    assert.deepEqual(result.broken, [other]);
+    assert.ok(swings <= WORKING_OFFSETS.length + 1, `${swings} swings`);
   }
 });

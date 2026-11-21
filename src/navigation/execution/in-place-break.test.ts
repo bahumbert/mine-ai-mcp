@@ -89,6 +89,78 @@ test("in-place excavation refuses the buried shaft without issuing a dig", async
   assert.equal(attempts, 0);
 });
 
+test("an in-place break names the cause of each refusal: a stance-local one is `stance`, a policy one `policy`, a target-wide one none (D39)", async () => {
+  const issued: string[] = [];
+  const bot = new FakeNavigationBot();
+  bot.current = { ...bot.current, position: { x: 0.5, y: 64, z: 0.5 } };
+  bot.startEffect = (operation) => {
+    issued.push(operation.kind);
+    throw new Error("no dig is issued for a refused preparation");
+  };
+
+  // Hidden behind a two-high wall: the preparation refuses this stance's sight, with the preparation's own reason.
+  const hidden = flatWorld();
+  const target = { x: 2, y: 64, z: 0 };
+  hidden.load(target, { stateId: 1 });
+  for (const y of [64, 65]) hidden.load({ x: 1, y, z: 0 }, { stateId: 3 });
+  const behindWall = await breakBlockInPlace({ world: hidden, bot }, { position: target, movements: createMovementPolicy() });
+  assert.equal(behindWall.status, "failed");
+  assert.match(behindWall.status === "failed" ? behindWall.reason : "", /cannot be seen within reach/);
+  assert.equal(behindWall.status === "failed" ? behindWall.cause : "broken", "stance");
+
+  // Not loaded: the block, not the stance.
+  const unloaded = await breakBlockInPlace({ world: flatWorld(), bot }, { position: { x: 40, y: 64, z: 40 }, movements: createMovementPolicy() });
+  assert.deepEqual(unloaded, { status: "failed", reason: "The block is not loaded." });
+
+  // Digging disabled and a prohibited break at the price: the block, from every cell.
+  const open = flatWorld();
+  open.load({ x: 1, y: 64, z: 0 }, { stateId: 1 });
+  const disabled = await breakBlockInPlace({ world: open, bot }, {
+    position: { x: 1, y: 64, z: 0 }, movements: createMovementPolicy({ allowDigging: false }),
+  });
+  assert.equal(disabled.status === "failed" ? disabled.cause : "broken", undefined);
+  const prohibited = createMovementPolicy({
+    evaluateBreak: () => ({ decision: { kind: "prohibited", reason: "never here" }, tool: { itemType: null, expectedTicks: 1 } }),
+  });
+  const refused = await breakBlockInPlace({ world: open, bot }, { position: { x: 1, y: 64, z: 0 }, movements: prohibited });
+  assert.deepEqual(refused, { status: "failed", reason: "never here" });
+  assert.deepEqual(issued, []);
+});
+
+test("an in-place break keeps the cause of a failing dig: `stance` and `support` from the effect, `policy` from a refusal mid-excavation", async () => {
+  const world = flatWorld();
+  const position = { x: 1, y: 64, z: 0 };
+  world.load(position, { stateId: 1 });
+  const bot = new FakeNavigationBot();
+  bot.current = { ...bot.current, position: { x: 0.5, y: 64, z: 0.5 } };
+  const results: unknown[] = [];
+  for (const cause of ["stance", "support"] as const) {
+    bot.startEffect = () => ({
+      issued: false, cancel() {},
+      completion: Promise.resolve({ kind: "failed", observation: `The ${cause} refused it.`, cause }),
+    });
+    results.push(await breakBlockInPlace({ world, bot }, { position, movements: createMovementPolicy() }));
+  }
+  assert.deepEqual(results, [
+    { status: "failed", reason: "The stance refused it.", cause: "stance" },
+    { status: "failed", reason: "The support refused it.", cause: "support" },
+  ]);
+
+  // A policy that refuses the dig only once the excavation is under way (the cell's neighbours changed): `policy`.
+  let evaluations = 0;
+  const lateRefusal = createMovementPolicy({
+    evaluateBreak: () => ({
+      decision: ++evaluations > 1 ? { kind: "prohibited", reason: "opens into liquid now" } : { kind: "allowed" },
+      tool: { itemType: null, expectedTicks: 1 },
+    }),
+  });
+  bot.startEffect = () => { throw new Error("a prohibited dig must not be issued"); };
+  assert.deepEqual(
+    await breakBlockInPlace({ world, bot }, { position, movements: lateRefusal }),
+    { status: "failed", reason: "opens into liquid now", cause: "policy" },
+  );
+});
+
 test("cancellation between column digs leaves the remaining support intact", async () => {
   const world = flatWorld();
   const target = { x: 1, y: 63, z: 0 };

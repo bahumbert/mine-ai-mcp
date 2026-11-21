@@ -8,7 +8,7 @@
 import { type MovementPolicy } from "../movements/policy.js";
 import { type BlockPosition, type WorldView, blockLabel, loadedObservation } from "../world/world.js";
 import { waterMiningStance } from "../world/water.js";
-import type { NavigationBot } from "../bot.js";
+import type { EffectFailureCause, NavigationBot } from "../bot.js";
 import { prepareExcavation } from "../movements/excavation.js";
 
 export interface BreakBlockInPlaceOptions {
@@ -21,7 +21,8 @@ export interface BreakBlockInPlaceOptions {
 }
 
 export type BreakBlockInPlaceResult =
-  { readonly status: "broken" } | { readonly status: "failed"; readonly reason: string; readonly cause?: "policy" | "support" };
+  | { readonly status: "broken" }
+  | { readonly status: "failed"; readonly reason: string; readonly cause?: "policy" | EffectFailureCause };
 
 export type BreakBlockInPlace = (options: BreakBlockInPlaceOptions) => Promise<BreakBlockInPlaceResult>;
 
@@ -85,7 +86,9 @@ export async function breakBlockInPlace(
     },
     policy,
   });
-  if (excavation.kind === "unavailable") return { status: "failed", reason: excavation.reason };
+  if (excavation.kind === "unavailable") {
+    return { status: "failed", reason: excavation.reason, ...(excavation.cause && { cause: excavation.cause }) };
+  }
   const controller = new AbortController();
   const stop = () => controller.abort();
   options.signal?.addEventListener("abort", stop, { once: true });

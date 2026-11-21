@@ -532,6 +532,31 @@ test("a break planned from a water stance holds that floor and lands on it befor
   }
 });
 
+test("a swing with no face in view after centring fails as this stance's (cause stance), issues no dig, and the next dig from a seen face succeeds", async () => {
+  const run = edgeDig();
+  using _clock = run.clock.install();
+  const seen = run.port.visibleDigAim;
+  let centred = 0;
+  run.port.visibleDigAim = () => null;
+  run.actuator.centerOnCell = async () => { centred += 1; return true; };
+  const effect = run.start();
+  const refused = await run.clock.settle(effect.completion, 10_000);
+  assert.equal(refused.kind, "failed");
+  assert.equal(refused.kind === "failed" && refused.cause, "stance");
+  assert.match(refused.kind === "failed" ? refused.observation : "", /^No face of the block at .* is in view from 0\.85,63\.00,0\.50\.$/);
+  assert.equal(centred, 1, "the swing centred once before giving up");
+  assert.equal(effect.issued, false);
+  assert.deepEqual(run.counts(), { digs: 0, reports: 0 });
+  assert.equal(run.world.blockAt(new Vec3(1, 62, 0))!.name, "stone");
+  run.clean();
+  run.port.visibleDigAim = seen;
+  run.bot.entity.position.set(1.5, 63, 0.5);
+  run.world.setCell(new Vec3(2, 62, 0), "stone");
+  const next = run.start({ position: { x: 2, y: 62, z: 0 } });
+  assert.deepEqual(await run.clock.settle(next.completion, 10_000), { kind: "accepted" });
+  run.clean();
+});
+
 test("a dig at the edge of reach centres on the stance search judged it from before giving up", async () => {
   // Search prices reach and sight from the centre of the stance cell; the body
   // can stop at its corner, which puts the same face out of reach.

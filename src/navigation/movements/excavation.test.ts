@@ -245,6 +245,57 @@ test("a dig the eye cannot see or the arm cannot reach is not executable work, h
   assert.equal(prepare(far, distant).kind, "unavailable");
 });
 
+/** The cause of a refusal, or `none` when the refusal names no stance: the caller reads it to exclude one stance or the block. */
+function refusalCause(result: ReturnType<typeof prepare>): string {
+  if (result.kind !== "unavailable") throw new Error("Expected a refusal, but the excavation was prepared.");
+  return result.cause ?? "none";
+}
+
+test("a refusal that holds only from this stance says so; one that holds from every cell names no stance (D39)", () => {
+  // Hidden behind a two-high wall: the sight refusal is this stance's.
+  const hidden = excavationWorld();
+  const target = { x: 2, y: 63, z: 0 };
+  hidden.load(target, { stateId: 1 });
+  for (const y of [63, 64]) hidden.load({ x: 1, y, z: 0 }, { stateId: 3 });
+  assert.match(refusal(prepare(hidden, target)), /cannot be seen within reach/);
+  assert.equal(refusalCause(prepare(hidden, target)), "stance");
+
+  // Out of reach is the same refusal from this stance.
+  const far = excavationWorld();
+  for (let x = 1; x <= 7; x += 1) for (const y of [63, 64]) far.load({ x, y, z: 0 }, { stateId: 0 });
+  far.load({ x: 7, y: 63, z: 0 }, { stateId: 1 });
+  assert.equal(refusalCause(prepare(far, { x: 7, y: 63, z: 0 })), "stance");
+
+  // A body hazard: the dug cell's column is over the body, with a falling block above it.
+  const hazard = excavationWorld();
+  const column = { x: 0, y: 65, z: 0 };
+  hazard.load(column, { stateId: 1 });
+  hazard.load({ x: 0, y: 66, z: 0 }, { stateId: 2, traits: { falling: true } });
+  hazard.load({ x: 0, y: 67, z: 0 }, { stateId: 3 });
+  assert.match(refusal(prepare(hazard, column, { standing: { x: 0.5, y: 63, z: 0.5 } })), /onto the bot|falling/);
+  assert.equal(refusalCause(prepare(hazard, column)), "stance");
+
+  // A falling column under the stance with no stable support: this stance's.
+  const unstable = excavationWorld();
+  const side = { x: 1, y: 63, z: 0 };
+  unstable.load(side, { stateId: 1 });
+  unstable.load({ x: 0, y: 62, z: 0 }, { stateId: 124, traits: { falling: true } });
+  unstable.load({ x: 0, y: 61, z: 0 }, { stateId: 0 });
+  assert.match(refusal(prepare(unstable, side)), /no observed stable support/);
+  assert.equal(refusalCause(prepare(unstable, side)), "stance");
+
+  // Not loaded, digging disabled, a prohibited break: the same from every cell, so no cause.
+  const open = excavationWorld();
+  assert.equal(refusalCause(prepare(open, { x: 50, y: 63, z: 50 })), "none");
+  open.load(side, { stateId: 1 });
+  assert.equal(refusalCause(prepare(open, side, { policy: createMovementPolicy({ allowDigging: false }) })), "none");
+  const prohibited = createMovementPolicy({
+    evaluateBreak: () => ({ decision: { kind: "prohibited", reason: "never here" }, tool: { itemType: null, expectedTicks: 1 } }),
+  });
+  assert.equal(refusalCause(prepare(open, side, { policy: prohibited })), "none");
+  assert.equal(prepare(open, side).kind, "prepared");
+});
+
 /**
  * The live failure: collecting dirt, the bot stood in a hole and search
  * "finished" the goal by digging the dirt through the stone beside it. The

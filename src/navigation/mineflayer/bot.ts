@@ -20,7 +20,7 @@ import { appendFileSync } from "node:fs";
 import { Vec3 } from "vec3";
 import { occupiedCell, placeWithoutLooking, type WorldBlock } from "../../world/placement.js";
 import { AIR_COAST_TICKS, COAST_TICKS, PLAYER_HALF_WIDTH } from "../../world/player-physics.js";
-import type { EffectHandle, MovementPreparation, NavigationBot, CellResync } from "../bot.js";
+import type { EffectFailureCause, EffectHandle, MovementPreparation, NavigationBot, CellResync } from "../bot.js";
 import {
   createMovementController,
   recenterControls,
@@ -79,7 +79,7 @@ function traceDig(record: Record<string, unknown>): void {
 }
 
 /** What an effect that did not happen says. */
-type EffectFailure = { readonly kind: "failed"; readonly observation: string; readonly cause?: "support" };
+type EffectFailure = { readonly kind: "failed"; readonly observation: string; readonly cause?: EffectFailureCause };
 
 export interface MineflayerBotSurface {
   readonly entity: {
@@ -730,6 +730,8 @@ export class MineflayerBot implements NavigationBot {
       const { x, y, z } = this.bot.entity.position;
       return {
         kind: "failed",
+        // The ray fails from where the body stands, not for the block: the caller refuses this stance.
+        cause: "stance",
         observation: `No face of the block at ${blockLabel(position)} is in view from ${x.toFixed(2)},${y.toFixed(2)},${z.toFixed(2)}.`,
       };
     }

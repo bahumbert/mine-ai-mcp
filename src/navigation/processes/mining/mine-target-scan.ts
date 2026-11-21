@@ -5,6 +5,7 @@ import { asVec3, cellKey } from "../../../utils/index.js";
 import { droppedItemName } from "../../../world/item-pickup.js";
 import { findLoadedBlockPositions } from "../../../world/loaded-block-scan.js";
 import { navigationFeet } from "../../world/block-geometry.js";
+import { workingCells } from "./mine-target-goal.js";
 import { standsOnBlock } from "./target-safety.js";
 import { scanTargets, WEIGHED_SCAN_LIMIT } from "./target-weighing.js";
 import type { MineBlockTarget, MineRequest, MineScan } from "./mine-process.js";
@@ -18,6 +19,8 @@ export const MAX_MINE_TARGETS = 64;
 interface MineBlacklist {
   readonly blockCells: ReadonlySet<string>;
   readonly blockStances: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Why the last stance of each target was refused. */
+  readonly stanceRefusals: ReadonlyMap<string, string>;
   readonly dropEntities: ReadonlySet<number>;
 }
 
@@ -56,8 +59,17 @@ export function scanMineTargets(bot: Bot, request: MineRequest, blacklist: MineB
       excludedStances.add(cellKey({ x: block.position.x, y: block.position.y + 1, z: block.position.z }));
       excludedStances.add(cellKey(navigationFeet(feet, bot.entity.onGround)));
     }
-    blocks.push({ position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances,
-      ...(decision.drained && { drained: true as const }) });
+    const target: MineBlockTarget = { position: block.position, kind: "block", routeMayBreak: decision.routeMayBreak, excludedStances,
+      ...(decision.drained && { drained: true as const }) };
+    // No working cell left for a target the route may not break: an empty goal would go to the search and blame a
+    // neighbour. Refused here, not blacklisted, so a world change that opens a cell brings it back.
+    if (!target.routeMayBreak && workingCells(bot, target, request.movements).length === 0) {
+      const refused = blacklist.stanceRefusals.get(key);
+      const reason = refused === undefined ? "no working stance beside it is open" : `every working stance was refused: ${refused}`;
+      rejections.set(reason, (rejections.get(reason) ?? 0) + 1);
+      continue;
+    }
+    blocks.push(target);
     if (!request.targetCost && blocks.length === MAX_MINE_TARGETS) break;
   }
 

@@ -19,8 +19,14 @@ import type { PlannedOperation, PlannedStep } from "./movements/movement.js";
 import type { NavigationObservation, Position3, WorldView } from "./world/world.js";
 export type { MovementExecution } from "./execution/movement-controller.js";
 
+/**
+ * Why an effect failed when the cause is not the block: `support` (the body's footing; the route replans), `stance`
+ * (the dig cannot be made from where the body stands; the caller refuses that stance, not the block).
+ */
+export type EffectFailureCause = "support" | "stance";
+
 export interface EffectHandle {
-  readonly completion: Promise<{ kind: "accepted" } | { kind: "failed"; observation: string; readonly cause?: "support" }>;
+  readonly completion: Promise<{ kind: "accepted" } | { kind: "failed"; observation: string; readonly cause?: EffectFailureCause }>;
   readonly issued: boolean;
   cancel(): void;
 }

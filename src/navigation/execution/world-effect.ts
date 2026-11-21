@@ -1,13 +1,13 @@
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { DEFAULT_POLL_MS, serverTickDeadline, type ServerTickDeadline } from "../../world/world-age.js";
-import type { EffectHandle, NavigationBot } from "../bot.js";
+import type { EffectFailureCause, EffectHandle, NavigationBot } from "../bot.js";
 import type { BlockMatcher, PlannedOperation } from "../movements/movement.js";
 import type { BlockPosition } from "../world/world.js";
 import type { AttemptToken, ExpectedMutationLedger, MutationResult } from "./mutations.js";
 
 export type WorldEffectResult =
   | MutationResult
-  | { readonly kind: "effect_failed"; readonly observation: string; readonly cause?: "support" }
+  | { readonly kind: "effect_failed"; readonly observation: string; readonly cause?: EffectFailureCause }
   | { readonly kind: "cancelled" }
   | { readonly kind: "invalidated" };
 
