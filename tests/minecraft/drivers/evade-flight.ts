@@ -31,6 +31,15 @@ interface FlightEvidence {
   readonly interruptions: readonly string[];
   /** Server ticks the first kept evade ran (its budget when it ended as capability_limit). */
   readonly elapsedTicks?: number | null;
+  /** Deaths observed during the flight (a respawn counts): the actor did not survive. */
+  readonly deaths: number;
+  /** The resumed order's error text when it failed. */
+  readonly error?: string;
+}
+
+/** The actor is alive at the end and no death was observed during the flight. */
+function survived(evidence: FlightEvidence): boolean {
+  return evidence.health > 0 && evidence.deaths === 0;
 }
 
 import { createLeeWitness, judgeNavigationEvents, judgeResume, observeResumeFlight, pairResumeReceipts, readResumeObservation, readResumeShooter, readResumeSpeed, resumeLeeCovered } from "./evade-flight-observation.ts";
@@ -338,8 +347,10 @@ async function runLivingResume(context: ScenarioContext, params: ResumeParams, a
 /**
  * Judge the first kept evade and resumed order; baseline diagnostics can omit unavailable basis telemetry.
  * `chain` proves survival, the floor, a hostile interruption and an order that succeeded after a kept evade that either
- * really separated or spent its server-tick budget (`capability_limit` with at least `budgetTicks` elapsed); its basis
- * and distance are not asserted, and a wall-backstop stop below the budget is not a budget ending.
+ * really separated or spent its server-tick budget (`capability_limit` with at least `budgetTicks` elapsed), or the
+ * refusal that the cover of that kept separation owes (`coverRefusalOwed`); its basis and distance are not asserted, and
+ * a wall-backstop stop below the budget is not a budget ending. `evade` and `order` require survival too: the evade's
+ * life at its end, and for `order` no death during the flight (`survived`).
  */
 export function flightVerdict(evidence: FlightEvidence, bases: readonly string[], maxDistance?: number,
   { requireBasis = true, judge = "order", budgetTicks }: { readonly requireBasis?: boolean; readonly judge?: "order" | "evade" | "chain";
@@ -348,17 +359,34 @@ export function flightVerdict(evidence: FlightEvidence, bases: readonly string[]
   return evidence.floor.kind === "ok" && evidence.outcome === "safe_separation" &&
     (!requireBasis || (evidence.basis != null && bases.includes(evidence.basis))) &&
     (maxDistance === undefined || (evidence.distance !== undefined && evidence.distance < maxDistance)) &&
-    (judge === "evade" ? (evidence.healthAfter ?? 0) > 0 : evidence.health > 0 &&
+    (judge === "evade" ? (evidence.healthAfter ?? 0) > 0 && survived(evidence) : survived(evidence) &&
       evidence.status === "succeeded" && evidence.interruptions.some((item) => item.includes("[HOSTILE_CONTACT]")));
 }
 
-/** A kept evade that really separated, or that ended as `capability_limit` after the whole server-tick budget elapsed. */
+/**
+ * A kept evade that really separated, or that ended as `capability_limit` after the whole server-tick budget elapsed,
+ * and whose resumed order succeeded; or the refusal that cover owes (`coverRefusalOwed`). Both need the floor, the first
+ * kept evade's life, survival and a hostile interruption.
+ */
 function chainVerdict(evidence: FlightEvidence, budgetTicks: number | undefined): boolean {
   const separated = evidence.outcome === "safe_separation";
   const budgetSpent = evidence.outcome === "capability_limit" && budgetTicks !== undefined && (evidence.elapsedTicks ?? -1) >= budgetTicks;
-  return evidence.floor.kind === "ok" && (separated || budgetSpent) &&
-    (evidence.healthAfter ?? 0) > 0 && evidence.health > 0 && evidence.status === "succeeded" &&
+  const proven = evidence.floor.kind === "ok" && (evidence.healthAfter ?? 0) > 0 && survived(evidence) &&
     evidence.interruptions.some((item) => item.includes("[HOSTILE_CONTACT]"));
+  return proven && (((separated || budgetSpent) && evidence.status === "succeeded") || coverRefusalOwed(evidence));
+}
+
+/**
+ * The resumed order was refused by the cover it owes: it failed with `[COVER_ROUTE_REFUSED]`, and a kept evade separated
+ * behind the cover of the shooter that refusal names (`#<id>`, `cover-obligation.ts` `shooterLabel`).
+ */
+function coverRefusalOwed(evidence: FlightEvidence): boolean {
+  const error = evidence.error ?? "";
+  const named = /#(\d+)\b/.exec(error)?.[1];
+  if (evidence.status !== "failed" || !error.includes("[COVER_ROUTE_REFUSED]") || named === undefined) return false;
+  const shooter = Number(named);
+  return evidence.receipts.some((receipt) => receipt.outcome === "safe_separation" &&
+    (receipt.ends ?? []).some((end) => end.id === shooter && end.basis === "cover"));
 }
 
 const receiptSchema = z.object({ response: z.string(), outcome: z.string(),
@@ -369,7 +397,7 @@ const receiptSchema = z.object({ response: z.string(), outcome: z.string(),
 
 /** Collect all evade receipts in the order the event cursor supplies them. */
 export function flightEvidence(events: readonly unknown[], options: { readonly startY: number; readonly deaths: number;
-  readonly health?: number; readonly status: string; readonly interruptions: readonly string[] }): FlightEvidence {
+  readonly health?: number; readonly status: string; readonly error?: string; readonly interruptions: readonly string[] }): FlightEvidence {
   const eventSchema = z.object({ type: z.literal("survival_outcome"), payload: z.object({ source: z.string(),
     evidence: z.object({ outcome: z.unknown() }) }) });
   const outcomes = events.flatMap((event) => { const parsed = eventSchema.safeParse(event); return parsed.success ? [parsed.data] : []; });
@@ -392,7 +420,8 @@ export function flightEvidence(events: readonly unknown[], options: { readonly s
   const end = kept?.ends?.[0];
   return { health: options.deaths ? 0 : (options.health ?? 0), healthAfter: kept?.healthAfter, floor, receipts, skipped,
     outcome: kept?.outcome, basis: end?.basis, distance: end?.distance ?? kept?.finalDistances?.[0]?.distance,
-    elapsedTicks: kept?.elapsedTicks, status: options.status, interruptions: options.interruptions };
+    elapsedTicks: kept?.elapsedTicks, deaths: options.deaths, error: options.error, status: options.status,
+    interruptions: options.interruptions };
 }
 
 /** Read every page of the durable event stream, oldest first. */
@@ -474,7 +503,8 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
     // The flight policy changes only `hide` (setFlightPolicy), so the default evade timeout is the effective budget.
     const budgetTicks = evadeBudgetTicks(DEFAULT_COMBAT_POLICY);
     const evidence = flightEvidence(await flightEvents(context), { startY, deaths: deaths.deaths.length, health: context.bot.health,
-      status: result.result.status, interruptions: result.interruptions ?? [] });
+      status: result.result.status, error: "error" in result.result ? String(result.result.error) : undefined,
+      interruptions: result.interruptions ?? [] });
     const detail = JSON.stringify({ ...evidence, ages, budgetTicks, deaths: deaths.deaths.length, summary: result.summary,
       physicalPass: flightVerdict(evidence, params.bases, params.maxDistance, { requireBasis: false, judge: params.judge }),
       chainPass: flightVerdict(evidence, params.bases, params.maxDistance, { judge: "chain", budgetTicks }) });

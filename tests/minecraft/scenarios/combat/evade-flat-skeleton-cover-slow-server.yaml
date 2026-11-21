@@ -1,7 +1,7 @@
 template: ../../templates/flat-single-action.yaml
 name: evade-flat-skeleton-cover-slow-server
 tags: [regression, reliability]
-description: A wounded actor's first evade runs into its server-tick budget (or separates), the interrupted order then resumes and succeeds; the run's --tick-rate selects the server rate (default 20). The first separation is not asserted (judge chain).
+description: A wounded actor's first evade runs into its server-tick budget (or separates), the interrupted order then resumes and succeeds, or, after a cover separation, is refused by the cover it owes ([COVER_ROUTE_REFUSED]); the run's --tick-rate selects the server rate (default 20). The first separation is not asserted (judge chain).
 world:
   type: flat
   time: midnight

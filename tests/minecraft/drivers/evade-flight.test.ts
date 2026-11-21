@@ -18,17 +18,20 @@ import { flightEvidence, flightVerdict, run } from "./evade-flight.ts";
 
 // check-reads: tests/minecraft/scenarios/combat/evade-flat-skeleton-held-cover.yaml, tests/minecraft/scenarios/combat/evade-flat-skeleton-cover-slow-server.yaml, tests/minecraft/templates/**/*.yaml
 
-const passing = { health: 7, outcome: "safe_separation", basis: "cover", distance: 12,
+const passing = { health: 7, deaths: 0, outcome: "safe_separation", basis: "cover", distance: 12,
   healthAfter: 3, floor: { kind: "ok" }, receipts: [], skipped: [], status: "succeeded", interruptions: ["[HOSTILE_CONTACT] skeleton"] } as const;
 
 test("judges first separation, floor, survival and resumed order independently", () => {
-  const pursuit = { ...passing, basis: "range", distance: 38, status: "cancelled", health: 0 };
+  const pursuit = { ...passing, basis: "range", distance: 38, status: "cancelled", health: 7 };
   const cases = [
     ["living resumed order", passing, ["cover"], 20, {}, true],
     ["below floor", { ...passing, floor: { kind: "below", index: 1, y: -62 } }, ["cover"], 20, {}, false],
     ["unknown floor", { ...passing, floor: { kind: "unknown", index: 0 } }, ["cover"], 20, {}, false],
     ["pursuit first evade", pursuit, ["range"], undefined, { judge: "evade" }, true],
     ["first evade fatal", { ...pursuit, healthAfter: 0 }, ["range"], undefined, { judge: "evade" }, false],
+    ["evade judge, actor dead at the end", { ...pursuit, healthAfter: 3, health: 0 }, ["range"], undefined, { judge: "evade" }, false],
+    ["evade judge, a death counted", { ...pursuit, healthAfter: 3, deaths: 1 }, ["range"], undefined, { judge: "evade" }, false],
+    ["order judge, a death counted", { ...passing, deaths: 1 }, ["cover"], 20, {}, false],
     ["held wrong basis", { ...pursuit, distance: 12 }, ["cover"], 36, { judge: "evade" }, false],
     ["missing basis", { ...passing, basis: undefined }, ["cover"], 20, {}, false],
     ["physical without basis", { ...passing, basis: undefined }, ["cover"], 20, { requireBasis: false }, true],
@@ -58,7 +61,7 @@ test("chain judge proves survival, floor, interruption and resumed order, not fi
     ["dead actor", { health: 0 }], ["fatal first evade", { healthAfter: 0 }], ["missing evade", { outcome: undefined }],
     ["failed evade", { outcome: "failed" }], ["cancelled evade", { outcome: "cancelled" }],
     ["budget one tick short", { elapsedTicks: 299 }], ["wall stop below the budget", { elapsedTicks: 225 }],
-    ["budget not measured", { elapsedTicks: null }],
+    ["budget not measured", { elapsedTicks: null }], ["a death counted", { deaths: 1 }],
     ["below floor", { floor: { kind: "below", index: 1, y: -62 } }], ["unknown floor", { floor: { kind: "unknown", index: 0 } }],
     ["no hostile contact", { interruptions: [] }], ["order cancelled", { status: "cancelled" }], ["order failed", { status: "failed" }],
   ] as const;
@@ -78,6 +81,32 @@ test("chain judge proves survival, floor, interruption and resumed order, not fi
   assert.equal(flightVerdict(flightEvidence([evade], { ...alive, deaths: 1, health: 20 }), ["cover"], undefined, chain), false,
     "a respawn at 20 health is a death");
   assert.equal(flightEvidence([evade], alive).elapsedTicks, 300);
+});
+
+// t00928 (evade-flat-skeleton-cover-slow-server, 2026-11-21): the kept evade separated behind skeleton#33's cover, and the
+// resumed navigate was refused by the cover it owes (cover-obligation.ts:36 and :250, `refusal` :245-248).
+const REFUSAL = "[COVER_ROUTE_REFUSED] step 2/24 at 37 -60 1560 is in sight of skeleton#33 at 34.9 blocks; no committed route keeps cover. The reflex still protects the body; choose the next action.";
+const coverEnd = { response: "evade", outcome: "safe_separation", healthAfter: 7, ends: [{ id: 33, name: "skeleton", basis: "cover", distance: 35.1 }] };
+const rangeEnd = { response: "evade", outcome: "safe_separation", healthAfter: 7, ends: [{ id: 33, name: "skeleton", basis: "range", distance: 38 }] };
+const refused = { ...passing, outcome: "safe_separation", basis: "cover", distance: 35.1, health: 7, healthAfter: 7, receipts: [coverEnd],
+  status: "failed", error: REFUSAL };
+
+test("the chain judge accepts the cover refusal an evade owes", () => {
+  const chain = { judge: "chain", budgetTicks: 300 } as const;
+  assert.equal(flightVerdict(refused, ["cover"], undefined, chain), true, "the owed refusal chains");
+  assert.equal(flightVerdict({ ...refused, receipts: [rangeEnd, coverEnd], basis: "range", distance: 38 }, ["cover"], undefined, chain), true,
+    "a cover end among the kept receipts chains");
+  const refusals: [string, Partial<Parameters<typeof flightVerdict>[0]>][] = [
+    ["no cover end", { receipts: [rangeEnd], basis: "range" }],
+    ["cover end of another shooter", { receipts: [{ ...coverEnd, ends: [{ id: 34, name: "skeleton", basis: "cover", distance: 35.1 }] }] }],
+    ["health 0", { health: 0 }], ["healthAfter 0", { healthAfter: 0 }], ["a death counted", { deaths: 1 }],
+    ["error not the refusal", { error: "order failed" }], ["no error", { error: undefined }],
+    ["no hostile contact", { interruptions: [] }], ["order cancelled", { status: "cancelled" }],
+    ["below floor", { floor: { kind: "below" as const, index: 1, y: -62 } }],
+  ];
+  for (const [name, changes] of refusals)
+    assert.equal(flightVerdict({ ...refused, ...changes }, ["cover"], undefined, chain), false, name);
+  assert.equal(flightVerdict(refused, ["cover"], undefined, { judge: "order" }), false, "order keeps its success check");
 });
 
 test("the slow-server fixture judges the chain; its default rate is the run's, and a 10 tps variant applies after loading", async () => {
@@ -190,7 +219,8 @@ test("judges the evade after footing cancelled its predecessor", () => {
   }
 });
 
-interface TimelineOptions { readonly judge?: "order" | "evade" | "chain"; readonly events?: unknown[]; readonly interruptions?: string[] }
+interface TimelineOptions { readonly judge?: "order" | "evade" | "chain"; readonly events?: unknown[]; readonly interruptions?: string[];
+  readonly error?: string }
 
 function timelineFixture(rate: number, status: "succeeded" | "failed" = "succeeded", driverError = false, options: TimelineOptions = {}) {
   const clock = createFakeClock({ mode: "mocked" });
@@ -213,7 +243,7 @@ function timelineFixture(rate: number, status: "succeeded" | "failed" = "succeed
         events, readThroughEventId: events.length, remainingEventCount: 0 } } as ScenarioCall;
     } });
   const finish = () => order.resolve({ action: "navigate", durationMs: 0, summary: "order", interruptions: options.interruptions,
-    result: status === "succeeded" ? { status } : { status, error: "order failed" } } as ScenarioCall);
+    result: status === "succeeded" ? { status } : { status, error: options.error ?? "order failed" } } as ScenarioCall);
   return { clock, harness, added, context, finish, events, listenerAtSend: () => listenerAtSend };
 }
 
@@ -242,6 +272,22 @@ test("the chain judge param selects the chain verdict through the event stream; 
       elapsedTicks?: number | null; budgetTicks?: number; status?: string };
     assert.deepEqual([detail.chainPass, detail.outcome, detail.basis, detail.elapsedTicks, detail.budgetTicks, detail.status],
       [true, "capability_limit", null, 300, 300, "succeeded"]);
+  }
+});
+
+test("the chain judge in run accepts the owed cover refusal and fails any other order error", async () => {
+  for (const [error, expected] of [[REFUSAL, "succeeded"], ["order failed", "failed"]] as const) {
+    const f = timelineFixture(20, "failed", false, { judge: "chain", error, interruptions: ["[HOSTILE_CONTACT] skeleton"] });
+    f.events.push(evadeOutcomeRow(f.harness.bot.entity.position.y, { ...coverEnd }));
+    using _timers = f.clock.install();
+    const pending = run(f.context);
+    await f.clock.advance(5_000);
+    f.finish();
+    const result = await f.clock.settle(pending, 1_000);
+    assert.equal(result.status, expected, error);
+    const detail = JSON.parse(result.detail ?? "{}") as { chainPass?: boolean; error?: string };
+    assert.equal(detail.chainPass, expected === "succeeded", `chain pass for ${error}`);
+    assert.equal(detail.error, error);
   }
 });
 
