@@ -2,7 +2,9 @@ import { Vec3 } from "vec3";
 import { declareProductiveProgress } from "../../../tests/minecraft/drivers/productive-progress.ts";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
-import { confirmArrival, fortressParamsSchema, observeFortress, prepareFortress, releaseThreats } from "./fortress-common.ts";
+import {
+  confirmArrival, fortressParamsSchema, navigateWithOneReturn, observeFortress, prepareFortress, releaseThreats,
+} from "./fortress-common.ts";
 import { isReturn, requestOf } from "./withdrawal-judge.ts";
 
 /** Acquire a rod and leave alive. The runtime owns combat and continuation. */
@@ -30,12 +32,13 @@ export const run: MineAiScenario = async (context) => {
       return { status: "failed", detail: JSON.stringify({ hunt, final: evidence.snapshot() }) };
     const [x, y, z] = params.exit;
     const target = new Vec3(x, y, z);
-    const navigate = runtime.actions.find((action) => action.name === "navigate")!;
-    const input = { x: Math.floor(x), y, z: Math.floor(z), range: 1 };
-    const firstExit = await runtime.run(navigate, input, signal);
-    const exit = !signal.aborted && bot.health > 0 && isReturn(requestOf(firstExit))
-      ? await runtime.run(navigate, input, signal) : firstExit;
-    const arrivedOnServer = exit.result.status === "succeeded" && !signal.aborted && bot.health > 0
+    const run = await navigateWithOneReturn(
+      runtime, bot, { x: Math.floor(x), y, z: Math.floor(z), range: 1 }, died.signal, context.signal,
+    );
+    const exit = run.kind === "completed" ? run.last : undefined;
+    // The request a return ended, kept beside the one that followed it (an unadmitted `[ACTION_BUSY]` is no request).
+    const firstExit = run.kind === "completed" && run.requests.length > 1 ? run.outputs.find((output) => isReturn(requestOf(output))) : undefined;
+    const arrivedOnServer = exit?.result.status === "succeeded" && !signal.aborted && bot.health > 0
       && await confirmArrival({ ...context, signal }, target, 2);
     const final = evidence.snapshot();
     const remaining = bot.entity.position.distanceTo(target);
@@ -44,7 +47,11 @@ export const run: MineAiScenario = async (context) => {
         arrivedOnServer && !signal.aborted && final.deaths === 0 && final.health > 0 && final.rods >= 1 && final.dimension === "the_nether"
           ? "succeeded"
           : "failed",
-      detail: JSON.stringify({ hunt, firstExit: exit === firstExit ? undefined : firstExit, exit, arrivedOnServer, remaining, final }),
+      detail: JSON.stringify({
+        hunt, firstExit, exit, arrivedOnServer, remaining, final,
+        exitRun: { kind: run.kind, returns: run.kind === "completed" ? run.returns : 0, owners: run.kind === "completed" ? run.owners : run.wait.owners,
+          wait: run.wait.kind },
+      }),
     };
   } catch (cause) {
     if (!died.signal.aborted) throw cause;

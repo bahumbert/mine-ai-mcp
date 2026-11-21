@@ -18,9 +18,15 @@ import * as pit from "./hazards/pit.ts";
 import { judgeFortressHunt, SAFE_HUNT_REFUSALS } from "./fortress-judge.ts";
 import * as collection from "./fortress-twelve-rods.ts";
 
-const refusal = { status: "failed", termination: "shield_required", error: "[HUNT_NO_SHIELD] shield missing" } as const;
-const capabilityRefusal = { status: "partial", termination: "capability_blocked", error: "[HUNT_CAPABILITY_BLOCKED] recovery" } as const;
-const successfulHandBack = { status: "succeeded", arrived: true } as const;
+const safeHandoff = { kind: "safe", observedAt: 1, basis: "clear", position: { x: 0, y: 64, z: 0 } } as const;
+const unsafeHandoff = { kind: "unsafe", observedAt: 1, reason: "a blaze is in sight", position: { x: 0, y: 64, z: 0 } } as const;
+const interruptedHandoff = { kind: "interrupted", reason: "a reflex took the body" } as const;
+const refusal = { status: "failed", termination: "shield_required", error: "[HUNT_NO_SHIELD] shield missing", handoff: safeHandoff } as const;
+const capabilityRefusal = { status: "partial", termination: "capability_blocked", error: "[HUNT_CAPABILITY_BLOCKED] recovery", handoff: safeHandoff } as const;
+/** A hand-back as the driver reports it: the completed run's last request and the return count, then the server's arrival answer. */
+const handBackOf = (last: "succeeded" | "failed", returns: number, arrived: boolean) =>
+  ({ run: { kind: "completed", last: { result: { status: last } }, returns }, arrived }) as const;
+const successfulHandBack = handBackOf("succeeded", 0, true);
 const judgeSample = { quotaMet: false, alive: true, hunt: refusal, handBack: successfulHandBack };
 
 for (const testCase of [
@@ -29,6 +35,14 @@ for (const testCase of [
   { name: "a cancelled hunt cannot earn hand-back", sample: { hunt: { ...refusal, status: "cancelled" } }, outcome: null },
   { name: "a bot death rules out either outcome", sample: { alive: false, quotaMet: true }, outcome: null },
   { name: "a quota verdict records the contradiction when the hunt failed", sample: { quotaMet: true }, outcome: "quota", contradiction: true },
+  { name: "a safe refusal with one return and a confirmed arrival hands back", sample: { handBack: handBackOf("succeeded", 1, true) }, outcome: "hand_back" },
+  { name: "a second return fails the hand-back", sample: { handBack: handBackOf("succeeded", 2, true) }, outcome: null },
+  { name: "a last request that did not succeed fails the hand-back", sample: { handBack: handBackOf("failed", 1, true) }, outcome: null },
+  { name: "an unconfirmed arrival fails the hand-back", sample: { handBack: handBackOf("succeeded", 0, false) }, outcome: null },
+  { name: "a run that never admitted a navigate fails the hand-back", sample: { handBack: { run: { kind: "not_admitted" }, arrived: false } }, outcome: null },
+  { name: "an unsafe handoff earns no hand-back", sample: { hunt: { ...refusal, handoff: unsafeHandoff } }, outcome: null },
+  { name: "an interrupted handoff earns no hand-back", sample: { hunt: { ...refusal, handoff: interruptedHandoff } }, outcome: null },
+  { name: "a refusal with no handoff earns no hand-back", sample: { hunt: { status: "failed", termination: "shield_required", error: "[HUNT_NO_SHIELD] x" } }, outcome: null },
 ] as const) {
   const { name, sample, outcome } = testCase;
   test(name, () => {
@@ -177,17 +191,34 @@ const coverRefused = { status: "failed", error: `${COVER_REFUSED_CODE} route ref
 
 const collectionTarget = [-27.5, 82, 355.5] as const;
 
+type Route = typeof navigated | typeof stalled | typeof coverRefused | { readonly status: "failed"; readonly error: string };
+
+interface CollectionScene {
+  readonly hunt: typeof refusal | typeof capabilityRefusal | (Omit<typeof refusal, "handoff"> & { readonly handoff: unknown });
+  /** One reply per navigate the driver may send, in order. */
+  readonly routes: readonly Route[];
+  readonly arrives: boolean;
+  readonly rate: number;
+  /** The runner is busy (a reflex holds the body) for this many ticks of world age after the hunt settles. */
+  readonly reflexTicks?: number;
+  /** The bot loses its health while the arrival is being confirmed. */
+  readonly diesInConfirmation?: boolean;
+}
+
 /** Keep the real collection driver and fake world, replacing the physical requests and fixture acknowledgements. */
-async function collectWithHandBack(hunt: typeof refusal | typeof capabilityRefusal, route: typeof navigated | typeof coverRefused, arrives: boolean) {
+async function collectWithHandBack({ hunt, routes, arrives, rate, reflexTicks = 0, diesInConfirmation = false }: CollectionScene) {
   const clock = createFakeClock({ mode: "mocked" });
   using _timers = clock.install();
-  const { bot } = createFakeBot({ clock, username: "FortressHunter", dimension: "the_nether",
+  const { bot, combat } = createFakeBot({ clock, username: "FortressHunter", dimension: "the_nether", server: { ticksPerSecond: rate },
     position: { x: -27.5, y: 82, z: 355.5 }, slots: { 8: { name: "diamond_boots" } },
     cells: { "-28,81,355": "nether_bricks", "-28,82,357": "spawner" },
     // The arrangement starts with the named cells already loaded in the shared fake world.
     overrides: { waitForChunksToLoad: async () => {} },
   });
   const signal = new AbortController().signal;
+  let busyUntilAge = 0;
+  /** Whether the signal the confirmation got was aborted by the time the server answered. */
+  const confirmationEnds: boolean[] = [];
   const context = { bot, signal, scenario: { params: { handBack: collectionTarget },
     players: [{ name: bot.username, pos: collectionTarget }], entities: [] }, log() {}, progress() {},
   } as unknown as MineAiScenarioContext;
@@ -198,14 +229,21 @@ async function collectWithHandBack(hunt: typeof refusal | typeof capabilityRefus
       submit: () => ({ state: "accepted", actionId: "collect" }),
       async wait() {
         calls.push("retrieved the hunt");
+        busyUntilAge = bot.time.age + reflexTicks;
         return { state: "settled", output: { action: COLLECT_MOB_DROP, durationMs: 0, result: hunt } };
       },
     },
     async run(action: { name: string }, input: unknown) {
-      calls.push([action.name, input]);
-      return { action: action.name, durationMs: 0, result: route };
+      calls.push([action.name, input, bot.time.age >= busyUntilAge ? "runner idle" : "runner busy"]);
+      const result = routes[calls.filter((call) => Array.isArray(call) && call[0] === "navigate").length - 1];
+      assert.ok(result, "an unplanned navigate was started");
+      return { action: action.name, durationMs: 400, result };
     },
-    navigation: { onEvent: () => () => {} }, status: () => ({}), async close() {},
+    navigation: { onEvent: () => () => {} }, async close() {},
+    status: () => {
+      const busy = bot.time.age < busyUntilAge;
+      return { busy, activeAction: busy ? { action: "hostile_reflex", startedAt: "" } : null, owner: busy ? "foreground" : "idle" };
+    },
   } as unknown as runtimeModule.Runtime;
   const originalRuntime = { ...runtimeModule };
   const originalFortress = { ...fortress };
@@ -214,8 +252,10 @@ async function collectWithHandBack(hunt: typeof refusal | typeof capabilityRefus
   const originalPit = { ...pit };
   mock.module("../../src/runtime.ts", () => ({ ...originalRuntime, openRuntime: async () => runtime, wearArmor: async () => {} }));
   mock.module("./fortress-common.ts", () => ({ ...originalFortress, releaseThreats: async () => {},
-    confirmArrival: async (_context: MineAiScenarioContext, target: { x: number; y: number; z: number }, radius: number) => {
+    confirmArrival: async (confirmed: MineAiScenarioContext, target: { x: number; y: number; z: number }, radius: number) => {
       calls.push(["arrival", [target.x, target.y, target.z], radius]);
+      if (diesInConfirmation) combat.setHealth(0);
+      confirmationEnds.push(confirmed.signal.aborted);
       return arrives;
     },
   }));
@@ -223,7 +263,7 @@ async function collectWithHandBack(hunt: typeof refusal | typeof capabilityRefus
   mock.module("../../flat/combat/reflex.ts", () => ({ ...originalReflex, readReflexOutcomes: async () => ({ encounters: [], failures: [], limits: [] }) }));
   mock.module("./hazards/pit.ts", () => ({ ...originalPit, observe: async () => {} }));
   try {
-    return { completion: await clock.settle(collection.run(context), 1_000), calls };
+    return { completion: await clock.settle(collection.run(context), 120_000), calls, confirmationEnds };
   } finally {
     mock.module("../../src/runtime.ts", () => originalRuntime);
     mock.module("./fortress-common.ts", () => originalFortress);
@@ -233,19 +273,44 @@ async function collectWithHandBack(hunt: typeof refusal | typeof capabilityRefus
   }
 }
 
-for (const { name, hunt, route, arrives, want } of [
-  { name: "a shield refusal with confirmed arrival", hunt: refusal, route: navigated, arrives: true, want: "hand_back" },
-  { name: "a partial capability refusal with confirmed arrival", hunt: capabilityRefusal, route: navigated, arrives: true, want: "hand_back" },
-  { name: "a succeeded hand-back without confirmation", hunt: refusal, route: navigated, arrives: false, want: null },
-  { name: "a failed hand-back at the destination", hunt: refusal, route: coverRefused, arrives: true, want: null },
-]) {
-  test(`collection judges ${name}`, async () => {
-    const { completion, calls } = await collectWithHandBack(hunt, route, arrives);
-    assert.equal(completion.status, want === "hand_back" ? "succeeded" : "failed");
-    assert.equal(JSON.parse(completion.detail!).outcome, want);
-    assert.deepEqual(calls, ["retrieved the hunt", ["navigate", { x: -28, y: 82, z: 355, range: 1 }],
-      ...(route.status === "succeeded" ? [["arrival", collectionTarget, 2]] : [])]);
-  });
+const handBackInput = { x: -28, y: 82, z: 355, range: 1 };
+const walk = ["navigate", handBackInput, "runner idle"] as const;
+const arrival = ["arrival", collectionTarget, 2] as const;
+const retrieved = "retrieved the hunt";
+
+for (const rate of [20, 10]) {
+  for (const { name, scene, want, calls: wanted, returns } of [
+    { name: "a shield refusal with confirmed arrival", scene: { hunt: refusal, routes: [navigated], arrives: true },
+      want: "hand_back", calls: [retrieved, walk, arrival], returns: 0 },
+    { name: "a partial capability refusal with confirmed arrival", scene: { hunt: capabilityRefusal, routes: [navigated], arrives: true },
+      want: "hand_back", calls: [retrieved, walk, arrival], returns: 0 },
+    { name: "a succeeded hand-back without confirmation", scene: { hunt: refusal, routes: [navigated], arrives: false },
+      want: null, calls: [retrieved, walk, arrival], returns: 0 },
+    { name: "a failed hand-back that is no return", scene: { hunt: refusal, routes: [{ status: "failed", error: "[EXECUTION_FAILED] failed" }], arrives: true },
+      want: null, calls: [retrieved, walk], returns: 0 },
+    { name: "a reflex holding the body, a refused cover route, then a confirmed arrival", scene: { hunt: refusal, routes: [coverRefused, navigated], arrives: true, reflexTicks: 60 },
+      want: "hand_back", calls: [retrieved, walk, walk, arrival], returns: 1 },
+    { name: "a stalled return then a confirmed arrival", scene: { hunt: refusal, routes: [stalled, navigated], arrives: true },
+      want: "hand_back", calls: [retrieved, walk, walk, arrival], returns: 1 },
+    { name: "a second return", scene: { hunt: refusal, routes: [stalled, coverRefused, navigated], arrives: true },
+      want: null, calls: [retrieved, walk, walk], returns: 2 },
+    { name: "an unsafe handoff, which sends no navigate", scene: { hunt: { ...refusal, handoff: unsafeHandoff }, routes: [], arrives: true },
+      want: null, calls: [retrieved], returns: undefined },
+    { name: "an interrupted handoff, which sends no navigate", scene: { hunt: { ...refusal, handoff: interruptedHandoff }, routes: [], arrives: true },
+      want: null, calls: [retrieved], returns: undefined },
+    { name: "a death during the arrival confirmation", scene: { hunt: refusal, routes: [navigated], arrives: true, diesInConfirmation: true },
+      want: null, calls: [retrieved, walk, arrival], returns: 0 },
+  ] as const) {
+    test(`collection judges ${name} at ${rate} tps`, async () => {
+      const { completion, calls, confirmationEnds } = await collectWithHandBack({ ...scene, rate });
+      if ("diesInConfirmation" in scene) assert.deepEqual(confirmationEnds, [true], "the bot's death did not reach the arrival confirmation");
+      assert.equal(completion.status, want === "hand_back" ? "succeeded" : "failed");
+      const detail = JSON.parse(completion.detail!);
+      assert.equal(detail.outcome, want);
+      assert.deepEqual(calls, wanted);
+      assert.equal(detail.handBack?.run?.returns, returns);
+    });
+  }
 }
 
 interface RodExitTrial {
@@ -254,26 +319,40 @@ interface RodExitTrial {
   readonly death?: boolean;
   readonly status: string;
   readonly count: number;
+  /** A reflex holds the body for this many ticks of world age after the hunt (the exit may only start after it). */
+  readonly reflexTicks?: number;
 }
 
 /** Drive the exit scenario with real bot state and controlled runtime replies. */
-async function checkRodExit({ results, arrival, death, status, count }: RodExitTrial) {
+async function checkRodExit({ results, arrival, death, status, count, reflexTicks = 0 }: RodExitTrial) {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   // Start near the exit to expose incorrect passes based on the client's position.
-  const { bot, combat } = createFakeBot({ dimension: "the_nether", carried: { blaze_rod: 1 } });
+  const { bot, combat } = createFakeBot({ clock, dimension: "the_nether", carried: { blaze_rod: 1 } });
   const added = listenersAddedSince(bot);
   const exit = [0.5, 64, 0.5];
   const context = { bot, signal: new AbortController().signal, scenario: { params: { exit } }, log() {}, progress() {} } as unknown as MineAiScenarioContext;
   const inputs: unknown[] = [];
+  const busyAtSend: boolean[] = [];
   let confirmations = 0;
+  let busyUntilAge = 0;
   const runtime = {
     actions: [{ name: COLLECT_MOB_DROP }, { name: "navigate" }],
     async run(action: { name: string }, input: unknown) {
-      if (action.name === COLLECT_MOB_DROP) return { action: action.name, durationMs: 0, result: navigated };
+      if (action.name === COLLECT_MOB_DROP) {
+        busyUntilAge = bot.time.age + reflexTicks;
+        return { action: action.name, durationMs: 0, result: navigated };
+      }
       inputs.push(input);
+      busyAtSend.push(bot.time.age < busyUntilAge);
       if (death) combat.setHealth(0);
       const result = results[inputs.length - 1];
       assert.ok(result, "an unplanned navigate was started");
-      return { action: action.name, durationMs: 0, result };
+      return { action: action.name, durationMs: 400, result };
+    },
+    status: () => {
+      const busy = bot.time.age < busyUntilAge;
+      return { busy, activeAction: busy ? { action: "hostile_reflex", startedAt: "" } : null, owner: busy ? "foreground" : "idle" };
     },
     async close() {},
   } as unknown as runtimeModule.Runtime;
@@ -291,11 +370,17 @@ async function checkRodExit({ results, arrival, death, status, count }: RodExitT
   }));
   try {
     const { run } = await import("./fortress-rod-and-exit.ts");
-    assert.equal((await run(context)).status, status);
+    const outcome = await clock.settle(run(context), 120_000);
+    assert.equal(outcome.status, status);
     assert.deepEqual(inputs, Array.from({ length: count }, () => ({ x: 0, y: 64, z: 0, range: 1 })),
       death ? "death must prevent the second navigate" : "a live bot must get the expected number of exit requests");
+    assert.deepEqual(busyAtSend, inputs.map(() => false), "an exit navigate started while a reflex held the body");
     assert.equal(confirmations, results.at(-1)?.status === "succeeded" ? 1 : 0);
     assert.equal(added("death"), 0);
+    // A return keeps the first exit in the detail beside the last one.
+    const detail = JSON.parse(outcome.detail!);
+    assert.equal(detail.firstExit?.result.status, count > 1 ? results[0]!.status : undefined);
+    assert.equal(detail.exit.result.status, results[count - 1]!.status);
   } finally {
     mock.module("../../src/runtime.ts", () => originalRuntime);
     mock.module("./fortress-common.ts", () => originalFortress);
@@ -309,6 +394,7 @@ test("one stalled exit returns to the same target only if the bot is alive", asy
 
 for (const { name, trial } of [
   { name: "a refused cover route navigates again", trial: { results: [coverRefused, navigated], arrival: true, status: "succeeded", count: 2 } },
+  { name: "a reflex holding the body delays the exit navigate", trial: { results: [navigated], arrival: true, status: "succeeded", count: 1, reflexTicks: 60 } },
   { name: "a failed exit near the destination fails", trial: { results: [{ status: "failed", error: "[EXECUTION_FAILED] failed" }], arrival: true, status: "failed", count: 1 } },
   { name: "a succeeded exit without server confirmation fails", trial: { results: [navigated], arrival: false, status: "failed", count: 1 } },
   { name: "a second return fails without a third navigate", trial: { results: [stalled, coverRefused], arrival: true, status: "failed", count: 2 } },

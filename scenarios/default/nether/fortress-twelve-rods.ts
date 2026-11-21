@@ -18,7 +18,7 @@ import {
 import type { MineAiScenario, MineAiScenarioContext } from "../../src/scenario-client.ts";
 import type { Runtime } from "../../src/runtime.ts";
 import { observe } from "./hazards/pit.ts";
-import { confirmArrival, releaseThreats } from "./fortress-common.ts";
+import { confirmArrival, navigateWithOneReturn, releaseThreats } from "./fortress-common.ts";
 import { isSafeHuntRefusal, judgeFortressHunt } from "./fortress-judge.ts";
 import { readReflexOutcomes } from "../../flat/combat/reflex.ts";
 import { z } from "zod";
@@ -265,14 +265,17 @@ async function observeLastVolley(bot: Bot, signal: AbortSignal) {
     elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge };
 }
 
-/** Start one next action and require the server's arrival answer at the fixture's starting cell. */
-async function handBackAfterHunt(context: MineAiScenarioContext, runtime: Runtime, target: Vec3) {
-  const navigate = runtime.actions.find((action) => action.name === "navigate");
-  if (!navigate) throw new Error("Fortress hand-back requires navigate.");
-  const output = await runtime.run(navigate, { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z), range: 1 }, context.signal);
-  const status = output.result.status;
-  const arrived = status === "succeeded" && !context.signal.aborted && await confirmArrival(context, target, 2);
-  return { status, arrived, output };
+/**
+ * Start the next action once the runner is idle (one return gets one fresh navigate) and require the server's arrival
+ * answer at the fixture's starting cell for the last request. `context.signal` is the trial's abort; `died` the bot's death.
+ */
+async function handBackAfterHunt(context: MineAiScenarioContext, runtime: Runtime, target: Vec3, died: AbortSignal) {
+  const run = await navigateWithOneReturn(
+    runtime, context.bot, { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z), range: 1 }, died, context.signal,
+  );
+  const arrived = run.kind === "completed" && run.last.result.status === "succeeded" && !context.signal.aborted
+    && !died.aborted && await confirmArrival({ ...context, signal: AbortSignal.any([context.signal, died]) }, target, 2);
+  return { run, arrived };
 }
 
 /** The driver supplies the task; all combat, recovery, and movement remain production actions. */
@@ -307,7 +310,7 @@ export const run: MineAiScenario = async (context) => {
       minimumPerMinute: collection.minimumDropsPerMinute ?? 0 });
     const quotaMet = rate.passed && volley?.end === "ticks";
     const handBack = !quotaMet && !signal.aborted && bot.health > 0 && isSafeHuntRefusal(result.result)
-      ? await handBackAfterHunt({ ...context, signal }, runtime, new Vec3(...collection.handBack)) : null;
+      ? await handBackAfterHunt(context, runtime, new Vec3(...collection.handBack), died.signal) : null;
     const reflexCounts = await reportReflexOutcomes(context, runtime);
     const judgement = judgeFortressHunt({ alive: state.deaths === 0 && bot.health > 0, quotaMet, hunt: result.result, handBack });
 
