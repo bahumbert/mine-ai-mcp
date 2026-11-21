@@ -19,6 +19,8 @@ interface AirHistory {
   reported: boolean;
   /** The world age of the first time packet heard after the body started. */
   firstAge: number | null;
+  /** Counts the bodies this tracker has seen: a proof of one body never stands for another. */
+  generation: number;
 }
 
 const histories = new WeakMap<Bot, AirHistory>();
@@ -36,9 +38,9 @@ function ownAirMetadata(bot: Bot): unknown {
  */
 export function watchAirHistory(bot: Bot): void {
   if (histories.has(bot)) return;
-  const history: AirHistory = { started: false, wet: false, reported: false, firstAge: null };
+  const history: AirHistory = { started: false, wet: false, reported: false, firstAge: null, generation: 0 };
   histories.set(bot, history);
-  const startBody = () => void Object.assign(history, { started: true, wet: false, reported: false, firstAge: null });
+  const startBody = () => void Object.assign(history, { started: true, wet: false, reported: false, firstAge: null, generation: history.generation + 1 });
   // `login` makes a new entity (`entities.js:100-105`); `respawn` clears the metadata unless the packet keeps it (`:115-122`).
   const watch = () => {
     if (!bot.entity) return;
@@ -73,16 +75,57 @@ export function watchAirHistory(bot: Bot): void {
  * the spawn's metadata packets are handled first). A present value that is not an integer is unknown, never full.
  */
 export function airSupplyTicks(bot: Bot): number | null {
+  const reading = readAir(bot, false);
+  return reading.kind === "reported" ? reading.ticks : reading.kind === "inferred-full" ? FULL_AIR_TICKS : null;
+}
+
+/** What makes air full without a report: this body, this entity and the world age of the read that showed it dry (`readAirSupply`). */
+export interface FullAirProof {
+  readonly entity: Bot["entity"];
+  readonly generation: number;
+  readonly age: number;
+}
+
+/** One read of the bot's air: `invalid` is a present value that is no integer, or a registry with no `air_supply` key. */
+export type AirReading =
+  | { readonly kind: "reported"; readonly ticks: number }
+  | { readonly kind: "inferred-full"; readonly proof: FullAirProof }
+  | { readonly kind: "absent" }
+  | { readonly kind: "invalid" };
+
+/**
+ * `airSupplyTicks` as a reading that keeps the proof of an inferred full air and tells an unknown air that is merely
+ * absent from one that is invalid (the first-air-packet allowance of a dive needs the difference, T31c-air 2026-11-20).
+ * A registry with no `air_supply` key is invalid here; `airSupplyTicks` keeps reading it as before.
+ */
+export function readAirSupply(bot: Bot): AirReading {
+  return readAir(bot, true);
+}
+
+function readAir(bot: Bot, needKey: boolean): AirReading {
+  if (needKey && (bot.registry.entitiesByName.player?.metadataKeys?.indexOf("air_supply") ?? -1) < 0) return { kind: "invalid" };
   const value = ownAirMetadata(bot);
   const history = histories.get(bot);
   if (value !== undefined) {
     if (history) history.reported = true;
-    return typeof value === "number" && Number.isInteger(value) ? value : null;
+    return typeof value === "number" && Number.isInteger(value) ? { kind: "reported", ticks: value } : { kind: "invalid" };
   }
-  if (!history) return null;
+  if (!history) return { kind: "absent" };
   // A read at the call that sees the head under water is an observation like a tick's: the body stays wet.
   if (bot.entity && botEyesInWater(bot)) history.wet = true;
-  if (!history.started || history.wet || history.reported || history.firstAge === null) return null;
+  if (!history.started || history.wet || history.reported || history.firstAge === null) return { kind: "absent" };
   const age = bot.time?.age;
-  return typeof age === "number" && age - history.firstAge >= SERVER_ANSWER_TICKS ? FULL_AIR_TICKS : null;
+  if (typeof age !== "number" || age - history.firstAge < SERVER_ANSWER_TICKS) return { kind: "absent" };
+  return { kind: "inferred-full", proof: { entity: bot.entity, generation: history.generation, age } };
+}
+
+/**
+ * Whether the body that `proof` described is still that body and has never reported its air since: the same entity, no
+ * login or respawn between, and no own metadata filed. A reading made after the head got wet cannot show it (the
+ * history latches), so a later wet read asks this of the proof taken while the body was dry.
+ */
+export function fullAirProofHolds(bot: Bot, proof: FullAirProof): boolean {
+  const history = histories.get(bot);
+  return history !== undefined && bot.entity === proof.entity && history.generation === proof.generation &&
+    history.started && !history.reported && ownAirMetadata(bot) === undefined;
 }

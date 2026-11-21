@@ -6,6 +6,7 @@ import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { waitForPhysicsTicks } from "../utils/physics-ticks.js";
 import { serverPacedSignal, type ServerPacedSignal } from "../world/server-paced.js";
 import { SERVER_ANSWER_TICKS, serverPacedWallMs, waitForWorldAge } from "../world/world-age.js";
+import { FirstDiveAir } from "./diving-first-air.js";
 import { exactBlockGoal } from "./goals/index.js";
 import type { Navigate, NavigateOptions, NavigationResult } from "./navigate.js";
 import type { MovementPolicy } from "./movements/policy.js";
@@ -32,6 +33,10 @@ interface DiveSession {
   /** The run ended with its goal reached: the body is where it was asked to be, whatever the water. */
   completed: boolean;
   ascentStroke: ObservedAscentStroke | null;
+  /** The private first-air-packet allowance of this run's active leg (T31c-air); never read by planning, work or refill. */
+  readonly firstAir: FirstDiveAir;
+  /** The first-air allowance was running when the verified ascent was lost: the run ends there, with no unverified swim back. */
+  allowanceLostAscent: boolean;
 }
 
 /** The stroke and world geometry observed on the preceding backstop read in this leg. */
@@ -177,14 +182,30 @@ function watchAscentStroke(bot: Bot, session: DiveSession): Disposable {
 
 /** Remember the last air pocket and request a breathing stop before an owned dive spends its ascent reserve. */
 function observeDiveTick(bot: Bot, read: WorldView["blockAt"], session: DiveSession): void {
-  if (!botEyesInWater(bot)) session.lastBreathable = bot.entity.position.floored();
-  if (!session.owned || session.returning || session.stop.signal.aborted) return;
+  if (!botEyesInWater(bot)) {
+    session.lastBreathable = bot.entity.position.floored();
+    session.firstAir.captureDry(session.lastBreathable);
+  }
+  if (!session.owned || session.returning || session.stop.signal.aborted || session.lifetime.aborted) return;
   const ascent = swimAscent(read, bot.entity.position.floored());
-  const air = airSupplyTicks(bot) ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
-  // With a lost corridor the survival backstop must take over; do not call it a planned return.
-  if (!ascent) return;
-  if (botEyesInWater(bot) && (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS))
+  const reported = airSupplyTicks(bot);
+  // A numeric air the server filed wins at once: the allowance is over and the ordinary stop below judges it.
+  if (reported !== null) session.firstAir.end();
+  const air = reported ?? (session.unchangedAir ? FULL_AIR_TICKS : null);
+  if (!ascent) {
+    // With a lost corridor the survival backstop must take over; do not call it a planned return. A leg running on the
+    // first-air allowance has nothing to stand on: it ends here, and the run reports the lost corridor.
+    if (session.firstAir.active) {
+      session.firstAir.end();
+      session.allowanceLostAscent = true;
+      session.stop.abort(BREATHING_STOP);
+    }
+    return;
+  }
+  if (botEyesInWater(bot) && (air === null || air <= ascent.ticks + DIVE_RESERVE_TICKS)) {
+    if (air === null && session.firstAir.permits(ascent.ticks)) return;
     session.stop.abort(BREATHING_STOP);
+  }
 }
 
 /** Scoped declaration shared with survival; never a switch that removes the reflex. */
@@ -262,20 +283,31 @@ export class Diving {
     return BREATHING_STOP;
   }
 
-  async run(options: NavigateOptions, navigate: Navigate) {
-    if (this.#session) throw new Error("Navigation already owns a dive session.");
+  /** The run's session, with its private first-air allowance bound to the active leg's stop token. */
+  #openSession(options: NavigateOptions): DiveSession {
     const cancelled = new AbortController();
     const lifetime = AbortSignal.any([cancelled.signal, ...(options.signal ? [options.signal] : [])]);
+    const firstAir = new FirstDiveAir({ bot: this.bot, world: this.world, leg: () => session.stop.signal,
+      decide: () => observeDiveTick(this.bot, this.#read, session) });
     const session: DiveSession = { owned: false, returning: false, stop: new AbortController(),
-      cancelled, lifetime, completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false, ascentStroke: null };
+      cancelled, lifetime, completedWork: 0, unchangedAir: false, lastBreathable: null, completed: false, ascentStroke: null,
+      firstAir, allowanceLostAscent: false };
     this.#session = session;
+    return session;
+  }
+
+  async run(options: NavigateOptions, navigate: Navigate) {
+    if (this.#session) throw new Error("Navigation already owns a dive session.");
+    const session = this.#openSession(options);
+    const { lifetime } = session;
+    const tick = () => observeDiveTick(this.bot, this.#read, session);
     using _strokeWatcher = watchAscentStroke(this.bot, session);
+    using _firstAir = session.firstAir;
     options = { ...options, stopSignal: AbortSignal.any([session.cancelled.signal,
       ...(options.stopSignal ? [options.stopSignal] : [])]) };
     const started = monotonicNow();
     let previousStop = "";
     let repeatedStops = 0;
-    const tick = () => observeDiveTick(this.bot, this.#read, session);
     this.bot.on("physicsTick", tick);
     if (this.#headInAir()) session.lastBreathable = this.bot.entity.position.floored();
     try {
@@ -305,6 +337,8 @@ export class Diving {
           (options.stopSignal?.aborted && !returnToProcess)) return this.#finished(session, result);
         const surface = swimAscent(this.#read, this.bot.entity.position.floored())?.surface;
         if (!surface) return { status: "stopped" as const, reason: "Dive lost its verified ascent corridor", elapsedMs: elapsedSince(started) };
+        // The corridor is back: the run goes on, and a later failure keeps the ordinary swim back.
+        session.allowanceLostAscent = false;
         const progress = `${this.bot.entity.position.floored()}:${session.completedWork}`;
         repeatedStops = progress === previousStop ? repeatedStops + 1 : 0;
         previousStop = progress;
@@ -332,6 +366,7 @@ export class Diving {
       throw error;
     } finally {
       this.bot.off("physicsTick", tick);
+      session.firstAir.end(); // the window is the leg's: the swim back below runs on real air only
       session.ascentStroke = null;
       if (session.returning && !session.cancelled.signal.aborted) this.bot.setControlState("jump", false);
       await this.#swimBackToAir(session, options, navigate);
@@ -403,7 +438,7 @@ export class Diving {
    */
   async #swimBackToAir(session: DiveSession, options: NavigateOptions, navigate: Navigate): Promise<void> {
     const target = session.lastBreathable;
-    if (session.completed || !session.owned || target === null || session.cancelled.signal.aborted || options.signal?.aborted ||
+    if (session.completed || session.allowanceLostAscent || !session.owned || target === null || session.cancelled.signal.aborted || options.signal?.aborted ||
       (this.bot.health ?? 20) <= 0) return;
     if (!botEyesInWater(this.bot)) return;
     using budget = this.#returnBudget(airSupplyTicks(this.bot));
