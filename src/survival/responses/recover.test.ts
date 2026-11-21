@@ -188,8 +188,10 @@ async function holdWaitsAcrossWallStep(maximumMs: number, wallStepMs: number): P
 }
 
 for (const wallStepMs of [-800, 1_200]) {
-  test(`covered recovery counts monotonic time: a 3 s budget with a ${wallStepMs} ms wall step is spent after 3 waits of 1 s`, async () => {
-    assert.equal(await holdWaitsAcrossWallStep(3_000, wallStepMs), 3);
+  // 3 s are 60 ticks at 20 a second, so the hold ends at the first look at or after the packet 80 ticks on (D33): the 4th wait
+  // of 1 s (20 ticks). The wall step moves nothing: the hold counts the world age and `monotonicNow`, never `Date.now()`.
+  test(`covered recovery counts monotonic time: a 3 s budget with a ${wallStepMs} ms wall step is spent after 4 waits of 1 s`, async () => {
+    assert.equal(await holdWaitsAcrossWallStep(3_000, wallStepMs), 4);
   });
 }
 

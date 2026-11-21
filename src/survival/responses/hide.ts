@@ -1,6 +1,6 @@
 import type { Bot } from "mineflayer";
 import { monotonicNow } from "../../utils/index.js";
-import { waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { PHYSICS_TICK_WALL_MS, waitForPhysicsTicks } from "../../utils/physics-ticks.js";
 import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { recoverUnderCover, type CoveredRecovery } from "./recover.js";
@@ -108,7 +108,8 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
       if (intruder) await repelShelterIntruder(build, intruder);
     },
     releaseItemUse: () => itemUse.lowerShield(),
-    wait: (ticks) => waitForPhysicsTicks(bot, ticks, options.signal),
+    // Bounded in real time: physics that stopped ends the hold `unavailable` instead of waiting for ever (D33).
+    wait: (ticks) => waitForPhysicsTicks(bot, ticks, options.signal, { wallMs: PHYSICS_TICK_WALL_MS * ticks }),
   });
   build.recovery = recovery;
   build.ate = recovery.ate;

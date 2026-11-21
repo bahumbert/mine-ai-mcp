@@ -62,7 +62,7 @@ export const combatPolicySchema = z.strictObject({
     .number()
     .int()
     .positive()
-    .describe("Milliseconds allowed for one protected recovery; routes and eating never renew this hold."),
+    .describe("Game time for one protected recovery at 20 ticks a second (90 000 = 1 800 world ticks at any server speed), with a wall-clock backstop of 3 x (ticks + 20) x 50 ms; routes and eating never renew this hold. The shelter built before it still counts real milliseconds."),
   evade_timeout_ms: z
     .number()
     .int()

@@ -2,7 +2,9 @@ import { incomingShieldProjectiles } from "../perception/combat/shield-projectil
 import type { Bot } from "mineflayer";
 import { eatFood } from "../../actions/eat-food/eat-food.js";
 import { monotonicNow } from "../../utils/index.js";
+import { PhysicsStoppedError } from "../../utils/physics-ticks.js";
 import { REGENERATION_HUNGER } from "../../world/food.js";
+import { serverPacedWallMs, serverTickDeadline, ticksOnTime } from "../../world/world-age.js";
 import { carriedCount } from "../../world/inventory-count.js";
 import { recoveryScope } from "../control/combat/scopes/recovery.js";
 import { fireContactCells, isInFire, isInLava } from "../perception/body.js";
@@ -109,6 +111,53 @@ async function eatInHold(
 }
 
 /**
+ * The hold's clock (D33): `maximumMs` is game time at 20 ticks a second, so one deadline on the world age decides whatever
+ * the server speed, and its wall twin ends a stopped server. The budget entry only shows the clock (the evade's shape,
+ * `evade.ts`); disposing the clock releases it. A hold of 0 ms is spent before it starts: no defence, no wait.
+ */
+function startHoldClock(bot: Bot, options: CoveredRecoveryOptions, scope: ReturnType<typeof recoveryScope>["scope"]) {
+  const ticks = ticksOnTime(options.maximumMs);
+  const startedMs = monotonicNow();
+  const wallMs = serverPacedWallMs(ticks);
+  const deadline = serverTickDeadline(() => bot.time?.age ?? null, ticks, startedMs, { origin: "packet", wallMs, stoppedMs: null });
+  const entry = options.survival.budgets.attempt({
+    name: "covered_recovery",
+    scope,
+    unit: "ticks",
+    limit: ticks,
+    measure: () => deadline.elapsed(monotonicNow()).ticks ?? 0,
+    wall: { limitMs: wallMs, measure: monotonicNow, startedAt: startedMs },
+    exhaustion: "Retain observed enclosure and return exhausted recovery with current health and hunger.",
+  });
+  return { spent: () => ticks === 0 || deadline.passed(monotonicNow()), [Symbol.dispose]: () => entry[Symbol.dispose]() };
+}
+
+/**
+ * One tick of waiting. Client physics that stopped (a ride, an unloaded chunk) ends the hold `unavailable`, but is not
+ * remembered as an answer: it says nothing about whether recovery can work once the body ticks again.
+ */
+async function waitOneTick(
+  bot: Bot,
+  options: CoveredRecoveryOptions,
+  held: (stop: "unavailable", reason: string, remember: boolean) => CoveredRecovery,
+): Promise<CoveredRecovery | null> {
+  try {
+    await options.wait(1);
+    return null;
+  } catch (cause) {
+    if (!(cause instanceof PhysicsStoppedError)) throw cause;
+    return held("unavailable", `client physics stopped: ${cause.message}, so the hold could not wait for health ${bot.health} (required ${options.recoverTo}); try again once the body ticks again`, false);
+  }
+}
+
+/** The hold's end when defence ended under `combat.recover: "never"`: the caller's health floor decides. */
+function endOfProhibitedRecovery(bot: Bot, options: CoveredRecoveryOptions, ate: string | null): CoveredRecovery {
+  return bot.health >= options.recoverTo
+    ? { kind: "recovered", ate }
+    : { kind: "held", stop: "prohibited", ate, reason: `Defence ended at health ${bot.health}; required ${options.recoverTo}, but recovery is prohibited.` };
+}
+
+/**
  * Eat and recover only while the owning position remains usable. Construction
  * and weapons belong to callers.
  *
@@ -150,21 +199,14 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
   if (answered) return { kind: "held", stop: "answered", ate, reason: answered.failure.why };
   if (policy().combat.recover === "never" && !options.holdWhile)
     return { kind: "held", stop: "prohibited", ate, reason: "Recovery is prohibited." };
-  using budget = survival.budgets.attempt({
-    name: "covered_recovery",
-    scope: scope.scope,
-    unit: "milliseconds",
-    limit: options.maximumMs,
-    measure: monotonicNow,
-    exhaustion: "Retain observed enclosure and return exhausted recovery with current health and hunger.",
-  });
-  const held = (stop: "exhausted" | "unavailable" | "eating_failed", reason: string): CoveredRecovery => {
+  using clock = startHoldClock(bot, options, scope.scope);
+  const held = (stop: "exhausted" | "unavailable" | "eating_failed", reason: string, remember = true): CoveredRecovery => {
     options.signal.throwIfAborted();
     if (bot.health <= 0) return { kind: "held", stop: "death", ate, reason: "The bot died during recovery." };
-    survival.answered.remember(scope, { kind: stop, why: reason });
+    if (remember) survival.answered.remember(scope, { kind: stop, why: reason });
     return { kind: "held", stop, ate, reason };
   };
-  while ((bot.health < options.recoverTo || (policy().combat.recover !== "never" && bot.food < REGENERATION_HUNGER) || options.holdWhile?.()) && bot.health > 0 && !budget.exhausted) {
+  while ((bot.health < options.recoverTo || (policy().combat.recover !== "never" && bot.food < REGENERATION_HUNGER) || options.holdWhile?.()) && bot.health > 0 && !clock.spent()) {
     options.signal.throwIfAborted();
     await options.defendIntruder();
     const cause = await unlessCleared();
@@ -174,10 +216,10 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
     // through the attack, then hand back only if the caller's health floor is
     // met; never eat or wait for regeneration against an explicit prohibition.
     if (policy().combat.recover === "never") {
-      if (options.holdWhile?.()) { await options.wait(1); continue; }
-      return bot.health >= options.recoverTo
-        ? { kind: "recovered", ate }
-        : { kind: "held", stop: "prohibited", ate, reason: `Defence ended at health ${bot.health}; required ${options.recoverTo}, but recovery is prohibited.` };
+      if (!options.holdWhile?.()) return endOfProhibitedRecovery(bot, options, ate);
+      const stopped = await waitOneTick(bot, options, held);
+      if (stopped) return stopped;
+      continue;
     }
     if (bot.food < REGENERATION_HUNGER && !hasRegeneration(bot)) {
       const meal = await eatInHold(bot, options, ate, hazardNow, unlessCleared, held);
@@ -187,7 +229,8 @@ export async function recoverUnderCover(bot: Bot, options: CoveredRecoveryOption
       // A bite can end with the bot dead (a fire dug out after it): its exits decide, never a wait.
       if (bot.health <= 0) break;
     }
-    await options.wait(1);
+    const stopped = await waitOneTick(bot, options, held);
+    if (stopped) return stopped;
   }
   const endCause = await unlessCleared();
   if (endCause) return { kind: "exposed", ate, cause: endCause };

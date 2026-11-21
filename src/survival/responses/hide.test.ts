@@ -15,6 +15,10 @@ import { regionRefusalText, setProtectedRegionsProvider, type ProtectedRegion } 
 import { observeHostileResponse } from "../control/combat/observation.js";
 import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
+import { exactBlockGoal } from "../../navigation/goals/index.js";
+import { createMovementPolicy } from "../../navigation/movements/policy.js";
+import { createNavigationRuntime } from "../../navigation/runtime.js";
+import { PHYSICS_TICK_WALL_MS } from "../../utils/physics-ticks.js";
 import { hideInPlace } from "./hide.js";
 import { capBlock, countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../positioning/combat/hide-blocks.js";
 
@@ -904,4 +908,75 @@ test("a slow third cell leaves the dug part and names it", async () => {
   assert.match(result.error ?? "", /shaft cell deepslate digs in \d+\.\d s, \d\.\d s left/);
   assert.match(result.error ?? "", /2 shaft cells already dug/);
   assert.equal(bot.blockAt(new Vec3(0, 61, 0))!.name, "deepslate", "the slow cell was left whole");
+});
+
+// D33 (plan 2026-11-18-scenario-reds-part2-a3 T13g): the covered hold inside a finished shelter counts game time. The scenes
+// are sealed boxes with no regeneration model: health arrives at a chosen server tick.
+function sealedHold(options: { readonly ticksPerSecond: number; readonly maximumMs: number; readonly healthAtTick?: number; readonly simulatePhysics?: boolean }) {
+  const scene_ = scene({ mockedClock: true, health: 6, food: 20, cells: SEALED_BOX, server: { ticksPerSecond: options.ticksPerSecond },
+    simulatePhysics: options.simulatePhysics });
+  const { bot, server } = scene_;
+  const startTick = server.gameTime;
+  if (options.healthAtTick !== undefined) {
+    const release = server.onTick(() => { if (server.gameTime - startTick >= options.healthAtTick!) { bot.health = 18; release(); } });
+  }
+  return { ...scene_, hold: () => hide(bot, new Set(), options.maximumMs) };
+}
+
+test("a hold whose server and client physics are both stopped ends held unavailable within one physics-tick wall", async () => {
+  const { bot, clock, server, hold } = sealedHold({ ticksPerSecond: 20, maximumMs: 10_000 });
+  using _installed = clock.install();
+  server.stop();
+  bot.physicsEnabled = false;
+  const startMs = clock.now();
+  const result = await clock.settle(hold(), 5_000);
+  assert.equal(result.kind, "held");
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, "unavailable");
+  assert.match(result.error ?? "", /client physics stopped/);
+  assert.ok(clock.now() - startMs <= PHYSICS_TICK_WALL_MS + 100, `${clock.now() - startMs} ms`);
+  assert.equal(bot.listenerCount("physicsTick"), 0, "the aborted wait left no physics listener");
+});
+
+test("a hold with physics running and the server stopped ends exhausted at its 33 000 ms wall", async () => {
+  const { bot, clock, server, hold } = sealedHold({ ticksPerSecond: 20, maximumMs: 10_000 });
+  using _installed = clock.install();
+  server.stop();
+  const startMs = clock.now();
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, "exhausted");
+  assert.ok(clock.now() - startMs >= 33_000 && clock.now() - startMs <= 33_200, `${clock.now() - startMs} ms`);
+  assert.equal(bot.listenerCount("physicsTick"), 0);
+});
+
+// A real caller at 10 tps (16 000 ms of clock, past the old wall); the rate table of the hold itself is in `recover-hold-clock.test.ts`.
+test("hideInPlace with a 10 s hold recovers at 10 tps when health reaches 18 at tick 160", async () => {
+  const { clock, hold } = sealedHold({ ticksPerSecond: 10, maximumMs: 10_000, healthAtTick: 160 });
+  using _installed = clock.install();
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.kind, "recovered", JSON.stringify(result));
+  assert.equal(result.healthAfter, 18);
+});
+
+// The next action from the held states: a navigate out of the shell through its wall completes within its bound.
+for (const state of ["exhausted", "unavailable"] as const) test(`a one-block navigate out of a shell completes after a hold that ended ${state} at 10 tps`, async () => {
+  const { bot, clock, server, world, hold } = sealedHold({ ticksPerSecond: 10, maximumMs: 10_000, simulatePhysics: true });
+  using _installed = clock.install();
+  if (state === "unavailable") bot.physicsEnabled = false;
+  const result = await clock.settle(hold(), 40_000);
+  assert.equal(result.recovery?.kind === "held" && result.recovery.stop, state);
+  bot.physicsEnabled = true;
+  const stop = server.onPacket("block_dig", (data) => {
+    const packet = data as { status: number; location: Vec3 };
+    if (packet.status === 2) server.answer(() => {
+      world.setCell(packet.location, "air");
+      bot._client.emit("block_change", { location: packet.location, type: 0 });
+    });
+  });
+  try {
+    await using navigation = createNavigationRuntime(bot);
+    const next = await clock.settle(navigation.navigate({
+      movements: createMovementPolicy(), goal: exactBlockGoal({ x: 1, y: 64, z: 0 }),
+    }), 60_000);
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally { stop(); }
 });
