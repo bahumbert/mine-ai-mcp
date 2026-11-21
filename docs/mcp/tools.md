@@ -659,7 +659,10 @@ supplies or explore for unloaded mobs. By default it returns when no loaded
 quarry remains. Its evidence lists the quarry the client holds at return,
 nearest first, and the drops still lying loaded at return; drops picked up or
 gone are counted, not listed. `observe_for_ms` opts into a finite wait in the action, measured
-from the first absence; fights and reflex suspension do not renew that window.
+from the first absence; fights and reflex suspension do not renew that window. It is game
+time at 20 ticks a second (45 000 = 900 world ticks at any server speed), ending at the first
+server time packet after it; a wall-clock backstop of 3 x (ticks + 20) x 50 ms ends it on a
+stopped server; with no server time heard it is real milliseconds.
 
 `camp_spawner: true` additionally remembers the nearest loaded spawner at
 admission and requires a positive `observe_for_ms`. After an absence wait, it
@@ -675,8 +678,8 @@ lighting, space and spawn rules permit spawning. Missing/destroyed spawners and
 failed return routes produce `spawner_unavailable` or `spawner_unreachable`.
 
 For example, `{ "mob_name": "blaze", "drop_name": "blaze_rod", "count": 12,
-"camp_spawner": true, "observe_for_ms": 45000 }` waits at most 45 seconds away
-before returning, then at most 45 seconds at the source without quarry.
+"camp_spawner": true, "observe_for_ms": 45000 }` waits at most 45 seconds of game
+time (900 world ticks) away before returning, then the same at the source without quarry.
 
 The result separates `termination`, explaining collection's end, from `handoff`,
 which records observed safety or an unsafe/interrupted withdrawal under the same policy. Success proves

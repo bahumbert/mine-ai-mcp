@@ -4,6 +4,8 @@ import { equipmentSlotsSchema } from "./equip/contract.js";
 const position = z.strictObject({ x: z.number(), y: z.number(), z: z.number() });
 const phase = z.string();
 const count = z.number();
+// A game-time window in server ticks (collect_mob_drop's `observe_for_ms`): `elapsed` is null until a server age was heard.
+const observationTicksSchema = z.strictObject({ elapsed: count.nullable(), limit: count });
 
 // Each action opts into its checkpoint contract. These schemas describe observed
 // evidence, not a universal percentage or a new completion policy.
@@ -19,8 +21,9 @@ export const pickupCheckpointSchema = z.strictObject({
 export const huntCheckpointSchema = z.strictObject({
   phase, selectedTargetId: count.nullable(), attacks: count, targetDeathsObserved: count, inventory: count, gained: count,
   requested: count, observationStartedAt: count.nullable(), observationUntil: count.nullable(),
+  observationTicks: observationTicksSchema.nullable().optional(),
   camp: z.strictObject({ position: position.nullable(), dimension: z.string(), phase,
-    returnAfter: count.nullable(), observationUntil: count.nullable() }).nullable(),
+    returnAfter: count.nullable(), observationUntil: count.nullable(), observationTicks: observationTicksSchema.nullable().optional() }).nullable(),
 });
 export const buildCheckpointSchema = z.strictObject({ phase, correct: count, requested: count, remaining: count, placed: count });
 export const craftCheckpointSchema = z.strictObject({ phase, items: z.array(z.strictObject({

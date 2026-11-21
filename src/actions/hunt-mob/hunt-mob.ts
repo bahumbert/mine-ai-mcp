@@ -16,7 +16,7 @@ import {
   type CombatStyle,
 } from "../../survival/index.js";
 import { Budgets } from "../../survival/state/budgets.js";
-import { clockStart, monotonicNow, waitForSignal, type ClockStart, type Position3 } from "../../utils/index.js";
+import { monotonicNow, waitForSignal, type Position3 } from "../../utils/index.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { hasInventorySpaceFor } from "../../world/inventory-capacity.js";
 import { hasItemFamily } from "../../world/item-families.js";
@@ -47,7 +47,7 @@ import {
 } from "./contract.js";
 import { observeHuntDrops } from "./drop-accounting.js";
 import { collectionTargetSafetyTier, compareCollectionTargets } from "./target-selection.js";
-import { closestLoadedSpawner, SpawnerCamp, spawnerCampGoal } from "./spawner-camp.js";
+import { closestLoadedSpawner, observationTicksOf, observationWindow, SpawnerCamp, spawnerCampGoal, waitInObservationWindow, type ObservationWindow } from "./spawner-camp.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -648,7 +648,8 @@ function beginHuntMob(
   let phase: { kind: "collecting" | "observing" } | { kind: "finishing"; result: HuntAttemptResult } = {
     kind: "collecting",
   };
-  let observationStart: ClockStart | null = null; // `at` shows in the checkpoint, `began` times the budget
+  // The window (game time, kept across a reflex): its `start.at` shows in the checkpoint, its deadline ends the wait.
+  let quarryWindow: ObservationWindow | null = null;
   let handedOff = false;
   observe(() => {
     const current = drop ? bot.inventory.count(drop.id, null) : 0;
@@ -662,8 +663,9 @@ function beginHuntMob(
         inventory: current,
         gained: current - inventoryBefore,
         requested: request.count,
-        observationStartedAt: observationStart?.at ?? null,
-        observationUntil: observationStart === null ? null : observationStart.at + request.observeForMs,
+        observationStartedAt: quarryWindow?.start.at ?? null,
+        observationUntil: quarryWindow === null ? null : quarryWindow.start.at + request.observeForMs,
+        observationTicks: observationTicksOf(quarryWindow),
         camp: camp?.snapshot ?? null,
       },
       completion: {
@@ -771,28 +773,23 @@ function beginHuntMob(
           break;
         }
         if (result.termination === "no_loaded_targets" && request.observeForMs > 0) {
-          observationStart ??= clockStart();
+          const window = (quarryWindow ??= observationWindow(bot, request.observeForMs));
           phase = { kind: "observing" };
-          using window = budgets.attempt({
+          // Evidence only: the window's game-time deadline decides (D32), as the evade's clock does.
+          using _budget = budgets.attempt({
             name: "quarry_observation",
-            scope: `request:${request.mobName}:${observationStart.at}`,
-            unit: "milliseconds",
-            limit: request.observeForMs,
-            measure: monotonicNow,
-            startedAt: observationStart.began,
+            scope: `request:${request.mobName}:${window.start.at}`,
+            unit: "ticks",
+            limit: window.ticks,
+            measure: () => window.elapsedTicks(monotonicNow()) ?? 0,
+            startedAt: 0,
+            wall: { limitMs: window.wallMs, measure: monotonicNow, startedAt: window.start.began },
             exhaustion:
               "Return partial inventory and observation_exhausted after a final observation and safe handoff.",
           });
-          // The original absolute window includes time spent suspended or fighting.
-          const remaining = window.remaining;
-          const appeared =
-            remaining > 0 &&
-            (await waitForSignal(() => available() || null, bot, ["entitySpawn", "entityUpdate", "physicsTick"], {
-              context,
-              timeoutMs: remaining,
-            }));
-          context.signal?.throwIfAborted();
-          if (appeared || available()) continue;
+          // The original window includes time spent suspended or fighting: a resume reads its end before any wait.
+          await waitInObservationWindow(bot, window, available, context.signal);
+          if (available()) continue;
           phase = {
             kind: "finishing",
             result: stoppedResult(

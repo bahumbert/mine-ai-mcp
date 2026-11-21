@@ -21,7 +21,7 @@ export const huntMobInputSchema = z
       .safe()
       .default(0)
       .describe(
-        "Without camping: one finite observation window after the first absence of loaded quarry; zero returns immediately and the window never renews. With camp_spawner: required positive wait before returning, and a second wait of the same duration at the spawner. No quarry there returns observation_exhausted. Reflex suspension does not renew either deadline.",
+        "Without camping: one finite observation window after the first absence of loaded quarry; zero returns immediately and the window never renews. With camp_spawner: required positive wait before returning, and a second wait of the same duration at the spawner. No quarry there returns observation_exhausted. Reflex suspension does not renew either deadline. Game time at 20 ticks a second (45 000 = 900 world ticks at any server speed), ending at the first server time packet after it; a wall-clock backstop of 3 x (ticks + 20) x 50 ms ends it on a stopped server; with no server time heard it is real milliseconds.",
       ),
     camp_spawner: z
       .boolean()
