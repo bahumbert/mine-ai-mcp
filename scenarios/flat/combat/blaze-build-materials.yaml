@@ -24,6 +24,9 @@ players:
         count: 1
       - item: shield
         count: 1
+      # The two opposing blazes are crossfire one shield cannot answer: the hunt's admission asks for cover blocks (preparation.ts).
+      - item: cobblestone
+        count: 64
 entities:
   - type: blaze
     pos:
@@ -44,7 +47,7 @@ client:
     - ../../src/hunter.ts
 goal:
   kind: all
-  timeout: 30
+  timeout: 90
   goals:
     - kind: kill
       who: BlazeMaterials
@@ -57,5 +60,5 @@ goal:
 params:
   mob_name: blaze
   drop_name: blaze_rod
-  count: 1
-  defeat_count: 1
+  count: 2
+  defeat_count: 2
