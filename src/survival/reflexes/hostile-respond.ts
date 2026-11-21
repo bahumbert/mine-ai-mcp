@@ -25,18 +25,33 @@ interface ResponseStart extends CoverCapture {
 /** The request each scene last released a fight for: one goal-met release per request, so no claim loop can form. */
 const goalReleases = new WeakMap<HostileScene, string>();
 
-/**
- * A fight that continues a request whose own goal is met ends at its next decision, once per request; the request
- * resumes and settles itself. The goal is the request's own `goalMet`, read only for the request this response began
- * on and in the life it began in.
- */
-function continuesMetGoal(scene: HostileScene, start: ResponseStart): boolean {
-  if (start.released) return true;
+/** The request this response began on, as it runs now; null once it ended, was replaced, or its life was cleared. */
+function continuedRequest(scene: HostileScene, start: ResponseStart): RequestSnapshot | null {
   const running = scene.driver.runner.request();
-  if (!start.request || running?.id !== start.request.id || scene.chains.generation !== start.generation) return false;
-  if (running.evidence?.goalMet !== true || goalReleases.get(scene) === running.id) return false;
-  goalReleases.set(scene, running.id);
-  start.released = "goal_met";
+  return start.request && running?.id === start.request.id && scene.chains.generation === start.generation ? running : null;
+}
+
+/**
+ * Why the request this fight continues ends it at its next decision, or null. A request whose own goal is met ends it
+ * once per request (this read spends that release, so no claim loop can form); the request resumes and settles itself.
+ * A stalled request ends it too: the finalize counts the fight and returns the request at the limit, not at the
+ * fight's end, and the running fight is counted as the one it will be when it ends.
+ */
+function takeFightEndReason(scene: HostileScene, running: RequestSnapshot, generation: number): NonNullable<ResponseStart["released"]> | null {
+  if (running.evidence?.goalMet === true && goalReleases.get(scene) !== running.id) {
+    goalReleases.set(scene, running.id);
+    return "goal_met";
+  }
+  return scene.stalls.limitIfCounted(running, generation, scene.bot.time.age ?? null, monotonicNow()) === null ? null : "stalled";
+}
+
+/** The fight's `satisfied` read: the first reason its request gave to end it stays the settlement's `released`. */
+function requestEndsFight(scene: HostileScene, start: ResponseStart): boolean {
+  if (start.released !== null) return true;
+  const running = continuedRequest(scene, start);
+  const reason = running && takeFightEndReason(scene, running, start.generation);
+  if (!reason) return false;
+  start.released = reason;
   return true;
 }
 
@@ -150,21 +165,19 @@ async function executeResponse(scene: HostileScene, directive: HostileResponse, 
   await prepareBotForMovement(bot, navigation, signal, { takeBackHits: HOSTILE_TAKE_BACK_HITS });
   signal.throwIfAborted();
   return executeHostileResponse(bot, navigation, controller,
-    directive.kind === "fight" ? { ...directive, caller: { satisfied: () => continuesMetGoal(scene, start) } } : directive,
+    directive.kind === "fight" ? { ...directive, caller: { satisfied: () => requestEndsFight(scene, start) } } : directive,
     context, healthBefore, signal);
 }
 
 /** Record each response once, refusing late work from a life or dimension that has ended. */
 function finalizeHostileResponse(scene: HostileScene, start: ResponseStart, settlement: HostileSettlement): HostileSettlement {
-  const { request, generation, startedAtMs, firstDistances } = start;
+  const { generation, startedAtMs, firstDistances } = start;
   const endedAtMs = monotonicNow();
-  // Reset invalidates in-flight work before the next response has observed the new generation.
-  const current = generation === scene.chains.generation;
   const age = scene.bot.time.age ?? null;
   // The request as it stands now: progress made during the response counts, and a request that was replaced or ended
-  // meanwhile is not the one this response continued, so it counts nothing for the request that replaced it.
-  const running = scene.driver.runner.request();
-  const continued = current && request !== null && running?.id === request.id ? running : null;
+  // meanwhile, or a life that was reset (invalidating in-flight work before the next response has observed the new
+  // generation), is not what this response continued, so it counts nothing for the request that replaced it.
+  const continued = continuedRequest(scene, start);
   if (continued) scene.stalls.observe(continued, generation, age, endedAtMs);
   const stall = continued && settlement.kind === "completed" && (settlement.response === "fight" || settlement.response === "evade")
     ? scene.stalls.recordResponse(continued, generation, settlement.response, settlement.evidence.threats, age, endedAtMs) : null;

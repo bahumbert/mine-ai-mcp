@@ -590,7 +590,7 @@ const FIGHT_READ_TICKS = 20;
  * An `engage` that reads its caller's `satisfied` every 20 world ticks: `target_lost` when true, else `died` at the
  * ceiling. The zombie stands in reach, so the fight's contact watch (which ends a fight out of reach) leaves it be.
  */
-function pollingFight(fixture: ReturnType<typeof journeyFixture>, rate: number): CombatController["engage"] {
+function pollingFight(fixture: ReturnType<typeof journeyFixture>, rate: number, ceilingTicks = FIGHT_CEILING_TICKS): CombatController["engage"] {
   fixture.bot.entities[8]!.position.set(1.5, 64, 0.5);
   return async (targetId, signal, _movement, options) => {
     const startedAt = fixture.bot.time.age;
@@ -598,7 +598,7 @@ function pollingFight(fixture: ReturnType<typeof journeyFixture>, rate: number):
       await fixture.clock.sleep(FIGHT_READ_TICKS * 1_000 / rate);
       if (signal.aborted) return { ...killed(targetId), kind: "cancelled" };
       if (options?.satisfied?.()) return { ...killed(targetId), kind: "target_lost" };
-      if (fixture.bot.time.age - startedAt >= FIGHT_CEILING_TICKS) return killed(targetId);
+      if (fixture.bot.time.age - startedAt >= ceilingTicks) return killed(targetId);
     }
   };
 }
@@ -630,6 +630,8 @@ for (const rate of [20, 10]) test(`a reflex fight whose request never meets its 
   await using fixture = journeyFixture(rate);
   await fixture.started();
   for (const met of [false, undefined]) {
+    // One request each: a second 2,000-tick fight on the same request is a stalled one (T18l).
+    if (met === undefined) await fixture.replaceJourney();
     fixture.journey.met = met;
     fixture.engage.run = pollingFight(fixture, rate);
     const startAge = fixture.bot.time.age;
@@ -692,8 +694,131 @@ for (const rate of [20, 10]) test(`a second fight on a request whose goal alread
   const startAge = fixture.bot.time.age;
   const first = await fixture.respond();
   assert.deepEqual([first.released, fixture.bot.time.age - startAge], ["goal_met", FIGHT_READ_TICKS]);
+  // The second fight ends by itself at 1,000 ticks, under the stall limit (T18l: a longer one would end `stalled`, not by the goal).
+  const secondCeiling = 1_000;
+  fixture.engage.run = pollingFight(fixture, rate, secondCeiling);
   const secondAge = fixture.bot.time.age;
   const second = await fixture.respond();
-  assert.deepEqual([second.released, fixture.bot.time.age - secondAge], [undefined, FIGHT_CEILING_TICKS], "once per request");
+  assert.deepEqual([second.released, fixture.bot.time.age - secondAge], [undefined, secondCeiling], "once per request");
+  fixture.assertNoListenersLeft();
+});
+
+// A fight that continues a stalled request ends at its next decision after the limit (plan 2026-11-18-scenario-reds-part3-a4 T18l).
+const STALL_TICKS_LIMIT = 1_680;
+const STALL_REASON = /^\[HOSTILE_STALLED\] 2 hostile responses \(0 evades\) from zombie#8 over 16[89]\d server ticks without progress on navigate/;
+
+/** The journey's first fight, instant and completed; the second then runs as `engage` says. */
+async function afterFirstFight(fixture: ReturnType<typeof journeyFixture>) {
+  await fixture.started();
+  const first = await fixture.respond();
+  assert.deepEqual([first.stall?.limit, first.stall?.responses], [null, 1]);
+}
+
+for (const rate of [20, 10]) test(`a second reflex fight on a journey with no progress ends at its first read at or after 1680 ticks, and the journey is returned (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await afterFirstFight(fixture);
+  fixture.engage.run = pollingFight(fixture, rate);
+  const startAge = fixture.bot.time.age;
+  const second = await fixture.respond();
+  const ticks = second.stall?.ticks ?? -1;
+  assert.ok(ticks >= STALL_TICKS_LIMIT && ticks <= STALL_TICKS_LIMIT + FIGHT_READ_TICKS - 1, `stall over ${ticks} ticks, the fight ended ${fixture.bot.time.age - startAge} ticks after its start`);
+  assert.deepEqual([second.kind, fightResult(second), second.released, second.stall?.limit, second.stall?.responses],
+    ["completed", "target_lost", "stalled", "ticks", 2]);
+  const continuation = responseContinuation(second);
+  assert.equal(continuation.kind, "return");
+  assert.match(continuation.kind === "return" ? continuation.reason ?? "" : "", STALL_REASON);
+  assert.equal(responseFailure(second), null, "the target is not remembered as lost");
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a second fight that ends by itself at 1660 ticks resumes, and the third ends at its first read after 1680 (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await afterFirstFight(fixture);
+  fixture.engage.run = pollingFight(fixture, rate, 1_660);
+  const second = await fixture.respond();
+  assert.deepEqual([fightResult(second), second.released, second.stall?.limit, second.stall?.responses, responseContinuation(second).kind],
+    ["died", undefined, null, 2, "resume"]);
+  fixture.engage.run = pollingFight(fixture, rate);
+  const thirdAge = fixture.bot.time.age;
+  const third = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - thirdAge, third.stall?.ticks, third.released, third.stall?.limit, third.stall?.responses, responseContinuation(third).kind],
+    [FIGHT_READ_TICKS, STALL_TICKS_LIMIT, "stalled", "ticks", 3, "return"]);
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) for (const dip of [false, true]) test(`a second fight during which the journey gets closer at 840 ticks${dip ? " and back at 860" : ""} ${dip ? "is still ended by the stall, counted from the first reading" : "is not ended by the stall, and its finalize counts the progress"} (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await afterFirstFight(fixture);
+  fixture.engage.run = pollingFight(fixture, rate);
+  const startAge = fixture.bot.time.age;
+  afterTicks(fixture, rate, 840, () => { fixture.journey.remaining = 99; });
+  if (dip) afterTicks(fixture, rate, 860, () => { fixture.journey.remaining = 100; });
+  const second = await fixture.respond();
+  // Written into the stall's best at 840 ticks, the dip would have restarted the count from there: no stop at 1680.
+  if (dip) {
+    assert.deepEqual([fightResult(second), second.released, second.stall?.limit, second.stall?.best, second.stall?.responses],
+      ["target_lost", "stalled", "ticks", 100, 2]);
+    const ticks = second.stall?.ticks ?? -1;
+    assert.ok(ticks >= STALL_TICKS_LIMIT && ticks < STALL_TICKS_LIMIT + FIGHT_READ_TICKS, `counted from the first reading: ${ticks} ticks`);
+  } else {
+    assert.deepEqual([fixture.bot.time.age - startAge, fightResult(second), second.released, second.stall?.limit, second.stall?.responses, second.stall?.ticks, second.stall?.best],
+      [FIGHT_CEILING_TICKS, "died", undefined, null, 1, 0, 99]);
+    assert.equal(fixture.counted(), 1);
+  }
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`progress landing right after the stall ended a fight keeps the request: the fight is released, the count restarts, the request resumes (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await afterFirstFight(fixture);
+  const polling = pollingFight(fixture, rate);
+  fixture.engage.run = (targetId, signal, movement, options) => polling(targetId, signal, movement, options && { satisfied: () => {
+    const ended = options.satisfied?.() === true;
+    if (ended) fixture.journey.remaining = 99; // the journey closes in after the stall read said stop and before the finalize
+    return ended;
+  } });
+  const second = await fixture.respond();
+  assert.deepEqual([fightResult(second), second.released, second.stall?.limit, second.stall?.responses, second.stall?.best, responseContinuation(second).kind],
+    ["target_lost", "stalled", null, 1, 99, "resume"], "the receipt says the stall read ended the fight; the request was not returned");
+  assert.equal(fixture.counted(), 1);
+  fixture.engage.run = pollingFight(fixture, rate, 200);
+  const nextAge = fixture.bot.time.age;
+  const next = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - nextAge, next.released, next.stall?.limit, next.stall?.responses], [200, undefined, null, 2],
+    "the next fight is not ended at its first read: the count restarted at the progress");
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a second fight on a stopped server ends at the first poll at or after the wall backstop, world age unchanged (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  const began = fixture.clock.now();
+  await afterFirstFight(fixture);
+  fixture.server.stop();
+  const age = fixture.bot.time.age;
+  const POLL_MS = 1_000;
+  fixture.bot.entities[8]!.position.set(1.5, 64, 0.5); // in reach, so the fight's contact watch leaves it be
+  fixture.engage.run = async (targetId, signal, _movement, options) => {
+    for (;;) {
+      await fixture.clock.sleep(POLL_MS);
+      if (signal.aborted) return { ...killed(targetId), kind: "cancelled" };
+      if (options?.satisfied?.()) return { ...killed(targetId), kind: "target_lost" };
+    }
+  };
+  const second = await fixture.clock.settle(fixture.respond(), serverPacedWallMs(STALL_TICKS_LIMIT) + 10 * POLL_MS);
+  const elapsed = fixture.clock.now() - began;
+  assert.deepEqual([second.released, second.stall?.limit, second.stall?.ticks, fixture.bot.time.age], ["stalled", "wall", 0, age]);
+  assert.ok(elapsed >= serverPacedWallMs(STALL_TICKS_LIMIT) && elapsed < serverPacedWallMs(STALL_TICKS_LIMIT) + 2 * POLL_MS, `ended ${elapsed} ms after the first reading`);
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a second fight whose journey is cancelled at 1000 ticks has no request to return and runs to its own end (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await afterFirstFight(fixture);
+  fixture.engage.run = pollingFight(fixture, rate);
+  const startAge = fixture.bot.time.age;
+  afterTicks(fixture, rate, 1_000, () => { fixture.driver.runner.cancelActive("Cancel the journey"); });
+  const second = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - startAge, fightResult(second), second.released, second.stall], [FIGHT_CEILING_TICKS, "died", undefined, null]);
+  assert.equal(fixture.counted(), undefined);
   fixture.assertNoListenersLeft();
 });

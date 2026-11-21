@@ -1,5 +1,5 @@
 // A request that keeps being answered by hostile fights and evades without getting closer to its objective is handed back to the model.
-import type { RequestSnapshot } from "../../session/request.js";
+import type { RequestEvidence, RequestSnapshot } from "../../session/request.js";
 import { serverPacedWallMs } from "../../world/world-age.js";
 
 /**
@@ -74,6 +74,18 @@ export class RequestStalls {
     return tracker ? factsOf(tracker, age, nowMs) : null;
   }
 
+  /**
+   * The limit the running fight would reach if it ended now, read without moving `best` or the count: only the
+   * response start, its finalize and the held release record progress. Null for another life, another request, a request
+   * with no objective, evidence that would count as progress, and fewer than two responses counting the running one.
+   */
+  limitIfCounted(request: RequestSnapshot | null, generation: number, age: number | null, nowMs: number): StallFacts["limit"] {
+    const tracker = this.#tracker;
+    if (!tracker || generation !== this.#generation || request?.id !== tracker.requestId) return null;
+    if (request.evidence !== null && (request.evidence.objective === undefined || progressed(tracker, request.evidence))) return null;
+    return factsOf({ ...tracker, responses: tracker.responses + 1 }, age, nowMs).limit;
+  }
+
   /** Forget the count; the newest generation heard stays, so a late finalize of the life that ended is still refused. */
   clear(): void {
     this.#tracker = null;
@@ -105,13 +117,13 @@ export class RequestStalls {
       : (this.#tracker = { requestId: request.id, action: request.action, best: null, current: null,
         responses: 0, evades: 0, progressAge: age, progressMs: nowMs, threats: new Map() });
     tracker.progressAge ??= age;
-    const { objective, completion } = request.evidence;
+    const { objective } = request.evidence;
     tracker.current = objective?.remaining ?? null;
+    // The first reading sets `best` and is no progress; every later one is judged against it.
     const first = objective && tracker.best === null;
+    const moved = progressed(tracker, request.evidence);
     if (first) tracker.best = objective.remaining;
-    const progressed = completion.observed
-      || (objective && !first && tracker.best !== null && objective.remaining <= tracker.best - objective.tolerance);
-    if (!progressed) return tracker;
+    if (!moved) return tracker;
     if (objective) tracker.best = objective.remaining;
     tracker.responses = 0;
     tracker.evades = 0;
@@ -119,6 +131,13 @@ export class RequestStalls {
     tracker.progressMs = nowMs;
     return tracker;
   }
+}
+
+/** A reading is progress when its completion is observed, or its remaining distance is a full tolerance under the best so far; the first reading, with no best yet, is none. */
+function progressed(tracker: Tracker, evidence: RequestEvidence): boolean {
+  const { objective, completion } = evidence;
+  return completion.observed
+    || (objective !== undefined && objective !== null && tracker.best !== null && objective.remaining <= tracker.best - objective.tolerance);
 }
 
 function factsOf(tracker: Tracker, age: number | null, nowMs: number): StallFacts {

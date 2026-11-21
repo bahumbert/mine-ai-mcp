@@ -3437,3 +3437,92 @@ for (const rate of [20, 10]) test(`blazes entering contact after a hunt's releas
   for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
 });
 
+// A reflex fight that continues a stalled request ends at its next decision after the limit (plan 2026-11-18-scenario-reds-part3-a4 T18l).
+const STALL_FIGHT_CEILING_TICKS = 4_000;
+const STALL_PROGRESS_EVERY_TICKS = 300;
+const STALL_TARGET_ID = 8;
+
+/**
+ * A reflex on a `navigate` that publishes a distance it never closes: its first fight completes at once (its target,
+ * the nearest, is removed), its second polls `satisfied` every 20 world ticks up to 4,000 ticks (the target attacked every 300 ticks, so
+ * the driver's no-progress limit stays out of it), the later ones end after 400 ticks with the target removed.
+ */
+function stallReflex(rate: number, target: FakeEntitySpec) {
+  const fights: GoalFight[] = [];
+  /** Each fight as it begins: its target, and the request it continues (null: none). */
+  const starts: { readonly targetId: number; readonly request: string | null }[] = [];
+  const fixture: ReflexFixture = reflexFixture(async (targetId, signal, _movement, options) => {
+    const from = fixture.bot.time.age;
+    starts.push({ targetId, request: fixture.runner.request()?.id ?? null });
+    const end = (ended: GoalFight["ended"]) => void fights.push({ targetId, from, to: fixture.bot.time.age, ended });
+    if (fights.length === 0) { // the mob that began the journey's hostile responses dies as the one that stalls it arrives
+      fixture.entities.remove(targetId);
+      fixture.entities.spawn({ id: STALL_TARGET_ID, ...target });
+      end("died");
+      return died(targetId);
+    }
+    const ceiling = fights.length === 1 ? STALL_FIGHT_CEILING_TICKS : GOAL_FIGHT_TICKS;
+    for (let marked = 0; ; ) {
+      await fixture.clock.sleep(GOAL_READ_TICKS * 1_000 / rate);
+      const elapsed = fixture.bot.time.age - from;
+      if (signal.aborted) { end("cancelled"); return { ...died(targetId), kind: "cancelled" }; }
+      if (options?.satisfied?.()) { end("target_lost"); return { ...died(targetId), kind: "target_lost" }; }
+      if (elapsed >= ceiling) { fixture.entities.remove(targetId); end("died"); return died(targetId); }
+      if (elapsed >= (marked + 1) * STALL_PROGRESS_EVERY_TICKS) { marked++; fixture.combat.hurt(targetId, null, 1); }
+    }
+  }, undefined, { clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate, startAge: 1_000 },
+    stand: { position: new Vec3(0, 64, 0), groundY: 63 }, entities: { 7: hostile("zombie", 1) }, carried: { diamond_sword: 1, shield: 1 } });
+  const input = z.object({});
+  const action = defineAction({ name: "navigate", description: "A journey that never gets closer", inputSchema: input,
+    resultSchema: actionResultSchema({}), formatResult: (result) => result.status, parse: (value: unknown) => input.parse(value),
+    execution: { kind: "resumable_task" }, begin: (_request, _lifetime, observe) => {
+      observe(() => ({ baseline: null, checkpoint: null, objective: { remaining: 100, tolerance: 1 },
+        completion: { kind: "current", observed: false, owes: "reach the destination" } }));
+      return async ({ signal }) => {
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        return signal!.aborted ? { status: "cancelled" as const, error: "interrupted" } : { status: "succeeded" as const };
+      };
+    } });
+  return { fixture, fights, starts, action,
+    run: () => fixture.clock.settle(fixture.runner.run(action, {}), 2 * STALL_FIGHT_CEILING_TICKS * 1_000 / rate),
+    /** A fight still running (a failed assertion leaves one) ends on the clock before the reflex closes. */
+    async [Symbol.asyncDispose]() {
+      await fixture.clock.advance(STALL_FIGHT_CEILING_TICKS * 1_000 / rate, 1_000);
+      await fixture.observer.close();
+      fixture.data.close();
+    } };
+}
+
+for (const rate of [20, 10]) for (const [where, target] of [["in reach", hostile("zombie", 1.5)], ["out of reach", hostile("blaze", 8)]] as const)
+test(`a navigate returned stalled inside its second reflex fight leaves the reflex fighting the same ${where} target, and the next navigate finishes (${rate} tps)`, async () => {
+  await using journey = stallReflex(rate, target);
+  const { fixture, fights, starts } = journey;
+  using _clock = fixture.clock.install();
+  const added = listenersAddedSince(fixture.bot);
+  const start = fixture.bot.entity.position.clone();
+  const returned = await journey.run();
+  const [, second] = fights;
+  // The window, the text and the settlement of the stall return: hostile-respond.test.ts, one layer down.
+  assert.deepEqual([returned.result.status, fights[0]?.targetId, second?.targetId, second?.ended], ["cancelled", 7, 8, "target_lost"], JSON.stringify([fights, returned.result, recordedEncounters(fixture.data)]));
+  assert.ok(second!.to - second!.from < STALL_FIGHT_CEILING_TICKS, "the second fight ended before its own end");
+  assert.match(returned.result.status === "cancelled" ? returned.result.error : "", /\[HOSTILE_STALLED\] 2 hostile responses/);
+  assert.equal(returned.request?.state.kind, "returned");
+  assert.equal(encounterReceipts(fixture.data)[1].released, "stalled");
+  // The next decision on the same target is the one after any fight: a fight claim, with no request behind it.
+  await fixture.clock.advance(3 * GOAL_READ_TICKS * 1_000 / rate, 1_000);
+  assert.deepEqual([starts[2]?.targetId, starts[2]?.request, fixture.runner.request()], [8, null, null], JSON.stringify(starts));
+  assert.deepEqual(fixture.driver.answered.snapshot(), [], "no remembered failure, so no evade of an out-of-reach target either");
+  assert.deepEqual(fixture.bot.entity.position, start, "the return moved the body nowhere");
+  const navigations = { count: 0 };
+  // A model that calls an action at once finds the third claim holding the body: the answer is the claim's, never a second stall return.
+  const during = await fixture.clock.settle(fixture.runner.run(walkRequest(fixture.navigation, navigations, "navigate"), {}), 1_000);
+  assert.deepEqual([during.result.status, navigations.count], ["failed", 0]);
+  assert.match(during.result.status === "failed" ? during.result.error : "", /^\[ACTION_BUSY\] hostile_reflex has been running since .*; no new action started\.$/);
+  assert.equal(fixture.runner.request(), null, "the refused action left no request behind");
+  await fixture.clock.advance(GOAL_FIGHT_TICKS * 1_000 / rate, 1_000);
+  assert.deepEqual(fights.map((fight) => [fight.targetId, fight.ended]), [[7, "died"], [8, "target_lost"], [8, "died"]], "the third fight, with no request behind it, ran to its end");
+  const next = await fixture.clock.settle(fixture.runner.run(walkRequest(fixture.navigation, navigations, "navigate"), {}), 2 * GOAL_FIGHT_TICKS * 1_000 / rate);
+  assert.deepEqual([next.result.status, navigations.count], ["succeeded", 1], JSON.stringify(next.result));
+  for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
+

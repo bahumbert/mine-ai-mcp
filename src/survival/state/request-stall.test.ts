@@ -51,6 +51,10 @@ function sceneAt(ticksPerSecond: number, options: { timePacketYet?: boolean } = 
     },
     observe(request: RequestSnapshot | null, generation = 0) { stalls.observe(request, generation, age(), clock.now()); },
     check(request: RequestSnapshot | null, generation = 0) { return stalls.check(request, generation, age(), clock.now()); },
+    /** The limit a running fight would reach now; `atAge` reads at an age the fake's 20-tick packets cannot land on. */
+    ifCounted(request: RequestSnapshot | null, generation = 0, atAge: number | null = age()) {
+      return stalls.limitIfCounted(request, generation, atAge, clock.now());
+    },
   };
 }
 
@@ -199,6 +203,79 @@ atRates("fights alone return on the wall backstop of a stopped server", async (s
   assert.equal(s.check(request)?.limit, null, "one response is no chain");
   s.fight(request);
   assert.deepEqual([s.check(request)?.limit, s.age()], ["wall", 0]);
+});
+
+// B1: the limit a running fight would reach is read without moving the count (plan 2026-11-18-scenario-reds-part3-a4 T18l).
+atRates("limitIfCounted counts the running fight as the second response, from 1679 and 1680 ticks (T10)", (s) => {
+  const request = requestOf(far(20));
+  s.observe(request); // world age 0: the progress age
+  s.fight(request);
+  assert.equal(s.ifCounted(request, 0, STALL_TICKS - 1), null, "1679 ticks since the progress");
+  assert.equal(s.ifCounted(request, 0, STALL_TICKS), "ticks", "1680 ticks");
+  assert.equal(s.ifCounted(request, 0, STALL_TICKS + 1), "ticks");
+});
+
+atRates("limitIfCounted counts the running fight as a response and never as an evade", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  await s.toAge(5_000);
+  assert.equal(s.ifCounted(request), null, "no completed response: the running fight would be the first, 5000 ticks or not");
+  s.fight(request);
+  assert.equal(s.ifCounted(request), "ticks", "one completed fight and the running one make two");
+  const evading = requestOf(far(20), { id: "evading" });
+  s.observe(evading);
+  for (let evade = 1; evade < STALL_EVADES; evade++) s.evade(evading);
+  assert.equal(s.ifCounted(evading), null, `${STALL_EVADES - 1} evades stay under the limit`);
+  assert.equal(s.check(evading)?.evades, STALL_EVADES - 1);
+  s.evade(evading);
+  assert.equal(s.ifCounted(evading), "evades", `${STALL_EVADES} recorded evades`);
+});
+
+atRates("limitIfCounted on a stopped server reads the wall backstop, one millisecond either side", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  s.fight(request);
+  s.harness.server.stop();
+  await s.pass(WALL_MS - 1);
+  assert.equal(s.ifCounted(request), null);
+  await s.pass(1);
+  assert.deepEqual([s.ifCounted(request), s.age()], ["wall", 0]);
+});
+
+atRates("limitIfCounted is a pure read: a dip returns null and moves neither best, count nor ticks", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  s.fight(request);
+  await s.toAge(STALL_TICKS);
+  const before = s.check(request);
+  assert.equal(s.ifCounted(requestOf(far(19))), null, "a full tolerance closer is progress: no limit");
+  assert.deepEqual(s.check(request), before, "the dip left best, responses and ticks as they were");
+  assert.equal(s.ifCounted(requestOf(far(19.01))), "ticks", "a hair under the tolerance is not progress (T10)");
+  assert.equal(s.ifCounted(requestOf(far(20), { observed: true })), null, "a completion observed is progress");
+  assert.equal(s.ifCounted(request), "ticks");
+  assert.equal(s.ifCounted(request), "ticks");
+  assert.deepEqual(s.check(request), before, "two calls leave the count at one");
+  assert.equal(s.check(request)?.responses, 1);
+});
+
+test("limitIfCounted is null for another request, an old or new generation, no objective, no request, nothing tracked and a clear; it reads the stored count when the evidence failed to read", async () => {
+  const s = sceneAt(20);
+  const request = requestOf(far(20));
+  assert.equal(s.ifCounted(request, 2), null, "nothing tracked yet");
+  s.observe(request, 2);
+  s.fight(request, 2);
+  await s.toAge(STALL_TICKS);
+  assert.equal(s.ifCounted(request, 2), "ticks");
+  assert.equal(s.ifCounted(unreadable(request), 2), "ticks", "an observer that failed once reads nothing new: the stored count decides");
+  assert.equal(s.ifCounted(requestOf(far(20), { id: "request-2" }), 2), null, "another request");
+  assert.equal(s.ifCounted(request, 1), null, "an old life");
+  assert.equal(s.ifCounted(request, 3), null, "a life nothing has been counted in");
+  assert.equal(s.ifCounted(requestOf(undefined), 2), null, "an action that publishes no objective");
+  assert.equal(s.ifCounted(null, 2), null, "no request");
+  assert.equal(s.check(request, 2)?.responses, 1, "no refused read dropped the tracker or moved the generation");
+  assert.equal(s.ifCounted(request, 2), "ticks");
+  s.stalls.clear();
+  assert.equal(s.ifCounted(request, 2), null, "cleared");
 });
 
 test("a new generation drops the fight count", () => {
