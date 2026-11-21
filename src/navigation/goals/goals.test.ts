@@ -6,6 +6,9 @@ import { excavateGoal } from "./excavate.js";
 import { MemoryWorld as GoalTestWorld } from "../world/memory-world.js";
 import type { NavigationObservation, Position3 } from "../world/world.js";
 import type { ResolvedGoal } from "./goal.js";
+import { searchRegion } from "../search/region.js";
+import { dryLandGoal } from "./dry-land.js";
+import { liquidAccessGoal } from "./liquid-access.js";
 import * as goals from "./index.js";
 import {
   DESCENT_TICKS_PER_BLOCK,
@@ -22,6 +25,64 @@ import {
 } from "./index.js";
 
 const goalTestWorld = new GoalTestWorld();
+
+test("each bounded goal's region measures blocks to the cells it accepts", () => {
+  const root = { x: 0, y: 63, z: 0 };
+  const cases = [
+    { goal: exactBlockGoal({ x: 5, y: 63, z: 0 }), straight: 5, end: { x: 5, y: 63, z: 0 } },
+    { goal: nearGoal({ x: 10, y: 63, z: 0 }, 2), straight: 8, end: { x: 8, y: 63, z: 0 } },
+    { goal: nearXzGoal({ x: 0, z: 12 }, 1), straight: 11, end: { x: 0, y: 63, z: 11 } },
+    { goal: advanceGoal({ x: 0.5, z: 0.5 }, { x: 1, z: 0 }, 16), straight: 16, end: { x: 16, y: 63, z: 0 } },
+    { goal: advanceGoal({ x: 0.5, z: 0.5 }, { x: 2, z: 0 }, 32), straight: 16, end: { x: 16, y: 63, z: 0 } },
+    { goal: occupyGoal({ x: 4, y: 65, z: 0 }, 2), straight: Math.hypot(4, 1), end: { x: 4, y: 64, z: 0 } },
+  ];
+  for (const row of cases) {
+    const resolved = active(row.goal.resolve(observation()));
+    const region = resolved.region?.(root);
+    assert.ok(region);
+    assert.equal(region.satisfies, resolved.isSatisfied);
+    assert.equal(region.parts[0]?.straight, row.straight);
+    assert.equal(region.parts[0]?.distance(row.end), 0);
+  }
+  const drop = { position: { x: 3.4, y: 63, z: 0.6 }, width: 0.25, height: 0.25 };
+  const item = active(itemPickupGoal({ id: 7 }).resolve(watching(observation().position, drop)));
+  const itemRegion = item.region?.(root);
+  assert.ok(itemRegion);
+  assert.equal(itemRegion.parts[0]?.straight, Math.min(Math.hypot(3, 0), Math.hypot(3, 1)));
+  assert.equal(itemRegion.parts[0]?.distance({ x: 3, y: 62, z: 0 }), 0);
+  const touching = active(itemPickupGoal({ id: 7 }).resolve(watching(drop.position, drop)));
+  assert.equal(touching.region, undefined);
+});
+
+test("goals without a proven distance have no region, and unions require every active branch", () => {
+  const root = { x: 0, y: 63, z: 0 };
+  const a = nearGoal({ x: 4, y: 63, z: 0 }, 1);
+  const b = nearGoal({ x: 8, y: 63, z: 0 }, 1);
+  const custom = goals.customGoal("custom", () => false);
+  const body = { position: { x: 6.5, y: 63, z: 0.5 }, width: 0.6, height: 1.8 };
+  const unproven = [
+    { name: "near entity", seen: watching(observation().position, body), goal: nearEntityGoal({ id: 7 }, 1) },
+    { name: "custom", seen: observation(), goal: custom },
+    { name: "safe from entities", seen: observation(), goal: safeFromEntitiesGoal([], 1) },
+    { name: "excavate", seen: observation(), goal: excavateGoal(root) },
+    { name: "dry land", seen: observation(), goal: dryLandGoal(63) },
+    { name: "liquid access", seen: observation(), goal: liquidAccessGoal([{ x: 3, y: 62, z: 0 }], "water") },
+  ];
+  for (const row of unproven) assert.equal(searchRegion(active(row.goal.resolve(row.seen)), root), null, row.name);
+  // A branch whose region was built for another predicate cannot vouch for the union.
+  const foreign = { resolve: () => ({ ...active(a.resolve(observation())), isSatisfied: () => false }) };
+  assert.equal(searchRegion(active(anyGoal([foreign, b]).resolve(observation())), root), null);
+  for (const heading of [{ x: Infinity, z: 0 }, { x: NaN, z: 1 }])
+    assert.equal(active(advanceGoal({ x: 0.5, z: 0.5 }, heading, 16).resolve(observation())).region, undefined);
+  const resolved = active(a.resolve(observation()));
+  assert.equal(searchRegion({ ...resolved, isSatisfied: () => false }, root), null);
+  assert.equal(searchRegion(active(anyGoal([]).resolve(observation())), root), null);
+  assert.equal(searchRegion(active(anyGoal([a, b]).resolve(observation())), root)?.parts.length, 2);
+  assert.equal(searchRegion(active(anyGoal([a, custom]).resolve(observation())), root), null);
+  assert.equal(searchRegion(active(anyGoal([a, nearEntityGoal({ id: 7 }, 1)]).resolve(observation())), root)?.parts.length, 1);
+  assert.equal(searchRegion(active(anyGoal([anyGoal([a, b]), a]).resolve(observation())), root)?.parts.length, 3);
+  assert.equal(searchRegion(active(advanceGoal({ x: 0.5, z: 0.5 }, { x: 0, z: 0 }, 16).resolve(observation())), root), null);
+});
 
 test("stationary excavation judges actual support and preserves the admitted body pose", () => {
   const cases = [

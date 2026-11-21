@@ -18,6 +18,16 @@ export interface PlanningNode {
 
 export type GoalEndPredicate = (node: PlanningNode, observation: NavigationObservation) => boolean;
 
+/** A lower bound in blocks from a feet cell to the nearest cell this part accepts. */
+export interface GoalRegionPart {
+  readonly straight: number;
+  distance(feet: BlockPosition): number;
+}
+export interface GoalRegion {
+  readonly satisfies: (node: PlanningNode, world: WorldView) => boolean;
+  readonly parts: readonly GoalRegionPart[];
+}
+
 export type ResolvedGoal =
   | {
       readonly kind: "active";
@@ -36,6 +46,7 @@ export type ResolvedGoal =
       progress?(node: PlanningNode): number;
       /** Search supplies predicted edits; arrival supplies the observed world. */
       isSatisfied(node: PlanningNode, world: WorldView): boolean;
+      region?(root: BlockPosition): GoalRegion | null;
       /**
        * Every integer feet cell `satisfies` accepts, or null for an unbounded set, a cube over `limit`,
        * or a fractional centre. `satisfies` is the goal's own `isSatisfied` function object.

@@ -27,6 +27,8 @@ The [`NavigationEvent`](../../src/navigation/telemetry/index.ts) type in [teleme
 
 Step phase events transition through six distinct states: `aligning`, `breaking`, `placing`, `activating`, `moving`, and `confirming`.
 
+Search counts include `region` when the resolved goal has a proven distance: `straight` is the nearest part's initial distance, `allowance` is null, and `refused` is zero. A committed route also reports `detour`, the largest distance-from-start plus remaining distance to its endpoint's nearest goal part. These fields are evidence only; they do not yet limit a search.
+
 ## The telemetry action streams events to host logs
 
 The MCP action [`debug_set_pathfinder_telemetry`](../../src/actions/debug-set-pathfinder-telemetry/contract.ts) enables streaming JSON events directly to standard output.

@@ -61,6 +61,7 @@ export interface PartialRouteCheckpoint {
 }
 
 export interface SearchEvidence {
+  readonly region?: { readonly straight: number; readonly allowance: number | null; readonly refused: number; readonly detour?: number };
   readonly queued: number;
   readonly visited: number;
   /** The largest distance in blocks (Chebyshev, feet cells) from the root of any visited node; 0 when only the root was visited. */

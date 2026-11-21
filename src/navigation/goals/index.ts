@@ -27,9 +27,14 @@ import {
   type NavigationObservation,
   type WorldView,
 } from "../world/world.js";
-import type { Goal, GoalEndPredicate, PlanningNode, ResolvedGoal } from "./goal.js";
+import type { Goal, GoalEndPredicate, GoalRegion, PlanningNode, ResolvedGoal } from "./goal.js";
 type Distance = (position: BlockPosition) => number;
 type Satisfaction = (position: BlockPosition) => boolean;
+
+/** Bind a distance to the predicate that establishes its accepted cells. */
+function regionOf(isSatisfied: GoalRegion["satisfies"], distance: Distance, root: BlockPosition): GoalRegion {
+  return { satisfies: isSatisfied, parts: [{ straight: distance(root), distance }] };
+}
 
 /** Resolve a static target with an optional enumeration tied to its own predicate. */
 function staticGoal(
@@ -37,6 +42,7 @@ function staticGoal(
   distance: Distance,
   satisfiesPosition: Satisfaction,
   enumerate?: (limit: number) => readonly BlockPosition[] | null,
+  regionDistance?: Distance,
 ): Goal {
   return {
     resolve() {
@@ -46,6 +52,7 @@ function staticGoal(
         revision: name,
         heuristic: (node) => distance(node.feet),
         isSatisfied,
+        ...(regionDistance && { region: (root: BlockPosition) => regionOf(isSatisfied, regionDistance, root) }),
         ...(enumerate && { endpoints(limit: number) {
           const cells = enumerate(limit);
           return cells === null ? null : { satisfies: isSatisfied, cells };
@@ -170,6 +177,7 @@ export function exactBlockGoal(target: BlockPosition): Goal {
     (position) => ticksToReach(position, target),
     (position) => spatialDistance(position, target) === 0,
     (limit) => limit >= 1 && isBlockCentre(target) ? [target] : null,
+    (position) => spatialDistance(position, target),
   );
 }
 
@@ -180,6 +188,7 @@ export function nearGoal(target: BlockPosition, range: number): Goal {
     (position) => ticksToReach(position, target, range),
     (position) => spatialDistance(position, target) <= range,
     (limit) => cellsWithin(target, range, limit),
+    (position) => Math.max(0, spatialDistance(position, target) - range),
   );
 }
 
@@ -190,6 +199,8 @@ export function nearXzGoal(target: Pick<BlockPosition, "x" | "z">, range: number
     name,
     (position) => Math.max(0, horizontalDistance(position, point) - range) * HORIZONTAL_TICKS_PER_BLOCK,
     (position) => horizontalDistance(position, point) <= range,
+    undefined,
+    (position) => Math.max(0, horizontalDistance(position, point) - range),
   );
 }
 
@@ -213,10 +224,13 @@ export function advanceGoal(
   const name = `advance:${start.x.toFixed(1)},${start.z.toFixed(1)}>${heading.x.toFixed(3)},${heading.z.toFixed(3)}:${distance}`;
   const advanced = (position: BlockPosition) =>
     (position.x + 0.5 - start.x) * heading.x + (position.z + 0.5 - start.z) * heading.z;
+  const length = Math.hypot(heading.x, heading.z);
   return staticGoal(
     name,
     (position) => Math.max(0, distance - advanced(position)) * HORIZONTAL_TICKS_PER_BLOCK,
     (position) => advanced(position) >= distance,
+    undefined,
+    length > 0 && Number.isFinite(length) ? (position) => Math.max(0, distance - advanced(position)) / length : undefined,
   );
 }
 
@@ -256,6 +270,8 @@ export function occupyGoal(target: BlockPosition, levels: 2 | 3): Goal {
       return closest;
     },
     (position) => occupies(position, target, levels),
+    undefined,
+    (position) => Math.min(...cells.map((cell) => spatialDistance(position, cell))),
   );
 }
 
@@ -276,6 +292,7 @@ export function anyGoal(goals: readonly Goal[]): Goal {
       );
       if (invalid?.kind === "invalid" && active.length === 0) return invalid;
       const revision = `any(${active.map((candidate) => candidate.revision).join("|")})`;
+      const isSatisfied: GoalRegion["satisfies"] = (node, world) => active.some((candidate) => candidate.isSatisfied(node, world));
       return {
         kind: "active",
         revision,
@@ -284,7 +301,13 @@ export function anyGoal(goals: readonly Goal[]): Goal {
           for (const candidate of active) closest = Math.min(closest, candidate.heuristic(node));
           return closest;
         },
-        isSatisfied: (node, world) => active.some((candidate) => candidate.isSatisfied(node, world)),
+        isSatisfied,
+        region(root) {
+          const regions = active.map((candidate) => candidate.region?.(root));
+          if (regions.some((region, index) => !region || region.satisfies !== active[index]!.isSatisfied)) return null;
+          const parts = regions.flatMap((region) => region?.parts ?? []);
+          return parts.length ? { satisfies: isSatisfied, parts } : null;
+        },
         ...(active.some((candidate) => candidate.finish) &&
           ({
             finish: (state, context, digContext, actualStart) => {
@@ -489,12 +512,16 @@ export function itemPickupGoal(entity: EntityReference): Goal {
       // beneath it. Use the actual body position, not the centre of its node;
       // extending every node's arrival range left a coal run just out of reach.
       const touching = withinItemPickupReach(observation.position, target);
+      const isSatisfied = (node: PlanningNode) => touching || occupies(node.feet, cell, 2);
+      const cells = occupancyCells(cell, 2);
       return {
         kind: "active",
         revision: `item:${entityRevision(target)}:${touching}`,
         heuristic: (node) =>
           touching ? 0 : Math.min(...occupancyCells(cell, 2).map((level) => ticksToReach(node.feet, level))),
-        isSatisfied: (node) => touching || occupies(node.feet, cell, 2),
+        isSatisfied,
+        ...(!touching && { region: (root: BlockPosition) => regionOf(isSatisfied,
+          (position) => Math.min(...cells.map((level) => spatialDistance(position, level))), root) }),
       };
     },
   };

@@ -24,6 +24,50 @@ type ActiveGoal = Extract<ResolvedGoal, { kind: "active" }>;
 
 const ORIGIN = { x: 0, y: 63, z: 0 };
 
+test("the region evidence reports straight distance and route detour", () => {
+  const paths: ReadonlyArray<ReadonlyArray<readonly [number, number]>> = [
+    Array.from({ length: 7 }, (_, x) => [x, 0] as const),
+    [[0, 0], [0, -1], [0, -2], ...Array.from({ length: 6 }, (_, i) => [i + 1, -2] as const), [6, -1], [6, 0]] as const,
+  ];
+  for (const path of paths) {
+    const catalogue = stubCatalogue((state) => {
+      const index = path.findIndex(([x, z]) => x === state.node.feet.x && z === state.node.feet.z);
+      const next = path[index + 1];
+      return next ? [graphMovement(state, next[0], next[1], 1)] : [];
+    });
+    const result = expect(searchOver(destination({ x: 6, y: 63, z: 0 }), catalogue, { id: "region" })
+      .advance({ maximumExpansions: 100, maximumMilliseconds: Infinity }), "complete");
+    const detour = Math.max(...path.map(([x, z]) => Math.hypot(x, z) + Math.hypot(6 - x, z)));
+    assert.deepEqual(result.evidence.region, { straight: 6, allowance: null, refused: 0, detour });
+  }
+  const custom = searchOver(goalOf("custom", () => 0, (node) => node.feet.x === 1),
+    stubCatalogue((state) => state.node.feet.x === 0 ? [graphMovement(state, 1, 0, 1)] : []));
+  assert.equal(custom.advance({ maximumExpansions: 10, maximumMilliseconds: Infinity }).evidence.region, undefined);
+});
+
+test("a partial route reports the detour of its own prefix and a search with no route reports no detour", () => {
+  const goal = { x: 40, y: 63, z: 1 };
+  const clock = perExpansionClock(
+    stubCatalogue((state) => {
+      const { x, z } = state.node.feet;
+      if (z === 0 && x > -16) return [graphMovement(state, x - 1, 0, 1)];
+      if (z === 0) return [graphMovement(state, x, 1, 1)];
+      return [graphMovement(state, x + 1, 1, 1)];
+    }),
+  );
+  const partial = expect(searchOver(destination(goal), clock.catalogue,
+    { id: "partial-region", limits: { failureTimeoutMs: clock.atExpansion(58) }, now: clock.now })
+    .advance({ maximumExpansions: 100, maximumMilliseconds: Infinity }), "segment_ready");
+  const reach = (cell: { x: number; y: number; z: number }) => Math.hypot(cell.x - ORIGIN.x, cell.y - ORIGIN.y, cell.z - ORIGIN.z)
+    + Math.hypot(goal.x - cell.x, goal.y - cell.y, goal.z - cell.z);
+  const detour = Math.max(reach(ORIGIN), ...partial.plan.steps.map((step) => reach(step.to)));
+  assert.deepEqual(partial.evidence.region, { straight: Math.hypot(40, 1), allowance: null, refused: 0, detour });
+  const stuck = searchOver(destination(goal), stubCatalogue(() => []))
+    .advance({ maximumExpansions: 10, maximumMilliseconds: Infinity });
+  assert.equal(stuck.kind, "no_path");
+  assert.deepEqual(stuck.evidence.region, { straight: Math.hypot(40, 1), allowance: null, refused: 0 });
+});
+
 /**
  * A clock that charges a search one millisecond per node it expands.
  *

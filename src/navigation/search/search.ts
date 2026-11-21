@@ -38,6 +38,7 @@ import { endsStrandedUnderWater } from "./stranded-segment.js";
 import { countStartRefusals } from "./start-refusals.js";
 import { NodeStore } from "./node-store.js";
 import { OpenSet } from "./open-set.js";
+import { routeDetour, searchRegion } from "./region.js";
 
 export type { SearchEvidence } from "./search-result.js";
 export type SearchUpdate =
@@ -358,6 +359,7 @@ function attemptSegment(
  */
 export class IncrementalSearch {
   readonly #options: SearchOptions;
+  readonly #region: ReturnType<typeof searchRegion>;
   readonly #now: () => number;
   /** The goal with its heuristic scaled by the policy's weight; nothing reads `options.goal` after construction. */
   readonly #goal: SearchOptions["goal"];
@@ -387,6 +389,7 @@ export class IncrementalSearch {
 
   constructor(options: SearchOptions) {
     this.#options = options;
+    this.#region = searchRegion(options.goal, options.start.node.feet);
     this.#now = options.now ?? performance.now.bind(performance);
     // Goals report ticks, the same unit as costs, so nothing is converted here.
     // They used to report blocks and be scaled by the cheapest per-block edge,
@@ -454,7 +457,7 @@ export class IncrementalSearch {
           return {
             kind: plan.complete ? "complete" : "segment_ready",
             plan,
-            evidence: this.#evidence(),
+            evidence: this.#evidence(plan),
             checkpoint: this.#slice.checkpoint,
           };
         });
@@ -486,7 +489,7 @@ export class IncrementalSearch {
         return {
           kind: "segment_ready",
           plan: attempt.plan,
-          evidence: this.#evidence(),
+          evidence: this.#evidence(attempt.plan),
           checkpoint: this.#slice.checkpoint,
         };
       return {
@@ -525,7 +528,7 @@ export class IncrementalSearch {
         return this.#finish(() => ({
           kind: "segment_ready",
           plan: attempt.plan,
-          evidence: this.#evidence(),
+          evidence: this.#evidence(attempt.plan),
           checkpoint: this.#partialRouteCheckpoint(primary, selection, "segment_ready"),
         }));
       }
@@ -549,7 +552,7 @@ export class IncrementalSearch {
         return this.#finish(() => ({
           kind: "segment_ready",
           plan: attempt.plan,
-          evidence: this.#evidence(),
+          evidence: this.#evidence(attempt.plan),
           checkpoint,
         }));
       }
@@ -661,10 +664,14 @@ export class IncrementalSearch {
     }
   }
 
-  #evidence(): SearchEvidence {
+  #evidence(plan?: RoutePlan): SearchEvidence {
     return {
       queued: this.#open.size, visited: this.#visited, farthestVisited: this.#farthestVisited, generated: this.#generated,
       slices: this.#slices, computeMs: this.#computeMs,
+      ...(this.#region && { region: {
+        straight: Math.min(...this.#region.parts.map((part) => part.straight)), allowance: null, refused: 0,
+        ...(plan && { detour: routeDetour(this.#region, this.#options.start.node.feet, plan.steps.map((step) => step.to)).detour }),
+      } }),
     };
   }
 

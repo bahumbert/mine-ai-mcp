@@ -56,7 +56,7 @@ export { describeCalculationFailure, type NavigationCalculationFailure } from ".
 export { RELAXED_DIG_STRAIGHT_DOWN, RELAXED_FLOWING_WATER } from "./orchestration/escape-policy.js";
 
 // Goals: what a route is asked to satisfy.
-export type { Goal } from "./goals/goal.js";
+export type { Goal, GoalRegion, GoalRegionPart } from "./goals/goal.js";
 export {
   ASCENT_TICKS_PER_BLOCK,
   DESCENT_TICKS_PER_BLOCK,
