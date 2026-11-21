@@ -11,7 +11,7 @@ world:
   gamerules:
     doDaylightCycle: false
     doMobSpawning: false
-    naturalRegeneration: false
+    naturalRegeneration: true
 players:
   - name: BlazeMaterials
     op: true
@@ -24,6 +24,9 @@ players:
         count: 1
       - item: shield
         count: 1
+      # The hunt's recovery hold can end only by healing: regeneration is on and food is carried (the hold has no other exit before its 90 s clock).
+      - item: cooked_beef
+        count: 16
       # The two opposing blazes are crossfire one shield cannot answer: the hunt's admission asks for cover blocks (preparation.ts).
       - item: cobblestone
         count: 64
