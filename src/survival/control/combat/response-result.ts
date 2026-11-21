@@ -67,6 +67,8 @@ export type HostileSettlement = {
   readonly response: HostileResponse["kind"];
   readonly evidence: EncounterEvidence;
   readonly physical: HostileResponseResult | null;
+  /** The fight was ended by the request it continued (its goal met, or its stall limit), not by the target. */
+  readonly released?: "goal_met" | "stalled";
 } & (
   | { readonly kind: "completed"; readonly physical: HostileResponseResult }
   | { readonly kind: "cancelled" | "bot_died" | "failed"; readonly reason: string }

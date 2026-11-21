@@ -37,8 +37,15 @@ import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline, type Server
  */
 export const CONTACT_GRACE_TICKS = 20;
 
-/** A caller-owned recovery hold can refine a hide without bypassing its occupied-shell follow-up. */
-export type HostileResponseRequest = Exclude<HostileResponse, { kind: "hide" }> |
+/** What a caller may add to a fight: `satisfied`, the caller's own goal, read at the engagement's turns (`controller.engage`). */
+export type FightOptions = NonNullable<Parameters<CombatController["engage"]>[3]>;
+
+/**
+ * A caller-owned recovery hold can refine a hide without bypassing its occupied-shell follow-up, and a caller-owned goal
+ * (`caller`) can end a fight at the engagement's next decision.
+ */
+export type HostileResponseRequest = Exclude<HostileResponse, { kind: "hide" | "fight" }> |
+  (Extract<HostileResponse, { kind: "fight" }> & { readonly caller?: FightOptions }) |
   (Extract<HostileResponse, { kind: "hide" }> & {
     readonly recovery?: Pick<HideOptions, "recoverTo" | "maximumMs" | "holdWhile">;
   });
@@ -114,7 +121,7 @@ function watchFightContact(
 async function fight(
   bot: Bot,
   controller: CombatController,
-  request: Extract<HostileDirective, { kind: "fight" }>,
+  request: Extract<HostileResponseRequest, { kind: "fight" }>,
   context: ResponseContext,
   healthBefore: number,
   signal: AbortSignal,
@@ -133,6 +140,7 @@ async function fight(
         health: bot.health,
         target: target ? { name: target.name ?? "unknown", defendsOnContact: defendsOnContact(bot, target) } : null,
       }),
+      request.caller,
     );
     result = await pending;
   } finally {

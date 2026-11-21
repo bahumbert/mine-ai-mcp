@@ -86,6 +86,7 @@ export function encounterReceipt(settlement: HostileSettlement) {
     stall: settlement.stall ? { ...settlement.stall,
       threats: settlement.stall.threats.map((threat) => ({ ...threat })) } : null,
     outcome: summary.outcome,
+    ...(settlement.released ? { released: settlement.released } : {}),
     ...(summary.error === null ? {} : { error: summary.error }),
     ...(effective?.response === "evade" ? {
       ends: effective.ends.map((end) => ({ ...end })),
@@ -132,6 +133,8 @@ export function responseContinuation(settlement: HostileSettlement): ResponseCon
 }
 
 export function responseFailure(settlement: HostileSettlement): AnsweredEntry["failure"] | null {
+  // The request ended this fight, so the target is no lost target: the next decision is the one after any fight.
+  if (settlement.released) return null;
   if (settlement.kind !== "completed")
     return settlement.kind === "failed" ? { kind: "failed", why: settlement.reason } : null;
   const physical = settledResponse(settlement.physical);

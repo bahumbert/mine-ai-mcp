@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { encounterBaseline, type EncounterEvidence, type FightResponseResult, type HostileResponseResult } from "./response-result.js";
-import { completeResponse, encounterReceipt, responseContinuation, responseFailure } from "./settlement.js";
+import { completeResponse, describeResponse, encounterReceipt, responseContinuation, responseFailure } from "./settlement.js";
 
 test("a survived explosion preserves request reassessment after a completed fight", () => {
   const { bot } = createFakeBot();
@@ -103,6 +103,23 @@ test("a withheld deflection retains its bystander reason as a capability limit a
   assert.equal(encounterReceipt(settlement).error, observation);
   assert.deepEqual(responseFailure(settlement), { kind: "deflection_unobserved", why: observation });
   assert.equal(responseContinuation(settlement).kind, "hold");
+});
+
+// A fight ended by the request it continued is no lost target (plan 2026-11-18-scenario-reds-part3-a4 T18j).
+test("a fight released by its request's goal or stall resumes with no remembered failure and names the release", () => {
+  const lost = completeResponse(responseResults()[6]!, new AbortController().signal);
+  assert.deepEqual([responseFailure(lost)?.kind, responseContinuation(lost).kind, "released" in encounterReceipt(lost)],
+    ["target_lost", "resume", false]);
+  for (const released of ["goal_met", "stalled"] as const) {
+    const settlement = { ...lost, released };
+    assert.equal(responseFailure(settlement), null, released);
+    assert.deepEqual(responseContinuation(settlement), { kind: "resume" }, released);
+    assert.equal(encounterReceipt(settlement).released, released);
+    const facts = describeResponse(settlement);
+    assert.ok(typeof facts === "object" && facts !== null && !Array.isArray(facts), "the description is a record");
+    assert.equal((facts as { readonly released?: unknown }).released, released);
+    assert.equal(encounterReceipt(settlement).outcome, "target_lost");
+  }
 });
 
 test("an occupied hide settles its one follow-up without losing the refusal", () => {

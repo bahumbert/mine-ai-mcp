@@ -5,6 +5,10 @@ import { z } from "zod";
 import { defineAction, actionResultSchema } from "../../actions/action.js";
 import { readNotificationSummary, SqlBotData } from "../../bot-data/index.js";
 import { createNavigateAction } from "../../actions/navigate/navigate.js";
+import { createCollectMobDropAction } from "../../actions/hunt-mob/hunt-mob.js";
+import { dependencies as huntDependencies } from "../../actions/hunt-mob/hunt-mob-fixtures.test.js";
+import { setCarriedCount } from "../../test-support/carried-counts.js";
+import { createDiscardedItems } from "../../world/discarded-items.js";
 import type { NavigateRequest } from "../../actions/navigate/contract.js";
 import { cellsWithin, createNavigationRuntime, obstaclesOf, worldViewRaycaster, type BlockPosition, type NavigationEvent, type NavigationRuntime, type WorldView } from "../../navigation/index.js";
 import { ActionRunner, type ActionRunnerOptions } from "../../session/action-runner.js";
@@ -3276,3 +3280,160 @@ for (const ticksPerSecond of [20, 10]) {
     assert.deepEqual(scenario.held(), [], "a cover end from a zombie is no obligation: only a direct shooter's sight is owed");
   });
 }
+
+// A reflex fight that continues a request whose own goal is met ends at its next decision, once per request (plan 2026-11-18-scenario-reds-part3-a4 T18j).
+// Under the driver's 600-tick no-progress limit (`COMBAT_LIMITS.noProgressTicks`): the fake fight makes no attack to count as progress.
+const GOAL_FIGHT_TICKS = 400;
+const GOAL_READ_TICKS = 20;
+const GOAL_RESUME_TICKS = 5;
+
+interface GoalFight { readonly targetId: number; readonly from: number; readonly to: number; readonly ended: "target_lost" | "died" | "cancelled" }
+
+/**
+ * A reflex whose fights poll their request's goal: every 20 world ticks the fight reads `satisfied` and ends
+ * `target_lost` when it is true, else `died` (the target removed) after 2,000 ticks. The running `navigate` publishes
+ * `met.value` as its `goalMet` (absent when undefined); its first run waits for the reflex to take the body, a resumed run
+ * waits 5 world ticks and succeeds. `metAfterTicks` makes the goal true that many world ticks into the first fight;
+ * `onFightStart` runs as each fight begins (what another source does meanwhile).
+ */
+function goalReflex(rate: number, entities: Record<number, FakeEntitySpec>, metAfterTicks?: number, onFightStart?: (fight: number) => void) {
+  const fights: GoalFight[] = [];
+  const met: { value: boolean | undefined } = { value: false };
+  const fixture: ReflexFixture = reflexFixture(async (targetId, signal, _movement, options) => {
+    const from = fixture.bot.time.age;
+    onFightStart?.(fights.length);
+    const end = (ended: GoalFight["ended"]) => void fights.push({ targetId, from, to: fixture.bot.time.age, ended });
+    if (fights.length === 0 && metAfterTicks !== undefined) void fixture.clock.sleep(metAfterTicks * 1_000 / rate).then(() => { met.value = true; });
+    for (;;) {
+      await fixture.clock.sleep(GOAL_READ_TICKS * 1_000 / rate);
+      if (signal.aborted) { end("cancelled"); return { ...died(targetId), kind: "cancelled" }; }
+      if (options?.satisfied?.()) { end("target_lost"); return { ...died(targetId), kind: "target_lost" }; }
+      if (fixture.bot.time.age - from >= GOAL_FIGHT_TICKS) {
+        fixture.entities.remove(targetId);
+        end("died");
+        return died(targetId);
+      }
+    }
+  }, undefined, { clock: createFakeClock({ mode: "mocked" }), simulatePhysics: true, server: { ticksPerSecond: rate, startAge: 1_000 },
+    stand: { position: new Vec3(0, 64, 0), groundY: 63 }, entities,
+    // The shield a hostile-mob hunt's admission asks for (plan 2026-11-18-scenario-reds-part2-a6 T13q).
+    carried: { diamond_sword: 1, shield: 1 } });
+  const input = z.object({});
+  let attempts = 0;
+  const action = defineAction({ name: "navigate", description: "A journey that publishes whether its goal is met", inputSchema: input,
+    resultSchema: actionResultSchema({}), formatResult: (result) => result.status, parse: (value: unknown) => input.parse(value),
+    execution: { kind: "resumable_task" }, begin: (_request, _lifetime, observe) => {
+      observe(() => ({ baseline: null, checkpoint: null, ...(met.value === undefined ? {} : { goalMet: met.value }),
+        completion: { kind: "current", observed: false, owes: "reach the destination" } }));
+      return async ({ signal }) => {
+        const preempted = new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        if (++attempts > 1) await Promise.race([fixture.clock.sleep(GOAL_RESUME_TICKS * 1_000 / rate), preempted]);
+        else await preempted;
+        return signal!.aborted ? { status: "cancelled" as const, error: "interrupted" } : { status: "succeeded" as const };
+      };
+    } });
+  return { fixture, fights, met, action, run: () => fixture.clock.settle(fixture.runner.run(action, {}), 2 * GOAL_FIGHT_TICKS * 1_000 / rate),
+    async [Symbol.asyncDispose]() { await fixture.observer.close(); fixture.data.close(); } };
+}
+
+for (const rate of [20, 10]) test(`a reflex fight released by its met request is followed by one that runs to its end, then the request settles (${rate} tps)`, async () => {
+  await using journey = goalReflex(rate, { 8: hostile("zombie", 1.5) });
+  const { fixture, fights } = journey;
+  using _clock = fixture.clock.install();
+  const added = listenersAddedSince(fixture.bot);
+  journey.met.value = true;
+  const finished = await journey.run();
+  assert.equal(finished.result.status, "succeeded");
+  assert.deepEqual(fights.map((fight) => [fight.targetId, fight.ended, fight.to - fight.from]),
+    [[8, "target_lost", GOAL_READ_TICKS], [8, "died", GOAL_FIGHT_TICKS]], "one release, then the same target fought to its end: no claim loop");
+  assert.equal(encounterReceipts(fixture.data)[0].released, "goal_met");
+  assert.equal(encounterReceipts(fixture.data)[0].outcome, "target_lost");
+  assert.deepEqual(fixture.driver.answered.snapshot(), [], "the released fight left no remembered failure for its target");
+  for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
+
+for (const rate of [20, 10]) test(`a target out of reach that a met request released is fought again, not evaded (${rate} tps)`, async () => {
+  await using journey = goalReflex(rate, { 8: hostile("blaze", 8) }, 300);
+  const { fixture, fights } = journey;
+  using _clock = fixture.clock.install();
+  const added = listenersAddedSince(fixture.bot);
+  const start = fixture.bot.entity.position.clone();
+  const finished = await journey.run();
+  assert.equal(finished.result.status, "succeeded");
+  const [released, next] = fights;
+  assert.deepEqual([released?.ended, next?.ended, next?.targetId], ["target_lost", "died", 8], JSON.stringify(fights));
+  assert.ok(released!.to - released!.from >= 300 && released!.to - released!.from <= 300 + GOAL_READ_TICKS, "released at the first read at or after 300 ticks");
+  assert.deepEqual(recordedEncounters(fixture.data), ["fight -> target_lost", "fight -> target_died"], "no evade between the two fights");
+  assert.deepEqual(fixture.driver.answered.snapshot(), [], "no answered entry for the target: no `evade(unreachable)` followed");
+  assert.deepEqual(fixture.bot.entity.position, start, "the release moved the body nowhere");
+  for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
+
+/** The real `collect_mob_drop` for one blaze rod on the journey's reflex; its pursuit waits for the abort, and a rod is carried as the first fight begins. */
+function goalHunt(rate: number, entities: Record<number, FakeEntitySpec>, onFightStart?: (fight: number) => void) {
+  let fixtureRef: ReflexFixture | undefined;
+  const carryRod = () => {
+    const { bot, inventory } = fixtureRef!;
+    setCarriedCount(inventory, bot.registry, bot.registry.itemsByName.blaze_rod!.id, 1);
+  };
+  const journey = goalReflex(rate, entities, undefined, (fight) => { if (fight === 0) carryRod(); onFightStart?.(fight); });
+  const { fixture } = journey;
+  fixtureRef = fixture;
+  const action = createCollectMobDropAction(fixture.bot, fixture.navigation, fixture.controller, createDiscardedItems(), {
+    ...huntDependencies(fixture.bot, { count: 0 }, []),
+    pursue: async (pursuit) => {
+      await new Promise<void>((resolve) => pursuit.signal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { status: "stopped", reason: "interrupted by the reflex" };
+    },
+  });
+  const request = { mob_name: "blaze", drop_name: "blaze_rod", count: 1 };
+  /** The hunt's result and the world age it settled at. */
+  const hunt = () => fixture.clock.settle(fixture.runner.run(action, request).then((result) => ({ result, age: fixture.bot.time.age })),
+    2 * GOAL_FIGHT_TICKS * 1_000 / rate);
+  return { ...journey, hunt };
+}
+
+for (const rate of [20, 10]) test(`a hunt whose count is carried during a reflex fight settles at the fight's release, and the next navigate finishes (${rate} tps)`, async () => {
+  await using journey = goalHunt(rate, { 8: hostile("blaze", 8) });
+  const { fixture, fights } = journey;
+  using _clock = fixture.clock.install();
+  const added = listenersAddedSince(fixture.bot);
+  const { result, age } = await journey.hunt();
+  assert.deepEqual([result.result.status, result.result.status === "succeeded" ? result.result.termination : null], ["succeeded", "quantity_collected"], JSON.stringify(result));
+  assert.deepEqual(fights.map((fight) => [fight.targetId, fight.ended, fight.to - fight.from]), [[8, "target_lost", GOAL_READ_TICKS]]);
+  assert.equal(age, fights[0]!.to, "the hunt settled at the age the fight was released");
+  assert.deepEqual(fixture.controller.policy.quarry, [], "the hunt's quarry declaration ended with it");
+  assert.deepEqual(fixture.driver.answered.snapshot(), []);
+  const navigations = { count: 0 };
+  const next = await fixture.clock.settle(fixture.runner.run(walkRequest(fixture.navigation, navigations, "navigate"), {}), 2 * GOAL_FIGHT_TICKS * 1_000 / rate);
+  assert.equal(next.result.status, "succeeded");
+  assert.equal(navigations.count, 1);
+  for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
+
+for (const rate of [20, 10]) test(`blazes entering contact after a hunt's release meet the reflex alone, which releases nothing more (${rate} tps)`, async () => {
+  const spawned: Record<number, number> = {};
+  const blaze = (id: number) => ({ id, ...hostile("blaze", 8) });
+  await using journey = goalHunt(rate, { 8: hostile("blaze", 8) }, (fight) => {
+    if (fight !== 0) return;
+    for (const [id, afterTicks] of [[9, 100], [10, 200]] as const)
+      void journey.fixture.clock.sleep(afterTicks * 1_000 / rate).then(() => { spawned[id] = journey.fixture.bot.time.age; journey.fixture.entities.spawn(blaze(id)); });
+  });
+  const { fixture, fights } = journey;
+  using _clock = fixture.clock.install();
+  const added = listenersAddedSince(fixture.bot);
+  const { result, age } = await journey.hunt();
+  assert.equal(result.result.status, "succeeded");
+  assert.ok(age < 1_000 + 100 + GOAL_READ_TICKS, `the hunt settled at ${age}, before blaze #9 entered`);
+  await fixture.clock.advance(3 * GOAL_FIGHT_TICKS * 1_000 / rate, 1_000);
+  assert.ok(spawned[9]! > age && Object.keys(spawned).length === 2, `both blazes entered after the hunt settled at ${age}: ${JSON.stringify(spawned)}`);
+  assert.deepEqual(fights.map((fight) => [fight.targetId, fight.ended]), [[8, "target_lost"], [8, "died"]],
+    "the released target is fought to its end once no request is behind it");
+  // Measured (plan T18j said #9 and #10 fight to `died`): with no quarry declared the reflex answers them with other responses.
+  assert.deepEqual(recordedEncounters(fixture.data).slice(0, 2), ["fight -> target_lost", "fight -> target_died"]);
+  const releases = encounterReceipts(fixture.data).map((receipt) => receipt.released);
+  assert.ok(releases.length > 2, `the reflex answered #9 and #10 too: ${releases.length} responses`);
+  assert.deepEqual(releases, ["goal_met", ...releases.slice(1).map(() => undefined)], "one goal-met release; no request is behind the later responses");
+  for (const event of ["physicsTick", "time", "entityGone", "death"]) assert.equal(added(event), 0, event);
+});
+

@@ -18,6 +18,32 @@ interface ResponseStart extends CoverCapture {
   readonly generation: number;
   readonly startedAtMs: number;
   readonly firstDistances: ReadonlyMap<number, number>;
+  /** Why the request ended this response, set by the fight's `satisfied` read the first time it answers true. */
+  released: HostileSettlement["released"] | null;
+}
+
+/** The request each scene last released a fight for: one goal-met release per request, so no claim loop can form. */
+const goalReleases = new WeakMap<HostileScene, string>();
+
+/**
+ * A fight that continues a request whose own goal is met ends at its next decision, once per request; the request
+ * resumes and settles itself. The goal is the request's own `goalMet`, read only for the request this response began
+ * on and in the life it began in.
+ */
+function continuesMetGoal(scene: HostileScene, start: ResponseStart): boolean {
+  if (start.released) return true;
+  const running = scene.driver.runner.request();
+  if (!start.request || running?.id !== start.request.id || scene.chains.generation !== start.generation) return false;
+  if (running.evidence?.goalMet !== true || goalReleases.get(scene) === running.id) return false;
+  goalReleases.set(scene, running.id);
+  start.released = "goal_met";
+  return true;
+}
+
+/** A fight the request ended through its `satisfied` read is settled as released, and no failure is remembered for its target. */
+function withRelease(start: ResponseStart, settlement: HostileSettlement): HostileSettlement {
+  return start.released && settlement.kind === "completed" && settlement.physical.response === "fight"
+    && settlement.physical.result.kind === "target_lost" ? { ...settlement, released: start.released } : settlement;
 }
 
 /** Hits the reflex's preparation spends taking back a boat she stands on (about 4.5 s): a mob attacks meanwhile, and the next movement action takes it back with the full time bound (run 20). */
@@ -116,14 +142,16 @@ function diedDuring(
 }
 
 /** Prepare only where leaving the boat is safe; deep water keeps the response in its seat. */
-async function executeResponse(scene: HostileScene, directive: HostileResponse, healthBefore: number, signal: AbortSignal) {
+async function executeResponse(scene: HostileScene, directive: HostileResponse, healthBefore: number, signal: AbortSignal, start: ResponseStart) {
   signal.throwIfAborted();
   const { bot, policy, navigation, controller, context } = scene;
   if (seatedAtSea(bot, policy.combat.evade_safe_range))
     return respondToHostileFromBoat(scene, directive, healthBefore, signal);
   await prepareBotForMovement(bot, navigation, signal, { takeBackHits: HOSTILE_TAKE_BACK_HITS });
   signal.throwIfAborted();
-  return executeHostileResponse(bot, navigation, controller, directive, context, healthBefore, signal);
+  return executeHostileResponse(bot, navigation, controller,
+    directive.kind === "fight" ? { ...directive, caller: { satisfied: () => continuesMetGoal(scene, start) } } : directive,
+    context, healthBefore, signal);
 }
 
 /** Record each response once, refusing late work from a life or dimension that has ended. */
@@ -159,7 +187,8 @@ export async function respondToHostile(
   const startedAtMs = monotonicNow();
   scene.stalls.observe(request, generation, bot.time.age ?? null, startedAtMs);
   const firstDistances = new Map(directive.threats.map((threat) => [threat.id, threat.distance]));
-  const start: ResponseStart = { request, generation, startedAtMs, firstDistances, safeRange: directive.kind === "evade" ? directive.safeRange : null };
+  const start: ResponseStart = { request, generation, startedAtMs, firstDistances, released: null,
+    safeRange: directive.kind === "evade" ? directive.safeRange : null };
   const finalize = (settlement: HostileSettlement) => finalizeHostileResponse(scene, start, settlement);
   const { resolvedIds, attackerIds } = perception;
   scene.activeResponse = directive.kind;
@@ -181,7 +210,7 @@ export async function respondToHostile(
   try {
     let settlement: HostileSettlement;
     try {
-      const physical = await executeResponse(scene, directive, healthBefore, signal);
+      const physical = await executeResponse(scene, directive, healthBefore, signal, start);
       settlement = completeResponse(physical, signal);
     } catch (cause) {
       settlement = abandonedEvidence(bot, directive, healthBefore, cause, signal);
@@ -198,7 +227,7 @@ export async function respondToHostile(
     if (settlement.kind === "completed" && settlement.response === "evade"
       && evade?.response === "evade" && evade.result.kind === "separated")
       for (const id of answeredAttackers) attackerIds.delete(id);
-    return finalize(settlement);
+    return finalize(withRelease(start, settlement));
   } finally {
     bot.off("death", capture);
     bot.off("entityHurt", preserveNewAttack);

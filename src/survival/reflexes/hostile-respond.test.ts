@@ -29,7 +29,7 @@ import { senseHostile } from "./hostile-sense.js";
 import { ThreatChains } from "../state/threat-chains.js";
 import { RequestStalls } from "../state/request-stall.js";
 import { CoverObligations } from "../state/cover-obligation.js";
-import { describeResponse, responseContinuation } from "../control/combat/settlement.js";
+import { describeResponse, responseContinuation, responseFailure } from "../control/combat/settlement.js";
 import { serverTickPace } from "../../world/server-tick-pace.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
 import { serverPacedWallMs, waitForServerTicks } from "../../world/world-age.js";
@@ -464,13 +464,13 @@ function journeyFixture(ticksPerSecond: number) {
     groundY: 63, position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
   const engage: { run: CombatController["engage"] } = { run: async (targetId) => killed(targetId) };
   const fixture = responseFixture(false, harness, undefined, (...args) => engage.run(...args));
-  const journey = { remaining: 100 };
+  const journey: { remaining: number; met: boolean | undefined } = { remaining: 100, met: false };
   const input = z.strictObject({});
   const action = defineAction({ name: "navigate", description: "A journey with an objective", inputSchema: input,
     resultSchema: actionResultSchema({}), parse: (value) => input.parse(value), formatResult: (result) => result.status,
     execution: { kind: "resumable_task" }, begin: (_request, _lifetime, observe) => {
       observe(() => ({ baseline: null, checkpoint: null, objective: { remaining: journey.remaining, tolerance: 1 },
-        completion: { kind: "current", observed: false, owes: "reach the destination" } }));
+        ...(journey.met === undefined ? {} : { goalMet: journey.met }), completion: { kind: "current", observed: false, owes: "reach the destination" } }));
       return async ({ signal }) => {
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
         signal!.throwIfAborted();
@@ -579,5 +579,121 @@ test("a fight that outlives its request with none behind it counts nothing", asy
   const settlement = await fixture.respond();
   assert.deepEqual([settlement.kind, settlement.stall], ["completed", null]);
   assert.equal(fixture.counted(), undefined);
+  fixture.assertNoListenersLeft();
+});
+
+// A fight that continues a request whose own goal is met ends at its next decision, once per request (plan 2026-11-18-scenario-reds-part3-a4 T18j).
+const FIGHT_CEILING_TICKS = 2_000;
+const FIGHT_READ_TICKS = 20;
+
+/**
+ * An `engage` that reads its caller's `satisfied` every 20 world ticks: `target_lost` when true, else `died` at the
+ * ceiling. The zombie stands in reach, so the fight's contact watch (which ends a fight out of reach) leaves it be.
+ */
+function pollingFight(fixture: ReturnType<typeof journeyFixture>, rate: number): CombatController["engage"] {
+  fixture.bot.entities[8]!.position.set(1.5, 64, 0.5);
+  return async (targetId, signal, _movement, options) => {
+    const startedAt = fixture.bot.time.age;
+    for (;;) {
+      await fixture.clock.sleep(FIGHT_READ_TICKS * 1_000 / rate);
+      if (signal.aborted) return { ...killed(targetId), kind: "cancelled" };
+      if (options?.satisfied?.()) return { ...killed(targetId), kind: "target_lost" };
+      if (fixture.bot.time.age - startedAt >= FIGHT_CEILING_TICKS) return killed(targetId);
+    }
+  };
+}
+
+/** `act` runs once the clock has gone `ticks` world ticks on; its timer is made before the fight's, so it fires first at a shared time. */
+function afterTicks(fixture: ReturnType<typeof journeyFixture>, rate: number, ticks: number, act: () => void | Promise<void>) {
+  void fixture.clock.sleep(ticks * 1_000 / rate).then(act);
+}
+
+const fightResult = (settlement: HostileSettlement) =>
+  settlement.physical?.response === "fight" ? settlement.physical.result.kind : null;
+
+for (const rate of [20, 10]) test(`a reflex fight whose request meets its goal at 300 ticks ends at its next read, resuming, not remembered (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  fixture.engage.run = pollingFight(fixture, rate);
+  const startAge = fixture.bot.time.age;
+  afterTicks(fixture, rate, 300, () => { fixture.journey.met = true; });
+  const settlement = await fixture.respond();
+  const endedAfter = fixture.bot.time.age - startAge;
+  assert.ok(endedAfter >= 300 && endedAfter <= 300 + FIGHT_READ_TICKS, `ended ${endedAfter} ticks after its start`);
+  // The continuation and the unremembered failure of a released settlement: settlement.test.ts; the next decision: hostile.test.ts.
+  assert.deepEqual([settlement.kind, fightResult(settlement), settlement.released, settlement.stall?.limit ?? null],
+    ["completed", "target_lost", "goal_met", null]);
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a reflex fight whose request never meets its goal, or publishes none, runs to its own end (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  for (const met of [false, undefined]) {
+    fixture.journey.met = met;
+    fixture.engage.run = pollingFight(fixture, rate);
+    const startAge = fixture.bot.time.age;
+    const settlement = await fixture.respond();
+    assert.deepEqual([fixture.bot.time.age - startAge, fightResult(settlement), settlement.released, responseFailure(settlement)],
+      [FIGHT_CEILING_TICKS, "died", undefined, null], `goalMet ${met}`);
+  }
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a reflex fight keeps going when its journey is cancelled, or replaced by one that is met (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  fixture.engage.run = pollingFight(fixture, rate);
+  let startAge = fixture.bot.time.age;
+  // Cancelled 10 ticks before a read: a cancelled request leaves `request()` once its task has settled, not in the same turn.
+  afterTicks(fixture, rate, 290, () => { fixture.driver.runner.cancelActive("Cancel the journey"); fixture.journey.met = true; });
+  const cancelled = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - startAge, cancelled.released], [FIGHT_CEILING_TICKS, undefined], "no request, no goal");
+  fixture.journey.met = false;
+  await fixture.replaceJourney();
+  startAge = fixture.bot.time.age;
+  afterTicks(fixture, rate, 290, async () => { fixture.journey.met = true; await fixture.replaceJourney(); });
+  const replaced = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - startAge, replaced.released], [FIGHT_CEILING_TICKS, undefined], "the new request is another request");
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a reflex fight whose life ended meanwhile (the chains were cleared) is not released by the request's goal (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  fixture.engage.run = pollingFight(fixture, rate);
+  const startAge = fixture.bot.time.age;
+  afterTicks(fixture, rate, 290, () => { fixture.scene.chains.clear(); });
+  afterTicks(fixture, rate, 300, () => { fixture.journey.met = true; });
+  const settlement = await fixture.respond();
+  assert.deepEqual([fixture.bot.time.age - startAge, settlement.released], [FIGHT_CEILING_TICKS, undefined], "a new generation is not the life the fight began in");
+  fixture.assertNoListenersLeft();
+});
+
+test("a met goal read again during the one fight it released stays true", async () => {
+  await using fixture = journeyFixture(20);
+  await fixture.started();
+  fixture.journey.met = true;
+  const reads: boolean[] = [];
+  fixture.engage.run = async (targetId, _signal, _movement, options) => {
+    for (let read = 0; read < 3; read++) reads.push(options?.satisfied?.() === true);
+    return { ...killed(targetId), kind: "target_lost" };
+  };
+  const settlement = await fixture.respond();
+  assert.deepEqual([reads, settlement.released], [[true, true, true], "goal_met"], "the once-per-request rule spends on the first release, not on its re-reads");
+  fixture.assertNoListenersLeft();
+});
+
+for (const rate of [20, 10]) test(`a second fight on a request whose goal already ended one fights to its own end (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  fixture.engage.run = pollingFight(fixture, rate);
+  fixture.journey.met = true;
+  const startAge = fixture.bot.time.age;
+  const first = await fixture.respond();
+  assert.deepEqual([first.released, fixture.bot.time.age - startAge], ["goal_met", FIGHT_READ_TICKS]);
+  const secondAge = fixture.bot.time.age;
+  const second = await fixture.respond();
+  assert.deepEqual([second.released, fixture.bot.time.age - secondAge], [undefined, FIGHT_CEILING_TICKS], "once per request");
   fixture.assertNoListenersLeft();
 });
