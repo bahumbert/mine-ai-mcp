@@ -1512,6 +1512,82 @@ test("a blaze fireball still in flight keeps the bow shielded after the charge f
   assert.ok(outcome.projectileGuards > 0);
 });
 
+// The caller's goal (`satisfied`) ends a pursuit at its next decision, between fights and inside one (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+for (const ticksPerSecond of [20, 10]) {
+  test(`a pursuit whose caller goal is met as its health falls ends target_lost, not a recovery, recorded once (${ticksPerSecond} tps)`, async () => {
+    const fixture = combatFixture(["iron_sword", "shield"], { ticksPerSecond });
+    fixture.target.kind = "Hostile mobs";
+    let satisfied = false;
+    let metAtAge = 0;
+    // The goal is met and the policy's health bar fails in the same wait. The fight's own boundary read ends it first
+    // (the engagement turn between fights is the subject of engagement.test.ts); old code: `capability_blocked` (no recovery).
+    fixture.script.onWait = () => {
+      if (satisfied) return;
+      satisfied = true;
+      metAtAge = fixture.bot.time.age;
+      fixture.combat.setHealth(7);
+    };
+    fixture.script.onAttack = () => fixture.combat.kill(fixture.target.id);
+    const controller = createCombatController(fixture.bot, navigationFixture());
+    await forbidRecovery(controller);
+    const decisions: CombatDecision[] = [];
+    controller.onDecision((event) => decisions.push(event));
+    const outcome = await controller.engage(7, new AbortController().signal, "pursue", { satisfied: () => satisfied });
+    assert.equal(outcome.kind, "target_lost", `the old code answered ${outcome.kind}`);
+    assert.equal(satisfied, true, "the goal turned true while the target lived");
+    const stoppedAge = fixture.bot.time.age;
+    assert.ok(stoppedAge - metAtAge <= 60, `stopped ${stoppedAge - metAtAge} world ticks after the goal was met (${ticksPerSecond} tps)`);
+    const recorded = decisions.filter(
+      (event) => event.kind === "response" && (event.evidence as { response?: string }).response === "caller_satisfied",
+    );
+    assert.equal(recorded.length, 1, "caller_satisfied recorded once");
+    assert.equal(controller.activeEngagement(), null);
+    assert.equal(fixture.bot.listenerCount("health"), 0);
+  });
+
+  test(`a fight guarding fireballs stops at its next tactic turn once the caller goal is met, never inside the guard (${ticksPerSecond} tps)`, async () => {
+    const fixture = combatFixture(["bow", "arrow", "shield"], { targetDistance: 26, ticksPerSecond });
+    fixture.target.name = "blaze";
+    fixture.target.metadata = [];
+    fixture.entities.spawn({ id: 8, name: "small_fireball", width: 0.3125, position: new Vec3(20, 65, 0), velocity: new Vec3(-0.5, 0, 0) });
+    let satisfied = false;
+    let metTick = 0;
+    let metAge = 0;
+    let removedAge = 0;
+    fixture.script.onWait = () => {
+      if (fixture.clock.tick === 12) {
+        satisfied = true;
+        metTick = fixture.clock.tick;
+        metAge = fixture.bot.time.age;
+      }
+      if (fixture.clock.tick === 30) {
+        fixture.entities.remove(8);
+        removedAge = fixture.bot.time.age;
+      }
+    };
+    fixture.script.onShot = () => fixture.combat.kill(fixture.target.id);
+    const controller = createCombatController(fixture.bot, navigationFixture());
+    const decisions: CombatDecision[] = [];
+    controller.onDecision((event) => decisions.push(event));
+    const outcome = await controller.engage(7, new AbortController().signal, "hold", { satisfied: () => satisfied });
+    assert.equal(outcome.kind, "target_lost", `the old code answered ${outcome.kind} after ${fixture.shotTicks.length} shot(s)`);
+    assert.equal(fixture.shotTicks.length, 0, "no volley is fired once the goal is met");
+    assert.ok(fixture.clock.tick >= 30, `the running guard (fireball in flight to tick 30) was not cut: stopped at tick ${fixture.clock.tick}, met at ${metTick}`);
+    // World age (the fake moves it in jumps of 20): the goal met at 24000, the guard ended at 24020 (20 tps) or 24000 (10 tps),
+    // the stop at 24040 or 24020: one jump after the guard, and never before it.
+    const stoppedAge = fixture.bot.time.age;
+    assert.ok(stoppedAge >= removedAge, `stopped at world age ${stoppedAge}, before the guard ended at ${removedAge}`);
+    assert.ok(stoppedAge - removedAge <= 20, `stopped ${stoppedAge - removedAge} world ticks after the guard ended (met at ${metAge}, ${ticksPerSecond} tps)`);
+    assert.equal(fixture.bot.usingHeldItem, false, "shield lowered");
+    assert.equal(fixture.activeControls.size, 0, "controls released");
+    assert.equal(controller.activeEngagement(), null);
+    const recorded = decisions.filter(
+      (event) => event.kind === "response" && (event.evidence as { response?: string }).response === "caller_satisfied",
+    );
+    assert.equal(recorded.length, 1, "caller_satisfied recorded once");
+  });
+}
+
 test("a shielded melee defender strikes a close blaze whose charging flag remains set", async () => {
   const fixture = combatFixture(["iron_sword", "shield"], { targetDistance: 2.3 });
   fixture.target.name = "blaze";

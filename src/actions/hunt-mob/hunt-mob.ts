@@ -95,7 +95,12 @@ export interface HuntMobDependencies {
    * range; getting there is the navigation process's job.
    */
   readonly pursue: (pursuit: HuntPursuit) => Promise<HuntResult>;
-  readonly engageTarget: (target: Entity, context: ActionContext) => Promise<TargetEngagement>;
+  /** `satisfied`: the hunt's own quantity, read by the engagement at each of its decisions. */
+  readonly engageTarget: (
+    target: Entity,
+    context: ActionContext,
+    satisfied?: () => boolean,
+  ) => Promise<TargetEngagement>;
   readonly collectDropAfterDeath: (
     observation: HuntDropObservation,
     context: ActionContext,
@@ -173,7 +178,7 @@ export function huntMobDependencies(
         remove();
       }
     },
-    engageTarget: (target, context) => engageTarget(bot, combat, target, context),
+    engageTarget: (target, context, satisfied) => engageTarget(bot, combat, target, context, satisfied),
     collectDropAfterDeath: (observation, context) =>
       collectDropAfterDeath(bot, navigation, observation, context, discarded),
     sweepDropsAfterDeath: (observation, context) =>
@@ -201,6 +206,7 @@ export async function engageTarget(
   combat: CombatController,
   target: Entity,
   context: ActionContext,
+  satisfied?: () => boolean,
 ): Promise<TargetEngagement> {
   let deathPosition: Position3 | null = null;
   const onDeath = (entity: Entity) => {
@@ -210,7 +216,7 @@ export async function engageTarget(
   try {
     const signal = context.signal ?? new AbortController().signal;
     const targetId = target.id;
-    const outcome = await combat.engage(targetId, signal, "pursue");
+    const outcome = await combat.engage(targetId, signal, "pursue", satisfied && { satisfied });
     return { outcome, deathPosition: outcome.kind === "died" ? (deathPosition ?? positionOf(target)) : null };
   } finally {
     bot.removeListener("entityDead", onDeath);
@@ -493,10 +499,15 @@ function pursuitStop(request: HuntMobRequest, result: HuntResult, gained: number
   }
 }
 
+/** Whether the requested drop's carried count meets the request: a read only, the observation is not written. */
+function quantityCarried(bot: Bot, drop: HuntDrop, observation: HuntObservation): boolean {
+  return bot.inventory.count(drop.id, null) - observation.inventoryBefore >= observation.requested;
+}
+
 /** Read the requested drop's count into the observation, and say whether the request is met. */
 function settleInventory(bot: Bot, drop: HuntDrop, observation: HuntObservation): boolean {
   observation.inventoryAfter = bot.inventory.count(drop.id, null);
-  return observation.inventoryAfter - observation.inventoryBefore >= observation.requested;
+  return quantityCarried(bot, drop, observation);
 }
 
 /** What one engagement in a hunt needs, held for the whole run. */
@@ -524,7 +535,10 @@ async function fightAndCollect(fight: HuntEngagement, targetId: number): Promise
   observation.targetsEngaged += 1;
   const dropEntityBaseline = snapshotEntityIds(bot);
   const dropInventoryBefore = observation.inventoryAfter;
-  const { outcome, deathPosition } = await dependencies.engageTarget(target, context);
+  // The engagement reads the hunt's own quantity at its decisions: a count met by another kill ends it at the next one.
+  const { outcome, deathPosition } = await dependencies.engageTarget(target, context, () =>
+    quantityCarried(bot, drop, observation),
+  );
   observation.attacks += outcome.attacks;
   observation.projectileGuards += outcome.projectileGuards;
   for (const style of outcome.stylesUsed) observation.combatStyles.add(style);
@@ -532,6 +546,8 @@ async function fightAndCollect(fight: HuntEngagement, targetId: number): Promise
   // Incidental pack kills can leave the requested item even when the selected
   // target survives or disappears. Gather that evidence before choosing another mob.
   if (outcome.kind === "target_lost" || outcome.kind === "unreachable") {
+    // A count already carried walks to no other loaded drop, under fire or not.
+    if (settleInventory(bot, drop, observation)) return { kind: "defeated" };
     await dependencies.gatherLoadedDrops(drop, context);
     if (settleInventory(bot, drop, observation)) return { kind: "defeated" };
   }
@@ -682,6 +698,10 @@ function beginHuntMob(
     if (!mob) return stoppedResult(huntMobOutcomes.unknownMob(request.mobName), observation, "invalid_request");
     // "wool" is a family: the ids carry a colour (white_wool ...), named back so the caller can pick one.
     if (!drop) return stoppedResult(huntMobOutcomes.unknownDrop(request.dropName, similarItemNames(bot, request.dropName), mobNotItemAnswer(request.dropName, bot.registry.entitiesByName, bot.version)), observation, "invalid_request");
+    const quarry: HuntDrop = { name: request.dropName, id: drop.id };
+    const settled = () => settleInventory(bot, quarry, observation);
+    // A quantity the caller already carries (a resumed run, a camp wait) ends the hunt before any admission refusal.
+    if (settled()) return { status: "succeeded", hunt: huntEvidence(observation), termination: "quantity_collected" };
     // Check admission, every target approach, and contact after drop collection.
     // One pursuit can fight several loaded targets before this function returns.
     let shieldRequired: string | null = null;
@@ -693,9 +713,7 @@ function beginHuntMob(
 
     const dropChance = mobSourcesOf(request.dropName, bot.version).find((source) => source.mob === request.mobName)?.chance ?? null;
     const fruitlessKills = fruitlessKillLimit(dropChance);
-    const quarry: HuntDrop = { name: request.dropName, id: drop.id };
     const fight: HuntEngagement = { bot, request, drop: quarry, observation, dependencies, context };
-    const settled = () => settleInventory(bot, quarry, observation);
     const inventoryStop = () =>
       hasInventorySpaceFor(bot.inventory, new Set([quarry.name]))
         ? null

@@ -183,6 +183,35 @@ test("a shield lost mid-hunt refuses the next leg rather than the drop already c
   assert.match(stopText(result), /Refused before approaching/);
 });
 
+// A resumed run reads the quantity its caller already carries before it admits or refuses anything (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+for (const gained of [true, false])
+  test(`a resumed hunt run whose shield broke ${gained ? "after the quantity was carried ends succeeded" : "with no gain is refused at admission"}`, async () => {
+    const inventory = { count: 0 };
+    const type = minecraftData("1.21.4").entitiesByName.skeleton.id;
+    const bot = carryingShield(huntBot([mob(8, type, "skeleton", 5, "Hostile mobs")], inventory));
+    const wanderer = unseen(bot, 8);
+    const pending = huntMob(bot, { ...huntRequest("skeleton"), observeForMs: 5_000 }, {}, dependencies(bot, inventory, []));
+    // The first run ends with no loaded target and waits in its observation window; then the drop is carried
+    // (by another kill) and the shield broke, and a skeleton loads, which wakes the wait into a second run.
+    setImmediate(() => {
+      if (gained) inventory.count += 1;
+      loseShield(bot);
+      bot.entities[8] = wanderer;
+      bot.emit("entitySpawn", wanderer);
+    });
+    const result = await pending;
+    if (gained) {
+      assert.equal(result.status, "succeeded", `the old code answered ${result.status} ${result.termination}`);
+      assert.equal(result.termination, "quantity_collected");
+      assert.equal(result.hunt.gained, 1);
+      assert.equal(result.hunt.targetsEngaged, 0);
+    } else {
+      assert.equal(result.termination, "shield_required");
+      assert.equal(result.status, "failed");
+      assert.match(stopText(result), /Refused before approaching/);
+    }
+  });
+
 for (const loss of ["broken", "forbidden"] as const) {
   test(`a ${loss} shield stops the real pursuit before approaching the next loaded enemy`, async () => {
     const inventory = { count: 0 };

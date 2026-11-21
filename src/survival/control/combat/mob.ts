@@ -8,7 +8,7 @@ import type { FightEnvironment } from "../../responses/fight/scene.js";
 import { ProtectedAttackProgress } from "./attack-progress.js";
 import { EndermanProgress } from "./enderman-progress.js";
 import { QuarryProgress } from "./quarry-progress.js";
-import type { CombatOutcome, CombatResult } from "./contract.js";
+import type { CombatDecision, CombatOutcome, CombatResult } from "./contract.js";
 import { runEngagement } from "./engagement.js";
 import { CombatExecution, type CombatExecutionSnapshot } from "./execution.js";
 import { observeCombatDecision } from "./observation.js";
@@ -94,6 +94,23 @@ async function runResponseEffect<T>(
   }
 }
 
+/** The caller's goal, read at the engagement's turns and the fight's tactic boundaries; its first true is recorded once. */
+function recordingGoal(
+  goal: () => boolean,
+  targetId: number,
+  reportDecision: (event: CombatDecision) => void,
+): () => boolean {
+  let recorded = false;
+  return () => {
+    if (!goal()) return false;
+    if (!recorded) {
+      recorded = true;
+      reportDecision({ kind: "response", evidence: { response: "caller_satisfied", targetId } });
+    }
+    return true;
+  };
+}
+
 /** Bind the shared request coordinator to physical responses under one owner's signal. */
 export async function runMobEngagement(
   environment: FightEnvironment,
@@ -101,8 +118,10 @@ export async function runMobEngagement(
   movement: "pursue" | "hold",
   signal: AbortSignal,
   observe: MobObservation,
+  callerSatisfied?: () => boolean,
 ): Promise<CombatOutcome> {
   const { bot, navigation, policy, survival, reportDecision } = environment;
+  const satisfied = callerSatisfied && recordingGoal(callerSatisfied, targetId, reportDecision);
   const minimumHealth =
     movement === "pursue" && isHostile(bot.entities[targetId]) ? policy.combat.engage_min_health : 0;
   const purpose =
@@ -123,6 +142,7 @@ export async function runMobEngagement(
     const result = await runEngagement(signal, {
       purpose,
       ticks: events.ticks,
+      ...(satisfied && { satisfied }),
       nextTick: () => waitForPhysicsTicks(bot, 1, signal),
       observe: () => observeCombatDecision(bot, context),
       record: (facts, response) =>
@@ -132,7 +152,7 @@ export async function runMobEngagement(
         if (!target?.isValid) return emptyCombatEvidence(targetId, "target_lost");
         return runMobFight(
           environment,
-          { target, movement, minimumHealth, signal, ownerSignal: signal },
+          { target, movement, minimumHealth, signal, ownerSignal: signal, ...(satisfied && { satisfied }) },
           protectedProgress,
           endermanProgress,
           observe,

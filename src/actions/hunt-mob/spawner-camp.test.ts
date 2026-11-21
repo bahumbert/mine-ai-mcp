@@ -89,6 +89,30 @@ test("a destroyed camp wakes its wait and reports source loss", async () => {
   assert.equal((await pending)?.termination, "spawner_unavailable");
 });
 
+// A count met during the wait hands back to hunting even when the spawner is gone (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+test("a camp whose quantity was carried during the wait hands back to hunting although its spawner is gone", async () => {
+  const f = fixture();
+  using _timers = f.clock.install();
+  f.bot.entity.position = new Vec3(1.5, 64, 0.5);
+  let available = false;
+  const pending = f.camp.waitForQuarry(() => available, new AbortController().signal);
+  available = true;
+  f.destroy();
+  const failure = await f.clock.settle(pending, 10_000, SLICE_MS);
+  assert.equal(failure, null, `the old code answered ${failure?.reason}`);
+  assert.equal(f.camp.snapshot.phase, "hunting");
+});
+
+test("a camp whose spawner is gone and whose quantity is not carried still reports the loss", async () => {
+  const f = fixture();
+  using _timers = f.clock.install();
+  f.bot.entity.position = new Vec3(1.5, 64, 0.5);
+  f.destroy();
+  const failure = await f.clock.settle(f.camp.waitForQuarry(() => false, new AbortController().signal), 10_000, SLICE_MS);
+  assert.equal(failure?.termination, "spawner_unavailable");
+  assert.match(failure?.reason ?? "", /\[HUNT_SPAWNER_UNAVAILABLE\] The remembered spawner at .* is now air\./);
+});
+
 test("failed navigation returns its observation instead of waiting again", async () => {
   const f = fixture();
   using _timers = f.clock.install();

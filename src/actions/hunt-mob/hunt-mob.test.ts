@@ -117,6 +117,57 @@ test("a completed quantity is checked again after handoff consumes it", async ()
   assert.equal(result.hunt.gained, 0);
 });
 
+// The hunt hands combat its own request's quantity as `satisfied` (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+test("the hunt's engagement hands combat the caller's quantity predicate as the fourth argument", async () => {
+  const { bot } = engagementHarness([mob(7, 1, "sheep", 2)]);
+  const seen: ({ readonly satisfied?: () => boolean } | undefined)[] = [];
+  const combat = engagingCombat(bot, async (_id, _signal, _movement, options) => {
+    seen.push(options);
+    return outcome("died", 1);
+  });
+  let carried = false;
+  await engageTarget(bot, combat, bot.entities[7]!, {}, () => carried);
+  const satisfied = seen[0]?.satisfied;
+  assert.ok(satisfied, "combat.engage got no satisfied predicate");
+  assert.equal(satisfied(), false);
+  carried = true;
+  assert.equal(satisfied(), true, "the predicate reads the caller's state at each call");
+  await engageTarget(bot, combat, bot.entities[7]!, {});
+  assert.equal(seen[1], undefined, "an engagement with no caller goal passes no option");
+});
+
+for (const engagementEnd of ["target_lost on the predicate", "target_lost always"] as const)
+  test(`a hunt whose quantity was carried by another kill ends at its engagement without a death or a drop sweep (${engagementEnd})`, async () => {
+    const inventory = { count: 0 };
+    const bot = huntBot([mob(7, minecraftData("1.21.4").entitiesByName.sheep.id, "sheep", 3)], inventory);
+    let engaged = false;
+    let gathersAfterEngagement = 0;
+    const result = await huntMob(
+      bot,
+      { campSpawner: false, allowWithoutShield: false, observeForMs: 0, mobName: "sheep", dropName: "white_wool", count: 1 },
+      {},
+      {
+        ...dependencies(bot, inventory, []),
+        // Another mob's drop is carried while this engagement fights its own target.
+        engageTarget: async (_target, _context, satisfied) => {
+          engaged = true;
+          inventory.count += 1;
+          const goalMet = engagementEnd === "target_lost always" || satisfied?.() === true;
+          return goalMet ? { outcome: outcome("target_lost", 1), deathPosition: null } : died(1, 3);
+        },
+        gatherLoadedDrops: async () => {
+          if (engaged) gathersAfterEngagement++;
+          return 0;
+        },
+      },
+    );
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.termination, "quantity_collected");
+    assert.equal(result.hunt.gained, 1);
+    assert.equal(result.hunt.targetDeathsObserved, 0, "no death was observed: the engagement ended on the carried count");
+    assert.equal(gathersAfterEngagement, 0, "a carried count does not walk to other loaded drops after the engagement");
+  });
+
 for (const gainedDuringReflex of [false, true])
   test(`quarry observation retains its deadline and baseline through a reflex (gain: ${gainedDuringReflex})`, async () => {
     const inventory = { count: 4 };

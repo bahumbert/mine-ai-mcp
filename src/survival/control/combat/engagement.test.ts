@@ -377,3 +377,71 @@ for (const exit of ["normal", "abort", "throw"] as const) {
     assert.equal(clock.pendingGlobalTimers(), 0);
   });
 }
+
+// The caller's own goal (`satisfied`) ends an engagement at its next decision turn (plan 2026-11-18-scenario-reds-part3-a3 T18g).
+test("a caller goal met during a fight ends the engagement at the next turn, keeping the fight's attacks", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let fights = 0;
+  let satisfied = false;
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...operations(bot),
+    satisfied: () => satisfied,
+    fight: async () => {
+      fights++;
+      satisfied = true;
+      // A second fight (the old code's path) ends the test's loop with a kill instead of spinning on microtasks.
+      return fights === 1
+        ? { ...result("cancelled", 2), kind: "response_required", observation: "Boundary response." }
+        : result("died", 1);
+    },
+    recover: async () => {
+      throw new Error("No recovery is needed.");
+    },
+  });
+  assert.equal(outcome.kind, "target_lost");
+  assert.equal(outcome.attacks, 2);
+  assert.equal(fights, 1);
+});
+
+// A goal already met at the first turn: abort, then death, then the goal decide (order of runEngagement).
+for (const row of [
+  { name: "ends the engagement before any fight", health: 20, aborted: false, kind: "target_lost" },
+  { name: "loses to an aborted signal", health: 20, aborted: true, kind: "cancelled" },
+  { name: "loses to a dead bot", health: 0, aborted: false, kind: "bot_died" },
+] as const)
+  test(`a caller goal already met at the first turn ${row.name}`, async () => {
+    const bot = createFakeBot({ health: row.health }).bot;
+    const request = new AbortController();
+    if (row.aborted) request.abort("user cancelled");
+    const outcome = await runEngagement(request.signal, {
+      ...operations(bot),
+      satisfied: () => true,
+      fight: async () => {
+        throw new Error("A met goal starts no fight.");
+      },
+      recover: async () => {
+        throw new Error("A met goal starts no recovery.");
+      },
+    });
+    assert.equal(outcome.kind, row.kind);
+    assert.equal(outcome.attacks, 0);
+  });
+
+test("a caller goal that is never met leaves the engagement outcome unchanged", async () => {
+  const bot = createFakeBot({ health: 20 }).bot;
+  let fights = 0;
+  const outcome = await runEngagement(new AbortController().signal, {
+    ...operations(bot),
+    satisfied: () => false,
+    fight: async () => {
+      fights++;
+      return fights === 1
+        ? { ...result("cancelled", 1), kind: "response_required", observation: "Boundary response." }
+        : result("died", 2);
+    },
+    recover: async () => ({ kind: "recovered" }),
+  });
+  assert.equal(outcome.kind, "died");
+  assert.equal(outcome.attacks, 3);
+  assert.equal(fights, 2);
+});

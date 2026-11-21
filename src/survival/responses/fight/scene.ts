@@ -42,6 +42,8 @@ export interface FightRequest {
   readonly signal: AbortSignal;
   readonly ownerSignal: AbortSignal;
   readonly minimumHealth: number;
+  /** The caller's own goal: once true, the fight ends `target_lost` at its next tactic boundary. */
+  readonly satisfied?: () => boolean;
 }
 /** The observed scene and evidence of one physical fight, shared by its tactics. */
 export class FightScene implements Disposable {

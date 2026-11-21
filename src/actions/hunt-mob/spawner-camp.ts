@@ -160,12 +160,13 @@ export class SpawnerCamp {
   async waitForQuarry(available: () => boolean, signal: AbortSignal): Promise<CampFailure | null> {
     for (;;) {
       signal.throwIfAborted();
-      const missing = this.unavailable();
-      if (missing) return missing;
+      // What the caller already has is read before the camp's own admission: a count met during the wait ends it.
       if (available()) {
         this.hunting();
         return null;
       }
+      const missing = this.unavailable();
+      if (missing) return missing;
       if (!this.#atCamp()) {
         const absence = (this.#absenceWindow ??= observationWindow(this.bot, this.waitMs));
         if (!absence.ended(monotonicNow())) {

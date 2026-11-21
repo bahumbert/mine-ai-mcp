@@ -16,6 +16,8 @@ export interface EngagementOperations {
   fight(): Promise<FightOutcome>;
   recover(): Promise<EngagementRecovery>;
   deflect(targetId: number): Promise<void>;
+  /** The caller's own goal, read at each decision turn: the combat layer knows no item, mob or count. */
+  readonly satisfied?: () => boolean;
 }
 
 /** One requested quarry survives every selected response; completed effects accumulate once. */
@@ -34,6 +36,8 @@ export async function runEngagement(signal: AbortSignal, operations: EngagementO
       signal.throwIfAborted();
       const facts = operations.observe();
       if (facts.health <= 0) return { ...evidence, kind: "bot_died" };
+      // The caller's own goal is met: the target is no longer this engagement's.
+      if (operations.satisfied?.()) return { ...evidence, kind: "target_lost" };
       const response = decideCombatResponse(facts, operations.purpose);
       operations.record(facts, response);
       const tickBefore = operations.ticks();

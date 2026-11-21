@@ -88,6 +88,8 @@ export async function runMobFight(
       scene.observeQuarryStop(cover.recovering);
       await scene.responsiveness.checkpoint(scene.signal);
       if (scene.bot.health <= 0) { outcome = scene.result("bot_died"); break; }
+      // The caller's goal is met: stop at this boundary, never inside a running guard or volley.
+      if (request.satisfied?.()) { outcome = scene.result("target_lost"); break; }
       const tickBefore = scene.elapsedTicks;
       scene.observeBoundary();
       const tactic = scene.tactics.observe(scene, weapons);

@@ -155,7 +155,12 @@ export function createCombatController(
       if (active === engagement) active = null;
     }
   }
-  async function engage(targetId: number, signal: AbortSignal, movement: "pursue" | "hold"): Promise<CombatOutcome> {
+  async function engage(
+    targetId: number,
+    signal: AbortSignal,
+    movement: "pursue" | "hold",
+    options?: { readonly satisfied?: () => boolean },
+  ): Promise<CombatOutcome> {
     if (active)
       return { ...emptyCombatEvidence(targetId, "failed"), observation: "Combat controller is already engaged." };
     signal.throwIfAborted();
@@ -191,6 +196,7 @@ export function createCombatController(
           policyUse = value;
         },
       },
+      options?.satisfied,
     );
     const engagement = { kind: "mob" as const, targetId, controller, outcome };
     active = engagement;

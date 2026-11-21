@@ -104,7 +104,16 @@ export interface CombatController {
     signal: AbortSignal,
   ): Promise<EndCombatResult>;
   endDanger(): boolean;
-  engage(targetId: number, signal: AbortSignal, movement: "pursue" | "hold"): Promise<CombatOutcome>;
+  /**
+   * `options.satisfied` is the caller's own goal (the hunt's carried quantity): once it holds, the engagement ends
+   * `target_lost` at its next decision, between fights and inside one. The combat layer knows no item, mob or count.
+   */
+  engage(
+    targetId: number,
+    signal: AbortSignal,
+    movement: "pursue" | "hold",
+    options?: { readonly satisfied?: () => boolean },
+  ): Promise<CombatOutcome>;
   stop(reason: string): Promise<void>;
   /** The caller retains ownership until protection/separation succeeds or its physical limits are observed. */
   finish(signal: AbortSignal): Promise<CombatHandoff>;
