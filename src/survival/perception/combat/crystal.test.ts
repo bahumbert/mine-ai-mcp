@@ -248,7 +248,8 @@ test("crystal bow search accepts distant clear shots without preferring a blocke
 });
 
 test("explicit melee reports staircase supplies instead of falling back to a carried bow", async () => {
-  const f = fixture({ cells: { "30,79,0": "bedrock", "32,76,0": "obsidian" }, carried: { bow: 1, arrow: 8, cobblestone: 32 } });
+  // "30,76,0": the native core 4 under the crystal that the survey requires (first-entry-64510673-tower.fixture.json -42,85,-1, one radius-3 spike; spikeCells in crystal-staircase.test.ts)
+  const f = fixture({ cells: { "30,79,0": "bedrock", "32,76,0": "obsidian", "30,76,0": "obsidian" }, carried: { bow: 1, arrow: 8, cobblestone: 32 } });
   f.target.position.set(30.5, 80, 0.5);
   let moves = 0;
   const navigation = {
