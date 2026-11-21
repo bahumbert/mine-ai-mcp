@@ -36,6 +36,7 @@ import { projectileShieldFacing, shieldFacing } from "../../weapons/shield-facin
 import { monotonicNow } from "../../../utils/index.js";
 import { survivalResources } from "../../state/resources.js";
 import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { BodyAbort } from "../../../session/abort.js";
 import { ActionRunner } from "../../../session/action-runner.js";
 import { started, stubAction } from "../../../session/action-runner-fixtures.test.js";
 import { serverPacedWallMs } from "../../../world/world-age.js";
@@ -4363,6 +4364,156 @@ test("changing the withdrawal budget settles an active End escape before publish
   assert.equal(controller.activeEngagement(), null);
   assert.equal(controller.policy.settling, false);
   assert.equal(controller.policy.combat.evade_timeout_ms, 5_000);
+});
+
+/** An End evade whose route holds its rejection until `release()`: the real navigation's release outlasts the teardown that
+ *  stops it (cause E, t01524: the engagement ended 9 ms after the runtime close), so the order is the live one. */
+function heldEvadeFixture(ticksPerSecond: number) {
+  const { bot, entities } = combatFixture(["shield"], { ticksPerSecond });
+  entities.spawn({
+    id: 99,
+    name: "area_effect_cloud",
+    position: bot.entity.position.clone(),
+    metadata: { 8: 5, 10: { type: "dragon_breath" } },
+  });
+  let navigateCalls = 0;
+  let routeError: ((reason: unknown) => unknown) | null = null;
+  let notifyNavigation!: () => void;
+  const navigating = new Promise<void>((resolve) => {
+    notifyNavigation = resolve;
+  });
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const navigation: NavigationRuntime = {
+    ...navigationFixture(),
+    navigate: async ({ signal }) =>
+      new Promise((_resolve, reject) => {
+        navigateCalls++;
+        signal!.addEventListener("abort", () => void released.then(() => reject(routeError ? routeError(signal!.reason) : signal!.reason)), { once: true });
+        notifyNavigation();
+      }),
+  };
+  const controller = createCombatController(bot, navigation);
+  const events: CombatDecision[] = [];
+  controller.onDecision((event) => events.push(event));
+  // After the controller's own listeners: what the engagement adds must be gone once it is stopped.
+  const added = listenersAddedSince(bot);
+  const outer = new AbortController();
+  const escape = controller.runEnd({ kind: "evade" }, outer.signal);
+  return {
+    bot, controller, outer, escape, navigating, release, added, events,
+    navigateCalls: () => navigateCalls,
+    /** The route's rejection once released; the default is the abort's own reason. */
+    failRouteWith: (make: (reason: unknown) => unknown) => {
+      routeError = make;
+    },
+  };
+}
+
+const connectionClosed = () =>
+  new BodyAbort({ kind: "connection_lost" }, "[MINECRAFT_DISCONNECTED] Minecraft runtime closed");
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`stop settles an evade engagement the connection aborted first (tps ${ticksPerSecond})`, async () => {
+    const evade = heldEvadeFixture(ticksPerSecond);
+    const { controller, outer, escape, navigating, release, added, events } = evade;
+    const seen = assert.rejects(escape, /\[MINECRAFT_DISCONNECTED\] Minecraft runtime closed/);
+    await navigating;
+    assert.notEqual(controller.activeEngagement(), null);
+    outer.abort(connectionClosed());
+    const stopped = controller.stop("hostile contact observer closed");
+    release();
+    await stopped;
+    await seen;
+    assert.equal(controller.activeEngagement(), null);
+    const eventsAtStop = events.length;
+    await fightClock.advance(2 * controller.policy.combat.evade_timeout_ms);
+    assert.equal(evade.navigateCalls(), 1, "no second route after the stop");
+    assert.equal(events.length, eventsAtStop, "no decision event after the stop settled");
+    assert.equal(added("physicsTick"), 0, "the engagement released its tick listener");
+  });
+}
+
+// The cases below have no server-paced step of their own (the abort ends the engagement): one rate each; the main case above shows both rates alike.
+test("stop settles the engagement it aborted itself", async () => {
+  const { controller, escape, navigating, release } = heldEvadeFixture(20);
+  const seen = assert.rejects(escape, (cause) => cause === "closed");
+  await navigating;
+  const stopped = controller.stop("closed");
+  release();
+  await stopped;
+  await seen;
+  assert.equal(controller.activeEngagement(), null);
+});
+
+const otherAborts: readonly (readonly [string, () => BodyAbort])[] = [
+  ["cancelled", () => new BodyAbort({ kind: "cancelled", by: "model" }, "Cancelled by the model.")],
+  ["death", () => new BodyAbort({ kind: "death" }, "The bot died.")],
+  ["dimension_changed", () => new BodyAbort({ kind: "dimension_changed", from: "minecraft:overworld", to: "minecraft:the_end" }, "The bot changed dimension.")],
+  ["reflex_limit", () => new BodyAbort({ kind: "reflex_limit", reflex: "dragon_reflex", limit: "ceiling", elapsedMs: 0, elapsedTicks: 2_400 }, "dragon_reflex reached its ceiling.")],
+  ["preempted", () => new BodyAbort({ kind: "preempted", by: "hunger_reflex" }, "Preempted by hunger_reflex.")],
+  ["policy_changed", () => new BodyAbort({ kind: "policy_changed", revision: "r1" }, "Combat policy changed.")],
+];
+for (const [kind, make] of otherAborts)
+  test(`stop settles an engagement a ${kind} abort ended first`, async () => {
+    const { controller, outer, escape, navigating, release } = heldEvadeFixture(20);
+    const abort = make();
+    const seen = assert.rejects(escape, (cause) => cause === abort);
+    await navigating;
+    outer.abort(abort);
+    const stopped = controller.stop("closed");
+    release();
+    await stopped;
+    await seen;
+    assert.equal(controller.activeEngagement(), null);
+  });
+
+test("stop still throws a non-abort failure", async () => {
+  const evade = heldEvadeFixture(20);
+  const { controller, escape, navigating, release } = evade;
+  evade.failRouteWith(() => new Error("boom"));
+  const seen = assert.rejects(escape, /boom/);
+  await navigating;
+  const stopped = assert.rejects(controller.stop("closed"), /boom/);
+  release();
+  await stopped;
+  await seen;
+  assert.equal(controller.activeEngagement(), null);
+});
+
+test("stop settles an engagement a nested body abort ended", async () => {
+  const evade = heldEvadeFixture(20);
+  const { controller, escape, navigating, release } = evade;
+  // Not the signal's reason: a claim inside the route ended on its own abort.
+  evade.failRouteWith(() => new BodyAbort({ kind: "cancelled", by: "runtime" }, "nested claim ended"));
+  const seen = assert.rejects(escape, /nested claim ended/);
+  await navigating;
+  const stopped = controller.stop("closed");
+  release();
+  await stopped;
+  await seen;
+  assert.equal(controller.activeEngagement(), null);
+});
+
+test("a policy edit settles an evade a body abort already ended", async () => {
+  const { controller, outer, escape, navigating, release } = heldEvadeFixture(20);
+  const seen = assert.rejects(escape, /The bot died\./);
+  await navigating;
+  outer.abort(new BodyAbort({ kind: "death" }, "The bot died."));
+  // Listeners start in one map, in order: this one runs once the controller's listener has entered `stop`.
+  controller.policy.onChange(() => release());
+  await controller.policy.edit({
+    operation: "set",
+    expected_revision: controller.policy.snapshot().revision,
+    changes: { combat: { evade_timeout_ms: 5_000 } },
+    lifetime: { kind: "session" },
+    reason: "test",
+  });
+  await seen;
+  assert.equal(controller.policy.settling, false);
+  assert.equal(controller.activeEngagement(), null);
 });
 
 test("an optional cover route failure leaves ordinary combat available", async () => {

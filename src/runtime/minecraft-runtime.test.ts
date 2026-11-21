@@ -16,6 +16,8 @@ import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/cont
 import { engagingCombat } from "../test-support/combat.js";
 import { type FakeHarness, type Listened, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
+import { createCombatController } from "../survival/index.js";
+import { serverPacedWallMs } from "../world/world-age.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
 const { spyOn } = require("bun:test") as {
@@ -912,3 +914,82 @@ test("with a chat command prefix the runtime keeps command lines in its ring and
   const history = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
   assert.deepEqual(history.events.map(({ summary }) => summary), ["Tom: hello"]);
 });
+
+for (const rate of [20, 10, "stopped"] as const)
+  test(`closing the runtime during a dragon evade resolves (${rate})`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "close-evade-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const harness = createFakeBot({
+      clock,
+      username: "CloseBot",
+      position: new Vec3(0, 64, 0),
+      server: { ticksPerSecond: rate === 10 ? 10 : 20 },
+    });
+    const { bot } = harness;
+    bot.setMaxListeners(40);
+    harness.entities.spawn({
+      id: 99,
+      name: "area_effect_cloud",
+      position: bot.entity.position.clone(),
+      metadata: { 8: 5, 10: { type: "dragon_breath" } },
+    });
+    let navigateCalls = 0;
+    let notifyNavigation!: () => void;
+    const navigating = new Promise<void>((resolve) => { notifyNavigation = resolve; });
+    let notifyStopEntered!: () => void;
+    const stopEntered = new Promise<void>((resolve) => { notifyStopEntered = resolve; });
+    const stops: boolean[] = [];
+    // The route's release outlasts the disposal chain, as live (t01524: the engagement ended 9 ms after the close).
+    const navigate = ({ signal }: { signal?: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        navigateCalls++;
+        signal!.addEventListener("abort", () => void stopEntered.then(() => reject(signal!.reason)), { once: true });
+        notifyNavigation();
+      });
+    let notifyClaim!: () => void;
+    const claimed = new Promise<void>((resolve) => { notifyClaim = resolve; });
+    let receiptsAfterClose = 0;
+    let closed = false;
+    const added = listenersAddedSince(bot);
+    const runtime = await createMinecraftRuntime(bot, {
+      incidents: { directory },
+      botData: { storage: { kind: "temporary" }, identity: { worldId: "close-during-evade", scope: { kind: "bot", botId: "CloseBot" } } },
+      createCombatController: (controllerBot, navigation, ...rest) => {
+        const real = createCombatController(
+          controllerBot,
+          new Proxy(navigation, { get: (target, key) => (key === "navigate" ? navigate : Reflect.get(target, key)) }),
+          ...rest,
+        );
+        return {
+          ...real,
+          stop: (reason) => {
+            stops.push(real.activeEngagement() !== null);
+            notifyStopEntered();
+            return real.stop(reason);
+          },
+        };
+      },
+      onSurvivalReceipt: (receipt) => {
+        if (closed) receiptsAfterClose++;
+        if (receipt.source === "dragon_reflex" && receipt.kind === "claim") notifyClaim();
+      },
+    });
+    await clock.settle(claimed, 5000);
+    await clock.settle(navigating, 5000);
+    if (rate === "stopped") {
+      harness.server.stop();
+      await clock.advance(5000);
+    }
+    const closing = runtime.close();
+    assert.equal(runtime.close(), closing);
+    await assert.doesNotReject(clock.settle(closing, 5000));
+    closed = true;
+    assert.deepEqual(stops, [true], "the hostile reflex stopped the engagement once, with the evade live");
+    // Past the dragon reflex's ceiling (`dragon.ts`, 2 400 ticks): by the world age when it moves, by its wall backstop when the server is stopped.
+    await clock.advance(rate === "stopped" ? serverPacedWallMs(2_400) + 1000 : (2_400 / rate) * 1000 + 1000);
+    assert.equal(receiptsAfterClose, 0, "no receipt after the close");
+    assert.equal(navigateCalls, 1);
+    for (const event of ["physicsTick", "end", "chat", "death"]) assert.equal(added(event), 0, event);
+  });

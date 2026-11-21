@@ -207,8 +207,7 @@ export function createCombatController(
     }
   }
 
-  /** Abort the current engagement and wait for it to leave the bot neutral. */
-
+  /** Abort the engagement and wait for the bot to be neutral; a body abort that ended it first is a stop too, other errors throw. */
   async function stop(reason: string | BodyAbort): Promise<void> {
     const engagement = active;
     if (!engagement) return;
@@ -216,7 +215,7 @@ export function createCombatController(
     try {
       await engagement.outcome;
     } catch (cause) {
-      if (cause !== engagement.controller.signal.reason) throw cause;
+      if (!(cause instanceof BodyAbort) && cause !== engagement.controller.signal.reason) throw cause;
     }
   }
 
