@@ -25,6 +25,7 @@ interface Scene {
   readonly carried?: Record<string, number>;
   readonly slots?: FakeBotOptions["slots"];
   readonly clock?: FakeBotOptions["clock"];
+  readonly server?: FakeBotOptions["server"];
 }
 
 /** A bot at (0.5, 64, 0.5) on flat ground whose standing cells are at `groundY`: stone below, air from there up. */
@@ -35,6 +36,7 @@ function flatGroundBot(groundY = 64, scene: Scene = {}) {
     carried: scene.carried ?? (scene.slots === undefined ? { dirt: 4, cobblestone: 11 } : undefined),
     slots: scene.slots,
     clock: scene.clock,
+    server: scene.server,
   });
   /** Lower the count of `name` carried to `count`, as a route that placed some leaves it. */
   const useUntil = (name: string, count: number) => {
@@ -227,6 +229,40 @@ test("navigate publishes its objective: the remaining distance and a tolerance o
     assert.deepEqual(seen, [{ remaining, tolerance }, null], `range ${range}`);
   }
 });
+
+// The arrival test reads the feet cell (`navigationFeet`, an integer cell): a cell 1 block off is no arrival at range 0,
+// and a cell at distance sqrt(10) is none at range 3.
+const GOAL_CASES = [
+  { range: 0, at: [10.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: true },
+  { range: 0, at: [9.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: false },
+  { range: 3, at: [7.5, 64, 0.5], onGround: true, dimension: "overworld", goalMet: true },
+  { range: 3, at: [7.5, 64, 1.5], onGround: true, dimension: "overworld", goalMet: false },
+  { range: 3, at: [10.5, 64.6, 0.5], onGround: false, dimension: "overworld", goalMet: false },
+  { range: 3, at: [10.5, 64, 0.5], onGround: true, dimension: "the_nether", goalMet: false },
+] as const;
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`navigate publishes goalMet as its own arrival test at each case (${ticksPerSecond} tps)`, async () => {
+    for (const goal of GOAL_CASES) {
+      const clock = createFakeClock({ mode: "mocked" });
+      using _installed = clock.install();
+      const { bot } = flatGroundBot(64, { clock, server: { ticksPerSecond } });
+      const runner = new ActionRunner();
+      let evidence: { goalMet?: boolean; completion: { observed: boolean } } | undefined;
+      const action = createNavigateAction(bot, fakeNavigation, dependencies(async () => {
+        const [x, y, z] = goal.at;
+        bot.entity.position.set(x, y, z);
+        bot.entity.onGround = goal.onGround;
+        bot.game.dimension = goal.dimension;
+        evidence = runner.request()?.evidence ?? undefined;
+        return { status: "stopped", reason: "stopped", elapsedMs: 1 };
+      }));
+      await clock.settle(runner.run(action, { x: 10, y: 64, z: 0, range: goal.range }), 2_000);
+      assert.equal(evidence?.goalMet, goal.goalMet, JSON.stringify(goal));
+      assert.equal(evidence?.goalMet, evidence?.completion.observed, JSON.stringify(goal));
+    }
+  });
+}
 
 test("resumed navigation retains the request origin and stocks and sums only route elapsed time", async () => {
   const { bot, useUntil } = flatGroundBot();

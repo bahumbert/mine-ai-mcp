@@ -226,9 +226,11 @@ function observeNavigateProgress(leg: NavigateLeg, observe: ObserveRequest): voi
   observe(() => {
     const remainingDistance = leg.destination && bot.game.dimension === startDimension
       ? bot.entity.position.distanceTo(asVec3(leg.destination)) : null;
+    const arrived = arrivedAt(leg);
     return {
       baseline: { dimension: startDimension, position: { ...start } },
       objective: remainingDistance === null ? null : { remaining: remainingDistance, tolerance: Math.max(1, request.range) },
+      goalMet: arrived,
       checkpoint: {
         destination: leg.destination,
         remainingDistance,
@@ -239,16 +241,23 @@ function observeNavigateProgress(leg: NavigateLeg, observe: ObserveRequest): voi
       },
       completion: {
         kind: "current",
-        observed:
-          leg.destination !== null &&
-          bot.game.dimension === startDimension &&
-          asVec3(navigationFeet(bot.entity.position, bot.entity.onGround)).distanceTo(asVec3(leg.destination)) <=
-            request.range &&
-          (bot.entity.onGround || canOccupyWater(bot, navigationFeet(bot.entity.position, bot.entity.onGround))),
+        observed: arrived,
         owes: "Current destination distance and supported footing or admitted water.",
       },
     };
   });
+}
+
+/** Whether the leg's body stands at its destination now: the feet cell within range, in the start dimension, on footing or admitted water. */
+function arrivedAt(leg: NavigateLeg): boolean {
+  const { bot, request, startDimension } = leg;
+  const feet = navigationFeet(bot.entity.position, bot.entity.onGround);
+  return (
+    leg.destination !== null &&
+    bot.game.dimension === startDimension &&
+    asVec3(feet).distanceTo(asVec3(leg.destination)) <= request.range &&
+    (bot.entity.onGround || canOccupyWater(bot, feet))
+  );
 }
 
 /** The evidence of the leg as it stands, measured against its resolved destination once there is one. */

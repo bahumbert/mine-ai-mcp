@@ -671,6 +671,7 @@ function beginHuntMob(
     const current = drop ? bot.inventory.count(drop.id, null) : 0;
     return {
       baseline: { item: request.dropName, count: inventoryBefore },
+      goalMet: current - inventoryBefore >= request.count,
       checkpoint: {
         phase: phase.kind,
         selectedTargetId: observation.selectedTargetId,

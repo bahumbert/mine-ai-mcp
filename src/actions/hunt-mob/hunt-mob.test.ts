@@ -801,3 +801,30 @@ test("the checkpoint schema reads a payload with observationTicks and an old one
   assert.deepEqual(huntCheckpointSchema.parse(current), current);
   assert.throws(() => huntCheckpointSchema.parse({ ...old, observationTicks: { elapsed: "20", limit: 40 } }));
 });
+
+// The goal is the net gain over the count at the start: with 3 carried, the first drop (gross 4) is no goal for a request of
+// 2, so a gross comparison (`current >= count`) reads true there and this case turns red.
+for (const ticksPerSecond of [20, 10]) for (const carried of [0, 3]) {
+  test(`a hunt publishes goalMet once the net gain meets its request (count 2, carried ${carried}, ${ticksPerSecond} tps)`, async () => {
+    const inventory = { count: carried };
+    const clock = createFakeClock({ mode: "mocked" });
+    using _installed = clock.install();
+    const bot = huntBot([], inventory, 20, { clock, server: { ticksPerSecond } });
+    const runner = new ActionRunner();
+    const goalMetSeen: (boolean | undefined)[] = [];
+    const read = () => runner.request()?.evidence?.goalMet;
+    const action = createCollectMobDropAction(bot, fakeNavigation, fakeCombat, createDiscardedItems(), {
+      ...dependencies(bot, inventory, []),
+      pursue: async () => {
+        goalMetSeen.push(read());
+        inventory.count += 1;
+        goalMetSeen.push(read());
+        inventory.count += 1;
+        goalMetSeen.push(read());
+        return { status: "satisfied", reason: null };
+      },
+    });
+    await clock.settle(runner.run(action, { mob_name: "sheep", drop_name: "white_wool", count: 2 }), 2_000);
+    assert.deepEqual(goalMetSeen, [false, false, true]);
+  });
+}
