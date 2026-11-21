@@ -170,7 +170,9 @@ for (const mode of ["overhang", "constrained", "active cancel", "late cancel"] a
       const policy = { ...DEFAULT_SURVIVAL_POLICY, combat: {
         ...DEFAULT_SURVIVAL_POLICY.combat, terrain: { dig: false, place: true },
       } };
-      assert.match(await build(scene, navigation, undefined, policy) ?? "", /CRYSTAL_STAIRCASE_INCOMPLETE.*refused/);
+      const refusal = await build(scene, navigation, undefined, policy) ?? "";
+      assert.match(refusal, /CRYSTAL_STAIRCASE_INCOMPLETE.*refused/);
+      assert.doesNotMatch(refusal, /Dragon breath/);
       assert.equal(bot.blockAt(CAGE_BAR)?.name, "iron_bars");
       assert.deepEqual(digs, []);
       assert.equal(navigation.active, false);
@@ -192,13 +194,19 @@ for (const mode of ["overhang", "constrained", "active cancel", "late cancel"] a
 }
 
 /** The saved-world cloud control covers the next step while the current feet remain outside its damage slab. */
-function spawnCloud(scene: Scene): void {
+/** A dragon breath cloud spawned with the metadata the client reads (particle type, radius 7). */
+function spawnBreathCloud(scene: Scene, id: number, position: Vec3): void {
   const { bot, entities } = scene;
   const keys = bot.registry.entitiesByName.area_effect_cloud!.metadataKeys!;
   const metadata: unknown[] = [];
   metadata[keys.indexOf("particle")] = { type: "dragon_breath" };
   metadata[keys.indexOf("radius")] = 7;
-  entities.spawn({ id: 51, name: "area_effect_cloud", position: new Vec3(-45.5, 80, -2.5), metadata });
+  entities.spawn({ id, name: "area_effect_cloud", position, metadata });
+}
+
+function spawnCloud(scene: Scene): void {
+  const { bot } = scene;
+  spawnBreathCloud(scene, 51, new Vec3(-45.5, 80, -2.5));
   const [cloud] = readDragonCloudHazards(bot);
   assert.ok(cloud);
   assert.equal(cloudExposure(cloud, bot.entity.position), 0);
@@ -236,6 +244,7 @@ for (const liftsDuringCall of [false, true]) {
         assert.equal(result, null);
       } else {
         assert.match(result ?? "", /CRYSTAL_STAIRCASE_INCOMPLETE.*refused at .*no path.*clouds near the build/i);
+        assert.match(result ?? "", /Dragon breath #51 at -45\.5, 80\.0, -2\.5 \(radius 7\.0\) meets the staircase's work box/);
         assert.ok(result?.includes(JSON.stringify(MISSING_TREADS[0])));
         assert.notEqual(bot.blockAt(MISSING_TREADS[0]!)?.name, "end_stone");
         entities.remove(51);
@@ -246,6 +255,22 @@ for (const liftsDuringCall of [false, true]) {
     } finally { off(); }
   });
 }
+
+test("the receipt names each cloud meeting the work box in id order, and no cloud outside it", async () => {
+  const scene = towerScene();
+  const { bot, clock } = scene;
+  spawnCloud(scene);
+  spawnBreathCloud(scene, 9, new Vec3(-45.5, 80, -2.5));
+  spawnBreathCloud(scene, 77, new Vec3(-15.5, 80, -2.5));
+  using _timers = clock.install();
+  await using navigation = createNavigationRuntime(bot);
+  const result = await build(scene, navigation) ?? "";
+  assert.match(result, /CRYSTAL_STAIRCASE_INCOMPLETE.*refused at .*no path/);
+  const nine = result.indexOf("Dragon breath #9 at -45.5, 80.0, -2.5 (radius 7.0) meets the staircase's work box.");
+  const fiftyOne = result.indexOf("Dragon breath #51 at -45.5, 80.0, -2.5 (radius 7.0) meets the staircase's work box.");
+  assert.ok(nine >= 0 && fiftyOne > nine, result);
+  assert.doesNotMatch(result, /Dragon breath #77 /);
+});
 
 const OUTSIDE = new Vec3(-25.5, 62, 0.5);
 

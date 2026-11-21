@@ -354,10 +354,15 @@ function cloudMeetsBox(cloud: DragonCloud, { min, max }: WorkBox): boolean {
     Math.max(0, min.y - cloud.y, cloud.y - max.y), Math.max(0, min.z - cloud.z, cloud.z - max.z)) <= cloud.radius;
 }
 
+/** The dragon breath clouds whose sphere meets the work box, lowest id first. */
+function cloudsMeetingBox(bot: Bot, plan: CrystalStaircase): DragonCloud[] {
+  return readDragonCloudHazards(bot).filter(cloud => cloudMeetsBox(cloud, plan.box)).sort((a, b) => a.id - b.id);
+}
+
 /** Only facts that could reopen a refused work route change its stamp. */
 function workRouteObservation(bot: Bot, plan: CrystalStaircase): string {
   const feet = feetOf(bot);
-  const clouds = readDragonCloudHazards(bot).filter(cloud => cloudMeetsBox(cloud, plan.box))
+  const clouds = cloudsMeetingBox(bot, plan)
     .map(({ id, x, y, z, radius }) => `${id}:${[x, y, z, radius].map(value => value.toFixed(1)).join(",")}`).sort();
   const states = plan.cells.map(({ position: { x, y, z } }) => bot.blockAt(new Vec3(x, y, z))?.stateId ?? "u");
   return JSON.stringify([[feet.x, feet.y, feet.z], clouds, states]);
@@ -375,5 +380,8 @@ function incompleteStaircase(bot: Bot, plan: CrystalStaircase, result: BuildResu
     : "build stopped";
   const next = refused ? "Inspect or clear the blocked way to the named cell, or choose a different approach."
     : "Retry this crystal to repair and reuse the same staircase.";
-  return staircaseShortfall(bot, plan) ?? `[CRYSTAL_STAIRCASE_INCOMPLETE] ${left.length} cells remain; ${refused ? why : result.reason ?? why}. ${next}`;
+  // Name the clouds meeting the box, so a caller can tell a cloud from terrain in a refused route.
+  const clouds = refused ? cloudsMeetingBox(bot, plan).map(({ id, x, y, z, radius }) =>
+    `Dragon breath #${id} at ${[x, y, z].map(value => value.toFixed(1)).join(", ")} (radius ${radius.toFixed(1)}) meets the staircase's work box. `).join("") : "";
+  return staircaseShortfall(bot, plan) ?? `[CRYSTAL_STAIRCASE_INCOMPLETE] ${left.length} cells remain; ${refused ? why : result.reason ?? why}. ${clouds}${next}`;
 }
