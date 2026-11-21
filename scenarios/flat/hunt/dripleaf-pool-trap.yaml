@@ -97,6 +97,8 @@ players:
     pos: [-3.5, -57, 0.5]
     inventory:
       - { item: iron_sword, count: 1 }
+      # The hunt's admission asks a shield against a hostile mob (shield-gate.ts).
+      - { item: shield, count: 1 }
 
 client:
   command: bun

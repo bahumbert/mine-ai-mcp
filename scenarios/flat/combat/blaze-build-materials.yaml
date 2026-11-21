@@ -22,6 +22,8 @@ players:
     inventory:
       - item: diamond_sword
         count: 1
+      - item: shield
+        count: 1
 entities:
   - type: blaze
     pos:
