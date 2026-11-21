@@ -5,10 +5,12 @@ import { MineflayerWorldView } from "../../navigation/mineflayer/world.js";
 import { navigationFeet, safeSupportingCell } from "../../navigation/world/block-geometry.js";
 import type { WorldView } from "../../navigation/world/world.js";
 import { cellIntersectsBody } from "../../utils/geometry.js";
+import { entityDimensions } from "../../world/entity-dimensions.js";
 import type { WorldBlock } from "../../world/index.js";
 import type { ResponseContext } from "../control/combat/context.js";
 import { isThreat } from "../perception/combat/threats.js";
 import { fullProtectionBlock } from "../positioning/combat/build-protection.js";
+import { PROJECTILE_HIT_MARGIN } from "../positioning/combat/exposure.js";
 import { PROTECTION_SIDES, protectionShell } from "../positioning/combat/planner.js";
 
 export type Entity = Parameters<Bot["attack"]>[0];
@@ -123,8 +125,8 @@ export function* shelterIntruders(bot: Bot, context: ResponseContext): Generator
   }
 }
 
-/** The four sides, the one facing the nearest hostile first, so cover goes up where the arrows come from. */
-export function sidesByThreat(bot: Bot, context: ResponseContext): readonly Vec3[] {
+/** The vector from the bot to the nearest threat, or null when there is none. */
+export function nearestThreatDirection(bot: Bot, context: ResponseContext): Vec3 | null {
   let nearest: Entity | null = null;
   for (const id in bot.entities) {
     const entity = bot.entities[id];
@@ -136,7 +138,71 @@ export function sidesByThreat(bot: Bot, context: ResponseContext): readonly Vec3
       nearest = entity;
     }
   }
-  if (!nearest) return SIDES;
-  const toward = nearest.position.minus(bot.entity.position);
+  return nearest ? nearest.position.minus(bot.entity.position) : null;
+}
+
+/** The four sides, the one facing the nearest hostile first, so cover goes up where the arrows come from. */
+export function sidesByThreat(bot: Bot, context: ResponseContext): readonly Vec3[] {
+  const toward = nearestThreatDirection(bot, context);
+  if (!toward) return SIDES;
   return [...SIDES].sort((left, right) => right.dot(toward) - left.dot(toward));
+}
+
+/** The cells' coordinates a span from `min` to `max` touches: `floor(min)` up to `ceil(max) - 1`. */
+function wholeNumbersAcross(min: number, max: number): number[] {
+  const first = Math.floor(min);
+  return Array.from({ length: Math.max(0, Math.ceil(max) - first) }, (_, offset) => first + offset);
+}
+
+/** The body's own layers first, the layers above ascending, then the layers below descending. */
+function marginLayerRank(feet: Vec3, cell: Vec3): number {
+  const above = cell.y - feet.y;
+  return above >= 0 ? above : 1000 - above;
+}
+
+/** Horizontal Manhattan distance from the feet column: an eave comes before the corner it supports. */
+function marginColumnDistance(feet: Vec3, cell: Vec3): number {
+  return Math.abs(cell.x - feet.x) + Math.abs(cell.z - feet.z);
+}
+
+/**
+ * Every cell the body box, expanded by `margin` on every face, overlaps with positive volume, minus the feet and head
+ * cells and the shell. A projectile's terrain ray stops at the entry point of that expanded box (`projectileContact`), so
+ * these are the cells a shell of `protectionShell` leaves between a shot and the body. No table of cells: the set follows
+ * the body's position and dimensions. The order is D9b's: layers (feet, head, above ascending, below descending), then
+ * the distance from the feet column, then x, then z.
+ */
+export function marginBoxCells(bot: Bot, feet: Vec3, margin = PROJECTILE_HIT_MARGIN): Vec3[] {
+  const { position } = bot.entity;
+  const { width, height } = entityDimensions(bot, bot.entity);
+  const box = { position: position.offset(0, -margin, 0), width: width + 2 * margin, height: height + 2 * margin };
+  const half = box.width / 2;
+  const excluded = new Set([feet, feet.offset(0, 1, 0), ...shell(feet)].map((cell) => cell.toString()));
+  const xs = wholeNumbersAcross(position.x - half, position.x + half);
+  const ys = wholeNumbersAcross(box.position.y, box.position.y + box.height);
+  const zs = wholeNumbersAcross(position.z - half, position.z + half);
+  const cells = xs.flatMap((x) => ys.flatMap((y) => zs.map((z) => new Vec3(x, y, z))))
+    .filter((cell) => cellIntersectsBody(cell, box) && !excluded.has(cell.toString()));
+  return cells.sort((left, right) =>
+    marginLayerRank(feet, left) - marginLayerRank(feet, right) ||
+    marginColumnDistance(feet, left) - marginColumnDistance(feet, right) ||
+    left.x - right.x || left.z - right.z);
+}
+
+/**
+ * The margin cells a shelter pass can still fill: loaded and not a full block. Inside a layer and distance group the
+ * cells on the `toward` side (the nearest threat) come first.
+ */
+export function marginCells(bot: Bot, feet: Vec3, toward: Vec3 | null, margin = PROJECTILE_HIT_MARGIN): Vec3[] {
+  const open = marginBoxCells(bot, feet, margin).filter((cell) => {
+    const block = bot.blockAt(cell);
+    return block !== null && !fullProtectionBlock(block);
+  });
+  if (!toward) return open;
+  const { position } = bot.entity;
+  const side = (cell: Vec3) => cell.offset(0.5, 0.5, 0.5).minus(position).dot(toward);
+  return open.sort((left, right) =>
+    marginLayerRank(feet, left) - marginLayerRank(feet, right) ||
+    marginColumnDistance(feet, left) - marginColumnDistance(feet, right) ||
+    side(right) - side(left) || left.x - right.x || left.z - right.z);
 }

@@ -10,6 +10,8 @@ import {
   type FakeServer,
   createFakeBot,
   createFakeClock,
+  itemOf,
+  listenersAddedSince,
 } from "../../test-support/fake-bot/index.js";
 import { regionRefusalText, setProtectedRegionsProvider, type ProtectedRegion } from "../../world/protected-regions.js";
 import { observeHostileResponse } from "../control/combat/observation.js";
@@ -18,6 +20,8 @@ import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { exactBlockGoal } from "../../navigation/goals/index.js";
 import { createMovementPolicy } from "../../navigation/movements/policy.js";
 import { createNavigationRuntime } from "../../navigation/runtime.js";
+import { SEALED_BOX, sealedBox } from "../../test-support/shelter-shell.js";
+import { incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { PHYSICS_TICK_WALL_MS } from "../../utils/physics-ticks.js";
 import { hideInPlace } from "./hide.js";
 import { capBlock, countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../positioning/combat/hide-blocks.js";
@@ -31,12 +35,6 @@ function boxOf(cell: FakeCell, x: Range, y: Range, z: Range): Record<string, Fak
     for (let cy = y[0]; cy <= y[1]; cy++) for (let cz = z[0]; cz <= z[1]; cz++) cells[`${cx},${cy},${cz}`] = cell;
   return cells;
 }
-
-/** The eight wall cells (feet and head height) and the cap around a bot standing at (0, 64, 0): the box the hide closes. */
-const SEALED_BOX: Record<string, FakeCell> = Object.fromEntries([
-  ...[[1, 0], [-1, 0], [0, 1], [0, -1]].flatMap(([x, z]) => [64, 65].map((y) => [`${x},${y},${z}`, "stone"])),
-  ["0,66,0", "stone"],
-]);
 
 type SceneOptions = Omit<FakeBotOptions, "clock" | "overrides"> & {
   readonly overrides?: FakeBotOptions["overrides"];
@@ -138,6 +136,7 @@ test("a bot already sealed in is hidden, not failed", async () => {
   assert.equal(result.enclosed, true);
   assert.equal(result.dug, 0);
   assert.equal(result.walled, 0);
+  assert.equal(result.margin.placed, 0, "no block is carried: the margin cells wait for a spare shell");
   assert.equal(result.error, undefined);
 });
 
@@ -976,6 +975,208 @@ for (const state of ["exhausted", "unavailable"] as const) test(`a one-block nav
     await using navigation = createNavigationRuntime(bot);
     const next = await clock.settle(navigation.navigate({
       movements: createMovementPolicy(), goal: exactBlockGoal({ x: 1, y: 64, z: 0 }),
+    }), 60_000);
+    assert.equal(next.status, "completed", JSON.stringify(next));
+  } finally { stop(); }
+});
+
+// ---- D9b (plan 2026-11-18-scenario-reds-part2-a5 T13o): the shelter seals the cells its projectile margin box overlaps ----
+
+/** The three shots traced in `.agent/reports/2026-11-21-hide-exposed-projectile-analysis.md` (fixture frame y -60, here +124 as the bot's). */
+const TRACED_SHOTS = [
+  { position: new Vec3(18.03, 65.4, 0.4856), velocity: new Vec3(-0.27525, 0, -0.0085) },
+  { position: new Vec3(-12.226, 65.4, 0.680), velocity: new Vec3(0.82175, 0, 0.028) },
+  { position: new Vec3(13.38, 69.19, 0.653), velocity: new Vec3(-0.79825, -0.19575, 0.0239) },
+];
+const shotOf = (index: number): FakeEntitySpec => ({ name: "small_fireball", ...TRACED_SHOTS[index]! });
+const MARGIN_CELLS = ["-1,64,-1", "-1,64,1", "1,64,-1", "1,64,1", "-1,65,-1", "-1,65,1", "1,65,-1", "1,65,1",
+  "-1,66,0", "0,66,-1", "0,66,1", "1,66,0", "-1,66,-1", "-1,66,1", "1,66,-1", "1,66,1"];
+const cellAt = (text: string) => new Vec3(...(text.split(",").map(Number) as [number, number, number]));
+const blockPlacements = (server: FakeServer) => server.packets.filter(({ name }) => name === "block_place");
+
+for (const ticksPerSecond of [20, 10]) for (const index of [0, 1, 2])
+  test(`a shell with its margin cells sealed survives traced shot ${index + 1}, a bare shell does not (${ticksPerSecond} tps)`, async () => {
+    const bare = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, server: { ticksPerSecond }, entities: { 61: shotOf(index) } });
+    {
+      using _installed = bare.clock.install();
+      assert.equal(incomingShieldProjectiles(bare.bot).length, 1, "the traced shot meets the body box through the open margin");
+      const result = await bare.clock.settle(hide(bare.bot), HIDE_LIMIT_MS);
+      assert.equal(result.kind, "failed", "no spare shell is carried: the margin stays open and the recovery refuses");
+      assert.equal(result.refusal?.hazard, "projectile");
+    }
+    const sealed = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond }, entities: { 61: shotOf(index) } });
+    using _installed = sealed.clock.install();
+    const result = await sealed.clock.settle(hide(sealed.bot), HIDE_LIMIT_MS);
+    assert.equal(result.kind, "recovered", result.error ?? "");
+    assert.equal(result.margin.placed, 16);
+    assert.deepEqual(incomingShieldProjectiles(sealed.bot), []);
+  });
+
+test("a traced shot at a bot with no shell and no margin blocks is an incoming projectile", () => {
+  for (const index of [0, 1, 2]) {
+    const { bot } = scene({ health: 18, entities: { 61: shotOf(index) } });
+    assert.equal(incomingShieldProjectiles(bot).length, 1, `shot ${index + 1}`);
+  }
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide that finds the shell standing seals its margin: nothing dug or walled, 16 placed, one shell left (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered");
+  assert.equal(result.enclosed, true);
+  assert.equal(result.dug, 0);
+  assert.equal(result.walled, 0);
+  assert.equal(result.margin.placed, 16);
+  assert.deepEqual(result.margin.skipped, []);
+  assert.equal(countCapBlocks(bot), 10);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide that builds its shell then seals the margin while a spare shell is carried, and the next hide still closes (reserve, ${ticksPerSecond} tps)`, async () => {
+  const { bot, clock } = scene({ mockedClock: true, health: 18, carried: { cobblestone: 20 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const first = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(first.kind, "recovered", first.error ?? "");
+  assert.equal(first.margin.placed, 0, "the shell took 10 of 20: nothing is left over the reserve");
+  assert.deepEqual(first.margin.skipped.map(({ reason }) => reason), Array(first.margin.skipped.length).fill("reserve"));
+  assert.equal(countCapBlocks(bot), 10, "one shell is still carried");
+  bot.entity.position.set(4.5, 64, 4.5);
+  const second = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(second.kind, "recovered", second.error ?? "");
+  assert.equal(second.enclosed, false);
+  assert.ok(second.walled > 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`the dragon shelter's restricted cover seals its margin with the same blocks only (${ticksPerSecond} tps)`, async () => {
+  const options = { health: 18, mockedClock: true, cells: sealedBox("end_stone"), server: { ticksPerSecond } } as const;
+  const stone = scene({ ...options, carried: { end_stone: 26, cobblestone: 64 } });
+  {
+    using _installed = stone.clock.install();
+    const result = await stone.clock.settle(hideInPlace(stone.bot, { threatContext: combatTestContext(stone.bot), signal: new AbortController().signal,
+      recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS }), HIDE_LIMIT_MS);
+    assert.equal(result.kind, "recovered", result.error ?? "");
+    assert.equal(result.margin.placed, 16);
+    for (const cell of MARGIN_CELLS) assert.equal(stone.bot.blockAt(cellAt(cell))?.name, "end_stone", cell);
+    assert.equal(countCapBlocks(stone.bot, DRAGON_PROTECTION_BLOCKS), 10);
+  }
+  const cobble = scene({ ...options, carried: { cobblestone: 64 } });
+  using _installed = cobble.clock.install();
+  const result = await cobble.clock.settle(hideInPlace(cobble.bot, { threatContext: combatTestContext(cobble.bot), signal: new AbortController().signal,
+    recoverTo: 18, maximumMs: 90_000, blockNames: DRAGON_PROTECTION_BLOCKS }), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(result.margin.placed, 0, "cobblestone is no dragon cover");
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a fire in the feet cell is dug out before the first margin placement (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: { ...SEALED_BOX, "0,64,0": "fire" }, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  let atFirstPlacement: string | undefined = "never placed";
+  const stop = server.onPacket("block_place", () => { if (atFirstPlacement === "never placed") atFirstPlacement = bot.blockAt(new Vec3(0, 64, 0))?.name; });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  stop();
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(atFirstPlacement, "air");
+  assert.equal(result.margin.placed, 16);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a hide whose deadline passed before the margin pass places nothing and still recovers (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot, new Set(), 0), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.equal(result.margin.placed, 0);
+  assert.deepEqual(result.margin.skipped.map(({ reason }) => reason), Array(16).fill("stopped: construction changed"));
+  // The result goes into the survival receipt, whose facts schema refuses a class instance (hostile.test.ts reads it back).
+  assert.equal(Object.getPrototypeOf(result.margin.skipped[0]!.cell), Object.prototype);
+  assert.equal(blockPlacements(server).length, 0);
+});
+
+// The pass's own refusal and server-stopped paths are asserted at the pass (`shelter-construction.test.ts`); the hide goes on to recovery after 0 placed (deadline test above).
+for (const ticksPerSecond of [20, 10]) test(`cancelling during a margin placement ends the hide with no refusal and no listener left (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const added = listenersAddedSince(bot);
+  const abort = new AbortController();
+  const stop = server.onPacket("block_place", () => abort.abort(new Error("hide cancelled")));
+  const pending = hideInPlace(bot, { threatContext: combatTestContext(bot), signal: abort.signal, recoverTo: 18, maximumMs: 5_000 });
+  await assert.rejects(clock.settle(pending, 6_000), /hide cancelled/);
+  stop();
+  assert.equal(blockPlacements(server).length, 1);
+  await clock.advance(60_000);
+  for (const event of ["time", "physicsTick", "entityUpdate", "death", "health"]) assert.equal(added(event), 0, event);
+  assert.equal(clock.pendingTimers(), 0);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a death during the margin pass settles the hide with no refusal (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 26 }, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  let placed = 0;
+  const stop = server.onPacket("block_place", () => { if (++placed === 2) bot.health = 0; });
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  stop();
+  assert.equal(result.margin.placed, 2, "no placement after the death");
+  assert.equal(result.kind, "held", "a dead bot has no recovery to run: the hold ends, never a refusal");
+  assert.equal(result.refusal, undefined);
+});
+
+// ---- T13p: an exposed refusal names the open margin cells ----
+
+for (const ticksPerSecond of [20, 10]) test(`an exposed refusal with a whole shell names the open margin cells and the blocks left, and the next hide recovers (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, entities, inventory } = scene({ mockedClock: true, health: 18, cells: SEALED_BOX, carried: { cobblestone: 10 },
+    server: { ticksPerSecond }, entities: { 61: shotOf(0) } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.refusal?.cause, "exposed");
+  assert.equal(result.refusal?.hazard, "projectile");
+  assert.equal(result.margin.placed, 0, "the reserve: no margin cell was placed");
+  const margin = result.refusal!.margin;
+  assert.equal(margin.length, 25);
+  assert.deepEqual(margin.slice(0, 16).map(({ cell, block }) => `${cell.x},${cell.y},${cell.z}:${block}`), MARGIN_CELLS.map((cell) => `${cell}:air`));
+  assert.ok(margin.slice(16).every(({ cell, block }) => cell.y === 63 && block === "stone"), "the floor layer is stone");
+  assert.match(result.error ?? "", /during recovery \(projectile\); open margin cells: -1,64,-1; -1,64,1; /);
+  assert.match(result.error ?? "", /; 1,66,1 \(10 blocks left\)\.$/);
+  // Next action from the refusal: the shot gone and a spare shell carried, the same cell recovers with its margin sealed.
+  entities.remove(61);
+  const stack = bot.inventory.items().find((item) => item.name === "cobblestone")!;
+  inventory.updateSlot(stack.slot, itemOf(bot.registry, "cobblestone", 26));
+  const next = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(next.kind, "recovered", next.error ?? "");
+  assert.equal(next.margin.placed, 16);
+});
+
+for (const ticksPerSecond of [20, 10]) test(`an exposed refusal with every margin cell sealed names none, and its record holds no open cell (${ticksPerSecond} tps)`, async () => {
+  const sealedMargin = Object.fromEntries(MARGIN_CELLS.map((cell) => [cell, "stone" as FakeCell]));
+  const { bot, clock } = scene({ mockedClock: true, health: 7, cells: { ...SEALED_BOX, ...sealedMargin }, server: { ticksPerSecond },
+    entities: { 61: { name: "arrow", position: new Vec3(0.5, 65, 0.1), velocity: new Vec3(0, 0, 0.3) } } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error, "The shelter became exposed or unsafe during recovery (projectile).");
+  assert.equal(result.refusal?.margin.length, 25);
+  assert.ok(result.refusal!.margin.slice(0, 16).every(({ block }) => block === "stone"));
+});
+
+// A refusal of another cause carries the margin record too: the deadline refusal is asserted in `shelter-construction.test.ts`.
+
+// The next action from the new end state: out of a shelter that has margin blocks, through its wall, within the bound.
+for (const ticksPerSecond of [20, 10]) for (const carried of [26, 13]) test(`a navigate out of a shelter with margin blocks completes (${carried} carried, ${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, server, world } = scene({ mockedClock: true, health: 18, food: 20, cells: SEALED_BOX, carried: { cobblestone: carried }, simulatePhysics: true, server: { ticksPerSecond } });
+  using _installed = clock.install();
+  const result = await clock.settle(hide(bot), HIDE_LIMIT_MS);
+  assert.equal(result.kind, "recovered", result.error ?? "");
+  assert.ok(result.margin.placed >= 1);
+  const stop = server.onPacket("block_dig", (data) => {
+    const packet = data as { status: number; location: Vec3 };
+    if (packet.status === 2) server.answer(() => {
+      world.setCell(packet.location, "air");
+      bot._client.emit("block_change", { location: packet.location, type: 0 });
+    });
+  });
+  try {
+    await using navigation = createNavigationRuntime(bot);
+    const next = await clock.settle(navigation.navigate({
+      movements: createMovementPolicy(), goal: exactBlockGoal({ x: 4, y: 64, z: 0 }),
     }), 60_000);
     assert.equal(next.status, "completed", JSON.stringify(next));
   } finally { stop(); }

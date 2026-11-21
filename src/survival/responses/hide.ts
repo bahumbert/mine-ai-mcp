@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { monotonicNow } from "../../utils/index.js";
 import { PHYSICS_TICK_WALL_MS, waitForPhysicsTicks } from "../../utils/physics-ticks.js";
+import { fireContactCells } from "../perception/body.js";
 import { extinguishFireAt } from "../positioning/fire-clearance.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { recoverUnderCover, type CoveredRecovery } from "./recover.js";
@@ -10,11 +11,12 @@ import {
   type HideOptions,
   repelShelterIntruder,
   type ShelterBuild,
+  shelterBlocks,
   shelterHazard,
   shelterLiquidFailure,
 } from "./shelter-build.js";
-import { enclosedInPlace, shelterIntruder } from "./shelter-cells.js";
-import { constructShelterPass } from "./shelter-construction.js";
+import { enclosedInPlace, marginCells, shelterFeet, shelterIntruder } from "./shelter-cells.js";
+import { constructShelterPass, type MarginPass, sealMarginCells } from "./shelter-construction.js";
 import { describeShelterRefusal, type ShelterRefusal } from "./shelter-refusal.js";
 
 export { enclosedInPlace } from "./shelter-cells.js";
@@ -30,8 +32,10 @@ interface HideEvidence {
   readonly walled: number;
   /** Whether this hide placed the block over the bot's head. */
   readonly capped: boolean;
-  /** The bot was already in a closed cell, so nothing was dug or placed and nothing needed to be. */
+  /** The bot was already in a closed cell, so nothing was dug or walled. */
   readonly enclosed: boolean;
+  /** The projectile margin pass after the shell, D9b: its blocks are not in `walled`. */
+  readonly margin: MarginPass;
   readonly ate: string | null;
   /** Swings at authorized threats occupying the body or shelter shell. */
   readonly swings: number;
@@ -68,7 +72,10 @@ function startShelterBuild(bot: Bot, options: HideOptions): ShelterBuild {
   return build;
 }
 
-function concludeHide(build: ShelterBuild, conclusion: HideConclusion): HideResult {
+/** The margin pass of a hide that ended before the shell stood: nothing was sealed. */
+const noMargin = (): MarginPass => ({ placed: 0, ticks: 0, skipped: [] });
+
+function concludeHide(build: ShelterBuild, conclusion: HideConclusion, margin: MarginPass = noMargin()): HideResult {
   const { bot } = build;
   if ((bot.health <= 0 || build.options.signal.aborted) && "refusal" in conclusion) {
     const { refusal: _refusal, ...withoutRefusal } = conclusion;
@@ -80,12 +87,24 @@ function concludeHide(build: ShelterBuild, conclusion: HideConclusion): HideResu
     walled: build.walled,
     capped: build.capped,
     enclosed: build.enclosed,
+    margin,
     ate: build.ate,
     swings: build.swings,
     healthAfter: bot.health,
     hungerAfter: bot.food,
     ...conclusion,
   };
+}
+
+/**
+ * What a projectile refusal adds: the margin cells still open around the whole shell (the ones a shot can cross before the
+ * wall) and the blocks left to fill them, so the caller sees a shelter missing blocks rather than a shell with a hole. Empty
+ * for any other cause and when no margin cell is open.
+ */
+function openMarginText(build: ShelterBuild, cause: string): string {
+  if (cause !== "projectile") return "";
+  const open = marginCells(build.bot, shelterFeet(build.bot), null);
+  return open.length === 0 ? "" : `; open margin cells: ${open.map(({ x, y, z }) => `${x},${y},${z}`).join("; ")} (${shelterBlocks(build)} blocks left)`;
 }
 
 /** Heal inside the finished shelter, defending the shell, until health is back or the hold ends. */
@@ -115,7 +134,7 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
   build.ate = recovery.ate;
   switch (recovery.kind) {
     case "exposed":
-      return { kind: "failed", error: `The shelter became exposed or unsafe during recovery (${recovery.cause}).`,
+      return { kind: "failed", error: `The shelter became exposed or unsafe during recovery (${recovery.cause})${openMarginText(build, recovery.cause)}.`,
         refusal: describeShelterRefusal(build, "exposed", { hazard: shelterHazard(build) ?? recovery.cause }) };
     case "held":
       return { kind: "held", error: recovery.reason };
@@ -141,6 +160,10 @@ async function recoverInShelter(build: ShelterBuild): Promise<HideConclusion> {
  * hold. Without that, every successful hide guaranteed a failing one thirty
  * seconds later: each side already solid, nothing to place, and the runtime
  * reporting its safety net broken from inside a working shelter.
+ *
+ * Built or found, the closed shell is then widened by the margin pass (`sealMarginCells`): the open cells the body box
+ * expanded by the projectile hit margin overlaps, while a spare shell's worth of blocks stays carried, so the recovery's
+ * projectile test does not refuse a shell whose gaps only a diagonal shot could use. Its receipt is the result's `margin`.
  */
 export async function hideInPlace(bot: Bot, options: HideOptions): Promise<HideResult> {
   const build = startShelterBuild(bot, options);
@@ -163,5 +186,8 @@ export async function hideInPlace(bot: Bot, options: HideOptions): Promise<HideR
       error: `The shelter is still open${build.refusal ? `: ${build.refusal}` : open ? `: ${open}` : ""}`,
     });
   }
-  return concludeHide(build, await recoverInShelter(build));
+  // A fire in the body's cells is cleared first (as the recovery's own opening does), so the placements do not run in it.
+  for (const cell of fireContactCells(bot)) if ((await extinguishFireAt(bot, cell, options.signal, true)) === "blocked") break;
+  const margin = await sealMarginCells(build);
+  return concludeHide(build, await recoverInShelter(build), margin);
 }

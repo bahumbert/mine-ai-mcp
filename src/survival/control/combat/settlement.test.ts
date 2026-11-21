@@ -28,7 +28,7 @@ function responseResults(): HostileResponseResult[] {
   const result = { targetId: 8, attacks: 0, stylesUsed: [], weaponsUsed: [],
     shieldRaisedSwings: 0, projectileGuards: 0, explosions: 0 };
   const hide = { ...evidence, response: "hide" as const, followUp: null };
-  const shelter = { dug: 0, walled: 0, capped: false, enclosed: true, ate: null, swings: 0,
+  const shelter = { dug: 0, walled: 0, capped: false, enclosed: true, margin: { placed: 0, ticks: 0, skipped: [] }, ate: null, swings: 0,
     healthAfter: 11, hungerAfter: 20 };
   return [
     { ...evade, result: { kind: "exhausted", reason: "Still following" } },
@@ -49,7 +49,7 @@ function responseResults(): HostileResponseResult[] {
     { ...hide, result: { ...shelter, kind: "recovered", recovery: { kind: "recovered", ate: null } } },
     { ...hide, result: { ...shelter, kind: "failed", recovery: null, error: "No enclosure", refusal: {
       cause: "no_floor", feet: { x: 0, y: 64, z: 0 }, position: { x: 0.5, y: 64, z: 0.5 }, onGround: true,
-      floor: null, shell: [], occupied: [], intruders: [], hazard: null, projectiles: [], worldAge: null,
+      floor: null, shell: [], margin: [], occupied: [], intruders: [], hazard: null, projectiles: [], worldAge: null,
     } } },
     { ...hide, result: { ...shelter, kind: "held", recovery: null, error: "No food" } },
   ];

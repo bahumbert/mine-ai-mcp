@@ -381,7 +381,7 @@ for (const ticksPerSecond of [20, 10]) {
         }
         refusal = { cause: "occupied", feet: { x: 0, y: 64, z: 0 }, position: { x: 0.5, y: 64, z: 0.5 },
           onGround: true, floor: { name: "stone", shapes: [[0, 0, 0, 1, 1, 1]] },
-          shell: [{ cell: { x: 1, y: 64, z: 0 }, block: "air" }], occupied: [], intruders: [],
+          shell: [{ cell: { x: 1, y: 64, z: 0 }, block: "air" }], margin: [], occupied: [], intruders: [],
           hazard: null, projectiles: [], worldAge: bot.time.age };
         return { ...hideResult(bot, { kind: "failed", error: "occupied shell" }), refusal };
       }, { burning: true, health: fighting ? 20 : 6, ticksPerSecond, intruder: kind !== "hand-back", navigateNext: true, armed: fighting });

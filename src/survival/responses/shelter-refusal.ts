@@ -4,7 +4,7 @@ import { cellIntersectsBody, type Position3 } from "../../utils/geometry.js";
 import { familyIndexOf } from "../../world/item-families.js";
 import { protectionShell } from "../positioning/combat/planner.js";
 import type { ShelterBuild } from "./shelter-build.js";
-import { shelterFeet, shelterIntruders } from "./shelter-cells.js";
+import { marginBoxCells, shelterFeet, shelterIntruders } from "./shelter-cells.js";
 
 type Cause = "no_floor" | "not_centred" | "hazard" | "constrained" | "liquid" | "deadline" | "occupied" | "open" | "exposed";
 type Point = { readonly x: number; readonly y: number; readonly z: number };
@@ -19,6 +19,8 @@ export type ShelterRefusal = {
   readonly onGround: boolean;
   readonly floor: { readonly name: string; readonly shapes: readonly (readonly number[])[] } | null;
   readonly shell: readonly { readonly cell: Point; readonly block: string | null }[];
+  /** The cells the body box expanded by the projectile hit margin overlaps (`marginBoxCells`), in the order the margin pass takes them. */
+  readonly margin: readonly { readonly cell: Point; readonly block: string | null }[];
   readonly occupied: readonly ShelterOccupied[];
   readonly intruders: readonly Intruder[];
   readonly hazard: string | null;
@@ -50,6 +52,7 @@ export function describeShelterRefusal(build: ShelterBuild, cause: Cause, extra:
   return { cause, feet: point(feet), position: point(bot.entity.position), onGround: bot.entity.onGround,
     floor: floor ? { name: floor.name, shapes: floor.shapes.map((shape) => [...shape]) } : null,
     shell: cells.map((cell) => ({ cell: point(cell), block: bot.blockAt(cell)?.name ?? null })),
+    margin: marginBoxCells(bot, feet).map((cell) => ({ cell: point(cell), block: bot.blockAt(cell)?.name ?? null })),
     occupied, intruders, hazard: "hazard" in extra ? extra.hazard ?? null : build.options.unsafe?.() ?? null,
     projectiles, worldAge: bot.time?.age ?? null };
 }

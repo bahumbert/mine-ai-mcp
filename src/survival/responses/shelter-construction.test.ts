@@ -5,14 +5,16 @@ import { Vec3 } from "vec3";
 import { createNavigationRuntime, installNativeDigClock, type NavigationRuntime } from "../../navigation/index.js";
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { combatTestContext, onAttack } from "../../test-support/combat.js";
-import { createFakeBot, createFakeClock, type FakeBot, type FakeClock } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, type FakeBot, type FakeBotOptions, type FakeCell, type FakeClock, type FakeServer } from "../../test-support/fake-bot/index.js";
+import { SEALED_BOX } from "../../test-support/shelter-shell.js";
+import { countCapBlocks } from "../positioning/combat/hide-blocks.js";
 import { waitForServerTicks } from "../../world/world-age.js";
 import { serverTickPace } from "../../world/server-tick-pace.js";
 import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { CombatItemUse } from "../weapons/item-use.js";
 import { hideInPlace, enclosedInPlace } from "./hide.js";
 import { centerShelterCell, type ShelterBuild } from "./shelter-build.js";
-import { constructShelterPass } from "./shelter-construction.js";
+import { constructShelterPass, sealMarginCells } from "./shelter-construction.js";
 
 /** A construction attempt shared by centering and pass-bound tests. */
 function createTestShelterBuild(bot: FakeBot, clock: FakeClock): ShelterBuild {
@@ -236,6 +238,7 @@ for (const occupant of ["cow", "ender_dragon"]) for (const leaves of [false, tru
       if (result.kind !== "failed") throw new Error("expected failed hide");
       assert.equal(result.refusal?.cause, "deadline");
       assert.ok(result.refusal?.shell.some((entry) => entry.cell.x === 1 && entry.cell.y === 64 && entry.block === "air"));
+      assert.equal(result.refusal?.margin.length, 25, "a deadline refusal carries the margin record too");
     }
   });
 
@@ -372,4 +375,184 @@ test(`three blocked passes leave a named open cell and hand recovery to withdraw
   assert.match(next.kind === "blocked" ? next.observation : "", /withdrawal route unavailable/, "the evade ended on the route's own answer, not on an assertion failure");
   assert.ok(clock.now() - started < context.policy.recovery_timeout_ms + 3 * context.policy.evade_timeout_ms);
   assert.equal(bot.usingHeldItem, false);
+});
+
+// ---- The margin pass (plan 2026-11-18-scenario-reds-part2-a5 T13o) ----
+
+/** The 16 margin cells of a bot at the centre of (0, 64, 0), in the order the pass takes them (`shelter-cells.test.ts`). */
+const MARGIN_ORDER = [
+  "-1,64,-1", "-1,64,1", "1,64,-1", "1,64,1", "-1,65,-1", "-1,65,1", "1,65,-1", "1,65,1",
+  "-1,66,0", "0,66,-1", "0,66,1", "1,66,0", "-1,66,-1", "-1,66,1", "1,66,-1", "1,66,1",
+];
+const cellOf = (text: string) => new Vec3(...(text.split(",").map(Number) as [number, number, number]));
+const placements = (server: FakeServer) => server.packets.filter(({ name }) => name === "block_place");
+
+/** A bot in the 9-cell shell of `SEALED_BOX`, carrying `carried` cobblestone, and the build a hide would hold for it. */
+function marginScene(options: { readonly carried: number; readonly ticksPerSecond: number; readonly cells?: Record<string, FakeCell>;
+  readonly groundY?: null; readonly entities?: FakeBotOptions["entities"]; readonly overrides?: FakeBotOptions["overrides"] }) {
+  const clock = createFakeClock({ mode: "mocked" });
+  const harness = createFakeBot({ clock, server: { ticksPerSecond: options.ticksPerSecond ?? 20 }, carried: { cobblestone: options.carried },
+    cells: { ...SEALED_BOX, ...options.cells }, groundY: options.groundY, entities: options.entities, overrides: options.overrides });
+  return { ...harness, clock, build: createTestShelterBuild(harness.bot, clock) };
+}
+
+/** What a margin pass must leave alone: the shell's own record (`walled`, `capped`, `refusal`, `blockedCells`). */
+const shellRecord = (build: ShelterBuild) => ({ walled: build.walled, capped: build.capped, refusal: build.refusal, blocked: build.blockedCells.size });
+
+for (const ticksPerSecond of [20, 10])
+  test(`a whole shell with a spare shell carried gets its 16 margin cells, one shell stays, the shell's record is untouched (${ticksPerSecond} tps)`, async () => {
+    const { bot, clock, build } = marginScene({ ticksPerSecond, carried: 26 });
+    using _installed = clock.install();
+    const record = shellRecord(build);
+    const pass = await clock.settle(sealMarginCells(build), 60_000);
+    assert.equal(pass.placed, 16);
+    assert.deepEqual(pass.skipped, []);
+    // `pass.ticks` is not asserted: the fake answers a placement without moving the world age (0 at both rates); the real
+    // server's span is measured in the scenarios (the hide receipt's `margin.ticks`).
+    for (const cell of MARGIN_ORDER) assert.equal(bot.blockAt(cellOf(cell))?.name, "cobblestone", cell);
+    assert.equal(countCapBlocks(bot), 10);
+    assert.deepEqual(shellRecord(build), record);
+  });
+
+for (const ticksPerSecond of [20, 10]) test(`the reserve: a margin cell is placed only while more than one shell is carried (${ticksPerSecond} tps)`, async () => {
+  for (const [carried, placed] of [[26, 16], [13, 3], [11, 1], [10, 0]] as const) {
+    const { bot, clock, build } = marginScene({ ticksPerSecond, carried });
+    using _installed = clock.install();
+    const record = shellRecord(build);
+    const pass = await clock.settle(sealMarginCells(build), 60_000);
+    assert.equal(pass.placed, placed, `${carried} carried`);
+    assert.deepEqual(pass.skipped.map(({ reason }) => reason), Array(16 - placed).fill("reserve"), `${carried} carried`);
+    assert.deepEqual(pass.skipped.map(({ cell }) => `${cell.x},${cell.y},${cell.z}`), MARGIN_ORDER.slice(placed));
+    for (const cell of MARGIN_ORDER.slice(0, placed)) assert.equal(bot.blockAt(cellOf(cell))?.name, "cobblestone", `${carried}: ${cell}`);
+    assert.equal(countCapBlocks(bot), carried - placed, `${carried} carried: one shell is left`);
+    assert.deepEqual(shellRecord(build), record, `${carried} carried`);
+  }
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a threat's side goes first, whatever the wall direction the caller named (${ticksPerSecond} tps)`, async () => {
+  for (const firstWallDirection of [undefined, new Vec3(-1, 0, 0)]) {
+    const { bot, clock, build } = marginScene({ ticksPerSecond, carried: 12, entities: { 70: { name: "blaze", position: new Vec3(8.5, 64, 0.5) } } });
+    using _installed = clock.install();
+    const pass = await clock.settle(sealMarginCells({ ...build, options: { ...build.options, firstWallDirection } }), 60_000);
+    assert.equal(pass.placed, 2);
+    assert.deepEqual(["1,64,-1", "1,64,1"].map((cell) => bot.blockAt(cellOf(cell))?.name), ["cobblestone", "cobblestone"]);
+    assert.deepEqual(["-1,64,-1", "-1,64,1"].map((cell) => bot.blockAt(cellOf(cell))?.name), ["air", "air"]);
+  }
+});
+
+// A fire in a margin cell cannot be dug from inside the closed shell, whatever the dig permission: `extinguishFireAt`'s
+// ray from the eye to the cell meets the shell's corner (`clearCombatRay`), so the plan's "extinguished, then placed" case
+// does not happen; the pass ends at the fire, with the cells before it placed.
+for (const ticksPerSecond of [20, 10]) for (const dig of [true, false]) test(`a fire in a margin cell ends the pass there and names it (dig ${dig ? "allowed" : "prohibited"}, ${ticksPerSecond} tps)`, async () => {
+  const { clock, build, bot } = marginScene({ ticksPerSecond, carried: 26, cells: { "1,64,1": "fire" } });
+  using _installed = clock.install();
+  const policy = build.options.threatContext.policy;
+  const options = { ...build.options, threatContext: { ...build.options.threatContext, policy: { ...policy, terrain: { ...policy.terrain, dig } } } };
+  const pass = await clock.settle(sealMarginCells({ ...build, options }), 60_000);
+  assert.equal(pass.placed, 3, "the three diagonals before the fire");
+  assert.match(pass.skipped[0]!.reason, /^refused: Fire could not be cleared/);
+  assert.deepEqual(pass.skipped[0]!.cell, { x: 1, y: 64, z: 1 });
+  assert.deepEqual(pass.skipped.slice(1).map(({ reason }) => reason), Array(12).fill("stopped: refused"));
+  assert.equal(bot.blockAt(new Vec3(1, 64, 1))?.name, "fire", "nothing was dug");
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a bottom slab in a margin cell is refused with the placement's reason and ends the pass (${ticksPerSecond} tps)`, async () => {
+  const { clock, build } = marginScene({ ticksPerSecond, carried: 26, cells: { "-1,65,1": "stone_slab" } });
+  using _installed = clock.install();
+  const pass = await clock.settle(sealMarginCells(build), 60_000);
+  assert.equal(pass.placed, 5, "four diagonals at feet height and the first at head height");
+  assert.match(pass.skipped[0]!.reason, /^refused: .*stone_slab/);
+  assert.deepEqual(pass.skipped.slice(1).map(({ reason }) => reason), Array(10).fill("stopped: refused"));
+});
+
+for (const ticksPerSecond of [20, 10]) test(`an occupied margin cell is skipped and the pass goes on; a cell with no support is skipped too (${ticksPerSecond} tps)`, async () => {
+  const cow = marginScene({ ticksPerSecond, carried: 26, entities: { 5: { name: "cow", position: new Vec3(1.5, 64, 1.5) } } });
+  {
+    using _installed = cow.clock.install();
+    const pass = await cow.clock.settle(sealMarginCells(cow.build), 60_000);
+    // A cow is 1.4 high: it stands in the diagonal at feet height and the one above it.
+    assert.equal(pass.placed, 14);
+    assert.deepEqual(pass.skipped.map(({ reason }) => reason), ["occupied", "occupied"]);
+    assert.deepEqual(pass.skipped.map(({ cell }) => `${cell.x},${cell.y},${cell.z}`), ["1,64,1", "1,65,1"]);
+    assert.equal(cow.bot.blockAt(new Vec3(1, 64, 1))?.name, "air");
+  }
+  // No shell and no ground but the feet cell's floor: only the floor layer has a neighbour to be placed against.
+  const bare = marginScene({ ticksPerSecond, carried: 34, groundY: null, cells: { "0,63,0": "stone" } });
+  using _installed = bare.clock.install();
+  for (const cell of Object.keys(SEALED_BOX)) bare.world.setCell(cellOf(cell), "air");
+  const pass = await bare.clock.settle(sealMarginCells(bare.build), 60_000);
+  assert.equal(pass.placed, 8);
+  assert.deepEqual(pass.skipped.map(({ reason }) => reason), Array(16).fill("no_support"));
+});
+
+for (const ticksPerSecond of [20, 10]) test(`over a drop the floor layer goes last, and the reserve still caps the pass (${ticksPerSecond} tps)`, async () => {
+  const air = Object.fromEntries([-1, 0, 1].flatMap((x) => [-1, 0, 1].map((z) => [`${x},63,${z}`, "air" as FakeCell])));
+  const bridge = { groundY: null, cells: { ...air, "0,63,0": "stone" } } as const;
+  const wide = marginScene({ ticksPerSecond, carried: 34, ...bridge });
+  {
+    using _installed = wide.clock.install();
+    const pass = await wide.clock.settle(sealMarginCells(wide.build), 60_000);
+    assert.equal(pass.placed, 24);
+    assert.equal(wide.bot.blockAt(new Vec3(1, 63, 1))?.name, "cobblestone");
+  }
+  const short = marginScene({ ticksPerSecond, carried: 13, ...bridge });
+  using _installed = short.clock.install();
+  const pass = await short.clock.settle(sealMarginCells(short.build), 60_000);
+  assert.equal(pass.placed, 3);
+  assert.equal(short.bot.blockAt(new Vec3(1, 63, 0))?.name, "air", "the floor layer is not reached");
+});
+
+// The cancel of a margin placement is tested through the hide (`hide.test.ts`), which asserts the pass's abort path too.
+for (const ticksPerSecond of [20, 10]) test(`death after the second placement stops the pass: no third placement, every later cell skipped as stopped (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, build, server } = marginScene({ ticksPerSecond, carried: 26 });
+  using _installed = clock.install();
+  let seen = 0;
+  const stop = server.onPacket("block_place", () => { if (++seen === 2) bot.health = 0; });
+  const pass = await clock.settle(sealMarginCells(build), 60_000);
+  stop();
+  assert.equal(placements(server).length, 2);
+  assert.equal(pass.placed, 2);
+  assert.deepEqual(pass.skipped.map(({ reason }) => reason), Array(14).fill("stopped: dead"));
+});
+
+// The expired construction deadline is asserted through the hide (`hide.test.ts`).
+for (const ticksPerSecond of [20, 10]) test(`fire in the body or a hazard places nothing and names why (${ticksPerSecond} tps)`, async () => {
+  const burning = marginScene({ ticksPerSecond, carried: 26, cells: { "0,64,0": "fire" } });
+  {
+    using _installed = burning.clock.install();
+    const pass = await burning.clock.settle(sealMarginCells(burning.build), 60_000);
+    assert.equal(pass.placed, 0);
+    assert.deepEqual(pass.skipped.map(({ reason }) => reason), Array(16).fill("stopped: fire"));
+  }
+  const unsafe = marginScene({ ticksPerSecond, carried: 26 });
+  using _installed = unsafe.clock.install();
+  const hazard = { ...unsafe.build, options: { ...unsafe.build.options, unsafe: () => "a creeper is hissing" } };
+  const pass = await unsafe.clock.settle(sealMarginCells(hazard), 60_000);
+  assert.equal(pass.placed, 0);
+  assert.deepEqual(pass.skipped.map(({ reason }) => reason), Array(16).fill("stopped: a creeper is hissing"));
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a placement the server refuses ends the pass with its message and no second placement call (${ticksPerSecond} tps)`, async () => {
+  let equips = 0;
+  const { clock, build } = marginScene({ ticksPerSecond, carried: 26, overrides: { equip: async () => { equips += 1; throw new Error("the server would not equip cobblestone"); } } });
+  using _installed = clock.install();
+  const pass = await clock.settle(sealMarginCells(build), 60_000);
+  assert.equal(equips, 1);
+  assert.equal(pass.placed, 0);
+  assert.match(pass.skipped[0]!.reason, /^refused: .*the server would not equip cobblestone/);
+  assert.deepEqual(pass.skipped.slice(1).map(({ reason }) => reason), Array(15).fill("stopped: refused"));
+});
+
+for (const ticksPerSecond of [20, 10]) test(`a server that stops answering mid-pass ends the pass within its bound while the world age stands still (${ticksPerSecond} tps)`, async () => {
+  const { bot, clock, build, server } = marginScene({ ticksPerSecond, carried: 26 });
+  using _installed = clock.install();
+  const stop = server.onPacket("block_place", () => server.stop());
+  const pass = await clock.settle(sealMarginCells(build), 120_000);
+  stop();
+  const age = bot.time.age;
+  await clock.advance(30_000);
+  assert.equal(bot.time.age, age, "the world age stood still");
+  assert.ok(pass.placed < 16);
+  assert.ok(pass.skipped.length > 0);
+  assert.equal(placements(server).length, pass.placed + 1, "one placement call went unanswered, none after it");
 });

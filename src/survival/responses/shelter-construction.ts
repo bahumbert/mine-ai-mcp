@@ -5,10 +5,13 @@ import { selectHarvestTool } from "../../navigation/mineflayer/movement-policy.j
 import { nativeDigTicks } from "../../navigation/index.js";
 import { monotonicNow } from "../../utils/index.js";
 import { findPlacementSupport } from "../../world/index.js";
+import { occupiedCell } from "../../world/placement.js";
 import { foreignRegionAt, regionRefusalText } from "../../world/protected-regions.js";
 import { MS_PER_ON_TIME_TICK } from "../../world/world-age.js";
+import { isInFire, isInLava } from "../perception/body.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
 import { permitsHide } from "../policy/combat/permissions.js";
+import { buildProtection } from "../positioning/combat/build-protection.js";
 import {
   blockedCellsText,
   centerShelterCell,
@@ -27,6 +30,8 @@ import {
   diggable,
   enclosedInPlace,
   floorHoldsCentre,
+  marginCells,
+  nearestThreatDirection,
   shelterFeet,
   shelterIntruder,
   SIDES,
@@ -280,6 +285,84 @@ async function capShelter(
   build.capped = (await sealShelterCell(build, cap)) || build.capped;
   if (descended === 0 && solid(bot.blockAt(cap))) return hangShelterWallsFromRoof(build, feet, sides);
   return null;
+}
+
+/** What the margin pass did after the shell stood: the blocks it placed, the world age it took, and each cell it left open with why. */
+export type MarginPass = {
+  readonly placed: number;
+  readonly ticks: number;
+  /**
+   * `occupied`, `no_support`, `reserve`, `refused: <the placement's reason>` or `stopped: <why>`. The cell is a plain point,
+   * not a `Vec3`: the hide result goes into the survival receipt, and its `Facts` schema refuses a class instance
+   * (`hostile.test.ts` failed with one).
+   */
+  readonly skipped: { readonly cell: { readonly x: number; readonly y: number; readonly z: number }; readonly reason: string }[];
+};
+
+/** Why the margin pass cannot place another block (a death, fire or lava on the body, a changed stance, the reserve, a ban, a hazard), or null. */
+function marginPassStop(build: ShelterBuild, feet: Vec3): string | null {
+  const { bot, options } = build;
+  if (bot.health <= 0) return "stopped: dead";
+  if (isInFire(bot)) return "stopped: fire";
+  if (isInLava(bot)) return "stopped: lava";
+  if (constructionChanged(build, feet)) return "stopped: construction changed";
+  if (shelterBlocks(build) <= WALL_IN_BLOCKS) return "reserve";
+  if (!options.threatContext.policy.terrain.place) return "stopped: placement prohibited by policy";
+  const hazard = shelterHazard(build);
+  return hazard ? `stopped: ${hazard}` : null;
+}
+
+/**
+ * After the 10-cell shell stands, fill the open cells the body box expanded by `PROJECTILE_HIT_MARGIN` overlaps
+ * (`marginCells`), so a projectile's path to the body is closed as the recovery reads it. Best effort: a spare shell's worth of
+ * blocks stays carried (`WALL_IN_BLOCKS`), nothing is dug, the shell's own record (`walled`, `capped`, `refusal`,
+ * `blockedCells`) is never touched, an occupied cell or one with no support is skipped, and the pass ends on the first
+ * placement the server answered without the block, on a stop (`marginPassStop`) or on an abort (which throws).
+ */
+export async function sealMarginCells(build: ShelterBuild): Promise<MarginPass> {
+  const { bot, options, itemUse } = build;
+  const feet = shelterFeet(bot);
+  const cells = marginCells(bot, feet, nearestThreatDirection(bot, options.threatContext));
+  const startAge = bot.time?.age ?? 0;
+  const skipped: { cell: { x: number; y: number; z: number }; reason: string }[] = [];
+  let placed = 0;
+  let ended: string | null = null;
+  for (const cell of cells) {
+    const skip = (reason: string) => skipped.push({ cell: { x: cell.x, y: cell.y, z: cell.z }, reason });
+    options.signal.throwIfAborted();
+    ended ??= marginPassStop(build, feet);
+    if (ended) {
+      skip(ended);
+      continue;
+    }
+    if (occupiedCell(bot, cell)) {
+      skip("occupied");
+      continue;
+    }
+    if (!findPlacementSupport(bot, cell)) {
+      skip("no_support");
+      continue;
+    }
+    itemUse.lowerShield();
+    try {
+      const built = await buildProtection(bot, [cell], {
+        signal: options.signal,
+        mayContinue: () => shelterHazard(build),
+        terrain: options.threatContext.policy.terrain,
+        blockNames: options.blockNames,
+      });
+      placed += built.placed.length;
+      if (built.kind === "blocked") {
+        ended = "stopped: refused";
+        skip(`refused: ${built.reason}`);
+      }
+    } catch (cause) {
+      options.signal.throwIfAborted();
+      ended = "stopped: refused";
+      skip(`refused: ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+  return { placed, ticks: (bot.time?.age ?? 0) - startAge, skipped };
 }
 
 /** Why the hide must stop before another construction pass (a hazard, a ban, a liquid, the deadline), or null. */

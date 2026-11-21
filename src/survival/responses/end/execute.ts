@@ -163,7 +163,7 @@ export class EndCombat {
         holdWhile: () => incomingDragonBodies(bot).length > 0,
       }));
       this.recordDecision({ response: "dragon_shelter", state: hidden.kind, cell: origin.toString(),
-        dug: hidden.dug, walled: hidden.walled, capped: hidden.capped, enclosed: hidden.enclosed,
+        dug: hidden.dug, walled: hidden.walled, capped: hidden.capped, enclosed: hidden.enclosed, margin: hidden.margin.placed,
         ate: hidden.ate, healthAfter: hidden.healthAfter, hungerAfter: hidden.hungerAfter,
         error: hidden.error ?? null });
       if (hidden.kind === "recovered" && !this.danger) return this.result("evaded");
