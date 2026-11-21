@@ -1,0 +1,69 @@
+template: ../../templates/flat-single-action.yaml
+
+name: roofed-dive-long-return
+tags: [regression]
+description: >-
+  A bot that starts dry can lack reported air and refuse a dive before entering the tunnel. Diver must enter the
+  tunnel; the server then seals the tunnel's target cell and mouth, so the first navigation must fail, and Diver must
+  swim back to air through the submerged baffle (witnessed by a private tellraw), then finish the next navigation on
+  the ledge without taking damage.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -10 -63 -10 28 -40 12 air"
+
+geometry:
+  - fill: { block: stone, from: [-7, -64, -4], to: [20, -54, 9] }
+  - fill: { block: air, from: [-6, -63, -2], to: [-1, -54, 6] }
+  - fill: { block: water, from: [-6, -63, -2], to: [-1, -58, 6] }
+  - setblock: { block: stone, at: [-1, -58, -1] }
+  - fill: { block: water, from: [0, -59, 0], to: [3, -58, 0] }
+  - fill: { block: water, from: [1, -60, 1], to: [1, -58, 2] }
+  - fill: { block: water, from: [0, -60, 2], to: [1, -59, 2] }
+
+players:
+  - name: Diver
+    pos: [-0.5, -57, -0.5]
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+tick:
+  # Seal once Diver is in the pocket, leaving the baffle as the way back.
+  - "execute if entity @a[name=Diver,x=1.8,y=-60,z=-1,dx=0,dy=3,dz=2] if block 2 -59 0 water run fill 2 -59 0 2 -58 0 stone"
+  - "execute if entity @a[name=Diver,x=1.8,y=-60,z=-1,dx=0,dy=3,dz=2] if block 0 -59 0 water run fill 0 -59 0 0 -58 0 stone"
+  # Require both seals before the pool witness can count as a return. The diver rests with its eyes just above the
+  # fluid surface, still inside the top water block (feet -58.73, eyes -57.11), so the head top (feet + 1.8) is the
+  # block that tells "head out of the water"; the eye block would stay water.
+  - "execute if block 2 -59 0 stone if block 0 -59 0 stone as @a[name=Diver,x=-7,y=-58.5,z=-3,dx=6,dy=4,dz=10] at @s if block ~ ~1.8 ~ air run tellraw @s \"diver_returned\""
+  - "gamemode spectator @a[name=!Diver,gamemode=!spectator]"
+
+params:
+  actions:
+    # The driver's margin gives the dry start 40 server ticks for the air history to establish full air.
+    - { action: navigate, waitServerTicks: 20, input: { x: 2, y: -59, z: 0, range: 0, dig: false, scaffold: false }, expect: failed, errorAbsent: ["[BREATH]"], awaitChat: diver_returned }
+    # Range 1 admits only the ledge cell: range 2 accepted a pool cell 1.41 blocks away, and the reach goal's 1.5 radius
+    # then failed 1 of 3 at 10 tps when the floating body drifted.
+    - { action: navigate, input: { x: -1, y: -57, z: -1, range: 1, dig: false, scaffold: false } }
+
+goal:
+  kind: all
+  timeout: 150
+  goals:
+    - kind: reach
+      who: Diver
+      pos: [-0.5, -57, -0.5]
+      radius: 1.5
+    - { kind: health, who: Diver, health: 20 }
+    - { kind: completion, who: Diver }
