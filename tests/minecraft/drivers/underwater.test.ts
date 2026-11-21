@@ -91,9 +91,9 @@ test("abort releases a wet recovery wait immediately with the same reason", asyn
   await assert.rejects(pending, error => error === reason); await h.clean();
 });
 
-for (const end of ["abort", "stalled"] as const) test(`driver ${end} retains recovery detail and cleans up the runtime`, async () => {
+for (const rate of [20, 10]) for (const end of ["abort", "stalled"] as const) test(`driver ${end} retains recovery detail and cleans up the runtime at ${rate} tps`, async () => {
   await using scratch = await mkdtempDisposable("/dev/shm/underwater-driver-");
-  const h = fixture(10); using _timers = h.clock.install();
+  const h = fixture(rate); using _timers = h.clock.install();
   // The real runtime installs more than ten independent observers; their removal is checked below.
   h.bot.setMaxListeners(30);
   h.breath.hold(300);
@@ -101,10 +101,12 @@ for (const end of ["abort", "stalled"] as const) test(`driver ${end} retains rec
     scenario: scenarioDefinitionSchema.parse({ params: { legs: [], backstop: end === "stalled" }, goal: { kind: "completion" } }),
     get navigation(): never { throw new Error("no navigation telemetry"); }, get pathfinder(): never { throw new Error("no pathfinder telemetry"); } };
   let closes = 0, unsubscribes = 0, attached = false;
+  let closed: Promise<void> | undefined; let closeStarted!: () => void;
+  const started = new Promise<void>(resolve => { closeStarted = resolve; });
   const opener: typeof openRuntime = async (...args) => {
     const runtime = await openRuntimeWith({ createRuntime: createMinecraftRuntime, startWatch: startFreezeWatch }, args[0].bot, args[1], { incidents: { directory: scratch.path } }, undefined);
     const close = runtime.close.bind(runtime); const subscribe = runtime.navigation.onEvent.bind(runtime.navigation);
-    runtime.close = async () => { closes++; await close(); };
+    runtime.close = async () => { closes++; closeStarted(); closed = close(); await closed; };
     runtime.navigation.onEvent = callback => { const unsubscribe = subscribe(callback); attached = true; return () => { unsubscribes++; unsubscribe(); }; };
     return runtime;
   };
@@ -114,10 +116,12 @@ for (const end of ["abort", "stalled"] as const) test(`driver ${end} retains rec
   if (end === "abort") {
     const reason = new Error("trial abort"); h.controller.abort(reason); await h.clock.advance(0);
     assert.equal(closes, 1, "abort reaches cleanup before another tick"); assert.equal(unsubscribes, 1);
-    const rejected = assert.rejects(pending, error => error === reason); await h.clock.settle(rejected, 50);
+    const rejected = assert.rejects(pending, error => error === reason); assert.ok(closed); await closed; await h.clock.settle(rejected, 50);
   } else {
-    h.server.stop(); const result = await h.clock.settle(pending, DRIVER_CLOCK_STOPPED_MS + 10_000);
+    h.server.stop(); await h.clock.settle(started, DRIVER_CLOCK_STOPPED_MS + 10_000); assert.ok(closed); await closed;
+    const result = await h.clock.settle(pending, 50);
     assert.equal(result.status, "failed"); assert.match(result.detail ?? "", /airRecovery.*stalled/); assert.match(result.detail ?? "", /Backstop takeover/);
+    assert.equal(h.bot.time.age, 1000 + 2 * rate);
   }
   assert.equal(closes, 1); assert.equal(unsubscribes, 1); await h.clean();
 });
