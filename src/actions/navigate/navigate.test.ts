@@ -26,6 +26,8 @@ interface Scene {
   readonly slots?: FakeBotOptions["slots"];
   readonly clock?: FakeBotOptions["clock"];
   readonly server?: FakeBotOptions["server"];
+  /** The fake bot walks its controls: a route is physically followed instead of only planned. */
+  readonly simulatePhysics?: boolean;
 }
 
 /** A bot at (0.5, 64, 0.5) on flat ground whose standing cells are at `groundY`: stone below, air from there up. */
@@ -37,6 +39,7 @@ function flatGroundBot(groundY = 64, scene: Scene = {}) {
     slots: scene.slots,
     clock: scene.clock,
     server: scene.server,
+    ...(scene.simulatePhysics && { simulatePhysics: true }),
   });
   /** Lower the count of `name` carried to `count`, as a route that placed some leaves it. */
   const useUntil = (name: string, count: number) => {
@@ -1106,3 +1109,35 @@ test("a refusal reaches the navigate error", async () => {
   assert.ok(!/busy|route_refused/i.test(JSON.stringify(next.result)), JSON.stringify(next.result));
   assert.equal(navigation.active, false);
 });
+
+/**
+ * A sealed target: an air cell inside a bedrock shell (floor, walls and roof), 3 blocks east of the bot. Near on purpose:
+ * the shared bound lets a search explore about 9 x its straight distance, so a target 10 away visits 215,000 states on this
+ * open fake plane (measured) and a mocked clock never stops it; at 3 it is 6,400 and the test takes under a second.
+ */
+const sealedTargetCells = (): Record<string, FakeCell> => ({ ...cellsIn([2, 63, -1], [4, 65, 1], "bedrock"), "3,64,0": "air" });
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`a region limit reaches the model as no route nearby after the recoveries, and the next navigate moves (${ticksPerSecond} tps)`, async () => {
+    const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+    using _timers = clock.install();
+    // Only stone is carried: the policy's scaffold list holds none, so the fallback-scaffold retry runs as for a timeout.
+    const { bot } = flatGroundBot(64, { clock, server: { ticksPerSecond }, cells: sealedTargetCells(), carried: { stone: 32 }, simulatePhysics: true });
+    await using navigation = createNavigationRuntime(bot);
+    let runs = 0;
+    navigation.onEvent((event) => { if (event.kind === "run_started") runs += 1; });
+    const sealed = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: 3, y: 64, z: 0, range: 0 }), 60_000);
+    assert.equal(sealed.result.status, "failed");
+    const error = "error" in sealed.result ? sealed.result.error : "";
+    assert.match(error, /^\[NAVIGATION_STOPPED\] Pathfinder stopped: no route nearby: no route found within a detour of \d+ blocks \(straight distance 3 blocks\)/u);
+    assert.match(error, /Nothing reaches it nearby: choose another target/u);
+    assert.equal(runs, 2, "the fallback-scaffold retry ran, as for a timeout");
+    assert.equal(bot.entity.position.x, 0.5, "the body did not move");
+    assert.equal(navigation.active, false);
+
+    // The next navigate is admitted and walks: a region limit leaves no run behind.
+    const next = await clock.settle(new ActionRunner().run(createNavigateAction(bot, navigation), { x: -8, y: 64, z: 0, range: 1 }), 60_000);
+    assert.equal(next.result.status, "succeeded", JSON.stringify(next.result));
+    assert.ok(bot.entity.position.x < -6, `the bot moved west, at ${bot.entity.position.x}`);
+  });
+}

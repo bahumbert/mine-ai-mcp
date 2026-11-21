@@ -11,7 +11,9 @@ import { setProtectedRegionsProvider, type ProtectedRegion } from "../../world/p
 import { blockClass, observeMineflayerBlock } from "../mineflayer/world.js";
 import { createMovements } from "../runtime.js";
 import type { NavigationEvent } from "../telemetry/index.js";
+import type { SearchLimits } from "../search/search-result.js";
 import { MemoryWorld } from "../world/memory-world.js";
+import type { BlockPosition } from "../world/world.js";
 import { Vec3 } from "vec3";
 import { walking, EARLY_COMMIT, OvershootingBot } from "./navigation-run-fixtures.test.js";
 
@@ -73,17 +75,32 @@ const attempts = (outcome: { evidence: { movementAttempts: Readonly<Partial<Reco
 /** A region over a one-cell cage at the origin: dirt walls two high on all eight sides, over a stone floor. */
 const CAGE: ProtectedRegion = { regionId: 1, dimension: "overworld", min: { x: -1, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "house" };
 
+/** The region over the three-cell pocket and its walls. */
+const POCKET: ProtectedRegion = { regionId: 2, dimension: "overworld", min: { x: -3, y: 62, z: -1 }, max: { x: 1, y: 66, z: 1 }, owner: "Theo", label: "shed" };
+
 function cagedBot(regions: readonly ProtectedRegion[]): FakeBot {
   const { bot } = createFakeBot({ username: "Theo", position: new Vec3(0.5, 63, 0.5), carried: { dirt: 16 } });
   setProtectedRegionsProvider(bot, () => regions);
   return bot;
 }
 
-function cageWorld(bot: FakeBot): MemoryWorld {
+const cageWorld = (bot: FakeBot): MemoryWorld =>
+  blockWorld(bot, (x, y, z) => (y === 62 ? "stone" : Math.max(Math.abs(x), Math.abs(z)) === 1 && y <= 64 ? "dirt" : "air"));
+
+/** A pocket of three cells west of the bot (x -2..0, z 0), dirt walls two high around it, stone floor, air beyond: the way out is east. */
+const pocketWorld = (bot: FakeBot): MemoryWorld =>
+  blockWorld(bot, (x, y, z) => {
+    if (y === 62) return "stone";
+    const inPocket = x >= -2 && x <= 0 && z === 0;
+    const walled = x >= -3 && x <= 1 && Math.abs(z) <= 1 && !inPocket;
+    return walled && y <= 64 ? "dirt" : "air";
+  });
+
+function blockWorld(bot: FakeBot, blockAt: (x: number, y: number, z: number) => string): MemoryWorld {
   const world = new MemoryWorld();
   const Block = blockClass(bot);
-  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) for (let y = 62; y <= 66; y++) {
-    const name = y === 62 ? "stone" : Math.max(Math.abs(x), Math.abs(z)) === 1 && y <= 64 ? "dirt" : "air";
+  for (let x = -5; x <= 15; x++) for (let z = -5; z <= 5; z++) for (let y = 62; y <= 66; y++) {
+    const name = blockAt(x, y, z);
     const block = observeMineflayerBlock(Block.fromStateId(bot.registry.blocksByName[name]!.defaultState, 0));
     if (block.kind !== "loaded") throw new Error(name);
     world.load({ x, y, z }, { stateId: block.stateId, collisionShapes: block.collisionShapes, traits: block.traits });
@@ -92,10 +109,18 @@ function cageWorld(bot: FakeBot): MemoryWorld {
 }
 
 /** One run out of the cage. The fake bot cannot dig, so a route that is found still fails to be walked. */
-async function leaveCage(bot: FakeBot, policy = createMovements(bot)) {
+async function leaveCage(
+  bot: FakeBot,
+  policy = createMovements(bot),
+  shape: { readonly world?: MemoryWorld; readonly goal?: BlockPosition; readonly searchLimits?: SearchLimits } = {},
+) {
   const events: NavigationEvent[] = [];
-  const navigator = createNavigator({ world: cageWorld(bot), bot: new FakeNavigationBot(), telemetry: onEvent((event) => events.push(event)) });
-  const outcome = await settle(navigator, { goal: exactBlockGoal({ x: 4, y: 63, z: 0 }), policy });
+  const navigator = createNavigator({ world: shape.world ?? cageWorld(bot), bot: new FakeNavigationBot(), telemetry: onEvent((event) => events.push(event)) });
+  const outcome = await settle(navigator, {
+    goal: exactBlockGoal(shape.goal ?? { x: 4, y: 63, z: 0 }),
+    policy,
+    ...(shape.searchLimits && { searchLimits: shape.searchLimits }),
+  });
   const opened = events.findIndex((event) => event.kind === "own_regions_opened");
   return {
     outcome,
@@ -430,6 +455,83 @@ test("a bot whose own regions lie elsewhere digs out without opening them", asyn
   const run = await leaveCage(cagedBot([{ ...CAGE, min: { x: 20, y: 62, z: 20 }, max: { x: 22, y: 66, z: 22 } }]));
   assert.equal(run.openings, 0);
   assert.ok(run.routeAfterOpening);
+});
+
+// ── A search that the region bound clipped (plan 2026-11-20-route-region-bound T3b) ──────────────────────────────
+
+/** Test values, not the defaults: a bound so tight that the pocket's cells away from the goal are refused (stretch 1, margin 0). */
+const TIGHT_REGION: SearchLimits = { region: { stretch: 1, margin: 0 } };
+const FAR_GOAL = { x: 12, y: 63, z: 0 };
+
+test("a bot in its own region whose search clips opens its own regions once, and a route follows", async () => {
+  const bot = cagedBot([POCKET]);
+  const run = await leaveCage(bot, createMovements(bot), { world: pocketWorld(bot), goal: FAR_GOAL, searchLimits: TIGHT_REGION });
+  assert.equal(run.openings, 1);
+  assert.ok(run.routeAfterOpening);
+});
+
+test("a neighbour's region stays closed when the search clips: the run fails as a region limit", async () => {
+  const bot = cagedBot([{ ...POCKET, owner: "Tester" }]);
+  const run = await leaveCage(bot, createMovements(bot), { world: pocketWorld(bot), goal: FAR_GOAL, searchLimits: TIGHT_REGION });
+  assert.equal(run.openings, 0);
+  assert.equal(run.routeAfterOpening, false);
+  assert.equal(run.outcome.kind, "failed");
+  if (run.outcome.kind !== "failed" || run.outcome.failure.kind !== "search_limit") return assert.fail("a region search_limit failure");
+  assert.equal(run.outcome.failure.limit.kind, "region");
+});
+
+test("a region limit after a goal revision retries with the new goal instead of failing", async () => {
+  const sealed = exactBlockGoal({ x: 5, y: 70, z: 0 }); // floating in air, no scaffold to reach it: the search runs dry in its region
+  const open = exactBlockGoal({ x: 5, y: 63, z: 0 });
+  let revised = false;
+  const events: NavigationEvent[] = [];
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot: new FakeNavigationBot(), telemetry: onEvent((event) => {
+    events.push(event);
+    if (event.kind === "search_finished" && event.exhausted === "region") revised = true;
+  }) }), {
+    goal: { resolve: (at) => (revised ? open : sealed).resolve(at) },
+    policy: walking(),
+    searchLimits: { region: { stretch: 1, margin: 1 } },
+  });
+  assert.equal(outcome.kind, "completed");
+  assert.equal(events.filter((event) => event.kind === "search_finished" && event.exhausted === "region").length, 1);
+  assert.equal(outcome.evidence.searches, 2);
+});
+
+test("a region limit with no goal revision fails and is not retried", async () => {
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot: new FakeNavigationBot() }), {
+    goal: exactBlockGoal({ x: 5, y: 70, z: 0 }),
+    policy: walking(),
+    searchLimits: { region: { stretch: 1, margin: 1 } },
+  });
+  assert.equal(outcome.kind, "failed");
+  assert.equal(outcome.evidence.searches, 1);
+  if (outcome.kind === "failed") assert.equal(outcome.failure.kind === "search_limit" && outcome.failure.limit.kind, "region");
+});
+
+test("a forced partial's continuation measures its region from its own root", async () => {
+  const bot = new FakeNavigationBot();
+  bot.current = observation(-5);
+  const target = { x: 5, y: 63, z: 0 };
+  const events: NavigationEvent[] = [];
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot, telemetry: onEvent((event) => events.push(event)) }), {
+    goal: nearGoal(target, 0),
+    policy: walking(),
+    searchLimits: { ...EARLY_COMMIT, region: { stretch: 2, margin: 1 } },
+  });
+  assert.equal(outcome.kind, "completed");
+  const reasons = new Map<string, string>();
+  let root: BlockPosition = { x: -5, y: 63, z: 0 };
+  let continuations = 0;
+  for (const event of events) {
+    if (event.kind === "search_started") reasons.set(event.searchId, event.reason);
+    else if (event.kind === "route_committed") root = event.plan.end;
+    else if (event.kind === "search_finished" && reasons.get(event.searchId) === "segment_continuation" && event.counts.region) {
+      continuations += 1;
+      assert.equal(event.counts.region.straight, Math.hypot(target.x - root.x, target.y - root.y, target.z - root.z));
+    }
+  }
+  assert.ok(continuations > 0, "the forced partial produced a continuation search");
 });
 
 test("the opening lasts one run: the same policy refuses its own region again, and a second run opens it again", async () => {

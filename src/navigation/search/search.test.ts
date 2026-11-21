@@ -816,9 +816,11 @@ test("a step field bends the route around what it prices", () => {
   assert.deepEqual(plan.steps.at(-1)?.to, { x: 5, y: 63, z: 0 });
 });
 
-test("the shipped limits are Baritone's inline and plan-ahead search timeouts", () => {
-  assert.deepEqual(DEFAULT_SEARCH_LIMITS, { primaryTimeoutMs: 500, failureTimeoutMs: 2_000 });
-  assert.deepEqual(DEFAULT_CONTINUATION_SEARCH_LIMITS, { primaryTimeoutMs: 4_000, failureTimeoutMs: 5_000 });
+test("the shipped limits are Baritone's inline and plan-ahead search timeouts, and the measured region bound", () => {
+  // The region is the T2 fit (report 2026-11-21-region-bound-measurement.md), shared by both budgets.
+  const region = { stretch: 9.25, margin: 1 };
+  assert.deepEqual(DEFAULT_SEARCH_LIMITS, { primaryTimeoutMs: 500, failureTimeoutMs: 2_000, region });
+  assert.deepEqual(DEFAULT_CONTINUATION_SEARCH_LIMITS, { primaryTimeoutMs: 4_000, failureTimeoutMs: 5_000, region });
 });
 
 test("a timeout whose nearest node is within the minimum route distance of the start reports that distance (run 12 Y4, run 13 R10)", () => {

@@ -27,7 +27,9 @@ The [`NavigationEvent`](../../src/navigation/telemetry/index.ts) type in [teleme
 
 Step phase events transition through six distinct states: `aligning`, `breaking`, `placing`, `activating`, `moving`, and `confirming`.
 
-Search counts include `region` when the resolved goal has a proven distance: `straight` is the nearest part's initial distance, `allowance` is null, and `refused` is zero. A committed route also reports `detour`, the largest distance-from-start plus remaining distance to its endpoint's nearest goal part. These fields are evidence only; they do not yet limit a search.
+Search counts include `region` when the resolved goal has a proven distance: `straight` is the nearest part's initial distance, `allowance` is the bound's stretch x straight + margin for that part (null when the search applies no bound), and `refused` counts the cells the bound refused. A committed route also reports `detour`, the largest distance-from-start plus remaining distance to its endpoint's nearest goal part.
+
+A search whose frontier ran dry after the bound refused at least one cell finishes with `exhausted: "region"` and a `limit` of kind `region` (`limit` the allowance, `observed` the largest refused detour sum, `straight`, `part`). The run treats it like a no-path for the escape (own regions open, style rules relaxed) and, when the goal was revised meanwhile, searches again with the new goal; otherwise the navigate fails with the sentence "no route nearby: no route found within a detour of N blocks (straight distance D blocks) after M ms compute; ...". The defaults (`DEFAULT_SEARCH_LIMITS.region`, `DEFAULT_CONTINUATION_SEARCH_LIMITS.region` in `src/navigation/navigate.ts`) are the measured bound; a caller's `searchLimits.region` replaces them when it is not `undefined` (`null` removes the bound); a caller that sets `maximumRadius` is never clipped by the region.
 
 ## The telemetry action streams events to host logs
 

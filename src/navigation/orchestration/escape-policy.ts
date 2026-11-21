@@ -61,9 +61,11 @@ const refused = (refusals: StartRefusals): number => Object.values(refusals).red
  * An exhausted search that never left its start, whose first digs the escape's own policy refuses less often than the
  * run's: only then can an escape search get out. What the escape lifts is defined above and nowhere else, so a refusal
  * it leaves in place (lava) never starts a search that cannot succeed, and a rule it relaxes later is counted at once.
+ * The caller passes a `no_path` failure or a `region` limit (a frontier that ran dry inside the region bound): both
+ * carry the search's evidence, which is all this reads.
  */
 export function isShutInByEscapableRefusals(
-  failure: Extract<NavigationCalculationFailure, { readonly kind: "no_path" }>,
+  failure: Pick<NavigationCalculationFailure, "search">,
   world: WorldView,
   policy: MovementPolicy,
   feet: BlockPosition,

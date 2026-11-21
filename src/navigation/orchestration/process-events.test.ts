@@ -148,6 +148,44 @@ test("a search that visited the start cell and the cell above it still names the
   assert.match(text, /shut in at the start: /);
 });
 
+const REGION_NEXT = ". Nothing reaches it nearby: choose another target, or walk toward it another way and ask again.";
+const regionSearch = { ...search, visited: 400, farthestVisited: 12, generated: 900, computeMs: 37.2 };
+const regionLimit = { kind: "region" as const, limit: 20.4, observed: 23, straight: 8.2, part: 0, closest };
+
+test("a region limit reads as no route nearby", () => {
+  assert.equal(
+    describeCalculationFailure({ kind: "search_limit", search: regionSearch, limit: regionLimit }),
+    "no route nearby: no route found within a detour of 20 blocks (straight distance 8 blocks) after 37 ms compute; visited 400 nodes, generated 900; closest node was 295,32,-314" + REGION_NEXT,
+  );
+});
+
+test("a region limit followed a movement failure and says what it was replanning around", () => {
+  const after = {
+    kind: "operation_failed" as const,
+    stepId: "294,32,-312>294,32,-313",
+    phase: "breaking" as const,
+    observation: "The route planned to break with iron_pickaxe, which is not in the inventory.",
+  };
+  assert.equal(
+    describeCalculationFailure({ kind: "search_limit", search: regionSearch, limit: regionLimit, after }),
+    "no route nearby: no route found within a detour of 20 blocks (straight distance 8 blocks) after 37 ms compute; visited 400 nodes, generated 900; closest node was 295,32,-314, while replanning after a movement failure: " +
+      "The route planned to break with iron_pickaxe, which is not in the inventory." + REGION_NEXT.slice(1),
+  );
+});
+
+test("a region limit near the start keeps the standing clause and never calls it a dead end, one that left it says no more", () => {
+  const near = { ...regionLimit, closest: { ...closest, withinStartBlocks: 5 } };
+  const text = describeCalculationFailure({ kind: "search_limit", search: regionSearch, limit: near });
+  assert.match(text, /closest node was 295,32,-314; the node nearest the goal is within 5 blocks of where the bot stands, so no route found gets it more than 5 blocks nearer\. Nothing reaches it nearby: /);
+  assert.doesNotMatch(text, /dead end|Try a nearer target/);
+  const shut = describeCalculationFailure({
+    kind: "search_limit",
+    search: { ...regionSearch, visited: 1, farthestVisited: 0, generated: 1, startRefusals: { opens_into_liquid: 3 } },
+    limit: near,
+  });
+  assert.match(shut, /shut in at the start: 3 digs would open into water or lava\. Nothing reaches it nearby: /);
+});
+
 test("a search that ran out of time or radius names the model's next move, one that was exhausted does not need to", () => {
   const timeLimit = { kind: "search_time" as const, limit: 2000, observed: 2001, closest };
   const radiusLimit = { kind: "radius" as const, limit: 64, observed: 70, closest };
