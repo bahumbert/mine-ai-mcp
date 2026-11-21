@@ -82,6 +82,9 @@ players:
     # Opped so the driver can bring the bot under the hide bar and put the
     # zombie on its ledge once the route is under way.
     op: true
+    # The incident's hunger: thirteen, under the regeneration bar of eighteen. Mine Labs
+    # drains the declared food at join and the driver confirms it (`confirmVitals`).
+    food: 13
     # What EnderSeeker carried: tools, blocks enough to go wall-first, no food.
     inventory:
       - { item: iron_pickaxe, count: 1 }
@@ -96,6 +99,8 @@ client:
 
 params:
   hurtTo: 2
+  # The player's declared food above: the most the driver accepts.
+  maxFood: 13
   # The plateau, four blocks past the top of the stairs.
   target: [0, -43, 28]
   # Two blocks up the -x wall, eleven blocks from the start: inside the
