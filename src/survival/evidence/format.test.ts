@@ -27,9 +27,14 @@ test("the outcome line retains evade details, stalled requests and response chai
   const cases: { outcome: Facts; contains: RegExp; suffix: string }[] = [
     { outcome: { outcome: "safe_separation", detail: "skeleton#5 out of sight at 9.0 blocks (gained 3.0)" },
       contains: /out of sight at 9.0 blocks/, suffix: "(gained 3.0)" },
+    // An old receipt has `evades` only: it reads as the response count too.
     { outcome: { outcome: "safe_separation", stall: { requestId: "walk", action: "navigate",
       evades: 8, ticks: 160, threats: [{ id: 7, name: "skeleton" }], best: 100, current: 100, limit: "evades" } },
-      contains: /\[HOSTILE_STALLED\] 8 evades from skeleton#7 over 160 server ticks without progress on navigate/,
+      contains: /\[HOSTILE_STALLED\] 8 hostile responses \(8 evades\) from skeleton#7 over 160 server ticks without progress on navigate/,
+      suffix: "choose the next action." },
+    { outcome: { outcome: "target_died", stall: { requestId: "walk", action: "navigate", responses: 5,
+      evades: 1, ticks: 1_700, threats: [{ id: 7, name: "skeleton" }], best: 100, current: 100, limit: "ticks" } },
+      contains: /\[HOSTILE_STALLED\] 5 hostile responses \(1 evades\) from skeleton#7 over 1700 server ticks without progress on navigate/,
       suffix: "choose the next action." },
   ];
   for (const [response, outcome] of [["evade", "safe_separation"], ["evade", "capability_limit"], ["fight", "target_died"]]) {

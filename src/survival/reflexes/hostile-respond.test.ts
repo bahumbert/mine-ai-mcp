@@ -12,7 +12,9 @@ import { attackedIds, combatTestContext, engagingCombat, unexpectedEngage } from
 import { MemoryWorld } from "../../navigation/world/memory-world.js";
 import { recoverCombatHealth } from "../control/combat/recovery.js";
 import { secureCombatHandoff } from "../control/combat/handoff.js";
-import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { createFakeBot, createFakeClock, flush, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import type { CombatController, CombatOutcome } from "../control/combat/contract.js";
+import type { HostileSettlement } from "../control/combat/response-result.js";
 import { ReflexDriver } from "../control/driver.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import type { HostileScene } from "./hostile-scene.js";
@@ -98,10 +100,11 @@ function responseFixture(occluded = false, harness = createFakeBot({
       7: { name: "oak_boat", position: new Vec3(0.5, 64, 0.5) },
       8: { name: "zombie", position: new Vec3(occluded ? 10.5 : 100.5, 64, 0.5) },
     },
-  }), navigation = { cancel: () => undefined } as unknown as NavigationRuntime) {
+  }), navigation = { cancel: () => undefined } as unknown as NavigationRuntime,
+  engage: CombatController["engage"] = unexpectedEngage) {
   const { bot, clock } = harness;
   const timers = clock.install();
-  const controller = engagingCombat(bot, unexpectedEngage);
+  const controller = engagingCombat(bot, engage);
   const runner = new ActionRunner({ clock });
   const driver = new ReflexDriver(bot, runner, { now: clock.now });
   const perception = new CombatPerception(bot);
@@ -449,4 +452,132 @@ test("near shore a progressing slow server stops take-back at the hostile hit ca
     { kind: "fight", targetId: 8, threats: [] }, new AbortController().signal), 60_000);
   assert.equal(result.kind, "failed");
   assert.equal(attackedIds(fixture.server).filter((id) => id === 7).length, HOSTILE_TAKE_BACK_HITS);
+});
+
+// D28: completed fights count toward the stall of the request they continue (plan 2026-11-18-scenario-reds-part3-a2 T18d).
+const killed = (targetId: number): CombatOutcome => ({ kind: "died", targetId, attacks: 1, stylesUsed: ["melee"],
+  weaponsUsed: ["hand"], shieldRaisedSwings: 0, projectileGuards: 0, explosions: 0 });
+
+/** A running `navigate` that publishes a distance beside the real response services; each fight settles as `engage.run` says. */
+function journeyFixture(ticksPerSecond: number) {
+  const harness = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond, startAge: 1_000 },
+    groundY: 63, position: new Vec3(0.5, 64, 0.5), entities: { 8: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const engage: { run: CombatController["engage"] } = { run: async (targetId) => killed(targetId) };
+  const fixture = responseFixture(false, harness, undefined, (...args) => engage.run(...args));
+  const journey = { remaining: 100 };
+  const input = z.strictObject({});
+  const action = defineAction({ name: "navigate", description: "A journey with an objective", inputSchema: input,
+    resultSchema: actionResultSchema({}), parse: (value) => input.parse(value), formatResult: (result) => result.status,
+    execution: { kind: "resumable_task" }, begin: (_request, _lifetime, observe) => {
+      observe(() => ({ baseline: null, checkpoint: null, objective: { remaining: journey.remaining, tolerance: 1 },
+        completion: { kind: "current", observed: false, owes: "reach the destination" } }));
+      return async ({ signal }) => {
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve(), { once: true }));
+        signal!.throwIfAborted();
+        return { status: "succeeded" as const };
+      };
+    } });
+  const runner = fixture.driver.runner;
+  let added: ReturnType<typeof listenersAddedSince> | undefined;
+  let running = runner.run(action, {});
+  const directive = (kind: "fight" | "hide" = "fight"): HostileResponse => {
+    const threats = [{ id: 8, name: "zombie", position: fixture.bot.entities[8]!.position, distance: 4 }];
+    return kind === "fight" ? { kind, targetId: 8, threats } : { kind, threats, reason: "hurt" };
+  };
+  return { ...fixture, engage, journey, directive,
+    /** The reflex is stood down so only the test's responses run; the journey has started. */
+    async started() { await fixture.driver[Symbol.asyncDispose](); await flush(); added = listenersAddedSince(fixture.bot); },
+    /** T6: no response left a listener on the bot since `started()`. */
+    assertNoListenersLeft() {
+      for (const event of ["entityHurt", "physicsTick", "time", "entityGone", "death"]) assert.equal(added?.(event), 0, event);
+    },
+    respond(response = directive(), signal = new AbortController().signal) {
+      return fixture.clock.settle(respondToHostile(fixture.scene, response, signal), 200_000);
+    },
+    /** Replace the running navigate with a new request of the same action. */
+    async replaceJourney() { runner.cancelActive("Replace the journey"); await running; running = runner.run(action, {}); await flush(); },
+    /** The responses counted toward the running request; undefined with no request. */
+    counted() {
+      return fixture.scene.stalls.check(runner.request(), fixture.scene.chains.generation, fixture.bot.time.age ?? null, fixture.clock.now())?.responses;
+    },
+    async [Symbol.asyncDispose]() { runner.cancelActive("End the journey test"); await running; await fixture[Symbol.asyncDispose](); } };
+}
+
+for (const rate of [20, 10]) test(`fights alone return their navigate as stalled at 1680 ticks and not at 1660 (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  const first = await fixture.respond();
+  assert.deepEqual([first.stall?.limit, first.stall?.responses, first.stall?.evades, responseContinuation(first).kind], [null, 1, 0, "resume"]);
+  const age = fixture.bot.time.age;
+  await fixture.clock.advance(1_660 * 1_000 / rate, 1_000);
+  assert.equal(fixture.bot.time.age - age, 1_660);
+  const second = await fixture.respond();
+  assert.deepEqual([second.stall?.limit, second.stall?.responses, responseContinuation(second).kind], [null, 2, "resume"]);
+  await fixture.clock.advance(20 * 1_000 / rate, 1_000);
+  const third = await fixture.respond();
+  assert.equal(third.stall?.limit, "ticks");
+  const continuation = responseContinuation(third);
+  assert.equal(continuation.kind, "return");
+  assert.match((continuation.kind === "return" ? continuation.reason : "") ?? "",
+    /^\[HOSTILE_STALLED\] 3 hostile responses \(0 evades\) from zombie#8 over 1680 server ticks without progress on navigate/);
+});
+
+for (const rate of [20, 10]) test(`a fight during which the bot gets one block closer is progress, not a stall (${rate} tps)`, async () => {
+  await using fixture = journeyFixture(rate);
+  await fixture.started();
+  const { clock } = fixture;
+  fixture.engage.run = async (targetId) => {
+    await clock.sleep(840 * 1_000 / rate);
+    fixture.journey.remaining = 99;
+    await clock.sleep(840 * 1_000 / rate);
+    return killed(targetId);
+  };
+  const first = await fixture.respond();
+  assert.deepEqual([first.stall?.limit, first.stall?.ticks, first.stall?.best, responseContinuation(first).kind], [null, 0, 99, "resume"]);
+  fixture.engage.run = async (targetId) => killed(targetId);
+  const second = await fixture.respond();
+  assert.deepEqual([second.stall?.limit, second.stall?.responses, second.stall?.ticks], [null, 2, 0],
+    "1680 ticks passed since the response began, none since the progress made inside it");
+});
+
+test("a settlement counts only a completed fight of the request still running", async () => {
+  await using fixture = journeyFixture(20);
+  await fixture.started();
+  const abort = new AbortController();
+  const cases: [string, () => Promise<HostileSettlement>][] = [
+    ["a failed fight", () => { fixture.engage.run = async () => { throw new Error("engage broke"); }; return fixture.respond(); }],
+    ["an aborted fight", () => { fixture.engage.run = async (id) => { abort.abort(new Error("stop")); return killed(id); };
+      return fixture.respond(fixture.directive(), abort.signal); }],
+    ["a hide", () => fixture.respond(fixture.directive("hide"))],
+    ["a fight the bot died in", () => { fixture.engage.run = async (id) => { fixture.combat.setHealth(0); return killed(id); }; return fixture.respond(); }],
+  ];
+  for (const [name, run] of cases) {
+    const settlement = await run();
+    assert.equal(settlement.stall, null, `${name}: ${settlement.kind}/${settlement.response}`);
+    assert.equal(fixture.counted(), 0, name);
+  }
+  fixture.assertNoListenersLeft();
+});
+
+test("a fight that outlives its request counts nothing for the request that replaced it", async () => {
+  await using fixture = journeyFixture(20);
+  await fixture.started();
+  fixture.engage.run = async (targetId) => { await fixture.replaceJourney(); return killed(targetId); };
+  const settlement = await fixture.respond();
+  assert.equal(settlement.kind, "completed");
+  assert.equal(settlement.stall, null);
+  assert.equal(fixture.counted(), 0, "the new request starts with no response");
+  fixture.engage.run = async (targetId) => killed(targetId);
+  assert.equal((await fixture.respond()).stall?.responses, 1);
+  fixture.assertNoListenersLeft();
+});
+
+test("a fight that outlives its request with none behind it counts nothing", async () => {
+  await using fixture = journeyFixture(20);
+  await fixture.started();
+  fixture.engage.run = async (targetId) => { fixture.driver.runner.cancelActive("End the journey"); await fixture.clock.advance(1, 1_000); return killed(targetId); };
+  const settlement = await fixture.respond();
+  assert.deepEqual([settlement.kind, settlement.stall], ["completed", null]);
+  assert.equal(fixture.counted(), undefined);
+  fixture.assertNoListenersLeft();
 });

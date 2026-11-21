@@ -18,7 +18,9 @@ function stalledOutcome(value: Facts | undefined): string | null {
     || (stall.current !== null && typeof stall.current !== "number") || !Array.isArray(stall.threats)) return null;
   const threats = stall.threats.map(object);
   if (threats.some((threat) => typeof threat.id !== "number" || typeof threat.name !== "string")) return null;
-  return stallReason({ requestId: stall.requestId, action: stall.action, evades: stall.evades, ticks: stall.ticks,
+  // A receipt written before fights counted has `evades` only: every response of it was an evade.
+  const responses = typeof stall.responses === "number" ? stall.responses : stall.evades;
+  return stallReason({ requestId: stall.requestId, action: stall.action, responses, evades: stall.evades, ticks: stall.ticks,
     best: stall.best, current: stall.current, limit: stall.limit,
     threats: threats.map((threat) => ({ id: threat.id as number, name: threat.name as string })) });
 }

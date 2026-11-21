@@ -44,7 +44,10 @@ function sceneAt(ticksPerSecond: number, options: { timePacketYet?: boolean } = 
     /** Pass `ms` of clock; a stopped server's age stands still. */
     async pass(ms: number) { await clock.advance(ms); },
     evade(request: RequestSnapshot | null, generation = 0, who = threats) {
-      return stalls.recordEvade(request, generation, who, age(), clock.now());
+      return stalls.recordResponse(request, generation, "evade", who, age(), clock.now());
+    },
+    fight(request: RequestSnapshot | null, generation = 0, who = threats) {
+      return stalls.recordResponse(request, generation, "fight", who, age(), clock.now());
     },
     observe(request: RequestSnapshot | null, generation = 0) { stalls.observe(request, generation, age(), clock.now()); },
     check(request: RequestSnapshot | null, generation = 0) { return stalls.check(request, generation, age(), clock.now()); },
@@ -121,6 +124,85 @@ atRates("the limits order: evades over ticks over wall", async (s) => {
   assert.equal(s.check(request)?.limit, "ticks");
   for (let evade = 2; evade < STALL_EVADES; evade++) s.evade(request);
   assert.equal(s.check(request)?.limit, "evades", "all three hold: the evade count names it");
+});
+
+// D28: a completed fight is a response of the request like an evade (plan 2026-11-18-scenario-reds-part3-a2 T18d).
+atRates("two fights and no evade return at 1680 ticks and not at 1660", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  s.fight(request);
+  s.fight(request);
+  await s.toAge(1_660);
+  assert.equal(s.check(request)?.limit, null);
+  await s.toAge(STALL_TICKS);
+  const facts = s.check(request);
+  assert.deepEqual([facts?.limit, facts?.ticks, facts?.responses, facts?.evades], ["ticks", STALL_TICKS, 2, 0]);
+});
+
+atRates("one fight is no chain, and a fight with an evade is", async (s) => {
+  const single = requestOf(far(20), { id: "single" });
+  s.observe(single);
+  await s.toAge(STALL_TICKS);
+  assert.equal(s.fight(single)?.limit, null, "one response in 1680 ticks");
+  const mixed = requestOf(far(20), { id: "mixed" });
+  s.observe(mixed);
+  s.fight(mixed);
+  const facts = s.evade(mixed);
+  assert.deepEqual([facts?.responses, facts?.evades, facts?.limit], [2, 1, null]);
+  await s.toAge(2 * STALL_TICKS);
+  assert.deepEqual([s.check(mixed)?.limit, s.check(mixed)?.evades], ["ticks", 1]);
+});
+
+atRates("progress at 1000 ticks restarts the fight count: null at 1680, ticks at 2680", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  s.fight(request);
+  s.fight(request);
+  await s.toAge(1_000);
+  const closer = requestOf(far(19));
+  s.observe(closer);
+  assert.deepEqual([s.check(closer)?.responses, s.check(closer)?.evades], [0, 0]);
+  s.fight(closer);
+  s.fight(closer);
+  await s.toAge(STALL_TICKS);
+  assert.equal(s.check(closer)?.limit, null, "680 ticks since the progress");
+  await s.toAge(1_000 + STALL_TICKS);
+  assert.deepEqual([s.check(closer)?.limit, s.check(closer)?.ticks], ["ticks", STALL_TICKS]);
+});
+
+atRates("eight fights are no evades limit, and eight evades still are", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  for (let fight = 0; fight < STALL_EVADES; fight++) s.fight(request);
+  assert.deepEqual([s.check(request)?.limit, s.check(request)?.responses, s.check(request)?.evades], [null, STALL_EVADES, 0]);
+  await s.toAge(STALL_TICKS);
+  assert.equal(s.check(request)?.limit, "ticks", "named by the ticks, not by an evade count");
+  const evading = requestOf(far(20), { id: "evading" });
+  s.observe(evading);
+  for (let evade = 1; evade < STALL_EVADES; evade++) s.evade(evading);
+  assert.equal(s.evade(evading)?.limit, "evades");
+});
+
+atRates("fights alone return on the wall backstop of a stopped server", async (s) => {
+  const request = requestOf(far(20));
+  s.observe(request);
+  s.fight(request);
+  s.harness.server.stop();
+  await s.pass(WALL_MS);
+  assert.equal(s.check(request)?.limit, null, "one response is no chain");
+  s.fight(request);
+  assert.deepEqual([s.check(request)?.limit, s.age()], ["wall", 0]);
+});
+
+test("a new generation drops the fight count", () => {
+  const s = sceneAt(20);
+  const request = requestOf(far(20));
+  s.observe(request, 1);
+  s.fight(request, 1);
+  s.fight(request, 1);
+  assert.equal(s.check(request, 1)?.responses, 2);
+  assert.equal(s.fight(request, 2)?.responses, 1);
+  assert.equal(s.fight(request, 1), null, "a late fight of the old life");
 });
 
 atRates("real progress resets the count, the age and the wall origin", async (s) => {
@@ -321,16 +403,20 @@ test("the facts name the threats once each and the reason says what the model ca
   const facts = s.check(request)!;
   assert.deepEqual(facts.threats, [{ id: 7, name: "skeleton" }, { id: 9, name: "zombie" }]);
   const unmeasured: StallFacts = {
-    requestId: "r", action: "navigate", evades: 8, ticks: null, threats: [{ id: 3, name: "zombie" }],
+    requestId: "r", action: "navigate", responses: 8, evades: 8, ticks: null, threats: [{ id: 3, name: "zombie" }],
     best: null, current: null, limit: "evades",
   };
   assert.equal(
     stallReason({ ...facts, limit: "evades" }),
-    "[HOSTILE_STALLED] 2 evades from skeleton#7, zombie#9 over 0 server ticks without progress on navigate (best remaining 20.0, now 20.0); the reflex still protects the body; choose the next action.",
+    "[HOSTILE_STALLED] 2 hostile responses (2 evades) from skeleton#7, zombie#9 over 0 server ticks without progress on navigate (best remaining 20.0, now 20.0); the reflex still protects the body; choose the next action.",
   );
   assert.equal(
     stallReason(unmeasured),
-    "[HOSTILE_STALLED] 8 evades from zombie#3 over an unknown number of server ticks without progress on navigate (best remaining unknown, now unknown); the reflex still protects the body; choose the next action.",
+    "[HOSTILE_STALLED] 8 hostile responses (8 evades) from zombie#3 over an unknown number of server ticks without progress on navigate (best remaining unknown, now unknown); the reflex still protects the body; choose the next action.",
+  );
+  assert.equal(
+    stallReason({ ...unmeasured, responses: 5, evades: 1, limit: "ticks" }),
+    "[HOSTILE_STALLED] 5 hostile responses (1 evades) from zombie#3 over an unknown number of server ticks without progress on navigate (best remaining unknown, now unknown); the reflex still protects the body; choose the next action.",
   );
   assert.equal(STALLED_CODE, "[HOSTILE_STALLED]");
 });

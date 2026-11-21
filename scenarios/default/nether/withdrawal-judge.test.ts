@@ -7,7 +7,7 @@ import { judgeWithdrawal, type WithdrawalRequest, type WithdrawalSample } from "
 
 const succeeded: WithdrawalRequest = { status: "succeeded", evades: 0, error: null, stall: null };
 const stalled: WithdrawalRequest = {
-  status: "cancelled", evades: 2, error: `${STALLED_CODE} 2 evades`, stall: `${STALLED_CODE} 2 evades`,
+  status: "cancelled", evades: 2, error: `${STALLED_CODE} 2 hostile responses (2 evades)`, stall: `${STALLED_CODE} 2 hostile responses (2 evades)`,
 };
 const refused: WithdrawalRequest = { status: "failed", evades: 0, error: `${COVER_REFUSED_CODE} step 1/3`, stall: null };
 

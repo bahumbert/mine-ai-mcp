@@ -1,16 +1,18 @@
-// A request that keeps being evaded without getting closer to its objective is handed back to the model.
+// A request that keeps being answered by hostile fights and evades without getting closer to its objective is handed back to the model.
 import type { RequestSnapshot } from "../../session/request.js";
 import { serverPacedWallMs } from "../../world/world-age.js";
 
 /** Evades of one request, with no objective progress between them, after which the request is returned. */
 export const STALL_EVADES = 8;
-/** World ticks without objective progress, with at least two evades, after which the request is returned. */
+/** World ticks without objective progress, with at least two completed fight or evade responses, after which the request is returned. */
 export const STALL_TICKS = 1680;
 export const STALLED_CODE = "[HOSTILE_STALLED]";
 
 export interface StallFacts {
   readonly requestId: string;
   readonly action: string;
+  /** Completed fight and evade responses since the last progress (an evade counts in both numbers). */
+  readonly responses: number;
   readonly evades: number;
   /** World ticks since the last progress; null until a world age was heard. */
   readonly ticks: number | null;
@@ -26,6 +28,7 @@ interface Tracker {
   readonly action: string;
   best: number | null;
   current: number | null;
+  responses: number;
   evades: number;
   progressAge: number | null;
   progressMs: number;
@@ -45,22 +48,24 @@ export class RequestStalls {
     this.#read(request, generation, age, nowMs);
   }
 
-  /** Count one finalized evade of the request; the facts carry `limit` when the request must be returned. */
-  recordEvade(
+  /** Count one completed fight or evade of the request; the facts carry `limit` when the request must be returned. */
+  recordResponse(
     request: RequestSnapshot | null,
     generation: number,
+    response: "fight" | "evade",
     threats: readonly { id: number; name: string }[],
     age: number | null,
     nowMs: number,
   ): StallFacts | null {
     const tracker = this.#read(request, generation, age, nowMs);
     if (!tracker) return null;
-    tracker.evades++;
+    tracker.responses++;
+    if (response === "evade") tracker.evades++;
     for (const threat of threats) tracker.threats.set(threat.id, threat.name);
     return factsOf(tracker, age, nowMs);
   }
 
-  /** The limit as it stands, counting no evade (the held release decides with it). */
+  /** The limit as it stands, counting no response (the held release decides with it). */
   check(request: RequestSnapshot | null, generation: number, age: number | null, nowMs: number): StallFacts | null {
     const tracker = this.#read(request, generation, age, nowMs);
     return tracker ? factsOf(tracker, age, nowMs) : null;
@@ -95,7 +100,7 @@ export class RequestStalls {
     const tracker = sameRequest
       ? known
       : (this.#tracker = { requestId: request.id, action: request.action, best: null, current: null,
-        evades: 0, progressAge: age, progressMs: nowMs, threats: new Map() });
+        responses: 0, evades: 0, progressAge: age, progressMs: nowMs, threats: new Map() });
     tracker.progressAge ??= age;
     const { objective, completion } = request.evidence;
     tracker.current = objective?.remaining ?? null;
@@ -105,6 +110,7 @@ export class RequestStalls {
       || (objective && !first && tracker.best !== null && objective.remaining <= tracker.best - objective.tolerance);
     if (!progressed) return tracker;
     if (objective) tracker.best = objective.remaining;
+    tracker.responses = 0;
     tracker.evades = 0;
     tracker.progressAge = age;
     tracker.progressMs = nowMs;
@@ -114,13 +120,13 @@ export class RequestStalls {
 
 function factsOf(tracker: Tracker, age: number | null, nowMs: number): StallFacts {
   const ticks = age !== null && tracker.progressAge !== null ? age - tracker.progressAge : null;
-  const chained = tracker.evades >= 2;
+  const chained = tracker.responses >= 2;
   const limit = tracker.evades >= STALL_EVADES ? "evades"
     : chained && ticks !== null && ticks >= STALL_TICKS ? "ticks"
     : chained && nowMs - tracker.progressMs >= serverPacedWallMs(STALL_TICKS) ? "wall"
     : null;
   return {
-    requestId: tracker.requestId, action: tracker.action, evades: tracker.evades, ticks,
+    requestId: tracker.requestId, action: tracker.action, responses: tracker.responses, evades: tracker.evades, ticks,
     threats: [...tracker.threats].map(([id, name]) => ({ id, name })),
     best: tracker.best, current: tracker.current, limit,
   };
@@ -132,7 +138,7 @@ const blocks = (distance: number | null): string => (distance === null ? "unknow
 export function stallReason(stall: StallFacts): string {
   const who = stall.threats.map((threat) => `${threat.name}#${threat.id}`).join(", ");
   const over = stall.ticks === null ? "an unknown number of" : String(stall.ticks);
-  return `${STALLED_CODE} ${stall.evades} evades from ${who} over ${over} server ticks without progress on ${stall.action} `
+  return `${STALLED_CODE} ${stall.responses} hostile responses (${stall.evades} evades) from ${who} over ${over} server ticks without progress on ${stall.action} `
     + `(best remaining ${blocks(stall.best)}, now ${blocks(stall.current)}); `
     + "the reflex still protects the body; choose the next action.";
 }

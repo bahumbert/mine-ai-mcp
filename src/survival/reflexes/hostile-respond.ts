@@ -133,9 +133,13 @@ function finalizeHostileResponse(scene: HostileScene, start: ResponseStart, sett
   // Reset invalidates in-flight work before the next response has observed the new generation.
   const current = generation === scene.chains.generation;
   const age = scene.bot.time.age ?? null;
-  if (current) scene.stalls.observe(request, generation, age, endedAtMs);
-  const stall = current && settlement.response === "evade"
-    ? scene.stalls.recordEvade(request, generation, settlement.evidence.threats, age, endedAtMs) : null;
+  // The request as it stands now: progress made during the response counts, and a request that was replaced or ended
+  // meanwhile is not the one this response continued, so it counts nothing for the request that replaced it.
+  const running = scene.driver.runner.request();
+  const continued = current && request !== null && running?.id === request.id ? running : null;
+  if (continued) scene.stalls.observe(continued, generation, age, endedAtMs);
+  const stall = continued && settlement.kind === "completed" && (settlement.response === "fight" || settlement.response === "evade")
+    ? scene.stalls.recordResponse(continued, generation, settlement.response, settlement.evidence.threats, age, endedAtMs) : null;
   recordCoverObligations(scene, start, settlement);
   return { ...settlement, stall,
     chain: scene.chains.record({ generation, startedAtMs, endedAtMs, settlement,

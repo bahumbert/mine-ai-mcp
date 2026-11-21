@@ -51,7 +51,7 @@ test("a stalled return starts one new navigate", async () => {
   const navigates: unknown[] = [];
   const outputs = [
     {
-      result: { status: "cancelled", error: `${STALLED_CODE} 2 evades from zombie#7 over 1700 server ticks without progress on navigate` },
+      result: { status: "cancelled", error: `${STALLED_CODE} 2 hostile responses (2 evades) from zombie#7 over 1700 server ticks without progress on navigate` },
       interruptions: ["[HOSTILE_CONTACT] evade response for zombie#7", "[HOSTILE_CONTACT] evade response for zombie#7"],
     },
     { result: { status: "succeeded" }, interruptions: [] },

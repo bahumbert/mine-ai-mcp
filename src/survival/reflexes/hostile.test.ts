@@ -227,7 +227,7 @@ for (const rate of [20, 10, "stopped"] as const) test(`two evades return at the 
   assert.equal(state.over, true, "the no-progress limit must return instead of resume");
   const result = await fixture.clock.settle(pending, 1_000);
   assert.equal(result.result.status, "cancelled");
-  assert.match(result.result.status === "cancelled" ? result.result.error : "", /\[HOSTILE_STALLED\] 2 evades/);
+  assert.match(result.result.status === "cancelled" ? result.result.error : "", /\[HOSTILE_STALLED\] 2 hostile responses \(2 evades\)/);
   await assertClean();
 });
 
@@ -284,7 +284,7 @@ for (const ticksPerSecond of [20, 10]) {
       assert.equal(output.result.status, "cancelled");
       const error = output.result.status === "cancelled" ? output.result.error : "";
       if (ending === "ticks" || wall) {
-        assert.match(error, /\[HOSTILE_STALLED\] 2 evades/);
+        assert.match(error, /\[HOSTILE_STALLED\] 2 hostile responses \(2 evades\)/);
         assert.equal(output.request?.state.kind, "returned");
         assert.ok(output.interruptions?.some(reason => reason.includes("[HOSTILE_STALLED]")));
       }
