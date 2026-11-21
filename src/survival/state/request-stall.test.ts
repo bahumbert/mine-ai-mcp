@@ -61,12 +61,19 @@ function atRates(name: string, body: (scene: Scene, ticksPerSecond: number) => P
   for (const ticksPerSecond of RATES) test(`${name} (${ticksPerSecond} tps)`, () => body(sceneAt(ticksPerSecond), ticksPerSecond));
 }
 
-atRates("seven evades resume and the eighth returns", (s) => {
+/** Task 10's measure: the most stall evades a succeeded request needed (fortress-withdrawal, t00990). */
+const LARGEST_SUCCEEDED_STALL_EVADES = 5;
+
+test("the evade limit is twice the largest succeeded request's stall evades (T10: 5)", () => {
+  assert.ok(STALL_EVADES >= 2 * LARGEST_SUCCEEDED_STALL_EVADES, `${STALL_EVADES} evades`);
+});
+
+atRates(`${STALL_EVADES - 1} evades resume and the next returns`, (s) => {
   const request = requestOf(far(20));
   s.observe(request);
   for (let evade = 1; evade < STALL_EVADES; evade++) assert.equal(s.evade(request)?.limit, null, `evade ${evade}`);
-  const eighth = s.evade(request);
-  assert.deepEqual([eighth?.limit, eighth?.evades], ["evades", STALL_EVADES]);
+  const atLimit = s.evade(request);
+  assert.deepEqual([atLimit?.limit, atLimit?.evades], ["evades", STALL_EVADES]);
 });
 
 atRates("1660 ticks resume and 1680 return with two evades", async (s) => {
@@ -170,7 +177,7 @@ atRates("progress at 1000 ticks restarts the fight count: null at 1680, ticks at
   assert.deepEqual([s.check(closer)?.limit, s.check(closer)?.ticks], ["ticks", STALL_TICKS]);
 });
 
-atRates("eight fights are no evades limit, and eight evades still are", async (s) => {
+atRates(`${STALL_EVADES} fights are no evades limit, and ${STALL_EVADES} evades still are`, async (s) => {
   const request = requestOf(far(20));
   s.observe(request);
   for (let fight = 0; fight < STALL_EVADES; fight++) s.fight(request);
@@ -208,7 +215,7 @@ test("a new generation drops the fight count", () => {
 atRates("real progress resets the count, the age and the wall origin", async (s) => {
   const request = requestOf(far(20));
   s.observe(request);
-  for (let evade = 0; evade < 7; evade++) s.evade(request);
+  for (let evade = 0; evade < STALL_EVADES - 1; evade++) s.evade(request);
   await s.toAge(1_600);
   const progressed = requestOf(far(17));
   s.observe(progressed);

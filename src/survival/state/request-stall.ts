@@ -2,8 +2,11 @@
 import type { RequestSnapshot } from "../../session/request.js";
 import { serverPacedWallMs } from "../../world/world-age.js";
 
-/** Evades of one request, with no objective progress between them, after which the request is returned. */
-export const STALL_EVADES = 8;
+/**
+ * Evades of one request, with no objective progress between them, after which the request is returned: twice the most
+ * stall evades a succeeded request needed (5, fortress-withdrawal t00990, 660 ticks).
+ */
+export const STALL_EVADES = 10;
 /** World ticks without objective progress, with at least two completed fight or evade responses, after which the request is returned. */
 export const STALL_TICKS = 1680;
 export const STALLED_CODE = "[HOSTILE_STALLED]";

@@ -40,7 +40,7 @@ import { swingReadiness } from "../weapons/swing-readiness.js";
 import { heldThreatEnded, senseHostile } from "./hostile-sense.js";
 import type { HostileScene } from "./hostile-scene.js";
 import { ThreatChains } from "../state/threat-chains.js";
-import { RequestStalls } from "../state/request-stall.js";
+import { RequestStalls, STALL_EVADES } from "../state/request-stall.js";
 import { CoverObligations } from "../state/cover-obligation.js";
 import { COMBAT_LIMITS } from "../control/combat/limits.js";
 import { evadeBudgetTicks, EVADE_WALL_FACTOR } from "../responses/evade-clock.js";
@@ -76,7 +76,7 @@ function watchStalledCleanup(fixture: ReflexFixture): () => Promise<void> {
 }
 
 /** A stationary objective whose physical attempts yield to the real hostile reflex. */
-function stalledJourney(ticksPerSecond: number, exhausted = false, exhaustedAt = 8) {
+function stalledJourney(ticksPerSecond: number, exhausted = false, exhaustedAt = STALL_EVADES) {
   let finishRoute: (() => void) | null = null;
   let attempts = 0;
   let routes = 0;
@@ -114,7 +114,7 @@ function stalledJourney(ticksPerSecond: number, exhausted = false, exhaustedAt =
 }
 
 for (const ticksPerSecond of [20, 10]) for (const exhausted of [false, true]) {
-  test(`${exhausted ? "a stall at an exhausted evade returns instead of holding" : "eight separated evades on one navigate return HOSTILE_STALLED; a new navigate finishes"} (${ticksPerSecond} tps)`, async () => {
+  test(`${exhausted ? "a stall at an exhausted evade returns instead of holding" : `${STALL_EVADES} separated evades on one navigate return HOSTILE_STALLED; a new navigate finishes`} (${ticksPerSecond} tps)`, async () => {
     await using fixture = stalledJourney(ticksPerSecond, exhausted);
     using _clock = fixture.clock.install();
     const assertClean = watchStalledCleanup(fixture);
@@ -123,24 +123,26 @@ for (const ticksPerSecond of [20, 10]) for (const exhausted of [false, true]) {
     const pending = fixture.runner.run(fixture.action, {});
     const state = watch(pending);
     await flush();
-    for (let evade = 1; evade <= 8; evade++) {
+    for (let evade = 1; evade <= STALL_EVADES; evade++) {
       fixture.bot.entities[7]!.position.x = 5;
       await fixture.clock.advance(50);
       assert.equal(fixture.observer.activeResponse(), "evade");
       fixture.finishRoute();
       assert.ok(await until(() => fixture.recorded().length === evade));
       await flush();
-      if (evade < 8) {
+      if (evade < STALL_EVADES) {
         assert.equal(state.over, false);
         assert.equal(fixture.attempts(), evade + 1);
       }
     }
-    assert.equal(fixture.attempts(), 8, "the stalled request must return instead of a ninth resume");
-    assert.equal(state.over, true, "the eighth evade returns the request");
+    assert.equal(fixture.attempts(), STALL_EVADES, "the stalled request must return instead of one more resume");
+    assert.equal(state.over, true, "the last evade of the limit returns the request");
     assert.equal(fixture.runner.status().busy, false, "a stalled exhausted evade must release the request");
     const output = await pending;
     assert.equal(output.result.status, "cancelled");
-    assert.match(output.result.status === "cancelled" ? output.result.error : "", /\[HOSTILE_STALLED\].*skeleton#7/);
+    const error = output.result.status === "cancelled" ? output.result.error : "";
+    assert.match(error, /\[HOSTILE_STALLED\].*skeleton#7/);
+    assert.match(error, new RegExp(`\\(${STALL_EVADES} evades\\)`), "the evade limit, not the tick rule, returned it");
     assert.ok(output.interruptions?.some((reason) => reason.includes("[HOSTILE_STALLED]") && reason.includes("skeleton#7")));
     assert.equal(output.request?.state.kind, "returned");
     assert.ok(fixture.bot.time.age >= 1_000 && fixture.bot.time.age < 2_680);
