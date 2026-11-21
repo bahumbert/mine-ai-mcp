@@ -149,8 +149,6 @@ export const SHOTS: Readonly<Record<ShotProjectile, { readonly speed: number; re
 };
 /** Fire lasts 5 s and costs 1 of `on_fire` damage a second, the 4th at 4 s (measured: 1.0, 2.0, 3.0, 4.0 s after the hit, the flag out at 5.0). */
 export const FIRE_TICKS = 100;
-export const BURN_EVERY_TICKS = 20;
-export const BURN_DAMAGE = 1;
 
 const GROUND_FRICTION = 0.91 * 0.6;
 const GRAVITY = 0.08;

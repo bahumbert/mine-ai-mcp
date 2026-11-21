@@ -25,6 +25,7 @@ import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
 import { eyeWaterSurface } from "./checks/eye-water-surface.ts";
 import { waterExtinguishesBurning } from "./checks/water-extinguishes-burning.ts";
+import { fireBlockBurn } from "./checks/fire-block-burn.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
 import { heldShooter } from "./checks/held-shooter.ts";
 import { armourPointsWorn } from "./checks/armour-points-worn.ts";
@@ -172,6 +173,7 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   airSupplyUnderWater,
   eyeWaterSurface,
   waterExtinguishesBurning,
+  fireBlockBurn,
   bedSleepAndWake,
   bedRefusedMonsterNear,
   rainAndThunderState,

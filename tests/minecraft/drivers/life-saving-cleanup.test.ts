@@ -61,7 +61,12 @@ function cleanupRun(t: TestContext, stopped: boolean, ticksPerSecond: number, sc
         world.world.setCell(bot.entity.position.floored(), "fire");
         fireAnswerAge = bot.time.age;
         fireAnswerMs = clock.now() - began;
-        atTick(1, () => { owner = "fire_reflex"; });
+        // The reflex takes the body and puts the fire out at once (it is scripted, not run): the fake lights a body in a fire block, so the block and the burn go with it.
+        atTick(1, () => {
+          owner = "fire_reflex";
+          world.world.setCell(bot.entity.position.floored(), "air");
+          world.combat.burn.extinguish();
+        });
         if (schedule.stop === "cleanup") atTick(42, () => { server.stop(); });
       });
     }

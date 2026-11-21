@@ -21,6 +21,7 @@ import { ReflexDriver } from "../control/driver.js";
 import { decideFireResponse } from "../policy/environment.js";
 import { attachFireReflex, fireEscapeFacts } from "./fire.js";
 import { recordFireContact } from "../perception/burn.js";
+import { hasFireDanger } from "../perception/fire-danger.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
 import { confirmFakeDigs } from "../../test-support/life-saving-placements.js";
@@ -375,6 +376,49 @@ test("health at or under the burn left is lethal", async () => {
   bot.health = 15;
   await clock.advance(50);
   assert.equal(JSON.parse(JSON.stringify(driver.snapshot().find((entry) => entry.name === "fire_reflex")!.danger)).lethalBurn, false);
+});
+
+/** The reflex's own reading of the burn danger (`fire_reflex` snapshot) for a body burning beside the pit, its last contact of `kind` at world age 1000. */
+async function burnDangerAfterContact(kind: "lava" | "fire", health: number, readAge: number) {
+  const { bot, clock, world } = burningBesidePit(true, { startAge: readAge });
+  recordFireContact(bot, kind, 1000);
+  bot.health = health;
+  await using resources = new AsyncDisposableStack();
+  const driver = resources.use(new ReflexDriver(bot, stillRunner(), { now: clock.now }));
+  resources.use(attachFireReflex(bot, driver, world));
+  await clock.advance(50);
+  return JSON.parse(JSON.stringify(driver.snapshot().find((entry) => entry.name === "fire_reflex")!.danger));
+}
+
+test("s278: a body on dry footing, still burning after a fire block at 14.18 hp, is not in a lethal burn, and after lava it is", async () => {
+  // Read at the contact's own age (the world age moves in jumps of 20, so a read right after the contact sees no time pass): lava owes 300 ticks, 15 hp.
+  assert.equal((await burnDangerAfterContact("fire", 14.18, 1000)).lethalBurn, false, "a fire block owes 177 ticks, 9 hp");
+  assert.equal((await burnDangerAfterContact("lava", 14.18, 1000)).lethalBurn, true, "lava owes 300 ticks, 15 hp");
+  // 20 ticks later: fire owes 156 ticks (8 hp), lava 280 (14 hp): the health that tells them apart is the one between.
+  assert.equal((await burnDangerAfterContact("fire", 10, 1020)).lethalBurn, false);
+  assert.equal((await burnDangerAfterContact("lava", 10, 1020)).lethalBurn, true);
+});
+
+test("a fire block's burn is lethal at its own hp and not above it, 20 ticks after the contact", async () => {
+  assert.equal((await burnDangerAfterContact("fire", 8, 1020)).lethalBurn, true, "156 ticks are 8 hp");
+  assert.equal((await burnDangerAfterContact("fire", 8.01, 1020)).lethalBurn, false);
+});
+
+test("cleanup after a fire block releases a burn the body survives, and keeps its protective stop for a burn that can kill it and for renewed lava", () => {
+  // Read at the contact's own world age: the 177 ticks of a fire block are 9 hp, lava's 300 would be 15.
+  const { bot } = burningBesidePit(true, { startAge: 1000 });
+  recordFireContact(bot, "fire", 1000);
+  bot.health = 14.18;
+  assert.equal(hasFireDanger(bot), false, "a fire block's 177 ticks (9 hp) do not kill 14.18 hp: the cleanup goes on");
+  bot.health = 9;
+  assert.equal(hasFireDanger(bot), true, "9 hp is the burn left: the stop");
+  bot.health = 9.01;
+  assert.equal(hasFireDanger(bot), false, "one step above it");
+  bot.health = 14.18;
+  Object.assign(bot.entity, { isInLava: true });
+  assert.equal(hasFireDanger(bot), true, "renewed lava");
+  Object.assign(bot.entity, { isInLava: false });
+  assert.equal(hasFireDanger(bot), true, "out of the lava again, its 300 ticks (15 hp) are owed: the stop stays");
 });
 
 test("the fire reflex sees a water bucket only in a dimension that holds water", async () => {

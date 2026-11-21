@@ -34,6 +34,7 @@ const REFUSED: ReadonlyMap<string, RegExp> = new Map([
   ["contract/scenarios/explosion-knockback.yaml", /exclusive/u],
   ["contract/scenarios/deflect-fireball.yaml", /exclusive/u],
   ["contract/scenarios/projectile-hit-bot.yaml", /exclusive/u],
+  ["contract/scenarios/fire-block-burn.yaml", /exclusive/u],
   ["contract/scenarios/item-pickup-after-delay.yaml", /exclusive/u],
   ["contract/scenarios/rain-and-thunder-state.yaml", /exclusive/u],
   // A contract check that sleeps: the sleeping share and the night skip are the whole server's (a second sleeper, or a `time set` at another's trial, changes them).

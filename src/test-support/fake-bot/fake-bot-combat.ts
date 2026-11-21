@@ -19,6 +19,7 @@ import { BOAT_NAME, inEntityReach } from "./fake-bot-entity-reach.js";
 import { type MobKnockback, attachMobKnockback } from "./fake-bot-mob-knockback.js";
 import { attachFakeFireballs } from "./fake-bot-fireballs.js";
 import { attachFakeShots } from "./fake-bot-shots.js";
+import { type FakeBurn, attachFakeBurn } from "./fake-bot-burn.js";
 import { DEFAULT_MOB_HEALTH, HURT_WINDOW_TICKS, KNOCKBACK_SIDEWAYS, NOT_HURTABLE_TYPES, SPRINT_BONUS_ABOVE_STRENGTH, SPRINT_KNOCKBACK, swingStrength, type ShotProjectile, notchVelocity, blastOn, damageTaken, knockbackFrom, opensHurtWindow, swingDamage, weaponOf } from "./fake-bot-combat-rules.js";
 import { attachFakeHeldUse } from "./fake-bot-held-use.js";
 import { eyeHeightOf } from "./fake-bot-physics.js";
@@ -45,6 +46,8 @@ export interface FakeCombat {
   kill(entityId: number): void;
   /** `shooterId` (a creature on the client) shoots the bot with an arrow or a small fireball that costs `amount` when it lands: the flight, the `damage_event`, the push, and a fireball's fire. */
   shootBot(projectile: ShotProjectile, shooterId: number, amount: number): void;
+  /** The bot's burning: lit by a shot, lava or a fire block, put out by water or a death (`fake-bot-burn.ts`). */
+  readonly burn: FakeBurn;
   /** The server summons a ghast's fireball at `position` flying with `motion` (blocks a tick) and accelerating along it; the bot can hit it to send it along her look. */
   launchFireball(position: Vec3, motion: Vec3): Entity;
   /**
@@ -278,7 +281,8 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
   });
   const fireballs = attachFakeFireballs(bot, { server: parts.server, entities: parts.entities, hear: sender.hear, hurtTheBot });
   const sprint = trackSprint(parts.server);
-  const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, deaths: sender.deaths, hurtTheBot, pushBot });
+  const burn = attachFakeBurn(bot, { server: parts.server, deaths: sender.deaths, hurtTheBot });
+  const shootBot = attachFakeShots(bot, { entities: parts.entities, afterTicks: sender.afterTicks, burn, hurtTheBot, pushBot });
 
   // `entities.js:860-873`: A2's `attack` writes the packet; a boat's answer is `fake-bot-boat-damage.ts`.
   parts.server.onPacket("use_entity", (data) => {
@@ -329,6 +333,7 @@ export function attachFakeCombat(bot: FakeBot, parts: CombatParts): FakeCombat {
       die(entity, creatureOf(entity));
     },
     shootBot,
+    burn,
     launchFireball: fireballs.launch,
     setHealth: (health, food) => sender.sendHealth(health, food ?? bot.food),
     beforeBotHurt: (listener) => void sender.beforeBotHurt.add(listener),
