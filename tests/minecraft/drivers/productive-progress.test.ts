@@ -144,6 +144,8 @@ function hostProbe(host: string, withRuntime: boolean): string {
     import { createFakeBot } from "./src/test-support/fake-bot/index.ts";
     const { bot } = createFakeBot();
     const reasons = [];
+    const navigationCalls = [];
+    const navigationListeners = [];
     const completions = [];
     const session = {
       env: {}, scenario: { name: "progress-host", params: {} }, username: "Actor",
@@ -156,7 +158,11 @@ function hostProbe(host: string, withRuntime: boolean): string {
     mock.module("@aibengineering/mine-ai-mcp", () => ({
       BOT_PHYSICS_OPTIONS: {}, assertBotPluginsLoaded() {}, loadBotPlugins() {},
       createNavigationRuntime: () => ({ async [Symbol.asyncDispose]() {} }),
-      createMinecraftRuntime: async () => ({ async [Symbol.asyncDispose]() {} })
+      // The real runtime declares \`navigation: Pick<NavigationRuntime, "onEvent">\` (src/runtime/minecraft-runtime.ts:129); the host subscribes it.
+      createMinecraftRuntime: async () => ({
+        navigation: { onEvent(listener) { navigationCalls.push("subscribe"); navigationListeners.push(listener); return () => { navigationCalls.push("unsubscribe"); }; } },
+        async [Symbol.asyncDispose]() {}
+      })
     }));
     mock.module("./tests/minecraft/scenario-bot.ts", () => ({
       createScenarioBot: () => bot, prepareScenarioBot: async () => {}, closeScenarioBot() {}
@@ -175,7 +181,7 @@ function hostProbe(host: string, withRuntime: boolean): string {
     process.argv = [process.execPath, ${JSON.stringify(host)}, driver, ...${JSON.stringify(withRuntime ? [] : ["--without-runtime"])}];
     await import(${JSON.stringify(host)});
     assert.deepEqual(completions.map(result => result.status), ["succeeded"], JSON.stringify(completions));
-    console.log(JSON.stringify(reasons));
+    console.log(JSON.stringify({ reasons, navigationCalls, listenerTypes: navigationListeners.map(listener => typeof listener) }));
   `;
 }
 
@@ -190,6 +196,11 @@ for (const { host, withRuntime } of [
       cwd: join(import.meta.dirname, "../../.."), signal: t.signal,
       env: { ...process.env, TMPDIR: scratch.path, MINE_AI_SCENARIO_EVIDENCE: "0", MINE_LABS_ARTIFACTS_DIR: "" },
     });
-    assert.deepEqual(JSON.parse(stdout.trim().split("\n").at(-1)!), ["x"]);
+    // Only the tests host with a runtime forwards navigation events to drivers: it subscribes `runtime.navigation.onEvent`
+    // once with a callable listener and releases it once in its `finally`; the other hosts never touch it.
+    const subscribes = host === "./tests/minecraft/client-host.ts" && withRuntime;
+    assert.deepEqual(JSON.parse(stdout.trim().split("\n").at(-1)!), {
+      reasons: ["x"], navigationCalls: subscribes ? ["subscribe", "unsubscribe"] : [], listenerTypes: subscribes ? ["function"] : [],
+    });
   });
 }
