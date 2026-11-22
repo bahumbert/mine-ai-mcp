@@ -12,14 +12,12 @@ import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { evade } from "./evade.js";
 import { EvadeObservation } from "./evade-observation.js";
 import { EvadeClock } from "./evade-clock.js";
-import { FIRE_LINE_PRICE_TICKS } from "./evade-fire-line.js";
-import type { PolicyDecision } from "../../navigation/movements/policy.js";
 import { CombatPerception } from "../perception/combat/observations.js";
 import { arrowImpact, incomingShieldProjectiles } from "../perception/combat/shield-projectiles.js";
 import { projectileContact } from "../positioning/combat/exposure.js";
 import { RETREAT_PROJECTILE_ALLOWANCE, retreatGuardLimit } from "../weapons/projectile-guard.js";
 import { swingReadiness } from "../weapons/swing-readiness.js";
-import { ACROSS_THE_LINE, EVADE_BUDGET_MS, evadeWallMs, fireVerdict, firstRouteAnswers, judgements, leavesNothing, reachFixture, ROUTE_MS, SLANT_OFF_SECOND, STRAIGHT_AWAY, walkAnswer, ZOMBIE } from "./evade-fixture.test.js";
+import { EVADE_BUDGET_MS, evadeWallMs, judgements, leavesNothing, reachFixture, ROUTE_MS, ZOMBIE } from "./evade-fixture.test.js";
 
 for (const ticksPerSecond of [20, 10]) {
   test(`a hidden shooter under the cover range does not hold the body at ${ticksPerSecond} tps`, async () => {
@@ -523,78 +521,4 @@ for (const wallStepMs of [-800, 1_200]) {
     assert.equal(await secondRouteTimeoutAcrossWallStep(wallStepMs), evadeWallMs(EVADE_BUDGET_MS) - ROUTE_MS);
   });
 }
-
-// T16b: the evade's route pays the line-of-fire price on the steps that run straight away from a bow shooter (the shooter
-// is the observation's `attack: "projectile"`; the walks and the answer helpers are in `evade-fixture.test.ts`).
-test("a bow skeleton prices a walk straight away from it and leaves a walk across its line unpriced", async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9 });
-  using _installed = fixture.clock.install();
-  const nothingLeft = leavesNothing(fixture);
-  const [away, across] = await firstRouteAnswers(fixture, [STRAIGHT_AWAY, ACROSS_THE_LINE]);
-  assert.equal(fireVerdict(away!), "line_of_fire");
-  assert.equal(away!.kind === "penalized" ? away!.cost : 0, FIRE_LINE_PRICE_TICKS);
-  assert.equal(fireVerdict(across!), "allowed");
-  await nothingLeft();
-});
-
-for (const exit of [
-  { how: "dies", leave: (fixture: ReturnType<typeof reachFixture>) => fixture.bot.emit("entityDead", fixture.bot.entities[7]!) },
-  { how: "is out of view", leave: (fixture: ReturnType<typeof reachFixture>) => fixture.entities.remove(7) },
-]) test(`a bow skeleton that ${exit.how} mid-route stops pricing at the next answer`, async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9 });
-  using _installed = fixture.clock.install();
-  const nothingLeft = leavesNothing(fixture);
-  const navigate = fixture.navigation.navigate;
-  const answers: string[] = [];
-  fixture.navigation.navigate = async (options) => {
-    answers.push(fireVerdict(walkAnswer(options.movements, STRAIGHT_AWAY)));
-    // The next answer is asked in the same turn as the event: a death ends the route as separated at once.
-    fixture.clock.after(500, () => {
-      exit.leave(fixture);
-      answers.push(fireVerdict(walkAnswer(options.movements, STRAIGHT_AWAY)));
-    });
-    return navigate(options);
-  };
-  await fixture.run();
-  assert.deepEqual(answers, ["line_of_fire", "allowed"]);
-  await nothingLeft();
-});
-
-for (const melee of [{ threat: "a skeleton with a sword", shooter: true }, { threat: "a zombie", shooter: false }]) test(`${melee.threat} is melee to the price: no walk is priced`, async () => {
-  const fixture = reachFixture({ shooter: melee.shooter, distance: 9 });
-  if (melee.shooter) fixture.bot.entities[7]!.equipment[0] = itemOf(fixture.bot.registry, "iron_sword", 1);
-  using _installed = fixture.clock.install();
-  const [away, across] = await firstRouteAnswers(fixture, [STRAIGHT_AWAY, ACROSS_THE_LINE]);
-  assert.equal(fireVerdict(away!), "allowed");
-  assert.equal(fireVerdict(across!), "allowed");
-});
-
-test("two bow skeletons price a walk straight away from each one, and a walk off both lines once", async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9 });
-  const second = fixture.entities.spawn({ id: 9, name: "skeleton", position: new Vec3(9.5, 64, 2.5) });
-  second.equipment[0] = itemOf(fixture.bot.registry, "bow", 1);
-  fixture.request.threats.push({ id: 9, name: "skeleton", position: { x: 9.5, y: 64, z: 2.5 }, distance: 9.2 });
-  using _installed = fixture.clock.install();
-  const [both, slant] = await firstRouteAnswers(fixture, [STRAIGHT_AWAY, SLANT_OFF_SECOND]);
-  assert.equal(both!.kind === "penalized" ? both!.cost : 0, FIRE_LINE_PRICE_TICKS, "priced once, not once per shooter");
-  assert.equal(fireVerdict(both!), "line_of_fire");
-  assert.equal(fireVerdict(slant!), "line_of_fire", "the second skeleton's line prices a walk the first does not");
-});
-
-for (const ticksPerSecond of [20, 10]) test(`a priced evade route ends separated or exhausted at ${ticksPerSecond} tps`, async () => {
-  const fixture = reachFixture({ shooter: true, distance: 9, budget: 3_000, ticksPerSecond });
-  using _installed = fixture.clock.install();
-  const nothingLeft = leavesNothing(fixture);
-  const navigate = fixture.navigation.navigate;
-  let away: PolicyDecision | undefined;
-  fixture.navigation.navigate = async (options) => {
-    away ??= walkAnswer(options.movements, STRAIGHT_AWAY);
-    fixture.bot.entity.position.x = -40.5;
-    return navigate(options);
-  };
-  const result = await fixture.run();
-  assert.equal(fireVerdict(away!), "line_of_fire");
-  assert.ok(["separated", "exhausted"].includes(result.result.kind), JSON.stringify(result.result));
-  await nothingLeft();
-});
 

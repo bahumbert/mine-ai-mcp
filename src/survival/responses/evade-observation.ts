@@ -161,17 +161,6 @@ export class EvadeObservation {
     });
   }
 
-  /** The live feet of each projectile shooter in view and not dead: a route's line-of-fire price reads them at every step. */
-  shooters(): Vec3[] {
-    const shooters: Vec3[] = [];
-    for (const [id, entry] of this.#entries) {
-      const entity = this.bot.entities[id];
-      if (this.#dead.has(id) || !entity?.isValid || entry.body.attack !== "projectile") continue;
-      shooters.push(entity.position);
-    }
-    return shooters;
-  }
-
   /** Evidence retains dead entries rather than silently dropping their result. */
   threats(): HostileThreat[] { return [...this.#entries].filter(([id]) => !this.#dead.has(id)).map(([, entry]) => entry.threat); }
 }
