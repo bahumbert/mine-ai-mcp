@@ -5,6 +5,7 @@ import { snapshotEntityIds } from "../../../world/item-pickup.js";
 import { packKey, type BlockPosition } from "../../index.js";
 import { build, BuildProgress, type BuildRequest, type BuildResult, type PlacedScaffold } from "./build-process.js";
 import { pickUpScaffoldDrops } from "./scaffold-drops.js";
+import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 
 /** Rounds of scaffold takedown: the highest block first, and a round's own pillars are taken down in the next (live count unmeasured: a pillar is a few blocks). */
 const MAX_TAKEDOWN_ROUNDS = 4;
@@ -18,7 +19,7 @@ const standsStill = (bot: Bot, placed: PlacedScaffold): boolean => bot.blockAt(a
 async function digRound(bot: Bot, request: BuildRequest, before: readonly PlacedScaffold[], known: Map<number, PlacedScaffold>): Promise<void> {
   const takedown = new BuildProgress();
   try {
-    await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...before.map(({ position }) => ({ position, blockName: "air" }))] }, true, takedown);
+    await build(bot, { ...request, removeWrongBlocks: true, cells: [...request.cells, ...before.map(({ position }) => ({ position, blockName: DIG_CLEAR_BLOCK }))] }, true, takedown);
   } catch (error) {
     request.signal?.throwIfAborted();
     void error;

@@ -6,6 +6,7 @@ import { reserveCountsOf, reserveItemsInputSchema } from "../reserve-items.js";
 import { REFUSAL_CAUSES } from "../../world/placement.js";
 import { HORIZONTAL_FACINGS, type HorizontalFacing } from "../../world/facing.js";
 import { BLOCK_AXES, BLOCK_HALVES, type BlockAxis, type BlockHalf } from "../../world/block-states.js";
+import { DIG_CLEAR_BLOCK } from "../../world/dig-clear.js";
 
 export { DIG_CLEAR_BLOCK } from "./dig-clear.js";
 export const BUILD_STRUCTURE = "build_structure" as const;
@@ -121,8 +122,8 @@ export function portalFrameCells(frame: z.output<typeof portalFrameRequestSchema
   for (let offset = -1; offset <= 2; offset += 1) cells.push(along(offset, frame.y - 1, rowBlock(offset)));
   for (let up = 0; up < 3; up += 1) {
     cells.push(along(-1, frame.y + up));
-    cells.push(along(0, frame.y + up, "air"));
-    cells.push(along(1, frame.y + up, "air"));
+    cells.push(along(0, frame.y + up, DIG_CLEAR_BLOCK));
+    cells.push(along(1, frame.y + up, DIG_CLEAR_BLOCK));
     cells.push(along(2, frame.y + up));
   }
   for (let offset = -1; offset <= 2; offset += 1) cells.push(along(offset, frame.y + 3, rowBlock(offset)));
