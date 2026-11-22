@@ -1,5 +1,6 @@
 // One claim check on arrival at a remembered house, rearmed only by a departure.
 import type { MaterialCount } from "../building/blueprint.ts";
+import { unfinishedHousePlan } from "../building/house-facts.ts";
 import { planTemplate, type HousePlan, type Materials, type Site } from "../building/plan.ts";
 import { templateOfHouse } from "../building/templates.ts";
 import { sameDimension } from "../bot-data-sql.ts";
@@ -29,7 +30,7 @@ function planOfHouse(house: { readonly template?: string; readonly kind?: string
 
 /** Resume the same blueprint as build, without surveying the world between visits. */
 function unfinishedPlan(house: UnfinishedHouse): HousePlan | null {
-  return planOfHouse(house, house.site, house.materials, house.shapes);
+  return unfinishedHousePlan(house);
 }
 
 /** Keep only the newest house notes; legacy ownership is safe only for an explicitly own house. */

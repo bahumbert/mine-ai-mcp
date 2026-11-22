@@ -2,17 +2,37 @@
 import type { KnownPlace } from "../mind.ts";
 import type { OpportunityFacts } from "../opportunities.ts";
 import type { Position } from "../runtime-client.ts";
-import { BUILD_ROLES, shortfall, type MaterialCount } from "./blueprint.ts";
+import { BUILD_ROLES, shortfall, type MaterialCount, type Variants } from "./blueprint.ts";
 import { improvement, temporaryRoles } from "./materials.ts";
 import { chooseSite, planTemplate, type HousePlan, type Materials, type Site } from "./plan.ts";
-import { classicTemplate, templateOfHouse } from "./templates.ts";
+import { classicTemplate, templateOfHouse, TEMPLATES, type Template } from "./templates.ts";
 
 type Inventory = readonly { readonly name: string; readonly count: number }[];
 
+/** What the plan of an unfinished house reads from its record: which template, and the materials and substitute shapes it is built with. */
+export interface UnfinishedHouseRecord {
+  readonly template?: string;
+  readonly kind?: string;
+  readonly style?: string;
+  readonly size?: string;
+  readonly site: Site;
+  readonly materials?: Materials;
+  readonly shapes?: Variants;
+}
+
+/**
+ * The plan of an unfinished house as `build` plans it: its template (by `templateOfHouse`), at its site, with the materials and
+ * the substitute shapes saved in its record; null for a house nobody has a template for any more. Every reader of an unfinished
+ * house (its bill, its reserve, its claim, the resume box) plans it here, so none bills full blocks for cells built as stairs or slabs.
+ */
+export function unfinishedHousePlan(house: UnfinishedHouseRecord, templates: ReadonlyMap<string, Template> = TEMPLATES): HousePlan | null {
+  const template = templateOfHouse(house, templates);
+  return template === undefined ? null : planTemplate(template, house.site, house.materials ?? {}, house.shapes ?? {});
+}
+
 /** The item kinds an unfinished house is built of; none for a house nobody has a template for any more (never throws: read every step). */
-export function houseBillItems(house: { readonly template?: string; readonly kind?: string; readonly site: Site; readonly materials?: Materials } | null): string[] {
-  const template = house === null ? undefined : templateOfHouse(house);
-  return house === null || template === undefined ? [] : planTemplate(template, house.site, house.materials ?? {}).bill.map((entry) => entry.item);
+export function houseBillItems(house: UnfinishedHouseRecord | null): string[] {
+  return (house === null ? null : unfinishedHousePlan(house))?.bill.map((entry) => entry.item) ?? [];
 }
 
 /** The persona's own small house: its classic template at the style it likes (none shipped: no small house to tell about). */

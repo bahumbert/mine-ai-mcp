@@ -1,6 +1,7 @@
 // Building a house from a template (build): the site, its protection and leveling, then the stages and the claim sign.
 import type { Step } from "../actions.ts";
 import { billOfMaterials, type MaterialCount } from "../building/blueprint.ts";
+import { unfinishedHousePlan } from "../building/house-facts.ts";
 import { houseBox } from "../building/house-site.ts";
 import { checkMaterials, shapesForMaterials } from "../building/materials.ts";
 import { replacedHouseNote, siteRefusal } from "../building/new-site.ts";
@@ -100,7 +101,9 @@ function resumable(unfinished: UnfinishedHouse | null | undefined, template: Tem
   if ((unfinished.template ?? templateOfKind(unfinished.kind, templates)?.id) !== template.id) return null;
   if (distanceBetween(from, unfinished.site.door) <= RESUME_RANGE) return unfinished;
   // A 30-wide house puts a bot standing in it far from its door.
-  const { min, max } = houseBox(planTemplate(template, unfinished.site, unfinished.materials ?? {}, unfinished.shapes ?? {}).batches.flat());
+  const plan = unfinishedHousePlan(unfinished, templates);
+  if (plan === null) return null;
+  const { min, max } = houseBox(plan.batches.flat());
   const inside = from.x >= min.x && from.x < max.x + 1 && from.z >= min.z && from.z < max.z + 1 && from.y >= min.y && from.y < max.y + 2;
   return inside ? unfinished : null;
 }

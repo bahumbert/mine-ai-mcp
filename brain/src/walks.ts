@@ -1,9 +1,9 @@
 // How the skills ask for a walk: the `navigate` input, the walk that keeps what the work at its end needs
 // (plan 2026-11-12-house-build-fixes Task 1), and the way back a failed fetch names (Task 3).
 import type { ActOutcome } from "./body.ts";
-import { planTemplate, type HousePlan } from "./building/plan.ts";
+import { unfinishedHousePlan } from "./building/house-facts.ts";
+import type { HousePlan } from "./building/plan.ts";
 import { callWorks, scaffoldReserve, stageAt, stageCellsNow } from "./building/stage-progress.ts";
-import { templateFor, templateOfKind, TEMPLATES } from "./building/templates.ts";
 import { billOfMaterials, type MaterialCount } from "./building/blueprint.ts";
 import { sameDimension } from "./bot-data-sql.ts";
 import { describeWay } from "./gathering/fetch-farther.ts";
@@ -61,10 +61,8 @@ const NO_HOUSE_RESERVE: HouseReserve = { keep: NO_KEEP, bill: [] };
 export async function houseReserve(context: Pick<SkillContext, "runtime" | "building" | "templates">): Promise<HouseReserve> {
   const unfinished = context.building?.unfinished;
   if (unfinished === null || unfinished === undefined) return NO_HOUSE_RESERVE;
-  const templates = context.templates ?? TEMPLATES;
-  const template = templateFor(unfinished.template ?? templateOfKind(unfinished.kind, templates)?.id ?? "", templates);
-  if (template === undefined) return NO_HOUSE_RESERVE;
-  const plan = planTemplate(template, unfinished.site, unfinished.materials ?? {});
+  const plan = unfinishedHousePlan(unfinished, context.templates);
+  if (plan === null) return NO_HOUSE_RESERVE;
   const first = plan.stages[stageAt(plan, unfinished.part)]!;
   const cells = await stageCellsNow(plan, { ...first, last: plan.stages.at(-1)!.last }, context.runtime);
   const bill = billOfMaterials(cells).map(({ item, count }) => ({ item, count }));
