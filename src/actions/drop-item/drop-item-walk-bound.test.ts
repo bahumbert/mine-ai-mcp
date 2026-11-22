@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { listenersAddedSince } from "../../test-support/fake-bot/listener-counts.js";
 import type { FakeBot } from "../../test-support/fake-bot/index.js";
-import { sleepMs } from "../../utils/wall-timers.js";
 import { parseDropItemRequest } from "./contract.js";
 import { dropItem } from "./drop-item.js";
 import { abortAfterToss, deps, dropBot, dropTest, pitWorld } from "./drop-item-fixtures.test.js";
@@ -53,7 +52,7 @@ dropTest("four slow sides share one 5 s bound", async ({ clock, run }) => {
     dropItem(bot, parseDropItemRequest({ items: [{ item_name: "oak_log" }] }), {}, deps({
       navigate: (async (options: RouteOptions) => {
         starts.push(clock.now());
-        await sleepMs(2_000, options.stopSignal).catch(() => undefined);
+        await clock.sleep(2_000, options.stopSignal).catch(() => undefined);
         lastEnd = clock.now();
         return { status: "completed", elapsedMs: 2_000 };
       }) as never,
@@ -132,7 +131,7 @@ dropTest("the bound fires within 1.5 blocks of the toss (slow route search) -> a
     dropItem(bot, parseDropItemRequest({ items: [{ item_name: "oak_log" }] }), {}, deps({
       navigate: (async (options: RouteOptions) => {
         routes += 1;
-        await sleepMs(10_000, options.stopSignal).catch(() => undefined);
+        await clock.sleep(10_000, options.stopSignal).catch(() => undefined);
         return { status: "stopped", elapsedMs: 5_000 };
       }) as never,
     }), createDiscardedItems()),

@@ -150,10 +150,10 @@ dropTest("a route that never ends toward a still recipient on a pillar: out of r
   const search = (async ({ signal }: { signal: AbortSignal }) => {
     await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
   }) as never;
-  const started = performance.now();
+  const started = clock.now();
   const result = await run(dropItem(bot, handOverRequest, {}, deps({ navigate: search, recipientWaitMs: 1_000 }), createDiscardedItems()));
   assert.match(errorOf(result), /^\[DROP_RECIPIENT_OUT_OF_REACH\]/);
-  assert.ok(performance.now() - started <= 1_500, "ends with the wait, not the trade's clock");
+  assert.ok(clock.now() - started <= 1_500, "ends with the wait, not the trade's clock");
 });
 
 dropTest("a recipient who moved while the route found no stance is not out of reach: the walk ends as it does today", async ({ clock, run }) => {

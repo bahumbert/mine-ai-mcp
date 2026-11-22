@@ -167,7 +167,7 @@ test("cancelling a pin release stops the effect and waits for its cleanup withou
   assert.equal(bot.ticks.size, 0);
 });
 
-test("cancelling while a second ceiling still pins the body releases the observation wait", async () => {
+test("cancelling while a second ceiling still pins the body releases the observation wait", async (t) => {
   const world = heldWorld();
   world.load({ x: 1, y: 64, z: 0 }, { stateId: 8, collisionShapes: LEAF_SHAPE, traits: { empty: false, safeToBreak: true } });
   // 2026-11-17 (plan house-build-fixes-2 Task 16: 17 reds of 40 under load): the run plans in time-sliced searches, each on a fresh turn of the event loop (navigation-run.ts, the planning loop):
@@ -187,16 +187,10 @@ test("cancelling while a second ceiling still pins the body releases the observa
   const navigator = createNavigator({ world, bot });
   const admission = navigator.startRun({ goal: exactBlockGoal({ x: 2, y: 63, z: 0 }), policy: createMovementPolicy() });
   if (admission.kind !== "started") assert.fail("busy");
-  let bound: ReturnType<typeof setTimeout> | undefined;
-  const never = new Promise<never>((_, reject) => { bound = setTimeout(() => reject(new Error("the run never waited for the body to clear")), 5_000); });
-  try {
-    await Promise.race([waitStarted, never]);
-  } catch (error) {
-    admission.handle.cancel(); // a run that never waited must not outlive the failed test
-    throw error;
-  } finally {
-    clearTimeout(bound);
-  }
+  // A run that never waits hangs here to Bun's 30 s test bound, the hang detector: no wall timer of its own (check 6b).
+  // A failing test still cancels its run: t.after runs after the body, whether it passes or throws.
+  t.after(() => admission.handle.cancel());
+  await waitStarted;
   assert.equal(bot.breaks.length, 1);
   assert.equal(bot.ticks.size, 1, "waiting for body clearance");
   admission.handle.cancel();

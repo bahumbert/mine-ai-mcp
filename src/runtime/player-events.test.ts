@@ -7,7 +7,7 @@ import { closeSqlDatabase } from "../bot-data/sql-bot-data.js";
 import { persistentBotData } from "../test-support/bot-data.js";
 import { recordPersonalRespawn } from "../actions/portal-entry/respawn-knowledge.js";
 import { Vec3 } from "vec3";
-import { type FakeBot, type FakeBotOptions, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { captureStderr } from "../test-support/stderr.js";
 import { ChatCommandRing } from "./chat-commands.js";
 import { observePlayerEvents } from "./player-events.js";
@@ -517,8 +517,8 @@ test("localized talk during a database lock does not throw out of the listener",
 });
 
 /** A bot with a player "Alex", a zombie and an arrow near her, and the store the runtime writes to; `hurts()` reads the `hurt_by` events. */
-function hurtScene(t: TestContext) {
-  const harness = createFakeBot({ username: "MineAI", position: { x: 0.5, y: 64, z: 0.5 } });
+function hurtScene(t: TestContext, clock?: FakeClock) {
+  const harness = createFakeBot({ username: "MineAI", position: { x: 0.5, y: 64, z: 0.5 }, clock });
   const { bot, entities, combat } = harness;
   const data = SqlBotData.create({
     storage: { kind: "temporary" },
@@ -537,15 +537,19 @@ function hurtScene(t: TestContext) {
 }
 
 test("a player's hit records hurt_by naming the player, with no other direct entity and the wall-clock time", (t) => {
-  const { combat, player, hurts } = hurtScene(t);
-  const before = Date.now();
+  // Live the two clocks read unrelated values (uptime vs epoch): the wall step makes a start taken on the wrong one visible.
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  clock.stepWallClock(5_000);
+  const { combat, player, hurts } = hurtScene(t, clock);
+  const at = Date.now();
   combat.hurtBot(2, player.id);
 
   const [hurt, ...rest] = hurts();
   assert.equal(rest.length, 0);
   assert.equal(hurt?.summary, "Alex hurt MineAI.");
   assert.deepEqual({ ...hurt?.payload, at: undefined }, { attacker: "Alex", direct: null, at: undefined });
-  assert.ok((hurt?.payload as { at: number }).at >= before && (hurt?.payload as { at: number }).at <= Date.now());
+  assert.equal((hurt?.payload as { at: number }).at, at);
 });
 
 test("an arrow from a player records the shooter with direct arrow", (t) => {
