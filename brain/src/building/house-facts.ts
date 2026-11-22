@@ -1,4 +1,5 @@
 // What the agent tells the model about its houses, read from the templates: an unfinished house's bill, its own small house, a temporary house's roles.
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import type { KnownPlace } from "../mind.ts";
 import type { OpportunityFacts } from "../opportunities.ts";
 import type { Position } from "../runtime-client.ts";
@@ -44,7 +45,7 @@ export function ownSmallHouse(style: string | undefined, position: Position): Ho
 /** What a house is made of: its cells per role (air excluded), in the order of the roles. */
 export function rolesOf(plan: HousePlan | null): OpportunityFacts["smallHouse"] {
   const cells = plan?.cells ?? [];
-  return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== "air").length })).filter((entry) => entry.count > 0);
+  return BUILD_ROLES.map((role) => ({ role, count: cells.filter((cell) => cell.role === role && cell.block !== DIG_CLEAR_BLOCK).length })).filter((entry) => entry.count > 0);
 }
 
 /** A temporary house's door, its temporary roles and what improving them needs beyond `inventory`; null for a house nobody has a template for any more (nothing to swap back). */

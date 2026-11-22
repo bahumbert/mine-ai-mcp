@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import { groupEntryOf, supportGroups, type SupportGroup } from "./support.ts";
 
 /**
@@ -8,7 +9,7 @@ import { groupEntryOf, supportGroups, type SupportGroup } from "./support.ts";
 export const ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "accent", "railing", "air"] as const;
 export const DIG_ROLE = "air";
 export type Role = (typeof ROLES)[number];
-export type BlockRole = Exclude<Role, "air">;
+export type BlockRole = Exclude<Role, typeof DIG_ROLE>;
 
 /** The roles a house is built with: every role but `air`; `build` may name a block for each. */
 export const BUILD_ROLES = ["foundation", "floor", "wall", "pillar", "trim", "roof", "window", "door", "accent", "railing"] as const satisfies readonly BlockRole[];
@@ -76,7 +77,7 @@ export const blueprintSchema = z.strictObject({
   if (sign !== undefined) {
     const door = blueprint.cells.find((cell) => cell.role === "door");
     if (sign.x >= blueprint.size.x || sign.y >= blueprint.size.y || sign.z >= blueprint.size.z) context.addIssue({ code: "custom", message: "sign is outside the blueprint bounds" });
-    if (blueprint.cells.some((cell) => cell.x === sign.x && cell.y === sign.y && cell.z === sign.z && cell.role !== "air")) context.addIssue({ code: "custom", message: "sign overlaps a non-air cell" });
+    if (blueprint.cells.some((cell) => cell.x === sign.x && cell.y === sign.y && cell.z === sign.z && cell.role !== DIG_ROLE)) context.addIssue({ code: "custom", message: "sign overlaps a non-air cell" });
     if (door !== undefined && sign.x === door.x && sign.z === door.z - 1 && (sign.y === door.y || sign.y === door.y + 1)) context.addIssue({ code: "custom", message: "sign overlaps the doorway walk cell" });
   }
 });
@@ -175,7 +176,7 @@ export function placeBlueprint(blueprint: Blueprint, palette: Readonly<Partial<R
   return blueprint.cells.map((cell): WorldCell => {
     const [dx, dz] = rotate(cell.x - anchor.x, cell.z - anchor.z);
     const position = { x: door.x + dx, y: door.y + cell.y - anchor.y, z: door.z + dz };
-    if (cell.role === "air") return { ...position, block: "air", role: "air" };
+    if (cell.role === DIG_ROLE) return { ...position, block: DIG_CLEAR_BLOCK, role: DIG_ROLE };
     if (cell.role === "door") return { ...position, block: paletteBlock("door"), role: "door", facing: OPPOSITE[facing] };
     const shaped = cell.shape === undefined ? undefined : variants[cell.role]?.[cell.shape];
     const block = shaped ?? paletteBlock(cell.role);
@@ -201,7 +202,7 @@ export interface MaterialCount {
 /** Blocks to carry, most needed first; every block used here is placed from the item of the same id. */
 export function billOfMaterials(cells: readonly WorldCell[]): MaterialCount[] {
   const counts = new Map<string, number>();
-  for (const cell of cells) if (cell.block !== "air") counts.set(cell.block, (counts.get(cell.block) ?? 0) + 1);
+  for (const cell of cells) if (cell.block !== DIG_CLEAR_BLOCK) counts.set(cell.block, (counts.get(cell.block) ?? 0) + 1);
   return [...counts].map(([item, count]) => ({ item, count })).sort((a, b) => b.count - a.count || a.item.localeCompare(b.item));
 }
 
@@ -263,12 +264,12 @@ export function batchCells(cells: readonly WorldCell[], max = MAX_BATCH_CELLS, g
 export function buildBatches(cells: readonly WorldCell[], max = MAX_BATCH_CELLS): WorldCell[][] {
   const doors = cells.filter((cell) => cell.role === "door");
   const doorway = doors.flatMap((door): WorldCell[] => [
-    { x: door.x, y: door.y, z: door.z, block: "air", role: "air" },
-    { x: door.x, y: door.y + 1, z: door.z, block: "air", role: "air" },
+    { x: door.x, y: door.y, z: door.z, block: DIG_CLEAR_BLOCK, role: DIG_ROLE },
+    { x: door.x, y: door.y + 1, z: door.z, block: DIG_CLEAR_BLOCK, role: DIG_ROLE },
   ]);
   const supports = cells.filter((cell) => doors.some((door) => cell.x === door.x && cell.y === door.y - 1 && cell.z === door.z));
   const body = batchCells([...cells.filter((cell) => cell.role !== "door"), ...doorway], max, supportGroups(cells).groups);
-  const air = cells.filter((cell) => cell.role === "air");
+  const air = cells.filter((cell) => cell.role === DIG_ROLE);
   const clearing: WorldCell[][] = [];
   for (let start = 0; start < air.length; start += max) clearing.push(air.slice(start, start + max));
   return [...body, ...clearing, ...(doors.length === 0 ? [] : [[...supports, ...doors]])];

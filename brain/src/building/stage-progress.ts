@@ -1,5 +1,6 @@
 // A house is built stage by stage: what a stage asks the bot to carry now, and what the step tells the model when it stops
 // between two stages (spec 2026-11-09-house-templates section 4). Pure over a `HousePlan`, besides the one box read.
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import { areaKey, BodyDown, type BotRuntime, type ItemCount } from "../runtime-client.ts";
 import { billOfMaterials, cellsCountedOnce, describeMaterials, type MaterialCount, type WorldCell } from "./blueprint.ts";
 import type { HousePlan } from "./plan.ts";
@@ -22,7 +23,7 @@ export function billFrom(plan: HousePlan, first: number): MaterialCount[] {
 
 /** The cells a stage places, counted in their last call only (as {@link HousePlan.stageBill} does), air left out. */
 export function stageCells(plan: HousePlan, stage: Pick<Stage, "first" | "last">): WorldCell[] {
-  return cellsCountedOnce(plan.batches).slice(stage.first, stage.last + 1).flat().filter((cell) => cell.block !== "air");
+  return cellsCountedOnce(plan.batches).slice(stage.first, stage.last + 1).flat().filter((cell) => cell.block !== DIG_CLEAR_BLOCK);
 }
 
 /**

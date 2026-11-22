@@ -1,4 +1,5 @@
-import { billOfMaterials, buildBatches, cellsCountedOnce, describeMaterials, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type Variants, type WorldCell } from "./blueprint.ts";
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
+import { billOfMaterials, buildBatches, cellsCountedOnce, describeMaterials, DIG_ROLE, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type Variants, type WorldCell } from "./blueprint.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 import { supportGroups, withStatesItHas } from "./support.ts";
 import { stagesOf, type Stage, type Template } from "./templates.ts";
@@ -114,7 +115,7 @@ export function catalogueLine(template: Template): string {
   const blocks = plan.bill.reduce((sum, { count }) => sum + count, 0);
   const first = plan.stages[0]!;
   // The built footprint, not the blueprint's: a file may pad a row (the rondavel's, for its sign) or a column that no cell fills.
-  const built = plan.cells.filter((cell) => cell.block !== "air");
+  const built = plan.cells.filter((cell) => cell.block !== DIG_CLEAR_BLOCK);
   const span = (axis: "x" | "z") => Math.max(...built.map((cell) => cell[axis])) - Math.min(...built.map((cell) => cell[axis])) + 1;
   return `${template.id} (${span("x")}x${span("z")}, ${floors} floor${floors === 1 ? "" : "s"}, ${blocks} blocks, mostly ${plan.bill.slice(0, 3).map(({ item }) => item).join(", ")}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${template.description}`;
 }
@@ -122,7 +123,7 @@ export function catalogueLine(template: Template): string {
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof); a house with no roof role, the highest cell. */
 export function roofTop(cells: readonly WorldCell[]): Position {
   const roofCells = cells.filter((cell) => cell.role === "roof");
-  const roof = roofCells.length > 0 ? roofCells : cells.filter((cell) => cell.role !== "air");
+  const roof = roofCells.length > 0 ? roofCells : cells.filter((cell) => cell.role !== DIG_ROLE);
   const top = Math.max(...roof.map((cell) => cell.y));
   const ridge = roof.filter((cell) => cell.y === top);
   const middleX = ridge.reduce((sum, cell) => sum + cell.x, 0) / ridge.length;

@@ -1,8 +1,9 @@
 // The house templates: JSON files of layers of role cells with their own palette, loaded into one registry and cut into build stages.
 import { readdirSync, readFileSync } from "node:fs";
+import { extname } from "node:path";
 import { z } from "zod";
 import { stackSizeOf } from "../newest-registry.ts";
-import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, FACINGS, placeBlueprint, ROLES, SHAPES, signCellSchema, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, DIG_ROLE, FACINGS, placeBlueprint, ROLES, SHAPES, signCellSchema, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
 import { blockId, DEFAULT_STYLE, findDataDirectory, kebabId, STYLES, variantsSchema } from "./styles.ts";
 import { groupEntryOf, supportGroups, validateBlueprint, type SupportGroup } from "./support.ts";
 
@@ -106,7 +107,7 @@ function highestGroup(blueprint: Blueprint, data: TemplateFile): number {
   if (anchor === undefined) return 0;
   const placed = placeBlueprint(blueprint, data.palette, anchor, "north", data.variants);
   const { groups } = supportGroups(placed);
-  return Math.max(0, ...placed.filter((cell) => cell.role !== "air" && cell.role !== "door").map((cell) => groups.get(`${cell.x},${cell.y},${cell.z}`)?.group ?? 0));
+  return Math.max(0, ...placed.filter((cell) => cell.role !== DIG_ROLE && cell.role !== "door").map((cell) => groups.get(`${cell.x},${cell.y},${cell.z}`)?.group ?? 0));
 }
 
 /** Declared stages rise strictly, the last at or above the highest group, so every call belongs to one. */
@@ -152,7 +153,7 @@ export const TEMPLATES_DIRECTORY = findDataDirectory("building-templates", new U
 export function loadTemplates(directory: URL = TEMPLATES_DIRECTORY): ReadonlyMap<string, Template> {
   const templates = new Map<string, Template>();
   const fileOfName = new Map<string, string>();
-  for (const file of readdirSync(directory).filter((name) => name.endsWith(".json")).sort()) {
+  for (const file of readdirSync(directory).filter((name) => extname(name) === ".json").sort()) {
     const template = parseTemplateFile(file, readFileSync(new URL(file, directory), "utf8"));
     const same = fileOfName.get(template.name);
     if (same !== undefined) throw invalid(file, `name "${template.name}" is also the name of ${same}: a name (the kind of notes and areas) is one house.`);
@@ -206,7 +207,7 @@ export function familiesOf(templates: ReadonlyMap<string, Template>): string[] {
 }
 
 /** Whether a call is the closing pass: the air clearing or the door's. */
-const isFinishBatch = (batch: readonly WorldCell[]) => batch.every((cell) => cell.role === "air") || batch.some((cell) => cell.role === "door");
+const isFinishBatch = (batch: readonly WorldCell[]) => batch.every((cell) => cell.role === DIG_ROLE) || batch.some((cell) => cell.role === "door");
 
 /** The first batch of the trailing run of closing calls. */
 function finishStart(batches: readonly (readonly WorldCell[])[]): number {
@@ -220,10 +221,10 @@ const indexFrom = (batches: readonly (readonly WorldCell[])[], from: number, end
   return end;
 };
 
-const onlyFoundationOrFloor = (batch: readonly WorldCell[]) => batch.every((cell) => cell.role === "air" || cell.role === "foundation" || cell.role === "floor");
+const onlyFoundationOrFloor = (batch: readonly WorldCell[]) => batch.every((cell) => cell.role === DIG_ROLE || cell.role === "foundation" || cell.role === "floor");
 
 function isMostlyRoof(batch: readonly WorldCell[]): boolean {
-  const placed = batch.filter((cell) => cell.role !== "air");
+  const placed = batch.filter((cell) => cell.role !== DIG_ROLE);
   return placed.filter((cell) => cell.role === "roof").length * 2 > placed.length;
 }
 

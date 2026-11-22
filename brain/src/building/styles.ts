@@ -1,11 +1,13 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { extname } from "node:path";
 import { z } from "zod";
-import { ROLES, type BlockRole } from "./blueprint.ts";
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
+import { DIG_ROLE, ROLES, type BlockRole } from "./blueprint.ts";
 
 // check-reads: brain/building-styles/*.json
-export const blockId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft block id such as oak_planks").refine((id) => id !== "air", "air is not a material");
+export const blockId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft block id such as oak_planks").refine((id) => id !== DIG_CLEAR_BLOCK, "air is not a material");
 export const kebabId = z.string().regex(/^[a-z0-9-]+$/u, "kebab-case id");
-const blockRoles = ROLES.filter((role): role is BlockRole => role !== "air");
+const blockRoles = ROLES.filter((role): role is BlockRole => role !== DIG_ROLE);
 
 /** Per role, its stairs and slab blocks (ADR-013): a stair roof needs `roof`'s; a role without them builds full blocks. */
 export const variantsSchema = z.partialRecord(z.enum(blockRoles), z.strictObject({ stairs: blockId.optional(), slab: blockId.optional() }));
@@ -39,7 +41,7 @@ export const STYLES_DIRECTORY = findDataDirectory("building-styles", new URL(imp
 
 export function loadStyles(directory: URL = STYLES_DIRECTORY): ReadonlyMap<string, Style> {
   const styles = new Map<string, Style>();
-  for (const file of readdirSync(directory).filter((name) => name.endsWith(".json")).sort()) {
+  for (const file of readdirSync(directory).filter((name) => extname(name) === ".json").sort()) {
     const parsed = styleSchema.safeParse(JSON.parse(readFileSync(new URL(file, directory), "utf8")));
     if (!parsed.success) throw new Error(`[STYLE_INVALID] ${file}: ${z.prettifyError(parsed.error)}`);
     if (`${parsed.data.id}.json` !== file) throw new Error(`[STYLE_INVALID] ${file}: id "${parsed.data.id}" does not match the file name`);

@@ -1,3 +1,4 @@
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import { areaKey, type BlockArea, type ToolClass } from "../runtime-client.ts";
 
 /** A rectangle of columns (inclusive bounds). */
@@ -120,7 +121,7 @@ export function levelPlan(zone: Zone, level: number, area: BlockArea, fill: stri
           const tool = area.kinds[name]?.tool;
           if (tool !== null && tool !== undefined) tools.add(tool);
         }
-        digs.push({ x, y, z, block: "air" });
+        digs.push({ x, y, z, block: DIG_CLEAR_BLOCK });
       }
     }
   }

@@ -1,3 +1,4 @@
+import { DIG_CLEAR_BLOCK } from "#src/actions/build-structure/dig-clear.ts";
 import type { KnownPlace } from "../mind.ts";
 import type { BlockKind } from "../runtime-client.ts";
 import { billOfMaterials, BUILD_ROLES, STRUCTURAL_ROLES, type BlockRole, type MaterialCount, type Variants, type WorldCell } from "./blueprint.ts";
@@ -21,7 +22,7 @@ export function checkMaterials(materials: Materials, template: Template, kinds: 
   const refusals: string[] = [];
   for (const role of BUILD_ROLES) {
     const block = materials[role];
-    if (block === undefined || (OPEN_ROLES.includes(role) && block === "air")) continue;
+    if (block === undefined || (OPEN_ROLES.includes(role) && block === DIG_CLEAR_BLOCK)) continue;
     const kind = kinds[block];
     const own = template.palette[role];
     const preferred = own === undefined ? "" : ` (this house uses ${own})`;
