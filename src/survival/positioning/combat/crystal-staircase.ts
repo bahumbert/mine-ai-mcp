@@ -9,7 +9,6 @@ import { isAir } from "../../../world/block-classification.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../../world/block-visibility.js";
 import { readDragonCloudHazards, type DragonCloud } from "../../../world/dragon-hazards.js";
 import { placeBlock } from "../../../world/index.js";
-import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 import type { SurvivalPolicy } from "../../policy/contract.js";
 
 type WorkBox = { readonly min: Vec3; readonly max: Vec3 };
@@ -156,7 +155,7 @@ function staircaseCells(bot: Bot, path: readonly Vec3[], pedestal: Vec3): BuildC
   }
   for (const position of staircaseClearance(path)) {
     if (floors.has(position.toString())) throw new Error("Staircase clearance overlaps a tread");
-    cells.set(position.toString(), { position, blockName: DIG_CLEAR_BLOCK });
+    cells.set(position.toString(), { position, blockName: "air" });
   }
   // The feet/head clearance above opens the attack corner. Keep the rest of
   // the cage intact; the attack checks actual reach and line of sight.
@@ -277,7 +276,7 @@ function topStance(bot: Bot, crystal: Vec3, center: Vec3, radius: number, rim: V
 export function staircaseShortfall(bot: Bot, plan: CrystalStaircase): string | null {
   const needed = new Map<string, number>();
   for (const cell of plan.cells) {
-    if (cell.blockName !== DIG_CLEAR_BLOCK && bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName)
+    if (cell.blockName !== "air" && bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName)
       needed.set(cell.blockName, (needed.get(cell.blockName) ?? 0) + 1);
   }
   for (const [name, count] of needed) {
@@ -292,7 +291,7 @@ export function staircaseShortfall(bot: Bot, plan: CrystalStaircase): string | n
 export async function buildCrystalStaircase(bot: Bot, navigation: NavigationRuntime,
   policy: Readonly<SurvivalPolicy>, plan: CrystalStaircase, signal: AbortSignal,
   startEnclosed?: () => boolean): Promise<string | null> {
-  const needsBlocks = plan.cells.some(cell => cell.blockName !== DIG_CLEAR_BLOCK &&
+  const needsBlocks = plan.cells.some(cell => cell.blockName !== "air" &&
     bot.blockAt(new Vec3(cell.position.x, cell.position.y, cell.position.z))?.name !== cell.blockName);
   if (needsBlocks && (!policy.combat.terrain.place || !policy.navigation.scaffold_blocks.includes("end_stone")))
     return "[CRYSTAL_STAIRCASE_CONSTRAINED] Building this reusable staircase requires end_stone placement permitted by the survival policy.";

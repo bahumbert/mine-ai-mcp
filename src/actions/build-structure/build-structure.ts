@@ -1,5 +1,4 @@
 import { buildCheckpointSchema } from "../checkpoint-schemas.js";
-import { DIG_CLEAR_BLOCK } from "../../world/dig-clear.js";
 /**
  * `build_structure`: ask the build process for a structure, and report
  * the audit of every cell afterwards.
@@ -70,7 +69,7 @@ export function siteBreakRequest(request: Pick<BuildStructureRequest, "cells" | 
 
 /** What the structure is made of: the blocks no route may spend as scaffold (air is no block to keep). */
 function structureBlockNames(request: Pick<BuildStructureRequest, "cells">): ReadonlySet<string> {
-  return new Set(request.cells.map((cell) => cell.blockName).filter((name) => name !== DIG_CLEAR_BLOCK));
+  return new Set(request.cells.map((cell) => cell.blockName).filter((name) => name !== "air"));
 }
 
 /** The physics a build runs with outside tests; exported for the test that the request's reserve reaches the movements. */
@@ -81,7 +80,7 @@ export function productionPhysics(
 ): BuildStructurePhysics {
   // Where the structure will hold its own block: scaffold there would stand in a cell that is not its own to fill (the
   // roof call of 2026-11-12 laid its dirt in the doorway and on the floor line). Air cells stay open: an inside pillar.
-  const ownBlockCells = new Set(request.cells.filter((cell) => cell.blockName !== DIG_CLEAR_BLOCK).map((cell) => packKey(cell.x, cell.y, cell.z)));
+  const ownBlockCells = new Set(request.cells.filter((cell) => cell.blockName !== "air").map((cell) => packKey(cell.x, cell.y, cell.z)));
   return {
     // What the structure is made of must not be spent building scaffold to reach it.
     movements: (protectedCells) =>
@@ -160,7 +159,7 @@ function leftReason(state: BuildCellState): LeftReason | null {
 function shortfall(bot: Bot, result: BuildResult): StructureAudit["missing"] {
   const needed = new Map<string, number>();
   for (const { cell, state } of result.cells) {
-    if (state.kind === "correct" || cell.blockName === DIG_CLEAR_BLOCK) continue;
+    if (state.kind === "correct" || cell.blockName === "air") continue;
     needed.set(cell.blockName, (needed.get(cell.blockName) ?? 0) + 1);
   }
   const carried = new Map<string, number>();
