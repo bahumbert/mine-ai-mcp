@@ -3,11 +3,11 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { IncidentRecorder } from "../diagnostics/incident-recorder.js";
+import { sleepMs } from "../utils/wall-timers.js";
 import type { RestartSettings } from "./runtime-liveness.js";
 import { startMcpSupervisor } from "./runtime-supervisor.js";
 
@@ -51,7 +51,8 @@ async function stateOf({ url }: Linked): Promise<string> {
 
 /** Bounded by the test's own timeout. */
 async function whenState(target: Linked, wanted: string): Promise<void> {
-  while ((await stateOf(target)) !== wanted) await delay(20);
+  // real wait: the supervisor announces no state change; this reads its /diagnostics/runtime route again until it says `wanted`
+  while ((await stateOf(target)) !== wanted) await sleepMs(20);
 }
 
 async function connectClient(target: Linked): Promise<Client> {
@@ -72,12 +73,14 @@ const echoText = async (client: Client, text: string) => {
 };
 const closed = (client: Client) => new Promise<void>((resolve) => (client.onclose = resolve));
 
-test("openLink before ready rejects with RUNTIME_STARTING", { timeout: 15_000 }, async (t) => {
+// limit: 98 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("openLink before ready rejects with RUNTIME_STARTING", { timeout: 1_000 }, async (t) => {
   const target = await linked(t, { waits: [`--ready-ms=${NEVER_READY_MS}`] });
   await assert.rejects(target.supervisor.openLink(), /^Error: \[RUNTIME_STARTING\] the runtime is starting/u);
 });
 
-test("openLink after a failure rejects with the saved failure", { timeout: 20_000 }, async (t) => {
+// limit: 1478 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("openLink after a failure rejects with the saved failure", { timeout: 3_000 }, async (t) => {
   const target = await linked(t);
   const client = await connectWhenReady(target);
   const wedged = client.callTool({ name: "wedge" }).catch((error: unknown) => error);
@@ -86,7 +89,8 @@ test("openLink after a failure rejects with the saved failure", { timeout: 20_00
   assert.match(String(await wedged), /\[RUNTIME_UNRESPONSIVE\]/u);
 });
 
-test("a link call pending at the kill gets the failure", { timeout: 20_000 }, async (t) => {
+// limit: 1460 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("a link call pending at the kill gets the failure", { timeout: 3_000 }, async (t) => {
   const target = await linked(t);
   const slowLink = await connectWhenReady(target);
   const wedgeLink = await connectClient(target);
@@ -100,7 +104,8 @@ test("a link call pending at the kill gets the failure", { timeout: 20_000 }, as
   await Promise.all([slowClosed, wedgeClosed, wedgeCall]);
 });
 
-test("a restarted runtime takes a new link", { timeout: 25_000 }, async (t) => {
+// limit: 1510 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("a restarted runtime takes a new link", { timeout: 4_000 }, async (t) => {
   const target = await linked(t, { restart: RESTART_AT_ONCE });
   const first = await connectWhenReady(target);
   const firstClosed = closed(first);
@@ -116,7 +121,8 @@ test("a restarted runtime takes a new link", { timeout: 25_000 }, async (t) => {
   assert.ok(events.every((row) => row.instanceId === "link-test"), "every supervisor line names its host (spec D2)");
 });
 
-test("close closes every link and the child exits", { timeout: 15_000 }, async (t) => {
+// limit: 334 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("close closes every link and the child exits", { timeout: 1_000 }, async (t) => {
   const target = await linked(t);
   const first = await connectWhenReady(target);
   const second = await connectClient(target);
@@ -128,7 +134,8 @@ test("close closes every link and the child exits", { timeout: 15_000 }, async (
   await exited;
 });
 
-test("a killed parent takes its child", { timeout: 20_000 }, async (t) => {
+// limit: 595 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("a killed parent takes its child", { timeout: 2_000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "mcp-link-parent-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const script = path.join(directory, "parent.ts");
@@ -157,7 +164,6 @@ setInterval(() => {}, 1000);
   });
   assert.doesNotThrow(() => process.kill(childPid, 0), "the child runs while its parent does");
   parent.kill("SIGKILL");
-  const deadline = performance.now() + 5_000;
   const alive = () => {
     try {
       process.kill(childPid, 0);
@@ -166,8 +172,11 @@ setInterval(() => {}, 1000);
       return false;
     }
   };
-  while (alive() && performance.now() < deadline) await delay(50);
-  assert.equal(alive(), false, "the child is gone within 5 s of its parent's SIGKILL");
+  // The child's stdout pipe (shared with the parent, so the parent's `close` event) closes before init reaps it, and a zombie
+  // still answers `kill(pid, 0)`: waiting on `close` was red 5 of 10 copies, 2026-11-22. Bounded by the test's own limit.
+  // real wait: no event follows the reaping of a process that is not our child; only `kill(pid, 0)` shows it
+  while (alive()) await sleepMs(50);
+  assert.equal(alive(), false, "the child is gone after its parent's SIGKILL");
 });
 
 /**
@@ -177,7 +186,8 @@ setInterval(() => {}, 1000);
  * had no callback, emits `'error'` on the child, which with no listener is an uncaught exception of the parent. So every
  * send passes a callback and the failure answers what was in flight.
  */
-test("sends on a killed child's links do not crash the parent", { timeout: 20_000 }, async (t) => {
+// limit: 366 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("sends on a killed child's links do not crash the parent", { timeout: 1_000 }, async (t) => {
   const target = await linked(t);
   const uncaught: unknown[] = [];
   const onUncaught = (error: unknown) => uncaught.push(error);
@@ -200,7 +210,8 @@ test("sends on a killed child's links do not crash the parent", { timeout: 20_00
   assert.deepEqual(uncaught, []);
 });
 
-test("a link request while the runtime is failing is kept for the failure and not forwarded", { timeout: 20_000 }, async (t) => {
+// limit: 403 ms measured n=20 (2 x 10) at load 26.2-27.8, 2026-11-22 (twice the worst, up to 1 s)
+test("a link request while the runtime is failing is kept for the failure and not forwarded", { timeout: 1_000 }, async (t) => {
   const target = await linked(t);
   const releaseCapture = holdIncidentCapture(t);
   const link = await connectWhenReady(target);
@@ -216,7 +227,8 @@ test("a link request while the runtime is failing is kept for the failure and no
   await whenState(target, "failing");
   const writtenBefore = forwarded.length;
   const call = link.callTool({ name: "echo", arguments: { text: "late" } }).then(() => "answered", (error: unknown) => String(error));
-  await delay(100);
+  // real wait: the subject is that nothing is forwarded to the dead child in the time a forward would take (a write is one event-loop turn)
+  await sleepMs(100);
   releaseCapture();
   assert.match(await call, /\[RUNTIME_EXITED\]/u);
   assert.equal(forwarded.length, writtenBefore, "nothing was written to the dead child for it");

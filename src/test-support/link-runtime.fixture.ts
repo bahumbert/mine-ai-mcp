@@ -5,11 +5,11 @@
  * It exits when its parent goes, as the real runtime does.
  */
 import { createServer } from "node:http";
-import { setTimeout as delay } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { processIpcChannel, serveLinkSessions } from "../server/ipc-transport.js";
 import { reportRuntimeLiveness } from "../server/runtime-liveness.js";
+import { sleepMs } from "../utils/wall-timers.js";
 import { blockThread } from "./block-thread.js";
 
 /** A child-side wait: `--<name>=<ms>` on the command line, else its default. */
@@ -24,7 +24,7 @@ function fixtureServer() {
   const server = new McpServer({ name: "link-runtime-fixture", version: "1.0.0" });
   server.registerTool("echo", { inputSchema: { text: z.string() } }, ({ text: said }) => text(said));
   server.registerTool("slow", {}, async () => {
-    await delay(slowMs);
+    await sleepMs(slowMs);
     return text("finished");
   });
   server.registerTool("wedge", {}, () => {
@@ -40,6 +40,6 @@ serveLinkSessions(processIpcChannel(), fixtureServer, (line) => process.stderr.w
 const listener = createServer();
 listener.listen(0, "127.0.0.1", async () => {
   const address = listener.address();
-  await delay(readyMs);
+  await sleepMs(readyMs);
   if (address && typeof address !== "string") process.send?.({ kind: "ready", port: address.port });
 });

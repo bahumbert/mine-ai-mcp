@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { setTimeout as sleep } from "node:timers/promises";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -26,21 +25,56 @@ class MemoryChannel extends EventEmitter implements IpcChannel {
   peer!: MemoryChannel;
   connected = true;
   readonly sent: unknown[] = [];
-  constructor(private readonly callbackDelayMs: number) {
+  constructor(
+    private readonly callbackDelayMs: number,
+    private readonly inFlight: InFlight,
+  ) {
     super();
   }
   send(message: unknown, callback?: (error: Error | null) => void): boolean {
     this.sent.push(message);
     const copy: unknown = JSON.parse(JSON.stringify(message));
-    setImmediate(() => this.peer.emit("message", copy));
-    if (callback) setTimeout(() => callback(null), this.callbackDelayMs);
+    this.inFlight.begin();
+    setImmediate(() => {
+      this.peer.emit("message", copy);
+      this.inFlight.end();
+    });
+    if (callback) {
+      this.inFlight.begin();
+      setTimeout(() => {
+        callback(null); // a sender writes its next piece from here: that send begins before this one ends
+        this.inFlight.end();
+      }, this.callbackDelayMs);
+    }
     return true;
+  }
+  /** Resolves once every message of the pair has reached its peer and every send callback has run, the ones those started included. */
+  settled(): Promise<void> {
+    return this.inFlight.idle();
+  }
+}
+
+/** The deliveries and send callbacks of a channel pair still to come; `idle` waits for none. */
+class InFlight {
+  private count = 0;
+  private waiting: (() => void)[] = [];
+  begin(): void {
+    this.count += 1;
+  }
+  end(): void {
+    this.count -= 1;
+    if (this.count > 0) return;
+    for (const resolve of this.waiting.splice(0)) resolve();
+  }
+  idle(): Promise<void> {
+    return this.count === 0 ? Promise.resolve() : new Promise((resolve) => this.waiting.push(resolve));
   }
 }
 
 function channelPair(callbackDelayMs = 0): [MemoryChannel, MemoryChannel] {
-  const a = new MemoryChannel(callbackDelayMs);
-  const b = new MemoryChannel(callbackDelayMs);
+  const inFlight = new InFlight();
+  const a = new MemoryChannel(callbackDelayMs, inFlight);
+  const b = new MemoryChannel(callbackDelayMs, inFlight);
   a.peer = b;
   b.peer = a;
   return [a, b];
@@ -163,7 +197,7 @@ test("a message over 256 KB arrives whole", async () => {
   await client.close();
 });
 
-test("a message of exactly LINK_PART_BYTES goes whole and one character more goes in two parts", () => {
+test("a message of exactly LINK_PART_BYTES goes whole and one character more goes in two parts", async () => {
   const [a] = channelPair();
   const sender = createLinkSender(a);
   const withText = (length: number): JSONRPCMessage => ({ jsonrpc: "2.0", id: 1, result: { text: "x".repeat(length) } });
@@ -172,9 +206,8 @@ test("a message of exactly LINK_PART_BYTES goes whole and one character more goe
   const framesAtBound = a.sent.map((frame) => (frame as { kind: string }).kind);
   assert.deepEqual(framesAtBound, ["mcp"]);
   sender.send("s", withText(LINK_PART_BYTES - overhead + 1)); // queued behind the first until its callback: still counted
-  return sleep(10).then(() => {
-    assert.deepEqual(a.sent.map((frame) => (frame as { kind: string }).kind), ["mcp", "mcp-part", "mcp-part"]);
-  });
+  await a.settled();
+  assert.deepEqual(a.sent.map((frame) => (frame as { kind: string }).kind), ["mcp", "mcp-part", "mcp-part"]);
 });
 
 test("no part ends inside a surrogate pair, and the emoji text arrives whole", async () => {
@@ -193,7 +226,7 @@ test("no part ends inside a surrogate pair, and the emoji text arrives whole", a
     const text = "x".repeat(LINK_PART_BYTES - 43 + lead) + "😀".repeat(100);
     const message: JSONRPCMessage = { jsonrpc: "2.0", id: lead, result: { text } };
     createLinkSender(child).send("s", message);
-    await sleep(30);
+    await child.settled();
     assert.deepEqual(received.at(-1), message);
   }
   assert.ok(parts.length >= 4);
@@ -210,7 +243,7 @@ test("a heartbeat is not held behind a large reply", async () => {
   const reply: JSONRPCMessage = { jsonrpc: "2.0", id: 1, result: { text: "x".repeat(4_000_000) } };
   sender.send("s", reply);
   child.send({ kind: "heartbeat" }); // what reportRuntimeLiveness does: no queue, straight to the channel
-  await sleep(150);
+  await child.settled();
   const heartbeatAt = arrivals.findIndex((frame) => frame.kind === "heartbeat");
   const lastPartAt = arrivals.findIndex((frame) => frame.kind === "mcp-part" && frame.index === frame.count! - 1);
   assert.ok(heartbeatAt >= 0 && lastPartAt >= 0, "both the heartbeat and the last part arrived");
@@ -230,9 +263,17 @@ test("a failed write is reported once and the queued pieces are dropped", async 
     on: () => {},
     off: () => {},
   };
-  const sender = createLinkSender(failing, { onSendError: (error) => errors.push(error) });
-  sender.send("s", { jsonrpc: "2.0", id: 1, result: { text: "x".repeat(LINK_PART_BYTES * 3) } });
-  await sleep(20);
+  const reported = new Promise<void>((resolve) => {
+    const sender = createLinkSender(failing, {
+      onSendError: (error) => {
+        errors.push(error);
+        resolve();
+      },
+    });
+    sender.send("s", { jsonrpc: "2.0", id: 1, result: { text: "x".repeat(LINK_PART_BYTES * 3) } });
+  });
+  await reported;
+  await new Promise<void>((resolve) => setImmediate(resolve)); // one more turn of the event loop: a wrong second write or report would come in it
   assert.equal(written.length, 1, "the pieces behind the failed one are not written");
   assert.equal(errors.length, 1);
   assert.match(errors[0]!.message, /cannot be used after the process has exited/);
@@ -247,7 +288,7 @@ test("a sender refuses and writes nothing once its channel is not connected or i
   const sender = createLinkSender(child);
   sender.send("s", { jsonrpc: "2.0", id: 1, result: { text: "x".repeat(LINK_PART_BYTES * 3) } });
   sender.dispose();
-  await sleep(30);
+  await child.settled(); // the one piece in flight has called back: the sender had its chance to write the next
   assert.equal(child.sent.length, 1, "the pieces behind the one in flight are not written");
   assert.equal(sender.send("s", request(2)), false);
 });
