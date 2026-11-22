@@ -14,7 +14,7 @@ import { TEMPLATES, templateFor } from "#brain/building/templates.ts";
 import { ZERO_ARENA, arenaFrame } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
 import { DEFAULT_SCAFFOLD_BLOCKS } from "#src/survival/policy/contract.ts";
-import { buildInput, flaggedStages, partInputs, scaffoldCarriedMismatch, scaffoldListKeepingBill, stageOfCutCall } from "./template-build.ts";
+import { buildInput, flaggedStages, partInputs, scaffoldCarriedMismatch, scaffoldListKeepingBill, stageOfCutCall, templateBuildParams } from "./template-build.ts";
 
 // check-reads: tests/minecraft/scenarios/build/*.yaml, brain/building-templates/*.json
 const BUILD_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../scenarios/build");
@@ -53,6 +53,23 @@ for (const name of files) {
     if (params.interruptAfterBatch !== undefined) {
       assert.equal(stageOfCutCall(plan, params.interruptAfterBatch), params.interruptStage, "the cut call lies in the stage the scenario names");
     }
+  });
+}
+
+// The cut is counted in placed cells and bounded in server ticks, never in wall milliseconds (plan 2026-11-22-phase5-gate-p1 T18; S1).
+const interruptFiles = files.filter((name) => name.startsWith("template-stages-interrupted"));
+
+test("a template-stages-interrupted scenario exists", () => {
+  assert.ok(interruptFiles.length > 0);
+});
+
+for (const name of interruptFiles) {
+  test(`${name} cuts the call after its first placed cell within a server-tick bound, not after wall milliseconds`, async () => {
+    const scenario = await loadScenario(path.join(BUILD_DIR, name));
+    for (const key of ["cancelAfterCells", "cancelWithinTicks"]) assert.ok(key in (scenario.params as object), `${key} is written in the scenario, not left to a default`);
+    const params = templateBuildParams(arenaFrame(ZERO_ARENA)).parse(scenario.params);
+    assert.equal(params.cancelAfterCells, 1, "the cancel comes once the call's first cell stands");
+    assert.ok(params.cancelWithinTicks >= 20 && params.cancelWithinTicks % 20 === 0, "the bound is a whole number of 20-tick steps (P5)");
   });
 }
 

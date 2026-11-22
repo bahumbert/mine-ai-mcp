@@ -36,6 +36,7 @@ export async function joinOnServer(bot: Bot, name: string): Promise<OtherPlayer>
   const player = mineflayer.createBot({ host: socket.remoteAddress, port: socket.remotePort, username: name, version: bot.version, auth: "offline" });
   player.on("error", () => {});
   try {
+    // wall bound: a TCP login and spawn, which the server does not pace in ticks (S1)
     await once(player as never, "spawn", { signal: AbortSignal.timeout(JOIN_WALL_MS) });
   } catch (cause) {
     player.end();

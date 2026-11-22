@@ -5,7 +5,7 @@ tags: [regression]
 description: >-
   The rondavel (declared stages floor, walls, roof; a round hut with stairs, slabs, fence windows and a door) cut short
   in its walls stage, as a restart of the brain cuts a build: the driver sends the floor call, starts
-  the first wall call, cancels it 0.3 s later and checks it is cut midway (some cells placed, some not), then sends every call again from
+  the first wall call, cancels it once its first cell stands and checks it is cut midway (some cells placed, some not), then sends every call again from
   the first, as a resumed build does, and the final check. Every cell of the house and of the ring around it is read
   back, so a cell the resume left wrong or a scaffold left standing fails the run.
 
@@ -42,7 +42,10 @@ params:
   facing: north
   interruptAfterBatch: 0
   interruptStage: walls
-  cancelAfterMs: 300
+  cancelAfterCells: 1
+  # The first placed cell stood within one world-age packet (under 20 ticks) in 6 of 6 runs at 20 and at 10 tps (2026-11-22);
+  # twice the 20-tick packet resolution, rounded up to 20 (test-writing P5); the wait runs one packet past it (waitServerTicks).
+  cancelWithinTicks: 40
 
 goal:
   kind: all

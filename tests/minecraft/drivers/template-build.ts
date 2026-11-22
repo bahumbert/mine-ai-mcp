@@ -1,4 +1,3 @@
-import { setTimeout as delay } from "node:timers/promises";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
@@ -12,18 +11,22 @@ import { DEFAULT_SCAFFOLD_BLOCKS } from "#src/survival/policy/contract.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaCell } from "../arena/params.ts";
 import type { ScenarioCall, ScenarioContext } from "../scenario.ts";
+import { DRIVER_CLOCK_STOPPED_MS, waitServerTicks } from "./server-ticks.ts";
 
-const paramsIn = (arena: ArenaFrame) => z.strictObject({
+export const templateBuildParams = (arena: ArenaFrame) => z.strictObject({
   /** A template id of `brain/building-templates/`. */
   template: z.string().min(1),
   /** The door's lower cell (feet height): the house stands behind it, facing `facing`, in front of the actor. */
   door: arenaCell(arena),
   facing: z.enum(FACINGS).default("north"),
-  /** Cut the build short: calls 0..n are sent whole, call n + 1 is cancelled `cancelAfterMs` after it starts, then every call is sent again from the first. */
+  /** Cut the build short: calls 0..n are sent whole, call n + 1 is cancelled once `cancelAfterCells` of its cells stand, then every call is sent again from the first. */
   interruptAfterBatch: z.number().int().nonnegative().optional(),
   /** The stage the cancelled call must belong to (a template edit that moves the call out of it fails the scenario instead of testing another stage). */
   interruptStage: z.string().min(1).optional(),
-  cancelAfterMs: z.number().int().nonnegative().default(3_000),
+  /** How many of the cut call's cells must stand before the cancel (1: the call has placed its first). */
+  cancelAfterCells: z.number().int().positive().default(1),
+  /** The server ticks the cut call has to place `cancelAfterCells` cells: past them the run fails (the bound of a stopped or very slow server). */
+  cancelWithinTicks: z.number().int().positive().default(200),
   /** The scenario carries the bill and no block to stand on: the first stage the brain's reach rule flags must stop with "no scaffold block carried to stand on" (every stage before it builds whole). */
   expectScaffoldStop: z.boolean().default(false),
   /**
@@ -192,25 +195,45 @@ export function stageOfCutCall(plan: HousePlan, after: number): string | undefin
   return plan.stages.find((stage) => index >= stage.first && index <= stage.last)?.name;
 }
 
-/** Starts the call after `after`, cancels it `cancelAfterMs` later and checks it stopped midway: some of its cells stand, some do not. */
-async function interruptNext(context: ScenarioContext, plan: HousePlan, inputs: readonly (PartInput | null)[], after: number, cancelAfterMs: number): Promise<string> {
+/** The cells of `part` (the ones its call is the last to send) that stand by name in the client's world. */
+function standingCount(context: ScenarioContext, part: PartInput): number {
+  return part.blocks.filter((cell) => context.bot.blockAt(new Vec3(Number(cell.x), Number(cell.y), Number(cell.z)))?.name === cell.block_name).length;
+}
+
+/**
+ * Starts the call after `after`, waits until `cancelAfterCells` of its cells stand (at least `cancelWithinTicks` server ticks
+ * and up to one world-age packet more, `waitServerTicks`: the server paces the placing; a stopped server ends it after
+ * `DRIVER_CLOCK_STOPPED_MS`), cancels it and checks it stopped midway: some of its cells stand, some do not.
+ */
+async function interruptNext(context: ScenarioContext, plan: HousePlan, inputs: readonly (PartInput | null)[], after: number, cut: { cancelAfterCells: number; cancelWithinTicks: number }): Promise<string> {
+  const { cancelAfterCells, cancelWithinTicks } = cut;
   const index = callAfter(inputs, after);
   if (index === -1) throw new Failed(`interruptAfterBatch ${after}: no call follows it (${plan.batches.length} calls)`);
   const next = inputs[index]!;
+  const startedAge = context.bot.time.age;
+  // Cells that already hold what the call asks (a doorway's air, a cell an earlier call set) are not this call's placing.
+  const alreadyStanding = standingCount(context, next);
   const pending = context.call("build_structure", buildInput(next, false));
   pending.catch(() => undefined);
-  await delay(cancelAfterMs);
+  const waited = await waitServerTicks(context.bot, cancelWithinTicks, { until: () => standingCount(context, next) - alreadyStanding >= cancelAfterCells });
+  const cutTicks = context.bot.time.age - startedAge;
   const cancel = await context.call("cancel_foreground_action", { reason: "scenario: the house build is cut short" });
   const cancelled = await pending;
   if (cancelled.result.status !== "cancelled") {
-    throw new Failed(`call ${index + 1} read ${cancelled.result.status}, not cancelled, ${cancelAfterMs} ms after its start (it was done before the cancel: pick a later call or a shorter wait): ${cancelled.summary}; cancel: ${cancel.summary}`);
+    throw new Failed(`call ${index + 1} read ${cancelled.result.status}, not cancelled, ${cutTicks} server ticks after its start (it was done before the cancel: pick a later call${cancelAfterCells > 1 ? ` or a lower cancelAfterCells (now ${cancelAfterCells})` : ""}): ${cancelled.summary}; cancel: ${cancel.summary}`);
   }
   // The cells this call is the last to send (what it must leave standing), by name.
-  const standing = next.blocks.filter((cell) => context.bot.blockAt(new Vec3(Number(cell.x), Number(cell.y), Number(cell.z)))?.name === cell.block_name).length;
+  const standing = standingCount(context, next);
+  const placed = standing - alreadyStanding;
   const unplaced = next.blocks.length - standing;
   if (unplaced === 0) throw new Failed(`call ${index + 1} was cancelled but every cell of it stands: the cancel came after the work (${cancelled.summary})`);
-  if (standing === 0) throw new Failed(`call ${index + 1} was cancelled before it placed a cell (${cancelAfterMs} ms): the cut is not midway, raise cancelAfterMs (${cancelled.summary})`);
-  return `call ${index + 1}/${plan.batches.length} cancelled midway, ${standing} cells placed and ${unplaced} not`;
+  if (placed < cancelAfterCells) {
+    const cause = waited === "stalled"
+      ? `the server's world age stood still (${DRIVER_CLOCK_STOPPED_MS} ms): the server stopped, no param of the scenario helps`
+      : `${cancelWithinTicks} server ticks (cancelWithinTicks) passed first: raise cancelWithinTicks${cancelAfterCells > 1 ? ` or lower cancelAfterCells (now ${cancelAfterCells})` : ""}`;
+    throw new Failed(`call ${index + 1} was cancelled before it placed ${cancelAfterCells} cell(s), ${placed} placed after ${cutTicks} server ticks: ${cause} (${cancelled.summary})`);
+  }
+  return `call ${index + 1}/${plan.batches.length} cancelled midway, ${placed} cells placed and ${unplaced} not (the cut came ${cutTicks} server ticks after the call started)`;
 }
 
 /** The cells to read: every cell of the plan, the ring of one around the footprint and the layer above the roof, from the door's level up. */
@@ -362,7 +385,7 @@ async function buildUntilScaffoldStop(context: ScenarioContext, plan: HousePlan,
  * stand on" (`describeNoScaffold`, src/actions/build-structure/contract.ts), so that clause is read from the error text.
  */
 export async function run(context: ScenarioContext): Promise<ClientCompletion> {
-  const params = paramsIn(context.arena).parse(context.scenario.params);
+  const params = templateBuildParams(context.arena).parse(context.scenario.params);
   if (params.expectScaffoldStop && params.interruptAfterBatch !== undefined) return { status: "failed", detail: "expectScaffoldStop and interruptAfterBatch cannot be combined: the run stops at the first stage out of reach, a cut and resume would never reach it" };
   const template = templateFor(params.template);
   if (template === undefined) return { status: "failed", detail: `no template ${params.template}` };
@@ -387,7 +410,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
       const stage = stageOfCutCall(plan, params.interruptAfterBatch);
       if (params.interruptStage !== undefined && stage !== params.interruptStage) throw new Failed(`the cut call is in stage "${stage}", not "${params.interruptStage}": move interruptAfterBatch`);
       await sendAll(context, inputs.slice(0, params.interruptAfterBatch + 1), false, "before the cut");
-      notes.push(await interruptNext(context, plan, inputs, params.interruptAfterBatch, params.cancelAfterMs));
+      notes.push(await interruptNext(context, plan, inputs, params.interruptAfterBatch, params));
     }
     const first = await sendAll(context, inputs, false, "build");
     const final = await sendAll(context, inputs, true, "final check");

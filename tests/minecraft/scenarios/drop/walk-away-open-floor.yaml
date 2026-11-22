@@ -26,6 +26,10 @@ params:
   item_name: oak_log
   count: 3
   max_path_blocks: 14
+  # the plain walk off the toss took 55-60 server ticks at 20 tps and 20-31 at 10 tps (6 of 6 runs each, 2026-11-22), the same
+  # bound as walk-away-bounded (worst of that scenario 100 x 1.5, rounded up to 20), so both scenarios share one limit.
+  max_step_ticks: 160
+  # wall: the backstop of the tick bound above; 3.0 s measured at both rates.
   max_step_ms: 8000
   back: { x: 0, y: -60, z: 0 }
 
