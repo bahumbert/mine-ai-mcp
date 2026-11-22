@@ -43,7 +43,7 @@ import { executeWorldEffect } from "../execution/world-effect.js";
 import { pinReleaseTicks } from "../execution/confirmation-deadline.js";
 import { OpenedPassages } from "../execution/opened-passages.js";
 import { RouteExecutor, type RouteContext, type StepDecision } from "../execution/route-executor.js";
-import type { PlanningNode } from "../goals/goal.js";
+import type { PlanningNode, ResolvedGoal } from "../goals/goal.js";
 import { priceExcavation } from "../movements/excavation.js";
 import type { MovementCatalogue } from "../movements/catalogue.js";
 import {
@@ -71,7 +71,6 @@ import { describeAbort } from "./describe-abort.js";
 import { provenEndpoints } from "./endpoint-proof.js";
 import { PlanningStall } from "./planning-stall.js";
 import { searchFinishedEvent } from "./search-events.js";
-import type { ActiveGoal, SearchAnswer, SearchCalculation, SearchInterruption, SearchObservation } from "./search-answer.js";
 import { awaitLanding } from "./landing-wait.js";
 import {
   blockKey,
@@ -120,6 +119,7 @@ const CHANGE_COUNTER = {
   irrelevant: "irrelevantChanges",
 } as const satisfies Record<MutationClassification, keyof Counters>;
 
+type ActiveGoal = Extract<ResolvedGoal, { kind: "active" }>;
 type PlanningResult =
   | {
       readonly kind: "plan";
@@ -163,6 +163,31 @@ interface PendingContinuation {
 }
 /** What walking a plan reports: the same as planning, minus a plan. */
 type ExecutionResult = Exclude<PlanningResult, { readonly kind: "plan" }>;
+/** A search that calculated a plan or exhausted its options. */
+type SearchCalculation =
+  | { readonly kind: "plan"; readonly plan: RoutePlan; readonly plannedGoal: ActiveGoal; readonly latestGoal: ActiveGoal }
+  | {
+      readonly kind: "calculation_failed";
+      readonly failure: NavigationCalculationFailure;
+      readonly observation: NavigationObservation;
+    };
+type SearchInterruption =
+  | { readonly kind: "stale" }
+  | { readonly kind: "start_changed" }
+  | { readonly kind: "arrived"; readonly node: PlanningNode; readonly observation: NavigationObservation }
+  | { readonly kind: "goal_invalid"; readonly failure: NavigationFailure }
+  | { readonly kind: "planning_stalled"; readonly failure: NavigationFailure }
+  | { readonly kind: "stopped" };
+/** What one search said when it stopped, before the run decides what that means. */
+type SearchAnswer =
+  | (SearchCalculation & { readonly identity: string })
+  | SearchInterruption
+  | { readonly kind: "repeated"; readonly identity: string }
+  | { readonly kind: "refused"; readonly observation: string; readonly goalRevision: string };
+
+type SearchObservation =
+  | Extract<SearchAnswer, { readonly kind: "start_changed" | "goal_invalid" | "arrived" }>
+  | { readonly kind: "continue"; readonly observation: NavigationObservation; readonly latestGoal: ActiveGoal };
 
 /** Ticks to wait for the world to show the ceiling gone once the break has completed. */
 const PIN_RELEASE_TICKS = 40;
@@ -636,8 +661,6 @@ export class NavigationRun {
         };
       case "start_changed":
         return { kind: "retry", reason: "start_changed" };
-      case "goal_revised":
-        return { kind: "retry", reason: "goal_revised" };
       case "stale":
         return { kind: "retry", reason: "world_changed" };
       case "calculation_failed":
@@ -708,7 +731,7 @@ export class NavigationRun {
     const { search, searchId } = this.#beginSearch(goal, node, reason, field, ahead, root);
     const answer = await this.#advanceSearch(search, searchId, goal, node, searchStart, signal, ahead);
     if (answer.kind === "plan" || answer.kind === "calculation_failed") return { ...answer, identity };
-    if (answer.kind === "stopped" || answer.kind === "start_changed" || answer.kind === "stale" || answer.kind === "goal_revised")
+    if (answer.kind === "stopped" || answer.kind === "start_changed" || answer.kind === "stale")
       this.#searchIdentities.delete(identity);
     return answer;
   }
@@ -762,11 +785,6 @@ export class NavigationRun {
       const { observation } = judged;
       if (update.kind === "progress") continue;
       if (update.kind === "stale") return { kind: "stale" };
-      // A frontier that ran dry inside the region bound of a goal that was revised meanwhile (a moving drop, a revised
-      // target list) says nothing about the new goal: search again with it. Only the planning stall bounds the repeats:
-      // each revision has its own search identity (`#search` releases it), so the repeated-search guard never sees them.
-      if (update.kind === "limit" && update.limit.kind === "region" && judged.latestGoal.revision !== goal.revision)
-        return { kind: "goal_revised" };
       if (update.kind === "no_path" || update.kind === "limit") {
         const after = this.#lastMovementFailure ? { after: this.#lastMovementFailure } : {};
         return {
@@ -1117,16 +1135,13 @@ export class NavigationRun {
     // with the bot's own regions open, once per run. Other owners' regions stay forbidden.
     const escape = this.#policy.ownRegionEscape;
     const feet = navigationFeet(observation.position, observation.stance === "supported");
-    // A search that ran dry inside the region bound is exhausted like one that ran dry without it: the bot may still be
-    // shut in by what its own policy refuses, and the bound clipping the cells beyond must not hide that.
-    const exhausted = failure.kind === "no_path" || (failure.kind === "search_limit" && failure.limit.kind === "region");
-    if (exhausted && !this.#ownRegionsOpened && escape?.inside(feet.x, feet.y, feet.z)) {
+    if (failure.kind === "no_path" && !this.#ownRegionsOpened && escape?.inside(feet.x, feet.y, feet.z)) {
       this.#ownRegionsOpened = true;
       escape.open();
       this.#events.emit({ kind: "own_regions_opened", start: { x: feet.x, y: feet.y, z: feet.z } });
       return { kind: "retry", reason: "calculation_failure" };
     }
-    if (exhausted && this.#relaxedRules.length === 0 && isShutInByEscapableRefusals(failure, this.context.world, this.#policy, feet)) {
+    if (failure.kind === "no_path" && this.#relaxedRules.length === 0 && isShutInByEscapableRefusals(failure, this.context.world, this.#policy, feet)) {
       this.#relaxStyleRules();
       return { kind: "retry", reason: "calculation_failure" };
     }

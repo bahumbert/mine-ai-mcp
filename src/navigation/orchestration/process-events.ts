@@ -53,9 +53,6 @@ function describeStartRefusals(refusals: Readonly<Record<string, number>> | unde
 /** What a model reads after a search that ran out of time or radius: the next move it has. */
 const SEARCH_LIMIT_NEXT_STEP = "Try a nearer target, or walk part of the way first and ask again.";
 
-/** What a model reads after a search ran dry inside the region bound: the goal is not reachable by a nearby route. */
-export const REGION_LIMIT_NEXT_STEP = "Nothing reaches it nearby: choose another target, or walk toward it another way and ask again.";
-
 /** The one sentence every caller reports for a failed calculation: what ran out, how close it got, and what it was replanning around. */
 export function describeCalculationFailure(failure: NavigationCalculationFailure): string {
   const closest = failure.kind === "no_path" ? failure.closest : failure.limit.closest;
@@ -68,9 +65,7 @@ export function describeCalculationFailure(failure: NavigationCalculationFailure
       ? `no path found after ${spent}`
       : failure.limit.kind === "search_time"
         ? `search timed out after ${spent} (limit ${failure.limit.limit} ms); no path or usable partial route found`
-        : failure.limit.kind === "region"
-          ? `no route nearby: no route found within a detour of ${Math.round(failure.limit.limit)} blocks (straight distance ${Math.round(failure.limit.straight)} blocks) after ${spent}`
-          : `search radius limit ${failure.limit.limit} blocks reached after ${spent}; no path or usable partial route found`;
+        : `search radius limit ${failure.limit.limit} blocks reached after ${spent}; no path or usable partial route found`;
   const near = closest.withinStartBlocks;
   // What is known: the node nearest the goal is within `near` blocks of the bot. Only an exhausted search
   // (no_path) shows nothing else is reachable; a timeout or radius limit may just have stopped too soon. The
@@ -84,8 +79,5 @@ export function describeCalculationFailure(failure: NavigationCalculationFailure
   const what = `${stopped}; ${work}; ${where}${standing}`;
   const replanning = failure.after ? `${what}, while replanning after a movement failure: ${failure.after.observation}` : what;
   // A search that ran out of time or radius says nothing about the goal's reachability; the model's move is a shorter ask.
-  // One that ran dry inside the region bound says the goal is not reachable nearby: the move is another target or another way.
-  if (failure.kind !== "search_limit") return replanning;
-  const nextStep = failure.limit.kind === "region" ? REGION_LIMIT_NEXT_STEP : SEARCH_LIMIT_NEXT_STEP;
-  return `${replanning}${replanning.endsWith(".") ? "" : "."} ${nextStep}`;
+  return failure.kind === "search_limit" ? `${replanning}${replanning.endsWith(".") ? "" : "."} ${SEARCH_LIMIT_NEXT_STEP}` : replanning;
 }

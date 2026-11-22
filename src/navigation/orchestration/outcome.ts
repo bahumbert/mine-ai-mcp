@@ -42,22 +42,12 @@ export interface ClosestNodeEvidence {
   readonly withinStartBlocks?: number;
 }
 
-export type SearchLimitEvidence =
-  | {
-      readonly kind: "search_time" | "radius";
-      readonly limit: number;
-      readonly observed: number;
-      readonly closest: ClosestNodeEvidence;
-    }
-  | {
-      /** The frontier ran dry inside the region bound: `limit` is the allowance and `observed` the largest refused detour sum of the part with the smallest straight distance. */
-      readonly kind: "region";
-      readonly limit: number;
-      readonly observed: number;
-      readonly straight: number;
-      readonly part: number;
-      readonly closest: ClosestNodeEvidence;
-    };
+export interface SearchLimitEvidence {
+  readonly kind: "search_time" | "radius";
+  readonly limit: number;
+  readonly observed: number;
+  readonly closest: ClosestNodeEvidence;
+}
 
 export interface MovementFailure {
   readonly kind: "precondition_changed" | "operation_failed" | "no_progress" | "unstable";

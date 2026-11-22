@@ -12,7 +12,7 @@ export type NavigationEvent =
   | { readonly kind: "dive"; readonly runId: string; readonly atMs: number; readonly state: "breathing" | "resumed" | "released" }
   | { readonly kind: "search_finished"; readonly runId: string; readonly searchId: string; readonly atMs: number;
       readonly goal: string; readonly result: "complete" | "segment_ready" | "no_path" | "limit" | "stale" | "cancelled";
-      readonly counts: SearchEvidence; readonly exhausted: "frontier" | "compute_time" | "radius" | "region" | null;
+      readonly counts: SearchEvidence; readonly exhausted: "frontier" | "compute_time" | "radius" | null;
       readonly limit: SearchLimitEvidence | null;
       readonly interpretation: string }
   | { readonly kind: "run_started"; readonly runId: string; readonly atMs: number }

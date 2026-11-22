@@ -22,45 +22,21 @@ import {
   type NavigationCalculationFailureEvent,
   type NavigationCalculationFailureResult,
 } from "./orchestration/process-events.js";
-import { assertRegionBound } from "./search/region.js";
 import type { SearchLimits } from "./search/search-result.js";
 import { elapsedSince, monotonicNow } from "../utils/monotonic-clock.js";
 import { timeoutSignal } from "../utils/wall-timers.js";
-
-/**
- * The route searches' bound on the explored region: a cell is explored only while its detour sum (distance from the
- * start plus straight distance to the goal) is within `stretch` x the start's straight distance + `margin`. Measured, not
- * chosen (spec D4, report `2026-11-21-region-bound-measurement.md`: 4,898 routes, 3,478 single-part, 679 of them at
- * a straight distance of 16 or more): stretch = the worst single-part ratio 6.0625 x 1.5 rounded up to 0.25; margin =
- * the worst pointwise excess 0.463 x 2 rounded up to a block. One goal kind (`advance`, one lava-shore scenario) sets
- * the stretch (O2); the shared value stays until the owner decides.
- */
-const DEFAULT_REGION = Object.freeze({ stretch: 9.25, margin: 1 });
 
 /** Baritone's inline search budgets: enough to find a useful first segment without holding movement up indefinitely. */
 export const DEFAULT_SEARCH_LIMITS = Object.freeze({
   primaryTimeoutMs: 500,
   failureTimeoutMs: 2_000,
-  region: DEFAULT_REGION,
 } satisfies SearchLimits);
 
 /** Baritone's larger plan-ahead budgets, spent while the bot is already walking the current segment. */
 export const DEFAULT_CONTINUATION_SEARCH_LIMITS = Object.freeze({
   primaryTimeoutMs: 4_000,
   failureTimeoutMs: 5_000,
-  region: DEFAULT_REGION,
 } satisfies SearchLimits);
-
-/**
- * `defaults` under the caller's limits. The caller's `region` replaces the default only when it is not `undefined`:
- * `null` removes the bound, an explicit `undefined` keeps it (spec D5). A bound that could exclude the start throws
- * `RangeError` here, before any search starts, so no run reports a search it never finished.
- */
-function withCallerLimits(defaults: SearchLimits, caller: SearchLimits | undefined): SearchLimits {
-  const merged = { ...defaults, ...caller, region: caller?.region === undefined ? defaults.region : caller.region };
-  if (merged.region) assertRegionBound(merged.region);
-  return merged;
-}
 
 export type NavigationResult =
   | { readonly status: "completed"; readonly elapsedMs: number; readonly escapeRelaxed?: readonly string[] }
@@ -160,7 +136,6 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
   const stops = [options.signal, options.stopSignal];
   if (options.timeoutMs !== undefined) stops.push(timeoutSignal(options.timeoutMs));
   const signal = AbortSignal.any(stops.filter((source) => source !== undefined));
-  const searchLimits = withCallerLimits(DEFAULT_SEARCH_LIMITS, options.searchLimits);
   const admission = navigator.startRun({
     goal: options.goal,
     policy: options.movements,
@@ -173,8 +148,14 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     // Commit a useful partial route instead of retaining an ever-growing A*
     // frontier. Without this qualified boundary cavern-ore-return expanded
     // 100,548 nodes and 652 MB RSS without taking its first physical step.
-    searchLimits,
-    continuationSearchLimits: withCallerLimits(DEFAULT_CONTINUATION_SEARCH_LIMITS, options.searchLimits),
+    searchLimits: {
+      ...DEFAULT_SEARCH_LIMITS,
+      ...options.searchLimits,
+    },
+    continuationSearchLimits: {
+      ...DEFAULT_CONTINUATION_SEARCH_LIMITS,
+      ...options.searchLimits,
+    },
   });
   if (admission.kind === "busy") throw new Error(`Navigation is busy with run ${admission.activeRunId}.`);
 

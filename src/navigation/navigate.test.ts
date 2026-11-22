@@ -9,7 +9,7 @@ import test from "node:test";
 import { createFakeClock } from "../test-support/fake-bot/index.js";
 import { exactBlockGoal } from "./goals/index.js";
 import { createMovementPolicy } from "./movements/policy.js";
-import { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS, runNavigation } from "./navigate.js";
+import { runNavigation } from "./navigate.js";
 import type { NavigationRequest, Navigator } from "./orchestration/navigator.js";
 import type { NavigationEvidence, NavigationFailure, NavigationOutcome } from "./orchestration/outcome.js";
 
@@ -217,35 +217,6 @@ test("an escape request reaches the run as an escape, and a plain one does not",
   await runNavigation(navigator, { ...request, escape: true });
   await runNavigation(navigator, request);
   assert.deepEqual(requests.map((started) => started.escape), [true, undefined]);
-});
-
-test("the defaults carry the region and a caller's region overrides only when defined, in both limit objects", async () => {
-  const custom = { stretch: 3, margin: 2 };
-  const { navigator, requests } = fakeNavigator(() => ({ kind: "completed", evidence: evidence() }));
-  await runNavigation(navigator, request);
-  await runNavigation(navigator, { ...request, searchLimits: { region: undefined } });
-  await runNavigation(navigator, { ...request, searchLimits: { region: null } });
-  await runNavigation(navigator, { ...request, searchLimits: { region: custom } });
-  await runNavigation(navigator, { ...request, searchLimits: { primaryTimeoutMs: 100 } });
-  const regions = requests.map((started) => [started.searchLimits?.region, started.continuationSearchLimits?.region]);
-  assert.notEqual(DEFAULT_SEARCH_LIMITS.region, undefined);
-  assert.notEqual(DEFAULT_SEARCH_LIMITS.region, null);
-  assert.deepEqual(regions, [
-    [DEFAULT_SEARCH_LIMITS.region, DEFAULT_CONTINUATION_SEARCH_LIMITS.region],
-    [DEFAULT_SEARCH_LIMITS.region, DEFAULT_CONTINUATION_SEARCH_LIMITS.region],
-    [null, null],
-    [custom, custom],
-    [DEFAULT_SEARCH_LIMITS.region, DEFAULT_CONTINUATION_SEARCH_LIMITS.region],
-  ]);
-  // The caller's other limits still override their own defaults.
-  assert.equal(requests[4]!.searchLimits?.primaryTimeoutMs, 100);
-});
-
-test("a region bound that could exclude the start is refused before any search starts", async () => {
-  const { navigator, requests } = fakeNavigator(() => ({ kind: "completed", evidence: evidence() }));
-  for (const region of [{ stretch: 0.5, margin: 1 }, { stretch: 2, margin: -1 }, { stretch: Number.NaN, margin: 1 }, { stretch: 2, margin: Infinity }])
-    await assert.rejects(runNavigation(navigator, { ...request, searchLimits: { region } }), RangeError);
-  assert.equal(requests.length, 0);
 });
 
 /** A route that takes `legMs` of the installed clock, steps the wall clock by `wallStepMs` in the middle, and completes. */
