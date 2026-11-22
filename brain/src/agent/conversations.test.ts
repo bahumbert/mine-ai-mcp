@@ -1,11 +1,11 @@
 // Tests of agent conversations: opening, groups, closing, orders ending them, status reads, requests from members.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import type { BrainEvent } from "../brain-log.ts";
 import { ConversationBudget, type ConversationController } from "../conversation/controller.ts";
-import { FakeRuntime, steppedClocks, testPersona, until } from "../testing.ts";
-import { agentFor, heardOnce, others, say, talkOptions, toAyla } from "./agent-fixtures.test.ts";
+import { FakeRuntime, testPersona, until } from "../testing.ts";
+import { agentFor, clockedAgentFor, clockUntil, heardOnce, others, say, talkOptions, toAyla } from "./agent-fixtures.test.ts";
 
 test("another agent's line is still ignored outside a conversation, and always without conversations", async (t) => {
   const runtime = new FakeRuntime();
@@ -20,20 +20,29 @@ test("another agent's line is still ignored outside a conversation, and always w
   assert.equal(off.agent.conversation, null);
 });
 
-test("the conversation's windows run on the monotonic clock and its end is written on the wall clock (the controller's two named clocks)", async (t) => {
-  const clocks = steppedClocks(t);
-  const { agent, chat } = agentFor(t, new FakeRuntime(), {}, talkOptions());
+test("the conversation's windows run on the monotonic clock and its end is written on the wall clock (the controller's two named clocks)", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  // The 90 s of clock fire the agent's polls and the conversation look: the silence and range ends are set past them, so the talk is still open to read.
+  const conversation = { ...testPersona().settings.conversation, silenceSeconds: 600, outOfRangeSeconds: 600 };
+  const settings = { ...testPersona().settings, conversation };
+  const { agent, chat, stop } = clockedAgentFor(clock, new FakeRuntime(), { settings }, talkOptions());
   const talks = (agent as unknown as { talks: ConversationController }).talks;
-  chat.reply({ ...toAyla, say: "Sure, what's up?" });
-  await agent.handle(say("Vex", "Ayla, hi"));
-  assert.notEqual(agent.conversation, null);
-  clocks.monotonic(90_000);
-  clocks.wall(-2_000);
-  assert.equal(talks.facts()?.minutes, 1.5, "the minutes are the monotonic time since the start, the wall step changed nothing");
-  chat.reply({ gist: "Talked." });
-  talks.end("goodbye");
-  await talks.finished();
-  assert.ok(Math.abs((talks.lastTalk("Vex")?.endedAt ?? 0) - Date.now()) < 1_000, "the end is a wall time, the one a memory writes as an ISO date");
+  try {
+    chat.reply({ ...toAyla, say: "Sure, what's up?" });
+    await agent.handle(say("Vex", "Ayla, hi"));
+    assert.notEqual(agent.conversation, null);
+    await clock.advance(90_000);
+    clock.stepWallClock(-30_000); // WSL steps about 2 s; a 2 s step still rounds to the same 1.5 minutes, so the step is 30 s to show a wall-read window
+    assert.equal(talks.facts()?.minutes, 1.5, "the minutes are the monotonic time since the start, the wall step changed nothing");
+    chat.reply({ gist: "Talked." });
+    talks.end("goodbye");
+    const endedAt = Date.now();
+    await clock.settle(talks.finished(), 10_000);
+    assert.equal(talks.lastTalk("Vex")?.endedAt, endedAt, "the end is a wall time, the one a memory writes as an ISO date");
+  } finally {
+    await stop();
+  }
 });
 
 test("an agent's line naming her opens a conversation and is answered; a member's line naming nobody is answered too", async (t) => {
@@ -123,16 +132,23 @@ test("simultaneous openings merge: both end with both members", async (t) => {
   assert.equal(vex.chat.requests.length, 2);
 });
 
-test("its own line coming back is not a member's: no wake, no line counted", async (t) => {
+test("its own line coming back is not a member's: no wake, no line counted", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
-  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
-  chat.reply({ ...toAyla, say: "Hi." });
-  await agent.handle(say("Vex", "Ayla, hi"));
-  const lines = agent.conversation!.lines;
-  runtime.inbox.push(say("Ayla", "Hi."));
-  await sleep(40);
-  assert.equal(agent.conversation?.lines, lines);
-  assert.equal(chat.requests.length, 1);
+  const { agent, chat, stop } = clockedAgentFor(clock, runtime, {}, talkOptions());
+  try {
+    chat.reply({ ...toAyla, say: "Hi." });
+    await agent.handle(say("Vex", "Ayla, hi"));
+    const lines = agent.conversation!.lines;
+    runtime.inbox.push(say("Ayla", "Hi."));
+    await clock.advance(40); // eight polls of the agent (pollMs 5): the returned line is read, and nothing came of it
+    assert.equal(runtime.inbox.length, 0, "the line was read");
+    assert.equal(agent.conversation?.lines, lines);
+    assert.equal(chat.requests.length, 1);
+  } finally {
+    await stop();
+  }
 });
 
 test("an order ends a social conversation: its follow step is aborted, the order runs", async (t) => {
@@ -164,40 +180,52 @@ test("socialising is never offered to a character without conversations", async 
   assert.equal(agent.conversation, null);
 });
 
-test("a runtime that stays down is logged once by the conversation check, again only after a read worked", async (t) => {
+test("a runtime that stays down is logged once by the conversation check, again only after a read worked", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const { agent, chat } = agentFor(t, runtime, {}, talkOptions({ log: (line) => logs.push(line), talkLookMs: 5 }));
-  chat.reply({ ...toAyla, say: "Hi." });
-  await agent.handle(say("Vex", "Ayla, hi"));
-  await until(() => logs.some((line) => line.startsWith("listening as")));
-  const status = runtime.status.bind(runtime);
-  let down = true;
-  runtime.status = async () => {
-    if (down) throw new Error("runtime down");
-    return status();
-  };
-  await sleep(120);
-  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 1);
-  down = false;
-  await sleep(60);
-  down = true;
-  await sleep(60);
-  assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 2, "logged again after a read worked");
+  const { agent, chat, stop } = clockedAgentFor(clock, runtime, {}, talkOptions({ log: (line) => logs.push(line), talkLookMs: 5 }));
+  try {
+    chat.reply({ ...toAyla, say: "Hi." });
+    await agent.handle(say("Vex", "Ayla, hi"));
+    await clockUntil(clock, () => logs.some((line) => line.startsWith("listening as")));
+    const status = runtime.status.bind(runtime);
+    let down = true;
+    runtime.status = async () => {
+      if (down) throw new Error("runtime down");
+      return status();
+    };
+    await clock.advance(120);
+    assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 1);
+    down = false;
+    await clock.advance(60);
+    down = true;
+    await clock.advance(60);
+    assert.equal(logs.filter((line) => line.startsWith("conversation check failed")).length, 2, "logged again after a read worked");
+  } finally {
+    await stop();
+  }
 });
 
-test("no chance opening while a socialising objective is on its way to its partner", async (t) => {
+test("no chance opening while a socialising objective is on its way to its partner", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   runtime.durations.navigate = 1_500;
   runtime.snapshot = { ...runtime.snapshot, players: [{ username: "Vex", position: { x: 30, y: 64, z: 0 } }] };
   const settings = { ...testPersona().settings, conversation: { ...testPersona().settings.conversation, checkEverySeconds: 1 } };
-  const { agent, chat, planner } = agentFor(t, runtime, { goal: "Be friendly.", settings }, talkOptions({ otherAgents: others("Vex"), random: () => 0 }));
-  planner.reply({ objective: "go and chat with Vex", for: "socialising" });
-  await until(() => agent.activity.includes("go and chat with Vex"));
-  runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, { username: "Bruno", position: { x: 4, y: 64, z: 0 } }] };
-  await sleep(1_300);
-  assert.equal(chat.requests.length, 0, "no opening call to Bruno on the way");
-  assert.equal(agent.conversation, null);
+  const { agent, chat, planner, stop } = clockedAgentFor(clock, runtime, { goal: "Be friendly.", settings }, talkOptions({ otherAgents: others("Vex"), random: () => 0 }));
+  try {
+    planner.reply({ objective: "go and chat with Vex", for: "socialising" });
+    await clockUntil(clock, () => agent.activity.includes("go and chat with Vex"));
+    runtime.snapshot = { ...runtime.snapshot, players: [...runtime.snapshot.players, { username: "Bruno", position: { x: 4, y: 64, z: 0 } }] };
+    await clock.advance(1_300); // past the conversation check period (1 s): the look ran, and the walk (1.5 s) is still on its way
+    assert.equal(chat.requests.length, 0, "no opening call to Bruno on the way");
+    assert.equal(agent.conversation, null);
+  } finally {
+    await stop();
+  }
 });
 
 /** The status reads made by the conversation look (found by its frame in the stack: the goal loop reads the status too). */
@@ -211,20 +239,27 @@ function countStatusReads(runtime: FakeRuntime): { calls: number } {
   return reads;
 }
 
-test("in a conversation the status is read at most once per 2 s, and the first look after it opens is not delayed", async (t) => {
+test("in a conversation the status is read at most once per 2 s, and the first look after it opens is not delayed", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const runtime = new FakeRuntime();
   const reads = countStatusReads(runtime);
-  const { agent, chat } = agentFor(t, runtime, {}, talkOptions());
-  chat.reply({ ...toAyla, say: "Sure, what's up?" });
-  await sleep(50);
-  const idle = reads.calls;
-  await agent.handle(say("Vex", "Ayla, hi"));
-  assert.notEqual(agent.conversation, null);
-  assert.ok(idle >= 1, "an idle look was made before the talk opened, so the first look below proves the key");
-  await until(() => reads.calls > idle, 500);
-  const first = reads.calls;
-  await sleep(700);
-  assert.ok(reads.calls - first <= 1, `${reads.calls - first} status reads in 0.7 s of conversation (poll 5 ms)`);
+  const { agent, chat, stop } = clockedAgentFor(clock, runtime, {}, talkOptions());
+  try {
+    chat.reply({ ...toAyla, say: "Sure, what's up?" });
+    await clock.advance(50);
+    const idle = reads.calls;
+    await agent.handle(say("Vex", "Ayla, hi"));
+    assert.notEqual(agent.conversation, null);
+    assert.ok(idle >= 1, "an idle look was made before the talk opened, so the first look below proves the key");
+    await clock.advance(500);
+    assert.ok(reads.calls > idle, "the first look after the talk opened came within 500 ms");
+    const first = reads.calls;
+    await clock.advance(700);
+    assert.ok(reads.calls - first <= 1, `${reads.calls - first} status reads in 0.7 s of conversation (poll 5 ms)`);
+  } finally {
+    await stop();
+  }
 });
 
 test("in a group talk her reply to the carried partner's line is the trade ask, a reply to another member is not", async (t) => {
