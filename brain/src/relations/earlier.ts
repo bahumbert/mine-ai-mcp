@@ -1,3 +1,4 @@
+// The earlier ledger: what changed hands with a player before a trade with them was agreed, kept in memory for a few minutes.
 import type { BotSnapshot, Position } from "../runtime-client.ts";
 import { manhattan } from "../conversation/state.ts";
 import { owedItems } from "./trade.ts";

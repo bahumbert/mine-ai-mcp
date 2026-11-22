@@ -3,7 +3,7 @@ import type { Body } from "../body.ts";
 import { BodyDown } from "../body-down.ts";
 import type { ConversationRelations } from "../conversation/controller.ts";
 import { manhattan } from "../conversation/state.ts";
-import { realClock, type Clock } from "../conversation/socialise.ts";
+import { monotonicClock, realClock, type Clock } from "../conversation/socialise.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
 import { memoryNote, relationContextPrefix, relationNotesQuery, type Memory, type Recalled } from "../memory.ts";
 import type { ChatDecision, ChatInput, Mind } from "../mind.ts";
@@ -48,7 +48,7 @@ export interface AgentRelationsDeps {
   readonly lacks: (inventory?: BotSnapshot["inventory"]) => readonly string[];
   readonly journal: (e: TradeEvent | RelationEvent) => void;
   readonly log: (line: string) => void;
-  /** The wall clock the book and the wait for a partner's payment run on; the real one unless a test moves it. */
+  /** The clock the book (wall times) and the waits for a partner's payment and record (durations) run on; the real ones (`realClock` for the book, `monotonicClock` for the waits) unless a test moves one clock for both. */
   readonly clock?: Clock;
   /** The monotonic clock the trade ledgers' windows and the look and request-check throttles run on; `monotonicNow` unless a test moves it. */
   readonly monotonic?: () => number;
@@ -350,14 +350,14 @@ export class AgentRelations {
 
   /** What a give to a character of this brain may ask of the partner: its own record of the trade, and a call to come down; undefined for a player. */
   private witnessOf(h: Exclude<Handoff, { kind: "await" }>): PartnerWitness | undefined {
-    const { board, persona, clock = realClock } = this.deps;
+    const { board, persona, clock = monotonicClock } = this.deps;
     if (h.kind !== "give" || board?.isLocal(h.partner) !== true) return undefined;
     return { unclaimed: () => this.trades.unclaimedByPartner(h.tradeId), cannotReach: () => board.cannotReach(h.tradeId, persona.username, h.partner), clock, log: this.deps.log };
   }
 
   /** The wait for their side: it ends when their payment is credited, at the bound, or when stopped; it never counts as a give. */
   private async awaitPayment(tradeId: string, partner: string, context: SkillContext): Promise<HandoffEnd> {
-    const { persona, clock = realClock } = this.deps;
+    const { persona, clock = monotonicClock } = this.deps;
     let end: HandoffEnd;
     try {
       end = handoffOutcome(await awaitTheirSide(context, partner, {

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Memory } from "../memory.ts";
 import type { TradeDecision } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { FakeRuntime, scriptedMind, testPersona, testScoring } from "../testing.ts";
 import { RelationBook } from "./book.ts";
 import { TradeController } from "./controller.ts";
@@ -351,14 +352,14 @@ test("bad nudge keeps the gist and moves nothing", async () => {
 });
 
 test("owing does not block work: nothing is handed off before the agreement says so, and the tick is quick", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const h = harness();
   const s = snapshot();
   await h.c.onDecision(decision({ action: "propose", first: "me" }), "Theo", s);
   await h.c.onDecision(decision({ action: "propose", first: "them", give: bread(1) }), "Bruno", s);
   await h.c.onDecision(decision({ action: "accept", first: "them", give: bread(1), get: ingots(1) }), "Bruno", s);
-  const started = Date.now();
-  await h.c.tick(s, new Set(), signal);
-  assert.ok(Date.now() - started < 100);
+  await clock.settle(h.c.tick(s, new Set(), signal), 100); // a tick that waits 100 ms of clock for anything is not quick
   assert.deepEqual(h.handoffs, []);
 });
 
@@ -1765,6 +1766,14 @@ test("B1: two board accepts before one tick are both started, the oldest agreeme
   assert.equal(h.handoffs.length, 0, "no baseline: both wait for the tick");
   await h.c.tick(snapshot(), new Set(), signal);
   assert.deepEqual(h.handoffs.map((x) => (x.kind === "give" ? x.partner : "")), ["Theo", "Bruno"]);
+});
+
+test("B1: a board accept while a tick has been watching starts at once, from that tick's bag", async () => {
+  const h = harness();
+  const proposal = await boardProposal(h, "Theo", "me"); // an open trade keeps the baseline of the tick
+  await h.c.tick(snapshot(), new Set(), signal);
+  await h.c.offerAccepted(proposal.id, "Theo");
+  assert.deepEqual(kinds(h), ["give"], "no wait for the next tick: the controller's live baseline was read");
 });
 
 test("B1: a deferred start that throws keeps the accept: the next tick credits the payment", async () => {

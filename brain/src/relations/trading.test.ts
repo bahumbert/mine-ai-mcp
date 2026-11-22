@@ -5,7 +5,8 @@ import { Body, INSTANT_TYPING } from "../body.ts";
 import { ConversationBudget, ConversationController } from "../conversation/controller.ts";
 import type { Clock } from "../conversation/socialise.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
-import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { FakeRuntime, scriptedMind, testPersona, until } from "../testing.ts";
 import { heardNeeds, offerFrom, partnersInReach, reachOf, TradeAsks, tradePlan, tradeRoutine, tradingPartners, tradingShare, wantedItems, withoutRefusedTrading, withTrading } from "./trading.ts";
 import type { ActivityTime } from "../time-spent.ts";
 import { newRelation, withSaid } from "./record.ts";
@@ -22,6 +23,9 @@ test("wantedItems finds the item ids an objective names, else the needs", () => 
   assert.deepEqual(wantedItems("get some white_wool and oak_log from Theo", ["bread"]), ["white_wool", "oak_log"]);
   assert.deepEqual(wantedItems("swap with Theo for his shiny thing", ["bread", "stick"]), ["bread", "stick"]);
   assert.deepEqual(wantedItems("swap with Theo", []), []);
+  assert.deepEqual(wantedItems("I want iron ingots and bread", ["stick"]), ["iron_ingot", "bread"], "a one-word item after a two-word plural, in text order");
+  assert.deepEqual(wantedItems("bread then iron ingots, more bread", ["stick"]), ["bread", "iron_ingot"], "an item named twice is listed once, at its first place");
+  assert.deepEqual(wantedItems("", ["bread", "stick"]), ["bread", "stick"]);
 });
 
 test("TradeAsks.current drops carried needs and old ones, and keeps three", () => {
@@ -207,18 +211,23 @@ test("the routine reads the trade by the objective's wall start and the ask by i
   assert.deepEqual(t.reads, [{ partner: "Theo", since: startedWall }], "the trade board is read by the wall start");
 });
 
-test("a declined offer is held 10 min of monotonic time, whatever the wall clock does", async (c) => {
-  const clocks = steppedClocks(c);
+test("a declined offer is held 10 min of monotonic time, whatever the wall clock does", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const t = setup(theoAt(30));
   t.setTrade("cancelled");
-  const running = startTalk(t);
-  await until(() => t.talks.current !== null);
+  t.chat.reply(OPEN);
+  const running = t.run();
+  for (let waited = 0; t.talks.current === null; waited += 5) {
+    assert.ok(waited < 5_000, "the opening talk did not start within 5 s of clock");
+    await clock.advance(5);
+  }
   t.talks.said(true);
-  await running;
-  clocks.monotonic(5 * MIN);
-  clocks.wall(-2_000);
+  await clock.settle(running, 5_000);
+  await clock.advance(5 * MIN, 10_000);
+  clock.stepWallClock(-2_000);
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), true, "5 min later, the wall clock stepped back: still refused");
-  clocks.monotonic(5 * MIN + 100);
+  await clock.advance(5 * MIN + 100, 10_000);
   assert.equal(t.asks.refused.isRefused("Theo", ["iron_ingot"], monotonicNow()), false, "10 min and 100 ms of monotonic time: over");
 });
 

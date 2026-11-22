@@ -3,11 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { Body } from "../body.ts";
 import { runStep, type SkillContext } from "../skills.ts";
-import { FakeRuntime } from "../testing.ts";
+import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import type { Clock } from "../conversation/socialise.ts";
+import { createFakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { AgentRelations } from "./agent-relations.ts";
+import { TradeBoard } from "./board.ts";
 import type { OwedItem } from "./items.ts";
 import type { ItemCount } from "./types.ts";
-import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, PICK_BACK_RADIUS, runHandoff, type AwaitOptions } from "./handoff.ts";
+import { awaitTheirSide, describeHandoff, handoffKey, handoffOutcome, PICK_BACK_RADIUS, runHandoff, UNCONFIRMED_WAIT_MS, type AwaitOptions } from "./handoff.ts";
 
 function contextFor(runtime: FakeRuntime): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal };
@@ -643,4 +646,56 @@ test("B3: an abort during the wait is stopped even when the trade has ended", as
   abort.abort();
   const w = waiting(runtime, null, { endedAs: () => "cancelled: x" });
   assert.deepEqual(await w.run({ ...contextFor(runtime), signal: abort.signal }), { status: "stopped" });
+});
+
+test("a get-back is cut at the pay-back time left on the clock: running at one ms less, items_gone at it", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const runtime = tableGone();
+  runtime.durations.craft_item = 10_000; // polls of one ms each: the craft outlasts the bound
+  const getBackMs = 5_000;
+  const result = { ended: null as ReturnType<typeof handoffOutcome> | null };
+  const running = runHandoff(contextFor(runtime), giveTable(), undefined, { getBackMs, stillDue: () => true }).then((r) => void (result.ended = handoffOutcome(r)));
+  const endedNow = () => result.ended; // read through a function: an assert on the field would narrow it for the lines below
+  await clock.advance(getBackMs - 1);
+  assert.equal(endedNow(), null, "1 ms before the pay-back time left: the get-back still runs");
+  await clock.advance(1);
+  await clock.settle(running, 1_000);
+  assert.equal(endedNow()?.outcome, "items_gone");
+  assert.match(endedNow()?.detail ?? "", /the trade's clock ran out after 5 s/u);
+  assert.equal(drops(runtime).length, 0);
+});
+
+/** Ayla owes Theo a crafting_table, her toss is not seen taken, and Theo (a stub of this brain's characters) shows nothing received: the wait for his record runs on the default clock. */
+function tossNobodySawTaken() {
+  const board = new TradeBoard();
+  const table = [{ item: "crafting_table", count: 1 }];
+  const runtime = new FakeRuntime();
+  runtime.simulateInventory = true;
+  runtime.walkOnNavigate = true;
+  runtime.failures.pick_up_items = "[NO_MATCHING_ITEMS] No matching loaded dropped items were observed in the area.";
+  runtime.failureResults.pick_up_items = { pickup: { observed: 0, sightings: [] } };
+  runtime.snapshot = { ...runtime.snapshot, position: { x: 0, y: 64, z: 0 }, inventory: [{ name: "crafting_table", count: 1 }], players: [{ username: "Theo", position: { x: 2, y: 64, z: 0 } }] };
+  runtime.dropOutcomes.push({ status: "succeeded", error: null, dropped: [{ item: "crafting_table", dropped: 1 }], recipient: { collected: false, collectedCount: 0, settled: true } });
+  board.join("Theo", { offerAccepted: async () => undefined, offerDeclined: async () => undefined, partnerEnded: async () => undefined, cannotReach: async () => undefined, receivedFor: () => [] });
+  board.post({ id: "t1", proposer: "Theo", partner: "Ayla", give: [{ item: "iron_ingot", count: 1 }], get: table, first: "them", postedAt: 0 });
+  const relations = new AgentRelations({
+    persona: testPersona(), mind: scriptedMind().mind, runtime, body: new Body(runtime, () => undefined), takeHandoff: () => undefined, isAgent: () => true, lacks: () => [],
+    journal: () => undefined, log: () => undefined, board, hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0,
+  });
+  return { relations, runtime, table, give: { kind: "give", tradeId: "t1", partner: "Theo", items: table } as const };
+}
+
+test("the wait for a partner's record after an unseen toss ends at UNCONFIRMED_WAIT_MS of clock whatever the wall clock does", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const h = tossNobodySawTaken();
+  await h.relations.trades.onDecision({ action: "accept", give: h.table, get: [{ item: "iron_ingot", count: 1 }], first: "me" }, "Theo", h.runtime.snapshot);
+  const startedAt = clock.now();
+  clock.after(1_500, () => clock.stepWallClock(-2_000)); // WSL steps its wall clock back about 2 s, inside the wait
+  const context = { runtime: h.runtime, body: new Body(h.runtime, () => undefined), signal: new AbortController().signal };
+  const ended = await clock.settle(h.relations.runHandoff(h.give, context), 20_000);
+  assert.equal(ended.outcome, "not_taken", ended.detail);
+  const waited = clock.now() - startedAt;
+  assert.ok(waited >= UNCONFIRMED_WAIT_MS && waited < UNCONFIRMED_WAIT_MS + 1_000, `ended after ${waited} ms of clock, not ${UNCONFIRMED_WAIT_MS} ms`);
 });

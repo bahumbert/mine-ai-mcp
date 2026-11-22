@@ -33,6 +33,12 @@ export const OPENING_WAIT_MS = 45_000;
 
 type Inventory = BotSnapshot["inventory"];
 
+/** The item id the `n` words from `at` name ("iron ingots" -> iron_ingot, the plural cut), else undefined. */
+function itemNamedAt(words: readonly string[], at: number, n: number): string | undefined {
+  const id = words.slice(at, at + n).join("_");
+  return [id, id.replace(/s$/u, "")].find((candidate) => stackSizeOf(candidate) !== null);
+}
+
 /** Item ids named in the text ("3 iron ingots" -> iron_ingot, longest id first), else `needs`. */
 export function wantedItems(objective: string, needs: readonly string[]): string[] {
   const words = objective.toLowerCase().match(/[a-z]+(?:_[a-z]+)*/gu) ?? [];
@@ -40,12 +46,10 @@ export function wantedItems(objective: string, needs: readonly string[]): string
   for (let at = 0; at < words.length;) {
     let matched = 0;
     for (let n = Math.min(MAX_ID_WORDS, words.length - at); n >= 1 && matched === 0; n--) {
-      const id = words.slice(at, at + n).join("_");
-      const item = [id, id.replace(/s$/u, "")].find((candidate) => stackSizeOf(candidate) !== null);
-      if (item !== undefined) {
-        if (!found.includes(item)) found.push(item);
-        matched = n;
-      }
+      const item = itemNamedAt(words, at, n);
+      if (item === undefined) continue;
+      if (!found.includes(item)) found.push(item);
+      matched = n;
     }
     at += Math.max(1, matched);
   }

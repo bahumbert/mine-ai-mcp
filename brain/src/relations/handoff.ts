@@ -5,6 +5,7 @@ import type { Position } from "../runtime-client.ts";
 import { runStep, type SkillContext, type SkillResult } from "../skills.ts";
 import { giveTo } from "../skills/give-item.ts";
 import { findPlayer } from "../skills/positions.ts";
+import { timeoutSignal } from "../wall-timers.ts";
 import { carriedOf, holdsBack, sideText, spareFor } from "./items.ts";
 import { type ItemCount, MINUTE_MS } from "./types.ts";
 
@@ -86,7 +87,7 @@ async function shortOf(context: SkillContext, partner: string, items: readonly I
  * on the wall clock; null when nothing was short afterwards, else the line that says what is still lacking and what the fetch said.
  */
 async function getBackShort(context: SkillContext, partner: string, short: readonly Short[], getBackMs: number): Promise<string | null> {
-  const timeout = AbortSignal.timeout(getBackMs);
+  const timeout = timeoutSignal(getBackMs);
   const fetched = await runStep({ skill: "get_items", items: short.map(({ item, lacking }) => ({ item, count: lacking })) }, { ...context, signal: AbortSignal.any([context.signal, timeout]) });
   const still = await shortOf(context, partner, short);
   if (still.length === 0) return null;
