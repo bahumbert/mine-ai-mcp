@@ -1,52 +1,51 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { setCarriedCount } from "../../test-support/carried-counts.js";
-import type { FakeBot, FakeClock } from "../../test-support/fake-bot/index.js";
+import { type FakeBot, type FakeBotOptions, type FakeClock, createFakeBot } from "../../test-support/fake-bot/index.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { type DroppedItem, parseDropItemRequest } from "./contract.js";
 import { dropItem } from "./drop-item.js";
 import { deps, dropBot, dropTest, type Stack } from "./drop-item-fixtures.test.js";
-import { awaitHandover, cameFromToss, recountAfterToss, rememberDiscards } from "./hand-over.js";
+import { type HandoverOutcome, awaitHandover, cameFromToss, recountAfterToss, rememberDiscards } from "./hand-over.js";
 
 const ITEM_ID = 77;
 const STACK = 3;
 const GIVER_ID = 1;
 
 /** A bot that sees one tossed item entity of `STACK` items and a recipient, plus the raw `collect` channel. */
-function handoverBot() {
-  const client = new EventEmitter();
-  const entities: Record<number, unknown> = {
-    [ITEM_ID]: { id: ITEM_ID, name: "item", position: new Vec3(0, 64, 1), getDroppedItem: () => ({ name: "bread", count: STACK }) },
-    9: { id: 9, username: "Theo" },
-  };
-  const bot = Object.assign(new EventEmitter(), { _client: client, entities, time: { age: 0 } }) as unknown as Bot;
-  return { bot, client };
+function handoverBot(options: Pick<FakeBotOptions, "username" | "position"> = {}) {
+  const { bot } = createFakeBot({
+    ...options,
+    entities: {
+      [ITEM_ID]: { name: "item", position: new Vec3(0, 64, 1), getDroppedItem: () => ({ name: "bread", count: STACK }) },
+      9: { name: "player", position: new Vec3(0, 64, 1), username: "Theo" },
+    },
+  });
+  return { bot, client: bot._client };
 }
 
 /** What the recipient took when the server's `collect` packet carries `pickupItemCount` (absent when `undefined`). */
-async function takenWhenAnnounced(pickupItemCount: unknown, expectedItems: number) {
+async function takenWhenAnnounced(run: (promise: Promise<HandoverOutcome>) => Promise<HandoverOutcome>, pickupItemCount: unknown, expectedItems: number) {
   const { bot, client } = handoverBot();
   const waiting = awaitHandover(bot, { recipientName: "Theo", isTossed: () => false, tossedIds: new Set([ITEM_ID]), expectedItems, wallMs: 30 });
+  // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
   client.emit("collect", { collectedEntityId: ITEM_ID, collectorEntityId: 9, ...(pickupItemCount === undefined ? {} : { pickupItemCount }) });
-  return (await waiting).recipientCount;
+  return (await run(waiting)).recipientCount;
 }
 
-test("a collect packet's pickup count is taken as announced when it is a positive whole number", async () => {
-  assert.equal(await takenWhenAnnounced(2, 10), 2);
+dropTest("a collect packet's pickup count is taken as announced when it is a positive whole number", async ({ run }) => {
+  assert.equal(await takenWhenAnnounced(run, 2, 10), 2);
 });
 
-test("a collect packet with no pickup count, 0 or a fraction counts the stack of the item", async () => {
-  assert.equal(await takenWhenAnnounced(undefined, 10), STACK, "an older server says nothing");
-  assert.equal(await takenWhenAnnounced(0, 10), STACK);
-  assert.equal(await takenWhenAnnounced(1.5, 10), STACK);
+dropTest("a collect packet with no pickup count, 0 or a fraction counts the stack of the item", async ({ run }) => {
+  assert.equal(await takenWhenAnnounced(run, undefined, 10), STACK, "an older server says nothing");
+  assert.equal(await takenWhenAnnounced(run, 0, 10), STACK);
+  assert.equal(await takenWhenAnnounced(run, 1.5, 10), STACK);
 });
 
 test("a toss claims the item entities that appeared near the bot, even one whose metadata has not arrived", () => {
-  const { bot } = handoverBot();
-  (bot as unknown as { entity: unknown }).entity = { position: new Vec3(0, 64, 0) };
+  const { bot } = handoverBot({ position: { x: 0, y: 64, z: 0 } });
   const entities = bot.entities as Record<number, any>;
   entities[78] = { id: 78, name: "item", position: new Vec3(0, 64, 1), getDroppedItem: () => { throw new Error("no metadata yet"); } };
   entities[79] = { id: 79, name: "zombie", position: new Vec3(0, 64, 1), getDroppedItem: () => null };
@@ -69,9 +68,7 @@ test("cameFromToss: a new item entity near the toss spot, with or without its me
 
 // awaitHandover: whose pickup counts as the recipient's take (plan 2026-11-02 Task R, review gaps 1 and 2).
 test("the giver's own collect of a tossed-looking item is not a take: the watch stays open and the recipient has none", async () => {
-  const { bot, client } = handoverBot();
-  (bot as unknown as { entity: unknown }).entity = { id: GIVER_ID, position: new Vec3(0, 64, 0) };
-  (bot.entities as Record<number, unknown>)[GIVER_ID] = { id: GIVER_ID, username: "Giver" };
+  const { bot, client } = handoverBot({ username: "Giver", position: { x: 0, y: 64, z: 0 } });
   const waiting = awaitHandover(bot, { recipientName: "Theo", isTossed: () => true, tossedIds: new Set(), expectedItems: STACK, wallMs: 30 });
   client.emit("collect", { collectedEntityId: ITEM_ID, collectorEntityId: GIVER_ID, pickupItemCount: STACK });
   const outcome = await waiting;
@@ -92,7 +89,9 @@ test("the recipient's take is counted per item name; an entity of another name t
     tossedCounts: new Map([["bread", STACK]]),
     wallMs: 30,
   });
+  // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
   client.emit("collect", { collectedEntityId: 90, collectorEntityId: 9, pickupItemCount: 2 });
+  // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
   client.emit("collect", { collectedEntityId: ITEM_ID, collectorEntityId: 9, pickupItemCount: STACK });
   const outcome = await waiting;
   assert.deepEqual([...outcome.recipientTookOf], [["bread", STACK]]);
@@ -111,8 +110,10 @@ test("a tossed entity claimed by id whose name is another item's is no take; one
     tossedCounts: new Map([["bread", STACK], ["cobblestone", 1]]),
     wallMs: 30,
   });
+  // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
   client.emit("collect", { collectedEntityId: 90, collectorEntityId: 9, pickupItemCount: 2 }); // the recipient's own dirt, claimed beside the toss
   entities[ITEM_ID].getDroppedItem = () => null; // the stack is gone when the packet is heard
+  // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
   client.emit("collect", { collectedEntityId: ITEM_ID, collectorEntityId: 9, pickupItemCount: STACK });
   const outcome = await waiting;
   assert.deepEqual([...outcome.recipientTookOf], [["bread", STACK]]);
@@ -124,6 +125,7 @@ test("an entity with no name yet is the recipient's take only when a single item
     const { bot, client } = handoverBot();
     (bot.entities as Record<number, any>)[ITEM_ID].getDroppedItem = () => { throw new Error("no metadata yet"); };
     const waiting = awaitHandover(bot, { recipientName: "Theo", isTossed: () => true, tossedIds: new Set(), expectedItems: STACK, tossedCounts, wallMs: 30 });
+    // Stopgap until the master adds a measured pickup by another player (a collect with a player collector): fake-bot-entities.ts:186-191
     client.emit("collect", { collectedEntityId: ITEM_ID, collectorEntityId: 9, pickupItemCount: STACK });
     assert.equal((await waiting).recipientCount, taken);
   }

@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { placeOffsetShapes } from "./offset-shapes.js";
 
 const require = createRequire(import.meta.url);
@@ -61,31 +62,32 @@ function assertBox(actual: readonly number[] | undefined, expected: readonly num
 }
 
 test("a bamboo block read from the world has the server's box at its cell", () => {
-  const bot = fakeBot(fakeWorld({ [key(AYLA)]: "bamboo" }));
-  placeOffsetShapes(asBot(bot));
+  const bot = createFakeBot({ cells: { [key(AYLA)]: "bamboo" } }).bot;
+  placeOffsetShapes(bot);
   const block = bot.world.getBlock(AYLA)!;
   assert.equal(block.shapes.length, 1);
   assertBox(block.shapes[0], BAMBOO_AT_AYLA);
 });
 
 test("a block that is not offset keeps the registry's own shapes array", () => {
-  const bot = fakeBot(fakeWorld({ [key(AYLA)]: "stone" }));
+  const bot = createFakeBot({ cells: { [key(AYLA)]: "stone" } }).bot;
   const original = BlockClass.fromStateId(stateOf("stone"), 0).shapes;
-  placeOffsetShapes(asBot(bot));
+  placeOffsetShapes(bot);
   assert.equal(bot.world.getBlock(AYLA)!.shapes, original);
 });
 
 test("placing a bamboo box leaves the registry's shared shapes alone", () => {
-  const before = structuredClone(BlockClass.fromStateId(stateOf("bamboo"), 0).shapes);
-  const bot = fakeBot(fakeWorld({ [key(AYLA)]: "bamboo" }));
-  placeOffsetShapes(asBot(bot));
+  const bot = createFakeBot({ cells: { [key(AYLA)]: "bamboo" } }).bot;
+  placeOffsetShapes(bot);
   bot.world.getBlock(AYLA);
-  assert.deepEqual(BlockClass.fromStateId(stateOf("bamboo"), 0).shapes, before);
+  // The unplaced box as minecraft-data gives it (the disposer test at :115 restores the same literal): a literal, not a
+  // snapshot, so a write an earlier test made to the shared array still shows here.
+  assert.deepEqual(BlockClass.fromStateId(stateOf("bamboo"), 0).shapes, [[0.15625, 0, 0.15625, 0.34375, 1, 0.34375]]);
 });
 
 test("an unloaded cell is still null", () => {
-  const bot = fakeBot(fakeWorld({}));
-  placeOffsetShapes(asBot(bot));
+  const bot = createFakeBot().bot;
+  placeOffsetShapes(bot);
   assert.equal(bot.world.getBlock(AYLA), null);
 });
 
@@ -130,15 +132,17 @@ test("a registry without collision data installs nothing", () => {
 });
 
 test("two bots are wrapped independently", () => {
-  const botA = fakeBot(fakeWorld({ [key(AYLA)]: "bamboo" }));
-  const botB = fakeBot(fakeWorld({ [key(AYLA)]: "bamboo" }));
-  const disposeA = placeOffsetShapes(asBot(botA));
-  placeOffsetShapes(asBot(botB));
+  const botA = createFakeBot({ cells: { [key(AYLA)]: "bamboo" } }).bot;
+  const botB = createFakeBot({ cells: { [key(AYLA)]: "bamboo" } }).bot;
+  const disposeA = placeOffsetShapes(botA);
+  placeOffsetShapes(botB);
   disposeA();
   assertBox(botA.world.getBlock(AYLA)!.shapes[0], [0.15625, 0, 0.15625, 0.34375, 1, 0.34375]);
   assertBox(botB.world.getBlock(AYLA)!.shapes[0], BAMBOO_AT_AYLA);
 });
 
+// Stopgap until the master adds the fake's blockAt and raycast reading bot.world.getBlock: blocks.js:216 (Mineflayer),
+// fake-bot.ts:224, fake-world.ts:223-234. Stays hand-built until then (the cast is covered by quality-gate.allow).
 test("blockAt and a raycast that calls getBlock on the world see the placed box", () => {
   const bot = fakeBot(fakeWorld({ [key(AYLA)]: "bamboo" }));
   placeOffsetShapes(asBot(bot));

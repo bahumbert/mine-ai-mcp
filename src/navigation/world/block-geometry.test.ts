@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryWorld } from "./memory-world.js";
 import minecraftData from "minecraft-data";
-import type { Bot } from "mineflayer";
 import { blockClass, liveBlockReader, observeMineflayerBlock } from "../mineflayer/world.js";
 import { offsetBlocks } from "../../world/block-offset.js";
 import { describeBlockGeometry, heldByBlockAt, isSafeSupport, knockbackCorridorHazard, observationBits, standsOnDryGround } from "./block-geometry.js";
@@ -53,7 +52,7 @@ test("a yielding tread is not support, though the same shape is", () => {
 
 test("placing an offset block's boxes changes no geometry bit, in any state or cell", () => {
   const registry = minecraftData("1.21.4");
-  const Block = blockClass({ registry } as unknown as Pick<Bot, "registry">);
+  const Block = blockClass(createFakeBot().bot);
   const offsets = offsetBlocks(registry);
   assert.deepEqual([...offsets.keys()].sort(), ["bamboo", "pointed_dripstone"]);
   let compared = 0;
