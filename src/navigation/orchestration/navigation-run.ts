@@ -59,10 +59,10 @@ import type { RouteAdmission } from "../route-admission.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
-import { partialCellAt, partialCellExit } from "../world/body-clearance.js";
+import { partialCellAt } from "../world/body-clearance.js";
 import { overheadPinningCell } from "../world/overhead-pin.js";
 import { awaitBodyClear, breakHeldCell } from "./held-cell-break.js";
-import { digOutOfPartialCell } from "./partial-cell-dig-out.js";
+import { type PartialCellRun, type PartialCellState, leavePartialCell } from "./partial-cell-dig-out.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
 import { ArrivalRepeat } from "./arrival-repeat.js";
 import { describeAbort } from "./describe-abort.js";
@@ -271,10 +271,8 @@ export class NavigationRun {
   readonly #searchIdentities = new Set<string>();
   readonly #planningStall: PlanningStall;
   readonly #arrivalRepeat: ArrivalRepeat;
-  /** Whether the run already stepped out of a partial cell; see `#leavePartialCell`. */
-  #leftPartialCell = false;
-  /** Whether the run already dug out of a partial cell; see `#leavePartialCell`. */
-  #partialCellDug = false;
+  /** Whether the run already stepped out of a partial cell, and dug out of one; see `#leavePartialCell`. */
+  readonly #partialCell: PartialCellState = { leftPartialCell: false, partialCellDug: false };
   readonly #movementFailures = new Set<string>();
   #pinReleases = 0;
   /** The movement failure being replanned around, until a new route commits. */
@@ -601,44 +599,13 @@ export class NavigationRun {
    * (`partial-cell-dig-out.ts`). Each once per run, so a second partial cell is a failure and never a loop. "left":
    * observe again.
    */
-  async #leavePartialCell(cell: BlockPosition, position: Position3): Promise<"left" | NavigationOutcome> {
-    const exit = this.#leftPartialCell ? null : partialCellExit(this.context.world, position);
-    if (exit !== null) {
-      this.#leftPartialCell = true;
-      this.status({ kind: "stabilizing", runId: this.context.runId, reason: "inside_partial_block" });
-      const arrived = await this.context.bot.centerOnCell(exit, this.context.signal);
-      if (this.context.signal.aborted) return this.#stopped();
-      if (arrived) return "left";
-    }
-    let digOutRefusal = "";
-    if (this.#policy.allowDigging && this.#partialCellDug) {
-      digOutRefusal = " Digging out: this run has already dug out of one partial block.";
-    } else if (this.#policy.allowDigging) {
-      this.status({ kind: "stabilizing", runId: this.context.runId, reason: "inside_partial_block" });
-      const dug = await digOutOfPartialCell({
-        context: this.context,
-        policy: this.#policy,
-        openOwnRegions: (inside) => this.#openOwnRegionsAt(inside),
-        // The budget is spent by the first break: a dig-out that found nothing left to break (the failed step out moved
-        // the body clear) leaves it for a later partial cell, and cannot loop, since no break means no partial cell.
-        onBreak: () => {
-          this.#partialCellDug = true;
-          this.#counters.breaks += 1;
-        },
-      });
-      if (dug === "stopped") return this.#stopped();
-      if (dug === "left") return "left";
-      digOutRefusal = ` Digging out: ${dug.refused}`;
-    }
-    return this.#failed({
-      kind: "movement_failed",
-      movement: {
-        kind: "unstable",
-        stepId: "leave_partial_cell",
-        phase: "moving",
-        observation: `Standing inside the partial block at ${cell.x},${cell.y},${cell.z} with no clear side to step out to.${digOutRefusal}`,
-      },
-    });
+  #leavePartialCell(cell: BlockPosition, position: Position3): Promise<"left" | NavigationOutcome> {
+    const run: PartialCellRun = {
+      context: this.context, policy: this.#policy, state: this.#partialCell, status: this.status,
+      openOwnRegions: (inside) => this.#openOwnRegionsAt(inside), countBreak: () => { this.#counters.breaks += 1; },
+      stopped: () => this.#stopped(), failed: (failure) => this.#failed(failure),
+    };
+    return leavePartialCell(run, cell, position);
   }
   /**
    * Whether the run is being moved back between routes; see `STALLED_ROUTES`.

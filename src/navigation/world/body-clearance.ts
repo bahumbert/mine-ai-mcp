@@ -128,21 +128,44 @@ function sweepIsClear(world: WorldView, from: Position3, to: { readonly x: numbe
 /** The boxes the body at x, y, z overlaps, by cell and index, or null when a cell it covers is unloaded. */
 function boxesOverlapping(world: WorldView, x: number, y: number, z: number): Set<string> | null {
   const overlapping = new Set<string>();
+  for (const [cellX, cellY, cellZ] of cellsUnder(x, y, z)) {
+    const block = world.blockAt(cellX, cellY, cellZ);
+    if (block.kind !== "loaded") return null;
+    boxesSharing(block, cellX, cellY, cellZ, x, y, z).forEach((key) => overlapping.add(key));
+  }
+  return overlapping;
+}
+
+/** The cells the body at x, y, z covers, as [cellX, cellY, cellZ]. */
+function cellsUnder(x: number, y: number, z: number): [number, number, number][] {
+  const cells: [number, number, number][] = [];
   for (let cellY = Math.floor(y); cellY <= Math.floor(y + BODY_HEIGHT - OVERLAP_EPSILON); cellY += 1)
     for (let cellX = Math.floor(x - HALF_WIDTH); cellX <= Math.floor(x + HALF_WIDTH); cellX += 1)
-      for (let cellZ = Math.floor(z - HALF_WIDTH); cellZ <= Math.floor(z + HALF_WIDTH); cellZ += 1) {
-        const block = world.blockAt(cellX, cellY, cellZ);
-        if (block.kind !== "loaded") return null;
-        collisionBoxesAt(block, cellX, cellZ).forEach((box, index) => {
-          const shares =
-            cellX + box.maxX - (x - HALF_WIDTH) > OVERLAP_EPSILON &&
-            x + HALF_WIDTH - (cellX + box.minX) > OVERLAP_EPSILON &&
-            cellZ + box.maxZ - (z - HALF_WIDTH) > OVERLAP_EPSILON &&
-            z + HALF_WIDTH - (cellZ + box.minZ) > OVERLAP_EPSILON &&
-            cellY + box.maxY - y > OVERLAP_EPSILON &&
-            y + BODY_HEIGHT - (cellY + box.minY) > OVERLAP_EPSILON;
-          if (shares) overlapping.add(`${cellX},${cellY},${cellZ}#${index}`);
-        });
-      }
-  return overlapping;
+      for (let cellZ = Math.floor(z - HALF_WIDTH); cellZ <= Math.floor(z + HALF_WIDTH); cellZ += 1)
+        cells.push([cellX, cellY, cellZ]);
+  return cells;
+}
+
+/** The keys (`cell#index`) of the collision boxes of the loaded block at cellX, cellY, cellZ that the body at x, y, z shares volume with. */
+function boxesSharing(
+  block: Parameters<typeof collisionBoxesAt>[0],
+  cellX: number,
+  cellY: number,
+  cellZ: number,
+  x: number,
+  y: number,
+  z: number,
+): string[] {
+  const keys: string[] = [];
+  collisionBoxesAt(block, cellX, cellZ).forEach((box, index) => {
+    const shares =
+      cellX + box.maxX - (x - HALF_WIDTH) > OVERLAP_EPSILON &&
+      x + HALF_WIDTH - (cellX + box.minX) > OVERLAP_EPSILON &&
+      cellZ + box.maxZ - (z - HALF_WIDTH) > OVERLAP_EPSILON &&
+      z + HALF_WIDTH - (cellZ + box.minZ) > OVERLAP_EPSILON &&
+      cellY + box.maxY - y > OVERLAP_EPSILON &&
+      y + BODY_HEIGHT - (cellY + box.minY) > OVERLAP_EPSILON;
+    if (shares) keys.push(`${cellX},${cellY},${cellZ}#${index}`);
+  });
+  return keys;
 }
