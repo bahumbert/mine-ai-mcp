@@ -8,7 +8,7 @@ import { BodyDown } from "../runtime-client.ts";
 import type { Persona } from "../persona.ts";
 import { OtherAgents } from "../other-agents.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
-import type { FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { createFakeClock, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 
 export function steveAt(x: number) {
   return { username: "Steve", position: { x, y: 64, z: 0 } };
@@ -115,6 +115,29 @@ export async function clockUntil(clock: FakeClock, condition: () => boolean): Pr
   try {
     await clock.settle(new Promise<void>((resolve) => { cancel = clock.every(() => { if (condition()) resolve(); }, 5); }), 10_000);
   } finally { cancel(); }
+}
+
+/** What a test on a mocked clock registers to run on the clock before the clock is disposed (T6). */
+export type Scope = { after(fn: () => Promise<void>): void };
+
+/** A test on a mocked clock: each agent it starts is stopped on the clock before the clock is disposed (T6). A stop that throws does not hide the body's own error. */
+export function onClock(body: (clock: FakeClock, scope: Scope) => Promise<void>): () => Promise<void> {
+  return async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const stops: (() => Promise<void>)[] = [];
+    let bodyPassed = false;
+    try {
+      await body(clock, { after: (fn) => { stops.push(fn); } });
+      bodyPassed = true;
+    } finally {
+      let stopFailure: { error: unknown } | undefined;
+      for (const stop of stops) {
+        try { await clock.settle(stop(), 10_000); } catch (error) { stopFailure ??= { error }; }
+      }
+      if (stopFailure !== undefined && bodyPassed) throw stopFailure.error;
+    }
+  };
 }
 
 /** Run an agent on a mocked clock, stopping it before the clock is disposed. */
