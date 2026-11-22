@@ -4,6 +4,8 @@ import type { BlockPosition } from "../../index.js";
 import { facingVector, type HorizontalFacing } from "../../../world/facing.js";
 import type { BlockAxis, BlockHalf } from "../../../world/block-states.js";
 
+export { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
+
 export interface BuildCell {
   readonly position: BlockPosition;
   readonly blockName: string;

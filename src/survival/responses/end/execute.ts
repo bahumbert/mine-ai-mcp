@@ -1,4 +1,4 @@
-import { buildCrystalStaircase, pillarShortfall, planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
+import { buildCrystalStaircase, DIG_CLEAR_BLOCK, pillarShortfall, planCrystalStaircase } from "../../positioning/combat/crystal-staircase.js";
 import { standingCell } from "../../positioning/combat/geometry.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
@@ -28,7 +28,6 @@ import {
 import { entityHealth, dragonPhase, isDragonLanding, isDragonPerched, observedDragonLandingCenter, perchAttackCell, perchedDragonHead, perchedDragonBodyParts } from "../../../world/end-fight.js";
 import { nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { REGENERATION_HUNGER } from "../../../world/food.js";
-import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 import { hasItemFamily } from "../../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { selectPolicyFood } from "../../perception/food.js";

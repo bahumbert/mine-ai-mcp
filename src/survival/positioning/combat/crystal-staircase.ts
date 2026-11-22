@@ -12,6 +12,8 @@ import { placeBlock } from "../../../world/index.js";
 import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 import type { SurvivalPolicy } from "../../policy/contract.js";
 
+export { DIG_CLEAR_BLOCK };
+
 type WorkBox = { readonly min: Vec3; readonly max: Vec3 };
 
 /**
