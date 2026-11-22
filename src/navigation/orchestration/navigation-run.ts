@@ -763,8 +763,8 @@ export class NavigationRun {
       if (update.kind === "progress") continue;
       if (update.kind === "stale") return { kind: "stale" };
       // A frontier that ran dry inside the region bound of a goal that was revised meanwhile (a moving drop, a revised
-      // target list) says nothing about the new goal: search again with it. The repeated-search guard and the planning
-      // stall bound the repeats.
+      // target list) says nothing about the new goal: search again with it. Only the planning stall bounds the repeats:
+      // each revision has its own search identity (`#search` releases it), so the repeated-search guard never sees them.
       if (update.kind === "limit" && update.limit.kind === "region" && judged.latestGoal.revision !== goal.revision)
         return { kind: "goal_revised" };
       if (update.kind === "no_path" || update.kind === "limit") {

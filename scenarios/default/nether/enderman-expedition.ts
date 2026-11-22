@@ -9,7 +9,7 @@ import { recordSourceIdentity } from "../../src/source-identity.ts";
 import { createNativeWave } from "../../src/native-wave.ts";
 import { runExpeditionAction } from "../../src/expedition-action.ts";
 import { judgeDrops } from "../../src/game-rate.ts";
-import { waitForServerPaced } from "../../../src/world/server-paced.ts";
+import { serverPacedElapsed, waitForServerPaced } from "../../../src/world/server-paced.ts";
 import { declareProductiveProgress } from "../../../tests/minecraft/drivers/productive-progress.ts";
 
 const position = z.tuple([z.number().int(), z.number().int(), z.number().int()]);
@@ -24,11 +24,9 @@ type Runtime = Awaited<ReturnType<typeof openRuntime>>;
 
 /** Arrangement commands must visibly settle before the measured expedition begins. */
 async function arranged(bot: Bot, fact: () => boolean, label: string, signal: AbortSignal): Promise<void> {
-  const started = monotonicNow();
-  const startAge = bot.time?.age ?? null;
+  const elapsed = serverPacedElapsed(bot);
   const end = await waitForServerPaced(bot, 400, { until: fact, signal });
-  if (end !== "until") throw new Error(`Arrangement did not observe ${label} ${JSON.stringify({ end,
-    elapsedMs: monotonicNow() - started, elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge })}`);
+  if (end !== "until") throw new Error(`Arrangement did not observe ${label} ${JSON.stringify({ end, ...elapsed() })}`);
 }
 
 /** Survey the standing cells and confirm equipment before the native mobs are arranged. */

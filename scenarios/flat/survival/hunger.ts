@@ -14,10 +14,6 @@ const paramsSchema = z.strictObject({
   waitTicks: z.number().int().positive(),
 });
 
-/**
- * Drain hunger with the hunger effect, from the client so the scenario can
- * wait for the bar to actually reach the target before the trial starts.
- */
 /** The hunger effect is given for 60 s and the bar gets this many server ticks to reach its target. */
 const STARVE_TICKS = 1200;
 
@@ -30,6 +26,10 @@ function clearHunger(bot: MineAiScenarioContext["bot"]): void {
   }
 }
 
+/**
+ * Drain hunger with the hunger effect, from the client so the scenario can
+ * wait for the bar to actually reach the target before the trial starts; the effect is cleared on every exit.
+ */
 // @function-metrics size=9 branches=2 fan-out=5 depth=2 interface=2 fan-in=1
 export async function starve(context: MineAiScenarioContext, target: number): Promise<boolean> {
   const { bot, signal } = context;

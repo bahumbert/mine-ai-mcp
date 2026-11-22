@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { listenersAddedSince } from "../../test-support/fake-bot/listener-counts.js";
 import { burnLeft, recordFireContact } from "./burn.js";
 import { readFireDanger } from "./fire-danger.js";
 
@@ -133,4 +134,28 @@ test("a contact of a kind outside the type (a caller that forgot the kinds) keep
   const { bot } = burningBody();
   recordFireContact(bot, "magma" as never, 1000);
   assert.deepEqual(burnLeft(bot), { ticks: LAVA_BURN, hp: 15 });
+});
+
+test("burning episodes of one life add one death listener, and a death still clears the episode that follows", async () => {
+  const { bot, clock, burning } = burningBody();
+  const added = listenersAddedSince(bot);
+  const EPISODES = 12; // one more than Node's warning limit of 10 listeners per event
+  for (let episode = 0; episode < EPISODES; episode++) {
+    burning(true);
+    recordFireContact(bot, "fire", bot.time.age);
+    await clock.advance(1_000);
+    burning(false);
+    assert.deepEqual(burnLeft(bot), { ticks: 0, hp: 0 }, `episode ${episode} ends at the first read of a body that no longer burns`);
+  }
+  assert.equal(added("death"), 1, "one listener for the life, not one per episode");
+  burning(true);
+  recordFireContact(bot, "lava", bot.time.age);
+  bot.emit("death");
+  assert.deepEqual(burnLeft(bot), { ticks: 0, hp: 0 });
+  // The same bot object lives the next life (Mineflayer emits `death` on it each time): the listener is armed again.
+  burning(true);
+  recordFireContact(bot, "lava", bot.time.age);
+  assert.ok(burnLeft(bot).ticks > 0, "the second life burns");
+  bot.emit("death");
+  assert.deepEqual(burnLeft(bot), { ticks: 0, hp: 0 }, "the second death clears the episode too");
 });

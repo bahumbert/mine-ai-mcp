@@ -4,7 +4,7 @@ import { getEventListeners } from "node:events";
 import test from "node:test";
 import { createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { watch } from "../test-support/pending.js";
-import { ServerPacedExpired, serverPacedSignal, waitForServerPaced } from "./server-paced.js";
+import { ServerPacedExpired, serverPacedElapsed, serverPacedSignal, waitForServerPaced } from "./server-paced.js";
 
 /** The shared fake's world-age-per-second contract sends ages in 20-tick packets, after interval callbacks. */
 function pacedBot(ticksPerSecond = 20, timePacketYet = true) {
@@ -121,6 +121,29 @@ for (const latePacket of [false, true]) {
     assert.equal(budget.end(), "unobserved");
     assert.deepEqual(budget.elapsed(), { ms: 5_000, ticks: null });
     await assertClean(controller.signal);
+  });
+}
+
+for (const ticksPerSecond of [20, 10]) {
+  test(`the elapsed read names wall ms and world ticks at ${ticksPerSecond} tps, and no ticks when an age is missing at either end`, async () => {
+    const { bot, clock } = pacedBot(ticksPerSecond);
+    using _timers = clock.install();
+    const elapsed = serverPacedElapsed(bot);
+    assert.deepEqual(elapsed(), { elapsedMs: 0, elapsedTicks: 0 });
+    await clock.advance(2_000);
+    assert.deepEqual(elapsed(), { elapsedMs: 2_000, elapsedTicks: ticksPerSecond * 2 });
+    const heard = bot.time;
+    Object.defineProperty(bot, "time", { value: { age: null }, configurable: true });
+    assert.deepEqual(elapsed(), { elapsedMs: 2_000, elapsedTicks: null }, "no age now: no tick count, not a difference with null");
+    Object.defineProperty(bot, "time", { value: heard, configurable: true });
+  });
+
+  test(`the elapsed read of a wait begun before any time packet has no ticks at ${ticksPerSecond} tps`, async () => {
+    const { bot, clock } = pacedBot(ticksPerSecond, false);
+    using _timers = clock.install();
+    const elapsed = serverPacedElapsed(bot);
+    await clock.advance(1_000);
+    assert.deepEqual(elapsed(), { elapsedMs: 1_000, elapsedTicks: null });
   });
 }
 

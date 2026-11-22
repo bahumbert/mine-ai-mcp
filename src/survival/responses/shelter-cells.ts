@@ -1,9 +1,8 @@
 // The cells around a bot that is hiding: where it stands, whether the box is closed, who is inside it.
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { MineflayerWorldView } from "../../navigation/mineflayer/world.js";
+import { liveBlockReader } from "../../navigation/mineflayer/world.js";
 import { navigationFeet, safeSupportingCell } from "../../navigation/world/block-geometry.js";
-import type { WorldView } from "../../navigation/world/world.js";
 import { cellIntersectsBody } from "../../utils/geometry.js";
 import { entityDimensions } from "../../world/entity-dimensions.js";
 import type { WorldBlock } from "../../world/index.js";
@@ -18,18 +17,6 @@ export type Entity = Parameters<Bot["attack"]>[0];
 export const SIDES = PROTECTION_SIDES;
 /** A mob this close is in the shaft with the bot, and the only fight left is the one at arm's length. */
 const SHAFT_REACH = 2;
-
-/** One read view per bot, as the runtime keeps one: its listeners live as long as the bot does. */
-const liveWorlds = new WeakMap<Bot, WorldView>();
-
-function liveWorldOf(bot: Bot): WorldView {
-  let world = liveWorlds.get(bot);
-  if (!world) {
-    world = new MineflayerWorldView(bot);
-    liveWorlds.set(bot, world);
-  }
-  return world;
-}
 
 /**
  * Whether the floor under `feet` holds the cell's centre at the body's height. A bottom slab or a fence top beside the
@@ -72,7 +59,7 @@ function footprintFloorsAtBodyHeight(bot: Bot, feetY: number): boolean {
  */
 export function shelterFeet(bot: Bot): Vec3 {
   if (bot.entity.onGround) {
-    const support = safeSupportingCell(liveWorldOf(bot), bot.entity.position);
+    const support = safeSupportingCell({ blockAt: liveBlockReader(bot) }, bot.entity.position);
     if (support) {
       const at = new Vec3(support.x, support.y, support.z);
       if (floorHoldsCentre(bot, at) && footprintFloorsAtBodyHeight(bot, at.y)) return at;

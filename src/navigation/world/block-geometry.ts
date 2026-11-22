@@ -120,7 +120,7 @@ export function knockbackCorridorHazard(
 }
 
 /** Find safe support under the player's whole footprint, including a centre over air. */
-export function safeSupportingCell(world: WorldView, position: Position3): BlockPosition | null {
+export function safeSupportingCell(world: Pick<WorldView, "blockAt">, position: Position3): BlockPosition | null {
   const { y } = navigationFeet(position, true);
   let nearest: BlockPosition | null = null;
   const distance = (at: BlockPosition) => Math.hypot(at.x + 0.5 - position.x, at.z + 0.5 - position.z);

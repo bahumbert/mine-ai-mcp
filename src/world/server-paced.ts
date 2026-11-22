@@ -81,6 +81,19 @@ function pacedDeadline(bot: Pick<Bot, "time">, ticks: number, options: ServerPac
   } };
 }
 
+/**
+ * Start a stopwatch on wall time and world age; each read names what a failed wait reports (`elapsedMs`, `elapsedTicks`, spec D5
+ * of red-paths-server-ticks). The tick count is null when the age is unknown at the start or at the read.
+ */
+export function serverPacedElapsed(bot: Pick<Bot, "time">): () => { readonly elapsedMs: number; readonly elapsedTicks: number | null } {
+  const startedMs = monotonicNow();
+  const startAge = bot.time?.age ?? null;
+  return () => {
+    const age = bot.time?.age ?? null;
+    return { elapsedMs: monotonicNow() - startedMs, elapsedTicks: startAge === null || age === null ? null : age - startAge };
+  };
+}
+
 /** Abort when the server-tick window, wall backstop or stopped-clock bound ends; dispose on every caller exit. */
 export function serverPacedSignal(bot: Pick<Bot, "time">, ticks: number, options: ServerPacedOptions = {}): ServerPacedSignal {
   const budget = pacedDeadline(bot, ticks, options);

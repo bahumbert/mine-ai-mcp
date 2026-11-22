@@ -1,17 +1,11 @@
 /** Wait for server metadata confirming release of arranged mobs. */
 import type { Entity } from "prismarine-entity";
 import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
-import { waitForServerPaced } from "../../src/world/server-paced.ts";
+import { serverPacedElapsed, waitForServerPaced } from "../../src/world/server-paced.ts";
 import { SERVER_ANSWER_TICKS } from "../../src/world/world-age.ts";
 import type { MineAiScenarioContext } from "./scenario-client.ts";
 
 type Target = "primary" | "alternative";
-
-/** Keep wall time as diagnostics alongside the server's packet age, never as progress. */
-function waitDetails(context: MineAiScenarioContext, startedMs: number, startAge: number | null, end: string) {
-  const age = context.bot.time?.age ?? null;
-  return { end, elapsedMs: monotonicNow() - startedMs, elapsedTicks: startAge === null || age === null ? null : age - startAge };
-}
 
 /** Remove tagged entities and wait for both server disappearance answers. */
 export async function removeArrangedEntities(context: MineAiScenarioContext, targets: readonly { tag: string; id: number }[]): Promise<void> {
@@ -25,8 +19,7 @@ export async function removeArrangedEntities(context: MineAiScenarioContext, tar
     else { pending.delete(id); context.log(`arranged ${tag} id ${id} already gone before removal`); }
   }
   const answers: string[] = [];
-  const startedMs = monotonicNow();
-  const startAge = bot.time?.age ?? null;
+  const elapsed = serverPacedElapsed(bot);
   const gone = (entity: Entity) => { pending.delete(entity.id); };
   const moved = (entity: Entity) => {
     if (pending.has(entity.id)) positions.set(entity.id, { x: entity.position.x, y: entity.position.y, z: entity.position.z });
@@ -42,7 +35,7 @@ export async function removeArrangedEntities(context: MineAiScenarioContext, tar
       const detail = {
         pending: targets.filter(({ id }) => pending.has(id)).map(({ tag, id }) => ({ tag, id, present: Boolean(bot.entities[id]), position: positions.get(id) ?? null })),
         commands: targets.map(({ tag }) => `/kill @e[tag=${tag}]`), answers,
-        ...waitDetails(context, startedMs, startAge, end),
+        end, ...elapsed(),
       };
       throw new Error(`arranged Endermen not removed: ${JSON.stringify(detail)}`);
     }
@@ -67,8 +60,7 @@ export function changesObserved(changes: readonly { fromTargetId: number | null;
 export async function releaseByTag(context: MineAiScenarioContext, tag: string, species: string): Promise<number> {
   const { bot, signal } = context;
   signal.throwIfAborted();
-  const startedMs = monotonicNow();
-  const startAge = bot.time?.age ?? null;
+  const elapsed = serverPacedElapsed(bot);
   const candidates = new Set(Object.values(bot.entities).filter((entity) => entity.isValid && entity.name === species).map((entity) => entity.id));
   const answers = new Set<number>();
   const metadata = (packet: { entityId: number; metadata: { key: number; value: unknown }[] }) => {
@@ -80,7 +72,7 @@ export async function releaseByTag(context: MineAiScenarioContext, tag: string, 
     const end = await waitForServerPaced(bot, SERVER_ANSWER_TICKS, { until: () => answers.size > 1, signal });
     if (answers.size > 1) throw new Error("ambiguous release");
     const id = answers.values().next().value;
-    if (end !== "ticks" || id === undefined) throw new Error(`release not answered (${end}): ${JSON.stringify(waitDetails(context, startedMs, startAge, end))}`);
+    if (end !== "ticks" || id === undefined) throw new Error(`release not answered (${end}): ${JSON.stringify({ end, ...elapsed() })}`);
     return id;
   } finally {
     bot._client.off("entity_metadata", metadata);
@@ -92,7 +84,7 @@ export async function waitForReleaseAnswers(context: MineAiScenarioContext, pend
   const { bot, signal } = context;
   signal.throwIfAborted();
   const sentAt = monotonicNow();
-  const startAge = bot.time?.age ?? null;
+  const elapsed = serverPacedElapsed(bot);
   const metadata = (packet: { entityId: number; metadata: { key: number; value: unknown }[] }) => {
     const now = monotonicNow();
     if (packet.metadata.some((entry) => entry.key === 15 && typeof entry.value === "number" && (entry.value & 1) === 0) && pending.delete(packet.entityId)) {
@@ -107,7 +99,7 @@ export async function waitForReleaseAnswers(context: MineAiScenarioContext, pend
     bot.chat(command);
     const end = await waitForServerPaced(bot, SERVER_ANSWER_TICKS, { until: () => pending.size === 0, signal });
     if (end !== "until") {
-      const detail = { pending: [...pending], ms: monotonicNow() - sentAt, ...waitDetails(context, sentAt, startAge, end) };
+      const detail = { pending: [...pending], ms: monotonicNow() - sentAt, end, ...elapsed() };
       context.log(`release timeout ${JSON.stringify(detail)}`);
       throw new Error(`release not answered (${end}): ${JSON.stringify(detail)}`);
     }

@@ -24,10 +24,18 @@ interface Episode {
 }
 
 const episodes = new WeakMap<Bot, Episode>();
+/** The bots whose `death` listener is on: one per bot for its life, however many episodes end and start before it dies. */
+const clearedOnDeath = new WeakSet<Bot>();
 
 /** Remember a contact in the current episode until the body stops burning or dies; a later contact never shortens what is owed. */
 export function recordFireContact(bot: Bot, kind: "lava" | "fire", age: number): void {
-  if (!episodes.has(bot)) bot.once("death", () => { episodes.delete(bot); });
+  if (!clearedOnDeath.has(bot)) {
+    clearedOnDeath.add(bot);
+    bot.once("death", () => {
+      episodes.delete(bot);
+      clearedOnDeath.delete(bot);
+    });
+  }
   // An unknown kind (a caller outside the type) keeps today's 300 ticks.
   const owed = BURN_AFTER_CONTACT[kind] ?? BURN_AFTER_LAVA_TICKS;
   const episode = episodes.get(bot);

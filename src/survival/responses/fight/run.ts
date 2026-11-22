@@ -123,6 +123,15 @@ export async function runMobFight(
     observation.stopEffects();
   }
   try {
+    return await releaseFight(scene, weapons, locomotion, outcome);
+  } finally {
+    observation.close();
+  }
+}
+
+/** Release the body after a fight (shield down, footing stopped or released), then report the fight's end; a failed release replaces the outcome. */
+async function releaseFight(scene: FightScene, weapons: FightWeapons, locomotion: FightMovement, outcome: FightOutcome): Promise<FightOutcome> {
+  try {
     await scene.execution.run("release", () =>
       weapons.itemUse.neutralise(async () => {
         if (scene.footingRecovery.needed && !scene.signal.aborted) await locomotion.recoverFooting();
@@ -136,7 +145,5 @@ export async function runMobFight(
     const primary = outcome.kind === "failed" ? `${outcome.observation}; ` : "";
     scene.reportProgress("ended", "cleanup_failed");
     return scene.failure(`${primary}Combat cleanup failed: ${message(cause)}`);
-  } finally {
-    observation.close();
   }
 }

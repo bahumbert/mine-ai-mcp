@@ -5,10 +5,9 @@ import { z } from "zod";
 import type { Bot } from "mineflayer";
 import type { Entity } from "prismarine-entity";
 import { MAX_COLLECT_BLOCKS } from "../../src/actions/collect-block/contract.ts";
-import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import { dragonPhase, entityHealth } from "../../src/world/end-fight.ts";
 import { carriedCount } from "../../src/world/inventory-count.ts";
-import { serverPacedSignal, waitForServerPaced } from "../../src/world/server-paced.ts";
+import { serverPacedElapsed, serverPacedSignal, waitForServerPaced } from "../../src/world/server-paced.ts";
 import { SERVER_ANSWER_TICKS } from "../../src/world/world-age.ts";
 import { declareProductiveProgress } from "../../tests/minecraft/drivers/productive-progress.ts";
 import { openRuntime, type Runtime } from "./runtime.ts";
@@ -33,12 +32,10 @@ export async function runActionWithin(runtime: Pick<Runtime, "run">, action: Par
 
 /** Observe the native dragon removal before declaring the fight complete. */
 export async function awaitDragonRemoval(bot: Bot, dragon: Entity | undefined, signal: AbortSignal): Promise<void> {
-  const start = monotonicNow(), startAge = bot.time.age;
+  const elapsed = serverPacedElapsed(bot);
   // The approved removal observation ends at its 39 s wall backstop, beyond the default 20 s stall (part 2 T3).
   const end = await waitForServerPaced(bot, 240, { until: () => !dragon?.isValid, stoppedMs: null, signal });
-  if (end !== "until") throw new Error(`Native death/removal was not observed: ${JSON.stringify({
-    end, elapsedMs: monotonicNow() - start, elapsedTicks: startAge == null ? null : bot.time.age - startAge,
-  })}`);
+  if (end !== "until") throw new Error(`Native death/removal was not observed: ${JSON.stringify({ end, ...elapsed() })}`);
 }
 
 /** Allow a late health/death answer before recording the first failure. */
@@ -99,13 +96,11 @@ interface FirstEntryCallOptions {
 async function callFirstEntryAction(name: string, input: unknown, options: FirstEntryCallOptions) {
   const { runtime, bot, signal, log, artifacts, observation: { state, snapshot } } = options;
   signal.throwIfAborted();
-  const startedMs = monotonicNow(), startAge = bot.time.age;
+  const elapsed = serverPacedElapsed(bot);
   const ready = await waitForServerPaced(bot, ACTION_BUDGET_TICKS, {
     until: () => !runtime.status().busy, stoppedMs: ACTION_STOPPED_MS, signal,
   });
-  if (ready !== "until") throw new Error(`Runtime remained busy: ${JSON.stringify({
-    end: ready, elapsedMs: monotonicNow() - startedMs, elapsedTicks: startAge == null ? null : bot.time.age - startAge,
-  })}`);
+  if (ready !== "until") throw new Error(`Runtime remained busy: ${JSON.stringify({ end: ready, ...elapsed() })}`);
   const action = runtime.actions.find(a => a.name === name);
   if (!action) throw new Error(`Missing action ${name}`);
   const start = snapshot();

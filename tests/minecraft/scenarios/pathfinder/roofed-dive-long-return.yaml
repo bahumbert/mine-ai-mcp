@@ -43,10 +43,13 @@ tick:
   # Seal once Diver is in the pocket, leaving the baffle as the way back.
   - "execute if entity @a[name=Diver,x=1.8,y=-60,z=-1,dx=0,dy=3,dz=2] if block 2 -59 0 water run fill 2 -59 0 2 -58 0 stone"
   - "execute if entity @a[name=Diver,x=1.8,y=-60,z=-1,dx=0,dy=3,dz=2] if block 0 -59 0 water run fill 0 -59 0 0 -58 0 stone"
-  # Require both seals before the pool witness can count as a return. The diver rests with its eyes just above the
-  # fluid surface, still inside the top water block (feet -58.73, eyes -57.11), so the head top (feet + 1.8) is the
-  # block that tells "head out of the water"; the eye block would stay water.
-  - "execute if block 2 -59 0 stone if block 0 -59 0 stone as @a[name=Diver,x=-7,y=-58.5,z=-3,dx=6,dy=4,dz=10] at @s if block ~ ~1.8 ~ air run tellraw @s \"diver_returned\""
+  # Latch a marker (in stone away from the route; the reset clears it) once Diver's server feet are inside the baffle's
+  # low exit cell near its floor, after both seals: the return then went through that exit, not by another way.
+  - "execute if block 2 -59 0 stone if block 0 -59 0 stone if entity @a[name=Diver,x=0.5,y=-60,z=2.5,distance=..0.49] run setblock 8 -63 8 gold_block"
+  # Require the marker and both seals before the pool witness can count as a return. The diver rests with its eyes just
+  # above the fluid surface, still inside the top water block (feet -58.73, eyes -57.11), so the head top (feet + 1.8)
+  # is the block that tells "head out of the water"; the eye block would stay water.
+  - "execute if block 8 -63 8 gold_block if block 2 -59 0 stone if block 0 -59 0 stone as @a[name=Diver,x=-7,y=-58.5,z=-3,dx=6,dy=4,dz=10] at @s if block ~ ~1.8 ~ air run tellraw @s \"diver_returned\""
   - "gamemode spectator @a[name=!Diver,gamemode=!spectator]"
 
 params:

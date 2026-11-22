@@ -1,8 +1,7 @@
 // Summons and bounds acknowledgement of an expedition's native mob waves.
 import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
-import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
-import { serverPacedSignal, waitForServerPaced, type ServerPacedSignal } from "../../src/world/server-paced.ts";
+import { serverPacedElapsed, serverPacedSignal, waitForServerPaced, type ServerPacedSignal } from "../../src/world/server-paced.ts";
 import { createWaveTracker } from "./native-population.ts";
 
 /** Keep one wave in flight and abort if its spawn events do not arrive. */
@@ -48,11 +47,9 @@ export function createNativeWave(bot: Bot, positions: readonly Vec3[], log: (mes
     spawn(id: number) { tracker.observeSpawn(id); if (!tracker.pending) stopBudget(); },
     tick(collecting: boolean) { replenish(collecting); },
     async waitServerTicks(count: number): Promise<void> {
-      const started = monotonicNow();
-      const startAge = bot.time?.age ?? null;
+      const elapsed = serverPacedElapsed(bot);
       const end = await waitForServerPaced(bot, count, { signal: stopped });
-      if (end !== "ticks") throw new Error(`Native wave observation ${JSON.stringify({ end,
-        elapsedMs: monotonicNow() - started, elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge })}`);
+      if (end !== "ticks") throw new Error(`Native wave observation ${JSON.stringify({ end, ...elapsed() })}`);
     },
     close,
   };

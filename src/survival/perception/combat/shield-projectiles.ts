@@ -87,7 +87,7 @@ export function assessIncomingShieldProjectiles(bot: Bot, movementAllowance = 0)
   const forecasts: { entity: Entity; impactInTicks: number | null; contact: Vec3 }[] = [];
   const body = { ...bot.entity, width: bot.entity.width + movementAllowance * 2 };
   for (const entity of Object.values(bot.entities)) {
-    if (!projectileThreatensBody(bot, entity, movementAllowance, bot.entity)) continue;
+    // One judgement per entity: the branch's own forecast is the filter (`projectileThreatensBody` runs the same two predicates).
     if (isArrowEntity(bot, entity)) {
       const impact = arrowImpact(bot, entity, movementAllowance);
       if (impact) forecasts.push({ entity, impactInTicks: impact.ticks, contact: impact.position });

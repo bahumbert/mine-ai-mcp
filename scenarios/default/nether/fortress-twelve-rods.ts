@@ -24,7 +24,7 @@ import { readReflexOutcomes } from "../../flat/combat/reflex.ts";
 import { z } from "zod";
 import { recordSourceIdentity } from "../../src/source-identity.ts";
 import { judgeDrops } from "../../src/game-rate.ts";
-import { waitForServerPaced } from "../../../src/world/server-paced.ts";
+import { serverPacedElapsed, waitForServerPaced } from "../../../src/world/server-paced.ts";
 
 const collectionSchema = z.strictObject({
   drops: z.number().int().positive().default(12),
@@ -258,11 +258,9 @@ function observeFortress(context: MineAiScenarioContext, runtime: Runtime, spawn
 
 /** Delayed fire must get a full native charge and volley after the last pickup (spec D5 S8). */
 async function observeLastVolley(bot: Bot, signal: AbortSignal) {
-  const started = monotonicNow();
-  const startAge = bot.time?.age ?? null;
+  const elapsed = serverPacedElapsed(bot);
   const end = await waitForServerPaced(bot, 100, { signal });
-  return { end, elapsedMs: monotonicNow() - started,
-    elapsedTicks: startAge === null || bot.time?.age == null ? null : bot.time.age - startAge };
+  return { end, ...elapsed() };
 }
 
 /**

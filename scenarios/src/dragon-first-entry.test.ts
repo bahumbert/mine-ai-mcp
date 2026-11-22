@@ -218,6 +218,24 @@ for (const fails of [false, true]) {
   });
 }
 
+// Defensive case outside measured game behaviour: Mineflayer's `time.age` is null until the first time packet and never goes
+// back to null, so no game answer loses the age mid-wait. The detail must still not be a difference with a missing age.
+// The cause is rate-independent, so one rate.
+test("a removal wait that loses the world age names no tick count, not a difference with a missing age", async () => {
+  const { bot, clock, entities, assertClean } = trial();
+  using _timers = clock.install();
+  const dragon = entities.spawn({ name: "ender_dragon", position: { x: 0, y: 70, z: 0 } });
+  const controller = new AbortController();
+  const rejected = assert.rejects(driver.awaitDragonRemoval(bot, dragon, controller.signal), /Native death\/removal.*"elapsedTicks":null/);
+  await clock.advance(100);
+  const heard = bot.time;
+  Object.defineProperty(bot, "time", { value: { age: null }, configurable: true });
+  await clock.advance(39_000);
+  await rejected;
+  Object.defineProperty(bot, "time", { value: heard, configurable: true });
+  await assertClean(controller.signal);
+});
+
 test("without an initial world age each wait stays bounded and removal fails unobserved", async () => {
   const { bot, clock, server, entities, assertClean } = trial(20, false);
   using _timers = clock.install();

@@ -1,8 +1,7 @@
 /** Judge survival under real pressure; the production runtime chooses its response. */
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
-import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
-import { type ServerPacedEnd, waitForServerPaced } from "../../../src/world/server-paced.ts";
+import { type ServerPacedEnd, serverPacedElapsed, waitForServerPaced } from "../../../src/world/server-paced.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { openAtArrangedHealth } from "./arranged-health.ts";
 
@@ -35,14 +34,6 @@ export async function observeSurvival(
   }
 }
 
-/** Keep elapsed wall and world time as diagnostics; neither turns a backstop into survival. */
-function observationMark(context: MineAiScenarioContext) {
-  const startedAt = monotonicNow();
-  const startAge = context.bot.time?.age;
-  return () => JSON.stringify({ elapsedMs: monotonicNow() - startedAt,
-    elapsedTicks: startAge == null || context.bot.time?.age == null ? null : context.bot.time.age - startAge });
-}
-
 /** Observe declared nearby threats and retain the bounded server-clock wait's evidence. */
 async function observeThreats(context: MineAiScenarioContext) {
   const { bot } = context;
@@ -54,12 +45,12 @@ async function observeThreats(context: MineAiScenarioContext) {
     expected.set(type, (expected.get(type) ?? 0) + 1);
   }
   const threats = [...expected].map(([type, count]) => `${count} ${type}`).join(", ");
-  const elapsed = observationMark(context);
+  const elapsed = serverPacedElapsed(bot);
   const end = await waitForServerPaced(bot, 40, { signal: context.signal, until: () => {
     const nearby = Object.values(bot.entities).filter((entity) => entity.position.distanceTo(bot.entity.position) < 16);
     return [...expected].every(([type, count]) => nearby.filter((entity) => entity.name === type).length === count);
   } });
-  return { threats, end, elapsed: elapsed() };
+  return { threats, end, elapsed: JSON.stringify(elapsed()) };
 }
 
 /** Explain why a clock backstop could not confirm the survival window. */
@@ -83,12 +74,12 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
   const runtime = await openAtArrangedHealth(context, startingHealth, "low-health-night-survival");
   try {
     context.log(`Survival window started: ${survival.seconds}s, health ${bot.health}, ${setup.threats}; any strategy allowed`);
-    const elapsed = observationMark(context);
+    const elapsed = serverPacedElapsed(bot);
     const outcome = await observeSurvival(context, survival.seconds);
     const reason = outcome === "stalled" || outcome === "wall" || outcome === "unobserved" ? `; ${clockFailure(outcome)}` : "";
     return {
       status: outcome === "survived" ? "succeeded" : "failed",
-      detail: `${outcome}${reason}; ${survival.seconds}s survival window; final health ${bot.health}; ${elapsed()}`,
+      detail: `${outcome}${reason}; ${survival.seconds}s survival window; final health ${bot.health}; ${JSON.stringify(elapsed())}`,
     };
   } finally {
     await runtime.close();
