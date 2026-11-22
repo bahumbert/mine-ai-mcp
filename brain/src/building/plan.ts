@@ -113,8 +113,10 @@ export function catalogueLine(template: Template): string {
   const floors = new Set(plan.cells.filter((cell) => cell.role === "floor").map((cell) => cell.y)).size;
   const blocks = plan.bill.reduce((sum, { count }) => sum + count, 0);
   const first = plan.stages[0]!;
-  const { x, z } = template.blueprint.size;
-  return `${template.id} (${x}x${z}, ${floors} floor${floors === 1 ? "" : "s"}, ${blocks} blocks, mostly ${plan.bill.slice(0, 3).map(({ item }) => item).join(", ")}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${template.description}`;
+  // The built footprint, not the blueprint's: a file may pad a row (the rondavel's, for its sign) or a column that no cell fills.
+  const built = plan.cells.filter((cell) => cell.block !== "air");
+  const span = (axis: "x" | "z") => Math.max(...built.map((cell) => cell[axis])) - Math.min(...built.map((cell) => cell[axis])) + 1;
+  return `${template.id} (${span("x")}x${span("z")}, ${floors} floor${floors === 1 ? "" : "s"}, ${blocks} blocks, mostly ${plan.bill.slice(0, 3).map(({ item }) => item).join(", ")}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${template.description}`;
 }
 
 /** The spot above the highest roof block nearest the middle of the top row (the ridge centre of a gable roof); a house with no roof role, the highest cell. */

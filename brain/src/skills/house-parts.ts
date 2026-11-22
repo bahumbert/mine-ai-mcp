@@ -135,7 +135,8 @@ export async function buildParts(context: SkillContext, plan: HousePlan, what: s
 async function claimSupportConflict(context: SkillContext, plan: HousePlan, keep: readonly Position[]): Promise<string | null> {
   const targets = plan.cells.filter((cell) => keep.some((kept) => sameCell(kept, cell)));
   if (targets.length === 0) return null;
-  const observed = await context.runtime.cellsAt(targets);  const conflict = targets.find((target, index) => {
+  const observed = await context.runtime.cellsAt(targets);
+  const conflict = targets.find((target, index) => {
     const cell = observed[index];
     return cell?.loaded !== true || cell.name !== target.block;
   });

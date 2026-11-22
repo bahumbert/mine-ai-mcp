@@ -15,7 +15,7 @@ const SEARCH_HEIGHTS = [0, -1, 1] as const;
 export type NearbyPlacement =
   | { readonly kind: "placed"; readonly position: Vec3; readonly block: WorldBlock }
   | { readonly kind: "no_item" }
-  /** `foreignArea`: set when cells were free only inside an area another player owns (`takeBack`): where it is and the way out. */
+  /** `foreignArea`: set when cells were free only inside an area another player owns (every placement refuses it, ADR-012): where it is and the way out. */
   | { readonly kind: "no_cell"; readonly foreignArea?: string }
   | { readonly kind: "failed"; readonly position: Vec3; readonly error: string };
 
@@ -97,7 +97,7 @@ function canStandAt(bot: Bot, feet: Vec3): boolean {
 
 /**
  * The nearest cell (straight-line, no path asked) where a player can stand and from which a block of this kind can
- * be placed the way `placeCarriedBlockNearby` does (`takeBack`: the same rule about other players' areas), or null when there is none within `maxRadius` blocks across and
+ * be placed the way `placeCarriedBlockNearby` does (the same rule about other players' areas, ADR-012), or null when there is none within `maxRadius` blocks across and
  * three up or down. Loaded blocks only.
  *
  * Live 2026-10-02: a bot logged in standing in water, and a bot leveling inside its own cut had no free cell either;
@@ -107,8 +107,6 @@ export function findStandingSpot(
   bot: Bot,
   maxRadius = STANDING_SPOT_RADIUS,
   itemName: string = CRAFTING_STATION,
-  /** Kept for callers that mean to take the block back: another owner's area is refused for every placement. */
-  _options: { readonly takeBack?: boolean } = {},
 ): Vec3 | null {
   const origin = bot.entity.position.floored();
   const spots: { readonly feet: Vec3; readonly distance: number }[] = [];
@@ -145,11 +143,6 @@ export async function placeCarriedBlockNearby(
   options: {
     readonly maxRadius?: number;
     readonly signal?: AbortSignal;
-    /**
-     * The caller means to pick the block up again (a craft's table): it is never put down inside an area another player owns,
-     * where it could not be mined (live s3i 2026-10-31: an agreed trade broke on a table left in Finn's perimeter).
-     */
-    readonly takeBack?: boolean;
     /** Told the cell right before the placement packet goes out (not at the choice): a caller cut off after it knows where its block may stand. */
     readonly onPlacementSent?: (cells: readonly Vec3[]) => void;
   } = {},
@@ -161,7 +154,7 @@ export async function placeCarriedBlockNearby(
   // nothing else is free; inside another owner's never (the placement core refuses it as well, ADR-012).
   const radius = options.maxRadius ?? 3;
   const cell = chooseCellFor(bot, itemName, radius);
-  if (!cell) return noCell(bot, itemName, radius, options.takeBack === true);
+  if (!cell) return noCell(bot, itemName, radius);
   const result = await placeBlock(bot, {
     item,
     support: cell.support,
@@ -175,9 +168,9 @@ export async function placeCarriedBlockNearby(
   return { kind: "failed", position: cell.position, error: result.error };
 }
 
-/** No cell: with `takeBack`, says when the only free cells lie in another player's area, and the way to its nearest edge. */
-function noCell(bot: Bot, itemName: string, radius: number, takeBack: boolean): NearbyPlacement {
-  const foreign = takeBack ? chooseCell(bot, itemName, radius, "any") : null;
+/** No cell: says when the only free cells lie in another player's area (refused for every placement, ADR-012), and the way to its nearest edge. */
+function noCell(bot: Bot, itemName: string, radius: number): NearbyPlacement {
+  const foreign = chooseCell(bot, itemName, radius, "any");
   if (!foreign) return { kind: "no_cell" };
   const { x, y, z } = foreign.position;
   const area = protectedRegionAt(readProtectedRegions(bot), bot.game.dimension, x, y, z, bot.username);

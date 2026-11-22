@@ -205,7 +205,7 @@ function craftingBotAmong(regionOwner: string, box: { min: [number, number, numb
 
 const AROUND_THE_BOT = { min: [-13, 40, -13] as [number, number, number], max: [13, 80, 13] as [number, number, number] };
 
-test("a block to take back is refused inside an area another player owns, naming the nearest edge on each side", async () => {
+test("a block is refused inside an area another player owns, naming the nearest edge on each side", async () => {
   const sides = [
     { box: { min: [-5, 40, -13], max: [13, 80, 13] }, way: "6 blocks west" },
     { box: { min: [-13, 40, -13], max: [6, 80, 13] }, way: "7 blocks east" },
@@ -214,7 +214,7 @@ test("a block to take back is refused inside an area another player owns, naming
   ] as const;
   for (const { box, way } of sides) {
     const { bot } = craftingBotAmong("Finn", box as never);
-    const result = await placeCarriedBlockNearby(bot, "crafting_table", { takeBack: true });
+    const result = await placeCarriedBlockNearby(bot, "crafting_table");
     assert.deepEqual(result, { kind: "no_cell", foreignArea: `inside Finn's protected area 'Finn_Perimeter': go ${way} to its edge first` });
   }
 });
@@ -225,39 +225,39 @@ test("a bot swimming beside the area whose free cells are all inside it is not t
   setProtectedRegionsProvider(bot, () => [
     { regionId: 1, dimension: "overworld", min: { x: 1, y: 40, z: -20 }, max: { x: 20, y: 80, z: 20 }, owner: "Finn", label: "Finn_Perimeter", heldBy: "TestBot", peer: false },
   ]);
-  const result = await placeCarriedBlockNearby(bot, "crafting_table", { takeBack: true });
+  const result = await placeCarriedBlockNearby(bot, "crafting_table");
   assert.deepEqual(result, {
     kind: "no_cell",
     foreignArea: "inside Finn's protected area 'Finn_Perimeter' (you stand outside it): look for open ground elsewhere",
   });
 });
 
-test("a block put down to stay still is not put inside an area another player owns (ADR-012)", async () => {
+test("a block put down is not put inside an area another player owns (ADR-012)", async () => {
   const { bot, clock } = craftingBotAmong("Finn", AROUND_THE_BOT);
   using _installed = clock.install();
   const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 2_000);
   assert.equal(result.kind, "no_cell");
 });
 
-test("a block to take back is put down inside the bot's own area, the owner's name in another case", async () => {
+test("a block is put down inside the bot's own area, the owner's name in another case", async () => {
   const { bot, clock } = craftingBotAmong("testbot", AROUND_THE_BOT);
   using _installed = clock.install();
-  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table", { takeBack: true }), 2_000);
+  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 2_000);
   assert.equal(result.kind, "placed");
 });
 
-test("a block to take back goes outside the foreign area when a cell is free there", async () => {
+test("a block goes outside the foreign area when a cell is free there", async () => {
   const { bot, clock } = craftingBotAmong("Finn", { min: [-13, 40, -13], max: [0, 80, 13] });
   using _installed = clock.install();
-  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table", { takeBack: true }), 2_000);
+  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 2_000);
   assert.equal(result.kind, "placed");
   if (result.kind === "placed") assert.ok(result.position.x >= 1, "east of the area");
 });
 
-test("a standing spot to take a block back from is not inside a foreign area", () => {
+test("a standing spot to put a block down from is not inside a foreign area", () => {
   const { bot } = craftingBotAmong("Finn", AROUND_THE_BOT);
-  assert.equal(findStandingSpot(bot, 8, "crafting_table", { takeBack: true }), null, "the edge is 14 blocks off");
+  assert.equal(findStandingSpot(bot, 8, "crafting_table"), null, "the edge is 14 blocks off");
   const { bot: near } = craftingBotAmong("Finn", { min: [-13, 40, -13], max: [4, 80, 13] });
-  const spot = findStandingSpot(near, 8, "crafting_table", { takeBack: true });
+  const spot = findStandingSpot(near, 8, "crafting_table");
   assert.deepEqual(spot, new Vec3(2, 62, 0), "close enough to put a block east of the area");
 });

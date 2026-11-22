@@ -148,9 +148,9 @@ test("templateOfHouse maps old houses", () => {
   assert.equal(classicTemplate(undefined, "small")?.id, "medieval-small");
 });
 
-test("a catalogue line of a template on stilts names its footprint and floors (the exact line: plan.test.ts)", () => {
+test("a catalogue line of a template on stilts names its built footprint (not the blueprint's empty front row) and floors (the exact line: plan.test.ts)", () => {
   const stilts = withFolder({ "stilts.json": templateFile("stilts", {}, STILT_LAYERS) }, (directory) => loadTemplates(directory)).get("stilts")!;
-  assert.match(catalogueLine(stilts), /^stilts \(5x6, 1 floor, \d+ blocks, mostly /u);
+  assert.match(catalogueLine(stilts), /^stilts \(5x5, 1 floor, \d+ blocks, mostly /u);
 });
 
 test("every shipped template is valid at every facing", () => {

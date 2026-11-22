@@ -116,7 +116,7 @@ export async function prepareCraftingStation(
   // Recorded at the send, before the placement can throw an abort: a block set in that wait is this request's table,
   // found again by the next attempt. An abort before the send records nothing.
   const sent = (cells: readonly Vec3[]) => recordPlacementSent(hold.own, cells, bot.time?.age);
-  const placement = await place(bot, CRAFTING_TABLE_ITEM, { signal, onPlacementSent: sent, takeBack: true });
+  const placement = await place(bot, CRAFTING_TABLE_ITEM, { signal, onPlacementSent: sent });
   if (placement.kind !== "placed") {
     forgetPlacement(hold.own);
     const foreign = placement.kind === "no_cell" && placement.foreignArea ? ` The only free cells are ${placement.foreignArea}: a table there would be left where it cannot be picked up again.` : "";

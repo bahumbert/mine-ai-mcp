@@ -91,7 +91,9 @@ transaction; one `migrated` line per step goes to stderr. A file newer than the 
 <name>: <cause>`, and the next open retries it. The `schema_version` metadata row mirrors the version for people
 reading the file. Step 1 builds the base tables, step 2 moves the brain's old memory notes into `memories`, step 3
 renames the old per-bot frontier tables to `legacy_frontier_*` (see "The world file"); a background import then moves
-their rows and drops them.
+their rows and drops them. Step 4 (`item-families`) drops `bot_status` when it lacks `time_of_day` or `item_families_json`,
+`bot_inventory` when it lacks `families` and `bot_tools` when it lacks `rank`, then re-creates them from the schema: the
+runtime rewrites those live rows within a second, so nothing is lost.
 
 ## The world file
 

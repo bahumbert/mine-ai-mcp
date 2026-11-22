@@ -50,9 +50,9 @@ export function workstationOperations(
   dropClock?: DropClock,
 ): WorkstationOperations {
   return {
-    place: (name, signal, onPlacementSent) => placeCarriedBlockNearby(bot, name, { signal, onPlacementSent, takeBack: true }),
+    place: (name, signal, onPlacementSent) => placeCarriedBlockNearby(bot, name, { signal, onPlacementSent }),
     moveToOpenGround: async (name, context) => {
-      const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name, { takeBack: true });
+      const spot = findStandingSpot(bot, STANDING_SPOT_RADIUS, name);
       if (!spot) return false;
       // Arriving short of it is not a failure here: the second placement is the judge.
       await navigation.navigate({ movements: createMovements(bot), goal: exactBlockGoal(spot), signal: context.signal });

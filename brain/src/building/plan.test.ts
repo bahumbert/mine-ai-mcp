@@ -4,7 +4,7 @@ import { billOfMaterials, blueprintSchema, describeMaterials, placeBlueprint, pl
 import { houseBox } from "./house-site.ts";
 import { catalogueLine, chooseSite, planTemplate } from "./plan.ts";
 import minecraftData from "minecraft-data";
-import { TEMPLATES, templateFor } from "./templates.ts";
+import { TEMPLATES, templateFor, type Template } from "./templates.ts";
 
 const site = chooseSite({ x: 0, y: 64, z: 0 }, null);
 const medieval = templateFor("medieval-small")!;
@@ -127,6 +127,16 @@ test("a catalogue line names id, size, floors, blocks, the three main blocks wit
   assert.equal(catalogueLine(medieval), `medieval-small (7x7, 1 floor, ${blocks} blocks, mostly ${mostly}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${medieval.description}`);
   assert.match(catalogueLine(medieval), /its first stage, the floor, takes 15 cobblestone, 9 oak_planks\)/u);
   assert.doesNotMatch(catalogueLine(medieval).split("; its first stage")[0]!, /mostly [^;]*\d/u, "no count of the main blocks to paste into get_items");
+});
+
+test("a catalogue line gives the size of the house as built (merge review 2026-11-22 N1): every shipped template, the rondavel's sign row and the hanok's padding included", () => {
+  const sizeOf = (template: Template) => {
+    const cells = planTemplate(template, { door: { x: 0, y: 0, z: 0 }, facing: "north" }).cells.filter((cell) => cell.block !== "air");
+    const span = (axis: "x" | "z") => Math.max(...cells.map((cell) => cell[axis])) - Math.min(...cells.map((cell) => cell[axis])) + 1;
+    return `${span("x")}x${span("z")}`;
+  };
+  for (const template of TEMPLATES.values()) assert.ok(catalogueLine(template).startsWith(`${template.id} (${sizeOf(template)}, `), `${template.id}: ${catalogueLine(template).slice(0, 40)}`);
+  assert.ok(catalogueLine(templateFor("rondavel")!).startsWith("rondavel (7x7, "), "a hut of 7 by 7 cells, its blueprint pads a front row for the sign");
 });
 
 test("a substitute roof keeps the template's stair and slab cells when its shapes are supplied", () => {
