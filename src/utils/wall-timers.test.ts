@@ -1,20 +1,8 @@
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 import { describeAbort } from "../navigation/orchestration/describe-abort.js";
+import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
 import { sleepMs, timeoutSignal } from "./wall-timers.js";
-
-/** Node's mock timers on `setTimeout` for the body only, restored even when the body throws. */
-async function withMockedTimeout(body: () => Promise<void>): Promise<void> {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  try {
-    await body();
-  } finally {
-    mock.timers.reset();
-  }
-}
-
-/** Lets the promise reactions queued by a fired timer or an abort run. */
-const drainPromises = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** Counts the timers armed and cleared through the global functions while the body runs. */
 async function countingTimers(body: (counts: { armed: number; cleared: number }) => Promise<void>): Promise<void> {
@@ -55,23 +43,23 @@ function listenedSignal(controller: AbortController): { signal: AbortSignal; att
 }
 
 test("sleepMs: a mocked setTimeout tick ends the sleep, so a fake clock reaches it", async () => {
-  await withMockedTimeout(async () => {
-    let woke = false;
-    const sleeping = sleepMs(1000).then(() => {
-      woke = true;
-    });
-    mock.timers.tick(999);
-    await drainPromises();
-    assert.equal(woke, false, "the sleep must not end before its 1000 ms");
-    mock.timers.tick(1);
-    await drainPromises();
-    assert.equal(woke, true, "the tick, not the real clock, must end the sleep");
-    await sleeping;
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  let woke = false;
+  const sleeping = sleepMs(1000).then(() => {
+    woke = true;
   });
+  await clock.advance(999);
+  assert.equal(woke, false, "the sleep must not end before its 1000 ms");
+  await clock.advance(1);
+  assert.equal(woke, true, "the clock, not the real clock, must end the sleep");
+  await sleeping;
 });
 
 for (const when of ["before", "during"] as const) {
   test(`sleepMs: an abort ${when} the sleep rejects with the reason and leaves no timer and no listener`, async () => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
     await countingTimers(async (counts) => {
       const controller = new AbortController();
       const { signal, attached } = listenedSignal(controller);
@@ -87,24 +75,24 @@ for (const when of ["before", "during"] as const) {
 }
 
 test("sleepMs: a sleep that ends removes its abort listener", async () => {
-  await withMockedTimeout(async () => {
-    const { signal, attached } = listenedSignal(new AbortController());
-    const sleeping = sleepMs(1000, signal);
-    mock.timers.tick(1000);
-    await sleeping;
-    assert.equal(attached(), 0);
-  });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { signal, attached } = listenedSignal(new AbortController());
+  const sleeping = sleepMs(1000, signal);
+  await clock.advance(1000);
+  await sleeping;
+  assert.equal(attached(), 0);
 });
 
 test("timeoutSignal: aborts at its deadline of mocked time with a reason that reads as a timeout", async () => {
-  await withMockedTimeout(async () => {
-    const signal = timeoutSignal(100);
-    mock.timers.tick(99);
-    assert.equal(signal.aborted, false);
-    mock.timers.tick(1);
-    assert.equal(signal.aborted, true);
-    assert.ok(signal.reason instanceof DOMException);
-    assert.equal(signal.reason.name, "TimeoutError", "the name AbortSignal.timeout gives and portal-entry checks");
-    assert.equal(describeAbort(signal.reason), "navigation timeout");
-  });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const signal = timeoutSignal(100);
+  await clock.advance(99);
+  assert.equal(signal.aborted, false);
+  await clock.advance(1);
+  assert.equal(signal.aborted, true);
+  assert.ok(signal.reason instanceof DOMException);
+  assert.equal(signal.reason.name, "TimeoutError", "the name AbortSignal.timeout gives and portal-entry checks");
+  assert.equal(describeAbort(signal.reason), "navigation timeout");
 });

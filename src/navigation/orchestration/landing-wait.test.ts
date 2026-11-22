@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../test-support/fake-bot/fake-clock.js";
 import { flatWorld, observation } from "../../test-support/navigation.js";
 import type { CellResync } from "../bot.js";
 import { LANDING_WALL_MS, awaitLanding } from "./landing-wait.js";
@@ -16,8 +17,9 @@ const hangUntilAborted: Stabilize = (signal) =>
     signal.addEventListener("abort", () => reject(signal.reason), { once: true });
   });
 
-test("a landing seen within the bound is stable", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("a landing seen within the bound is stable", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const result = await awaitLanding(
     landingBot(async () => ({ kind: "stable" })),
     new AbortController().signal,
@@ -25,27 +27,36 @@ test("a landing seen within the bound is stable", async (context) => {
   assert.deepEqual(result, { kind: "stable" });
 });
 
-test("no tick for the bound reads as unstable with the position", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
-  const landing = awaitLanding(landingBot(hangUntilAborted), new AbortController().signal);
-  context.mock.timers.tick(LANDING_WALL_MS);
+test("no tick for the bound reads as unstable with the position", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  let settled = false;
+  const landing = awaitLanding(landingBot(hangUntilAborted), new AbortController().signal).then((outcome) => {
+    settled = true;
+    return outcome;
+  });
+  await clock.advance(LANDING_WALL_MS - 1);
+  assert.equal(settled, false, "one ms short of the bound: still waiting");
+  await clock.advance(1);
   const result = await landing;
   assert.equal(result.kind, "failed");
   assert.match(result.kind === "failed" ? result.observation : "", /No physics tick for 2 s while airborne at 2\.50, 70\.00, 0\.50/);
 });
 
-test("the run's abort reads as stopped", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("the run's abort reads as stopped", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const run = new AbortController();
   const landing = awaitLanding(landingBot(hangUntilAborted), run.signal);
   run.abort(new Error("cancelled"));
   assert.deepEqual(await landing, { kind: "stopped" });
 });
 
-test("a null signal is bounded by the wall clock only", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("a null signal is bounded by the wall clock only", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const landing = awaitLanding(landingBot(hangUntilAborted), null);
-  context.mock.timers.tick(LANDING_WALL_MS);
+  await clock.advance(LANDING_WALL_MS);
   assert.equal((await landing).kind, "failed");
 });
 
@@ -130,19 +141,30 @@ test("the run's abort during the resync reads stopped", async () => {
   assert.deepEqual(await awaitLanding(bot, run.signal, { world: ghostAirWorld() }), { kind: "stopped" });
 });
 
-test("no physics tick for the bound is not a held body: the wall-clock failure asks for nothing", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
+test("no physics tick for the bound is not a held body: the wall-clock failure asks for nothing", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const { bot, calls } = heldBot();
   bot.stabilize = hangUntilAborted;
   const landing = awaitLanding(bot, new AbortController().signal, { world: ghostAirWorld() });
-  context.mock.timers.tick(LANDING_WALL_MS);
+  await clock.advance(LANDING_WALL_MS);
   assert.match((await landing as { observation: string }).observation, /No physics tick/);
   assert.equal(calls.resync, 0);
 });
 
-test("the wall timer is gone after a landing", async (context) => {
-  context.mock.timers.enable({ apis: ["setTimeout"] });
-  const clear = context.mock.method(globalThis, "clearTimeout");
-  await awaitLanding(landingBot(async () => ({ kind: "stable" })), null);
-  assert.equal(clear.mock.callCount(), 1);
+test("the wall timer is gone after a landing", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const gate: { land?: () => void } = {};
+  const landing = awaitLanding(
+    landingBot((_signal) => new Promise((resolve) => {
+      gate.land = () => resolve({ kind: "stable" });
+    })),
+    null,
+  );
+  await clock.advance(50);
+  assert.equal(clock.pendingGlobalTimers(), 1, "the wait arms its wall timer while the landing is pending");
+  gate.land?.();
+  await landing;
+  assert.equal(clock.pendingGlobalTimers(), 0, "a landing clears the wall timer it armed");
 });
