@@ -28,6 +28,7 @@ import {
 import { entityHealth, dragonPhase, isDragonLanding, isDragonPerched, observedDragonLandingCenter, perchAttackCell, perchedDragonHead, perchedDragonBodyParts } from "../../../world/end-fight.js";
 import { nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { REGENERATION_HUNGER } from "../../../world/food.js";
+import { DIG_CLEAR_BLOCK } from "../../../world/dig-clear.js";
 import { hasItemFamily } from "../../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { selectPolicyFood } from "../../perception/food.js";
@@ -798,7 +799,7 @@ export class EndCombat {
       allowDigging: this.policy().combat.terrain.dig, scaffolding: pillar && this.policy().combat.terrain.place,
       protectedCells: new Set([packKey(pedestal.x, pedestal.y, pedestal.z),
         ...(observation.staircase?.tower.map(p => packKey(p.x, p.y, p.z)) ?? []),
-        ...(observation.staircase?.cells.filter(cell => cell.blockName !== "air")
+        ...(observation.staircase?.cells.filter(cell => cell.blockName !== DIG_CLEAR_BLOCK)
           .map(({ position: p }) => packKey(p.x, p.y, p.z)) ?? [])]),
     });
     while (!observation.destroyed && !observation.shot) {

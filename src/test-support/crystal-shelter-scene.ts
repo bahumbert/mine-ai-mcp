@@ -3,6 +3,7 @@ import { Vec3 } from "vec3";
 import { protectionShell } from "../survival/positioning/combat/planner.js";
 import type { CrystalStaircase } from "../survival/positioning/combat/crystal-staircase.js";
 import { enclosedInPlace, shelterFeet } from "../survival/responses/shelter-cells.js";
+import { DIG_CLEAR_BLOCK } from "../world/dig-clear.js";
 import type { FakeCell, FakeHarness } from "./fake-bot/index.js";
 
 type SceneParts = Pick<FakeHarness, "bot" | "server" | "world"> & { readonly plan: CrystalStaircase };
@@ -38,7 +39,7 @@ export function closeShelter({ bot, server, world, plan }: SceneParts): { readon
   for (const cell of shell) world.setCell(cell, "end_stone");
   if (!enclosedInPlace(bot)) throw new Error("the shelter shell does not close the bot in");
   for (const tread of MISSING_TREADS) world.setCell(tread, "end_stone");
-  const wrong = plan.cells.filter(({ blockName }) => blockName === "air")
+  const wrong = plan.cells.filter(({ blockName }) => blockName === DIG_CLEAR_BLOCK)
     .map(({ position }) => new Vec3(position.x, position.y, position.z))
     .reduce((nearest, cell) => cell.distanceTo(FIRST_ASCENT) < nearest.distanceTo(FIRST_ASCENT) ? cell : nearest);
   world.setCell(wrong, "end_stone");
