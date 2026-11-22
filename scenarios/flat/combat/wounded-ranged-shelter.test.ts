@@ -7,7 +7,7 @@ import { DEFAULT_SURVIVAL_POLICY } from "../../../src/survival/policy/contract.j
 import type { Runtime } from "../../src/runtime.ts";
 import { type Encounter, type ReflexOutcome } from "./reflex.ts";
 import {
-  declareRecoveryHighs, judgeShelter, phaseWaiter, readShelterReads, stageWound, watchDamage,
+  declareRecoveryHighs, enableRegenerationOnFirstAttack, judgeShelter, phaseWaiter, readShelterReads, stageWound, watchDamage, watchFirstHurt,
   type DamageLatch, type ShelterEvidence, type ShelterRead,
 } from "./wounded-ranged-shelter.ts";
 
@@ -343,6 +343,189 @@ for (const rate of [20, 10]) {
     await clock.settle(wait("lava", () => bot.time.age! >= first), 60_000);
     await clock.settle(assert.rejects(wait("recovery", () => false), /recovery: the goal budget ran out/), 60_000);
     assert.ok(bot.time.age! - (first - 30) < 80, "the second wait did not get a fresh budget");
+    assertClean();
+  });
+
+  const REGENERATION_ON = "/gamerule naturalRegeneration true";
+  const regenerationChats = <T extends { text: string }>(sent: readonly T[]): T[] => sent.filter((s) => s.text === REGENERATION_ON);
+
+  test(`the first-hurt watch reads a drop below the last heard health only, once, at ${rate} tps`, async () => {
+    const { clock, combat, bot, tick, assertClean } = arena(rate);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    {
+      using watch = watchFirstHurt(bot);
+      combat.setHealth(11); // regeneration
+      combat.setHealth(11); // a repeated packet
+      assert.equal(watch.hurt(), false);
+      assert.equal(watch.healthAtHurt(), null);
+      assert.equal(watch.ageAtHurt(), null);
+      await tick(20);
+      combat.setHealth(9);
+      const dropAge = bot.time.age!;
+      assert.equal(watch.hurt(), true);
+      assert.equal(watch.healthAtHurt(), 9);
+      assert.equal(watch.ageAtHurt(), dropAge);
+      await tick(20);
+      combat.setHealth(8); // a later drop changes nothing
+      assert.equal(watch.healthAtHurt(), 9);
+      assert.equal(watch.ageAtHurt(), dropAge);
+    }
+    assertClean();
+  });
+
+  // Armed at 10; each row is the health packets heard after it. A rise moves the last heard, so a drop is measured from the high.
+  test(`the first-hurt watch has a case on each side of its bound, measured from the last health heard, at ${rate} tps`, async () => {
+    for (const [heard, hurt, at] of [
+      [[10], false, null], [[10.01], false, null], [[9.99], true, 9.99],
+      [[12, 12], false, null], [[12, 11.5], true, 11.5], [[12, 10], true, 10],
+    ] as const) {
+      const { clock, combat, bot, assertClean } = arena(rate);
+      using _timers = clock.install();
+      combat.setHealth(10);
+      {
+        using watch = watchFirstHurt(bot);
+        for (const health of heard) combat.setHealth(health);
+        assert.equal(watch.hurt(), hurt, `heard ${heard.join(", ")} after 10`);
+        assert.equal(watch.healthAtHurt(), at, `heard ${heard.join(", ")} after 10`);
+      }
+      assertClean();
+    }
+  });
+
+  test(`regeneration stays off until the first drop, then one command goes out at or after the drop's world age, at ${rate} tps`, async () => {
+    const { clock, combat, bot, server, wait, sent, tick, assertClean } = waiter(30);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    const watch = watchFirstHurt(bot);
+    const done = enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => 0, () => {});
+    await tick(40);
+    assert.equal(regenerationChats(sent).length, 0, "a still health sends nothing in 40 server ticks");
+    combat.setHealth(11); // regeneration alone is no drop
+    await tick(20);
+    assert.equal(regenerationChats(sent).length, 0, "a health that only rises sends none");
+    combat.setHealth(9);
+    const dropTick = server.gameTime;
+    const dropAge = bot.time.age!;
+    assert.equal(await clock.settle(done, 60_000), "hurt", "a drop with the reflex idle says so");
+    const chats = regenerationChats(sent);
+    assert.equal(chats.length, 1, "exactly one command");
+    assert.ok(chats[0]!.serverTick >= dropTick, `sent at server tick ${chats[0]!.serverTick}, drop at ${dropTick}`);
+    assert.ok(bot.time.age! >= dropAge, "the wait ended at or after the drop's world age");
+    await tick(60);
+    combat.setHealth(7);
+    await tick(20);
+    assert.equal(regenerationChats(sent).length, 1, "a later drop sends nothing more");
+    watch[Symbol.dispose]();
+    assertClean();
+  });
+
+  test(`the wait reports one progress line per shot while the world age moves, and none after it ends, at ${rate} tps`, async () => {
+    const { clock, combat, bot, wait, tick, assertClean } = waiter(30);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    const reasons: string[] = [];
+    let shots = 1; // the first shot that admitted the runtime came before the wait
+    const watch = watchFirstHurt(bot);
+    const added = listenersAddedSince(bot);
+    const done = enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => shots, (reason) => void reasons.push(reason));
+    await tick(20);
+    assert.deepEqual(reasons, [], "no new shot, no progress");
+    shots = 2;
+    await tick(20);
+    assert.deepEqual(reasons, ["shot 2"]);
+    await tick(20);
+    assert.deepEqual(reasons, ["shot 2"], "the same count reports nothing again");
+    shots = 3;
+    await tick(20);
+    assert.deepEqual(reasons, ["shot 2", "shot 3"]);
+    combat.setHealth(9);
+    await clock.settle(done, 60_000);
+    assert.equal(added("physicsTick"), 0, "the progress listener is gone once the wait ends");
+    shots = 4;
+    await tick(20);
+    assert.deepEqual(reasons, ["shot 2", "shot 3"]);
+    watch[Symbol.dispose]();
+    assertClean();
+  });
+
+  test(`a shot counted while the server is stopped reports no progress, at ${rate} tps`, async () => {
+    const { clock, combat, bot, server, wait, tick, assertClean } = waiter(90);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    const reasons: string[] = [];
+    let shots = 0;
+    const watch = watchFirstHurt(bot);
+    const done = enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => shots, (reason) => void reasons.push(reason));
+    server.stop();
+    shots = 1;
+    await clock.advance(5_000); // client ticks go on, the world age stands still
+    assert.deepEqual(reasons, []);
+    server.resume();
+    await tick(20);
+    assert.deepEqual(reasons, ["shot 1"], "the shot is progress once the world age moves again");
+    combat.setHealth(9);
+    await clock.settle(done, 60_000);
+    watch[Symbol.dispose]();
+    assertClean();
+  });
+
+  test(`a death during the wait rejects, sends no command and leaves no listener, at ${rate} tps`, async () => {
+    const { clock, combat, bot, wait, sent, controller, tick, assertClean } = waiter(30);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    const added = listenersAddedSince(bot);
+    {
+      using watch = watchFirstHurt(bot);
+      const settled = assert.rejects(enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => 0, () => {}), /died/);
+      await tick(20);
+      controller.abort(new Error("Wounded bot died")); // run's `died` controller, aborted by the death event
+      await clock.settle(settled, 60_000);
+      assert.equal(added("physicsTick"), 0, "the progress listener is gone after the abort");
+    }
+    assert.equal(added("health"), 0);
+    assert.equal(regenerationChats(sent).length, 0);
+    assertClean();
+  });
+
+  // With the gate on the first drop alone the reflex hid at health 10 and no health or damage packet came, so the shell
+  // blocked every later shot and the wait ran into the 520-tick guard (facts `scenario-fixture-pitfalls.md`, T13v).
+  test(`regeneration turns on when the reflex takes the body with no health drop, and the answer says which, at ${rate} tps`, async () => {
+    const { clock, combat, bot, wait, sent, tick, assertClean } = waiter(30);
+    using _timers = clock.install();
+    combat.setHealth(10);
+    let responding = false;
+    const watch = watchFirstHurt(bot);
+    const done = enableRegenerationOnFirstAttack(bot, watch, () => responding, wait, () => 0, () => {});
+    await tick(40);
+    assert.equal(regenerationChats(sent).length, 0, "a bot nobody answered for and nothing hurt waits");
+    responding = true;
+    const opened = await clock.settle(done, 60_000);
+    assert.equal(opened, "responding");
+    assert.equal(regenerationChats(sent).length, 1);
+    assert.equal(watch.hurt(), false, "no drop was heard");
+    watch[Symbol.dispose]();
+    assertClean();
+  });
+
+  test(`no drop within the goal budget rejects naming the phase and sends nothing, at ${rate} tps`, async () => {
+    const { clock, bot, wait, sent, assertClean } = waiter(3);
+    using _timers = clock.install();
+    const watch = watchFirstHurt(bot);
+    await clock.settle(assert.rejects(enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => 0, () => {}), /first attack: the goal budget ran out/), 60_000);
+    assert.equal(regenerationChats(sent).length, 0);
+    watch[Symbol.dispose]();
+    assertClean();
+  });
+
+  test(`a stopped server rejects the wait naming the phase and sends nothing, at ${rate} tps`, async () => {
+    const { clock, server, bot, wait, sent, assertClean } = waiter(90);
+    using _timers = clock.install();
+    const watch = watchFirstHurt(bot);
+    server.stop();
+    await clock.settle(assert.rejects(enableRegenerationOnFirstAttack(bot, watch, () => false, wait, () => 0, () => {}), /first attack: the server's world age stood still/), 120_000);
+    assert.equal(regenerationChats(sent).length, 0);
+    watch[Symbol.dispose]();
     assertClean();
   });
 }

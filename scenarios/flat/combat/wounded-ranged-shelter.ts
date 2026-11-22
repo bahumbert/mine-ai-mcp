@@ -171,6 +171,81 @@ export function declareRecoveryHighs(bot: Bot, progress: (reason: string) => voi
   return { [Symbol.dispose]: () => void bot.off("health", onHealth) };
 }
 
+/** The first health drop after the wound, whatever caused it (a hit, a fire's damage). */
+export interface HurtWatch extends Disposable {
+  hurt(): boolean;
+  /** The health the first drop left, or null before one. */
+  healthAtHurt(): number | null;
+  /** The world age of the first drop, or null before one (or before the first time packet): a time packet's age, so exact to about 19 server ticks. */
+  ageAtHurt(): number | null;
+}
+
+/**
+ * Arm after the wound: a health strictly below the last health heard is the first hurt, recorded once. A health equal or
+ * above (regeneration, a heal) only updates the last heard; a hit the armour fully absorbs sends no drop and is no hurt.
+ */
+export function watchFirstHurt(bot: Bot): HurtWatch {
+  let last = bot.health;
+  let healthAtHurt: number | null = null;
+  let ageAtHurt: number | null = null;
+  const onHealth = () => {
+    if (healthAtHurt === null && bot.health < last) [healthAtHurt, ageAtHurt] = [bot.health, bot.time.age ?? null];
+    last = bot.health;
+  };
+  bot.on("health", onHealth);
+  return {
+    hurt: () => healthAtHurt !== null,
+    healthAtHurt: () => healthAtHurt,
+    ageAtHurt: () => ageAtHurt,
+    [Symbol.dispose]: () => void bot.off("health", onHealth),
+  };
+}
+
+/** The report's record of the first health drop after the wound (not a blaze hit: any damage), or null when none came. */
+function firstHealthDrop(watch: HurtWatch, woundAge: number | null): { health: number; ticks: number | null } | null {
+  const health = watch.healthAtHurt();
+  const age = watch.ageAtHurt();
+  return health === null ? null : { health, ticks: age === null || woundAge === null ? null : age - woundAge };
+}
+
+/**
+ * Turn natural regeneration on at the first attack on the wounded bot, so the response the trial judges is admitted below
+ * `engage_min_health` and not after the health has regenerated past it before the first hit (analysis 2026-11-22 section 2).
+ * The first attack is the first health drop (`watch`) or the reflex taking the body (`responding`): a blaze hit the reflex
+ * answers sends no health or damage packet: the hide began at health 10 with no drop, and its shell blocked every later
+ * shot, so a gate on the drop alone never opened (facts `scenario-fixture-pitfalls.md`, plan part2-a8 T13v).
+ * Regeneration freezes the bot's health, so nothing else would tell Mine Labs' still guard the trial lives: each new shot
+ * is reported as progress, and only while the world age has moved since the last report. A death aborts `waitPhase`'s
+ * signal (`run`'s `died` controller); a budget that runs out or a stopped world age throws from it, naming the phase.
+ * Returns what opened the gate.
+ */
+export async function enableRegenerationOnFirstAttack(
+  bot: Bot,
+  watch: HurtWatch,
+  responding: () => boolean,
+  waitPhase: (phase: string, until: () => boolean) => Promise<void>,
+  shots: () => number,
+  progress: (reason: string) => void,
+): Promise<"hurt" | "responding"> {
+  let reportedShots = shots();
+  let reportedAge = bot.time.age ?? null;
+  const onTick = () => {
+    const count = shots();
+    const age = bot.time.age ?? null;
+    if (count <= reportedShots || age === null || (reportedAge !== null && age <= reportedAge)) return;
+    [reportedShots, reportedAge] = [count, age];
+    progress(`shot ${count}`);
+  };
+  bot.on("physicsTick", onTick);
+  try {
+    await waitPhase("first attack", () => watch.hurt() || responding());
+  } finally {
+    bot.off("physicsTick", onTick);
+  }
+  bot.chat("/gamerule naturalRegeneration true");
+  return watch.hurt() ? "hurt" : "responding";
+}
+
 /**
  * A wait inside the driver's shared goal budget (the goal's timeout in game seconds, counted from the driver's first age),
  * leaving the terminal read its server ticks. It ends when `until` holds and throws, naming the phase, when the budget
@@ -237,6 +312,17 @@ async function burnInLava(bot: Bot, waitPhase: (phase: string, until: () => bool
   await waitPhase("out of the lava", () => !isInLava(bot));
 }
 
+/** Two shooters of `mob` on opposite sides of the bot (a skeleton holds a bow and stands closer). */
+function summonShooters(bot: Bot, mob: "blaze" | "skeleton"): void {
+  const range = mob === "skeleton" ? 12 : 18;
+  const equipment = mob === "skeleton" ? ',HandItems:[{id:"minecraft:bow",count:1},{}]' : "";
+  for (const [x, z] of [
+    [range + 0.5, 0.5],
+    [-range + 0.5, 0.5],
+  ])
+    bot.chat(`/summon ${mob} ${x} -60 ${z} {PersistenceRequired:1b${equipment}}`);
+}
+
 export const run: MineAiScenario = async (context) => {
   const { bot } = context;
   const died = new AbortController();
@@ -254,8 +340,9 @@ export const run: MineAiScenario = async (context) => {
   // Armed before the first hurt: the wound waits for the lava's hurt window by the damage packets it heard.
   using latch = watchDamage(bot);
   await wearArmor(context);
-  // Freeze recovery only during arrangement, so the admitted response starts
-  // in the observed eight-to-twelve-health gap. No teleport or healing in combat.
+  // Freeze recovery during the arrangement and until the first attack (`enableRegenerationOnFirstAttack`: a health drop or
+  // the reflex taking the body), so the admitted response starts below `engage_min_health`, not after regeneration has
+  // carried the health past it before the first hit (analysis 2026-11-22 section 2). No teleport or healing in combat.
   bot.chat("/gamerule naturalRegeneration false");
   if (burning) await burnInLava(bot, waitPhase);
   // A burning bot is wounded once the first shot is in the air (the 100 ticks of fire before it would otherwise carry
@@ -263,9 +350,11 @@ export const run: MineAiScenario = async (context) => {
   const woundNow = async () => {
     const staged = await stageWound(context, startingHealth, latch);
     if (staged.status !== "wounded") throw new Error(`Could not arrange ${startingHealth} health: ${JSON.stringify(staged)}`);
-    return staged;
+    return { ...staged, age: bot.time.age ?? null };
   };
   let wound = burning ? null : await woundNow();
+  // Armed as soon as the wound is staged, so a hit that lands before the runtime opens is still the first hurt.
+  let hurt: HurtWatch | null = wound === null ? null : watchFirstHurt(bot);
   const start = bot.entity.position.clone();
   let shots = 0;
   let minimumHealth = bot.health;
@@ -280,29 +369,26 @@ export const run: MineAiScenario = async (context) => {
   bot.once("death", onDeath);
   bot.on("entitySpawn", spawn);
   bot.on("physicsTick", tick);
-  const range = mob === "skeleton" ? 12 : 18;
-  const equipment = mob === "skeleton" ? ',HandItems:[{id:"minecraft:bow",count:1},{}]' : "";
-  for (const [x, z] of [
-    [range + 0.5, 0.5],
-    [-range + 0.5, 0.5],
-  ])
-    bot.chat(`/summon ${mob} ${x} -60 ${z} {PersistenceRequired:1b${equipment}}`);
+  summonShooters(bot, mob);
   try {
     // Admit the policy with an actual projectile already in flight, not merely
     // with a passive shooter in sight that an early sprint can leave behind.
     await waitPhase("first shot", () => shots > 0 || bot.health <= 0);
     wound ??= await woundNow();
+    hurt ??= watchFirstHurt(bot);
     const runtime = await openRuntime(context, `wounded-${mob}-shelter`);
     try {
       using _highs = declareRecoveryHighs(bot, context.progress);
-      bot.chat("/gamerule naturalRegeneration true");
+      const regenerationOpenedBy = await enableRegenerationOnFirstAttack(
+        bot, hurt, () => runtime.status().busy, waitPhase, () => shots, context.progress,
+      );
       await waitPhase("recovery", () => bot.health >= HEALTHY || bot.health <= 0);
       const reads = await readShelterReads(context, runtime, protection === "buildable", waitPhase.remaining());
       const verdict = judgeShelter({ protection, shots, health: bot.health, minimumHealth, reads });
       return {
         status: verdict.status,
         detail: JSON.stringify({
-          protection, verdict: verdict.why, wound, encounters: reads.flatMap((read) => read.encounters),
+          protection, verdict: verdict.why, wound, firstHealthDrop: firstHealthDrop(hurt, wound.age), regenerationOpenedBy, encounters: reads.flatMap((read) => read.encounters),
           limits: reads.flatMap((read) => read.limits), failures: reads.flatMap((read) => read.failures),
           shots, health: bot.health, minimumHealth, maximumDistance,
         }),
@@ -311,6 +397,7 @@ export const run: MineAiScenario = async (context) => {
       await runtime.close();
     }
   } finally {
+    hurt?.[Symbol.dispose]();
     bot.off("death", onDeath);
     bot.off("entitySpawn", spawn);
     bot.off("physicsTick", tick);
