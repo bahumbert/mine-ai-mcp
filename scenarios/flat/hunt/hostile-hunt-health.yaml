@@ -23,4 +23,4 @@ players:
 client:
   command: bun
   args: ["../../src/client-host.ts", "./hostile-hunt-health.ts"]
-goal: { kind: completion, who: HurtHunter, timeout: 120, stillTicks: 440 } # T18o 4a03256f: longest passing still span 212 (20 tps, n 33), 214 (10 tps, n 33); 2x rounded up to 20; /home/bhumbert/mcp/run-data-t18o/rep4b-20, rep4b-10, gate4a-20, gate4a-10
+goal: { kind: completion, who: HurtHunter, timeout: 120, stillTicks: 440 } # T18o 4a03256f: longest passing still span 212 (20 tps, n 33), 214 (10 tps, n 33); 2x rounded up to 20; $RUN_DATA_DIR/run-data-t18o/rep4b-20, rep4b-10, gate4a-20, gate4a-10
