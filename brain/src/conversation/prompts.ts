@@ -1,3 +1,4 @@
+/** The model prompts of a conversation: its opening call and the gist call that sums it up. */
 import type { LocalizedChat } from "../llm-mind.ts";
 import { personaPrompt } from "../llm-mind.ts";
 import type { ConversationFacts, GistInput, Nearby, OpeningInput, PastTalk } from "../mind.ts";

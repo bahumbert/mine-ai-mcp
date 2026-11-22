@@ -1,14 +1,19 @@
-import { setTimeout as sleep } from "node:timers/promises";
-import type { BrainEvent } from "../brain-log.ts";
+/** One character's conversation controller: the gates for opening a talk, its record and how it ends (spec 2026-10-18-conversations-design). */
 import { namesWord } from "../llm-mind.ts";
-import type { Memory } from "../memory.ts";
-import type { ChatLine, ConversationFacts, GistPartner, Mind, Nearby, OpeningDecision, OpeningInput, PastTalk } from "../mind.ts";
-import type { Persona } from "../persona.ts";
+import type { ChatLine, ConversationFacts, Nearby, OpeningDecision, OpeningInput } from "../mind.ts";
 import type { BotSnapshot, Position } from "../runtime-client.ts";
+import { sleepMs } from "../wall-timers.ts";
+import { ConversationBudget, fallbackGist, maxConversations } from "./budget.ts";
+import { addressed, nearby, pastTalk, playersNear } from "./nearby.ts";
 import {
-  addMembers, capReached, checkRange, ending, isMember, lineSaid, manhattan, openConversation,
+  addMembers, capReached, checkRange, ending, isMember, lineSaid, manhattan, openConversation, same,
   type Conversation, type ConversationKind, type EndReason, type Limits,
 } from "./state.ts";
+import type { CarriedIntent, ControllerDeps, ConversationEvent, ConversationMemory, ConversationRelations, OpenFacts, Talk } from "./types.ts";
+
+// Every name this module exported before its split stays importable from here.
+export { ConversationBudget, maxConversations };
+export type { ControllerDeps, ConversationEvent, ConversationMemory, ConversationRelations, OpenFacts };
 
 /** How many partners' last talks are kept. */
 const PARTNERS_KEPT = 5;
@@ -18,107 +23,6 @@ const CALL_WAIT_MS = 60_000;
 const GIST_WAIT_MS = 120_000;
 /** How often a deliberate opening looks again at what blocks it (real time). */
 const OPEN_POLL_MS = 1_000;
-/** The most of a member's last line the fallback gist quotes. */
-const FALLBACK_GIST_CHARS = 120;
-
-/** Conversations this brain's characters have opened and still hold; at most `max` at a time (`--max-conversations`). */
-export class ConversationBudget {
-  private taken = 0;
-  constructor(readonly max: number) {}
-
-  tryTake(): boolean {
-    if (this.taken >= this.max) return false;
-    this.taken += 1;
-    return true;
-  }
-
-  give(): void {
-    this.taken = Math.max(0, this.taken - 1);
-  }
-
-  get active(): number {
-    return this.taken;
-  }
-}
-
-export type ConversationEvent = Extract<BrainEvent, { kind: "conversation" }>;
-export type ConversationMemory = Extract<Memory, { kind: "conversation" }>;
-
-/** What the relations feature adds to a conversation (spec 2026-10-19-relations-trading-design): records in, judgments out. */
-export interface ConversationRelations {
-  /** Each named member's record text, given to the gist call (which then also judges them). */
-  readonly blocksFor: (names: readonly string[]) => readonly { readonly name: string; readonly block: string }[];
-  /** An opening line asked these names for something: each becomes an open request. */
-  readonly asked: (names: readonly string[], what: string, snapshot: BotSnapshot) => void;
-  /** One line per nearby partner for an opening call. */
-  readonly openingLines: (names: readonly string[]) => readonly string[];
-  /** The gist's judgment of the members, once a gist call returned them. */
-  readonly ended: (partners: readonly GistPartner[]) => void;
-}
-
-export interface ControllerDeps {
-  readonly self: string;
-  readonly persona: Persona;
-  readonly mind: Mind;
-  readonly budget: ConversationBudget;
-  /** Whether the model queue has a free slot: openings and gists are skipped, never queued. */
-  readonly modelFree: () => boolean;
-  /** Resolves true once a model slot is free within `ms`, false on time-out or abort; absent: a gist does not wait. */
-  readonly waitForModel?: (ms: number, signal: AbortSignal) => Promise<boolean>;
-  /** Blocks (Manhattan) talk carries: the Localized Chat range, else the staying distance. */
-  readonly talkRange: number;
-  /** Milliseconds between two looks of a waiting deliberate opening; default {@link OPEN_POLL_MS}. */
-  readonly openPollMs?: number;
-  /** Whether the server limits how far talk carries (Localized Chat): only then is a call shouted. */
-  readonly localized?: boolean;
-  readonly random: () => number;
-  /** Monotonic milliseconds (`monotonicNow`): every window of the controller (cooldown, minutes cap, checks, the ask stamps). Never compared with {@link ControllerDeps.wallNow}. */
-  readonly now: () => number;
-  /** Wall milliseconds (`Date.now`): what is written down or shown (a talk's end, its age) and the chat history's line times. */
-  readonly wallNow: () => number;
-  /** Resolves once the line is sent; rejects when it was not. */
-  readonly speak: (text: string, to: readonly string[], whisperTo: string | null, shout: boolean) => Promise<void>;
-  readonly journal: (event: ConversationEvent) => void;
-  readonly memorize: (memory: ConversationMemory) => void;
-  readonly log: (line: string) => void;
-  readonly history: () => readonly ChatLine[];
-  /** Absent: the feature is off, the gist and the opening are as before. */
-  readonly relations?: ConversationRelations;
-}
-
-export interface OpenFacts {
-  readonly snapshot: BotSnapshot;
-  readonly activity: string;
-  readonly lately: readonly string[];
-  readonly lastFailed: OpeningInput["lastFailed"];
-  readonly intent?: OpeningInput["intent"];
-}
-
-interface Talk {
-  readonly with: readonly string[];
-  readonly topic: string;
-  readonly gist: string;
-  /** Wall time: it is stored in the memory as an ISO date and compared with an objective's wall start. */
-  readonly endedAt: number;
-}
-
-interface CarriedIntent {
-  readonly partner: string;
-  readonly intent: NonNullable<OpeningInput["intent"]>;
-  readonly carriedAt: number;
-  /** A chat call was shown the intent: her next line is the ask. */
-  shown: boolean;
-}
-
-const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-
-/** What is remembered of a talk the model did not sum up: its topic, else the last line another member said, else who it was with. Never empty. */
-function fallbackGist(topic: string, othersLines: readonly ChatLine[], others: readonly string[]): string {
-  if (topic !== "") return topic;
-  const last = othersLines.at(-1);
-  if (last !== undefined) return `${last.speaker}: "${last.text}"`.slice(0, FALLBACK_GIST_CHARS);
-  return `with ${others.join(", ")}`;
-}
 
 /**
  * One character's conversation (spec 2026-10-18-conversations-design): the gates for opening one, its record, and how
@@ -206,7 +110,7 @@ export class ConversationController {
     if (pending !== null) pending.shown = true;
     return {
       kind: c.kind, others, opener: c.opener, topic: c.topic, planned: c.planned, lines: c.lines, minutes: Math.round((now - c.startedAt) / 6_000) / 10,
-      iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => this.pastTalk(talk, wallNow)),
+      iAmOpener: same(c.opener, this.deps.self), sayGoodbye: capReached(c, this.limits, now), lastGists: [...gists].map((talk) => pastTalk(talk, wallNow)),
       ...(pending !== null && { intent: { ...pending.intent, partner: pending.partner } }),
     };
   }
@@ -238,7 +142,7 @@ export class ConversationController {
     const { checkEverySeconds, openingDistance, pairCooldownMinutes, sociability } = this.limits;
     if (this.lastCheckAt !== null && now - this.lastCheckAt < checkEverySeconds * 1_000) return false;
     this.lastCheckAt = now;
-    const near = this.playersNear(o.snapshot, openingDistance)
+    const near = playersNear(o.snapshot, this.deps.self, openingDistance)
       .filter((player) => now - (this.cooldownFrom.get(player.username.toLowerCase()) ?? -Infinity) >= pairCooldownMinutes * 60_000);
     if (near.length === 0) return false;
     const draw = this.deps.random();
@@ -246,7 +150,7 @@ export class ConversationController {
     if (draw >= sociability) return false;
     if (!this.deps.budget.tryTake()) return false;
     const wallNow = this.deps.wallNow();
-    return this.open("chance", near.map((player) => this.nearby(player.username, player.distance, wallNow)), o, false, null, signal);
+    return this.open("chance", near.map((player) => nearby(this.talks, player.username, player.distance, wallNow)), o, false, null, signal);
   }
 
   /** Why the last deliberate opening that returned false was blocked: `model busy`, `conversation limit` or `in a talk with <names>`; null when nothing blocked it. */
@@ -277,7 +181,7 @@ export class ConversationController {
     }
     const wallNow = this.deps.wallNow();
     const calling = partnerPosition === null || manhattan(o.snapshot.position, partnerPosition) > this.limits.talkRange;
-    const near = [this.nearby(partner, calling || partnerPosition === null ? null : manhattan(o.snapshot.position, partnerPosition), wallNow)];
+    const near = [nearby(this.talks, partner, calling || partnerPosition === null ? null : manhattan(o.snapshot.position, partnerPosition), wallNow)];
     return this.open("social", near, o, calling, partner, signal);
   }
 
@@ -293,7 +197,7 @@ export class ConversationController {
     const started = performance.now();
     if (forModel && this.deps.waitForModel !== undefined && (await this.slotWithin(ms, signal))) return;
     // A wait that failed early must not turn the loop into a spin.
-    await sleep(Math.max(0, ms - (performance.now() - started)), undefined, { signal }).catch(() => undefined);
+    await sleepMs(Math.max(0, ms - (performance.now() - started)), signal).catch(() => undefined);
   }
 
   private async open(kind: ConversationKind, near: readonly Nearby[], o: OpenFacts, calling: boolean, partner: string | null, signal: AbortSignal): Promise<boolean> {
@@ -312,7 +216,7 @@ export class ConversationController {
     const now = this.deps.now();
     const wallNow = this.deps.wallNow();
     // Only the names the line holds hear it as spoken to them (a favour of ADR-017's name rule).
-    const to = (partner !== null ? [partner] : this.addressed(decision.to, o.snapshot)).filter((name) => namesWord(decision.say, name));
+    const to = (partner !== null ? [partner] : addressed(decision.to, o.snapshot, this.deps.self, this.limits.talkRange)).filter((name) => namesWord(decision.say, name));
     this.deps.log(`conversation: opening answer open=${decision.open} to=${to.join(",")} length=${decision.length} say=${JSON.stringify(decision.say)}`);
     // A line heard while the model thought may have opened one already: it is the conversation now.
     if (!decision.open || decision.say === "" || to.length === 0 || this.record !== null) {
@@ -472,33 +376,6 @@ export class ConversationController {
     this.deps.journal({ kind: "conversation", event, id: c.id, members: [...c.members], ...more });
   }
 
-  private playersNear(snapshot: BotSnapshot, distance: number): { readonly username: string; readonly distance: number }[] {
-    const near: { username: string; distance: number }[] = [];
-    for (const player of snapshot.players) {
-      if (player.position === null || same(player.username, this.deps.self)) continue;
-      const away = manhattan(snapshot.position, player.position);
-      if (away <= distance) near.push({ username: player.username, distance: away });
-    }
-    return near;
-  }
-
-  /** The names an opening speaks to, as spelled by the players online; ["everyone"] is all within talk range. */
-  private addressed(to: readonly string[], snapshot: BotSnapshot): string[] {
-    if (to.some((name) => name.toLowerCase() === "everyone")) return this.playersNear(snapshot, this.limits.talkRange).map((player) => player.username);
-    const online = snapshot.players.map((player) => player.username);
-    return to.flatMap((name) => online.filter((known) => same(known, name) && !same(known, this.deps.self)));
-  }
-
-  private nearby(username: string, distance: number | null, wallNow: number): Nearby {
-    const talk = this.talks.get(username.toLowerCase());
-    return { username, distance, lastTalk: talk === undefined ? null : this.pastTalk(talk, wallNow) };
-  }
-
-  /** A talk's age in minutes: `wallNow` less its stored wall `endedAt` (a recalled talk comes from an ISO date). */
-  private pastTalk(talk: Talk, wallNow: number): PastTalk {
-    return { with: talk.with, topic: talk.topic, gist: talk.gist, minutesAgo: Math.max(0, Math.round((wallNow - talk.endedAt) / 60_000)) };
-  }
-
   private remember(talk: Talk): void {
     for (const name of talk.with) this.talks.set(name.toLowerCase(), talk);
     while (this.talks.size > PARTNERS_KEPT) {
@@ -506,12 +383,4 @@ export class ConversationController {
       this.talks.delete(oldest[0]);
     }
   }
-}
-
-/** The `--max-conversations` flag: a whole number of conversations at once (0 = never opens one), default 2. */
-export function maxConversations(value: string | undefined): number {
-  if (value === undefined) return 2;
-  const count = Number(value);
-  if (value.trim() === "" || !Number.isInteger(count) || count < 0) throw new Error(`[BAD_START_ARG] --max-conversations expects a whole number (0 or more), got ${value}`);
-  return count;
 }

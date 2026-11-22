@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.ts";
 import { EveryoneLines } from "./everyone-lines.ts";
 import { FakeRuntime } from "./testing.ts";
+
+/** The line's memory, as `everyone-lines.ts` keeps it (its `FORGET_AFTER_MS`, not exported). */
+const FORGET_AFTER_MS = 60_000;
 
 function lines() {
   const clock = { now: 0 };
@@ -74,6 +78,24 @@ test("the line is forgotten 60 s after it was first heard, and can be claimed ag
   clock.now = 60_001;
   record.heard("Steve", "hi", "Vex", 30);
   assert.equal(record.claim("Steve", "hi", "Vex"), true);
+});
+
+// The default clock is the monotonic one (monotonic-clock.ts header): WSL steps its wall clock back about 2 s every 30 s,
+// and a window read from `Date.now` would then forget the line 2 s late.
+test("on the default clock the line is kept to the 60 s bound and forgotten after it, although the wall clock steps back 2 s", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  // `Date.now` is read through the clock's wall stepper once it has stepped: an earlier step (WSL's, 0.5 s) makes it a stepper reading.
+  clock.stepWallClock(-500);
+  const record = new EveryoneLines();
+  record.heard("Steve", "hi", "Vex", 30);
+  assert.equal(record.claim("Steve", "hi", "Vex"), true);
+  clock.stepWallClock(-2_000);
+  await clock.advance(FORGET_AFTER_MS);
+  assert.equal(record.claim("Steve", "hi", "Vex"), false, "kept at the bound (the window is over after it, not at it)");
+  await clock.advance(1);
+  record.heard("Steve", "hi", "Vex", 30);
+  assert.equal(record.claim("Steve", "hi", "Vex"), true, "forgotten 1 ms after the bound, whatever the wall clock did");
 });
 
 test("two speakers saying the same text are two lines; the speaker's case does not matter", () => {

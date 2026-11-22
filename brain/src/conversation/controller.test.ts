@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChatLine, GistPartner, OpeningDecision } from "../mind.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
+import { createFakeClock, flush } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { ConversationBudget, ConversationController, maxConversations, type ControllerDeps, type ConversationEvent, type ConversationMemory } from "./controller.ts";
 
@@ -564,15 +565,18 @@ test("an opening without the intent records no ask", async () => {
   assert.equal(t.controller.askedSince("Theo", 0), false);
 });
 
-const later = (ms: number, run: () => void): void => void setTimeout(run, ms);
 const THEO_NEAR = { username: "Theo", position: { x: 3, y: 64, z: 0 } };
+/** The deliberate opening's poll (`pollMs` of `setup`): the clock moves in slices of it while a test waits. */
+const POLL_MS = 5;
 
 test("a deliberate opening waits for the model to be free, then proceeds", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   let free = false;
-  const t = setup({ modelFree: () => free, pollMs: 5 });
+  const t = setup({ modelFree: () => free, pollMs: POLL_MS });
   t.chat.reply(OPEN);
-  later(30, () => { free = true; });
-  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), true);
+  clock.after(30, () => { free = true; });
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), 2_000, POLL_MS), true);
   assert.equal(t.budget.active, 1);
 });
 
@@ -585,13 +589,17 @@ test("a deliberate opening uses waitForModel when it is wired", async () => {
   assert.equal(waits.length, 1);
 });
 
-test("a full conversation cap fails at the deadline by the wall clock, whatever the tick clock says, and names the reason", async () => {
+test("a full conversation cap fails at the deadline on the monotonic clock, whatever the wall clock does, and names the reason", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const budget = new ConversationBudget(1);
   budget.tryTake();
-  const t = setup({ budget, pollMs: 5 });
-  const started = performance.now();
-  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 80), false);
-  assert.ok(performance.now() - started >= 75, "it waited the whole time");
+  const t = setup({ budget, pollMs: POLL_MS });
+  // WSL steps its wall clock back in the middle of the wait: a deadline read from `Date.now` would move 2 s out and the 80 ms budget run out.
+  clock.after(40, () => clock.stepWallClock(-2_000));
+  const started = clock.now();
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 80), 80, POLL_MS), false);
+  assert.ok(clock.now() - started >= 80, "it waited the whole time");
   assert.equal(t.controller.openRefusal, "conversation limit");
   assert.equal(t.chat.requests.length, 0);
   assert.equal(t.budget.active, 1, "the slot of the other talk is untouched");
@@ -599,51 +607,62 @@ test("a full conversation cap fails at the deadline by the wall clock, whatever 
 });
 
 test("a model that stays busy fails with 'model busy'", async () => {
-  const t = setup({ modelFree: () => false, pollMs: 5 });
-  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal, 40), false);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const t = setup({ modelFree: () => false, pollMs: POLL_MS });
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal, 40), 40, POLL_MS), false);
   assert.equal(t.controller.openRefusal, "model busy");
   assert.equal(t.budget.active, 0);
 });
 
 test("no wait: a refusal is immediate and keeps its reason", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const t = setup({ modelFree: () => false });
-  const started = performance.now();
-  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), false);
-  assert.ok(performance.now() - started < 50);
+  // Zero ms of clock: a sleep of any length would leave the promise pending.
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), signal), 0), false);
   assert.equal(t.controller.openRefusal, "model busy");
 });
 
 test("a bot in a chance talk with others opens once that talk ends; if it never ends, the reason names who", async () => {
-  const t = setup({ pollMs: 5 });
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const t = setup({ pollMs: POLL_MS });
   t.controller.heard("Cleo", "Ayla, hi", ["Ayla"], "chat");
   t.chat.reply({ gist: "Chatted." }, OPEN);
-  later(30, () => t.controller.end("goodbye"));
-  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), true);
+  clock.after(30, () => t.controller.end("goodbye"));
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 2_000), 2_000, POLL_MS), true);
   assert.deepEqual(t.controller.current?.members, ["Ayla", "Theo"]);
-  const stuck = setup({ pollMs: 5 });
+  const stuck = setup({ pollMs: POLL_MS });
   stuck.controller.heard("Cleo", "Ayla, hi", ["Ayla"], "chat");
-  assert.equal(await stuck.controller.openSocial("Theo", THEO_NEAR.position, stuck.facts(stuck.snapshotWith([THEO_NEAR])), signal, 40), false);
+  assert.equal(await clock.settle(stuck.controller.openSocial("Theo", THEO_NEAR.position, stuck.facts(stuck.snapshotWith([THEO_NEAR])), signal, 40), 40, POLL_MS), false);
   assert.equal(stuck.controller.openRefusal, "in a talk with Cleo");
 });
 
 test("an abort during the wait stops it and takes no slot", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const abort = new AbortController();
-  const t = setup({ modelFree: () => false, pollMs: 5 });
-  later(20, () => abort.abort());
-  const started = performance.now();
-  assert.equal(await t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), abort.signal, 5_000), false);
-  assert.ok(performance.now() - started < 1_000);
+  const t = setup({ modelFree: () => false, pollMs: POLL_MS });
+  clock.after(20, () => abort.abort());
+  const started = clock.now();
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", null, t.facts(t.snapshotWith([])), abort.signal, 5_000), 1_000, POLL_MS), false);
+  // It ends in the poll that follows the abort, not at its own 5 s deadline.
+  assert.ok(clock.now() - started <= 20 + POLL_MS, "ended at the abort");
+  assert.equal(clock.pendingGlobalTimers(), 0, "the abort cleared the wait's timer");
   assert.equal(t.budget.active, 0);
-  const early = setup({ pollMs: 5 });
-  assert.equal(await early.controller.openSocial("Theo", null, early.facts(early.snapshotWith([])), abort.signal, 5_000), false, "already aborted");
+  const early = setup({ pollMs: POLL_MS });
+  assert.equal(await clock.settle(early.controller.openSocial("Theo", null, early.facts(early.snapshotWith([])), abort.signal, 5_000), 0), false, "already aborted");
   assert.equal(early.budget.active, 0);
   assert.equal(early.chat.requests.length, 0);
 });
 
 test("the partner opens to the bot during the wait: the wait ends in their talk, with no model call", async () => {
-  const t = setup({ modelFree: () => false, pollMs: 5 });
-  later(20, () => t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat"));
-  assert.equal(await t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 5_000), true);
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const t = setup({ modelFree: () => false, pollMs: POLL_MS });
+  clock.after(20, () => t.controller.heard("Theo", "Ayla, hi", ["Ayla"], "chat"));
+  assert.equal(await clock.settle(t.controller.openSocial("Theo", THEO_NEAR.position, t.facts(t.snapshotWith([THEO_NEAR])), signal, 5_000), 5_000, POLL_MS), true);
   assert.equal(t.chat.requests.length, 0);
   assert.equal(t.budget.active, 0);
 });
@@ -700,33 +719,35 @@ test("an opening that asks someone it speaks to for something tells the relation
   const t = setup({ relations });
   t.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo", "Bruno"], asks_what: "some iron" });
   assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(5)), signal), true);
-  await new Promise((r) => setTimeout(r, 0));
+  await flush();
   assert.deepEqual(asked, [{ names: ["Theo"], what: "some iron" }]);
   const plain = setup({ relations });
   plain.chat.reply({ ...OPEN, say: "Theo, how is the mine?" });
   assert.equal(await plain.controller.maybeOpen(plain.facts(plain.theoAt(5)), signal), true);
-  await new Promise((r) => setTimeout(r, 0));
+  await flush();
   assert.equal(asked.length, 1, "an opening that asks nothing opens no request");
 });
 
 test("an opening's ask opens its request once the line is said, and none when the say fails", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const asked: string[] = [];
   const relations = { blocksFor: () => [], openingLines: () => [], asked: (names: readonly string[]) => asked.push(...names), ended: () => {} };
   let sent = () => {};
   const t = setup({ relations, sent: new Promise<void>((resolve) => { sent = resolve; }) });
   t.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo"], asks_what: "some iron" });
   assert.equal(await t.controller.maybeOpen(t.facts(t.theoAt(5)), signal), true);
-  await new Promise((r) => setTimeout(r, 5));
+  await clock.advance(POLL_MS);
   assert.deepEqual(asked, [], "still being typed");
   sent();
-  await new Promise((r) => setTimeout(r, 5));
+  await flush();
   assert.deepEqual(asked, ["Theo"]);
   const refused = Promise.reject(new Error("socket closed"));
   refused.catch(() => undefined);
   const failed = setup({ relations, sent: refused });
   failed.chat.reply({ ...OPEN, say: "Theo, could you give me some iron?", asks_of: ["Theo"], asks_what: "some iron" });
   await failed.controller.maybeOpen(failed.facts(failed.theoAt(5)), signal);
-  await new Promise((r) => setTimeout(r, 5));
+  await flush();
   assert.deepEqual(asked, ["Theo"], "a line that was not said asks nothing");
 });
 

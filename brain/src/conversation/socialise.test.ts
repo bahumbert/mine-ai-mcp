@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
-import { FakeRuntime, scriptedMind, steppedClocks, testPersona, until } from "../testing.ts";
+import { createFakeClock, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
+import { FakeRuntime, scriptedMind, testPersona } from "../testing.ts";
 import { ConversationBudget, ConversationController } from "./controller.ts";
-import { pickPartner, socialise, type Clock } from "./socialise.ts";
+import { monotonicClock, pickPartner, realClock, socialise, type Clock } from "./socialise.ts";
 
 const OPEN = { open: true, to: ["Theo"], topic: "the mine", length: "medium", say: "Theo! Got a minute?" };
 const limits = { openingDistance: 16, talkRange: 64, maxMinutes: 6 };
+/** The slice the fake clock moves in while a test waits for a state (the runtime fake's own wait is 1 ms). */
+const SLICE_MS = 50;
+
+/** Moves the fake clock on until `condition` holds (a state, not a duration); fails naming `maxMs` of clock when it never does. */
+async function advanceUntil(clock: FakeClock, condition: () => boolean, maxMs = 2_000): Promise<void> {
+  for (let passed = 0; !condition(); passed += SLICE_MS) {
+    if (passed >= maxMs) throw new Error(`condition not reached within ${maxMs} ms of clock`);
+    await clock.advance(SLICE_MS, SLICE_MS);
+  }
+}
 
 function setup(localized: boolean, players: FakeRuntime["snapshot"]["players"]) {
   const runtime = new FakeRuntime();
@@ -43,16 +54,35 @@ test("pickPartner prefers the named partner, then the nearest, then the first", 
   assert.equal(pickPartner("have a chat", [], snapshot), null);
 });
 
+test("the routine's own sleep ends on an abort, before or during the wait, without throwing and with no timer left", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
+  for (const clock of [realClock, monotonicClock]) {
+    const before = new AbortController();
+    before.abort();
+    await clock.sleep(1_000, before.signal);
+    assert.equal(fake.pendingGlobalTimers(), 0, "an aborted signal starts no timer");
+    const during = new AbortController();
+    fake.after(10, () => during.abort());
+    const started = fake.now();
+    await fake.settle(clock.sleep(1_000, during.signal), 1_000, 10);
+    assert.ok(fake.now() - started <= 10, "it ended at the abort, not after its 1 s");
+    assert.equal(fake.pendingGlobalTimers(), 0, "the abort cleared the wait's timer");
+  }
+});
+
 test("goes to the partner, opens, follows until the end", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, theoAt(30));
   t.runtime.durations.navigate = 5;
   t.chat.reply(OPEN);
   const running = t.run();
-  await until(() => t.talks.current !== null);
+  await advanceUntil(fake, () => t.talks.current !== null);
   assert.deepEqual(t.runtime.submitted.map((call) => call.tool).slice(0, 1), ["navigate"], "it walked up first");
   assert.equal(t.spoken[0]?.shout, false, "close enough to hear: not shouted");
   t.talks.said(true);
-  const result = await running;
+  const result = await fake.settle(running, 5_000);
   assert.equal(result.status, "done");
   assert.match(result.status === "done" ? result.detail : "", /^talked with Theo/u);
 });
@@ -75,15 +105,17 @@ test("without localized chat the call is a plain line", async () => {
 });
 
 test("a partner who comes within the opening distance is talked with", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, []);
   t.chat.reply(OPEN);
   t.runtime.durations.navigate = 5;
   let looks = 0;
-  const clock: Clock = { now: t.clock.now, sleep: async () => { looks += 1; if (looks === 2) t.runtime.snapshot = { ...t.runtime.snapshot, players: theoAt(6) }; await new Promise((resolve) => setTimeout(resolve, 2)); } };
+  const clock: Clock = { now: t.clock.now, sleep: async (ms, signal) => { looks += 1; if (looks === 2) t.runtime.snapshot = { ...t.runtime.snapshot, players: theoAt(6) }; await fake.sleep(ms, signal); } };
   const running = t.run({ clock });
-  await until(() => looks >= 3);
+  await advanceUntil(fake, () => looks >= 3, 10_000);
   t.talks.said(true);
-  assert.equal((await running).status, "done");
+  assert.equal((await fake.settle(running, 5_000)).status, "done");
 });
 
 test("with the agent's tick running, an unanswered call fails once: no second call, no follow", async () => {
@@ -100,32 +132,38 @@ test("with the agent's tick running, an unanswered call fails once: no second ca
 });
 
 test("resumed after its conversation ended, it finishes without a new opening", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, theoAt(30));
   t.runtime.durations.navigate = 5;
   t.chat.reply(OPEN, { gist: "Talked." }, OPEN);
   const first = t.run();
-  await until(() => t.talks.current !== null);
+  await advanceUntil(fake, () => t.talks.current !== null);
   t.talks.end("out_of_range");
   t.controller.abort();
-  await first;
-  await t.talks.finished();
+  await fake.settle(first, 5_000);
+  await fake.settle(t.talks.finished(), 5_000);
   // Set aside while it followed, the record ended meanwhile: run again.
-  assert.deepEqual(await t.run({ signal: new AbortController().signal }), { status: "done", detail: "talked with Theo: Talked." });
+  assert.deepEqual(await fake.settle(t.run({ signal: new AbortController().signal }), 5_000), { status: "done", detail: "talked with Theo: Talked." });
   assert.equal(t.chat.requests.length, 2, "the first opening and its gist only");
   assert.equal(t.spoken.length, 1);
 });
 
 test("a slow gist does not hold the routine", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, theoAt(30));
   t.runtime.durations.navigate = 5;
   t.chat.reply(OPEN);
   t.talks.finished = () => new Promise(() => undefined);
   const waits: number[] = [];
-  const clock: Clock = { now: () => waits.reduce((a, b) => a + b, 1_000_000), sleep: async (ms) => { waits.push(ms); await new Promise((resolve) => setTimeout(resolve, 2)); } };
+  const clock: Clock = { now: () => waits.reduce((a, b) => a + b, 1_000_000), sleep: async (ms, signal) => { waits.push(ms); await fake.sleep(ms, signal); } };
   const running = t.run({ clock });
-  await until(() => t.talks.current !== null);
+  await advanceUntil(fake, () => t.talks.current !== null);
   t.talks.said(true);
-  const result = await running;
+  // The report waits GIST_REPORT_MS (10 s) for a gist that never comes: after the follow poll (1 s) that sees the talk over, 10 s and no more.
+  const result = await fake.settle(running, 11_500, 500);
+  assert.ok(waits.includes(10_000), "it waited the 10 s report window");
   assert.equal(result.status, "done");
   assert.match(result.status === "done" ? result.detail : "", /^talked with Theo/u);
 });
@@ -139,40 +177,45 @@ test("a full conversation cap with no wait fails at once: 'had nothing to say', 
 });
 
 test("with openWaitMs the routine waits for a conversation slot and then opens", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, theoAt(3));
   t.budget.tryTake();
   t.budget.tryTake();
   t.chat.reply(OPEN);
-  setTimeout(() => t.budget.give(), 30);
+  fake.after(30, () => t.budget.give());
   const running = t.run({ openWaitMs: 5_000 });
-  await until(() => t.talks.current !== null);
+  // The controller looks again at the slot every OPEN_POLL_MS (1 s) of clock.
+  await advanceUntil(fake, () => t.talks.current !== null, 2_000);
   t.talks.said(true);
-  assert.equal((await running).status, "done");
+  assert.equal((await fake.settle(running, 5_000)).status, "done");
 });
 
 test("with openWaitMs a cap that stays full fails at the deadline with the reason", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const t = setup(true, theoAt(3));
   t.budget.tryTake();
   t.budget.tryTake();
-  const result = await t.run({ openWaitMs: 60 });
+  const result = await fake.settle(t.run({ openWaitMs: 60 }), 60);
   assert.deepEqual(result, { status: "failed", detail: "had nothing to say to Theo (conversation limit)", reason: "no_talk" });
 });
 
 // The two clocks (monotonic-clock.ts header): the call's wait is a window (monotonic); `since` is compared with a talk's end (wall).
-test("the call's 60 s wait (default clock) ends on monotonic time although the wall clock steps back at each poll", async (t) => {
-  const clocks = steppedClocks(t);
+test("the call's 60 s wait (default clock) ends on monotonic time although the wall clock steps back at each poll", async () => {
+  const fake = createFakeClock({ mode: "mocked" });
+  using _timers = fake.install();
   const s = setup(true, []);
   s.chat.reply(OPEN);
-  // One real 2 s poll: from the second look on, 61 s pass on the monotonic clock while the wall clock goes back 2 s as WSL does.
-  // A deadline read from the wall clock would not come (the run would wait its 60 s and time out).
+  // Every look at the partner goes with a 2 s step back of the wall clock, as WSL does: a deadline read from the wall
+  // clock would never come (the wall time moves back as much as the poll moves on), the monotonic one comes at 60 s.
   const status = s.runtime.status.bind(s.runtime);
-  let looks = 0;
   s.runtime.status = async () => {
-    looks += 1;
-    if (looks > 1) { clocks.monotonic(61_000); clocks.wall(-2_000); }
+    fake.stepWallClock(-2_000);
     return status();
   };
-  assert.deepEqual(await s.run(), { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
+  // 62 s of clock: the 60 s wait and one poll (2 s); in slices of a poll.
+  assert.deepEqual(await fake.settle(s.run(), 62_000, 2_000), { status: "failed", detail: "Theo did not come", reason: "did_not_come" });
 });
 
 test("a talk that ended since the objective started is the one it came for: the end and the start are both wall times", async () => {

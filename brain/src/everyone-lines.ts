@@ -1,4 +1,6 @@
+/** The lines to everyone that ask nothing, kept so that only the bot nearest the speaker answers one. */
 import { lineDistance } from "./conversation/state.ts";
+import { monotonicNow } from "./monotonic-clock.ts";
 import type { BotSnapshot, PlayerMessage } from "./runtime-client.ts";
 
 /** A line to everyone is forgotten this long after the first bot heard it. */
@@ -19,7 +21,8 @@ interface Line {
 export class EveryoneLines {
   private readonly lines = new Map<string, Line>();
 
-  constructor(private readonly now: () => number = Date.now) {}
+  /** `now`: monotonic milliseconds, the forget window is a duration inside this process. */
+  constructor(private readonly now: () => number = monotonicNow) {}
 
   /** Notes that `bot` heard the line and how far the speaker was (null when it cannot tell). */
   heard(speaker: string, text: string, bot: string, distance: number | null): void {

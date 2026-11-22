@@ -1,8 +1,9 @@
-import { setTimeout as sleep } from "node:timers/promises";
+/** The `socialising` routine: call or walk up to a partner, open the conversation, stay with them until it ends. */
 import { namesWord } from "../llm-mind.ts";
 import { monotonicNow } from "../monotonic-clock.ts";
 import type { BotRuntime, BotSnapshot, Position } from "../runtime-client.ts";
 import { runStep, type SkillContext, type SkillResult } from "../skills.ts";
+import { sleepMs } from "../wall-timers.ts";
 import type { ConversationController, OpenFacts } from "./controller.ts";
 import { manhattan } from "./state.ts";
 
@@ -21,7 +22,8 @@ export interface Clock {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
 }
 
-const sleepOn = (ms: number, signal: AbortSignal): Promise<void> => sleep(ms, undefined, { signal }).catch(() => undefined);
+/** An abort ends the wait early, never throws: the routine reads `signal.aborted` after it. */
+const sleepOn = (ms: number, signal: AbortSignal): Promise<void> => sleepMs(ms, signal).catch(() => undefined);
 
 /** Wall time: the relations' clock (book, trades, hand-offs: Task B2 of plan 2026-11-05-held-wording-and-relations-clock moves their windows off it). */
 export const realClock: Clock = {

@@ -1,3 +1,4 @@
+/** A conversation's record and its pure rules: members, lines, distances, the gates that end or cap it. */
 import type { Persona } from "../persona.ts";
 import type { BotSnapshot, PlayerMessage, Position } from "../runtime-client.ts";
 
@@ -60,7 +61,8 @@ export function openConversation(a: {
   };
 }
 
-function same(a: string, b: string): boolean {
+/** Two names are one player's: case aside. */
+export function same(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
