@@ -1,9 +1,10 @@
 // Moves the frontier a bot file kept before the world file (tables `legacy_frontier_*`, left by migration step 3) into
 // the world file and this bot's sightings. It grows with the world (up to 50 204 rows measured), so it is never a
 // migration step: it runs asynchronously after the bot is connected, in batches, and a restart resumes from what is left.
-import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { DatabaseSync } from "node:sqlite";
 import { worldWriteRetryDelayMs, type SqlBotData } from "../bot-data/index.js";
+import { sleepMs } from "../utils/wall-timers.js";
 
 /** Chunks moved per world write and per bot transaction. */
 const BATCH_CHUNKS = 500;
@@ -54,7 +55,7 @@ class LegacyImportRun implements LegacyFrontierImport {
   private failure: string | null = null;
 
   constructor(private readonly data: SqlBotData, private readonly botName: string, options: LegacyFrontierImportOptions) {
-    this.wait = options.wait ?? ((ms, signal) => sleep(ms, undefined, { signal }));
+    this.wait = options.wait ?? sleepMs;
     this.random = options.random ?? Math.random;
     const hasLegacy = legacyTableExists(data);
     this.remaining = hasLegacy ? Number(data.read("SELECT COUNT(*) AS n FROM legacy_frontier_chunks")[0]?.n ?? 0) : 0;

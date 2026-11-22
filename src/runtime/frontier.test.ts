@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { SqlBotData } from "../bot-data/index.js";
-import { persistentBotData, recordChunk } from "../test-support/bot-data.js";
+import { busyOnFirstWorldWrite, persistentBotData, recordChunk } from "../test-support/bot-data.js";
 import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { attachSessionFrontier, RESCAN_AFTER_MS, SEEN_CAP, SEEN_MOVED, SEEN_TTL_MS, seenInWorld } from "./frontier.js";
 
@@ -434,6 +434,51 @@ test("busy world write re-queues the chunk and records it on a later try", async
   assert.deepEqual(recorded, [{ dimension: "overworld", chunkX: -2, chunkZ: 4 }]);
   assert.equal(frontier.status().error, null);
   assert.equal(frontier.status().pendingChunks, 0);
+});
+
+// Plan 2026-11-22-phase5-gate-p1 T16: the default retry wait is a global timer, so the mocked clock moves it. The first
+// try is busy, the retry delay is 20 ms (`random: () => 0`), the second try writes.
+
+test("the default retry wait of a busy chunk ends at its delay on the mocked clock", async (t) => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot, data } = fixture();
+  const { attempts } = busyOnFirstWorldWrite(t, data);
+  const timersBefore = clock.pendingGlobalTimers();
+  const frontier = attachSessionFrontier(bot, data, { random: () => 0 });
+  t.after(() => {
+    frontier.close();
+    data.close();
+  });
+
+  await clock.advance(19, 1);
+  assert.equal(attempts.length, 1, "1 ms short of the 20 ms delay the chunk still waits");
+  assert.equal(clock.pendingGlobalTimers(), timersBefore + 1, "on a timer the mocked clock holds, not a node timer it cannot fire");
+  await clock.advance(1, 1);
+  await clock.settle(frontier.idle(), 1_000, 1);
+
+  assert.equal(attempts.length, 2, "at the delay the retry writes");
+  assert.equal(data.read("SELECT COUNT(*) AS n FROM frontier_chunks")[0]?.n, 1);
+  assert.equal(frontier.status().error, null);
+});
+
+test("closing the session during the default retry wait ends it and leaves no timer", async (t) => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const { bot, data } = fixture();
+  const { attempts } = busyOnFirstWorldWrite(t, data);
+  const timersBefore = clock.pendingGlobalTimers();
+  const frontier = attachSessionFrontier(bot, data, { random: () => 0 });
+  t.after(() => data.close());
+
+  await clock.advance(10, 1);
+  assert.equal(clock.pendingGlobalTimers(), timersBefore + 1, "the retry wait holds one timer");
+  frontier.close();
+  await clock.settle(frontier.idle(), 1_000, 1);
+
+  assert.equal(clock.pendingGlobalTimers(), timersBefore, "the abort clears the wait's timer");
+  await clock.advance(1_000);
+  assert.equal(attempts.length, 1, "nothing retries after the close");
 });
 
 test("20 busy tries give the scan error, and a later load clears it", async (t) => {

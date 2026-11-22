@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { TestContext } from "node:test";
 import type { BotDataScope } from "../bot-data/bot-data-identity.js";
 import { SqlBotData } from "../bot-data/sql-bot-data.js";
 
@@ -63,6 +64,20 @@ export function recordChunk(data: SqlBotData, chunk: RecordedChunk): void {
       .prepare("INSERT OR IGNORE INTO frontier_seen (bot_id, chunk_key, dimension, chunk_x, chunk_z, first_seen_at) VALUES (?, ?, ?, ?, ?, ?)")
       .run(chunk.seenBy ?? "test-bot", key, dimension, chunk.chunkX, chunk.chunkZ, firstSeenAt);
   }, { name: "recordChunk" });
+}
+
+/**
+ * The world file answers "busy" to its first write, then writes for real (`BUSY` of `sql-world-data.ts`, held by
+ * another connection). `attempts` has one entry per write call, so a test counts the tries.
+ */
+export function busyOnFirstWorldWrite(t: TestContext, data: SqlBotData): { readonly attempts: number[] } {
+  const original = data.world.write.bind(data.world);
+  const attempts: number[] = [];
+  t.mock.method(data.world, "write", (...args: Parameters<typeof original>) => {
+    attempts.push(1);
+    return attempts.length === 1 ? { status: "busy" as const } : original(...args);
+  });
+  return { attempts };
 }
 
 /** The file of a persistent store, for tests that open it with a raw connection. */

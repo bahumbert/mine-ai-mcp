@@ -4,8 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Vec3 } from "vec3";
 import type { BotDataScope } from "../bot-data/bot-data-identity.js";
 import type { SqlBotData } from "../bot-data/index.js";
-import { persistentBotData, persistentFile } from "../test-support/bot-data.js";
-import { createFakeBot } from "../test-support/fake-bot/index.js";
+import { busyOnFirstWorldWrite, persistentBotData, persistentFile } from "../test-support/bot-data.js";
+import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
 import { makeLegacyFrontierFile, type LegacyChunk } from "../test-support/legacy-frontier.js";
 import { attachSessionFrontier } from "./frontier.js";
 import { startLegacyFrontierImport } from "./legacy-frontier-import.js";
@@ -111,6 +111,48 @@ test("a busy world write waits and retries", async (t) => {
   assert.equal(count(data, "world.frontier_chunks"), 4);
   assert.equal(count(data, "main.frontier_seen"), 4);
   assert.equal(run.error(), null);
+});
+
+// Plan 2026-11-22-phase5-gate-p1 T16: the default retry wait is a global timer, so the mocked clock moves it. The first
+// world write is busy, the retry delay is 20 ms (`random: () => 0`), the second write lands.
+
+test("the default retry wait of a busy world write ends at its delay on the mocked clock", async (t) => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const data = openLegacy(persistentBotData(t), "default-wait", { kind: "shared" }, chunksFrom(0, 4));
+  const { attempts } = busyOnFirstWorldWrite(t, data);
+  const timersBefore = clock.pendingGlobalTimers();
+
+  const run = startLegacyFrontierImport(data, "Ayla", { random: () => 0 });
+  await clock.advance(19, 1);
+  assert.equal(attempts.length, 1, "1 ms short of the 20 ms delay the import still waits");
+  assert.equal(clock.pendingGlobalTimers(), timersBefore + 1, "on a timer the mocked clock holds, not a node timer it cannot fire");
+  await clock.advance(1, 1);
+  await clock.settle(run.done, 1_000, 1);
+
+  assert.equal(attempts.length, 2, "at the delay the retry writes");
+  assert.equal(count(data, "world.frontier_chunks"), 4);
+  assert.equal(run.error(), null);
+});
+
+test("stopping the import during the default retry wait ends it with no error and leaves no timer", async (t) => {
+  const clock = createFakeClock({ mode: "mocked", startMs: 1_000_000 });
+  using _installed = clock.install();
+  const data = openLegacy(persistentBotData(t), "default-wait-stop", { kind: "shared" }, chunksFrom(0, 4));
+  const { attempts } = busyOnFirstWorldWrite(t, data);
+  const timersBefore = clock.pendingGlobalTimers();
+
+  const run = startLegacyFrontierImport(data, "Ayla", { random: () => 0 });
+  await clock.advance(10, 1);
+  assert.equal(clock.pendingGlobalTimers(), timersBefore + 1, "the retry wait holds one timer");
+  run.stop();
+  await clock.settle(run.done, 1_000, 1);
+
+  assert.equal(run.error(), null, "a stop is no failure");
+  assert.equal(clock.pendingGlobalTimers(), timersBefore, "the abort clears the wait's timer");
+  await clock.advance(1_000);
+  assert.equal(attempts.length, 1, "nothing retries after the stop");
+  assert.equal(count(data, "world.frontier_chunks"), 0);
 });
 
 test("a crash between the world commit and the bot commit repeats the batch harmlessly", async (t) => {

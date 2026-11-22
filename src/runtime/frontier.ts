@@ -1,8 +1,9 @@
 import type { Bot } from "mineflayer";
 import type { DatabaseSync } from "node:sqlite";
-import { setImmediate as yieldToEventLoop, setTimeout as sleep } from "node:timers/promises";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Vec3 } from "vec3";
 import { monotonicNow } from "../utils/monotonic-clock.js";
+import { sleepMs } from "../utils/wall-timers.js";
 import { findLoadedBlockPositions } from "../world/loaded-block-scan.js";
 import { SqlBotData, worldWriteRetryDelayMs } from "../bot-data/index.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
@@ -210,7 +211,7 @@ class ChunkRecorder {
     this.data = data;
     this.now = timing.now ?? monotonicNow;
     this.random = timing.random ?? Math.random;
-    this.wait = timing.wait ?? ((ms, signal) => sleep(ms, undefined, { signal }));
+    this.wait = timing.wait ?? sleepMs;
     this.observedChunks = Number(data.read("SELECT COUNT(*) AS count FROM frontier_chunks")[0]?.count ?? 0);
   }
 
