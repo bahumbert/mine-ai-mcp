@@ -1772,13 +1772,13 @@ test("a crouching bow draw traces from the observed eye height", async () => {
   assert.ok(origins.every((y) => y < 65.3), "no ray starts at the standing eye height");
 });
 
-function navigationFixture(): NavigationRuntime {
+/** Flat ground at y 63 with open cells above it up to `openUpTo` (a body hovering higher needs the cells under it observed). */
+function navigationFixture(openUpTo = 65): NavigationRuntime {
   const world = new MemoryWorld();
   for (let x = -6; x <= 6; x++)
     for (let z = -6; z <= 6; z++) {
       world.load({ x, y: 63, z }, { stateId: 1 });
-      world.load({ x, y: 64, z }, { stateId: 0 });
-      world.load({ x, y: 65, z }, { stateId: 0 });
+      for (let y = 64; y <= openUpTo; y++) world.load({ x, y, z }, { stateId: 0 });
     }
   return {
     world,
@@ -1833,6 +1833,171 @@ test("a hunter waits for a nearby hopping cube to descend instead of climbing to
   assert.equal(result.kind, "died");
   assert.equal(result.attacks, 1);
   assert.deepEqual(fixture.controls, []);
+});
+
+/** The route answer measured for a blaze above reach and a bot that may not scaffold (analysis 2026-11-22 section 2, `navigate.ts` stopped shape). */
+const BLAZE_APPROACH_STOPPED = {
+  status: "stopped",
+  reason: "search radius limit 32 blocks reached after 252 ms compute; no path or usable partial route found; the node nearest the goal is within 5 blocks of where the bot stands",
+  elapsedMs: 0,
+} as const;
+
+/**
+ * A blaze hovering over open cells, its underside 3.38 above the bot's eye (feet 64, blaze feet 69), one block off, for a
+ * bot with no bow. Every route answer is the measured "no route" one, and each call is counted.
+ */
+function hoveringBlazeFixture(items: readonly string[] = ["iron_sword", "shield"], options: { ticksPerSecond?: number; gap?: number } = {}) {
+  const fixture = combatFixture(items, { targetDistance: options.gap ?? 1, groundY: null, ticksPerSecond: options.ticksPerSecond });
+  fixture.target.name = "blaze";
+  fixture.target.width = 0.6;
+  fixture.target.height = 1.8;
+  fixture.target.metadata = [];
+  fixture.target.position.y = 69;
+  const routes = { asked: 0 };
+  const navigation = {
+    ...navigationFixture(72),
+    navigate: async () => {
+      routes.asked++;
+      return BLAZE_APPROACH_STOPPED;
+    },
+  } as unknown as NavigationRuntime;
+  return { fixture, navigation, routes };
+}
+
+for (const rate of [20, 10]) test(`a hunter with no bow waits under a hovering blaze instead of ending the fight at ${rate} tps`, async () => {
+  const { fixture, navigation, routes } = hoveringBlazeFixture(["iron_sword", "shield"], { ticksPerSecond: rate });
+  await fixture.warm();
+  const started = fixture.server.gameTime;
+  let descendedAt: number | null = null;
+  fixture.script.onWait = () => {
+    if (descendedAt === null && fixture.server.gameTime - started >= 20) {
+      descendedAt = fixture.server.gameTime;
+      fixture.target.position.y = 64;
+    }
+  };
+  fixture.script.onAttack = () => {
+    assert.notEqual(descendedAt, null, "only the descended body is in attack reach");
+    fixture.combat.kill(fixture.target.id);
+  };
+  const outcome = await createCombatController(fixture.bot, navigation).engage(7, new AbortController().signal, "pursue");
+  assert.equal(routes.asked, 0, "the hold asks no route while the body hovers above reach (the old code asked once and took the stop)");
+  assert.equal(outcome.kind, "died");
+  assert.equal(outcome.attacks, 1);
+  assert.ok(fixture.server.gameTime - started >= 20, "the attack came after the descent at world age 20");
+  assert.deepEqual(fixture.controls, []);
+});
+
+test("a no-bow route toward a blaze hovering 5 blocks off stops when the bot comes under it, and the fight goes on", async () => {
+  const { fixture, routes } = hoveringBlazeFixture(["iron_sword", "shield"], { gap: 5 });
+  const stopReasons: string[] = [];
+  const navigation = {
+    ...navigationFixture(72),
+    navigate: async (options: { stopSignal?: AbortSignal }) => {
+      routes.asked++;
+      // The walk ends 2 blocks off the footprint: inside the horizontal gap, above reach.
+      fixture.bot.entity.position.x = fixture.target.position.x - 2;
+      fixture.bot.emit("physicsTick");
+      if (options.stopSignal?.aborted) stopReasons.push(String(options.stopSignal.reason));
+      fixture.target.position.y = 64;
+      return BLAZE_APPROACH_STOPPED;
+    },
+  } as unknown as NavigationRuntime;
+  fixture.script.onAttack = () => fixture.combat.kill(fixture.target.id);
+  const outcome = await createCombatController(fixture.bot, navigation).engage(7, new AbortController().signal, "pursue");
+  assert.deepEqual(stopReasons, ["target is descending above melee stance"], "the route is handed back, not left to run on to the end of its search");
+  assert.equal(routes.asked, 1);
+  assert.equal(outcome.kind, "died", "the fight resumes from the hold and swings once the body is in reach");
+});
+
+test("a bow carrier's approach to a hovering blaze with a screened shot is not stopped by the descent rule", async () => {
+  const { fixture, routes } = hoveringBlazeFixture(["iron_sword", "bow", "arrow", "shield"]);
+  // The shot from the eye to the blaze runs through the column over the bot: screened, so the turn walks to a firing line.
+  for (const y of [66, 67, 68]) fixture.world.setCell(new Vec3(0, y, 0), "stone");
+  const stopReasons: string[] = [];
+  const APPROACHES = 3;
+  const navigation = {
+    ...navigationFixture(72),
+    navigate: async (options: { stopSignal?: AbortSignal }) => {
+      routes.asked++;
+      fixture.bot.emit("physicsTick");
+      if (options.stopSignal?.aborted) stopReasons.push(String(options.stopSignal.reason));
+      if (routes.asked >= APPROACHES) fixture.combat.kill(fixture.target.id);
+      return BLAZE_APPROACH_STOPPED;
+    },
+  } as unknown as NavigationRuntime;
+  fixture.script.onShot = () => fixture.combat.kill(fixture.target.id);
+  await createCombatController(fixture.bot, navigation).engage(7, new AbortController().signal, "pursue");
+  assert.deepEqual(stopReasons, [], "the descent rule is the melee turn's: a bow carrier's route is never aborted by it");
+  assert.ok(routes.asked >= 1, "the turn reached its approach: a pass without an approach proves nothing");
+  assert.ok(routes.asked <= APPROACHES, `the approach calls stay bounded (${routes.asked})`);
+});
+
+for (const rate of [20, 10]) for (const exit of ["never_returns", "lost", "dead", "abort", "stopped"] as const)
+test(`a hold under a hovering blaze with no bow releases on ${exit} and permits the next engagement at ${rate} tps`, async () => {
+  const { fixture, navigation, routes } = hoveringBlazeFixture(["iron_sword", "shield"], { ticksPerSecond: rate });
+  await fixture.warm();
+  const controller = createCombatController(fixture.bot, navigation);
+  const added = listenersAddedSince(fixture.bot);
+  const packetsAdded = listenersAddedSince(fixture.bot._client);
+  const parent = new AbortController();
+  const started = fixture.server.gameTime;
+  let triggered = false;
+  fixture.script.onWait = () => {
+    if (triggered || fixture.server.gameTime - started < 20) return;
+    triggered = true;
+    if (exit === "lost") fixture.entities.remove(7);
+    if (exit === "dead") fixture.combat.kill(7);
+    if (exit === "abort") parent.abort("parent releases the hold under the blaze");
+    if (exit === "stopped") fixture.server.stop();
+  };
+  let settlements = 0;
+  const outcome = await controller.engage(7, parent.signal, "pursue").then(result => { settlements++; return result; });
+  assert.equal(outcome.kind, exit === "lost" ? "target_lost" : exit === "dead" ? "died" : exit === "abort" ? "cancelled" : "unreachable");
+  assert.equal(routes.asked, 0, "the body never came within reach: no route was asked at any point of the hold");
+  if (exit === "never_returns") {
+    // World age counts the same at both rates: the quarry clock of the fight, no guard spell in this hold.
+    assert.ok(fixture.server.gameTime - started >= DEFAULT_COMBAT_POLICY.quarry_wait_ticks);
+    assert.ok(fixture.server.gameTime - started <= DEFAULT_COMBAT_POLICY.quarry_wait_ticks + 40);
+  }
+  if (exit === "never_returns" || exit === "stopped") {
+    assert.equal(outcome.kind === "unreachable" && outcome.premise, "no_confirmed_damage");
+  }
+  // A stopped server ends the hold at world age 20 through the wall backstop on the fake clock.
+  if (exit === "stopped") assert.equal(fixture.server.gameTime, started + 20);
+  fixture.script.onWait = undefined;
+  if (exit === "stopped") fixture.server.resume();
+  await proveLateFlierRelease(fixture, controller, added, packetsAdded, () => settlements);
+});
+
+for (const rate of [20, 10]) test(`a hold under a hovering blaze pauses its quarry clock while a fireball is guarded at ${rate} tps`, async () => {
+  const { fixture, navigation } = hoveringBlazeFixture(["iron_sword", "shield"], { ticksPerSecond: rate });
+  await fixture.warm();
+  const started = fixture.server.gameTime;
+  const controller = createCombatController(fixture.bot, navigation);
+  // The fight's phases with the world age they began at: the guard ticks are counted from them, as the clock pauses on the same phase.
+  const phases: { phase: string; age: number }[] = [];
+  controller.onDecision((event) => { if (event.kind === "phase") phases.push({ phase: event.phase, age: fixture.server.gameTime - started }); });
+  // A blaze fires 3 fireballs 6 ticks apart (`ScriptedBlaze`); four such volleys, 100 ticks apart, so the guard time passes the clock's 40-tick slack.
+  const SHOTS = [100, 106, 112, 200, 206, 212, 300, 306, 312, 400, 406, 412];
+  let fired = 0;
+  fixture.script.onWait = () => {
+    // The shared fake's measured fireball (`fake-bot-combat-rules.ts` `deflect-fireball`: it flies, then hits for `amount`).
+    while (fired < SHOTS.length && fixture.server.gameTime - started >= SHOTS[fired]!) {
+      fired++;
+      fixture.combat.shootBot("small_fireball", 7, 3.5);
+    }
+    // The server heals the bot between hits: a wounded bot leaves the fight for recovery, which is not what this case measures.
+    if (fixture.bot.health < 20) fixture.combat.setHealth(20);
+  };
+  const outcome = await controller.engage(7, new AbortController().signal, "pursue");
+  const elapsed = fixture.server.gameTime - started;
+  const guardTicks = phases.reduce((sum, { phase, age }, index) => (phase === "guard" ? sum + ((phases[index + 1]?.age ?? elapsed) - age) : sum), 0);
+  assert.equal(outcome.kind, "unreachable");
+  assert.equal(outcome.kind === "unreachable" && outcome.premise, "no_confirmed_damage");
+  assert.ok(guardTicks > 0, `the fireball was met with a guard spell (phases ${JSON.stringify(phases)})`);
+  // The clock is paused for the guard ticks: it ends the hold 600 non-guard ticks after the start, plus the guard ticks, within the exits case's 40-tick slack.
+  assert.ok(elapsed >= DEFAULT_COMBAT_POLICY.quarry_wait_ticks + guardTicks, `ended at world age ${elapsed}, with ${guardTicks} guard ticks charged to the clock`);
+  assert.ok(elapsed <= DEFAULT_COMBAT_POLICY.quarry_wait_ticks + guardTicks + 40, `ended at world age ${elapsed}, with ${guardTicks} guard ticks`);
 });
 
 test("switching back from a navigation tool restores sword attack strength before swinging", async () => {

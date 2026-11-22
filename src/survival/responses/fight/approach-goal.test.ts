@@ -6,7 +6,9 @@ import { createFakeBot, itemOf } from "../../../test-support/fake-bot/index.js";
 import { flatWorld, observation } from "../../../test-support/navigation.js";
 import { STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { bowApproachGoal } from "../../positioning/combat/bow-approach.js";
+import type { Goal } from "../../../navigation/index.js";
 import { aimPoint } from "../../weapons/aim.js";
+import { meleeApproachGoal } from "../../weapons/melee.js";
 import { bowTrajectory, clearBowTrajectory } from "../../weapons/bow-trajectory.js";
 import { TargetMotion } from "../../weapons/target-motion.js";
 import { FightMovement } from "./movement.js";
@@ -103,4 +105,55 @@ test("the bow goal judges the cell the bot stands in by its own shot, other cell
   const unsupported = fixture({ bow: true, feet: new Vec3(0.5, 64, 0.5) });
   assert.equal(unsupported.weapons.hasClearShot(), true, "precondition: the bot has a clear shot from the unsupported cell");
   assert.equal(unsupported.bowSatisfiedFrom(new Vec3(0, 64, 0)), false, "no ground under the cell: not a standing cell");
+});
+
+/** A blaze hovering at (1.5, 68, 0.5), 5 above the bot's feet at (0.5, 63, 0.5), over open cells observed up to y 72. */
+function hoveringBlaze(options: { bow: boolean }) {
+  const { bot } = createFakeBot({
+    position: new Vec3(0.5, 63, 0.5),
+    groundY: 62,
+    entities: { 7: { name: "blaze", position: new Vec3(1.5, 68, 0.5), width: 0.6, height: 1.8, metadata: [] } },
+    carried: { diamond_sword: 1, bow: 1, arrow: 3 },
+  });
+  const world = flatWorld();
+  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) for (let y = 66; y <= 72; y++) world.load({ x, y, z }, { stateId: 0 });
+  const scene = {
+    bot,
+    target: bot.entities[7]!,
+    targetMotion: new TargetMotion(),
+    signal: new AbortController().signal,
+    perception: { read: () => [] },
+    navigation: { world },
+    policy: { combat: { bow: options.bow, melee: true, shield: true } },
+  } as unknown as FightScene;
+  const movement = new FightMovement(scene, new FightWeapons(scene, { recoverFooting: async () => {}, returnToCover: () => false }));
+  const resolve = (goal: Goal) => {
+    const resolved = goal.resolve({ ...observation(), position: bot.entity.position });
+    if (resolved.kind !== "active") throw new Error("the goal is not active");
+    return resolved;
+  };
+  const node = (x: number) => ({ feet: { x, y: 63, z: 0 }, remainingScaffolds: 0, overlayId: "overlay:0" });
+  return {
+    node,
+    world,
+    melee: (hovering: boolean) => resolve(meleeApproachGoal(bot, 7, world, undefined, { hovering })),
+    // `beganOutsideContact` false returns the bare melee goal, so the answer is the `hovering` decision alone, not a firing line.
+    fights: () => resolve(movement.approachGoal(false)),
+  };
+}
+
+test("a hovering blaze's footprint is the melee goal only when asked to hover; a cell 6 blocks off never is", () => {
+  const { melee, node, world } = hoveringBlaze({ bow: false });
+  // The pair that flips: the same node and the same body, `hovering` the only difference.
+  assert.equal(melee(true).isSatisfied(node(0), world), true, "flattened to the bot's height: the cell beside the footprint is in reach");
+  assert.equal(melee(false).isSatisfied(node(0), world), false, "the body's real height is above reach from every standing cell");
+  assert.equal(melee(true).isSatisfied(node(-5), world), false, "6 blocks off the footprint is out of reach even flattened");
+});
+
+test("the fight's approach goal hovers for a bot with no permitted bow, and not for one whose policy permits the bow", () => {
+  const noBow = hoveringBlaze({ bow: false });
+  assert.equal(noBow.fights().isSatisfied(noBow.node(0), noBow.world), true, "no permitted bow: wait under the footprint, never climb");
+  // A bow answers a hovering shooter from the fighting level: flattening its melee goal would arrive at once under it and spin.
+  const withBow = hoveringBlaze({ bow: true });
+  assert.equal(withBow.fights().isSatisfied(withBow.node(0), withBow.world), false, "a permitted bow: the melee goal keeps the body's real height");
 });

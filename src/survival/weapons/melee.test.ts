@@ -6,7 +6,7 @@ import { type FakeEntitySpec, createFakeBot } from "../../test-support/fake-bot/
 import { addItemsToServerTag } from "../../test-support/datapack-tags.js";
 import { flatWorld, observation } from "../../test-support/navigation.js";
 import { entityDimensions } from "../../world/entity-dimensions.js";
-import { combatItemsForTarget, hasMeleeKnockbackRoom, meleeApproachGoal, meleeDistance } from "./melee.js";
+import { combatItemsForTarget, hasMeleeKnockbackRoom, meleeApproachGoal, meleeDistance, waitingForDescendingBody } from "./melee.js";
 
 const goalTestWorld = new GoalTestWorld();
 const TARGET_ID = 7;
@@ -90,6 +90,84 @@ test("approach arrival agrees with attack reach above and below a ledge", () => 
       reachable,
     );
     assert.equal(meleeDistance(bot, target) <= 3, reachable);
+  }
+});
+
+/** The flat world with open cells observed up to y 80 over x,z -5..5, so a body can hover anywhere over it. */
+function openSkyWorld() {
+  const world = flatWorld();
+  for (let x = -5; x <= 5; x++)
+    for (let z = -5; z <= 5; z++) for (let y = 66; y <= 80; y++) world.load({ x, y, z }, { stateId: 0 });
+  return world;
+}
+
+/** The bot at feet (0,64,0), its eye 65.62, and `body` as entity 7: `waitingForDescendingBody` for it over `world`. */
+function waitsUnder(world: GoalTestWorld, body: { name: string; width: number; height: number; position: Vec3 }) {
+  const { bot, target } = sceneWith(new Vec3(0, 64, 0), body);
+  return waitingForDescendingBody(bot, world, target);
+}
+
+const BLAZE = { name: "blaze", width: 0.5, height: 1.8 } as const;
+
+test("a body over open cells waits for descent only above the bot's feet, above reach and within the horizontal gap", () => {
+  const world = openSkyWorld();
+  // Reach is 3 from the eye (65.62) to the body's underside; width 0.5 makes the gap x - 0.25, exact in binary.
+  for (const [x, y, waits, why] of [
+    [0, 68.6, false, "2.98 from the eye: in reach, swung at, not waited for"],
+    [0, 68.7, true, "3.08 from the eye: above reach"],
+    [3.25, 72, true, "gap 3.0"],
+    [3.35, 72, false, "gap 3.1: the bot would walk under it, not hold"],
+    [1, 64, false, "at the feet"],
+    [1, 63, false, "below the feet"],
+    // Accepted: the hold is bounded by the fight's quarry clock, not by the body's height.
+    [1, 77, true, "12 above the bot, within the horizontal gap"],
+  ] as const) assert.equal(waitsUnder(world, { ...BLAZE, position: new Vec3(x, y, 0) }), waits, why);
+});
+
+test("a body waits for descent only while no cell under its footprint holds it up or in liquid", () => {
+  const stand = { ...BLAZE, position: new Vec3(1, 70, 0) };
+  assert.equal(waitsUnder(openSkyWorld(), stand), true, "precondition: open cells under the footprint");
+  const floored = openSkyWorld();
+  floored.load({ x: 1, y: 69, z: 0 }, { stateId: 1 });
+  assert.equal(waitsUnder(floored, stand), false, "a solid block under one footprint cell: it stands on a ledge");
+  for (const liquid of ["water", "lava"] as const) {
+    const wet = openSkyWorld();
+    wet.load({ x: 1, y: 69, z: 0 }, { stateId: 0, traits: { liquid, damaging: liquid === "lava" } });
+    assert.equal(waitsUnder(wet, stand), false, `${liquid} under the footprint: a swimming body is not hovering`);
+  }
+  assert.equal(waitsUnder(new GoalTestWorld(), stand), false, "cells never observed are not open: no hold on a guess");
+});
+
+test("a mob mid-jump or on a fence top counts as airborne; one on a floor above does not", () => {
+  const zombie = { name: "zombie", width: 0.6, height: 1.95 } as const;
+  // Accepted (review B3): the hold is bounded by the fight's quarry clock, so a jump or a fence top costs at most that wait.
+  const jump = openSkyWorld();
+  jump.load({ x: 1, y: 67, z: 0 }, { stateId: 1 });
+  assert.equal(waitsUnder(jump, { ...zombie, position: new Vec3(1, 69, 0) }), true, "feet 1 above a floor, 5 above the bot, one block off: mid-jump");
+  const standing = openSkyWorld();
+  standing.load({ x: 1, y: 67, z: 0 }, { stateId: 1 });
+  assert.equal(waitsUnder(standing, { ...zombie, position: new Vec3(1, 68, 0) }), false, "feet on a floor 4 above the bot: supported");
+  const fence = openSkyWorld();
+  fence.load({ x: 1, y: 68, z: 0 }, { stateId: 1, collisionShapes: [{ minX: 0.375, minY: 0, minZ: 0.375, maxX: 0.625, maxY: 1.5, maxZ: 0.625 }] });
+  assert.equal(waitsUnder(fence, { ...zombie, position: new Vec3(1, 69.5, 0) }), true, "a fence top: its feet are 1.5 above the block, the cell under them is open");
+});
+
+test("a cube's approach goal answers the same with and without hovering", () => {
+  const { metadata, sized } = cubeSize("magma_cube");
+  const { bot, world: cells, target } = sceneWith(new Vec3(0, 63, 0), { name: "magma_cube", width: 0.52, height: 0.52, metadata, position: new Vec3(1, 67, 0) });
+  sized(bot, 4);
+  const world = openSkyWorld();
+  const node = { feet: { x: 0, y: 63, z: 0 }, remainingScaffolds: 0, overlayId: "overlay:0" };
+  // A cube standing on a ledge (4: block under it) is not flattened, in reach at 67 and not at 68; a hopping one (no block) is flattened.
+  for (const [y, ledge, reachable] of [[67, true, true], [68, true, false], [68, false, true]] as const) {
+    target.position.y = y;
+    cells.setCell(new Vec3(1, y - 1, 0), ledge ? "stone" : "air");
+    world.load({ x: 1, y: y - 1, z: 0 }, { stateId: ledge ? 1 : 0 });
+    for (const hovering of [false, true]) {
+      const goal = meleeApproachGoal(bot, TARGET_ID, world, undefined, { hovering }).resolve({ ...observation(), position: bot.entity.position });
+      assert.equal(goal.kind, "active");
+      if (goal.kind === "active") assert.equal(goal.isSatisfied(node, goalTestWorld), reachable, `cube at y ${y}, ${ledge ? "on a ledge" : "hopping"}, hovering ${hovering}`);
+    }
   }
 });
 

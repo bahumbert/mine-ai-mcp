@@ -2,6 +2,7 @@ import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { inDefensiveContact } from "./contact.js";
 import { CombatPerception } from "./observations.js";
 import { Vec3 } from "vec3";
 import { DEFAULT_MINECRAFT_VERSION } from "../../../server/config.js";
@@ -263,6 +264,17 @@ test("a jumping cube retains defensive contact before descending into swing reac
     "none",
     "a mob standing on an overhead ledge must not lock out travel",
   );
+});
+
+test("a blaze hovering above reach is not in defensive contact where a jumping cube is (plan 2026-11-18-scenario-reds-part2-a10 T13z)", () => {
+  // The hold under a hovering body is the melee turn's own; contact, and every decision that reads it, stays as it was.
+  const { bot } = sceneWith({ mobs: [{ id: 7, name: "blaze", x: 1 }, { id: 8, name: "magma_cube", x: 1 }], air: true });
+  const blaze = bot.entities[7]!, cube = bot.entities[8]!;
+  blaze.position.y = cube.position.y = 6;
+  assert.equal(inDefensiveContact(bot, cube), true, "the cube over open cells above reach: the pinned contact");
+  assert.equal(inDefensiveContact(bot, blaze), false, "the same geometry for a blaze: not contact");
+  blaze.position.y = 2;
+  assert.equal(inDefensiveContact(bot, blaze), true, "a blaze within reach is contact");
 });
 
 test("closed cover prevents contact even with a previous attacker or critically low health", () => {

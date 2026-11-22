@@ -12,6 +12,7 @@ import {
   meleeKnockbackHazard,
   meleeStanceSafe,
   sweepsOnSwing,
+  waitingForDescendingBody,
   waitingForDescendingCube,
 } from "../../weapons/melee.js";
 import type { EndermanFight } from "./enderman.js";
@@ -100,7 +101,12 @@ export async function runMeleeTurn(
 async function approachMeleeTarget(
   scene: FightScene, weapons: FightWeapons, locomotion: FightMovement, guarded: boolean,
 ): Promise<CombatOutcome | null> {
-  if (scene.movement === "hold" || scene.position.plan || waitingForDescendingCube(scene.bot, scene.target)) {
+  // A cube hops and a body over open cells above reach (a blaze's height) comes down by itself: neither is climbed to.
+  if (
+    scene.movement === "hold" || scene.position.plan ||
+    waitingForDescendingCube(scene.bot, scene.target) ||
+    waitingForDescendingBody(scene.bot, scene.navigation.world, scene.target)
+  ) {
     if (guarded) await weapons.raiseGuard();
     await scene.execution.run("hold", () => weapons.holdFacing(1));
     return null;

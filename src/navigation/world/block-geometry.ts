@@ -79,7 +79,7 @@ function* corridorCells(world: WorldView, from: Position3, displacement: Positio
 export type KnockbackHazard = "lava" | "drop";
 
 /** A falling body crosses passable dry cells; liquids can catch or damage it. */
-function isOpenFallCell(block: BlockObservation): boolean {
+export function isOpenFallCell(block: BlockObservation): boolean {
   return block.kind === "loaded" && isPassable(block) && !isSafeSupport(block) && block.traits.liquid === null;
 }
 

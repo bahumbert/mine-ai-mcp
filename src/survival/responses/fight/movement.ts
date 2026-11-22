@@ -18,6 +18,7 @@ import {
   meleeStanceSafe,
   meleeApproachGoal,
   meleeDistance,
+  waitingForDescendingBody,
   waitingForDescendingCube,
 } from "../../weapons/melee.js";
 import { retreatFromCreepers } from "./creeper-retreat.js";
@@ -63,8 +64,12 @@ function watchMeleeApproach(scene: FightScene, weapons: FightWeapons, request: M
     stop.abort("target entered melee reach");
   else if (weapons.contact() && (beganOutsideContact || safe))
     stop.abort("another hostile entered melee reach");
-  else if (waitingForDescendingCube(scene.bot, scene.target) && safe)
-    stop.abort("cube is descending above melee stance");
+  else if (
+    (waitingForDescendingCube(scene.bot, scene.target) ||
+      (weapons.currentLoadout().kind === "melee" && waitingForDescendingBody(scene.bot, scene.navigation.world, scene.target))) &&
+    safe
+  )
+    stop.abort("target is descending above melee stance");
   else if (weapons.currentLoadout().kind === "bow" && weapons.hasClearShot())
     stop.abort("target now calls for the carried bow with a clear shot");
 }
@@ -125,12 +130,15 @@ export class FightMovement {
    * its firing line here arrived at once, the melee turn found nothing in reach,
    * and the fight spun between guard and a zero-length approach without moving. */
   readonly approachGoal = (beganOutsideContact: boolean): Goal => {
-    const melee = meleeApproachGoal(this.scene.bot, this.scene.target.id, this.scene.navigation.world, () => meleeAttackers(this.scene));
     const permittedBow = permittedRangedLoadout(
       this.scene.bot,
       combatItemsForTarget(this.scene.bot, this.scene.target),
       this.scene.policy.combat,
     );
+    // No permitted bow: a body hovering over open cells is waited for, not climbed to (the bow answers it otherwise).
+    const melee = meleeApproachGoal(this.scene.bot, this.scene.target.id, this.scene.navigation.world, () => meleeAttackers(this.scene), {
+      hovering: !permittedBow,
+    });
     if (!beganOutsideContact || !isRangedAttacker(this.scene.bot, this.scene.target) || !permittedBow) return melee;
     return anyGoal([
       melee,

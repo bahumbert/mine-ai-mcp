@@ -1,7 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { HORIZONTAL_TICKS_PER_BLOCK, hasSupportedCorridor, knockbackCorridorHazard, type Goal, type KnockbackHazard, type WorldView } from "../../navigation/index.js";
-import { navigationFeet } from "../../navigation/world/block-geometry.js";
+import { isOpenFallCell, navigationFeet } from "../../navigation/world/block-geometry.js";
 import { obstaclesOf, worldViewRaycaster } from "../../navigation/world/line-of-sight.js";
 import type { Position3 } from "../../utils/index.js";
 import { STANDING_EYE_HEIGHT, observedEyeHeight } from "../../world/block-visibility.js";
@@ -48,6 +48,32 @@ export function waitingForDescendingCube(bot: Bot, entity: Entity): boolean {
   return Math.hypot(dx, dz) <= MELEE_RANGE && meleeDistance(bot, entity) > MELEE_RANGE;
 }
 
+/**
+ * A body over open cells: every cell under its footprint is one a fall crosses in the planning view, so water, lava and
+ * a floor all say "not airborne". Unobserved cells are not open. The body's species does not matter.
+ */
+export function airborneBody(world: WorldView, entity: Entity, width: number): boolean {
+  const y = Math.floor(entity.position.y - 0.01);
+  for (let x = Math.floor(entity.position.x - width / 2); x <= Math.floor(entity.position.x + width / 2); x++)
+    for (let z = Math.floor(entity.position.z - width / 2); z <= Math.floor(entity.position.z + width / 2); z++)
+      if (!isOpenFallCell(world.blockAt(x, y, z))) return false;
+  return true;
+}
+
+/**
+ * A bot with no bow cannot climb to a body hovering over open cells and above its reach, and the body comes down
+ * by itself (a mob mid-jump, a blaze changing height); the bot holds under it, shield up, and the quarry clock
+ * of the fight bounds the wait. A mob on a fence top or in a cobweb counts as airborne here: held, bounded by the same clock.
+ */
+export function waitingForDescendingBody(bot: Bot, world: WorldView, entity: Entity): boolean {
+  if (entity.position.y <= bot.entity.position.y) return false;
+  const { width } = entityDimensions(bot, entity);
+  if (!airborneBody(world, entity, width)) return false;
+  const dx = Math.max(0, Math.abs(entity.position.x - bot.entity.position.x) - width / 2);
+  const dz = Math.max(0, Math.abs(entity.position.z - bot.entity.position.z) - width / 2);
+  return Math.hypot(dx, dz) <= MELEE_RANGE && meleeDistance(bot, entity) > MELEE_RANGE;
+}
+
 export function distanceToBody(
   feet: Position3,
   body: { position: Position3; width: number; height: number },
@@ -61,7 +87,10 @@ export function distanceToBody(
 }
 
 /** The approach and swing must agree on reach, including targets above or below a ledge. */
-export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView, attackers?: () => readonly Position3[]): Goal {
+export function meleeApproachGoal(
+  bot: Bot, targetId: number, world: WorldView, attackers?: () => readonly Position3[],
+  options: { readonly hovering?: boolean } = {},
+): Goal {
   const rays = worldViewRaycaster((x, y, z) => obstaclesOf(world.blockAt(x, y, z)));
   return {
     resolve(observation) {
@@ -69,9 +98,10 @@ export function meleeApproachGoal(bot: Bot, targetId: number, world: WorldView, 
       if (!entity?.isValid) return { kind: "invalid", observation: `Entity ${targetId} is not currently observed.` };
       const body = { position: entity.position.clone(), ...entityDimensions(bot, entity) };
       const contacts = attackers?.() ?? (isHostile(entity) ? [body.position] : []);
-      // Approach the horizontal footprint of a hopping cube. The controller
-      // waits behind its shield until the real body descends into swing reach.
-      if (body.position.y > observation.position.y && airborneCube(bot, entity))
+      // Approach the horizontal footprint of a hopping cube, or of any airborne body when the bot has no bow
+      // (`hovering`). The controller waits behind its shield until the real body descends into swing reach.
+      if (body.position.y > observation.position.y &&
+        (airborneCube(bot, entity) || (options.hovering === true && airborneBody(world, entity, body.width))))
         body.position.y = observation.position.y;
       const current = navigationFeet(observation.position, observation.stance === "supported");
       const eyeHeight = observedEyeHeight(bot.entity);
