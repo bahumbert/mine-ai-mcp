@@ -51,6 +51,9 @@ client:
 goal:
   kind: all
   timeout: 90
+  # T13ab (plan 2026-11-18-scenario-reds-part2-a10): longest passing still span 404 ticks (20 tps, n 32), 383 (10 tps, n 32); 2x rounded up to 20.
+  # Runs: $RUN_DATA_DIR/run-data-p2a10-t13ab/gate-20tps, measure-20tps, gate-10tps, measure-10tps.
+  stillTicks: 820
   goals:
     - kind: kill
       who: BlazeMaterials
