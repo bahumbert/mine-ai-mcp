@@ -5,6 +5,7 @@ import type { Block } from "prismarine-block";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { arenaCell, arenaPoint } from "../arena/params.ts";
 import type { ScenarioContext } from "../scenario.ts";
+import { waitServerTicks } from "./server-ticks.ts";
 
 /**
  * `pocket` is the stalk's feet cell (its head cell is the one above), `target` where `navigate` is asked to go, `dig` whether
@@ -16,7 +17,7 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   dig: z.boolean(),
 });
 
-/** Ticks to stand still before asking: the body settles in the pocket, the chunk and the stalk are in. */
+/** Server ticks to stand still before asking: the body settles in the pocket, the chunk and the stalk are in. `waitServerTicks` rounds up to whole 20-tick time packets plus one (`server-ticks.ts`): 20 becomes 40. */
 const SETTLE_TICKS = 20;
 /** How far from the target the body may end and still have arrived. */
 const ARRIVAL_RADIUS = 2.5;
@@ -45,7 +46,7 @@ export async function run(context: ScenarioContext): Promise<ClientCompletion> {
         airTick[index] = ticks;
     });
   };
-  await context.waitForTicks(SETTLE_TICKS);
+  if ((await waitServerTicks(bot, SETTLE_TICKS)) === "stalled") return { status: "failed", detail: "[FIXTURE] the world age stood still while the bot settled in the pocket" };
   const start = bot.entity.position;
   if (Math.floor(start.x) !== pocket.x || Math.floor(start.y) !== pocket.y || Math.floor(start.z) !== pocket.z)
     return { status: "failed", detail: `the bot is not inside the pocket cell ${pocket.x},${pocket.y},${pocket.z}: at ${start.x},${start.y},${start.z}` };

@@ -5,6 +5,10 @@ import { arenaCell } from "../arena/params.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { handOverRolesSchema, handOverRun, type HandOverRoles } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
+import { pollWithinServerTicks } from "./toss-trace.ts";
+
+/** Physics ticks between two looks of the standing receiver at the ground: a cadence, the budget is `receiver_wait_ticks` of server time. */
+const RECEIVER_LOOK_EVERY_PHYSICS_TICKS = 5;
 
 const paramsIn = (arena: ArenaFrame) => z.strictObject({
   /** Places in the scenario's `players` list. */
@@ -15,7 +19,7 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   walk_to: arenaCell(arena),
   /** The brain's pick-back: this radius around the spot the giver tossed from (`PICK_BACK_RADIUS`, relations/handoff.ts). */
   pick_up_radius: z.number().int().positive().default(8),
-  /** How long the receiver stands, watching for the toss, before it gives up (ticks). */
+  /** How long the receiver stands, watching for the toss, before it gives up (server ticks, read from the world age). */
   receiver_wait_ticks: z.number().int().positive().default(400),
 });
 
@@ -45,12 +49,11 @@ async function walkOff(context: ScenarioContext, params: Params): Promise<Client
   return { status: output.result.status === "succeeded" ? "succeeded" : "failed", detail: output.summary };
 }
 
-/** Whether the toss's item shows on the ground near the receiver before its wait runs out. */
+/** Whether the toss's item shows on the ground near the receiver before its wait (server ticks) runs out. */
 async function seesToss(context: ScenarioContext, params: Params): Promise<boolean> {
-  for (let waited = 0; waited < params.receiver_wait_ticks; waited += 5) {
+  const polled = await pollWithinServerTicks(context.bot, params.receiver_wait_ticks, RECEIVER_LOOK_EVERY_PHYSICS_TICKS, async () => {
     const seen = viewStatusResultSchema.parse((await context.call("view_status", {})).result);
-    if (seen.status === "succeeded" && seen.situation.nearby.droppedItems.some((item) => item.name === params.item_name)) return true;
-    await context.waitForTicks(5);
-  }
-  return false;
+    return seen.status === "succeeded" && seen.situation.nearby.droppedItems.some((item) => item.name === params.item_name) ? true : undefined;
+  });
+  return "found" in polled;
 }

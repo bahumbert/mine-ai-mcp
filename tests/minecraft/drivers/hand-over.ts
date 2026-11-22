@@ -5,7 +5,11 @@ import { arenaCell } from "../arena/params.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import { handOverRolesSchema, handOverRun, type HandOverRoles } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
-import { describeRest, traceToss } from "./toss-trace.ts";
+import { waitServerTicks } from "./server-ticks.ts";
+import { describeRest, pollWithinServerTicks, traceToss } from "./toss-trace.ts";
+
+/** Physics ticks between two looks of the idle receiver at its inventory: a cadence, the budget is `receiver_wait_ticks` of server time. */
+const RECEIVER_LOOK_EVERY_PHYSICS_TICKS = 10;
 
 /** The refusal's codes: a giver that never gets a still recipient (`dropItemOutcomes.recipientMoving`), or one on a floor it cannot toss from (`recipientOutOfReach`), tosses nothing. */
 const REFUSAL_CODES = { moving: "[DROP_RECIPIENT_MOVING]", out_of_reach: "[DROP_RECIPIENT_OUT_OF_REACH]" } as const;
@@ -19,7 +23,7 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   taken: z.number().int().nonnegative().optional(),
   /** What the receiver holds of the item when it is done; `count` unless it already held some. */
   receiver_holds: z.number().int().positive().optional(),
-  /** How long the idle receiver watches its inventory for the items. */
+  /** How long the idle receiver watches its inventory for the items (server ticks, read from the world age). */
   receiver_wait_ticks: z.number().int().positive().default(200),
   /**
    * The receiver walks to each of `legs` in turn (cells, `x` `z` on the flat floor) before it stands (`then: stand`, and waits for
@@ -29,9 +33,9 @@ const paramsIn = (arena: ArenaFrame) => z.strictObject({
   receiver_walk: z.strictObject({ legs: z.array(arenaCell(arena)).min(1), then: z.enum(["stand", "end"]) }).optional(),
   /** `moving`: the giver must be refused with `[DROP_RECIPIENT_MOVING]` and toss nothing (the receiver never stands still); `out_of_reach`: with `[DROP_RECIPIENT_OUT_OF_REACH]` (the receiver stands still on a floor the giver cannot toss from). */
   giver_expects: z.enum(["taken", "moving", "out_of_reach"]).default("taken"),
-  /** The giver logs `TOSS_TRACE` lines (its feet, velocity and look, the items near it, who collected one) from the `drop_item` call to 60 ticks after its answer (`toss-trace.ts`). */
+  /** The giver logs `TOSS_TRACE` lines (its feet, velocity and look, the items near it, who collected one) from the `drop_item` call to 60 server ticks after its answer (`toss-trace.ts`). */
   trace: z.boolean().default(false),
-  /** Ticks between two samples of the trace (5; 1 to see the ticks around the toss). */
+  /** Physics ticks between two samples of the trace (5; 1 to see the ticks around the toss). */
   trace_every_ticks: z.number().int().positive().default(5),
   /** A measurement, not a test: both roles end `succeeded`, the giver with the outcome of its `drop_item` and the trace, the receiver with `TOSS_RESULT taken=... rest_dy=... rest_dist=...`. */
   measure: z.boolean().default(false),
@@ -50,7 +54,7 @@ async function give(context: ScenarioContext, params: Params, roles: HandOverRol
   // The first inventory item is in the hand; the toss is the point of the scenario, not the hand check.
   const toss = () => context.call("drop_item", { items: [{ item_name: params.item_name, count: params.count }], to_player: roles.receiver, allow_equipped: true });
   const { value: output, lines } = params.trace
-    ? await traceToss({ bot: context.bot, waitForTicks: (ticks) => context.waitForTicks(ticks) }, toss, params.trace_every_ticks)
+    ? await traceToss(context.bot, toss, params.trace_every_ticks)
     : { value: await toss(), lines: [] };
   if (params.measure) return { status: "succeeded", detail: [`TOSS_RESULT drop_item ${output.result.status}: ${output.summary}`, ...lines].join("\n") };
   if (params.giver_expects !== "taken") {
@@ -101,17 +105,18 @@ async function receive(context: ScenarioContext, params: Params): Promise<Client
   }
   if (params.giver_expects === "out_of_reach") {
     // The giver is refused and tosses nothing: this receiver stays still on its floor through the giver's whole wait, then holds none.
-    await context.waitForTicks(params.receiver_wait_ticks);
+    await waitServerTicks(context.bot, params.receiver_wait_ticks);
     const { held } = await seeHeld(context, params.item_name);
     return held === 0 ? { status: "succeeded", detail: "Stood still, holds none." } : { status: "failed", detail: `The receiver holds ${held} ${params.item_name}; nothing was to be tossed.` };
   }
   let lastSeen = "";
-  for (let waited = 0; waited < params.receiver_wait_ticks; waited += 10) {
+  const wanted = params.receiver_holds ?? params.count;
+  const polled = await pollWithinServerTicks(context.bot, params.receiver_wait_ticks, RECEIVER_LOOK_EVERY_PHYSICS_TICKS, async () => {
     const { held, summary } = await seeHeld(context, params.item_name);
     lastSeen = summary.match(/Position; [^;]*;|Dropped items[^;]*;[^;]*/gu)?.join(" ") ?? "";
-    if (held >= (params.receiver_holds ?? params.count)) return { status: "succeeded", detail: params.measure ? `TOSS_RESULT taken=yes held=${held}` : `Holds ${held} ${params.item_name}.` };
-    await context.waitForTicks(10);
-  }
+    return held >= wanted ? held : undefined;
+  });
+  if ("found" in polled) return { status: "succeeded", detail: params.measure ? `TOSS_RESULT taken=yes held=${polled.found}` : `Holds ${polled.found} ${params.item_name}.` };
   if (params.measure) return { status: "succeeded", detail: `TOSS_RESULT taken=no ${describeRest(context.bot)}` };
-  return { status: "failed", detail: `Never held ${params.receiver_holds ?? params.count} ${params.item_name}; last seen: ${lastSeen}` };
+  return { status: "failed", detail: `Never held ${wanted} ${params.item_name}${polled.ended === "stalled" ? " (the world age stood still)" : ""}; last seen: ${lastSeen}` };
 }

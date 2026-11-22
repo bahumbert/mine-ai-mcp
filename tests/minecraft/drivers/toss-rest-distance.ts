@@ -3,6 +3,11 @@ import { dropItemResultSchema, viewStatusResultSchema } from "@aibengineering/mi
 import type { ClientCompletion } from "mine-labs/client";
 import { handOverRolesOf, handOverRolesSchema, type HandOverRoles } from "./hand-over-roles.ts";
 import type { ScenarioContext, ScenarioRun } from "../scenario.ts";
+import { waitServerTicks } from "./server-ticks.ts";
+import { pollWithinServerTicks } from "./toss-trace.ts";
+
+/** Physics ticks between two looks of the standing receiver at the ground: a cadence, the budget is `receiver_wait_ticks` of server time. */
+const RECEIVER_LOOK_EVERY_PHYSICS_TICKS = 10;
 
 /** The most `pick_up_items` accepts as a radius (`src/actions/pick-up-items`): a toss resting farther cannot be picked back. */
 const TOOL_RADIUS_LIMIT = 32;
@@ -18,8 +23,9 @@ const paramsSchema = z.strictObject({
   mode: z.enum(["measure", "guard"]),
   /** The brain's pick-back radius (`PICK_BACK_RADIUS`, relations/handoff.ts; `handoff.test.ts` keeps the two equal). */
   pick_up_radius: z.number().int().positive().max(TOOL_RADIUS_LIMIT).optional(),
-  /** How long the receiver stands on after it first sees the toss: longer than the toss's own settle wait (100 ticks). */
+  /** How long the receiver stands on after it first sees the toss (server ticks): longer than the toss's own settle wait (100 ticks). */
   receiver_stay_ticks: z.number().int().positive().default(240),
+  /** How long the receiver waits for the toss to show (server ticks, read from the world age). */
   receiver_wait_ticks: z.number().int().positive().default(400),
 });
 
@@ -59,12 +65,8 @@ async function give(context: ScenarioContext, params: Params, roles: HandOverRol
 
 /** The receiver holds a full inventory and only stands: it waits for the toss to show, then stays through the giver's settle wait. */
 async function stand(context: ScenarioContext, params: Params): Promise<ClientCompletion> {
-  for (let waited = 0; waited < params.receiver_wait_ticks; waited += 10) {
-    if ((await groundItems(context, params.item_name)).length > 0) {
-      await context.waitForTicks(params.receiver_stay_ticks);
-      return { status: "succeeded", detail: "Saw the toss and stayed." };
-    }
-    await context.waitForTicks(10);
-  }
-  return { status: "failed", detail: `Never saw ${params.item_name} on the ground.` };
+  const polled = await pollWithinServerTicks(context.bot, params.receiver_wait_ticks, RECEIVER_LOOK_EVERY_PHYSICS_TICKS, async () => ((await groundItems(context, params.item_name)).length > 0 ? true : undefined));
+  if (!("found" in polled)) return { status: "failed", detail: `Never saw ${params.item_name} on the ground.` };
+  await waitServerTicks(context.bot, params.receiver_stay_ticks);
+  return { status: "succeeded", detail: "Saw the toss and stayed." };
 }
