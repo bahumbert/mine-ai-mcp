@@ -8,6 +8,7 @@ import { RARE_DROP_BREAKS } from "../gathering/how-to-get.ts";
 import { HostileInterruptions } from "../gathering/hostile-interruptions.ts";
 import { FakeRuntime, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL } from "../testing.ts";
 import { contextFor, describeCall, HOUSE_RECIPES, needsOnlyTools, GLASS_RECIPES } from "./skill-fixtures.test.ts";
+import { smeltCalls, smeltRuntime } from "./smelt-fixtures.test.ts";
 
 /** Run 13: Brea's shovel broke while digging dirt; dirt drops by hand, so the fetch went on bare-handed and never asked for another. */
 const SHOVEL_RECIPES = { ...HOUSE_RECIPES, wooden_shovel: { makes: 1, needs: [{ item: "oak_planks", count: 1 }, { item: "stick", count: 2 }] } };
@@ -94,19 +95,6 @@ const shovelLost = (runtime: FakeRuntime, dirt: number) => ({
     runtime.addItem("wooden_shovel", -1);
   },
 });
-
-function smeltRuntime(inventory: { name: string; count: number }[] = []): FakeRuntime {
-  const runtime = new FakeRuntime();
-  runtime.recipes = GLASS_RECIPES;
-  runtime.smelting = { glass: ["sand", "red_sand"], iron_ingot: ["deepslate_iron_ore", "iron_ore", "raw_iron"], coal: ["coal_ore", "deepslate_coal_ore"], cooked_beef: ["beef"] };
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory };
-  return runtime;
-}
-
-function smeltCalls(runtime: FakeRuntime) {
-  return runtime.submitted.filter((call) => call.tool === "smelt_item").map((call) => call.input);
-}
 
 /** A gather that ends on ground thirty blocks from the step's start, as a successful collect can. */
 function gatherAwayFromHome(runtime: FakeRuntime): void {

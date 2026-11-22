@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { flush } from "../../src/test-support/fake-bot/fake-clock.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 import { UnfinishedHouseSaver } from "./unfinished-house-saver.ts";
 
@@ -15,17 +16,15 @@ function saverOver(answers: boolean[]) {
   return { state, saver };
 }
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
-
 test("a failed note_save is tried again", async () => {
   const { state, saver } = saverOver([false, true]);
   state.house = house(1);
   saver.request();
-  await settle();
+  await flush();
   saver.request();
-  await settle();
+  await flush();
   saver.request();
-  await settle();
+  await flush();
   assert.deepEqual(state.saved, [house(1), house(1)], "asked again after the failure, not again after it went through");
 });
 
@@ -38,7 +37,7 @@ test("a house is saved at once, and a quick run of changes saves the latest one"
   saver.request();
   state.house = null;
   saver.request();
-  await settle();
+  await flush();
   assert.deepEqual(state.saved.at(-1), null, "no unfinished house is the last thing saved");
   assert.ok(state.saved.length <= 3);
 });
@@ -48,6 +47,6 @@ test("a house the memory already holds is not saved again", async () => {
   state.house = house(1);
   saver.known(house(1));
   saver.request();
-  await settle();
+  await flush();
   assert.deepEqual(state.saved, []);
 });

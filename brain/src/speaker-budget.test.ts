@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.ts";
 import { SpeakerBudget } from "./speaker-budget.ts";
 
 /** A budget over a clock the test moves. */
@@ -56,13 +57,16 @@ test("perMinute 0 turns the bound off", () => {
   assert.equal(budget.tryTake("Tom"), true);
 });
 
-test("the bucket runs on the injected monotonic clock", (t) => {
-  t.mock.method(Date, "now", () => {
-    throw new Error("the wall clock was read");
-  });
+test("the bucket runs on the monotonic clock, which the fake clock moves: a wall step of a minute refills nothing, ten seconds of monotonic time give a token", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
   const budget = new SpeakerBudget({ perMinute: 6, burst: 1 });
   assert.equal(budget.tryTake("Tom"), true);
   assert.equal(budget.tryTake("Tom"), false);
-  assert.ok(budget.waitMs("Tom") > 0);
+  assert.equal(budget.waitMs("Tom"), 10_000);
+  clock.stepWallClock(60_000);
+  assert.equal(budget.tryTake("Tom"), false, "a wall step alone refills nothing");
+  await clock.advance(10_000);
+  assert.equal(budget.tryTake("Tom"), true, "ten seconds of monotonic time give the token back");
   budget.refund("Tom");
 });

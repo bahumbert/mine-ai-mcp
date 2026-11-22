@@ -3,20 +3,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runStep } from "../skills.ts";
 import { FakeRuntime } from "../testing.ts";
-import { GLASS_RECIPES, HOUSE_RECIPES, contextFor, count, describeCall, owing } from "./skill-fixtures.test.ts";
-
-function smeltRuntime(inventory: { name: string; count: number }[] = []): FakeRuntime {
-  const runtime = new FakeRuntime();
-  runtime.recipes = GLASS_RECIPES;
-  runtime.smelting = { glass: ["sand", "red_sand"], iron_ingot: ["deepslate_iron_ore", "iron_ore", "raw_iron"], coal: ["coal_ore", "deepslate_coal_ore"], cooked_beef: ["beef"] };
-  runtime.simulateInventory = true;
-  runtime.snapshot = { ...runtime.snapshot, inventory };
-  return runtime;
-}
-
-function smeltCalls(runtime: FakeRuntime) {
-  return runtime.submitted.filter((call) => call.tool === "smelt_item").map((call) => call.input);
-}
+import { HOUSE_RECIPES, contextFor, count, describeCall, owing } from "./skill-fixtures.test.ts";
+import { smeltCalls, smeltRuntime } from "./smelt-fixtures.test.ts";
 
 test("get_items never crafts away the raw logs a trade owes: the table is made and the logs fetched back to the owed count", async () => {
   const runtime = new FakeRuntime();

@@ -3,6 +3,8 @@ import test, { type TestContext } from "node:test";
 import { Body, INSTANT_TYPING } from "../body.ts";
 import { BodyDown } from "../body-down.ts";
 import { FakeRuntime, movedClocks, scriptedMind, testPersona, until } from "../testing.ts";
+import { clockUntil } from "../agent/agent-fixtures.test.ts";
+import { createFakeClock, type FakeClock } from "../../../src/test-support/fake-bot/fake-clock.ts";
 import type { BotSnapshot } from "../runtime-client.ts";
 import { AgentRelations, type AgentRelationsDeps } from "./agent-relations.ts";
 import { EARLIER_GAIN_MS, EARLIER_GIVE_MS } from "./earlier.ts";
@@ -12,7 +14,16 @@ import { GIVE_OUTSIDE_TRADE } from "./order-refusal.ts";
 import { newRelation, withTrade } from "./record.ts";
 import type { RelationEvent } from "./types.ts";
 
-function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
+/** A test on its own mocked clock: installed for the body (`using`) and gone when it returns; its waits and yields move that clock. */
+function mockedTest(name: string, body: (timers: FakeClock) => void | Promise<void>): void {
+  test(name, async () => {
+    const timers = createFakeClock({ mode: "mocked" });
+    using _timers = timers.install();
+    await body(timers);
+  });
+}
+
+function relationsWithClock(timers: FakeClock, over: Partial<AgentRelationsDeps> = {}) {
   const rows: RelationEvent[] = [];
   const runtime = new FakeRuntime();
   let statusCalls = 0;
@@ -25,8 +36,8 @@ function relationsWithClock(over: Partial<AgentRelationsDeps> = {}) {
     isAgent: () => false, lacks: () => [], journal: (event) => { if (event.kind === "relation") rows.push(event); }, log: () => {}, clock, monotonic: () => time.at,
     hearingRange: 32, isOnline: () => true, waitingFrom: () => false, obeyRandom: () => 0, ...over,
   });
-  const look = async () => { relations.look(new Set(), new Set(), new AbortController().signal); await new Promise((r) => setTimeout(r, 5)); };
-  return { relations, time, look, rows, calls: () => statusCalls };
+  const look = async () => { relations.look(new Set(), new Set(), new AbortController().signal); await timers.advance(5); };
+  return { relations, time, look, rows, calls: () => statusCalls, timers };
 }
 
 const MIN = 60_000;
@@ -181,14 +192,14 @@ test("an open trade keeps its baseline between ticks: a payment tossed in betwee
   assert.deepEqual(h.trade()?.received, [{ item: "iron_ingot", count: 5 }]);
 });
 
-test("look() answers idle with nothing busy, busy_wait inside the throttle or while a tick runs, ticked otherwise", async () => {
-  const { relations, time, look } = relationsWithClock();
+mockedTest("look() answers idle with nothing busy, busy_wait inside the throttle or while a tick runs, ticked otherwise", async (timers) => {
+  const { relations, time, look } = relationsWithClock(timers);
   const signal = new AbortController().signal;
   assert.equal(relations.look(new Set(), new Set(), signal), "idle");
   relations.trades.heardLine("Theo", Date.now(), 2);
   assert.equal(relations.look(new Set(), new Set(), signal), "ticked");
   assert.equal(relations.look(new Set(), new Set(), signal), "busy_wait", "a tick is running");
-  await new Promise((r) => setTimeout(r, 5));
+  await timers.advance(5);
   assert.equal(relations.look(new Set(), new Set(), signal), "busy_wait", "inside the watch throttle");
   time.at += 2_000;
   assert.equal(relations.look(new Set(), new Set(), signal), "ticked");
@@ -196,8 +207,8 @@ test("look() answers idle with nothing busy, busy_wait inside the throttle or wh
   assert.equal(relations.look(new Set(), new Set(), AbortSignal.abort()), "idle", "aborted");
 });
 
-test("with only a window open look() polls status at most every 2 s", async () => {
-  const { relations, time, look, calls } = relationsWithClock();
+mockedTest("with only a window open look() polls status at most every 2 s", async (timers) => {
+  const { relations, time, look, calls } = relationsWithClock(timers);
   relations.trades.heardLine("Theo", Date.now(), 2);
   await look();
   await look();
@@ -217,37 +228,37 @@ const around = (players: Record<string, number | null>): BotSnapshot => ({
 });
 const refusal = (n = 1) => ({ say: "", route: "talk" as const, request: "", myRequest: { n, answer: "refused" as const } });
 
-test("a refusal heard scores the speaker", async () => {
-  const { relations, rows } = relationsWithClock();
+mockedTest("a refusal heard scores the speaker", async (timers) => {
+  const { relations, rows } = relationsWithClock(timers);
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   await relations.answered(refusal(), "Theo");
   const theo = relations.book.get("Theo")!;
   assert.deepEqual([theo.score, theo.requests, theo.ledger.map((e) => e.kind)], [-3, [], ["request_refused"]]);
   assert.deepEqual(rows.map((r) => [r.scoreKind, r.delta, r.score]), [["request_refused", -3, -3]]);
 });
 
-test("an answer that names no open request moves nothing", async () => {
-  const { relations, rows } = relationsWithClock();
+mockedTest("an answer that names no open request moves nothing", async (timers) => {
+  const { relations, rows } = relationsWithClock(timers);
   await relations.answered(refusal(), "Theo");
   assert.equal(relations.book.get("Theo"), null, "no record is made for it");
   relations.asked(["Theo"], "bread", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   await relations.answered(refusal(2), "Theo");
   assert.deepEqual([relations.book.get("Theo")?.requests.length, rows.length], [1, 0]);
 });
 
-test("an ignored request scores after 2 min with no brain tick in between", async () => {
-  const { relations, time, look, rows } = relationsWithClock();
+mockedTest("an ignored request scores after 2 min with no brain tick in between", async (timers) => {
+  const { relations, time, look, rows } = relationsWithClock(timers);
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   await look();
   time.at += 110_000;
   await look();
   assert.equal(relations.book.get("Theo")!.ledger.length, 0, "not yet");
   time.at += 10_000;
   await look();
-  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")!.ledger.length === 1);
   const theo = relations.book.get("Theo")!;
   assert.deepEqual([theo.requests, theo.ledger[0]?.kind, theo.ledger[0]?.why], [[], "request_ignored", "did not answer when you asked for 5 oak_log"]);
   assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
@@ -256,34 +267,37 @@ test("an ignored request scores after 2 min with no brain tick in between", asyn
   assert.equal(relations.book.get("Theo")!.ledger.length, 1, "scored once");
 });
 
-test("the request check is throttled on the monotonic clock: the wall clock moving does not run it, 5 s of monotonic time does", async () => {
+mockedTest("the request check is throttled on the monotonic clock: the wall clock moving does not run it, 5 s of monotonic time does", async (timers) => {
   const mono = { at: 1_000 };
-  const { relations, time, look, rows } = relationsWithClock({ monotonic: () => mono.at });
+  const { relations, time, look, rows } = relationsWithClock(timers, { monotonic: () => mono.at });
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   await look();
   time.at += 3 * MIN;
   await look();
   assert.equal(rows.length, 0, "the check ran 0 s of monotonic time ago");
+  mono.at += 4_000;
+  await look();
+  assert.equal(rows.length, 0, "the check ran 4 s of monotonic time ago, under its 5 s bound");
   mono.at += 5_000;
   await look();
-  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")!.ledger.length === 1);
   assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
 });
 
-test("the first request check runs at once in a process whose monotonic reading is small", async () => {
-  const { relations, time, look, rows } = relationsWithClock({ monotonic: () => 1_000 });
+mockedTest("the first request check runs at once in a process whose monotonic reading is small", async (timers) => {
+  const { relations, time, look, rows } = relationsWithClock(timers, { monotonic: () => 1_000 });
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   time.at += 3 * MIN;
   await look();
-  await until(() => relations.book.get("Theo")!.ledger.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")!.ledger.length === 1);
   assert.deepEqual(rows.map((r) => r.scoreKind), ["request_ignored"]);
 });
 
-test("the look of a watching bot is throttled on the monotonic clock: the wall clock moving does not poll the status", async () => {
+mockedTest("the look of a watching bot is throttled on the monotonic clock: the wall clock moving does not poll the status", async (timers) => {
   const mono = { at: 1_000 };
-  const { relations, time, look, calls } = relationsWithClock({ monotonic: () => mono.at });
+  const { relations, time, look, calls } = relationsWithClock(timers, { monotonic: () => mono.at });
   relations.trades.heardLine("Theo", Date.now(), 2);
   await look();
   time.at += 5_000;
@@ -294,55 +308,55 @@ test("the look of a watching bot is throttled on the monotonic clock: the wall c
   assert.equal(calls(), 2);
 });
 
-test("out of range is never ignored", async () => {
-  const { relations, time, look } = relationsWithClock({ hearingRange: 32 });
+mockedTest("out of range is never ignored", async (timers) => {
+  const { relations, time, look } = relationsWithClock(timers, { hearingRange: 32 });
   relations.asked(["Theo"], "bread", null, around({ Theo: 80 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   assert.equal(relations.book.get("Theo")?.requests[0]?.inRange, false);
   await look();
   time.at += 10 * MIN;
   await look();
-  await until(() => relations.book.get("Theo")!.requests.length === 0);
+  await clockUntil(timers,() => relations.book.get("Theo")!.requests.length === 0);
   assert.equal(relations.book.get("Theo")!.ledger.length, 0);
 });
 
-test("whisper to an offline player is never ignored", async () => {
+mockedTest("whisper to an offline player is never ignored", async (timers) => {
   const online = new Set<string>();
-  const { relations, time, look } = relationsWithClock({ isOnline: (name) => online.has(name) });
+  const { relations, time, look } = relationsWithClock(timers, { isOnline: (name) => online.has(name) });
   relations.book.load([newRelation("Zed", time.at, 0)]);
   relations.asked(["Zed"], "bread", "Zed", around({}));
-  await until(() => relations.book.get("Zed")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Zed")?.requests.length === 1);
   assert.equal(relations.book.get("Zed")?.requests[0]?.inRange, false, "offline: nobody heard the whisper");
   relations.asked(["Theo"], "wool", "Theo", around({ Theo: null }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   assert.equal(relations.book.get("Theo")?.requests[0]?.inRange, true, "online but not loaded: a whisper reaches them");
   online.add("Zed");
   await look();
   time.at += 10 * MIN;
   await look();
-  await until(() => relations.book.get("Zed")!.requests.length === 0);
+  await clockUntil(timers,() => relations.book.get("Zed")!.requests.length === 0);
   assert.equal(relations.book.get("Zed")!.ledger.length, 0);
 });
 
-test("a name that is neither in the book nor online asks nothing", async () => {
-  const { relations } = relationsWithClock();
+mockedTest("a name that is neither in the book nor online asks nothing", async (timers) => {
+  const { relations } = relationsWithClock(timers);
   relations.asked(["Nobody", "Ayla"], "bread", null, around({}));
-  await new Promise((r) => setTimeout(r, 5));
+  await timers.advance(5);
   assert.deepEqual([relations.book.get("Nobody"), relations.book.get("Ayla")], [null, null]);
 });
 
-test("opening's asks_of opens a request", async () => {
-  const { relations } = relationsWithClock();
+mockedTest("opening's asks_of opens a request", async (timers) => {
+  const { relations } = relationsWithClock(timers);
   relations.forConversations().asked(["theo"], "iron_ingot", around({ Theo: 5 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   assert.deepEqual(relations.book.get("Theo")?.requests.map((q) => [q.what, q.inRange, q.agreed]), [["iron_ingot", true, false]]);
 });
 
-test("a reply stuck in the model queue is not ignored", async () => {
+mockedTest("a reply stuck in the model queue is not ignored", async (timers) => {
   let waiting = true;
-  const { relations, time, look, rows } = relationsWithClock({ waitingFrom: () => waiting });
+  const { relations, time, look, rows } = relationsWithClock(timers, { waitingFrom: () => waiting });
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   await look();
   time.at += 5 * MIN;
   await look();
@@ -355,43 +369,43 @@ test("a reply stuck in the model queue is not ignored", async () => {
   assert.equal(relations.book.get("Theo")!.ledger.length, 1);
 });
 
-test("restart drops stale requests", () => {
-  const { relations, time } = relationsWithClock();
+mockedTest("restart drops stale requests", (timers) => {
+  const { relations, time } = relationsWithClock(timers);
   const stale = { ...newRelation("Theo", time.at - 10 * MIN, 0), requests: [{ what: "bread", at: time.at - 5 * MIN, inRange: true, agreed: false, heard: false }, { what: "wool", at: time.at - 1_000, inRange: true, agreed: false, heard: false }] };
   relations.load({ relations: [stale], skipped: 0 });
   assert.deepEqual(relations.book.get("Theo")?.requests.map((q) => q.what), ["wool"]);
   assert.equal(relations.book.get("Theo")?.ledger.length, 0);
 });
 
-test("the chat block shows the speaker's open requests, numbered", async () => {
-  const { relations, time } = relationsWithClock();
+mockedTest("the chat block shows the speaker's open requests, numbered", async (timers) => {
+  const { relations, time } = relationsWithClock(timers);
   relations.asked(["Theo"], "5 oak_log", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   time.at += 90_000;
   const block = relations.chatBlock("Theo", [], around({ Theo: 3 }));
   assert.deepEqual(block.requests, ["1. You asked Theo for 5 oak_log 1 min ago."]);
   assert.deepEqual(relations.chatBlock("Bruno", [], around({})).requests, []);
 });
 
-test("the relations block names the speaker once when the conversation lists them", () => {
-  const { relations } = relationsWithClock();
+mockedTest("the relations block names the speaker once when the conversation lists them", (timers) => {
+  const { relations } = relationsWithClock(timers);
   const summaries = (others: readonly string[]) => relations.chatBlock("Theo", others, around({ Theo: 3 })).block.split("\n").filter((line) => /^You (and|have not dealt with) Theo/u.test(line));
   assert.equal(summaries(["Theo", "Steve"]).length, 1, "the same name");
   assert.equal(summaries(["theo"]).length, 1, "another case");
   assert.equal(summaries(["Steve"]).length, 1);
 });
 
-test("a whisper makes only the one whispered to hear: the others it asks are out of range", async () => {
-  const { relations } = relationsWithClock();
+mockedTest("a whisper makes only the one whispered to hear: the others it asks are out of range", async (timers) => {
+  const { relations } = relationsWithClock(timers);
   relations.asked(["Ayla2", "Bob"], "bread", "Ayla2", around({ Ayla2: 2, Bob: 200 }));
-  await until(() => relations.book.get("Bob")?.requests.length === 1 && relations.book.get("Ayla2")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Bob")?.requests.length === 1 && relations.book.get("Ayla2")?.requests.length === 1);
   assert.deepEqual([relations.book.get("Ayla2")?.requests[0]?.inRange, relations.book.get("Bob")?.requests[0]?.inRange], [true, false]);
 });
 
-test("an answer journals only its own scored row, not one another writer queued before it", async () => {
-  const { relations, rows } = relationsWithClock();
+mockedTest("an answer journals only its own scored row, not one another writer queued before it", async (timers) => {
+  const { relations, rows } = relationsWithClock(timers);
   relations.asked(["Theo"], "bread", null, around({ Theo: 3 }));
-  await until(() => relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(timers,() => relations.book.get("Theo")?.requests.length === 1);
   rows.length = 0;
   void relations.book.score("Theo", { kind: "trade_done", why: "paid" });
   await relations.answered(refusal(), "Theo");
@@ -400,160 +414,160 @@ test("an answer journals only its own scored row, not one another writer queued 
 
 const hit = (attacker: string, direct: string | null = null, at = 0) => ({ attacker, direct, at });
 
-test("hits debounced per attacker", async () => {
-  const { relations, time, rows } = relationsWithClock();
+mockedTest("hits debounced per attacker", async (timers) => {
+  const { relations, time, rows } = relationsWithClock(timers);
   for (let i = 0; i < 10; i++) {
     relations.hurt(hit("Theo"));
     time.at += 400;
   }
   relations.hurt(hit("Ayla"));
-  await until(() => rows.length === 2);
+  await clockUntil(timers,() => rows.length === 2);
   assert.deepEqual(rows.map((r) => [r.partner, r.scoreKind, r.delta]), [["Theo", "hurt", -25], ["Ayla", "hurt", -25]]);
   time.at += 61_000;
   relations.hurt(hit("Theo"));
-  await until(() => rows.length === 3);
+  await clockUntil(timers,() => rows.length === 3);
   assert.deepEqual(rows.map((r) => r.partner), ["Theo", "Ayla", "Theo"]);
 });
 
-test("a hit inside the window writes nothing", async () => {
+mockedTest("a hit inside the window writes nothing", async (timers) => {
   const runtime = new FakeRuntime();
   let queries = 0;
   const query = runtime.queryBotData.bind(runtime);
   runtime.queryBotData = async (sql) => { queries += 1; return query(sql); };
-  const { relations, time, rows } = relationsWithClock({ runtime });
+  const { relations, time, rows } = relationsWithClock(timers, { runtime });
   for (let i = 0; i < 10; i++) {
     relations.hurt(hit("Theo"));
     time.at += 400;
   }
-  await until(() => rows.length === 1);
-  await new Promise((r) => setTimeout(r, 20));
+  await clockUntil(timers,() => rows.length === 1);
+  await timers.advance(20);
   assert.equal(queries, 0, "the first hit saves a new note; a rewrite would first look up and delete the old one");
 });
 
-test("a stranger hit is created at the first impression; the why names the weapon", async () => {
-  const { relations, rows } = relationsWithClock();
+mockedTest("a stranger hit is created at the first impression; the why names the weapon", async (timers) => {
+  const { relations, rows } = relationsWithClock(timers);
   assert.equal(relations.book.get("Theo"), null);
   relations.hurt(hit("Theo"));
   relations.hurt(hit("Ayla", "arrow"));
-  await until(() => rows.length === 2);
+  await clockUntil(timers,() => rows.length === 2);
   assert.deepEqual([relations.book.get("Theo")?.score, ...rows.map((r) => r.why)], [-25, "hit you", "shot you"]);
 });
 
 /** Relations whose notes really go through a body over a fake runtime, so the notes written can be counted. */
-function relationsWithNotes() {
+function relationsWithNotes(timers: FakeClock) {
   const runtime = new FakeRuntime();
   const logs: string[] = [];
-  const made = relationsWithClock({ runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), log: (line) => logs.push(line) });
+  const made = relationsWithClock(timers, { runtime, body: new Body(runtime, () => undefined, INSTANT_TYPING), log: (line) => logs.push(line) });
   return { ...made, notes: runtime.notes, logs };
 }
 const askTheo = async (c: ReturnType<typeof relationsWithClock>) => {
   c.relations.asked(["Theo"], "4 coal", null, around({ Theo: 3 }));
-  await until(() => c.relations.book.get("Theo")?.requests.length === 1);
+  await clockUntil(c.timers, () => c.relations.book.get("Theo")?.requests.length === 1);
 };
 
-test("a line from the asked partner stops the ignored score", async () => {
-  const c = relationsWithClock();
+mockedTest("a line from the asked partner stops the ignored score", async (timers) => {
+  const c = relationsWithClock(timers);
   await askTheo(c);
   c.time.at += 10_000;
   c.relations.heardFrom("Theo");
   c.time.at += 3 * MIN;
   await c.look();
-  await until(() => c.relations.book.get("Theo")!.requests.length === 0);
+  await clockUntil(timers,() => c.relations.book.get("Theo")!.requests.length === 0);
   assert.deepEqual([c.rows.length, c.relations.book.get("Theo")!.ledger.length], [0, 0]);
 });
 
-test("a line from someone else does not stop it", async () => {
-  const c = relationsWithClock();
+mockedTest("a line from someone else does not stop it", async (timers) => {
+  const c = relationsWithClock(timers);
   await askTheo(c);
   c.time.at += 10_000;
   c.relations.heardFrom("Ayla");
   c.time.at += 3 * MIN;
   await c.look();
-  await until(() => c.rows.length === 1);
+  await clockUntil(timers,() => c.rows.length === 1);
   assert.equal(c.rows[0]?.scoreKind, "request_ignored");
 });
 
-test("a line read before the ask does not count", async () => {
-  const c = relationsWithClock();
+mockedTest("a line read before the ask does not count", async (timers) => {
+  const c = relationsWithClock(timers);
   c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
   c.relations.heardFrom("Theo");
   c.time.at += 1_000;
   await askTheo(c);
   c.time.at += 3 * MIN;
   await c.look();
-  await until(() => c.rows.length === 1);
+  await clockUntil(timers,() => c.rows.length === 1);
   assert.equal(c.rows[0]?.scoreKind, "request_ignored");
 });
 
-test("a heard line writes no note when nothing changes", async () => {
-  const c = relationsWithNotes();
+mockedTest("a heard line writes no note when nothing changes", async (timers) => {
+  const c = relationsWithNotes(timers);
   await askTheo(c);
   c.time.at += 1_000;
   c.relations.heardFrom("Theo");
-  await until(() => c.relations.book.get("Theo")!.requests[0]?.heard === true);
-  await new Promise((r) => setTimeout(r, 10));
+  await clockUntil(timers,() => c.relations.book.get("Theo")!.requests[0]?.heard === true);
+  await timers.advance(10);
   const saved = c.notes.length;
   c.relations.heardFrom("Theo");
   c.relations.heardFrom("Nobody");
-  await new Promise((r) => setTimeout(r, 10));
+  await timers.advance(10);
   assert.equal(c.notes.length, saved);
   assert.equal(c.relations.book.get("Nobody"), null, "a stranger gets no record");
 });
 
-test("heardFrom while the ask's update is still queued marks it", async () => {
-  const c = relationsWithClock();
+mockedTest("heardFrom while the ask's update is still queued marks it", async (timers) => {
+  const c = relationsWithClock(timers);
   c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
   c.time.at += 1_000;
   c.relations.asked(["Theo"], "4 coal", null, around({ Theo: 3 }));
   c.time.at += 1_000;
   c.relations.heardFrom("Theo");
-  await until(() => c.relations.book.get("Theo")?.requests[0]?.heard === true);
+  await clockUntil(timers,() => c.relations.book.get("Theo")?.requests[0]?.heard === true);
 });
 
-test("a dropped heard request is logged and scores nothing", async () => {
-  const c = relationsWithNotes();
+mockedTest("a dropped heard request is logged and scores nothing", async (timers) => {
+  const c = relationsWithNotes(timers);
   await askTheo(c);
   c.time.at += 1_000;
   c.relations.heardFrom("Theo");
   c.time.at += 3 * MIN;
   await c.look();
-  await until(() => c.relations.book.get("Theo")!.requests.length === 0);
+  await clockUntil(timers,() => c.relations.book.get("Theo")!.requests.length === 0);
   assert.deepEqual(c.logs.filter((l) => l.includes("dropped")), ["request to Theo for 4 coal dropped: they spoke since"]);
   assert.equal(c.rows.length, 0);
 });
 
-test("heardFrom stamps the line at the time it was read, not when it is noted", async () => {
-  const c = relationsWithClock();
+mockedTest("heardFrom stamps the line at the time it was read, not when it is noted", async (timers) => {
+  const c = relationsWithClock(timers);
   c.relations.book.load([newRelation("Theo", c.time.at, 0)]);
   const readAt = c.time.at + 500;
   c.time.at += 1_000;
   await askTheo(c);
   c.time.at += 1_000;
   c.relations.heardFrom("Theo", readAt);
-  await new Promise((r) => setTimeout(r, 10));
+  await timers.advance(10);
   assert.equal(c.relations.book.get("Theo")!.requests[0]?.heard, false, "read before the ask");
 });
 
 const MOOD_LINE = /You don't feel like doing what Bruno asks right now \(you rate them -15\)\./u;
 
 /** Relations that rate Bruno at `score`, rolling with the given sequence of random numbers. */
-function relationsRating(score: number, rolls: number[], over: Partial<AgentRelationsDeps> = {}) {
-  const h = relationsWithClock({ obeyRandom: () => rolls.shift() ?? 0, ...over });
+function relationsRating(timers: FakeClock, score: number, rolls: number[], over: Partial<AgentRelationsDeps> = {}) {
+  const h = relationsWithClock(timers, { obeyRandom: () => rolls.shift() ?? 0, ...over });
   h.relations.load({ relations: [newRelation("Bruno", h.time.at, score)], skipped: 0 });
   return { ...h, rolls };
 }
 
-test("the chat block tells the model it does not feel like obeying when the roll says no, and not when it says yes", () => {
-  const no = relationsRating(-15, [0.99]);
+mockedTest("the chat block tells the model it does not feel like obeying when the roll says no, and not when it says yes", (timers) => {
+  const no = relationsRating(timers,-15, [0.99]);
   assert.match(no.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block, MOOD_LINE);
   assert.deepEqual(no.relations.obeys("Bruno"), { obeys: false, chance: obeyChance(-15, -4, 4), score: -15 });
-  const yes = relationsRating(-15, [0]);
+  const yes = relationsRating(timers,-15, [0]);
   assert.doesNotMatch(yes.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block, /don't feel like/u);
   assert.equal(yes.relations.obeys("Bruno")?.obeys, true);
 });
 
-test("a retry of the chat call inside the mood window reuses the roll, and the line shows the score as it is now", async () => {
-  const h = relationsRating(-15, [0.99, 0]);
+mockedTest("a retry of the chat call inside the mood window reuses the roll, and the line shows the score as it is now", async (timers) => {
+  const h = relationsRating(timers,-15, [0.99, 0]);
   h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
   await h.relations.book.update("Bruno", (r) => ({ ...r, score: -7 }));
   const again = h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).block;
@@ -561,40 +575,40 @@ test("a retry of the chat call inside the mood window reuses the roll, and the l
   assert.deepEqual(h.rolls, [0], "the second roll was never drawn");
 });
 
-test("obeys reads the stored roll after the window ran out, and answers null before any", () => {
-  const h = relationsRating(-15, [0.99]);
+mockedTest("obeys reads the stored roll after the window ran out, and answers null before any", (timers) => {
+  const h = relationsRating(timers,-15, [0.99]);
   assert.equal(h.relations.obeys("Bruno"), null);
   h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
   h.time.at += 30 * MIN;
   assert.equal(h.relations.obeys("Bruno")?.obeys, false);
 });
 
-test("the score that is rolled has drifted back with forgiveness", () => {
-  const h = relationsRating(-30, [0.5]);
+mockedTest("the score that is rolled has drifted back with forgiveness", (timers) => {
+  const h = relationsRating(timers,-30, [0.5]);
   h.time.at += 3_600_000 * 5;
   h.relations.chatBlock("Bruno", [], around({ Bruno: 2 }));
   assert.equal(h.relations.obeys("Bruno")?.score, -5);
 });
 
-test("a speaker with no record is rolled at the first impression, a player and a bot alike", () => {
+mockedTest("a speaker with no record is rolled at the first impression, a player and a bot alike", (timers) => {
   for (const isAgent of [false, true]) {
-    const h = relationsWithClock({ obeyRandom: () => 0.99, isAgent: () => isAgent });
+    const h = relationsWithClock(timers, { obeyRandom: () => 0.99, isAgent: () => isAgent });
     h.relations.chatBlock("Steve", [], around({ Steve: 1 }));
     assert.deepEqual([h.relations.obeys("Steve")?.score, h.relations.obeys("Steve")?.obeys], [0, false]);
   }
 });
 
-test("the chat block keeps the id of the offer the speaker made me", () => {
+mockedTest("the chat block keeps the id of the offer the speaker made me", (timers) => {
   const board = new TradeBoard();
-  const h = relationsRating(0, [], { board });
+  const h = relationsRating(timers,0, [], { board });
   assert.equal(h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).seenOfferId, undefined);
   board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [{ item: "bread", count: 1 }], get: [], first: "me", postedAt: 1 });
   assert.equal(h.relations.chatBlock("Bruno", [], around({ Bruno: 2 })).seenOfferId, "Bruno-Ayla-1");
 });
 
-test("tradeOpenWith names my open trade, else a board offer either way, else null", async () => {
+mockedTest("tradeOpenWith names my open trade, else a board offer either way, else null", async (timers) => {
   const board = new TradeBoard();
-  const h = relationsRating(0, [], { board });
+  const h = relationsRating(timers,0, [], { board });
   assert.equal(h.relations.tradeOpenWith("Bruno"), null);
   board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [], get: [], first: "me", postedAt: 1 });
   assert.equal(h.relations.tradeOpenWith("bruno"), "Bruno-Ayla-1");
@@ -606,9 +620,9 @@ test("tradeOpenWith names my open trade, else a board offer either way, else nul
   assert.equal(h.relations.tradeOpenWith("Bruno"), h.relations.book.get("Bruno")?.trades.at(-1)?.id);
 });
 
-test("decided closes only the offer the line read: an accept of a replaced offer is refused, of the same one agreed", async () => {
+mockedTest("decided closes only the offer the line read: an accept of a replaced offer is refused, of the same one agreed", async (timers) => {
   const board = new TradeBoard();
-  const h = relationsRating(0, [], { board });
+  const h = relationsRating(timers,0, [], { board });
   const offer = { id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [{ item: "iron_ingot", count: 1 }], get: [{ item: "bread", count: 1 }], first: "me" as const, postedAt: 1 };
   const accept = { say: "ok", route: "talk" as const, request: "", trade: { action: "accept" as const, give: [], get: [], first: "them" as const } };
   board.post(offer);
@@ -618,37 +632,37 @@ test("decided closes only the offer the line read: an accept of a replaced offer
   assert.equal(h.relations.book.get("Bruno")?.trades.at(-1)?.state, "agreed");
 });
 
-test("decided passes the spoken line on: a proposal whose words give another number than the terms logs it", async () => {
+mockedTest("decided passes the spoken line on: a proposal whose words give another number than the terms logs it", async (timers) => {
   const logs: string[] = [];
-  const h = relationsRating(0, [], { log: (line) => logs.push(line) });
+  const h = relationsRating(timers,0, [], { log: (line) => logs.push(line) });
   const propose = { say: "Bruno, 16 bread for 3 iron ingots?", route: "talk" as const, request: "", trade: { action: "propose" as const, give: [{ item: "bread", count: 1 }], get: [{ item: "iron_ingot", count: 3 }], first: "me" as const } };
   assert.notEqual(await h.relations.decided(propose, "Bruno", around({ Bruno: 2 }), { heardAt: 5 }), null);
   assert.ok(logs.includes("trade: terms differ from the words: bread 1 in terms, 16 in the line"), logs.join("\n"));
 });
 
-test("offerStillStands: only the offer that was read, and only when one was read", () => {
+mockedTest("offerStillStands: only the offer that was read, and only when one was read", (timers) => {
   const board = new TradeBoard();
-  const h = relationsRating(0, [], { board });
+  const h = relationsRating(timers,0, [], { board });
   board.post({ id: "Bruno-Ayla-1", proposer: "Bruno", partner: "Ayla", give: [], get: [], first: "me", postedAt: 1 });
   assert.deepEqual([h.relations.offerStillStands("Bruno", "Bruno-Ayla-1"), h.relations.offerStillStands("Bruno", "Bruno-Ayla-2"), h.relations.offerStillStands("Bruno", undefined)], [true, false, false]);
   board.withdraw("Bruno-Ayla-1");
   assert.equal(h.relations.offerStillStands("Bruno", "Bruno-Ayla-1"), false);
 });
 
-test("the rating is the drifted score, the first impression for a stranger", () => {
-  const h = relationsRating(-30, [0.5]);
+mockedTest("the rating is the drifted score, the first impression for a stranger", (timers) => {
+  const h = relationsRating(timers,-30, [0.5]);
   assert.equal(h.relations.rating("Bruno"), -30);
   assert.equal(h.relations.rating("Nobody"), 0);
 });
 
-test("a trade the checks refuse is dropped and the decision says so, whether the re-answer keeps it or leaves it out", async () => {
+mockedTest("a trade the checks refuse is dropped and the decision says so, whether the re-answer keeps it or leaves it out", async (timers) => {
   const first = { say: "Here.", route: "act" as const, request: "give bread", trade: { action: "propose" as const, give: [{ item: "bread", count: 5 }], get: [], first: "me" as const } };
   const snapshot = { ...new FakeRuntime().snapshot, inventory: [] };
   const input = { persona: testPersona(), message: { username: "Bruno", channel: "chat" as const, message: "give me bread", addressed: true }, history: [], snapshot, activity: "idle", places: [], areas: [], relations: { block: "", tradeOn: true } };
   for (const second of [first, { say: "No.", route: "act" as const, request: "give bread" }]) {
     const { chat, mind } = scriptedMind();
     chat.reply(second);
-    const h = relationsWithClock({ mind });
+    const h = relationsWithClock(timers, { mind });
     const { decision: out } = await h.relations.checkedTrade(first, input, { speaker: "Bruno", heardAt: Date.now(), snapshot, signal: new AbortController().signal });
     assert.deepEqual([out.trade, out.tradeDropped, out.route], [undefined, true, "act"]);
   }
@@ -767,9 +781,9 @@ test("giveOutsideTrade refuses a give before a proposal is agreed", async (t) =>
   assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), `${GIVE_OUTSIDE_TRADE} not given: Theo and I have trade ${h.trade()!.id} open; its hand-off is how items move between us`);
 });
 
-test("giveOutsideTrade refuses while only the speaker's board offer stands", () => {
+mockedTest("giveOutsideTrade refuses while only the speaker's board offer stands", (timers) => {
   const board = new TradeBoard();
-  const h = relationsWithClock({ board });
+  const h = relationsWithClock(timers, { board });
   board.post({ id: "Theo-Ayla-1", proposer: "Theo", partner: "Ayla", give: [{ item: "bread", count: 5 }], get: [], first: "me", postedAt: 1 });
   assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 5, false), `${GIVE_OUTSIDE_TRADE} not given: Theo and I have trade Theo-Ayla-1 open; its hand-off is how items move between us`);
 });
@@ -786,8 +800,8 @@ test("giveOutsideTrade lets a held trade's awaited item go", async (t) => {
   assert.equal(h.relations.giveOutsideTrade("Theo", "oak_log", 1, true), CAME_TO_NOTHING, "an item no held trade awaits is no part of it");
 });
 
-test("giveOutsideTrade marks a give after a line's trade came to nothing", () => {
-  const h = relationsWithClock();
+mockedTest("giveOutsideTrade marks a give after a line's trade came to nothing", (timers) => {
+  const h = relationsWithClock(timers);
   assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 1, false), null);
   assert.equal(h.relations.giveOutsideTrade("Theo", "bread", 1, true), CAME_TO_NOTHING);
 });
