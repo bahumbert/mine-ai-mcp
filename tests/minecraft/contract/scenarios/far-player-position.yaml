@@ -30,6 +30,9 @@ players:
 goal:
   kind: all
   timeout: 90
+  # The check waits 16 x 40 server ticks (8 distances x 2 modes, serverQuiet) with the goal still, a deliberate long wait
+  # (S1): 34 runs at 20 and 10 tps, longest still span 645 ticks (2026-11-22); twice, rounded up to 20.
+  stillTicks: 1300
   goals:
     - kind: completion
       who: Actor
