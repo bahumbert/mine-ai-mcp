@@ -232,6 +232,7 @@ const NO_COORDINATE_DRIVERS: Readonly<Record<string, string>> = {
   "death-is-read.ts": "no action; the death is made by a chat command on the actor itself (@s)",
   "explore-frontier.ts": "a heading and a chunk count",
   "ground-first-barter.ts": "barter by the nearest piglin, no coordinate",
+  "hovering-blaze-contact.ts": "summons the probe blaze by chat using arenaPoint; the collect_mob_drop input holds no x or z",
   "idle-then-breathe.ts": "no action, reads the air",
   "lava-pool-escape.ts": "asks only view_status; the teleport is a chat command built from the params' pool floor through arenaPoint",
   "unreachable-shooter-ledge.ts": "teleports by chat using arenaPoint; action inputs read claim identities without coordinates",
