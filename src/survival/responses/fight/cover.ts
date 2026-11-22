@@ -204,13 +204,10 @@ export class CoverFight {
     }
     const protectedWindow = this.scene.protectedProgress.enter(plan.protected.toString());
     if (!this.recovering && protectedWindow.exhausted) {
-      this.scene.reportDecision({
-        kind: "position_rejected",
-        targetId: this.scene.target.id,
-        position: plan.protected,
-        reason: `No confirmed quarry damage during ${this.scene.policy.combat.protected_wait_ticks} protected waiting ticks or ${tickBudgetWallMs(this.scene.policy.combat.protected_wait_ticks) / 1000} s.`,
-      });
-      this.scene.position.rejectCover();
+      const waitTicks = this.scene.policy.combat.protected_wait_ticks;
+      const reason = `No confirmed quarry damage during ${waitTicks} protected waiting ticks or ${tickBudgetWallMs(waitTicks) / 1000} s.`;
+      this.scene.reportDecision({ kind: "position_rejected", targetId: this.scene.target.id, position: plan.protected, reason });
+      this.scene.position.rejectCoverWait(reason);
       this.scene.protectedProgress.leave();
       this.failedPeeks = 0;
       return { kind: "continue" };

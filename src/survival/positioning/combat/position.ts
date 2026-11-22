@@ -62,7 +62,26 @@ export class CombatPosition {
 
   get canEstablish(): boolean {
     const scope = this.searchScope();
-    return this.answered.find(scope.capability, scope.scope) === null;
+    return !this.coverWaitSpent && this.answered.find(scope.capability, scope.scope) === null;
+  }
+  /** A protected wait for this target ended without damage: no cover is adopted or built for it any more. */
+  private get coverWaitSpent(): boolean {
+    const scope = this.coverWaitScope();
+    return this.answered.find(scope.capability, scope.scope) !== null;
+  }
+  /** Per target, with no facts: the target moving or the world changing never reopens it, a policy change does. */
+  private coverWaitScope(): AnsweredScope {
+    return {
+      capability: "combat.cover_wait",
+      response: "establish",
+      scope: `target:${this.target.id}`,
+      facts: () => null,
+      permissions: () => ({
+        dig: this.policy().terrain.dig,
+        place: this.policy().terrain.place,
+        melee: this.policy().melee,
+      }),
+    };
   }
   private get rejectedCoverCount(): number {
     return this.answered
@@ -101,7 +120,8 @@ export class CombatPosition {
   private acceptsCover = (plan: CombatPositionPlan): boolean =>
     plan.protected.distanceTo(this.#origin) <= COMBAT_APPROACH_RADIUS &&
     plan.placements.every(this.canPlaceProtection) &&
-    this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null;
+    this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null &&
+    !this.coverWaitSpent;
 
   private canPlaceProtection = (cell: Vec3): boolean => canPlaceProtection(this.bot, this.navigation.world, cell);
 
@@ -113,6 +133,15 @@ export class CombatPosition {
         { kind: "position_rejected", why: reason },
       );
     this.plan = null;
+  }
+
+  /**
+   * The protected wait ended without damage: end cover for this target, wherever the refuge. A key record alone lapses
+   * when the quarry moves a block, and the next refuge would get a wait of its own (plan part2-a9 T13y).
+   */
+  rejectCoverWait(reason: string): void {
+    this.rejectCover(reason);
+    this.answered.remember(this.coverWaitScope(), { kind: "target_progress_exhausted", why: reason });
   }
 
   rejectRoof(cell: Vec3, reason: string): void {

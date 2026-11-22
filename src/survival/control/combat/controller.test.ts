@@ -20,6 +20,8 @@ import { observation } from "../../../test-support/navigation.js";
 import { CREEPER_CLEARANCE } from "../../perception/combat/creepers.js";
 import { positionWorld } from "../../positioning/combat/geometry.js";
 import { findCombatPosition } from "../../positioning/combat/planner.js";
+import { CombatPosition as RuntimeCombatPosition } from "../../positioning/combat/position.js";
+import { combatResourceRefusal as priceBlazeAdmission } from "./preparation.js";
 import { retreatFromCreepers } from "../../responses/fight/creeper-retreat.js";
 import { guardRetreatProjectiles } from "../../weapons/projectile-guard.js";
 
@@ -266,6 +268,21 @@ test("blaze admission prices the whole cover before any aim, equipment or moveme
   assert.deepEqual(fixture.controls, []);
   assert.deepEqual(fixture.equipped, []);
   assert.equal(fixture.clock.tick, 0);
+});
+
+test("blaze admission prices no cover for a blaze whose protected wait ended without damage", () => {
+  const fixture = blazePreflightFixture(["iron_sword", "cobblestone"]);
+  const { bot, target, navigation } = fixture;
+  bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 0;
+  const survival = survivalResources();
+  using perception = new CombatPerception(bot);
+  const price = () => priceBlazeAdmission(bot, navigation, target, DEFAULT_COMBAT_POLICY, perception, survival.answered);
+  assert.match(price() ?? "", /COMBAT_BUILD_MATERIALS_MISSING/, "with no answer the missing blocks refuse admission");
+  // The admission price reads the runtime's answers (`controller.ts` passes `survival.answered`): with cover spent for
+  // this target no cover is priced, so the blocks it would need are not an admission failure; the approach goes on.
+  new RuntimeCombatPosition(bot, navigation, target, new Set(), perception, () => DEFAULT_COMBAT_POLICY, survival.answered)
+    .rejectCoverWait("protected wait ended");
+  assert.equal(price(), null);
 });
 
 test("combat cover never plans a placement inside another owner's protected region (plan 06a T5a)", () => {
@@ -959,8 +976,10 @@ test("cancelling while aiming at passage fire never starts the punch afterwards"
   await assert.rejects(cover.extinguishFireAt(cell, abort.signal));
 });
 
-test("an unproductive refuge is rejected instead of terminating the engagement", async () => {
-  const { bot, target, script, clock } = combatFixture(["iron_sword", "cobblestone"]);
+/** A blaze 8 blocks north of a bot with 64 cobblestone on open floor, and the refuge the planner builds for it, already built. */
+function blazeRefugeFixture(options: CombatFixtureOptions = {}) {
+  const fixture = combatFixture(["iron_sword", "cobblestone"], options);
+  const { bot, target } = fixture;
   bot.inventory.items().find((item) => item.name === "cobblestone")!.count = 64;
   bot.entity.position.set(0.5, 64, 0.5);
   target.name = "blaze";
@@ -976,6 +995,11 @@ test("an unproductive refuge is rejected instead of terminating the engagement",
   assert.ok(plan);
   for (const cell of plan.placements) world.load(cell, { stateId: 1 });
   Object.defineProperty(bot, "world", { value: positionWorld(world) });
+  return { ...fixture, navigation, world, plan };
+}
+
+test("an unproductive refuge is rejected instead of terminating the engagement", async () => {
+  const { bot, target, script, clock, navigation, world, plan } = blazeRefugeFixture();
   const cancelled = new AbortController();
   // The production protected-wait budget is 300 ticks. Allow the release
   // handoff, but reject both a reset and the former ninety-second wait.
@@ -1008,6 +1032,129 @@ test("an unproductive refuge is rejected instead of terminating the engagement",
   assert.equal(result.kind, "cancelled", JSON.stringify(result));
   assert.equal(rejected, true);
   assert.equal(bot.inventory.items().find((item) => item.name === "cobblestone")!.count, 64);
+});
+
+/** Moves the bot to the nearest loaded cell satisfying the goal: a cell of the refuge when it is one, else the approach. */
+function refugeNavigation(fixture: ReturnType<typeof blazeRefugeFixture>, calls: string[]): NavigationRuntime["navigate"] {
+  const { bot, plan, target } = fixture;
+  const refuge = [plan.protected, plan.corner, plan.fighting];
+  return async (options) => {
+    const goal = options.goal.resolve(observation());
+    if (goal.kind !== "active") throw new Error("invalid test goal");
+    const satisfied = (feet: Vec3) => goal.isSatisfied({ feet, remainingScaffolds: 0, overlayId: "0" }, goalTestWorld);
+    const destination = refuge.find(satisfied) ?? (() => {
+      const cells: Vec3[] = [];
+      for (let x = -12; x <= 12; x++) for (let z = -12; z <= 12; z++) cells.push(new Vec3(x, 64, z));
+      return cells.filter(satisfied).sort((a, b) => a.distanceTo(target.position) - b.distanceTo(target.position))[0];
+    })();
+    calls.push(refuge.some((cell) => destination?.equals(cell)) ? "refuge" : destination ? "approach" : "nowhere");
+    if (!destination) return { status: "stopped", reason: "no cell satisfies the goal" } as Awaited<ReturnType<NavigationRuntime["navigate"]>>;
+    bot.entity.position = destination.offset(0.5, 0, 0.5);
+    return { status: "completed", elapsedMs: 1 };
+  };
+}
+
+/**
+ * The engagement of the sibling test above, left running past the protected wait's end. At its first walk (the approach, after
+ * the answer is remembered) the blaze moves a block, as a live one does: that lapses the key record of the rejected refuge,
+ * so only the target's answer holds. `approach.enter` runs at that first walk; `approachStops` makes every walk end `stopped`.
+ */
+function rejectedRefugeEngagement(options: CombatFixtureOptions & { readonly approachStops?: boolean } = {}) {
+  const fixture = blazeRefugeFixture(options);
+  const { bot, target, navigation, world, clock } = fixture;
+  const survival = survivalResources();
+  const calls: string[] = [];
+  const decisions: string[] = [];
+  const stop = new AbortController();
+  const approach = { enter: (_signal: AbortSignal): void => {} };
+  const navigate = refugeNavigation(fixture, calls);
+  const controller = createCombatController(bot, { ...navigation, world, navigate: async (request) => {
+    if (calls.length === 0) {
+      target.position.x += 1;
+      approach.enter(stop.signal);
+    }
+    if (options.approachStops) {
+      calls.push("approach");
+      return { status: "stopped", reason: "no route to the blaze" } as Awaited<ReturnType<NavigationRuntime["navigate"]>>;
+    }
+    return navigate(request);
+  } }, undefined, undefined, survival);
+  controller.onDecision((event) => decisions.push(event.kind));
+  const policy = controller.policy.combat;
+  // The window (protected_wait_ticks) and the quarry clock (quarry_wait_ticks) bound the engagement. Measured, 3 runs each,
+  // for the approach that kills the blaze: 355 client ticks at 20 tps, 407 at 10 tps; the bound below is 1 500 (3.7 times the
+  // larger) and the policy's own limits decide it.
+  const bound = policy.protected_wait_ticks + 2 * policy.quarry_wait_ticks;
+  fixture.script.onWait = () => {
+    if (clock.tick > bound) stop.abort("the engagement did not reach an outcome within its bounds");
+  };
+  const records = () => survival.answered.snapshot().filter((entry) => entry.capability === "combat.cover_wait");
+  const cobblestone = () => bot.inventory.items().find((item) => item.name === "cobblestone")!.count;
+  const rejections = () => decisions.filter((kind) => kind === "position_rejected").length;
+  return { ...fixture, controller, survival, calls, decisions, stop, approach, bound, records, cobblestone, rejections };
+}
+
+for (const ticksPerSecond of [20, 10]) test(`after a protected wait ended without damage the fight builds no second cover for that blaze and reaches an outcome at ${ticksPerSecond} tps`, async () => {
+  const run = rejectedRefugeEngagement({ ticksPerSecond });
+  const result = await run.controller.engage(run.target.id, run.stop.signal, "pursue");
+  assert.equal(result.kind, "died", JSON.stringify(result));
+  assert.equal(run.rejections(), 1, "the wait ended once: the next refuge gets no wait of its own");
+  assert.deepEqual(run.calls, ["approach"], "the only walk is the approach, never a second refuge");
+  assert.equal(run.cobblestone(), 64, "no second cover was built");
+  assert.deepEqual(run.records().map((entry) => entry.scope), [`target:${run.target.id}`]);
+  assert.ok(run.clock.tick <= run.bound);
+});
+
+// A cancel by the model and a reflex taking the body (a `BodyAbort`), both during the approach after the wait's end.
+const APPROACH_ABORTS = [
+  ["a cancel", (): unknown => "cancelled by the model"],
+  ["a reflex taking the body", (): unknown => new BodyAbort({ kind: "preempted", by: "hunger_reflex" }, "Preempted by hunger_reflex.")],
+] as const;
+for (const [name, reason] of APPROACH_ABORTS) for (const ticksPerSecond of [20, 10])
+  test(`${name} during the approach after the wait's end keeps the answer and leaves nothing running at ${ticksPerSecond} tps`, async () => {
+    const run = rejectedRefugeEngagement({ ticksPerSecond });
+    const outer = new AbortController();
+    run.approach.enter = () => outer.abort(reason());
+    const added = listenersAddedSince(run.bot);
+    const packetsAdded = listenersAddedSince(run.bot._client);
+    const result = await run.controller.engage(run.target.id, outer.signal, "pursue");
+    assert.equal(result.kind, "cancelled", JSON.stringify(result));
+    assert.equal(run.records().length, 1, "the answer outlives the aborted engagement");
+    const decided = run.decisions.length;
+    const walks = run.calls.length;
+    await fightClock.advance(2 * run.bound * 50);
+    assert.equal(run.decisions.length, decided, "the clock past the old deadlines fires nothing");
+    assert.equal(run.calls.length, walks);
+    assert.equal(run.controller.activeEngagement(), null);
+    assert.equal(run.cobblestone(), 64);
+    for (const event of ["physicsTick", "entityHurt", "entityDead", "entityGone", "entitySwingArm", "death", "health"] as const) assert.equal(added(event), 0, event);
+    for (const event of ["damage_event", "entity_status", "explosion"]) assert.equal(packetsAdded(event), 0, event);
+  });
+
+test("a stopped server ends a protected wait and the fight reaches its bounded outcome with the world age still", async () => {
+  const run = rejectedRefugeEngagement();
+  run.server.stop();
+  const age = run.bot.time.age;
+  // The quarry clock counts world ticks: it never runs here, so the wall backstop (`serverPacedWallMs`) ends the fight.
+  const result = await fightClock.settle(
+    run.controller.engage(run.target.id, run.stop.signal, "pursue"),
+    2 * serverPacedWallMs(run.controller.policy.combat.quarry_wait_ticks),
+  );
+  assert.equal(result.kind, "unreachable", JSON.stringify(result));
+  assert.equal(run.bot.time.age, age, "the stopped server never moved the world age");
+  assert.equal(run.rejections(), 1, "the window counts client ticks: the stopped server does not hold it open");
+  assert.equal(run.stop.signal.aborted, false, "the bound is the engagement's own, not the test's tick cap");
+  assert.equal(run.cobblestone(), 64);
+});
+
+test("a blaze out of reach after the wait's end ends the fight within its bounds with no second cover", async () => {
+  const run = rejectedRefugeEngagement({ approachStops: true });
+  const result = await run.controller.engage(run.target.id, run.stop.signal, "pursue");
+  assert.equal(result.kind, "unreachable", JSON.stringify(result));
+  assert.ok(run.clock.tick <= run.bound, `the fight ended at tick ${run.clock.tick}`);
+  assert.equal(run.rejections(), 1);
+  assert.deepEqual(run.calls, ["approach"], "one walk, no second refuge");
+  assert.equal(run.cobblestone(), 64);
 });
 
 for (const interruption of [
