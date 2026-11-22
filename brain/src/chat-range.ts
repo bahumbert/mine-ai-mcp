@@ -1,3 +1,4 @@
+// The Localized Chat mod's settings as the brain reads them from the environment (MC_LOCALIZED_CHAT, MC_CHAT_RANGE).
 import type { LocalizedChat } from "./llm-mind.ts";
 
 const DEFAULT_CHAT_RANGE = 64;
