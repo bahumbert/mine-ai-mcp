@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { Vec3 } from "vec3";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
@@ -6,7 +7,7 @@ import type { MineAiScenario } from "../../src/scenario-client.ts";
 export const run: MineAiScenario = async (context) => {
   const runtime = await openRuntime(context, "ocean-sand-shaft");
   const target = new Vec3(1414, 59, -91);
-  const started = Date.now();
+  const started = monotonicNow();
   const events: Record<string, number> = {};
   const reasons: Record<string, number> = {};
   let minY = context.bot.entity.position.y;
@@ -21,12 +22,12 @@ export const run: MineAiScenario = async (context) => {
   const observe = () => {
     minY = Math.min(minY, context.bot.entity.position.y);
     maxY = Math.max(maxY, context.bot.entity.position.y);
-    if (Date.now() >= nextSample) {
-      nextSample = Date.now() + 5_000;
-      context.log(JSON.stringify({ elapsedMs: Date.now() - started, position: context.bot.entity.position,
+    if (monotonicNow() >= nextSample) {
+      nextSample = monotonicNow() + 5_000;
+      context.log(JSON.stringify({ elapsedMs: monotonicNow() - started, position: context.bot.entity.position,
         target: context.bot.blockAt(target)?.name, minY, maxY, events, reasons }));
     }
-    if (!captured && Date.now() - started >= 30_000) {
+    if (!captured && monotonicNow() - started >= 30_000) {
       captured = true;
       capture = runtime.captureIncident().then((result) => context.log(JSON.stringify({ checkpointCapture: result })));
     }

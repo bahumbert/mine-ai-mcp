@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Body } from "./body.ts";
-import { gatherMaterials, type GatherContext } from "./gathering.ts";
+import { gatherMaterials, type GatherContext } from "./gathering/gather-materials.ts";
+import { HostileInterruptions } from "./gathering/hostile-interruptions.ts";
 import { FakeRuntime } from "./testing.ts";
 import type { WalkKeep } from "./walk-keep.ts";
 
@@ -14,7 +15,7 @@ const NONE_NEAR = "[NO_TARGET_IN_RANGE] No oak_log block left within 64 blocks o
 const WALK_KEEP: WalkKeep = { items: [], reserve: [{ item: "cobblestone", count: 15 }], scaffold: [{ item: "dirt", count: 4 }] };
 
 function contextFor(runtime: FakeRuntime, walkKeep: WalkKeep = WALK_KEEP): GatherContext {
-  return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, walkKeep };
+  return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, hostileInterruptions: new HostileInterruptions(() => 0), walkKeep };
 }
 
 /** A runtime whose first collect finds no log near and that knows a forest 150 blocks off: the fetch walks there. */

@@ -8,7 +8,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { type MineflayerBlock, blockClass } from "../navigation/mineflayer/world.js";
-import type { BuildRequest } from "../navigation/processes/building/build-process.js";
+import type { BuildRequest, CellKeys } from "../navigation/processes/building/build-process.js";
 import { CarriedCounts } from "./carried-counts.js";
 import { type FakeCell, type FakeClock, type FakeHarness, type FakeWorld, createFakeBot } from "./fake-bot/index.js";
 import { observation } from "./navigation.js";
@@ -24,6 +24,8 @@ export interface StructureWorldOptions {
   readonly loadedRadius?: number;
   /** The harness's clock (a mocked one the test drives). A new manual clock otherwise. */
   readonly clock?: FakeClock;
+  /** Simulate a navigator calculation failure for this goal revision. */
+  readonly failCalculation?: (revision: string) => boolean | Promise<boolean>;
 }
 
 /** A block of the scene as its physics and tests read it. */
@@ -32,6 +34,15 @@ type StructureBlock = Pick<MineflayerBlock, "name" | "position"> & { readonly bo
 const DEFAULT_CARRIED = { cobblestone: 64, obsidian: 14 };
 
 export type StructurePhysics = Pick<BuildRequest, "movements" | "route" | "breakInPlace" | "canSeeDig" | "place">;
+
+/** The no-path result when the search cannot get beyond the bot's feet. */
+function noPath(position: Vec3) {
+  return {
+    kind: "no_path" as const,
+    search: { queued: 0, visited: 1, farthestVisited: 0, generated: 1, slices: 1, computeMs: 1 },
+    closest: { position: position.floored(), heuristic: 1, routeCost: 0, basis: "best_heuristic_search_node" as const },
+  };
+}
 
 /** The cells of the floor: stone at y 63 from x -6 to 40 and z -6 to 6; air around and under it. */
 function floorCells(): Record<string, FakeCell> {
@@ -125,29 +136,46 @@ export function structureWorld(options: StructureWorldOptions = {}) {
   /** The direction the bot looked for each placement that asked for one. */
   const looks: string[] = [];
   const routes: string[] = [];
-  const protectedSets: ReadonlySet<number>[] = [];
+  const routeCalls: { movements: ReturnType<StructurePhysics["movements"]>; isWorkRoute: boolean }[] = [];
+  const breakPolicies: ReturnType<StructurePhysics["movements"]>[] = [];
+  const calculationFailures: string[] = [];
+  const protectedSets: CellKeys[] = [];
   const physics: StructurePhysics = {
     canSeeDig: () => true,
     movements: (protectedCells) => {
       protectedSets.push(protectedCells);
       return {} as never;
     },
-    route: async ({ goal, onArrival }) => {
+    route: async ({ goal, movements, onArrival, onCalculationFailure, signal }) => {
+      routeCalls.push({ movements, isWorkRoute: onArrival !== undefined });
       // Arrive next to whatever the goal asks for first: two blocks toward the
       // origin side of it. Then let the process work there and, if it asks to
       // continue, walk on to the next thing the revised goal names.
       for (let legs = 0; legs < 64; legs += 1) {
-        const resolved = goal.resolve(observation());
+        const position = bot.entity.position;
+        const observed = { ...observation(), position };
+        const resolved = goal.resolve(observed);
         if (resolved.kind !== "active") return { status: "stopped", reason: resolved.observation, elapsedMs: 0 };
-        const target = /(-?\d+),(-?\d+),(-?\d+)/.exec(resolved.revision)!;
         routes.push(resolved.revision);
+        if (onCalculationFailure && await options.failCalculation?.(resolved.revision)) {
+          calculationFailures.push(resolved.revision);
+          const decision = await onCalculationFailure({
+            failure: noPath(position),
+            observation: observed,
+            signal: signal ?? new AbortController().signal,
+          });
+          if (decision.kind === "completed") return { status: "completed", elapsedMs: 0 };
+          continue;
+        }
+        const target = /(-?\d+),(-?\d+),(-?\d+)/.exec(resolved.revision)!;
         bot.entity.position = new Vec3(Number(target[1]) - 2 + 0.5, 64, Number(target[3]) + 0.5);
         const decision = onArrival ? await onArrival({ signal: undefined } as never) : { kind: "completed" };
         if (decision.kind === "completed") return { status: "completed", elapsedMs: 0 };
       }
       return { status: "stopped", reason: "the fake route ran out of legs", elapsedMs: 0 };
     },
-    breakInPlace: async ({ position }) => {
+    breakInPlace: async ({ movements, position }) => {
+      breakPolicies.push(movements);
       put(new Vec3(position.x, position.y, position.z), "air");
       return { status: "broken" };
     },
@@ -175,5 +203,5 @@ export function structureWorld(options: StructureWorldOptions = {}) {
       return { kind: "placed", block: blocks.get(key(cell)) as never };
     },
   };
-  return { bot, blocks, put, physics, placements, looks, routes, protectedSets, harness };
+  return { bot, blocks, put, physics, placements, looks, routes, routeCalls, breakPolicies, calculationFailures, protectedSets, harness };
 }

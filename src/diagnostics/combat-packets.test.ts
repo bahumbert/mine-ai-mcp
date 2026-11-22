@@ -3,6 +3,24 @@ import test from "node:test";
 import { createFakeBot } from "../test-support/fake-bot/index.js";
 import type { IncidentRecorder } from "./incident-recorder.js";
 import { observeCombatPackets } from "./combat-packets.js";
+import { Vec3 } from "vec3";
+
+test("boat attack telemetry retains reach, received damage metadata and vehicle commands", () => {
+  const { bot } = createFakeBot({ entities: { 7: { name: "oak_boat", position: new Vec3(1.5, 64, 0.5) } } });
+  const records: any[] = [];
+  using _observer = observeCombatPackets(bot, { record: (_kind: string, facts: object) => records.push(facts) } as unknown as IncidentRecorder, 8);
+  bot._client.emit("entity_metadata", { entityId: 7, metadata: [{ key: 10, value: 30 }] });
+  bot._client.emit("entity_metadata", { entityId: 7, metadata: [{ key: 8, value: 3 }] });
+  bot._client.emit("vehicle_move", { x: 1, y: 64, z: 0.5, yaw: 90, pitch: 0 });
+  bot._client.write("vehicle_move", { x: 2, y: 64, z: 0.5, yaw: 90, pitch: 0 });
+  bot.attack(bot.entities[7]!);
+  const hit = records.find((entry) => entry.packet === "use_entity");
+  assert.ok(hit, "an attack write must be retained");
+  assert.equal(hit.fields.target, 7);
+  assert.deepEqual(hit.target.position, { x: 1.5, y: 64, z: 0.5 });
+  assert.deepEqual(hit.target.metadata, [{ key: 10, value: 30 }, { key: 8, value: 3 }]);
+  assert.deepEqual(records.filter((entry) => entry.packet === "vehicle_move").map((entry) => entry.direction), ["incoming", "outgoing"]);
+});
 
 test("item-use assignment tracing preserves values and restores the property on disposal", () => {
   const { bot } = createFakeBot();

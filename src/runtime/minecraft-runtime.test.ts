@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { z } from "zod";
 import type { CombatDecision } from "../survival/control/combat/contract.js";
 
@@ -9,6 +10,7 @@ import path from "node:path";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { readRecentEventsResultSchema } from "../actions/read-recent-events/contract.js";
+import * as incidentLog from "../bot-data/incident-log.js";
 import { ExecutionScope } from "../execution/execution-scope.js";
 import { CombatExecution, combatExecutionSnapshotSchema } from "../survival/control/combat/execution.js";
 import { engagingCombat } from "../test-support/combat.js";
@@ -17,9 +19,93 @@ import { ProtectedRegionStore } from "../bot-data/protected-regions.js";
 import { persistentBotData } from "../test-support/bot-data.js";
 import { type FakeHarness, type Listened, createFakeBot, createFakeClock, listenersAddedSince } from "../test-support/fake-bot/index.js";
 import { monotonicNow } from "../utils/index.js";
+import { createCombatController } from "../survival/index.js";
+import { serverPacedWallMs } from "../world/world-age.js";
 import { readProtectedRegions } from "../world/protected-regions.js";
 import { createMinecraftRuntime } from "./minecraft-runtime.js";
 
+const { spyOn } = require("bun:test") as {
+  spyOn(target: typeof incidentLog, method: "writeIncidentArtifact"): { mockImplementation(implementation: typeof incidentLog.writeIncidentArtifact): { mockRestore(): void } };
+  spyOn(target: typeof fs, method: "rm"): { mockImplementation(implementation: typeof fs.rm): { mockRestore(): void } };
+};
+
+test("the optional survival receipt observer cannot mutate or interrupt incident recording", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-combat-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const listeners = new Set<(event: CombatDecision) => void>();
+  const received: string[] = [];
+  const runtime = await createMinecraftRuntime(runtimeBot(), {
+    incidents: { directory },
+    botData: { storage: { kind: "temporary" }, identity: { worldId: "receipt-observer", scope: { kind: "bot", botId: "runtime-bot" } } },
+    createCombatController: () => ({ ...combatController, onDecision: (listener) => { listeners.add(listener); return () => listeners.delete(listener); } }),
+    onSurvivalReceipt: (receipt) => { received.push(receipt.source); receipt.source = "changed"; throw new Error("observer"); },
+  });
+  try {
+    for (const listener of listeners) listener({ kind: "retarget", from: 7, to: 8 });
+    assert.deepEqual(received, ["combat"]);
+    const capture = await runtime.captureIncident();
+    assert.equal(capture.kind, "completed");
+    if (capture.kind !== "completed" || capture.reference.artifact.kind !== "written") throw new Error("Missing incident");
+    const content = await readFile(capture.reference.artifact.path, "utf8");
+    assert.match(content, /"source":"combat"/);
+    assert.doesNotMatch(content, /"source":"changed"/);
+  } finally { await runtime.close(); }
+  assert.equal(listeners.size, 0);
+});
+
+test("the optional survival receipt observer sees the claim and the durable outcome", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "receipt-hunger-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const clock = createFakeClock({ mode: "mocked" });
+  using _timers = clock.install();
+  const { bot } = createFakeBot({ clock, username: "ReceiptBot", food: 6, carried: { cooked_beef: 1 } });
+  bot.foodSaturation = 0;
+  bot.setMaxListeners(40);
+  const seen: string[] = [];
+  let observedOutcome!: () => void;
+  const outcomeReceipt = new Promise<void>(resolve => { observedOutcome = resolve; });
+  const runtime = await createMinecraftRuntime(bot, {
+    incidents: { directory },
+    botData: { storage: { kind: "temporary" }, identity: { worldId: "receipt-reflex", scope: { kind: "bot", botId: "ReceiptBot" } } },
+    onSurvivalReceipt: receipt => {
+      if (receipt.source !== "hunger_reflex") return;
+      seen.push(receipt.kind);
+      if (receipt.kind === "outcome") observedOutcome();
+      receipt.status.vitals.health = -999;
+      receipt.evidence = { changed: true };
+      throw new Error("observer failure");
+    },
+  });
+  try {
+    await clock.settle(outcomeReceipt, 5000);
+    assert.ok(seen.indexOf("claim") >= 0 && seen.indexOf("outcome") > seen.indexOf("claim"), JSON.stringify(seen));
+    const read = runtime.actions.find(action => action.name === "read_recent_events")!;
+    const events = readRecentEventsResultSchema.parse((await runtime.run(read, {})).result);
+    const outcomes = events.events.filter(event => event.type === "survival_outcome" && event.payload.source === "hunger_reflex");
+    assert.equal(outcomes.length, 1);
+    const outcome = outcomes[0];
+    assert.ok(outcome && outcome.type === "survival_outcome");
+    assert.notEqual(outcome.payload.status.vitals.health, -999, "observer mutation cannot reach the durable nested status");
+    assert.notDeepEqual(outcome.payload.evidence, { changed: true });
+    const capture = await runtime.captureIncident();
+    assert.equal(capture.kind, "completed");
+    if (capture.kind !== "completed" || capture.reference.artifact.kind !== "written") throw new Error("Missing incident");
+    const records = (await readFile(capture.reference.artifact.path, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    const hunger = records.filter(record => record.kind === "survival_receipt" && record.receipt.source === "hunger_reflex");
+    assert.ok(hunger.some(record => record.receipt.kind === "outcome"));
+    assert.ok(hunger.some(record => record.receipt.kind === "claim"));
+    assert.ok(hunger.every(record => record.receipt.status.vitals.health !== -999));
+    assert.ok(hunger.every(record => !record.receipt.evidence.changed));
+    assert.equal(runtime.status().busy, false);
+    const next = runtime.actions.find(action => action.name === "raw_action")!;
+    assert.equal((await clock.settle(runtime.run(next, { operation: "control", state: "jump", ticks: 1 }), 5000)).result.status, "succeeded");
+  } finally { await runtime.close(); }
+  const afterClose = seen.length;
+  await clock.advance(5000);
+  assert.equal(seen.length, afterClose, "no receipts arrive after runtime disposal");
+});
+
+// check-reads: src/**/*.ts
 /** Each runtime bot's count of listeners added since before the runtime attached: the shared fake listens to some events itself. */
 const idleListeners = new WeakMap<Bot, (event: string) => number>();
 
@@ -68,6 +154,176 @@ function runtimeHarness(controlStates: boolean[] = [], rejectedListener?: string
   bot.chat = (message) => bot.emit("chat", bot.username, message, null, {} as never, null);
   return harness;
 }
+
+test("temporary incident folders are removed after close without affecting another runtime", async () => {
+  const options = {
+    botData: { storage: { kind: "temporary" as const }, identity: { worldId: "incident-ownership", scope: { kind: "bot" as const, botId: "runtime-bot" } } },
+    createCombatController: () => combatController,
+  };
+  const first = await createMinecraftRuntime(runtimeBot(), options);
+  const second = await createMinecraftRuntime(runtimeBot(), options);
+  let firstDirectory = "";
+  let secondDirectory = "";
+  let releasePending!: () => void;
+  let releaseFinal!: () => void;
+  const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+  const finalGate = new Promise<void>((resolve) => { releaseFinal = resolve; });
+  let pendingEntered!: () => void;
+  let finalEntered!: () => void;
+  const pendingStarted = new Promise<void>((resolve) => { pendingEntered = resolve; });
+  const finalStarted = new Promise<void>((resolve) => { finalEntered = resolve; });
+  const originalWrite = incidentLog.writeIncidentArtifact;
+  let finalWritten = false;
+  let writeSpy: { mockRestore(): void } | undefined;
+  try {
+    const firstCapture = await first.captureIncident();
+    const secondCapture = await second.captureIncident();
+    assert.ok(firstCapture.kind === "completed" && firstCapture.reference.artifact.kind === "written");
+    assert.ok(secondCapture.kind === "completed" && secondCapture.reference.artifact.kind === "written");
+    firstDirectory = path.dirname(firstCapture.reference.artifact.path);
+    secondDirectory = path.dirname(secondCapture.reference.artifact.path);
+    assert.notEqual(firstDirectory, secondDirectory);
+    writeSpy = spyOn(incidentLog, "writeIncidentArtifact").mockImplementation(async (...args) => {
+      if (args[0] === firstDirectory && args[1] === "operator") { pendingEntered(); await pendingGate; }
+      if (args[0] === firstDirectory && args[1] === "runtime_closed") { finalEntered(); await finalGate; }
+      const result = await originalWrite(...args);
+      if (args[0] === firstDirectory && args[1] === "runtime_closed") finalWritten = result.artifact.kind === "written";
+      return result;
+    });
+    const pending = first.captureIncident();
+    await pendingStarted;
+    let settled = false;
+    const closing = first.close();
+    assert.equal(first.close(), closing);
+    void closing.then(() => { settled = true; });
+    await access(firstDirectory);
+    assert.equal(settled, false);
+    releasePending();
+    const pendingResult = await pending;
+    assert.ok(pendingResult.kind === "completed" && pendingResult.reference.artifact.kind === "written");
+    await finalStarted;
+    await access(firstDirectory);
+    assert.equal(settled, false);
+    releaseFinal();
+    await closing;
+    assert.equal(finalWritten, true);
+    await assert.rejects(access(firstDirectory), { code: "ENOENT" });
+    await access(secondDirectory);
+    const nextCapture = await second.captureIncident();
+    assert.ok(nextCapture.kind === "completed" && nextCapture.reference.artifact.kind === "written");
+    const query = second.actions.find((action) => action.name === "query_bot_data");
+    assert.ok(query);
+    assert.equal((await second.run(query, { sql: "SELECT 1" })).result.status, "succeeded");
+    const next = await createMinecraftRuntime(runtimeBot(), options);
+    try {
+      const captured = await next.captureIncident();
+      assert.ok(captured.kind === "completed" && captured.reference.artifact.kind === "written");
+      const nextQuery = next.actions.find((action) => action.name === "query_bot_data");
+      assert.ok(nextQuery);
+      assert.equal((await next.run(nextQuery, { sql: "SELECT 1" })).result.status, "succeeded");
+    } finally {
+      await next.close();
+    }
+  } finally {
+    releasePending();
+    releaseFinal();
+    await first.close();
+    await second.close();
+    writeSpy?.mockRestore();
+    if (firstDirectory) await rm(firstDirectory, { recursive: true, force: true });
+    if (secondDirectory) await rm(secondDirectory, { recursive: true, force: true });
+  }
+});
+
+test("construction rollback removes the owned incident folder", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-rollback-"));
+  const previous = process.env.TMPDIR;
+  const bot = runtimeBot();
+  const slots = bot.inventory.listenerCount("updateSlot");
+  process.env.TMPDIR = root;
+  try {
+    await assert.rejects(createMinecraftRuntime(bot, {
+      botData: { storage: { kind: "temporary" }, identity: { worldId: "rollback", scope: { kind: "bot", botId: "bot" } } },
+      createCombatController: () => ({ ...combatController, onDecision: () => { throw new Error("registration failed"); } }),
+    }), /registration failed/);
+    assert.deepEqual(await readdir(path.join(root, "mine-ai-incidents")), []);
+    for (const event of ["end", "physicsTick", "chat", "death"]) assert.equal(added(bot, event), 0, event);
+    assert.equal(bot.inventory.listenerCount("updateSlot"), slots);
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("caller and persistent incident artifacts survive close", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-retained-"));
+  try {
+    for (const persistent of [false, true]) {
+      const runtime = await createMinecraftRuntime(runtimeBot(), {
+        incidents: persistent ? undefined : { directory: path.join(root, "explicit") },
+        botData: { storage: persistent ? { kind: "persistent", root } : { kind: "temporary" }, identity: { worldId: "retained", scope: { kind: "bot", botId: "bot" } } },
+        createCombatController: () => combatController,
+      });
+      const capture = await runtime.captureIncident();
+      assert.ok(capture.kind === "completed" && capture.reference.artifact.kind === "written");
+      await runtime.close();
+      assert.ok((await readFile(capture.reference.artifact.path)).length > 0);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed artifacts, disposal errors and removal errors settle independently", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "incident-removal-"));
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  try {
+    for (const [disposalFails, removalFails] of [[true, false], [false, true], [true, true]]) {
+      const bot = runtimeBot();
+      let registrations = 0;
+      let disposals = 0;
+      const runtime = await createMinecraftRuntime(bot, {
+        incidents: { retention: { days: 5, maxBytes: 0 } },
+        botData: { storage: { kind: "temporary" }, identity: { worldId: "failure", scope: { kind: "bot", botId: "bot" } } },
+        createCombatController: () => ({ ...combatController, onDecision: () => {
+          const registration = ++registrations;
+          return () => { disposals++; if (disposalFails && registration === 1) throw new Error("disposal failed"); };
+        } }),
+      });
+      let removal: { mockRestore(): void } | undefined;
+      try {
+        // The real writer reports an artifact failure when the configured budget is zero.
+        const capture = await runtime.captureIncident();
+        assert.ok(capture.kind === "completed" && capture.reference.artifact.kind === "failed");
+        const parent = path.join(root, "mine-ai-incidents");
+        const directory = path.join(parent, (await readdir(parent))[0]!);
+        const originalRemove = fs.rm;
+        let removals = 0;
+        removal = spyOn(fs, "rm").mockImplementation(async (...args) => {
+          if (args[0] === directory) { removals++; if (removalFails) throw new Error("removal failed"); }
+          return originalRemove(...args);
+        });
+        const closing = runtime.close();
+        assert.equal(runtime.close(), closing);
+        if (disposalFails) await assert.rejects(closing, /disposal failed/); else await closing;
+        assert.equal(disposals, registrations);
+        assert.equal(removals, 1);
+        if (removalFails) await access(directory); else await assert.rejects(access(directory), { code: "ENOENT" });
+        for (const event of ["end", "physicsTick", "chat", "death"]) assert.equal(added(bot, event), 0, event);
+        removal.mockRestore();
+        removal = undefined;
+        await rm(directory, { recursive: true, force: true });
+      } finally {
+        removal?.mockRestore();
+        await runtime.close().catch(() => {});
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("completed combat decisions are retained without a physics sample and unsubscribe on close", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "combat-decision-test-"));
@@ -294,15 +550,11 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
 
   assert.equal(added(bot, "chunkColumnLoad"), 2);
   assert.equal(added(bot, "chunkColumnUnload"), 1);
-  assert.equal(
-    added(bot, "blockUpdate"),
-    2,
-    "frontier observation and advancing lava both observe world changes",
-  );
+  assert.equal(added(bot, "blockUpdate"), 3, "world observation, fire sensing and the driver's cleanup retry each own one listener");
   assert.equal(
     added(bot, "physicsTick"),
-    10,
-    "the runtime owns shared perception, bow timing, footing, survival observation, one reflex loop, idle water, Nether vine physics, End gaze and action progress",
+    9,
+    "the runtime owns shared perception, bow timing, footing, one reflex loop, idle water, Nether vine physics, End gaze and action progress; survival observation and swing readiness ride the shared body tick (onBodyTick), which also ticks while seated",
   );
   assert.equal(added(bot, "chat"), 1);
   assert.equal(added(bot, "whisper"), 1);
@@ -342,11 +594,13 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "protect_region",
       "unprotect_region",
       "place_block",
+      "place_sign",
       "prepare_dragon_perch",
       "pick_up_items",
       "raw_action",
       "query_bot_data",
       "read_recent_events",
+      "read_signs",
       "send_message",
       "sleep",
       "smelt_item",
@@ -354,6 +608,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
       "use_container",
       "view_blocks",
       "view_crafting_requirements",
+      "view_item_family",
       "view_smelting_recipes",
       "view_block_drops",
       "view_frontier",
@@ -515,11 +770,13 @@ test("death cancels the foreground action, records one event, and permits work a
   const eventPage = readRecentEventsResultSchema.parse(events.result);
   assert.equal(eventPage.status, "succeeded");
   assert.equal(eventPage.events.filter((event) => event.type === "player_death").length, 1);
-  assert.deepEqual(eventPage.events.find((event) => event.type === "player_death")?.payload, {
+  const { context, ...deathPayload } = (eventPage.events.find((event) => event.type === "player_death")?.payload ?? {}) as { context?: unknown };
+  assert.deepEqual(deathPayload, {
     dimension: "overworld",
     position: { x: 12.5, y: 64, z: -3.25 },
     cause: null,
   });
+  assert.equal(typeof context, "object", "the death carries the state it happened in");
 
   const resumed = runtime.run(rawAction, { operation: "control", state: "jump", ticks: 1 });
   assert.equal(runtime.status().activeAction?.action, "raw_action");
@@ -766,3 +1023,82 @@ test("temporary storage has no peers and no refresh", async (t) => {
     await runtime.close();
   }
 });
+
+for (const rate of [20, 10, "stopped"] as const)
+  test(`closing the runtime during a dragon evade resolves (${rate})`, async (t) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "close-evade-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const harness = createFakeBot({
+      clock,
+      username: "CloseBot",
+      position: new Vec3(0, 64, 0),
+      server: { ticksPerSecond: rate === 10 ? 10 : 20 },
+    });
+    const { bot } = harness;
+    bot.setMaxListeners(40);
+    harness.entities.spawn({
+      id: 99,
+      name: "area_effect_cloud",
+      position: bot.entity.position.clone(),
+      metadata: { 8: 5, 10: { type: "dragon_breath" } },
+    });
+    let navigateCalls = 0;
+    let notifyNavigation!: () => void;
+    const navigating = new Promise<void>((resolve) => { notifyNavigation = resolve; });
+    let notifyStopEntered!: () => void;
+    const stopEntered = new Promise<void>((resolve) => { notifyStopEntered = resolve; });
+    const stops: boolean[] = [];
+    // The route's release outlasts the disposal chain, as live (t01524: the engagement ended 9 ms after the close).
+    const navigate = ({ signal }: { signal?: AbortSignal }) =>
+      new Promise<never>((_resolve, reject) => {
+        navigateCalls++;
+        signal!.addEventListener("abort", () => void stopEntered.then(() => reject(signal!.reason)), { once: true });
+        notifyNavigation();
+      });
+    let notifyClaim!: () => void;
+    const claimed = new Promise<void>((resolve) => { notifyClaim = resolve; });
+    let receiptsAfterClose = 0;
+    let closed = false;
+    const added = listenersAddedSince(bot);
+    const runtime = await createMinecraftRuntime(bot, {
+      incidents: { directory },
+      botData: { storage: { kind: "temporary" }, identity: { worldId: "close-during-evade", scope: { kind: "bot", botId: "CloseBot" } } },
+      createCombatController: (controllerBot, navigation, ...rest) => {
+        const real = createCombatController(
+          controllerBot,
+          new Proxy(navigation, { get: (target, key) => (key === "navigate" ? navigate : Reflect.get(target, key)) }),
+          ...rest,
+        );
+        return {
+          ...real,
+          stop: (reason) => {
+            stops.push(real.activeEngagement() !== null);
+            notifyStopEntered();
+            return real.stop(reason);
+          },
+        };
+      },
+      onSurvivalReceipt: (receipt) => {
+        if (closed) receiptsAfterClose++;
+        if (receipt.source === "dragon_reflex" && receipt.kind === "claim") notifyClaim();
+      },
+    });
+    await clock.settle(claimed, 5000);
+    await clock.settle(navigating, 5000);
+    if (rate === "stopped") {
+      harness.server.stop();
+      await clock.advance(5000);
+    }
+    const closing = runtime.close();
+    assert.equal(runtime.close(), closing);
+    await assert.doesNotReject(clock.settle(closing, 5000));
+    closed = true;
+    assert.deepEqual(stops, [true], "the hostile reflex stopped the engagement once, with the evade live");
+    // Past the dragon reflex's ceiling (`dragon.ts`, 2 400 ticks): by the world age when it moves, by its wall backstop when the server is stopped.
+    await clock.advance(rate === "stopped" ? serverPacedWallMs(2_400) + 1000 : (2_400 / rate) * 1000 + 1000);
+    assert.equal(receiptsAfterClose, 0, "no receipt after the close");
+    assert.equal(navigateCalls, 1);
+    for (const event of ["physicsTick", "end", "chat", "death"]) assert.equal(added(event), 0, event);
+  });

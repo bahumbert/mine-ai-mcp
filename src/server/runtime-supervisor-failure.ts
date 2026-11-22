@@ -33,7 +33,7 @@ export async function failRuntime(parts: SupervisorParts, code: ObservedFailureC
     code,
     message,
     pid: sup.child?.pid,
-    heartbeatAgeMs: performance.now() - sup.lastHeartbeat,
+    heartbeatAgeMs: sup.clock.now() - sup.lastHeartbeat,
     supervisorTickDelayMs: machine.supervisorTickDelayMs,
     activity: sup.activity,
     activityAgeMs: sup.activity === null ? null : Date.now() - sup.activity.observedAt,
@@ -116,7 +116,7 @@ const restartSettingsOf = (options: McpSupervisorOptions): RestartSettings | nul
 
 /** The supervisor's lateness now and its largest over the last minute: whether the machine was starving it at the failure. */
 function tickDelaysAtFailure(sup: SupervisorState): { supervisorTickDelayMs: number; maxTickDelayMs: number } {
-  const since = performance.now() - TICK_HISTORY_MS;
+  const since = sup.clock.now() - TICK_HISTORY_MS;
   const recent = sup.tickDelays.filter((tick) => tick.at >= since).map((tick) => tick.delayMs);
   return { supervisorTickDelayMs: sup.watchdogDelayMs, maxTickDelayMs: Math.max(0, ...recent) };
 }
@@ -128,7 +128,7 @@ function tickDelaysAtFailure(sup: SupervisorState): { supervisorTickDelayMs: num
 function planRestart(sup: SupervisorState): RestartDecision | null {
   const settings = restartSettingsOf(sup.options);
   if (sup.stopping || settings === null) return null;
-  const decision = decideRestart(sup.streak, performance.now(), settings, Math.random);
+  const decision = decideRestart(sup.streak, sup.clock.now(), settings, Math.random);
   sup.streak = decision.streak;
   return decision.kind === "restart" ? { ...decision, delayMs: Math.round(decision.delayMs) } : decision;
 }
@@ -182,17 +182,17 @@ function scheduleRestart(
   const { event: _event, ...recorded } = scheduled;
   sup.recorder.record("runtime_restart_scheduled", recorded);
   printSupervisorLine(sup, scheduled);
-  sup.restartTimer = setTimeout(() => {
+  // Not kept alive by the wait: a process that is otherwise done does not wait to restart a runtime.
+  sup.restartTimer = sup.clock.after(decision.delayMs, () => {
     sup.restartTimer = null;
     if (sup.stopping) return;
     startAfterFailure(sup, code, failure, startChild);
-  }, decision.delayMs);
-  sup.restartTimer.unref();
+  }, { unref: true });
 }
 
 /** The restart timer's turn: the runtime is `starting` with fresh liveness clocks, or the supervisor stays failed if the spawn throws. */
 function startAfterFailure(sup: SupervisorState, code: ObservedFailureCode, failure: RuntimeFailure, startChild: () => void): void {
-  const now = performance.now();
+  const now = sup.clock.now();
   sup.recorder.record("runtime_restarted", { after: code, previousPid: sup.child?.pid });
   sup.runtime = { kind: "starting" };
   sup.lastHeartbeat = now;

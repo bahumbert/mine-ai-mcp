@@ -3,6 +3,13 @@ import type { AnsweredEntry, AnsweredScope, Facts, TemporalPremise } from "../st
 import type { REFLEX_PRIORITY } from "./priority.js";
 export type ReflexName = (typeof REFLEX_PRIORITY)[number];
 
+/** Responders offer a hold; the admitting runner supplies its owner and the claim's progress budget. */
+export type ResponseContinuation = Exclude<Continuation, { kind: "hold" }>
+  | { readonly kind: "hold"; readonly reason: string };
+
+/** The observed reason a held threat ended, or the first observation that still blocks a resume. */
+export type HeldThreatEnd = { readonly ended: string } | { readonly notEnded: string } | { readonly stalled: string };
+
 export type DangerObservation<Danger> =
   | { readonly kind: "observed"; readonly danger: Danger; readonly evidence: Facts }
   | { readonly kind: "unknown"; readonly missing: string }
@@ -16,24 +23,29 @@ export type ResponseExclusion =
   | { readonly kind: "infeasible_now"; readonly premise: string };
 
 export type ResponseDecision<Response> =
-  | { readonly kind: "respond"; readonly response: Response; readonly name: string; readonly reason: string }
+  | { readonly kind: "respond"; readonly response: Response; readonly name: string; readonly reason: string;
+      /** Stable response identity when the explanation contains live measurements. */
+      readonly identity?: Facts }
   | {
       readonly kind: "stand_down";
       readonly candidates: readonly { readonly response: string; readonly excluded: ResponseExclusion }[];
     }
   | { readonly kind: "handled"; readonly by: string };
 
-/** How soon a reflex that fights a lethal, growing danger (drowning, burning) tries again after a failed attempt. */
-export const LETHAL_REFLEX_RETRY_MS = 2_000;
+/**
+ * How soon a reflex that fights a lethal, growing danger (drowning, burning) tries again after a failed attempt, in world
+ * ticks (2 s at 20 tps; the pause starts at the age read when it is remembered, plus one time packet).
+ */
+export const LETHAL_REFLEX_RETRY_TICKS = 40;
 
-/** The two wall-clock limits of a reflex claim, and how long the reflex stands down after hitting one. */
+/** A reflex claim's limits and stand-down, in world ticks (the owner's values of 2026-10-19 at 20 tps). */
 export interface ReflexLimits {
   /** The longest the claim may hold the body, however well it progresses. */
-  readonly ceilingMs: number;
+  readonly ceilingTicks: number;
   /** How long the claim may go without a progress mark (the base probe's or the reflex's own). */
-  readonly noProgressMs: number;
-  /** After a limit the scope stays answered this long, whatever the facts do (time only). */
-  readonly standDownMs: number;
+  readonly noProgressTicks: number;
+  /** After a limit the scope stays answered this many ticks, whatever the facts do (time only). */
+  readonly standDownTicks: number;
 }
 
 export interface ReflexDefinition<Danger, Response, Outcome> {
@@ -48,6 +60,10 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
   facts(response: Response): AnsweredScope;
   /** What this response may hold the body for: the runner releases a claim that runs into either limit. */
   limits(response: Response): ReflexLimits;
+  /** A fight measures travel toward its targets in its own probe instead of crediting shuttling. */
+  bodyTravel?(response: Response): boolean;
+  /** Repeated no-progress fights against one target back off; life-saving and other responses keep their base pause. */
+  escalateStandDown?(response: Response): boolean;
   /**
    * The reflex's own progress probes for one claim, besides the base probe (the body travelled a block, its health
    * changed, it died): call `mark(reason)` when the response gets somewhere. Returns the unsubscribe, called when the
@@ -55,18 +71,20 @@ export interface ReflexDefinition<Danger, Response, Outcome> {
    */
   progress?(response: Response, mark: (reason: string) => void): () => void;
   act(response: Response, signal: AbortSignal): Promise<Outcome>;
-  continuation(outcome: Outcome): Continuation;
+  continuation(outcome: Outcome): ResponseContinuation;
+  /** Positive evidence that a held response's threat ended at this non-response decision. */
+  heldEnded?(held: Response, observed: Danger | null, decision: "none_observed" | Facts): HeldThreatEnd | null;
   failure(outcome: Outcome): AnsweredEntry["failure"] | null;
   describe(outcome: Outcome): Facts;
-  /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureMs`. */
+  /** An actual temporal dependency of one outcome (a premise that expires), tried before `retryAfterFailureTicks`. */
   temporal?(outcome: Outcome): TemporalPremise | null;
   /**
    * For a danger that grows while the scene stays equal (air running out in still water, burning in static lava): the
    * driver remembers every failure of this reflex (its `failure()` and an exception) as `retry_after_failure`, which
-   * expires after this long. The facts still apply: a changed scene reopens the scope sooner. Without it a failure
+   * expires after this many world ticks. The facts still apply: a changed scene reopens the scope sooner. Without it a failure
    * stands until its facts change.
    */
-  readonly retryAfterFailureMs?: number;
+  readonly retryAfterFailureTicks?: number;
   releaseAfterAdmission?(): void;
   settled?(response: Response, outcome: Outcome, interrupted: { action: string; startedAt: string } | null): void;
 }

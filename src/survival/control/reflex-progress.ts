@@ -30,13 +30,13 @@ export class ReflexProgress {
  * `AnchorTravel` counts it: the bob of a swimmer is not travel), its health changed (damage taken or healing: the
  * server answered), or it died. Returns the detach.
  */
-export function observeBodyProgress(bot: Bot, mark: (reason: string) => void): () => void {
+export function observeBodyProgress(bot: Bot, mark: (reason: string) => void, countTravel = true): () => void {
   const travel = new AnchorTravel();
   let health = bot.health;
   const sample = () => {
     // Between a respawn and the next position packet the bot has no entity: nothing to measure then.
     const position = (bot.entity as Bot["entity"] | undefined)?.position;
-    if (position && travel.add(position, isInWater(bot)) > 0) mark("moved");
+    if (countTravel && position && travel.add(position, isInWater(bot)) > 0) mark("moved");
   };
   const onHealth = () => {
     if (bot.health === health) return;
@@ -115,6 +115,19 @@ export function climbsBy(read: () => number, blocks: number): () => boolean {
     }
     lowest = Math.min(lowest, now);
     return false;
+  };
+}
+
+/** Marks each net block gained toward a target; retreating never renews the distance to beat. */
+export function nearsBy(read: () => number | null, blocks: number): () => boolean {
+  let anchor: number | undefined;
+  return () => {
+    const now = read();
+    if (now === null) return false;
+    anchor ??= now;
+    if (anchor - now < blocks) return false;
+    anchor = now;
+    return true;
   };
 }
 

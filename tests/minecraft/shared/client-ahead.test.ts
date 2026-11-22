@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import test from "node:test";
 import { ClientsAhead } from "./client-ahead.ts";
 import { loadScenarioServerConfig } from "./config.ts";
@@ -185,7 +186,7 @@ test("a client spawned for a queued trial reserves its booted size while it grow
   ahead.spawn(SUBMISSION, hostClient());
   ahead.spawn(SUBMISSION, hostClient());
   ahead.spawn(SUBMISSION, hostClient(), { trial: 9, covered: true });
-  const spawnedAt = Date.now();
+  const spawnedAt = monotonicNow();
   assert.equal(ahead.youngMb(spawnedAt), 2 * config.clientBootedMemMb, "the covered one is part of its trial's whole client");
   assert.equal(ahead.youngMb(spawnedAt + config.clientRampMs + 1_000), 0, "after the ramp it is in MemAvailable");
 }));

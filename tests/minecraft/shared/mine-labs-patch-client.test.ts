@@ -74,9 +74,9 @@ function initReport(logs: string[]): { hasEnv: boolean; env?: Record<string, str
 }
 
 async function until(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 10_000;
+  const deadline = performance.now() + 10_000;
   while (!condition()) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -119,10 +119,10 @@ test("a client that exited between the pick and the handover fails ready at once
   const ahead = mineLabs.spawnClientAhead(spec);
   await ahead.closed;
 
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   const { client } = launch("exit:3", { clientProvider: () => ahead });
   await assert.rejects(client.ready, /client .Walker. exited with code 3 before it was handed over: boot stderr line/u);
-  assert.ok(Date.now() - startedAt < 2_000, `ready failed after ${Date.now() - startedAt} ms, not at once`);
+  assert.ok(performance.now() - startedAt < 2_000, `ready failed after ${performance.now() - startedAt} ms, not at once`);
   await client.stop("test complete");
 });
 

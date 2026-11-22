@@ -42,4 +42,5 @@ goal:
   goals:
     - { kind: kill, who: BystanderBot, target: blaze }
     - { kind: health, who: BystanderBot, health: 20 }
+    - { kind: survive, who: BystanderBot, seconds: 1 }
     - { kind: completion, who: BystanderBot }

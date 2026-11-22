@@ -1,6 +1,7 @@
 // `abandon_house`: giving up the unfinished house for good (plan 2026-11-09-house-templates Task 4c).
 import { earlierProtections, ownLevelingOver } from "../protected-areas.ts";
-import { releaseArea, type SkillContext, type SkillResult } from "../skills.ts";
+import type { SkillContext, SkillResult } from "../skills.ts";
+import { releaseArea } from "../skills/protect-area.ts";
 
 /**
  * Gives up the unfinished house for good: its record is forgotten and the areas that protect it are released (the

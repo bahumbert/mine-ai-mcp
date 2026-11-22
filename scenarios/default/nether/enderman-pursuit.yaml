@@ -1,0 +1,41 @@
+name: enderman-pursuit
+description: Measure the hunt of one Enderman at its native speed after the first hit, hits per game minute and terrain against a target that moves, before any limit is set.
+minecraft: { version: "1.21.4" }
+world:
+  type: default
+  dimension: the_nether
+  seed: 20260906
+  difficulty: normal
+  gamerules: { doMobSpawning: false, doDaylightCycle: false, naturalRegeneration: true }
+geometry:
+  - fill: { block: air, from: [94, 100, -6], to: [146, 114, 8] }
+  - fill: { block: warped_nylium, from: [94, 99, -6], to: [146, 99, 8] }
+entities:
+  - { type: enderman, pos: [108.5, 100, 0.5], nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:max_health",base:1000.0d}],Health:1000.0f,Tags:["reconsider_primary"]}' }
+players:
+  - name: EndermanRanking
+    pos: [100.5, 100, 0.5]
+    op: true
+    inventory:
+      - { item: diamond_sword, count: 1 }
+      - { item: shield, count: 1 }
+      - { item: iron_helmet, count: 1 }
+      - { item: iron_chestplate, count: 1 }
+      - { item: iron_leggings, count: 1 }
+      - { item: golden_boots, count: 1 }
+      - { item: cooked_beef, count: 16 }
+      - { item: cobblestone, count: 64 }
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./enderman-reconsideration.ts"]
+params:
+  mode: pursuit
+  primary: [108.5, 100, 0.5]
+  pursuit:
+    windowTicks: 1200
+    minDisplacement: 8
+    returnTicks: 600 # the next action (navigate home) from wherever the pursuit ended: 30 s of game time, bounded; success or failure is recorded
+    terrain: { from: [94, 99, -6], to: [146, 114, 8] }
+    # A sword fight never moves an Enderman; damage with no living source teleports it, 1 time in 10 (EnderMan.hurtServer), as it did off the terrain live.
+    provoke: { everyTicks: 20, command: "/damage @e[tag=reconsider_primary,limit=1] 1 minecraft:on_fire" }
+goal: { kind: completion, who: EndermanRanking, timeout: 300 }

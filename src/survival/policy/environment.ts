@@ -8,10 +8,14 @@ export interface FireFacts {
   readonly inFire: boolean;
   readonly burning: boolean;
   readonly escapeAvailable: boolean;
+  readonly lethalBurn: boolean;
+  readonly waterBucket: boolean;
+  readonly health: number;
+  readonly burnTicks: number;
 }
 
 export function decideFireResponse(facts: FireFacts): ResponseDecision<FireEscapeReason> {
-  if (!facts.advancing && !facts.inLava && !facts.inFire && !facts.escapeAvailable)
+  if (!facts.advancing && !facts.inLava && !facts.inFire && !facts.escapeAvailable && !(facts.lethalBurn && facts.waterBucket))
     return {
       kind: "stand_down",
       candidates: [
@@ -19,7 +23,7 @@ export function decideFireResponse(facts: FireFacts): ResponseDecision<FireEscap
           response: "escape_fire",
           excluded: {
             kind: "infeasible_now",
-            premise: "No reachable water; the body is outside active fire and lava.",
+            premise: facts.lethalBurn ? `Burning with ${facts.health} HP and about ${Math.ceil(facts.burnTicks / 20)} s of burn left; no water in reach and no water bucket available to this response. Seek water or another way to extinguish the burn.` : "No reachable water; the body is outside active fire and lava.",
           },
         },
       ],

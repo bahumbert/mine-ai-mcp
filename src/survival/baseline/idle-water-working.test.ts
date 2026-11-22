@@ -80,16 +80,18 @@ function navigationWith(stance: () => boolean = () => false) {
 
 test("working in water with the eyes under it presses jump, and lets go once the eyes are out", async (t) => {
   const fixture = waterFixture(t);
-  waterUpTo(fixture, EYES_IN_WATER);
+  fixture.harness.world.setCell(new Vec3(0, EYES_IN_WATER - 1, 0), "water");
+  fixture.harness.world.setCell(new Vec3(0, EYES_IN_WATER, 0), "water");
   fixture.entity.isInWater = true;
   fixture.entity.onGround = false;
+  fixture.entity.position.y = 64.24;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
   const action = await foregroundAction(fixture.reflex.runner);
 
   assert.deepEqual(fixture.controls, [], "no physics tick yet (a stalled clock): nothing is written");
   fixture.bot.emit("physicsTick");
   assert.deepEqual(writesOf(fixture, "jump"), [["jump", true]]);
-  waterUpTo(fixture, EYES_OUT_OF_WATER);
+  fixture.entity.position.y = 64.356;
   fixture.bot.emit("physicsTick");
   fixture.bot.emit("physicsTick");
   assert.deepEqual(writesOf(fixture, "jump"), [["jump", true], ["jump", false]], "released once, not every tick");

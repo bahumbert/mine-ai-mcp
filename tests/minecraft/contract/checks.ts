@@ -24,16 +24,26 @@ import { explosionKnockback } from "./checks/explosion-knockback.ts";
 import { shieldRaised } from "./checks/shield-raised.ts";
 import { unequipHand } from "./checks/unequip-hand.ts";
 import { airSupplyUnderWater } from "./checks/air-supply-under-water.ts";
+import { eyeWaterSurface } from "./checks/eye-water-surface.ts";
+import { waterExtinguishesBurning } from "./checks/water-extinguishes-burning.ts";
+import { fireBlockBurn } from "./checks/fire-block-burn.ts";
 import { whisperEcho } from "./checks/whisper-echo.ts";
+import { heldShooter } from "./checks/held-shooter.ts";
+import { armourPointsWorn } from "./checks/armour-points-worn.ts";
+import { heightmapInChunkPacket } from "./checks/heightmap-in-chunk-packet.ts";
+import { lightInCells } from "./checks/light-in-cells.ts";
 import { bedRefusedMonsterNear } from "./checks/bed-refused-monster-near.ts";
 import { bedSleepAndWake } from "./checks/bed-sleep-and-wake.ts";
 import { boatDismountIgnored } from "./checks/boat-dismount-ignored.ts";
+import { useEntitySneakInBoat } from "./checks/use-entity-sneak-in-boat.ts";
 import { boatFollowsVehicleMove } from "./checks/boat-follows-vehicle-move.ts";
 import { boatGetOffByShift } from "./checks/boat-get-off-by-shift.ts";
 import { bucketPourAndFill } from "./checks/bucket-pour-and-fill.ts";
 import { chestOpenTakeClose } from "./checks/chest-open-take-close.ts";
 import { clickWindowHotbarSwap } from "./checks/click-window-hotbar-swap.ts";
 import { clickWindowShiftMove } from "./checks/click-window-shift-move.ts";
+import { furnaceOutputTake } from "./checks/furnace-output-take.ts";
+import { furnaceTakeCorrected } from "./checks/furnace-take-corrected.ts";
 import { clickWindowOntoVariant } from "./checks/click-window-onto-variant.ts";
 import { clickWindowVariantSplit } from "./checks/click-window-variant-split.ts";
 import { variantTransferClicks } from "./checks/variant-transfer-clicks.ts";
@@ -43,23 +53,36 @@ import { boatPlacedByUse } from "./checks/boat-placed-by-use.ts";
 import { boatShiftWithinOneTick } from "./checks/boat-shift-within-one-tick.ts";
 import { columnsHoldCells } from "./checks/columns-hold-cells.ts";
 import { digTimeAndUpdate } from "./checks/dig-time-and-update.ts";
+import { nativeDigClock } from "./checks/native-dig-clock.ts";
+import { occupiedFireDig } from "./checks/occupied-fire-dig.ts";
 import { equipHandAndOffHand } from "./checks/equip-hand-and-off-hand.ts";
 import { farPlayerPosition } from "./checks/far-player-position.ts";
 import { findBlocksMatching } from "./checks/find-blocks-matching.ts";
+import { lavaBesideHead } from "./checks/lava-beside-head.ts";
 import { lavaOverHole } from "./checks/lava-over-hole.ts";
 import { lavaOverPassable } from "./checks/lava-over-passable.ts";
 import { itemPickupAfterDelay } from "./checks/item-pickup-after-delay.ts";
+import { itemTakenByMob } from "./checks/item-taken-by-mob.ts";
 import { tossedItemKeptBeforeDelay } from "./checks/tossed-item-kept-before-delay.ts";
 import { itemsMatchSlots } from "./checks/items-match-slots.ts";
 import { itemVariantComponents } from "./checks/item-variant-components.ts";
 import { placeBlockWithOptions } from "./checks/place-block-with-options.ts";
+import { signEdit } from "./checks/sign-edit.ts";
 import { placementBlockUpdate } from "./checks/placement-block-update.ts";
 import { rainAndThunderState } from "./checks/rain-and-thunder-state.ts";
+import { respawnAfterDeath } from "./checks/respawn-after-death.ts";
+import { respawnAtSetPoint } from "./checks/respawn-at-set-point.ts";
+import { respawnWhileAsleep } from "./checks/respawn-while-asleep.ts";
 import { stateIdAgrees } from "./checks/state-id-agrees.ts";
+import { serverTags } from "./checks/server-tags.ts";
+import { combatDataMobs } from "./checks/combat-data-mobs.ts";
+import { COMBAT_DATA_ITEM_CHECKS } from "./checks/combat-data-items.ts";
 import { stopDiggingBothWindows } from "./checks/stop-digging-both-windows.ts";
 import { thinBlockShapes } from "./checks/thin-block-shapes.ts";
 import { tossCountAndEntity } from "./checks/toss-count-and-entity.ts";
+import { tossCorrectedInventoryAnswer } from "./checks/toss-corrected-inventory-answer.ts";
 import { waitForTicksAndAge } from "./checks/wait-for-ticks-and-age.ts";
+import { waterHeldCells } from "./checks/water-held-cells.ts";
 import { worldAgeAtSlowTick } from "./checks/world-age-at-slow-tick.ts";
 import { worldAgePerSecond } from "./checks/world-age-per-second.ts";
 
@@ -105,6 +128,8 @@ export interface ContractCheck {
   run(subject: ContractSubject): Promise<string | void>;
   /** Run on the bare bot, with no runtime of ours to act on it (`client-host.ts --without-runtime`). */
   readonly withoutRuntime?: boolean;
+  /** Override the fixture's normal fake rate when the same answer must hold at several rates. */
+  readonly fakeTickRates?: readonly number[];
   /**
    * Set when the subject changes something the whole server has (a game rule, the weather) while the check runs: the YAML is tagged
    * `exclusive` so the scenario gets a server of its own and never a lane of a shared one, where every other lane would see the change. The value is the reason.
@@ -118,19 +143,28 @@ export interface ContractCheck {
 }
 
 export const CONTRACT_CHECKS: readonly ContractCheck[] = [
+  heightmapInChunkPacket,
+  serverTags,
+  combatDataMobs,
+  ...COMBAT_DATA_ITEM_CHECKS,
   worldAgePerSecond,
   worldAgeAtSlowTick,
   waitForTicksAndAge,
   thinBlockShapes,
+  waterHeldCells,
   stateIdAgrees,
   itemsMatchSlots,
   equipHandAndOffHand,
   tossCountAndEntity,
+  tossCorrectedInventoryAnswer,
   placementBlockUpdate,
   digTimeAndUpdate,
+  nativeDigClock,
+  occupiedFireDig,
   stopDiggingBothWindows,
   boatGetOffByShift,
   boatDismountIgnored,
+  useEntitySneakInBoat,
   boatPlacedByUse,
   boatFollowsVehicleMove,
   boatBrokenByAttack,
@@ -139,17 +173,23 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   columnsHoldCells,
   findBlocksMatching,
   airSupplyUnderWater,
+  eyeWaterSurface,
+  waterExtinguishesBurning,
+  fireBlockBurn,
   bedSleepAndWake,
   bedRefusedMonsterNear,
   rainAndThunderState,
   clickWindowHotbarSwap,
   clickWindowShiftMove,
+  furnaceOutputTake,
+  furnaceTakeCorrected,
   clickWindowOntoVariant,
   clickWindowVariantSplit,
   variantTransferClicks,
   chestOpenTakeClose,
   itemVariantComponents,
   itemPickupAfterDelay,
+  itemTakenByMob,
   tossedItemKeptBeforeDelay,
   attackCooldownDamage,
   attackHurtsAndKills,
@@ -172,10 +212,18 @@ export const CONTRACT_CHECKS: readonly ContractCheck[] = [
   attackMobKnockbackSprint,
   bucketPourAndFill,
   placeBlockWithOptions,
+  signEdit,
+  lavaBesideHead,
   lavaOverHole,
   lavaOverPassable,
   farPlayerPosition,
   whisperEcho,
+  heldShooter,
+  respawnAfterDeath,
+  respawnAtSetPoint,
+  respawnWhileAsleep,
+  lightInCells,
+  armourPointsWorn,
 ];
 
 /** The check of that name; throws listing the known names. */

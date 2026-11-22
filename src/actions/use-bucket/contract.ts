@@ -1,5 +1,6 @@
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import type { Vec3 } from "vec3";
 import { LIQUIDS, type LiquidName } from "../../world/liquid.js";
 import { actionResultSchema, type ActionOutput } from "../action.js";
 
@@ -89,6 +90,10 @@ export const useBucketAnnotations = {
 } satisfies ToolAnnotations;
 
 export const useBucketOutcomes = {
+  pourReachesBody: (who: string, cell: Vec3) =>
+    `[BUCKET_POUR_REACHES_BODY] Lava could reach ${who}'s body at (${cell.x}, ${cell.y}, ${cell.z}); choose a pour cell farther from players.`,
+  pourInProtectedRegion: (region: string) =>
+    `[BUCKET_POUR_PROTECTED_REGION] The pour could reach ${region}; pour elsewhere or ask its owner.`,
   noBucket: (name: string) => `[BUCKET_MISSING] Bot inventory holds no ${name}.`,
   noSource: (liquid: string, explored: string | null) =>
     `[BUCKET_NO_SOURCE] No ${liquid} source in any loaded column` +

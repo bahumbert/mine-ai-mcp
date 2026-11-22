@@ -30,7 +30,7 @@ test("a world effect whose completion never settles still returns after its canc
       token: { runId: "run", planId: "plan", stepId: "break", attempt: 1 },
       operation: { kind: "break", position, expectedStateId: 1, toolType: null, brings: [] },
       targets: [{ position, before: stateMatcher(1), after: airMatcher }],
-      deadlineMs: monotonicNow() + 60_000,
+      deadlineTicks: 1_200,
     });
     let settled: Awaited<typeof pending> | undefined;
     void pending.then((outcome) => (settled = outcome));

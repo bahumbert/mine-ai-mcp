@@ -68,7 +68,9 @@ test("the singular log selects nothing: it is no block and no tag", () => {
 });
 
 test("a version with no shipped tags matches exact names only", () => {
-  const bot = factsBot({ version: "1.19.4" });
+  // The shared fake builds no registry older than 1.19.4 (every version from 1.19.4 has shipped tags), so only the version
+  // string the tag lookups read is set to a version no tags are shipped for.
+  const bot = Object.assign(factsBot(), { version: "1.18.2" });
   assert.equal(blockMatchesSelector("oak_log", "logs", bot), false);
   assert.equal(selectorKnown(bot, "logs"), false);
   assert.equal(blockMatchesSelector("oak_log", "oak_log", bot), true);

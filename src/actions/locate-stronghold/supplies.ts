@@ -1,10 +1,12 @@
 import type { Bot } from "mineflayer";
-import { REFLEX_AVOIDED_FOODS } from "../../world/food.js";
+import { isAutoEdibleFood } from "../../world/food.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import type { LocateStrongholdResult } from "./contract.js";
 
 /** One checklist supplies both the preparation message and the departure warning. */
 export function strongholdSupplies(bot: Bot): LocateStrongholdResult["supplies"] {
   // Include armor, offhand and crafting inputs, but not slot 0's uncrafted output.
+  const index = familyIndexOf(bot);
   const items = bot.inventory.slots.slice(1).filter((item) => item !== null);
   const count = (accept: (name: string) => boolean) =>
     items.reduce((total, item) => total + (accept(item.name) ? item.count : 0), 0);
@@ -14,10 +16,10 @@ export function strongholdSupplies(bot: Bot): LocateStrongholdResult["supplies"]
   return [
     { recommendation: "Carved pumpkin to wear against Enderman gaze", carried: named("carved_pumpkin"), required: 1 },
     { recommendation: "Bow for End crystals", carried: named("bow"), required: 1 },
-    { recommendation: "Regular arrows", carried: named("arrow"), required: 64 },
+    { recommendation: "Arrows (regular, spectral or tipped)", carried: count((name) => index.itemFamilies(name).includes("arrow")), required: 64 },
     {
       recommendation: "Auto-edible food items for the journey and fight",
-      carried: count((name) => !!bot.registry.foodsByName[name] && !REFLEX_AVOIDED_FOODS.has(name)),
+      carried: count((name) => isAutoEdibleFood(index, name)),
       required: 16,
     },
     ...["helmet", "chestplate", "leggings", "boots"].map((piece) => ({

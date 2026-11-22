@@ -6,8 +6,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { loadManifest } from "../manifest.ts";
 import type { Settings } from "../settings.ts";
-import { extractZipCommand, java, javaPath } from "./java.ts";
+import { diskWithRoomForAnything, twoDrives } from "./fixtures/fake-disk.ts";
+import { extractZipCommand, java as javaStep, javaPath, type JavaDeps } from "./java.ts";
 import type { InstallContext } from "./step.ts";
+
+/** The step over a disk with room for anything unless a test gives its own: only the free-space tests depend on the disk. */
+const java = (ctx: InstallContext, deps: JavaDeps = {}) => javaStep(ctx, { disk: diskWithRoomForAnything(), ...deps });
 
 const zipBytes = Buffer.from("pretend this is the Temurin JRE zip");
 const sha256Of = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -16,7 +20,7 @@ function context(sha256: string = sha256Of(zipBytes)): InstallContext & { progre
   const manifest = loadManifest();
   const progress: string[] = [];
   return {
-    manifest: { ...manifest, java: { url: "https://example.invalid/jre.zip", sha256 } },
+    manifest: { ...manifest, java: { ...manifest.java, url: "https://example.invalid/jre.zip", sha256 } },
     settings: {} as Settings,
     root: mkdtempSync(join(tmpdir(), "java-step-")),
     onProgress: (_fraction, label) => progress.push(label),
@@ -26,7 +30,7 @@ function context(sha256: string = sha256Of(zipBytes)): InstallContext & { progre
 
 /** The same context pinned to another zip: what a new manifest does on an update. */
 function pinnedTo(ctx: InstallContext, bytes: Buffer): InstallContext {
-  return { ...ctx, manifest: { ...ctx.manifest, java: { url: "https://example.invalid/jre2.zip", sha256: sha256Of(bytes) } } };
+  return { ...ctx, manifest: { ...ctx.manifest, java: { ...ctx.manifest.java, url: "https://example.invalid/jre2.zip", sha256: sha256Of(bytes) } } };
 }
 
 /** A fetch serving `bytes`, counting the requests. */
@@ -149,6 +153,67 @@ test("an archive without bin/java.exe fails the step", async () => {
     assert.match(result.hint, /Java download/u);
   }
   assert.equal(existsSync(javaPath(ctx.root)), false);
+});
+
+// Free-space guard (plan T1b) with the measured sizes: the JRE zip 49106397 bytes, unpacked 151829892, Mine AI keeps 1 GiB free.
+const GIB = 1024 ** 3;
+const JRE_ZIP_BYTES = 49106397;
+const JRE_UNPACKED_BYTES = 151829892;
+
+/** `ctx` with the shipped sizes and the data root on a fake disk with `free` bytes. */
+function onDiskWith(ctx: ReturnType<typeof context>, free: number) {
+  const { disk } = twoDrives(ctx.root, { data: free, other: 0 });
+  const sized = { ...ctx, manifest: { ...ctx.manifest, java: { ...ctx.manifest.java, installedBytes: JRE_UNPACKED_BYTES }, disk: { reserveBytes: GIB } } };
+  return { ctx: sized, disk };
+}
+
+/** A fetch announcing `announced` bytes; its body is never read by a download the guard stops. */
+function announcing(announced: number) {
+  const calls: string[] = [];
+  const fetchImpl = (async (url: string) => {
+    calls.push(String(url));
+    return new Response(new Uint8Array(zipBytes), { status: 200, headers: { "content-length": String(announced) } });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+test("a drive too small for the zip and the unpacked JRE fails once the size is announced, before the first byte is written, and installs nothing", async () => {
+  const { ctx, disk } = onDiskWith(context(), 1.1 * GIB);
+  const { fetchImpl, calls } = announcing(JRE_ZIP_BYTES);
+  const result = await java(ctx, { fetchImpl, extractZip: extractsTopFolder(), disk });
+  assert.ok(!result.ok);
+  assert.match(result.error, /^Not enough free space on \S+ for Java's download and Java: it needs 1\.2 GB \(including the 1\.0 GB Mine AI keeps free\) and \S+ has 1\.1 GB free\.$/u);
+  assert.match(result.hint, /^Free some space on \S+, then run the step again\.$/u);
+  assert.equal(calls.length, 1, "the size comes from the download's own answer: no extra request");
+  assert.equal(existsSync(join(ctx.root, "runtime", "downloads", "java.zip.part")), false, "not a byte was written");
+  assert.equal(existsSync(javaPath(ctx.root)), false);
+});
+
+test("a java.zip already there with the right hash is checked with 0 download bytes: 1.2 GB holds the unpacked JRE, 1.1 GB does not", async () => {
+  const bring = (free: number) => {
+    const prepared = onDiskWith(context(), free);
+    mkdirSync(join(prepared.ctx.root, "runtime", "downloads"), { recursive: true });
+    writeFileSync(join(prepared.ctx.root, "runtime", "downloads", "java.zip"), zipBytes);
+    return prepared;
+  };
+  const short = bring(1.1 * GIB);
+  const { fetchImpl, calls } = serving();
+  const refused = await java(short.ctx, { fetchImpl, extractZip: extractsTopFolder(), disk: short.disk });
+  assert.ok(!refused.ok);
+  assert.match(refused.error, /for Java: it needs 1\.1 GB/u, "only the unpacked JRE and the reserve: the zip is on the disk already");
+  assert.equal(calls.length, 0);
+
+  const roomy = bring(1.2 * GIB);
+  assert.equal((await java(roomy.ctx, { fetchImpl, extractZip: extractsTopFolder(), disk: roomy.disk })).ok, true);
+  assert.equal(calls.length, 0, "the zip on the disk is used: no request");
+});
+
+test("a JRE of the pinned zip that is installed already is never checked: the disk is not read", async () => {
+  const { ctx, disk } = onDiskWith(context(), 0);
+  await java(ctx, { fetchImpl: serving().fetchImpl, extractZip: extractsTopFolder(), disk: onDiskWith(ctx, 100 * GIB).disk });
+  const result = await java(ctx, { fetchImpl: serving().fetchImpl, extractZip: extractsTopFolder(), disk });
+  assert.ok(result.ok);
+  assert.deepEqual(disk.statfsCalls, []);
 });
 
 test("the zip is extracted with the system tar on Windows, never a tar from PATH", () => {

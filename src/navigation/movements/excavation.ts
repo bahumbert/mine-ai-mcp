@@ -1,5 +1,6 @@
 /** The work to remove a block, independent of why its caller wants it gone. */
 import { type BlockRaycaster, STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
+import { footprintColumns } from "../../world/player-physics.js";
 import { NO_OBSTACLE, obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { hasUnstableFallingSupport, navigationFeet } from "../world/block-geometry.js";
 import type { BlockPosition, CollisionBox, LoadedBlock, Position3, WorldView } from "../world/world.js";
@@ -34,7 +35,16 @@ export type Excavation =
       readonly breakTicks: number;
       readonly breakPenalty: number;
     }
-  | { readonly kind: "unavailable"; readonly reason: string };
+  | {
+      readonly kind: "unavailable";
+      readonly reason: string;
+      /**
+       * `stance`: the refusal holds only from the standing position (sight, reach, a body hazard, an unstable column under
+       * the feet), so the caller refuses that stance, not the block. No cause: it holds from every cell (the block is not
+       * loaded, digging is off, a break is prohibited).
+       */
+      readonly cause?: "stance";
+    };
 
 type PricedExcavation =
   | { readonly kind: "priced"; readonly digs: readonly Dig[] }
@@ -338,7 +348,7 @@ export const NOTHING_TO_CLEAR: Excavation = Object.freeze({
  * column that cannot be seen — sand above a plug across a corridor, under a
  * ceiling — is not planned as digs at all: it is brought down by the visible
  * dig beneath it and charged to that dig (see `Dig.brings`). A dig in the
- * bot's own column is refused while a falling block still stands above it,
+ * body's footprint is refused while a falling block still stands above it,
  * because removing it would drop that block onto the bot.
  */
 export function prepareExcavationDigs(
@@ -348,9 +358,11 @@ export function prepareExcavationDigs(
 ): Excavation {
   if (candidates.length === 0) return NOTHING_TO_CLEAR;
   const feet = navigationFeet(sight.standing, true);
-  if (hasUnstableFallingSupport(blockAt, feet.x, feet.y - 1, feet.z)) {
+  const footprint = [...footprintColumns(sight.standing)];
+  if (footprint.some(({ x, z }) => hasUnstableFallingSupport(blockAt, x, feet.y - 1, z))) {
     return {
       kind: "unavailable",
+      cause: "stance",
       reason: "The falling-block column beneath the mining stance has no observed stable support.",
     };
   }
@@ -362,8 +374,6 @@ export function prepareExcavationDigs(
   let breakPenalty = 0;
 
   const { standing } = sight;
-  const feetX = Math.floor(standing.x);
-  const feetZ = Math.floor(standing.z);
   const cleared: number[] = [];
   while (remaining.length > 0) {
     let index = 0;
@@ -373,30 +383,12 @@ export function prepareExcavationDigs(
       const hidden = remaining[0]!.position;
       return {
         kind: "unavailable",
+        cause: "stance",
         reason: `The required dig at ${blockLabel(hidden)} cannot be seen within reach from this position.`,
       };
     }
-    if (dig.position.x === feetX && dig.position.z === feetZ && dig.position.y < standing.y) {
-      const below = blockAt(dig.position.x, dig.position.y - 1, dig.position.z);
-      const body = blockAt(feetX, Math.floor(standing.y), feetZ);
-      if (below.kind === "loaded" && below.traits.liquid === "water" &&
-        (body.kind !== "loaded" || body.traits.liquid !== "water")) {
-        return { kind: "unavailable", reason: "The dig would remove the miner's dry footing above water." };
-      }
-    }
-    if (dig.position.x === feetX && dig.position.z === feetZ && dig.position.y > standing.y) {
-      const above = blockAt(dig.position.x, dig.position.y + 1, dig.position.z);
-      if (
-        above.kind === "loaded" &&
-        above.traits.falling &&
-        !cleared.includes(packKey(dig.position.x, dig.position.y + 1, dig.position.z))
-      ) {
-        return {
-          kind: "unavailable",
-          reason: `The dig at ${blockLabel(dig.position)} would drop the falling block above it onto the bot.`,
-        };
-      }
-    }
+    const hazard = excavationBodyHazard(blockAt, standing, dig.position, cleared);
+    if (hazard) return { kind: "unavailable", cause: "stance", reason: hazard };
     remaining.splice(index, 1);
     cleared.push(packKey(dig.position.x, dig.position.y, dig.position.z));
     // Whatever falling column still stands directly above this dig lands in
@@ -421,6 +413,40 @@ export function prepareExcavationDigs(
     breakPenalty += penalty;
   }
   return { kind: "prepared", digs, breakTicks, breakPenalty };
+}
+
+/** Whether the body's footprint at `standing` overlaps the column of `target`. */
+function bodyOverColumn(standing: Position3, target: BlockPosition): boolean {
+  return [...footprintColumns(standing)].some(({ x, z }) => target.x === x && target.z === z);
+}
+
+/**
+ * Refuse a dig whose falling column would land in a cell the body occupies. `standing` is where the body is (the
+ * planner's stance, or the live position at a swing): the footprint is read from it, so an off-centre body over the
+ * target's column is refused where the stance cell's centre is not.
+ */
+export function fallingColumnBodyHazard(
+  blockAt: WorldView["blockAt"], standing: Position3, target: BlockPosition, cleared: readonly number[] = [],
+): string | null {
+  if (target.y < standing.y || !bodyOverColumn(standing, target)) return null;
+  const above = blockAt(target.x, target.y + 1, target.z);
+  if (above.kind === "loaded" && above.traits.falling && !cleared.includes(packKey(target.x, target.y + 1, target.z)))
+    return `The dig at ${blockLabel(target)} would drop the falling block above it onto the bot.`;
+  return null;
+}
+
+/** Refuse work that drops a falling column onto the body or removes its dry footing above water. */
+function excavationBodyHazard(
+  blockAt: WorldView["blockAt"], standing: Position3, target: BlockPosition, cleared: readonly number[],
+): string | null {
+  if (target.y >= standing.y) return fallingColumnBodyHazard(blockAt, standing, target, cleared);
+  if (!bodyOverColumn(standing, target)) return null;
+  const below = blockAt(target.x, target.y - 1, target.z);
+  const body = blockAt(target.x, Math.floor(standing.y), target.z);
+  if (below.kind === "loaded" && below.traits.liquid === "water" &&
+    (body.kind !== "loaded" || body.traits.liquid !== "water"))
+    return "The dig would remove the miner's dry footing above water.";
+  return null;
 }
 
 /** The candidates once each, highest first; a cell two of a movement's cells share is dug once. */

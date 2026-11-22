@@ -36,7 +36,7 @@ test("a newer server uses the nearest older data; unknown items and versions wit
   assert.match(unknown.error ?? "", /^\[UNKNOWN_SMELT_ITEMS\] .*moon_rock/u);
   assert.deepEqual(unknown.smelting.items.map(({ item }) => item), ["glass"]);
 
-  const older = await viewSmeltingRecipes(bot("1.20.1"), parseViewSmeltingRecipesRequest({ items: ["glass"] }), {});
+  const older = await viewSmeltingRecipes(bot("1.18.2"), parseViewSmeltingRecipesRequest({ items: ["glass"] }), {});
   assert.equal(older.status, "failed");
   assert.match(older.error ?? "", /^\[SMELTING_DATA_UNAVAILABLE\]/u);
 });

@@ -4,7 +4,7 @@ import { cellIntersectsPlayerBody } from "../utils/index.js";
 import { isDryPlacementSite, isLiquid, supportsFlatPlacement } from "./block-classification.js";
 import { placeBlock, findPlacementSupport, type WorldBlock } from "./placement.js";
 import { chestOpeningObstruction } from "./chest-clearance.js";
-import { protectedRegionAt, readProtectedRegions, type ProtectedRegion } from "./protected-regions.js";
+import { anyRegionAt, foreignRegionAt, protectedRegionAt, readProtectedRegions, type ProtectedRegion } from "./protected-regions.js";
 import { CRAFTING_STATION } from "./workstations.js";
 
 /** Vanilla block-interaction reach, measured from the bot's feet cell like every other placement here. */
@@ -19,8 +19,11 @@ export type NearbyPlacement =
   | { readonly kind: "no_cell"; readonly foreignArea?: string }
   | { readonly kind: "failed"; readonly position: Vec3; readonly error: string };
 
-/** Which protected regions a cell may lie in: none, any, or only those the named player owns. */
-type RegionRule = "outside_all" | "any" | { readonly ownedBy: string };
+/**
+ * Which protected regions a cell may lie in: none ("outside_all"), the bot's own ("own_ok": another owner's never, the
+ * placement core refuses it, ADR-012), or any ("any": only to tell that the free cells are all in another's area).
+ */
+type RegionRule = "outside_all" | "own_ok" | "any";
 
 interface PlacementCell {
   readonly position: Vec3;
@@ -48,7 +51,6 @@ function chooseCell(
   from: { readonly feet: Vec3; readonly body: Vec3 } = { feet: bot.entity.position.floored(), body: bot.entity.position },
 ): PlacementCell | null {
   const { feet, body } = from;
-  const regions = readProtectedRegions(bot);
   let chosen: { readonly cell: PlacementCell; readonly distance: number; readonly onFloor: boolean } | null = null;
   for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
     for (let dz = -maxRadius; dz <= maxRadius; dz += 1) {
@@ -58,7 +60,7 @@ function chooseCell(
         if (distance > NEARBY_PLACEMENT_REACH || cellIntersectsPlayerBody(position, body)) continue;
         if (!isDryPlacementSite(bot.blockAt(position), bot.version)) continue;
         if (chestOpeningObstruction(bot, itemName, position)) continue;
-        if (regionRule !== "any" && regionBlocks(regions, bot, position, regionRule)) continue;
+        if (regionRule === "outside_all" ? anyRegionAt(bot, position) !== null : regionRule === "own_ok" && foreignRegionAt(bot, position) !== null) continue;
         const placement = findPlacementSupport(bot, position, supportsFlatPlacement);
         if (placement) {
           const { support, face } = placement;
@@ -75,18 +77,9 @@ function chooseCell(
   return chosen?.cell ?? null;
 }
 
-/** Whether the cell lies in a region this rule keeps out of: any region for "outside_all", the ones not owned by `ownedBy` for the other rule. */
-function regionBlocks(regions: readonly ProtectedRegion[], bot: Bot, cell: Vec3, rule: RegionRule): boolean {
-  const owner = typeof rule === "object" ? rule.ownedBy : undefined;
-  return protectedRegionAt(regions, bot.game.dimension, cell.x, cell.y, cell.z, owner) !== null;
-}
-
-/** Outside every region first, then inside: only the regions the bot owns when the block is taken back, any region otherwise. */
-function chooseCellFor(bot: Bot, itemName: string, maxRadius: number, takeBack: boolean, from?: { readonly feet: Vec3; readonly body: Vec3 }): PlacementCell | null {
-  return (
-    chooseCell(bot, itemName, maxRadius, "outside_all", from) ??
-    chooseCell(bot, itemName, maxRadius, takeBack ? { ownedBy: bot.username } : "any", from)
-  );
+/** Outside every region first, then inside the bot's own: another owner's area is never a choice. */
+function chooseCellFor(bot: Bot, itemName: string, maxRadius: number, from?: { readonly feet: Vec3; readonly body: Vec3 }): PlacementCell | null {
+  return chooseCell(bot, itemName, maxRadius, "outside_all", from) ?? chooseCell(bot, itemName, maxRadius, "own_ok", from);
 }
 
 /** How far a bot is sent for a spot where a workstation fits: a few steps, not a trek. */
@@ -114,7 +107,8 @@ export function findStandingSpot(
   bot: Bot,
   maxRadius = STANDING_SPOT_RADIUS,
   itemName: string = CRAFTING_STATION,
-  { takeBack = false }: { readonly takeBack?: boolean } = {},
+  /** Kept for callers that mean to take the block back: another owner's area is refused for every placement. */
+  _options: { readonly takeBack?: boolean } = {},
 ): Vec3 | null {
   const origin = bot.entity.position.floored();
   const spots: { readonly feet: Vec3; readonly distance: number }[] = [];
@@ -130,7 +124,7 @@ export function findStandingSpot(
   spots.sort((left, right) => left.distance - right.distance);
   for (const { feet } of spots) {
     const from = { feet, body: new Vec3(feet.x + 0.5, feet.y, feet.z + 0.5) };
-    const found = chooseCellFor(bot, itemName, 3, takeBack, from);
+    const found = chooseCellFor(bot, itemName, 3, from);
     if (found) return feet;
   }
   return null;
@@ -163,9 +157,10 @@ export async function placeCarriedBlockNearby(
   const item = bot.inventory.items().find((candidate) => candidate.name === itemName);
   if (!item) return { kind: "no_item" };
   // Outside every protected region first, the bot's own included: a block put down there could not be taken back
-  // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside one only when nothing else is free.
+  // up (live 2026-10-02: a crafting table left in the doorway of her own house). Inside its own region only when
+  // nothing else is free; inside another owner's never (the placement core refuses it as well, ADR-012).
   const radius = options.maxRadius ?? 3;
-  const cell = chooseCellFor(bot, itemName, radius, options.takeBack === true);
+  const cell = chooseCellFor(bot, itemName, radius);
   if (!cell) return noCell(bot, itemName, radius, options.takeBack === true);
   const result = await placeBlock(bot, {
     item,

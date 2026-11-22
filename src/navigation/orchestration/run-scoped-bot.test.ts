@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FakeNavigationBot, flatWorld, movementStep, observation } from "../../test-support/navigation.js";
 import { createRunScopedBot } from "./run-scoped-bot.js";
+import { createFakeBot, createFakeClock } from "../../test-support/fake-bot/index.js";
+import { MineflayerBot, mineflayerBotSurface } from "../mineflayer/bot.js";
 
 /** The shared bot, counting what reaches it. */
 class CountingBot extends FakeNavigationBot {
@@ -110,4 +112,21 @@ test("a run asks the server for a cell through its view, and an abandoned run as
 
 test("a shared bot without the resync gives the run none", () => {
   assert.equal(createRunScopedBot(new CountingBot()).bot.requestCellResync, undefined);
+});
+
+test("the scoped bot reads the shared bot's world age before and after revocation", async () => {
+  const clock = createFakeClock({ mode: "manual" });
+  const { bot } = createFakeBot({ clock, server: { startAge: 1_000, ticksPerSecond: 5, timePacketYet: false } });
+  const shared = new MineflayerBot(mineflayerBotSurface(bot), { revision: 0 });
+  const scoped = createRunScopedBot(shared);
+  assert.equal(scoped.bot.worldAge?.(), null, "no time packet heard yet");
+  await clock.advance(4_000);
+  assert.equal(scoped.bot.worldAge?.(), 1_020);
+  scoped.revoke();
+  await clock.advance(4_000);
+  assert.equal(scoped.bot.worldAge?.(), 1_040, "reads stay live after body control was withdrawn");
+});
+
+test("a shared bot without worldAge gives a scoped bot without it", () => {
+  assert.equal(createRunScopedBot(new CountingBot()).bot.worldAge, undefined);
 });

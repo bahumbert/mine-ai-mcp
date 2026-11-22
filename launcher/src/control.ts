@@ -215,10 +215,10 @@ class Console {
     return this.everAttached;
   }
 
-  endAll(): void {
+  endAll(failed: boolean): void {
     this.closedOnce = true;
     this.stopHeartbeat();
-    for (const stream of this.streams) stream.end();
+    for (const stream of this.streams) stream.end(`event: outcome\ndata: ${failed ? "failed" : "ended"}\n\n`);
   }
 
   /** One timer for all streams, started by the first attach and stopped with the last stream. */
@@ -247,11 +247,11 @@ export async function startControlServer(options: ControlOptions): Promise<Contr
     server.once("error", reject);
     server.listen(port, "127.0.0.1", resolve);
   });
-  return { port, publish: (line) => attached.publish(line), hasConsoleAttached: () => attached.hasEverAttached(), close: () => closeServer(server, attached) };
+  return { port, publish: (line) => attached.publish(line), hasConsoleAttached: () => attached.hasEverAttached(), close: () => closeServer(server, attached, handlers.status().problem !== null) };
 }
 
-function closeServer(server: Server, attached: Console): Promise<void> {
-  attached.endAll();
+function closeServer(server: Server, attached: Console, failed: boolean): Promise<void> {
+  attached.endAll(failed);
   return new Promise((resolve) => {
     server.close(() => resolve());
     server.closeAllConnections();

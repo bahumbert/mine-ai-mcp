@@ -1,10 +1,21 @@
-import type { Continuation } from "../../../session/abort.js";
+import type { ResponseContinuation } from "../contract.js";
 import type { AnsweredEntry, Facts } from "../../state/answered.js";
 import type { HostileResponseResult, HostileSettlement } from "./response-result.js";
+import { evadeDetail } from "../../responses/evade-detail.js";
+import { chainSuffix } from "../../state/threat-chains.js";
+import { stallReason } from "../../state/request-stall.js";
+
+/** An occupied shell hands back only after a confirmed kill or separation. */
+function settledResponse(physical: HostileResponseResult): HostileResponseResult {
+  if (physical.response !== "hide" || physical.healthAfter <= 0 || !physical.followUp) return physical;
+  const next = physical.followUp;
+  return next.healthAfter > 0 && (next.response === "fight" ? next.result.kind === "died" : next.result.kind === "separated")
+    ? next : physical;
+}
 
 export function completeResponse(physical: HostileResponseResult, signal: AbortSignal): HostileSettlement {
-  const { result: _result, response, ...evidence } = physical;
-  const common = { response, physical, evidence };
+  const { result: _result, response, ...evidence } = settledResponse(physical);
+  const common = { response, physical, evidence, chain: null, stall: null };
   return signal.aborted
     ? {
         ...common,
@@ -63,24 +74,47 @@ function responseSummary(physical: HostileResponseResult): { outcome: string; er
 
 /** Only the receipt boundary flattens response-specific results into operator vocabulary. */
 export function encounterReceipt(settlement: HostileSettlement) {
+  const effective = settlement.physical ? settledResponse(settlement.physical) : null;
   const summary =
     settlement.kind === "completed"
-      ? responseSummary(settlement.physical)
+      ? responseSummary(settledResponse(settlement.physical))
       : { outcome: settlement.kind, error: settlement.reason };
   return {
     ...settlement.evidence,
     response: settlement.response,
+    chain: settlement.chain ? { ...settlement.chain } : null,
+    stall: settlement.stall ? { ...settlement.stall,
+      threats: settlement.stall.threats.map((threat) => ({ ...threat })) } : null,
     outcome: summary.outcome,
+    ...(settlement.released ? { released: settlement.released } : {}),
     ...(summary.error === null ? {} : { error: summary.error }),
+    ...(effective?.response === "evade" ? {
+      ends: effective.ends.map((end) => ({ ...end })),
+      startPosition: { ...effective.startPosition }, elapsedMs: effective.elapsedMs,
+      elapsedTicks: effective.elapsedTicks,
+      goalRefreshes: effective.goalRefreshes,
+      ...(settlement.kind === "completed" && effective.result.kind === "separated"
+        ? { detail: evadeDetail(effective.ends) } : {}),
+    } : {}),
     hide: settlement.physical?.response === "hide" ? settlement.physical.result : null,
+    followUp: settlement.physical?.response === "hide" ? settlement.physical.followUp : null,
   };
 }
 
-export function responseContinuation(settlement: HostileSettlement): Continuation {
-  // A completed physical response returns the request to current-condition
-  // validation. Historical blasts do not invalidate every future route.
+/** A successful chain keeps its receipt too; only unsuccessful outcomes need the failure detail. */
+function settlementReason(settlement: HostileSettlement, resumed = false): string {
+  const receipt = encounterReceipt(settlement);
+  const detail = resumed ? "" : `: ${receipt.error ?? receipt.reason}`;
+  const chain = settlement.chain && settlement.chain.responses >= 2 ? chainSuffix(settlement.chain) : "";
+  return `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}${detail}${chain}.`;
+}
+
+export function responseContinuation(settlement: HostileSettlement): ResponseContinuation {
+  if (settlement.stall?.limit) return { kind: "return", reason: stallReason(settlement.stall) };
+  // Observed separation or a completed defence permits current-condition
+  // validation; an exhausted response leaves the reflex's next decision open (P4-29 a6).
   if (settlement.kind === "completed" && settlement.evidence.healthAfter > 0) {
-    const physical = settlement.physical;
+    const physical = settledResponse(settlement.physical);
     const resume =
       physical.response === "fight"
         ? ["died", "target_lost", "unreachable", "contact_ended"].includes(physical.result.kind)
@@ -89,25 +123,27 @@ export function responseContinuation(settlement: HostileSettlement): Continuatio
           : physical.response === "evade"
             ? physical.result.kind === "separated"
             : physical.result.kind === "reflected";
-    if (resume) return { kind: "resume" };
+    if (resume) return settlement.chain && settlement.chain.responses >= 2
+      ? { kind: "resume", reason: settlementReason(settlement, true) } : { kind: "resume" };
+    if (physical.response === "evade" && physical.result.kind === "exhausted"
+      || physical.response === "deflect" && physical.result.kind !== "reflected")
+      return { kind: "hold", reason: settlementReason(settlement) };
   }
-  const receipt = encounterReceipt(settlement);
-  return {
-    kind: "return",
-    reason: `[HOSTILE_SETTLED] ${receipt.response} ended with ${receipt.outcome} at health ${receipt.healthAfter}: ${receipt.error ?? receipt.reason}.`,
-  };
+  return { kind: "return", reason: settlementReason(settlement) };
 }
 
 export function responseFailure(settlement: HostileSettlement): AnsweredEntry["failure"] | null {
+  // The request ended this fight, so the target is no lost target: the next decision is the one after any fight.
+  if (settlement.released) return null;
   if (settlement.kind !== "completed")
     return settlement.kind === "failed" ? { kind: "failed", why: settlement.reason } : null;
-  const physical = settlement.physical;
+  const physical = settledResponse(settlement.physical);
   switch (physical.response) {
     case "fight": {
       const result = physical.result;
       if (["died", "contact_ended", "cancelled", "bot_died"].includes(result.kind)) return null;
       return {
-        kind: result.kind,
+        kind: result.kind === "unreachable" && result.premise === "no_confirmed_damage" ? result.premise : result.kind,
         why: "observation" in result ? result.observation : "The target left observation without a death.",
       };
     }
@@ -128,6 +164,16 @@ export function describeResponse(settlement: HostileSettlement): Facts {
   const receipt = encounterReceipt(settlement);
   return {
     ...receipt,
+    followUp: receipt.followUp ? {
+      ...(receipt.followUp.response === "evade" ? {
+        ...receipt.followUp,
+        startPosition: { ...receipt.followUp.startPosition }, ends: receipt.followUp.ends.map(end => ({ ...end })),
+      } : receipt.followUp),
+      result: { ...receipt.followUp.result },
+      finalPosition: { ...receipt.followUp.finalPosition },
+      threats: receipt.followUp.threats.map(threat => ({ ...threat, position: { ...threat.position } })),
+      finalDistances: receipt.followUp.finalDistances.map(entry => ({ ...entry })),
+    } : null,
     error: receipt.error ?? null,
     threats: receipt.threats.map((threat) => ({ ...threat, position: { ...threat.position } })),
     finalPosition: { ...receipt.finalPosition },

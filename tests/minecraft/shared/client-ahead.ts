@@ -1,4 +1,5 @@
 // The scenario clients the daemon boots before their trial: a submission's spare clients, waiting for `init`, handed to its trials through Mine Labs' `clientProvider`.
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { spawnClientAhead, type ClientAhead, type ClientCommandSpec, type ClientProvider } from "mine-labs";
 import { CLIENT_BOOTED_MESSAGE } from "../client-boot-marker.ts";
 import type { ScenarioServerConfig } from "./config.ts";
@@ -12,7 +13,7 @@ export interface ClientsAheadDeps {
   readonly log: (message: string) => void;
   /** Spawns a client process (Mine Labs' `spawnClientAhead`); injectable for the tests. */
   readonly spawn?: ClientAheadSpawner;
-  /** The clock the scheduler's young-client window runs on (default `Date.now`). */
+  /** The clock the scheduler's young-client window runs on (default `monotonicNow`). */
   readonly now?: () => number;
 }
 
@@ -58,7 +59,7 @@ export class ClientsAhead {
 
   constructor(private readonly deps: ClientsAheadDeps) {
     this.#spawnProcess = deps.spawn ?? (client => spawnClientAhead(client));
-    this.#now = deps.now ?? Date.now;
+    this.#now = deps.now ?? monotonicNow;
   }
 
   /** The listener is called when a client is lost or a tuple given up, so the scheduler can boot another or fail the trials that cannot get one. */

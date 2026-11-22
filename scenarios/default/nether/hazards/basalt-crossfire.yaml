@@ -22,11 +22,18 @@ geometry:
   - fill: { block: magma_block, from: [20, 101, -1], to: [22, 101, 1] }
   - fill: { block: basalt, from: [28, 101, 2], to: [29, 104, 3] }
   - setblock: { block: emerald_block, at: [36, 100, 0] }
+  # The free-flight probe left the acquisition band at both rates (a2 T13b). This floor and cap
+  # keep the ghast at y 101–102, and the three-high slit passes sight and shots over the y 102 ridge.
+  - fill: { block: basalt, from: [18, 100, 11], to: [24, 106, 17] }
+  - fill: { block: air, from: [19, 101, 12], to: [23, 105, 16] }
+  - fill: { block: air, from: [18, 102, 11], to: [24, 104, 17] }
 entities:
   - { type: magma_cube, pos: [7.5, 100, 0.5], nbt: "{Size:1,NoAI:1b,PersistenceRequired:1b}" }
   - { type: magma_cube, pos: [15.5, 101, 1.5], nbt: "{Size:3,NoAI:1b,PersistenceRequired:1b}" }
   - { type: enderman, pos: [6.5, 100, 2.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
-  - { type: ghast, pos: [21.5, 106, 12.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
+  # Vanilla 1.21.4 acquires within 4 vertical blocks (a6 T4 ghast-decompiled.txt:23).
+  # The four-wide ghast stays at z >= 14, over eight blocks from the ledge's z 5.5 walking line.
+  - { type: ghast, pos: [21.5, 101, 14.5], nbt: "{NoAI:1b,PersistenceRequired:1b}" }
 players:
   - name: BasaltTraveler
     pos: [0.5, 100, 0.5]

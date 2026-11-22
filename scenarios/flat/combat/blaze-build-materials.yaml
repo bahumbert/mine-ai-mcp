@@ -11,7 +11,7 @@ world:
   gamerules:
     doDaylightCycle: false
     doMobSpawning: false
-    naturalRegeneration: false
+    naturalRegeneration: true
 players:
   - name: BlazeMaterials
     op: true
@@ -22,6 +22,14 @@ players:
     inventory:
       - item: diamond_sword
         count: 1
+      - item: shield
+        count: 1
+      # The hunt's recovery hold can end only by healing: regeneration is on and food is carried (the hold has no other exit before its 90 s clock).
+      - item: cooked_beef
+        count: 16
+      # The two opposing blazes are crossfire one shield cannot answer: the hunt's admission asks for cover blocks (preparation.ts).
+      - item: cobblestone
+        count: 64
 entities:
   - type: blaze
     pos:
@@ -42,7 +50,10 @@ client:
     - ../../src/hunter.ts
 goal:
   kind: all
-  timeout: 30
+  timeout: 90
+  # T13ab (plan 2026-11-18-scenario-reds-part2-a10): longest passing still span 404 ticks (20 tps, n 32), 383 (10 tps, n 32); 2x rounded up to 20.
+  # Runs: $RUN_DATA_DIR/run-data-p2a10-t13ab/gate-20tps, measure-20tps, gate-10tps, measure-10tps.
+  stillTicks: 820
   goals:
     - kind: kill
       who: BlazeMaterials
@@ -55,5 +66,5 @@ goal:
 params:
   mob_name: blaze
   drop_name: blaze_rod
-  count: 1
-  defeat_count: 1
+  count: 2
+  defeat_count: 2

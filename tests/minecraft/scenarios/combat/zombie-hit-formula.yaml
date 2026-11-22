@@ -1,0 +1,25 @@
+template: ../../templates/combat-assessment.yaml
+
+name: zombie-hit-formula
+tags: [acceptance]
+description: >-
+  Natural zombie hits at normal difficulty cost the formula's health, first
+  unarmoured and then wearing an iron chestplate. Record two-hit intervals.
+
+geometry:
+  - fill: { block: glass, from: [-1, -60, -1], to: [3, -58, 1] }
+  - fill: { block: air, from: [0, -60, 0], to: [2, -59, 0] }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/zombie-hit-formula.ts, --without-runtime]
+
+params: {}
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: survive, who: Actor, seconds: 1 }
+    - { kind: completion, who: Actor }

@@ -6,18 +6,220 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLIENT_HOST_PROTOCOL } from "../client-boot-marker.ts";
 import { clientTupleOf } from "./client-ahead.ts";
-import { GameruleDefaultsCache } from "./gamerule-defaults.ts";
+import { GameruleDefaultsCache, ProbeFailed } from "./gamerule-defaults.ts";
 import type { InPlace, ScenarioMirror, Snapshot } from "./mirror.ts";
-import type { DaemonMessage } from "./protocol.ts";
+import { decodeDaemonMessage, type DaemonMessage } from "./protocol.ts";
 import { SchedulerRig } from "./scheduler-rig.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 import { ScriptedClients } from "./scripted-clients.ts";
 import { sourceRootOf } from "./source-root.ts";
 import { handleSubmit } from "./submission-handler.ts";
+import { BenchState } from "./bench-canary.ts";
+import type { SubmitMessage } from "./protocol.ts";
+import type { SubmissionSpec, SubmissionSummary } from "./scheduler-types.ts";
 
 // check-reads: tests/minecraft/contract/scenarios/air-supply-under-water.yaml, tests/minecraft/templates/**/*.yaml
 const CONTRACT_DIR = fileURLToPath(new URL("../contract/scenarios", import.meta.url));
 const ONE_FILE = join(CONTRACT_DIR, "air-supply-under-water.yaml");
+
+function canarySetup(real = false) {
+  const context = setup();
+  const bench = new BenchState();
+  const calls: SubmissionSpec[] = [];
+  const done = Promise.withResolvers<SubmissionSummary>();
+  const submit = context.rig.scheduler.submit.bind(context.rig.scheduler);
+  context.rig.scheduler.submit = spec => {
+    calls.push(spec);
+    return !real && calls.length === 1 ? { id: 900, finished: done.promise, cancel: () => done.resolve({ runs: 1, passed: 0, failed: 0, cancelled: 1 }) } : submit(spec);
+  };
+  context.rig.scheduler.waitReport = () => "the canary waits for admission";
+  const message: SubmitMessage = { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 2, lanes: null, lock: false,
+    env: { MINE_AI_SUBMIT_FEATURES: "classes,canary", MINE_AI_SUBMIT_CANARY: ONE_FILE } };
+  return { ...context, base: { ...context.base, bench, stateDir: "/tmp/bench" }, bench, calls, done, message };
+}
+
+test("a canary infra once then pass on its retry verifies the bench and starts the waiting batch", async () => {
+  const { rig, base, sent, calls, message, bench } = canarySetup(true);
+  const mirror = new FakeMirror();
+  rig.sample();
+  const running = handleSubmit({ ...base, mirror }, message);
+  await rig.until(() => calls.length === 1, "canary submission");
+  assert.deepEqual(mirror.released, [], "the canary owns its snapshot while running");
+  assert.equal(calls[0]!.repeat, 1);
+  assert.equal(calls[0]!.entries[0]!.scenario.client.env.MINE_AI_SUBMIT_CANARY, undefined);
+  assert.ok(calls[0]!.outDir.startsWith("/tmp/bench/canary/"));
+  await sampleUntilRunning(rig, 1);
+  const firstServer = rig.running[0]!.input.server.id;
+  await rig.killJavaOf(0);
+  rig.running[0]!.finish("fail");
+  await sampleUntilRunning(rig, 1);
+  assert.notEqual(rig.running[0]!.input.server.id, firstServer);
+  assert.equal(calls.length, 1, "the batch still waits during the retry");
+  rig.running[0]!.finish();
+  await rig.until(() => calls.length === 2, "batch submission");
+  assert.deepEqual(mirror.released, [1], "the completed canary releases its own snapshot");
+  assert.equal(bench.isVerified(), true);
+  await rig.drain();
+  await running.finished;
+  assert.equal(sent.filter(m => m.type === "result").length, 2, "neither canary attempt enters the batch results");
+  assert.deepEqual(sent.at(-1), { type: "done", runs: 2, passed: 2, failed: 0, cancelled: 0, infra: 0 });
+  assert.deepEqual(mirror.released, [1, 2], "the batch releases its separate snapshot");
+  assert.ok(sent.some(m => m.type === "info" && m.text.startsWith("bench canary passed in")));
+  assert.ok(sent.some(m => m.type === "wait" && m.text.includes("canary waits")));
+});
+
+test("canary non-selfMade infra blocks all trials; product, wall-bound and selfMade infra run the batch", async () => {
+  for (const [resultClass, selfMade, cause] of [["infra", false, "harness broke"], ["infra", true, "rcon failed"], ["product", undefined, "goal failed"], ["product", undefined, "trial passed its wall bound (running)"]] as const) {
+    const { rig, base, sent, calls, done, message } = canarySetup();
+    rig.sample();
+    const running = handleSubmit(base, message);
+    await rig.until(() => calls.length === 1, "canary");
+    const event = { type: "result", name: "canary", class: resultClass, selfMade, cause, outcome: "error", elapsedMs: 1, detail: "pending", runDir: "/r" } as const;
+    calls[0]!.emit(event);
+    done.resolve({ runs: 1, passed: 0, failed: 1, cancelled: 0, infra: resultClass === "infra" ? 1 : 0 });
+    if (resultClass === "infra" && !selfMade) {
+      await running.finished;
+      assert.equal(calls.length, 1);
+      assert.equal(sent.filter(m => m.type === "error").length, 1);
+      assert.deepEqual(sent.at(-1), { type: "done", runs: 2, passed: 0, failed: 2, infra: 2, cancelled: 0 });
+    } else {
+      await rig.until(() => calls.length === 2, "batch");
+      await rig.drain();
+      await running.finished;
+      assert.equal(sent.filter(m => m.type === "info" && m.text.includes("bench canary")).length, 1);
+    }
+  }
+});
+
+test("one trial, lock, absent canary and a bad canary file never gate the batch", async () => {
+  for (const mode of ["single", "lock", "absent", "bad"] as const) {
+    const { rig, sent, base } = setup();
+    const bench = new BenchState();
+    rig.sample();
+    const running = handleSubmit({ ...base, bench }, { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: mode === "single" ? 1 : 2, lanes: null, lock: mode === "lock",
+      env: { MINE_AI_SUBMIT_FEATURES: "classes,canary", ...(mode === "absent" ? {} : { MINE_AI_SUBMIT_CANARY: mode === "bad" ? "/missing.yaml" : ONE_FILE }) } });
+    await rig.until(() => rig.running.length > 0, "batch trial");
+    await rig.drain();
+    await running.finished;
+    assert.equal(sent.filter(m => m.type === "result").length, mode === "single" ? 1 : 2);
+    assert.equal(bench.isVerified(), mode === "single");
+    if (mode === "bad") assert.ok(sent.some(m => m.type === "info" && m.text.includes("bench canary")));
+  }
+});
+
+test("an infra result or probe failure invalidates a verified bench", async () => {
+  for (const probeFails of [false, true]) {
+    const { rig, base } = setup();
+    const bench = new BenchState();
+    bench.sawPass();
+    rig.factory.failNextStart = !probeFails;
+    rig.sample();
+    const defaults = probeFails ? new GameruleDefaultsCache(async () => { throw new Error("probe missing"); }) : base.defaults;
+    const running = handleSubmit({ ...base, bench, defaults }, { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: { MINE_AI_SUBMIT_FEATURES: "classes" } });
+    if (!probeFails) {
+      await rig.until(() => rig.factory.requests.length === 1 && rig.scheduler.queuedCount === 1, "retry budget consumed");
+      rig.sample();
+      await rig.until(() => rig.running.length === 1, "batch");
+      await rig.killJavaOf(0);
+      rig.running[0]!.finish("fail");
+    }
+    await running.finished;
+    assert.equal(bench.isVerified(), false);
+  }
+});
+
+test("the submitter leaves during the canary: done is cancelled and no batch is queued", async () => {
+  const { rig, base, sent, calls, message } = canarySetup();
+  const running = handleSubmit(base, message);
+  await rig.until(() => calls.length === 1, "canary");
+  running.connectionClosed();
+  await running.finished;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(sent.at(-1), { type: "done", runs: 2, passed: 0, failed: 0, cancelled: 2 });
+});
+
+test("a probe lost during canary preparation blocks the batch; a healthy next submission can run", async () => {
+  const { rig, base, sent } = setup();
+  const bench = new BenchState();
+  const ensure = base.defaults.ensure.bind(base.defaults);
+  let reads = 0;
+  base.defaults.ensure = (...args) => ++reads === 2 ? Promise.reject(new ProbeFailed("1.21.4", new Error("probe transport failed"))) : ensure(...args);
+  const message: SubmitMessage = { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 2, lanes: null, lock: false,
+    env: { MINE_AI_SUBMIT_FEATURES: "classes,canary", MINE_AI_SUBMIT_CANARY: ONE_FILE } };
+  const failed = handleSubmit({ ...base, bench }, message);
+  await rig.until(() => sent.some(m => m.type === "done") || rig.scheduler.queuedCount > 0, "probe verdict");
+  assert.equal(rig.scheduler.queuedCount, 0);
+  await failed.finished;
+  assert.deepEqual(sent.at(-1), { type: "done", runs: 2, passed: 0, failed: 2, cancelled: 0, infra: 2 });
+  assert.equal(sent.filter(m => m.type === "error").length, 1);
+  const next = handleSubmit({ ...base, bench }, message);
+  await sampleUntilRunning(rig, 1);
+  rig.running[0]!.finish();
+  await rig.until(() => sent.some(m => m.type === "info" && m.text.startsWith("bench canary passed")), "healthy canary");
+  await rig.drain();
+  await next.finished;
+  assert.equal(bench.isVerified(), true);
+});
+
+test("featured and legacy submissions get compatible infra results and private variables stay out of clients", async () => {
+  for (const featured of [false, true]) {
+    const { rig, sent, base } = setup();
+    rig.factory.failNextStart = true;
+    rig.sample();
+    const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false,
+      env: { MINE_AI_SUBMIT_FEATURES: featured ? "classes" : "", MINE_AI_SUBMIT_CANARY: "/secret" } });
+    await rig.until(() => rig.factory.requests.length === 1 && rig.scheduler.queuedCount === 1, "failed lane start consumed retry budget");
+    rig.sample();
+    await rig.until(() => rig.running.length === 1, "trial start");
+    assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_FEATURES, undefined);
+    assert.equal(rig.running[0]!.input.scenario.client.env.MINE_AI_SUBMIT_CANARY, undefined);
+    await rig.killJavaOf(0);
+    rig.running[0]!.finish("fail");
+    await running.finished;
+    for (const message of sent) assert.doesNotThrow(() => decodeDaemonMessage(JSON.stringify(message)));
+    assert.equal(sent.filter(message => message.type === "result").length, 1);
+    assert.equal(sent.filter(message => message.type === "done").length, 1);
+    const result = sent.find(m => m.type === "result");
+    assert.equal(result?.type, "result");
+    if (result?.type !== "result") throw new Error("missing result");
+    if (featured) assert.equal(result.class, "infra");
+    else { assert.equal(result.class, undefined); assert.match(result.error ?? "", /^infra: /u); }
+    const done = sent.find(m => m.type === "done");
+    assert.equal(done?.type === "done" && done.infra, featured ? 1 : undefined);
+  }
+});
+
+test("tick rate is applied before placement and kept scenarios are named", async () => {
+  const { rig, sent, base } = setup();
+  const dir = mkdtempSync(join(tmpdir(), "submission-rate-"));
+  try {
+    const submit = rig.scheduler.submit.bind(rig.scheduler);
+    let placements: { rate: number | null; key: string }[] = [];
+    rig.scheduler.submit = spec => {
+      placements = spec.entries.map(entry => {
+        assert.equal(entry.placement.kind, "lane");
+        if (entry.placement.kind !== "lane") throw new Error("expected lane placement");
+        return { rate: entry.placement.settings.tickRate, key: entry.placement.key };
+      });
+      return submit(spec);
+    };
+    const text = readFileSync(ONE_FILE, "utf8").replace("../../templates/flat-single-action.yaml", fileURLToPath(new URL("../templates/flat-single-action.yaml", import.meta.url))).replace("cwd: ../..", `cwd: ${dirname(dirname(CONTRACT_DIR))}`);
+    const kept = join(dir, "kept.yaml");
+    writeFileSync(kept, text.replace("setup:\n", "setup:\n  - tick rate 2\n"));
+    rig.sample();
+    const running = handleSubmit(base, { type: "submit", paths: [ONE_FILE, kept], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: {}, tickRate: 10 });
+    await rig.until(() => sent.some(m => m.type === "info" && m.text.startsWith("tick rate 10: ")), "rate summary");
+    const info = sent.find(m => m.type === "info" && m.text.startsWith("tick rate 10: "));
+    assert.match(info?.type === "info" ? info.text : "", /kept.*sets its own tick rate/u);
+    assert.match(info?.type === "info" ? info.text : "", /1 scenarios at 10 ticks\/s, 1 kept their own/u);
+    assert.equal(sent.filter(m => m.type === "info" && m.text.startsWith("tick rate 10: ")).length, 1);
+    await sampleUntilRunning(rig, 2);
+    assert.deepEqual(placements.map(p => p.rate).sort((a, b) => (a ?? 0) - (b ?? 0)), [2, 10]);
+    assert.notEqual(placements[0]!.key, placements[1]!.key);
+    await rig.drain();
+    await running.finished;
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 function setup() {
   const rig = new SchedulerRig();
@@ -118,15 +320,18 @@ test("a scenario whose client entry cannot be resolved gets a server of its own 
   }
 });
 
-test("a gamerule probe server that fails to start ends the submission with an error and a done instead of rejecting (a rejection would kill the daemon)", async () => {
-  const { rig, sent } = setup();
-  const failing = new GameruleDefaultsCache(async () => { throw new Error("probe port busy"); });
-  const running = handleSubmit({ scheduler: rig.scheduler, defaults: failing, config: rig.config, send: message => sent.push(message) },
-    { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 1, lanes: null, lock: false, env: {} });
-  await running.finished;
-  assert.ok(sent.some(message => message.type === "error" && message.text.includes("probe port busy")));
-  const done = sent.at(-1);
-  assert.deepEqual(done?.type === "done" ? [done.runs, done.failed] : [], [1, 1]);
+test("a failed gamerule probe ends both legacy and featured submissions with their respective totals", async () => {
+  for (const featured of [false, true]) {
+    const { rig, sent } = setup();
+    const failing = new GameruleDefaultsCache(async () => { throw new Error("probe port busy"); });
+    const running = handleSubmit({ scheduler: rig.scheduler, defaults: failing, config: rig.config, send: message => sent.push(message) },
+      { type: "submit", paths: [ONE_FILE], out: "/tmp/out", repeat: 2, lanes: null, lock: false, env: featured ? { MINE_AI_SUBMIT_FEATURES: "classes" } : {} });
+    await running.finished;
+    const errors = sent.filter(message => message.type === "error");
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!.text, featured ? /bench: probe server for 1\.21\.4 did not start.*probe port busy/u : /submission failed: probe port busy/u);
+    assert.deepEqual(sent.at(-1), featured ? { type: "done", runs: 2, passed: 0, failed: 2, infra: 2, cancelled: 0 } : { type: "done", runs: 1, passed: 0, failed: 1, cancelled: 0 });
+  }
 });
 
 // The scenario mirror (plan 2026-10-30-scenario-clients-ext4 T4): the clients of a submission start from a snapshot of their source root, or from where they are.
@@ -162,7 +367,7 @@ class FakeMirror {
     if (answer.kind === "in-place") return { kind: "in-place", root, reason: answer.reason, fallback: answer.fallback, release: () => {} };
     const generation = ++this.generations;
     return {
-      kind: "snapshot", root, dir: join(this.snapshotsIn, `g${generation}`), generation, syncMs: 123, startedAt: SNAPSHOT_TIME, release: () => { this.released.push(generation); },
+      kind: "snapshot", root, dir: join(this.snapshotsIn, `g${generation}`), generation, syncMs: 123, startedAt: SNAPSHOT_TIME, sourceHead: "1234567890abcdef", release: () => { this.released.push(generation); },
     };
   }
 }
@@ -215,6 +420,7 @@ test("lane and own entries of one root carry the snapshot's cwd, one acquire ser
     assert.deepEqual(fake.acquired.map(call => call.cwd), [TESTS_DIR], "one acquire for the root both scenarios share");
     const snapshotCwd = join("/snapshots/g1", relative(WORKTREE, TESTS_DIR));
     assert.deepEqual(cwdsOfRunning(rig), [snapshotCwd, snapshotCwd], "the lane trial (shifted copy of the lifted scenario) and the own trial both run from the snapshot");
+    assert.deepEqual(rig.running.map(trial => trial.input.scenario.client.env.MINE_AI_SOURCE_HEAD), ["1234567890abcdef", "1234567890abcdef"]);
     assert.ok(infoTexts(sent).includes(`clients start from snapshot g1 of ${WORKTREE} (synced in 123 ms, started ${SNAPSHOT_TIME})`), infoTexts(sent).join(" | "));
     await rig.drain();
     await running.finished;

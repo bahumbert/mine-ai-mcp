@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { describeStep, describeStepError, skillUsage, stepSchema } from "./actions.ts";
-import { catalogueLine } from "./building/plan.ts";
 import { templateFor, type Template } from "./building/templates.ts";
 
 /** The templates of two families, as a fixture registry: two of the medieval persona's own, one of another family. */
@@ -32,11 +31,8 @@ test("list_houses takes a family, abandon_house nothing", () => {
   assert.equal(stepSchema.safeParse({ skill: "abandon_house", extra: 1 }).success, false);
 });
 
-test("the build line lists the own family's houses, names the other families and how to read them", () => {
-  const own = ["medieval-small", "rustic-small"].map((id) => catalogueLine(templateFor(id)!)).join("\n    ");
-  assert.equal(skillUsage("build", "europe", fixture), `{"skill":"build","template":"<id>"}  build a house where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes) and builds in stages (floor, walls, roof...): send it first, before fetching anything: it starts when you carry the first stage's blocks, and otherwise its result names exactly what the next stage lacks (fetch exactly the items it names, and at least the blocks to stand on it names); it stops between stages the same way, and the step its result gives goes on. Your europe houses:
-    ${own}
-Other house families you know: east-asia: {"skill":"list_houses","family":"<family>"} shows their houses. {"skill":"build","size":"<small|medium>"} is short for your own small or medium house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: foundation, floor, wall, pillar, trim, roof, window, door, accent, railing) to build some parts with other blocks you carry (a full block for every role but window, door, accent and railing; window, accent and railing may be "air"; a door must be a door block); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`);
+test("the build line lists the own family's house ids, says where their details are, names the other families and how to read them", () => {
+  assert.equal(skillUsage("build", "europe", fixture), `{"skill":"build","template":"<id>"}  build a house where you stand, door facing whoever asked; add "x","y","z" (the door, at walking level) to build it there: it walks there itself; it levels the site first (trees, slopes, holes) and builds in stages (floor, walls, roof...). Send it first, before fetching anything: it starts once you carry the first stage's blocks, else its result names exactly what the next stage lacks (fetch exactly those items, and at least the blocks to stand on); it stops between stages the same way; the step its result gives goes on. Your europe houses: medieval-small, rustic-small; {"skill":"list_houses","family":"<family>"} gives each one's size, materials, what its first stage takes and description. Other house families you know: east-asia: {"skill":"list_houses","family":"<family>"} shows their houses. {"skill":"build","size":"<small|medium>"} is short for your own small or medium house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: foundation, floor, wall, pillar, trim, roof, window, door, accent, railing) to build parts with other blocks you carry (a full block for every role but a door, which must be a door block, and window, accent and railing, which may be "air"); the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is yours (asked to build yourself one, or for your own goal), not the asker's`);
 });
 
 test("the build line of a family with no other family has no look-up sentence", () => {

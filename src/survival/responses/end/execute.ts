@@ -28,6 +28,7 @@ import {
 import { entityHealth, dragonPhase, isDragonLanding, isDragonPerched, observedDragonLandingCenter, perchAttackCell, perchedDragonHead, perchedDragonBodyParts } from "../../../world/end-fight.js";
 import { nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { REGENERATION_HUNGER } from "../../../world/food.js";
+import { hasItemFamily } from "../../../world/item-families.js";
 import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { selectPolicyFood } from "../../perception/food.js";
 import type { CombatExecution, CombatPhase } from "../../control/combat/execution.js";
@@ -40,7 +41,7 @@ import type { PerchObservation } from "../../perception/combat/perch.js";
 import { PerchPreparation } from "../../perception/combat/perch-preparation.js";
 import type { SurvivalPolicy } from "../../policy/contract.js";
 import { decideEndResponse } from "../../policy/combat/end-decision.js";
-import { permittedCombatItems, permitsHide } from "../../policy/combat/permissions.js";
+import { permitsHide } from "../../policy/combat/permissions.js";
 import { recoveryHealth } from "../../policy/combat/health.js";
 import { fullProtectionBlock } from "../../positioning/combat/build-protection.js";
 import { countCapBlocks, DRAGON_PROTECTION_BLOCKS } from "../../positioning/combat/hide-blocks.js";
@@ -53,14 +54,15 @@ import {
 } from "../../positioning/combat/crystal-melee.js";
 import { type SurvivalResources } from "../../state/resources.js";
 import { bowTrajectory, clearBowTrajectory } from "../../weapons/bow-trajectory.js";
-import { fitsDragonShot } from "../../weapons/dragon-shot.js";
 import {
   equipCombatLoadout,
+  permittedMeleeLoadout,
+  permittedRangedLoadout,
   readCombatItems,
-  selectMeleeLoadout,
-  selectRangedLoadout,
 } from "../../weapons/equipment.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
+import { drawUntilFull } from "../../weapons/draw-progress.js";
+import { attackAndRestart } from "../../weapons/swing-readiness.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -69,6 +71,7 @@ import {
   meleeDistance,
 } from "../../weapons/melee.js";
 import { FootingRecovery } from "../footing.js";
+import { aimDragonBow } from "./dragon-bow-aim.js";
 import { enclosedInPlace, hideInPlace, WALL_IN_BLOCKS } from "../hide.js";
 import type { Facts } from "../../state/answered.js";
 
@@ -148,7 +151,7 @@ export class EndCombat {
       };
       this.recordDecision({ response: "dragon_shelter", state: "started", cell: origin.toString(), health: bot.health });
       const hidden = await this.phase("recover", () => hideInPlace(bot, {
-        signal,
+        navigation: this.navigation, signal,
         threatContext: this.threatContext,
         recoverTo: this.policy().combat.recover === "never"
           ? this.policy().combat.engage_min_health
@@ -160,7 +163,7 @@ export class EndCombat {
         holdWhile: () => incomingDragonBodies(bot).length > 0,
       }));
       this.recordDecision({ response: "dragon_shelter", state: hidden.kind, cell: origin.toString(),
-        dug: hidden.dug, walled: hidden.walled, capped: hidden.capped, enclosed: hidden.enclosed,
+        dug: hidden.dug, walled: hidden.walled, capped: hidden.capped, enclosed: hidden.enclosed, margin: hidden.margin.placed,
         ate: hidden.ate, healthAfter: hidden.healthAfter, hungerAfter: hidden.hungerAfter,
         error: hidden.error ?? null });
       if (hidden.kind === "recovered" && !this.danger) return this.result("evaded");
@@ -283,39 +286,11 @@ export class EndCombat {
     };
     const unavailable = () => {
       if (!this.policy().combat.bow) return "[COMBAT_CONSTRAINED] Bow use is prohibited.";
-      if (!selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat)))
+      if (!permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat))
         return "[DRAGON_BOW_UNAVAILABLE] Carry a permitted bow and arrows before shooting.";
       return null;
     };
-    // The body pose does not require unsent head/neck flight history. Lead its
-    // centre from observed motion; the parent's 16-wide box is not a hitbox.
-    const aim = () => {
-      const dragon = observation.target!, velocity = observation.velocity, previousVelocity = observation.previousVelocity;
-      if (!velocity || !previousVelocity) { observation.blockedBy = "Waiting for fresh dragon motion."; return null; }
-      const target = dragon.position.offset(Math.sin(dragon.yaw) * 0.5, 1.5, Math.cos(dragon.yaw) * 0.5);
-      if (bot.entity.position.distanceTo(target) > 64) {
-        observation.blockedBy = "Dragon is beyond the 64-block firing range; move closer or wait for its next pass.";
-        return null;
-      }
-      const trajectory = bowTrajectory(this.eyePosition().offset(0, -0.1, 0), target, velocity);
-      if (!trajectory || !clearBowTrajectory(trajectory, (p, d, n) => bot.world.raycast(p, d, n))) {
-        observation.blockedBy = "No clear intercept from this footing; wait for a pass or move to an exposed position.";
-        return null;
-      }
-      if (!fitsDragonShot(trajectory.points.at(-1)!, target, velocity, previousVelocity,
-          trajectory.flightTicks, observation.hitboxMargin)) {
-        observation.blockedBy = "Dragon motion leaves the inset body estimates; holding the arrow for a steadier or closer pass.";
-        return null;
-      }
-      const yaw = Math.atan2(-trajectory.velocity.x, -trajectory.velocity.z);
-      const pitch = Math.atan2(trajectory.velocity.y, Math.hypot(trajectory.velocity.x, trajectory.velocity.z));
-      if (endermanGazeRisk(bot, bot.entity.position, yaw, pitch)) {
-        observation.blockedBy = "An Enderman obstructs the safe aim direction.";
-        return null;
-      }
-      observation.blockedBy = null;
-      return { trajectory, yaw, pitch };
-    };
+    const aim = () => aimDragonBow(bot, observation, this.eyePosition().offset(0, -0.1, 0));
     const use = new CombatItemUse(bot, async ticks => { for (let i = 0; i < ticks; i++) await this.tick(signal); });
     try {
       for (;;) {
@@ -351,25 +326,26 @@ export class EndCombat {
         if (observation.attacks > 0) { await this.phase("observe_shot", () => this.tick(signal)); continue; }
         await this.settle(signal);
         if (!aim()) { observation.aimingTicks++; await this.tick(signal); continue; }
-        await equipCombatLoadout(bot, selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat))!);
+        await equipCombatLoadout(bot, permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat)!);
         await this.phase("shoot", async () => {
           using draw = use.drawBow();
           // Re-aim throughout the charge; a flying dragon moves tens of blocks
           // during a full draw. Revalidate again at release, after the last tick.
-          for (let tick = 0; tick <= 21; tick++) {
+          const drawn = await drawUntilFull(bot, draw, async () => {
             if (!observation.loaded || observation.died || this.danger || this.footing.needed ||
-                isDragonPerched(observation.nativePhase) || observation.nativePhase === 9 || unavailable()) return;
+                isDragonPerched(observation.nativePhase) || observation.nativePhase === 9 || unavailable()) return "interrupted";
             const shot = aim();
-            if (!shot) return;
+            if (!shot) return "interrupted";
             await bot.look(shot.yaw, shot.pitch, true);
             signal.throwIfAborted();
             if (!observation.loaded || observation.died || this.danger || this.footing.needed ||
                 isDragonPerched(observation.nativePhase) || observation.nativePhase === null ||
-                observation.nativePhase === 9 || unavailable()) return;
-            if (tick === 21) { observation.released(shot.trajectory.flightTicks); draw.release(); return; }
+                observation.nativePhase === 9 || unavailable()) return "interrupted";
             observation.aimingTicks++;
-            await this.tick(signal);
-          }
+            return "continue";
+          }, signal, () => this.tick(signal));
+          const shot = drawn === "full" ? aim() : null;
+          if (shot) { observation.released(shot.trajectory.flightTicks); draw.release(); }
         });
       }
     } finally {
@@ -539,9 +515,7 @@ export class EndCombat {
     const target = bot.entities[targetId];
     if (!target?.isValid || target.name !== "end_crystal")
       return this.crystalResult(observation, "stopped", "Selected end crystal is not loaded");
-    const rangedAvailable = () =>
-      selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat)) !== null &&
-      bot.inventory.items().some((i) => i.name === "arrow");
+    const rangedAvailable = () => permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat) !== null;
     if (observation.usedWeapon === null) {
       if (observation.weapon === "bow") {
         if (!this.policy().combat.bow)
@@ -671,8 +645,8 @@ export class EndCombat {
             unusableStances.add(`${feet.x},${feet.y},${feet.z}`);
           }
         }
-        const loadout = selectRangedLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat));
-        if (!loadout || !bot.inventory.items().some((i) => i.name === "arrow")) continue;
+        const loadout = permittedRangedLoadout(bot, readCombatItems(bot), this.policy().combat);
+        if (!loadout) continue;
         await equipCombatLoadout(bot, loadout);
         if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
         const trajectory = bowTrajectory(bot.entity.position.offset(0, 1.52, 0), aim);
@@ -681,21 +655,20 @@ export class EndCombat {
         let interrupted = false;
         const drawn = await this.phase("shoot", async () => {
           using draw = use.drawBow();
-          // The use packet can arrive after this client's current physics tick.
-          // One extra tick ensures the server has the full twenty-tick draw.
-          for (let ticks = 0; ticks < 21; ticks++) {
-            if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
+          const progress = await drawUntilFull(bot, draw, async () => {
+            if (!target.isValid || observation.destroyed) return "destroyed";
             if (this.danger || !canShoot(bot.entity.position)) {
-              interrupted = true;
-              break;
+              return "interrupted";
             }
             await bot.look(
               Math.atan2(-trajectory.velocity.x, -trajectory.velocity.z),
               Math.atan2(trajectory.velocity.y, Math.hypot(trajectory.velocity.x, trajectory.velocity.z)),
               true,
             );
-            await this.tick(signal);
-          }
+            return "continue";
+          }, signal, () => this.tick(signal));
+          if (progress === "destroyed") return this.observeCrystalShot(observation, signal);
+          interrupted = progress === "interrupted";
           if (!target.isValid || observation.destroyed) return this.observeCrystalShot(observation, signal);
           if (!interrupted && (this.danger || !canShoot(bot.entity.position))) interrupted = true;
           if (!interrupted) {
@@ -893,7 +866,7 @@ export class EndCombat {
       );
       observation.released(0);
       observation.beginBlastObservation();
-      bot.attack(crystal);
+      attackAndRestart(bot, crystal);
     }
     const receipt = await this.observeCrystalShot(observation, signal);
     if (receipt.outcome !== "crystal_destroyed") return receipt;
@@ -928,7 +901,7 @@ export class EndCombat {
       watch();
       if (stop.signal.aborted) return { kind: "changed" };
       const failure = await this.phase("approach", () => buildCrystalStaircase(this.bot, this.navigation,
-        this.policy(), observation.staircase!, AbortSignal.any([signal, stop.signal])));
+        this.policy(), observation.staircase!, AbortSignal.any([signal, stop.signal]), () => enclosedInPlace(this.bot)));
       return failure ? { kind: "failed", reason: failure } : { kind: "arrived" };
     } catch (error) {
       signal.throwIfAborted();
@@ -1281,10 +1254,9 @@ export class EndCombat {
         if (!head) {
           selectedPart = null;
           observation.stage = "waiting";
-          const loadout = selectMeleeLoadout(permittedCombatItems(readCombatItems(bot), this.policy().combat));
-          const heldBefore = bot.heldItem?.name;
+          const loadout = permittedMeleeLoadout(bot, readCombatItems(bot), this.policy().combat);
           await equipCombatLoadout(bot, loadout);
-          if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);
+          observation.requireCooldown(loadout.cooldownTicks);
           // The native final glide can overshoot and reverse its facing. Keep
           // the open low notch until the head is observed; chasing that yaw
           // sent the bot back onto the surface in front of the landing body.
@@ -1434,15 +1406,14 @@ export class EndCombat {
           }
           continue;
         }
-        const loadout = selectMeleeLoadout(permittedCombatItems(combatItemsForTarget(bot, target), this.policy().combat));
-        const heldBefore = bot.heldItem?.name;
+        const loadout = permittedMeleeLoadout(bot, combatItemsForTarget(bot, target), this.policy().combat);
         await equipCombatLoadout(bot, loadout);
-        if (heldBefore !== bot.heldItem?.name) observation.resetReadiness(loadout.cooldownTicks);
+        observation.requireCooldown(loadout.cooldownTicks);
         await bot.lookAt(aim, true);
         signal.throwIfAborted();
         observation.refresh();
         if (observation.ended || observation.died || this.danger || headMoved()) continue;
-        if (bot.heldItem?.name.endsWith("_sword") && hasSweepBystander(bot, target)) {
+        if (bot.heldItem && hasItemFamily(bot, bot.heldItem.name, "sword") && hasSweepBystander(bot, target)) {
           report("sweep_bystander");
           await this.tick(signal);
           continue;
@@ -1453,7 +1424,7 @@ export class EndCombat {
           if (!this.policy().combat.melee) return finish("stopped", "[COMBAT_CONSTRAINED] Melee is prohibited.");
           report("swinging");
           await this.phase("swing", async () => {
-            bot.attack(target);
+            attackAndRestart(bot, target);
             observation.swung(loadout.cooldownTicks);
           });
         } else report("weapon_cooldown");

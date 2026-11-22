@@ -1,7 +1,7 @@
 import { sleepCheckpointSchema } from "../checkpoint-schemas.js";
 import type { Bot } from "mineflayer";
 import { createMovements, nearGoal, type NavigationRuntime } from "../../navigation/index.js";
-import { waitForSignal } from "../../utils/index.js";
+import { raceSignal, waitForSignal } from "../../utils/index.js";
 import {
   awaitOwnPlacement,
   findLoadedBlockPositions,
@@ -226,7 +226,7 @@ async function setRespawnAtBed(
   signal?: AbortSignal,
 ): Promise<SleepResult> {
   try {
-    await bot.activateBlock(bed.block);
+    await raceSignal(bot.activateBlock(bed.block), signal);
   } catch (cause) {
     signal?.throwIfAborted();
     const error = sleepOutcomes.respawnRejected(message(cause));
@@ -268,7 +268,7 @@ async function sleepInBed(
   if (observedHostiles) return observedHostiles;
 
   try {
-    await bot.sleep(bed.block);
+    await raceSignal(bot.sleep(bed.block), signal);
     // Mineflayer resolves only after the native entitySleep event. Daytime
     // activateBlock has no equivalent acknowledgement and is not recorded.
     recordPersonalRespawn(bot, bedPosition(bed));

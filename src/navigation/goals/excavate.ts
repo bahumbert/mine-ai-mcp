@@ -4,6 +4,7 @@ import { DIG_REACH, prepareExcavation } from "../movements/excavation.js";
 import { stationaryExcavation } from "../movements/stationary-excavation.js";
 import { blockLabel, type BlockPosition } from "../world/world.js";
 import { waterMiningStance } from "../world/water.js";
+import { bodyDependsOnBlock } from "../world/body-support.js";
 
 /** Reaching a block is not completion: search must also pay for its excavation. */
 export function excavateGoal(target: BlockPosition): Goal {
@@ -17,8 +18,9 @@ export function excavateGoal(target: BlockPosition): Goal {
         revision: `excavate:${blockLabel(target)}`,
         heuristic: spatial.heuristic,
         isSatisfied: () => false,
-        finish(state, context, digContext) {
+        finish(state, context, digContext, actualStart) {
           const feet = state.node.feet;
+          const stand = actualStart?.position ?? { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 };
           // A stationary completion keeps its support. Underfoot excavation is
           // already a priced downward movement in the catalogue.
           if (target.x === feet.x && target.z === feet.z && target.y < feet.y) return null;
@@ -29,6 +31,9 @@ export function excavateGoal(target: BlockPosition): Goal {
           )
             return null;
           const world = state.overlay.view(context.world);
+          const supportWorld = actualStart ? context.world : world;
+          if (bodyDependsOnBlock(stand, actualStart ? actualStart.stance === "swimming" : !digContext.onGround,
+            target, (x, y, z) => supportWorld.blockAt(x, y, z))) return null;
           const body = world.blockAt(feet.x, feet.y, feet.z);
           // A dry target can still be slow or impossible to dig from a current.
           // Choose a stable stance; the mining process owns flow isolation.
@@ -38,11 +43,11 @@ export function excavateGoal(target: BlockPosition): Goal {
             world,
             policy: context.policy,
             position: target,
-            standing: { x: feet.x + 0.5, y: feet.y, z: feet.z + 0.5 },
+            standing: stand,
             digContext,
           });
           if (excavation.kind === "unavailable") return null;
-          return stationaryExcavation(state, excavation);
+          return stationaryExcavation(state, excavation, stand);
         },
       };
     },

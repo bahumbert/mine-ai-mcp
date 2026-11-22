@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { STYLES } from "./building/styles.ts";
 import { loadPersona, personaSchema, personaSkills } from "./persona.ts";
 
 /** The characters are not shipped with the code (`personas/`): checked only where they are present. */
 const PERSONAS = new URL("../../personas/", import.meta.url);
+const PERSONAS_DIR = fileURLToPath(PERSONAS);
 const noPersonas = { skip: existsSync(PERSONAS) ? false : "no personas/ in this checkout" };
+
+test("sign line length defaults to 15", () => {
+  const base = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+  assert.equal(personaSchema.parse(base).settings.signLineChars, 15);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { signLineChars: 4 } }).success, false);
+  assert.equal(personaSchema.safeParse({ ...base, settings: { signLineChars: 46 } }).success, false);
+});
 
 test("the personas are valid and build in a shipped style", noPersonas, async () => {
   for (const name of ["ayla", "vex", "real-world/ayla", "real-world/vex"]) {
@@ -154,4 +165,62 @@ test("chat limits default and refuse out-of-range values", () => {
   assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { burstMaxLines: 0 } } }).success, false);
   assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { burstMaxChars: 10 } } }).success, false);
   assert.equal(personaSchema.safeParse({ ...base, settings: { chat: { openOrdersPerRequester: 0 } } }).success, false);
+});
+
+const BOLDNESS_VALUES = ["cautious", "steady", "bold"];
+const fixtureBase = { id: "x", username: "Xena", displayName: "X", stance: "companion", description: "d", voice: "v" };
+
+const TMPFS_DIRECTORY = "/dev/shm";
+
+/** A temporary folder for fixture personas on tmpfs when the machine has one, removed when the test ends (the private catalog is never written). */
+async function withFixtureFolder(run: (folder: string) => Promise<void>): Promise<void> {
+  const parent = existsSync(TMPFS_DIRECTORY) ? TMPFS_DIRECTORY : tmpdir();
+  const folder = await mkdtemp(join(parent, "persona-test-"));
+  try {
+    await run(folder);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+test("boldness defaults to steady", () => {
+  assert.equal(personaSchema.parse(fixtureBase).boldness, "steady");
+});
+
+test("boldness takes cautious, steady or bold", () => {
+  for (const boldness of BOLDNESS_VALUES) {
+    assert.equal(personaSchema.parse({ ...fixtureBase, boldness }).boldness, boldness);
+  }
+});
+
+test("the loader takes cautious and bold, and refuses another boldness", () => withFixtureFolder(async (folder) => {
+  assert.equal(personaSchema.safeParse({ ...fixtureBase, boldness: "steady" }).success, true, "a listed value is accepted");
+  for (const boldness of ["cautious", "bold"]) {
+    const path = join(folder, `${boldness}.json`);
+    await writeFile(path, JSON.stringify({ ...fixtureBase, boldness }));
+    assert.equal((await loadPersona(path)).boldness, boldness);
+  }
+  const path = join(folder, "brave.json");
+  await writeFile(path, JSON.stringify({ ...fixtureBase, boldness: "brave" }));
+  await assert.rejects(loadPersona(path), /\[PERSONA_INVALID\]/u);
+}));
+
+test("an old shelterAtNight setting parses but does nothing", () => {
+  assert.equal(personaSchema.parse({ ...fixtureBase, settings: { shelterAtNight: false } }).settings.shelterAtNight, false);
+  assert.equal(personaSchema.parse(fixtureBase).settings.shelterAtNight, undefined);
+});
+
+/** Every persona file of the private catalog: `personas/*.json` and `personas/real-world/*.json`, where present. */
+function catalogFiles(): string[] {
+  const folders = [PERSONAS_DIR, join(PERSONAS_DIR, "real-world")].filter((folder) => existsSync(folder));
+  return folders.flatMap((folder) => readdirSync(folder).filter((name) => name.endsWith(".json")).map((name) => join(folder, name)));
+}
+
+test("every persona file in the private catalog states its boldness itself, one of the three values", noPersonas, async () => {
+  const files = catalogFiles();
+  assert.ok(files.length > 0, "the catalog has files");
+  for (const file of files) {
+    assert.ok(Object.hasOwn(JSON.parse(readFileSync(file, "utf8")), "boldness"), file);
+    assert.ok(BOLDNESS_VALUES.includes((await loadPersona(file)).boldness), file);
+  }
 });

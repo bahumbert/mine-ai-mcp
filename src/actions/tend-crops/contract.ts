@@ -5,12 +5,12 @@ import { registryNameSchema } from "../registry-name.js";
 
 export const TEND_CROPS = "tend_crops" as const;
 export const TEND_CROPS_DESCRIPTION =
-  "Farm a rectangle of soil the way a player does, cell by cell, walking into reach: harvest ripe crops (ripe by the game's loot tables) and pick up what they drop, break the ground cover standing on the soil (grass, ferns, flowers, snow layers; a torch, a sapling or any other block is left and reported `occupied by <name>`), till soil with the best carried hoe, and plant empty farmland with `plant`, or, without it, a cell harvested in this call with that crop's own seed when carried. Unripe crops are left growing. Water, leveling and fences are the caller's: a cell that is not soil is reported, not changed. Its own routes never dig farmland or crops. Reports what each cell became, the cells skipped and why, and the plot afterwards: crops by age, empty and dry farmland, water. A run where no cell changes for 180 s stops and says so.";
+  "Farm a rectangle of soil the way a player does, cell by cell, walking into reach: harvest ripe crops (ripe by the game's loot tables) and pick up what they drop, break the ground cover standing on the soil (grass, ferns, flowers, snow layers; a torch, a sapling or any other block is left and reported `occupied by <name>`), till soil with the best carried hoe, and plant empty farmland with `plant`, or, without it, a cell harvested in this call with that crop's own seed when carried. Unripe crops are left growing. Water, leveling and fences are the caller's: a cell that is not soil is reported, not changed. Its own routes never dig farmland or crops. Reports what each cell became, the cells skipped and why, and the plot afterwards: crops by age, empty and dry farmland, water. A run where no cell changes for 3 600 world ticks (180 s at 20 tps) stops and says so.";
 
 /** At most 16 x 16 cells per call, like `build_structure`'s 256. */
 export const MAX_TEND_SIDE = 16;
 /** How long a run may go without changing any cell before it settles with what it did. */
-export const TEND_STALL_MS = 180_000;
+export const TEND_STALL_TICKS = 3_600;
 
 const coordinate = (axis: string) => z.number().int().safe().describe(`Absolute ${axis} coordinate of a plot corner.`);
 
@@ -67,9 +67,16 @@ export const tendEvidenceSchema = z.strictObject({
   skipped: z.record(z.string(), z.array(cellSchema)),
   /** Drops left on the ground it could not pick up (a full inventory, no route), by item name. */
   dropsLeft: z.array(z.string()),
+  /** The plot as the call found it, read once at the start and kept across a reflex's resumed attempts: what was standing, so a harvest tend can be told from a plant-only one. */
+  before: z.strictObject({
+    /** Crops standing then, keyed as `after.crops`. */
+    crops: z.record(z.string(), z.number().int().nonnegative()),
+  }),
   after: z.strictObject({
     /** Crops standing on the plot, by `<block> age <n>` (`ripe` appended when ripe). */
     crops: z.record(z.string(), z.number().int().nonnegative()),
+    /** The age each standing crop block is ripe at, by block name (the loot table's age, else the last age); `{}` with no crop. */
+    ripeAge: z.record(z.string(), z.number().int().nonnegative()),
     emptyFarmland: z.number().int().nonnegative(),
     /** Farmland not hydrated (moisture below 7): crops on it grow slowly and bare farmland turns back to dirt. */
     dryFarmland: z.number().int().nonnegative(),
@@ -92,8 +99,8 @@ export const tendCropsAnnotations = {
 export const tendCropsOutcomes = {
   tooLarge: (width: number, depth: number) =>
     `[TEND_TOO_LARGE] The plot is ${width} x ${depth}; at most ${MAX_TEND_SIDE} x ${MAX_TEND_SIDE} cells per call.`,
-  stalled: (seconds: number, walked: number) =>
-    `[TEND_STALLED] No cell changed for ${seconds} s (walked ${walked} blocks meanwhile).`,
+  stalled: (seconds: number, ticks: number | null, walked: number) =>
+    `[TEND_STALLED] No cell changed for ${seconds} s and ${ticks ?? "unknown"} world ticks (walked ${walked} blocks meanwhile).`,
   incomplete: (skipped: number) =>
     `[TEND_INCOMPLETE] ${skipped} cell${skipped === 1 ? "" : "s"} could not be farmed; see skipped.`,
 } as const;

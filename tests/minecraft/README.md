@@ -118,11 +118,17 @@ assertion:
 | [movement-course](scenarios/pathfinder/movement-course.yaml) | The original constrained stair descent, ramps, soul sand, vines, ladders and unsupported diagonal treads. |
 | [gauntlet-lava-parkour](scenarios/pathfinder/gauntlet-lava-parkour.yaml) | Maximum gap crossings plus the obstacle course's steps, drops, magma detour and door. Repeat it for movement reliability. |
 | [cave-excavation-course](scenarios/pathfinder/cave-excavation-course.yaml) | Carpet maze, dripstone stairs and the unavoidable sand curtain. |
+| [staircase-descent-way-back](scenarios/pathfinder/staircase-descent-way-back.yaml) | Staircase descent, then a return by old stairs, new stairs or a pillar. |
+| [dug-hole-return-dig-off](scenarios/pathfinder/dug-hole-return-dig-off.yaml) | A replanned descent's undercut hole names digging off, then the next action digs out. |
 
 `navigate-route.ts` checks each named arrival with `view_status`, after ten
-physics ticks let the final landing settle. It requires full health at every
-checkpoint. Digging defaults to false; only the cave excavation course enables
-it. Scaffolding is always disabled. Mine Labs also checks the final position,
+server ticks let the final landing settle; a stopped server clock fails the leg.
+It requires full health at every checkpoint. Digging defaults to false and can be
+enabled for the route or overridden per leg. Each leg's `scaffold` defaults to
+false; the staircase return enables it. A leg with `expectFailure` requires a
+failed navigation whose summary contains that text and whose result has no
+`navigation.escapeRelaxed`, then starts the next leg without an arrival check.
+Mine Labs also checks the final position,
 health, deaths and protected or cleared blocks independently.
 
 The workshop runs at 16 TPS and checks inventory between stages, before later
@@ -181,6 +187,13 @@ Starting grounded is the default. Add an exception only when a real fixture
 needs to start off the ground; there is no configuration option for it now.
 The action starts only after Mine Labs sends `start`.
 
+`templates/hostile-night.yaml` is the night bed for hostile-mob and death scenarios (spec P4-01 D6): midnight, normal
+difficulty, mob spawning off (a scenario summons the mob it needs), one op `Actor` whose driver sends commands as chat.
+Its tag `exclusive` gives each scenario a server of its own, and a scenario lists the tag itself (a merge replaces the
+whole field). `drivers/deaths.ts` (`observeDeaths(bot)`) reads deaths, their cause and respawns on the monotonic clock,
+a respawn being the first `spawn` after a `death` (never Mineflayer's `respawn`, which a dimension change also fires);
+`scenarios/combat/zombie-at-night.yaml` and `death-is-read.yaml` use it.
+
 ## Contract checks: the fake bot against the real server
 
 `contract/` holds the answers of Mineflayer and a 1.21.4 server that the shared fake bot
@@ -212,6 +225,23 @@ bunx --bun mine-labs run tests/minecraft/contract/scenarios --repeat 3 -p <port>
 ```
 
 ## Shared server: many scenarios at once
+
+Results include `INFRA` for an infrastructure failure and a cause line. The session line counts infrastructure
+failures within the failed total: `session: N/M passed, F failed, I infra, C cancelled`. A successful retry is marked
+`after an infra retry`. The shared submitter exits 0 for success, 1 for product failures or cancellation, 3 when all
+failures are infrastructure, 2 for a submitter error, and 130 on interruption. Older daemons omit the infra count.
+
+Before a batch of at least two trials, an unverified daemon runs the submitter's scenario tagged `canary`
+(`collect/sand-single.yaml`). `bench canary passed in <s> s` starts the batch and verifies the bench; a one-trial
+submission's pass also verifies it. Any infra result or probe failure clears verification. Concurrent submissions
+using the same canary path share its run and receive its waiting lines. Leaving cancels only that submitter's wait;
+the canary stops when its last waiter leaves. Its results are separate from the batch's counts.
+
+A canary with an infra cause the scenario cannot make stops the batch with one `bench canary … infra: …; N trials
+not run` error and exit 3. A product failure, a wall bound without a bench event, or infra the scenario could make
+prints `bench canary unproven (…)` and allows the batch to run. A missing or unreadable canary prints an information
+line and also allows the batch. Discovery chooses the first valid tagged YAML by path and reports duplicates.
+Single-trial submissions, `--lock`, older submitters and `--isolated` skip the canary.
 
 `bun run scenarios:once` (and `bun tests/minecraft/shared/submit.ts <yaml|dir>...`) send the scenarios to one
 long-lived daemon instead of starting a Mine Labs server per run. The daemon keeps one or more servers per **settings
@@ -275,7 +305,8 @@ name (body 1, 2...: `<name>L0<body>`), like the trials of a lane, so no air or h
 - **Commands** (all through `submit.ts`; scripts `scenario-run.sh` and `scenario-repeat.sh` call it):
   `--repeat N`, `--lanes N` (at most N of this submission's trials at once; 1 = one at a time), `--lock` (servers of
   the batch's own on a calm machine: timing batches; no file lock), `--hold` (master only: runs alone once the queue
-  ahead is empty), `--out DIR`
+  ahead is empty), `--tick-rate N` (1–20 ticks/s, including decimals; keeps explicit rates and exclusive scenarios,
+  requires the daemon), `--out DIR`
   (evidence, default `.mine-labs`), `--isolated` (today's `mine-labs run`, one server per worker), `--stop` (daemon
   stops once its trials end; `bun run scenarios:stop`). The clients run from the YAML's own checkout, so a worker tests
   its own code; the submitter's `MINE_AI_*` variables reach the clients through `client.env`.
@@ -333,15 +364,10 @@ Mine Labs still retains its normal results, scenario snapshots and client/server
 Existing artifacts from earlier runs are not removed by this setting.
 
 To retain the SQLite database and incident files for an investigation, set the
-host's `MINE_AI_SCENARIO_EVIDENCE=1` environment variable before launching Mine Labs:
+host's `MINE_AI_SCENARIO_EVIDENCE=1` environment variable before launching Mine Labs (in WSL):
 
-```powershell
-$env:MINE_AI_SCENARIO_EVIDENCE = "1"
-try {
-  bunx --bun mine-labs run tests/minecraft/scenarios/collect/sand-single.yaml --repeat 1
-} finally {
-  Remove-Item Env:MINE_AI_SCENARIO_EVIDENCE
-}
+```bash
+MINE_AI_SCENARIO_EVIDENCE=1 bunx --bun mine-labs run tests/minecraft/scenarios/collect/sand-single.yaml --repeat 1
 ```
 
 Only the exact value `1` enables retention. Evidence goes under that trial's

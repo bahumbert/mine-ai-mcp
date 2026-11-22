@@ -11,6 +11,28 @@ import type { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
 
+/** Count fight time even without a cover plan, then observe the guard and body before movement. */
+function observeFightBody(
+  scene: FightScene, weapons: FightWeapons, locomotion: FightMovement, cover: CoverFight, effectsActive: boolean,
+): void {
+  scene.tactics.observe(scene, weapons);
+  scene.observeBoundary();
+  if (dragonDanger(scene.bot)) scene.dragonDefense.abort("Dragon hazard requires immediate evasion.");
+  scene.countTick();
+  scene.execution.tick();
+  if (canMeleeTarget(scene.bot, scene.target))
+    scene.execution.progress.milestone("attack_position", String(scene.target.id));
+  const change = scene.execution.progress.observe(scene.bot.health);
+  if (change) scene.reportProgress(change);
+  if (scene.position.plan) scene.protectedProgress.tick(cover.recovering);
+  scene.endermanProgress.tick(cover.recovering, scene.bot.time?.age);
+  scene.quarryProgress.tick(cover.recovering || scene.execution.snapshot(scene.attacks).phase === "guard");
+  weapons.observeVolley();
+  locomotion.observeFooting();
+  scene.observeQuarryStop(cover.recovering);
+  if (effectsActive) weapons.aimGuardBeforeMovement();
+}
+
 /** Packet and movement evidence stays active until this fight finishes releasing the body. */
 export function observeFight(
   scene: FightScene,
@@ -39,21 +61,7 @@ export function observeFight(
   const onExplosion = () => {
     scene.explosions += 1;
   };
-  const observeBody = () => {
-    scene.tactics.observe(scene, weapons);
-    scene.observeBoundary();
-    if (dragonDanger(scene.bot)) scene.dragonDefense.abort("Dragon hazard requires immediate evasion.");
-    scene.elapsedTicks++;
-    scene.execution.tick();
-    if (canMeleeTarget(scene.bot, scene.target))
-      scene.execution.progress.milestone("attack_position", String(scene.target.id));
-    const change = scene.execution.progress.observe(scene.bot.health);
-    if (change) scene.reportProgress(change);
-    if (scene.position.plan) scene.protectedProgress.tick(cover.recovering);
-    weapons.observeVolley();
-    locomotion.observeFooting();
-    if (effectsActive) weapons.aimGuardBeforeMovement();
-  };
+  const observeBody = () => observeFightBody(scene, weapons, locomotion, cover, effectsActive);
   const onTargetDamage = (packet: unknown) => {
     const parsed = targetDamageSchema.safeParse(packet);
     if (!parsed.success || parsed.data.sourceCauseId !== scene.bot.entity.id + 1) return;
@@ -63,6 +71,8 @@ export function observeFight(
     scene.execution.progress.confirmedHit(hit === scene.targetId);
     if (hit === scene.targetId) {
       scene.protectedProgress.confirmedTargetDamage();
+      scene.endermanProgress.confirmedTargetDamage(scene.targetId);
+      scene.quarryProgress.confirmedTargetDamage();
       roof.confirmedHit();
     }
   };

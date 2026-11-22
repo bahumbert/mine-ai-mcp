@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { hasItemFamily } from "../../../world/item-families.js";
 import { MELEE_RANGE } from "../../weapons/equipment.js";
 import { meleeDistance, waitingForDescendingCube } from "../../weapons/melee.js";
 
@@ -26,10 +27,13 @@ const SPECIAL_ATTACKS = new Set([
 ]);
 
 /** Ordinary melee mobs must come into reach to interrupt a journey; an explicit hunt still pursues them. */
-export function defendsOnContact(entity: Entity): boolean {
-  return (
-    !SPECIAL_ATTACKS.has(entity.name ?? "") && entity.heldItem?.name !== "bow" && entity.heldItem?.name !== "crossbow"
-  );
+export function defendsOnContact(bot: Bot, entity: Entity): boolean {
+  return !SPECIAL_ATTACKS.has(entity.name ?? "") && !holdsRangedWeapon(bot, entity);
+}
+
+/** Whether the held item belongs to the data-defined ranged weapon family. */
+export function holdsRangedWeapon(bot: Bot, entity: Entity): boolean {
+  return !!entity.heldItem && hasItemFamily(bot, entity.heldItem.name, "ranged_weapon");
 }
 
 export function inDefensiveContact(bot: Bot, entity: Entity): boolean {

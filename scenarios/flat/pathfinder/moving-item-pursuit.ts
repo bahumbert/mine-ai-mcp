@@ -1,4 +1,5 @@
 /** Prove that a live item is pursued while it is still moving. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { ClientCompletion } from "mine-labs/client";
 import { createMovements } from "../../../src/navigation/index.ts";
 import { pickupObservedItem } from "../../../src/world/item-pickup.ts";
@@ -12,9 +13,9 @@ const PICKUP_TIMEOUT_MS = 30_000;
 export async function run(context: MineAiScenarioContext): Promise<ClientCompletion> {
   const { bot } = context;
   await bot.waitForChunksToLoad();
-  const deadline = Date.now() + 10_000;
+  const deadline = monotonicNow() + 10_000;
   let item = Object.values(bot.entities).find((entity) => entity.name === "item");
-  while (!item && Date.now() < deadline) {
+  while (!item && monotonicNow() < deadline) {
     await bot.waitForTicks(1);
     item = Object.values(bot.entities).find((entity) => entity.name === "item");
   }

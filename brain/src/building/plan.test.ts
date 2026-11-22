@@ -1,12 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { billOfMaterials, describeMaterials, placeBlueprint } from "./blueprint.ts";
+import { billOfMaterials, blueprintSchema, describeMaterials, placeBlueprint, placeSign, type Facing } from "./blueprint.ts";
+import { houseBox } from "./house-site.ts";
 import { catalogueLine, chooseSite, planTemplate } from "./plan.ts";
 import minecraftData from "minecraft-data";
 import { TEMPLATES, templateFor } from "./templates.ts";
 
 const site = chooseSite({ x: 0, y: 64, z: 0 }, null);
 const medieval = templateFor("medieval-small")!;
+
+test("sign spot rotates with the door and stays outside the build", () => {
+  const expected = {
+    north: { x: 1, y: -60, z: -1 }, east: { x: 1, y: -60, z: 1 },
+    south: { x: -1, y: -60, z: 1 }, west: { x: -1, y: -60, z: -1 },
+  } as const;
+  for (const facing of Object.keys(expected) as Facing[]) {
+    const plan = planTemplate(medieval, { door: { x: 0, y: -60, z: 0 }, facing });
+    const spot = plan.sign!;
+    assert.deepEqual(spot.position, expected[facing]);
+    assert.equal(spot.facing, facing);
+    assert.deepEqual(spot.support, { ...spot.position, y: spot.position.y - 1 });
+    assert.ok(plan.cells.some((cell) => cell.role === "wall" && cell.x === spot.wall.x && cell.y === spot.wall.y && cell.z === spot.wall.z));
+    const box = houseBox(plan.batches.flat());
+    for (const axis of ["x", "y", "z"] as const) assert.ok(spot.position[axis] >= box.min[axis] && spot.position[axis] <= box.max[axis]);
+    assert.ok(plan.batches.flat().every((cell) => cell.x !== spot.position.x || cell.y !== spot.position.y || cell.z !== spot.position.z));
+    assert.deepEqual(plan.bill, billOfMaterials(plan.cells));
+  }
+});
+
+test("every plan carries the sign spot of its template's sign cell", () => {
+  for (const template of TEMPLATES.values()) assert.notEqual(planTemplate(template, site).sign, null, template.id);
+});
+
+test("blueprint sign validates bounds, occupancy and both doorway walk cells", () => {
+  const blueprint = medieval.blueprint;
+  const door = blueprint.cells.find((cell) => cell.role === "door")!;
+  const sign = blueprint.sign!;
+  assert.equal(placeSign({ ...blueprint, sign: undefined }, { x: 0, y: 0, z: 0 }, "north"), null);
+  for (const bad of [
+    { ...sign, x: blueprint.size.x },
+    { ...sign, x: door.x, y: door.y, z: door.z },
+    { ...sign, x: door.x, y: door.y, z: door.z - 1 },
+    { ...sign, x: door.x, y: door.y + 1, z: door.z - 1 },
+  ]) assert.equal(blueprintSchema.safeParse({ ...blueprint, sign: bad }).success, false);
+  assert.equal(blueprintSchema.safeParse(blueprint).success, true);
+  assert.equal(blueprintSchema.safeParse({ ...blueprint, cells: [...blueprint.cells, { ...sign, role: "air" }] }).success, true);
+  assert.equal(placeSign({ ...blueprint, sign: { ...sign, facing: "east" } }, { x: 0, y: 0, z: 0 }, "east")?.facing, "south");
+});
 
 test("a role built with another block takes it in every cell of the role, the others stay the template's", () => {
   const plain = planTemplate(medieval, site);
@@ -45,6 +85,8 @@ test("a roof built with another block builds full blocks: the template's stairs 
   assert.ok(roof.length > 0 && roof.every((cell) => cell.block === "dirt" && cell.facing === undefined && cell.half === undefined));
   assert.ok(plan.bill.every((entry) => entry.item !== "spruce_stairs" && entry.item !== "spruce_slab"));
   assert.ok(planTemplate(medieval, site, { wall: "dirt" }).bill.some((entry) => entry.item === "spruce_stairs"));
+  // Legacy oak, with no saved shapes, is full blocks too.
+  assert.ok(planTemplate(medieval, site, { roof: "oak_planks" }).cells.filter((cell) => cell.role === "roof").every((cell) => cell.block === "oak_planks" && cell.facing === undefined && cell.half === undefined));
 });
 
 // Task 7b bug 2: the classic japanese files give their trim `axis` over dark_oak_planks; the audit asked a state the planks
@@ -85,4 +127,21 @@ test("a catalogue line names id, size, floors, blocks, the three main blocks wit
   assert.equal(catalogueLine(medieval), `medieval-small (7x7, 1 floor, ${blocks} blocks, mostly ${mostly}; its first stage, the ${first.name}, takes ${describeMaterials(plan.stageBill(first))}) ${medieval.description}`);
   assert.match(catalogueLine(medieval), /its first stage, the floor, takes 15 cobblestone, 9 oak_planks\)/u);
   assert.doesNotMatch(catalogueLine(medieval).split("; its first stage")[0]!, /mostly [^;]*\d/u, "no count of the main blocks to paste into get_items");
+});
+
+test("a substitute roof keeps the template's stair and slab cells when its shapes are supplied", () => {
+  const plain = planTemplate(medieval, site);
+  const plan = planTemplate(medieval, site, { roof: "oak_planks" }, { roof: { stairs: "oak_stairs", slab: "oak_slab" } });
+  const roof = plan.cells.filter((cell) => cell.role === "roof");
+  assert.equal(roof.length, plain.cells.filter((cell) => cell.role === "roof").length);
+  for (const cell of plain.cells.filter((cell) => cell.role === "roof")) {
+    assert.deepEqual(roof.find((other) => other.x === cell.x && other.y === cell.y && other.z === cell.z), {
+      ...cell, block: cell.block === "spruce_stairs" ? "oak_stairs" : "oak_slab",
+    });
+  }
+  const stairs = plain.cells.filter((cell) => cell.block === "spruce_stairs").length;
+  const slabs = plain.cells.filter((cell) => cell.block === "spruce_slab").length;
+  assert.deepEqual(plan.bill.filter((entry) => ["oak_stairs", "oak_slab"].includes(entry.item)), [{ item: "oak_stairs", count: stairs }, { item: "oak_slab", count: slabs }]);
+  assert.ok(plan.bill.every((entry) => !entry.item.startsWith("spruce_")));
+  assert.deepEqual(plan.materials, { roof: "oak_planks" });
 });

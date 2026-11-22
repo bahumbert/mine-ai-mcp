@@ -50,6 +50,8 @@ export type NavigationResult =
       readonly calculationFailed?: true;
       /** Set when the route or the movement itself failed (no path, no progress, a movement that failed), not a stop, a lost tool or a bad goal. */
       readonly routeFailed?: true;
+      /** Set when the caller's route admission refused the route (`route-admission.ts`): the reason is the caller's text, and no recovery (climb, swim, boat) may replace it. */
+      readonly routeRefused?: true;
       /** With a calculation failure, the planned node nearest the goal: where the search got to. */
       readonly closest?: BlockPosition;
       /** The block whose planned break failed and ended the route, when one did. */
@@ -178,6 +180,7 @@ export async function runNavigation(navigator: Navigator, options: NavigateOptio
     ...escapeRelaxed,
     ...(failedBreak && { failedBreak }),
     ...(outcome.kind === "failed" && isRouteFailure(outcome.failure) && { routeFailed: true as const }),
+    ...(outcome.kind === "failed" && outcome.failure.kind === "no_progress" && outcome.failure.reason === "route_refused" && { routeRefused: true as const }),
     ...(outcome.kind === "failed" && (outcome.failure.kind === "no_path" || outcome.failure.kind === "search_limit") && {
       calculationFailed: true as const,
       closest: outcome.failure.kind === "no_path" ? outcome.failure.closest.position : outcome.failure.limit.closest.position,

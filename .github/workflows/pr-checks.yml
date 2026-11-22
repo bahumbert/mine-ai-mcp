@@ -1,6 +1,6 @@
-# Pull request checks: the full test suite with coverage (blocking), and a report comment (token cost of the change,
-# new or grown long functions, duplicated code, coverage). The model review runs locally before pushing (pre-push
-# gate), not here.
+# Pull request checks: the full test suite with coverage (blocking), the quality gate (checks 6-10, 12 and 15 blocking),
+# and a report comment (token cost of the change, new or grown long functions, duplicated code, coverage). The model review runs
+# locally before pushing (pre-push gate), not here.
 name: PR checks
 
 on:
@@ -38,6 +38,52 @@ jobs:
           name: coverage
           path: coverage/
           retention-days: 14
+
+  # The quality gate (spec D5, B9; plan 2026-11-15-test-writing-rules 6c): checks 6-10, 12 and 15 block; the whole gate
+  # goes to the job summary. The gate lives in
+  # the private `.agent` submodule, so the checkout needs the read-only token AGENT_REPO_TOKEN (owner chore O2).
+  quality-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The token secret is set
+        env:
+          AGENT_REPO_TOKEN: ${{ secrets.AGENT_REPO_TOKEN }}
+        run: |
+          if [ -z "$AGENT_REPO_TOKEN" ]; then
+            echo "quality-gate: AGENT_REPO_TOKEN is not set: the gate cannot run"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+          token: ${{ secrets.AGENT_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: bun install --frozen-lockfile
+      - name: Quality gate, checks 6-10, 12 and 15 block
+        shell: bash
+        run: bash .agent/scripts/quality/quality-gate.sh "origin/${{ github.base_ref }}" --only 6,7,8,9,10,12,15
+      # Report only: the other checks' hits are answered at the merge, which CI cannot see.
+      - name: Quality gate, whole report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          {
+            echo "## Quality gate (all checks)"
+            echo '```'
+            bash .agent/scripts/quality/quality-gate.sh "origin/${{ github.base_ref }}" 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Waits for the suite to carry its coverage (owner 2026-10-21, Q2); a red suite still gets its report, a run
   # cancelled by a newer push posts nothing over the newer comment.

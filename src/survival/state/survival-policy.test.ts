@@ -4,7 +4,7 @@ import { createSetSurvivalPolicyAction } from "../../actions/set-survival-policy
 import { ActionRunner } from "../../session/action-runner.js";
 import { createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { recoveryAvailable } from "../perception/combat/recovery.js";
-import { DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
+import { combatPolicySchema, DEFAULT_COMBAT_POLICY } from "../policy/combat/contract.js";
 import { permitsHide, responsePolicyChanged } from "../policy/combat/permissions.js";
 import {
   DEFAULT_FOOD_POLICY,
@@ -34,6 +34,17 @@ function fixture(now: () => number = Date.now, carried: Readonly<Record<string, 
     });
   return { bot, stock, policy, set };
 }
+
+test("the combat policy defaults the evade clear range to 16 and the cover range to 8", () => {
+  assert.equal(DEFAULT_COMBAT_POLICY.evade_clear_range, 16);
+  assert.equal(DEFAULT_COMBAT_POLICY.evade_cover_range, 8);
+  for (const field of ["evade_clear_range", "evade_cover_range"]) {
+    for (const value of [0, -1, Infinity, NaN]) {
+      assert.equal(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, [field]: value }).success, false);
+    }
+    assert.equal(combatPolicySchema.safeParse({ ...DEFAULT_COMBAT_POLICY, [field]: 50 }).success, true);
+  }
+});
 
 test("arrow hunting preserves policy edits and releases on cancellation without enabling prohibited bows", async () => {
   const { policy, set } = fixture();
@@ -324,12 +335,15 @@ test("setting a field again replaces only that field's lifetime, and stale edits
 
 test("encounter and condition overrides expire once without requiring a model reset", async () => {
   const { policy, bot, set } = fixture();
+  assert.equal(policy.encounter, null);
   const encounter = policy.beginEncounter();
+  assert.equal(policy.encounter, encounter);
   await set({ combat: { hide: "never" } }, { kind: "encounter", encounter_id: encounter });
   assert.equal(policy.beginEncounter(), encounter);
   await policy.refresh();
   assert.equal(policy.combat.hide, "never");
   await policy.endEncounter();
+  assert.equal(policy.encounter, null);
   assert.deepEqual(policy.snapshot().overrides, []);
   await assert.rejects(
     set({ combat: { hide: "never" } }, { kind: "encounter", encounter_id: encounter }),

@@ -44,12 +44,14 @@ import { createNoteSaveAction } from "./note-save/index.js";
 import { createProtectRegionAction } from "./protect-region/index.js";
 import { createUnprotectRegionAction } from "./unprotect-region/index.js";
 import { createPlaceBlockAction } from "./place-block/index.js";
+import { createPlaceSignAction } from "./place-sign/index.js";
 import { createPrepareDragonPerchAction } from "./prepare-dragon-perch/index.js";
 import { createPickUpItemsAction } from "./pick-up-items/index.js";
 import { createEnterEndPortalAction, createEnterNetherPortalAction } from "./portal-entry/index.js";
 import { createQueryBotDataAction } from "./query-bot-data/index.js";
 import { createRawAction } from "./raw-action/index.js";
 import { createReadRecentEventsAction } from "./read-recent-events/index.js";
+import { createReadSignsAction } from "./read-signs/index.js";
 import { createSendMessageAction } from "./send-message/index.js";
 import { createSleepAction } from "./sleep/index.js";
 import { createShootDragonAction } from "./shoot-dragon/index.js";
@@ -58,6 +60,7 @@ import { createUseBucketAction } from "./use-bucket/index.js";
 import { createUseContainerAction } from "./use-container/index.js";
 import { createViewBlocksAction } from "./view-blocks/index.js";
 import { createViewCraftingRequirementsAction } from "./view-crafting-requirements/index.js";
+import { createViewItemFamilyAction } from "./view-item-family/index.js";
 import { createViewSmeltingRecipesAction } from "./view-smelting-recipes/index.js";
 import { createViewBlockDropsAction } from "./view-block-drops/index.js";
 import { createViewFrontierAction } from "./view-frontier/index.js";
@@ -72,6 +75,7 @@ export interface ActionDependencies {
   readonly strongholdEyeFlights: StrongholdEyeFlights;
   /** The one combat controller; the hunt fights through it and the hostile reflex reads its state. */
   readonly combat: CombatController;
+  readonly combatContext?: import("../survival/control/combat/context.js").HostileContext;
   readonly cancelForegroundAction: (reason: string) => ForegroundCancellation;
   readonly observeStatusActivity: ObserveStatusActivity;
   /** The bot's protected regions (ADR-012); routes read them through the provider, these tools write them. */
@@ -91,6 +95,7 @@ export function createActions(
     navigation,
     strongholdEyeFlights,
     combat,
+    combatContext,
     cancelForegroundAction,
     observeStatusActivity,
     protectedRegions,
@@ -132,11 +137,13 @@ export function createActions(
     createProtectRegionAction(bot, protectedRegions),
     createUnprotectRegionAction(protectedRegions),
     createPlaceBlockAction(bot, navigation, botData),
+    createPlaceSignAction({ bot, navigation, botData }),
     createPrepareDragonPerchAction(bot, combat),
     createPickUpItemsAction(bot, navigation, botData, discarded),
     createRawAction(bot, botData),
     createQueryBotDataAction(botData, () => updateBotStatus(botData, snapshotBotStatus(bot))),
     createReadRecentEventsAction(botData, bot.username),
+    createReadSignsAction(bot, botData),
     createSendMessageAction(bot),
     createSleepAction(bot, navigation),
     createSmeltItemAction(bot, navigation),
@@ -144,10 +151,11 @@ export function createActions(
     createUseContainerAction(bot, navigation, botData),
     createViewBlocksAction(bot),
     createViewCraftingRequirementsAction(bot, seen),
+    createViewItemFamilyAction(bot),
     createViewSmeltingRecipesAction(bot),
     createViewBlockDropsAction(bot),
     createViewFrontierAction(botData, () => snapshotBotStatus(bot)),
-    createViewStatusAction(bot, botData, observeStatusActivity),
+    createViewStatusAction(bot, botData, observeStatusActivity, () => navigation.coverExit(), () => combat.policy.effective.combat.fight_margin, combatContext),
   ];
   if (options.debugExecuteJavaScript) {
     actions.push(createDebugSetPathfinderTelemetryAction(navigation), createDebugExecuteJavaScriptAction(bot));
@@ -183,12 +191,14 @@ export * from "./memory-forget/index.js";
 export * from "./protect-region/index.js";
 export * from "./unprotect-region/index.js";
 export * from "./place-block/index.js";
+export * from "./place-sign/index.js";
 export * from "./prepare-dragon-perch/index.js";
 export * from "./pick-up-items/index.js";
 export * from "./portal-entry/index.js";
 export * from "./query-bot-data/index.js";
 export * from "./raw-action/index.js";
 export * from "./read-recent-events/index.js";
+export * from "./read-signs/index.js";
 export * from "./send-message/index.js";
 export * from "./sleep/index.js";
 export * from "./smelt-item/index.js";
@@ -197,6 +207,7 @@ export * from "./use-bucket/index.js";
 export * from "./use-container/index.js";
 export * from "./view-blocks/index.js";
 export * from "./view-crafting-requirements/index.js";
+export * from "./view-item-family/index.js";
 export * from "./view-smelting-recipes/index.js";
 export * from "./view-block-drops/index.js";
 export * from "./tend-crops/index.js";

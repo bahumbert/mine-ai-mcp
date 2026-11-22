@@ -1,13 +1,17 @@
-// `mine-ai doctor`: what a bug report needs, in one screen (versions, GPU answer, ports, settings, last errors).
+// `mine-ai doctor`: what a bug report needs, in one screen (versions, GPU answer, free disk space, ports, settings, last errors).
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { findRunningLauncher, realLockDeps } from "./control.ts";
+import { realDiskDeps } from "./install/disk.ts";
+import { driveLines, orFallback, type NamedFolder } from "./install/disk-report.ts";
 import { assessGpu, remoteVerdictText } from "./install/gpu.ts";
 import type { StackStatus } from "./stack.ts";
 import { javaPath } from "./install/java.ts";
+import { modelStore } from "./install/model.ts";
 import { ollamaExeFor, parseOllamaVersion, runCommand } from "./install/ollama.ts";
 import { loadInstallState } from "./install/state.ts";
 import type { Manifest } from "./manifest.ts";
+import { appRoot } from "./paths.ts";
 import { freePort } from "./ports.ts";
 import { settingsFileExists, settingsPath, type Settings } from "./settings.ts";
 
@@ -25,6 +29,8 @@ export interface DoctorDeps {
   javaInstalled(): boolean;
   /** The adapters and the model verdict, one line each. */
   gpuSummary(): Promise<string[]>;
+  /** One line per drive Mine AI uses: its free space and what is on it (`C: 115.1 GB free (app folder, data folder)`). */
+  diskLines(): Promise<string[]>;
   /** `mine-ai`: the running launcher or one of its programs holds it; `other`: some other program does. */
   portOwner(port: number): Promise<"free" | "mine-ai" | "other">;
 }
@@ -44,7 +50,23 @@ async function portsHeldByLauncher(root: string, manifest: Manifest): Promise<Re
   }
 }
 
-export function realDoctorDeps(root: string, manifest: Manifest): DoctorDeps {
+/**
+ * The folders whose drives the doctor measures: the app folder, the data folder, the Ollama folder (where `ollama.exe`
+ * is, when one is found) and the model store; `lookups` replace the real ones in tests. A lookup that fails (a corrupt
+ * install state) leaves its folder out: the doctor is what a bug report is made of, it must not crash on the file it reports.
+ */
+export function doctorFolders(root: string, manifest: Manifest, app: string, lookups: { findOllama?: (root: string) => string | null; storeOf?: (root: string, manifest: Manifest) => string } = {}): NamedFolder[] {
+  const ollamaExe = orFallback(() => (lookups.findOllama ?? ollamaExeFor)(root), null);
+  const store = orFallback(() => (lookups.storeOf ?? modelStore)(root, manifest), null);
+  return [
+    { what: "app folder", folder: app },
+    { what: "data folder", folder: root },
+    ...(ollamaExe === null ? [] : [{ what: "Ollama", folder: dirname(ollamaExe) }]),
+    ...(store === null ? [] : [{ what: "Ollama models", folder: store }]),
+  ];
+}
+
+export function realDoctorDeps(root: string, manifest: Manifest, app: string = appRoot()): DoctorDeps {
   let held: Promise<ReadonlySet<number>> | undefined;
   return {
     bunVersion: Bun.version,
@@ -56,9 +78,10 @@ export function realDoctorDeps(root: string, manifest: Manifest): DoctorDeps {
     javaInstalled: () => existsSync(javaPath(root)),
     gpuSummary: async () => {
       const report = await assessGpu(null, manifest);
-      const adapters = report.adapters.map((adapter, i) => `Adapter ${i + 1}: ${(adapter.bytes / 1024 ** 3).toFixed(1)} GiB`);
+      const adapters = report.adapters.map((adapter, i) => `Adapter ${i + 1}: ${adapter.name}, ${(adapter.bytes / 1024 ** 3).toFixed(1)} GiB`);
       return [...adapters, report.choice.kind === "local" ? `Local model ${report.choice.model} can run here.` : remoteVerdictText(report.choice)];
     },
+    diskLines: () => driveLines(doctorFolders(root, manifest, app), realDiskDeps),
     portOwner: async (port) => {
       held ??= portsHeldByLauncher(root, manifest);
       if ((await held).has(port)) return "mine-ai";
@@ -93,8 +116,18 @@ function lastErrorLines(root: string): string[] {
   return found.slice(-ERROR_LINES_SHOWN).map(({ name, line }) => `  [${name}] ${line}`);
 }
 
-function describeLlm(settings: Settings): string {
-  return settings.llm.kind === "remote" ? `remote ${settings.llm.baseUrl}, model ${settings.llm.model} (key not shown)` : `local, model ${settings.llm.model}`;
+/** How the remote key is kept, from the settings as loaded; the key itself is never shown (spec D3). */
+function describeKey(llm: Extract<Settings["llm"], { kind: "remote" }>): string {
+  if (llm.keyUnreadable === true) return "key: saved for another Windows user or PC, cannot be read here";
+  if (llm.apiKey === "") return "key: none";
+  if (llm.clearKeyInFile === true) return "key: in clear (encrypted at the next start)";
+  return llm.apiKeyProtected === undefined ? "key: in the file, readable by this user only" : "key: saved, encrypted";
+}
+
+/** The settings lines about the model: the endpoint and, for a remote one, how its key is kept. */
+function describeLlm(settings: Settings): string[] {
+  const { llm } = settings;
+  return llm.kind === "remote" ? [`  model: remote ${llm.baseUrl}, model ${llm.model}`, `  ${describeKey(llm)}`] : [`  model: local, model ${llm.model}`];
 }
 
 function describeServer(settings: Settings): string {
@@ -119,10 +152,12 @@ export async function runDoctor(root: string, manifest: Manifest, settings: Sett
     deps.javaInstalled() ? "Java: installed" : "Java: not installed (only needed for a local server: `mine-ai install java`)",
     "GPU:",
     ...(await deps.gpuSummary()).map((line) => `  ${line}`),
+    "Disk:",
+    ...(await deps.diskLines()).map((line) => `  ${line}`),
     "Ports:",
     ...(await portLines(manifest, settings, deps)),
     `Settings: ${settingsPath(root)}${settingsFileExists(root) ? "" : " (not found: the values below are the defaults)"}`,
-    `  model: ${describeLlm(settings)}`,
+    ...describeLlm(settings),
     `  server: ${describeServer(settings)}`,
     `  bots: ${settings.bots.join(", ") || "(none)"}`,
     `Logs: ${join(root, "logs")}`,

@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { ACTIVITIES } from "./activities.ts";
-import { BUILD_ROLES } from "./building/blueprint.ts";
+import { BUILD_ROLES, SHAPES } from "./building/blueprint.ts";
 import { CLASSIC_SIZES, templateOfHouse, TEMPLATES, type Template } from "./building/templates.ts";
 import type { EndReason } from "./conversation/state.ts";
+import { describeStage } from "./farming/growth.ts";
 import type { KnownPlace } from "./mind.ts";
 import type { ActivityTime } from "./time-spent.ts";
 import { describeRelation, relationNote, relationSchema, versioned } from "./relations/record.ts";
@@ -15,6 +16,19 @@ import type { UnfinishedHouse } from "./skills.ts";
  * memory belongs to that world and bot, and the monitor shows it with the other notes. The note is a sentence for
  * people; the context carries the same memory as data, after a fixed prefix the brain reads back with one query.
  */
+/**
+ * Cells of a farm at its last tend: crops growing, ripe crops left, farmland left empty; then, when the runtime
+ * reported them, the mean growth stage of its crop, that crop's ripe age and the dry farmland (src/farming/growth.ts).
+ */
+export interface FarmState {
+  readonly planted: number;
+  readonly ripe: number;
+  readonly empty: number;
+  readonly stage?: number;
+  readonly ripeAge?: number;
+  readonly dry?: number;
+}
+
 /** A farm the character made, as it was when she last tended it. */
 export interface KnownFarm {
   /** The item planted on it (wheat_seeds, carrot...). */
@@ -24,8 +38,27 @@ export interface KnownFarm {
   readonly centre: { readonly x: number; readonly y: number; readonly z: number };
   readonly madeAt: string;
   readonly tendedAt: string;
-  /** Cells at the last tend: crops growing, ripe crops left, farmland left empty. */
-  readonly state: { readonly planted: number; readonly ripe: number; readonly empty: number };
+  /** Cells at the last tend (see {@link FarmState}). */
+  readonly state: FarmState;
+  /** The dimension it was tended in (the status's name for it); a note from before has none. */
+  readonly dimension?: string;
+  /** Stages gained per minute a player was near, measured between two tends (set by the pace measure, not by the tend). */
+  readonly pace?: number;
+  /** False after a tend stopped mid-way: the next tend measures no pace from its stale reading. */
+  readonly paceFresh?: boolean;
+}
+
+/**
+ * The hole the character last dug in (`dig_shelter`): `x y z` its surface cell, `at` the wall-clock time (display
+ * only). Kept for the monitor's map; no prompt reads it.
+ */
+export interface ShelterHole {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly depth: number;
+  readonly roofed: boolean;
+  readonly at: string;
 }
 
 export type Memory =
@@ -33,6 +66,8 @@ export type Memory =
   | { readonly kind: "own_objective"; readonly outcome: string }
   | { readonly kind: "unfinished_house"; readonly house: UnfinishedHouse | null }
   | { readonly kind: "farm"; readonly farm: KnownFarm }
+  /** Monitor only: {@link recall} and {@link recallQuery} leave it out, so no prompt carries it. */
+  | { readonly kind: "shelter"; readonly hole: ShelterHole }
   /** One finished step's activity and time (spec 2026-10-03-specialisations-preferences): the time per activity. */
   | { readonly kind: "activity_time"; readonly time: ActivityTime }
   /** A finished conversation (spec 2026-10-18-conversations-design): `members` are the others, not the character. */
@@ -87,13 +122,19 @@ export interface RecallLimits {
 }
 
 const PREFIX = "brain memory";
-const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time", "conversation", "relation:"] as const;
+const KINDS = ["place", "own_objective", "unfinished_house", "farm", "activity_time", "conversation", "relation:"] as const; // not "shelter": the monitor reads those notes
 
 const position = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const facing = z.enum(["north", "south", "east", "west"]);
 const materials = z.partialRecord(z.enum(BUILD_ROLES), z.string().min(1));
+const shapes = z.partialRecord(z.enum(BUILD_ROLES), z.partialRecord(z.enum(SHAPES), z.string().min(1)));
+const claimFields = {
+  owner: z.string().min(1).optional(),
+  dimension: z.string().min(1).optional(),
+  claim: z.strictObject({ position, facing, attach: z.enum(["ground", "wall"]), placed: z.boolean() }).optional(),
+};
 /** A house built: by its template, or (an older note) by its classic size and style; a classic one carries both. */
-const houseSchema = z.object({ template: z.string().min(1).optional(), family: z.string().min(1).optional(), size: z.enum(CLASSIC_SIZES).optional(), style: z.string().min(1).optional(), door: position, facing, materials });
+const houseSchema = z.object({ template: z.string().min(1).optional(), family: z.string().min(1).optional(), size: z.enum(CLASSIC_SIZES).optional(), style: z.string().min(1).optional(), door: position, facing, materials, shapes: shapes.optional(), ...claimFields });
 const memorySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("place"), place: z.object({ name: z.string().min(1), detail: z.string(), own: z.boolean().optional(), house: houseSchema.optional() }) }),
   z.object({ kind: z.literal("own_objective"), outcome: z.string().min(1) }),
@@ -105,12 +146,14 @@ const memorySchema = z.discriminatedUnion("kind", [
       part: z.number().int().min(0),
       prepared: z.boolean().optional(),
       materials: materials.optional(),
+      shapes: shapes.optional(),
       refused: z.array(position).optional(),
       template: z.string().min(1).optional(),
       family: z.string().min(1).optional(),
       stage: z.number().int().min(0).optional(),
       stages: z.number().int().positive().optional(),
       stageName: z.string().min(1).optional(),
+      ...claimFields,
     }).nullable(),
   }),
   z.object({
@@ -121,8 +164,22 @@ const memorySchema = z.discriminatedUnion("kind", [
       centre: position,
       madeAt: z.string(),
       tendedAt: z.string(),
-      state: z.object({ planted: z.number().int().min(0), ripe: z.number().int().min(0), empty: z.number().int().min(0) }),
+      state: z.object({
+        planted: z.number().int().min(0),
+        ripe: z.number().int().min(0),
+        empty: z.number().int().min(0),
+        stage: z.number().min(0).optional(),
+        ripeAge: z.number().int().min(0).optional(),
+        dry: z.number().int().min(0).optional(),
+      }),
+      dimension: z.string().min(1).optional(),
+      pace: z.number().min(0).optional(),
+      paceFresh: z.boolean().optional(),
     }),
+  }),
+  z.object({
+    kind: z.literal("shelter"),
+    hole: z.object({ x: z.number(), y: z.number(), z: z.number(), depth: z.number().int().min(0), roofed: z.boolean(), at: z.string() }),
   }),
   z.object({
     kind: z.literal("activity_time"),
@@ -162,10 +219,12 @@ function describe(memory: Memory, scoring: Scoring | undefined): string {
     }
     case "farm": {
       const { farm } = memory;
-      return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty when I last tended it (${farm.tendedAt}).`;
+      const growth = describeStage(farm.state);
+      return `My ${farm.crop} farm, ${farm.size}x${farm.size} around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}: ${farm.state.planted} planted, ${farm.state.ripe} ripe, ${farm.state.empty} empty${growth === "" ? "" : `, ${growth}`} when I last tended it (${farm.tendedAt}).`;
     }
     case "conversation": return `I talked with ${memory.talk.members.join(", ")}${memory.talk.topic === "" ? "" : ` about ${memory.talk.topic}`}: ${memory.talk.gist} (${memory.talk.endedAt}).`;
     case "relation": return scoring === undefined ? `My relationship record with ${memory.relation.partner}.` : describeRelation(memory.relation, memory.relation.partner, memory.relation.lastDealt, scoring);
+    case "shelter": return `I dug in at ${memory.hole.x} ${memory.hole.y} ${memory.hole.z}, ${memory.hole.depth} deep, ${memory.hole.roofed ? "roofed" : "open"} (${memory.hole.at}).`;
     case "activity_time": return `I spent ${memory.time.minutes.toFixed(1)} min ${memory.time.activity}${memory.time.purpose === undefined || memory.time.purpose === memory.time.activity ? "" : ` for ${memory.time.purpose}`} (until ${memory.time.ended}).`;
   }
 }
@@ -258,6 +317,22 @@ export function activityNotesQuery(username: string): string {
   const prefix = `${PREFIX}: activity_time `;
   return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
     `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC`;
+}
+
+/** This bot's shelter notes, newest first, as `note_id` and `context` (for {@link staleShelterNotes}). */
+export function shelterNotesQuery(username: string): string {
+  const prefix = `${PREFIX}: shelter `;
+  return `SELECT note_id, context FROM main.notes WHERE bot_id = '${username.replaceAll("'", "''")}' ` +
+    `AND substr(context, 1, ${prefix.length}) = '${prefix}' ORDER BY note_id DESC`;
+}
+
+/** The ids of every shelter note but the newest (one hole is kept per bot), from rows of `note_id` and `context`, newest first. */
+export function staleShelterNotes(rows: readonly (readonly unknown[])[]): number[] {
+  const ids: number[] = [];
+  for (const [id, context] of rows) {
+    if (parse(String(context ?? ""))?.kind === "shelter" && typeof id === "number") ids.push(id);
+  }
+  return ids.slice(1);
 }
 
 /**

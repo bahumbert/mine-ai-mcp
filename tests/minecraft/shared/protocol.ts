@@ -12,6 +12,7 @@ const clientMessage = z.discriminatedUnion("type", [
     repeat: z.number().int().min(1),
     /** `--lanes N`: at most N of this submission's trials at once. */
     lanes: z.number().int().min(1).nullable(),
+    tickRate: z.number().min(1).max(20).optional(),
     /** A timing batch (`--lock`): its trials run on servers reserved for it, on a calm machine. */
     lock: z.boolean(),
     /** A load batch (`--load`, the master's): runs once the queue ahead of it is empty, and alone. Absent: false. */
@@ -35,8 +36,11 @@ const daemonMessage = z.discriminatedUnion("type", [
     detail: z.string(),
     error: z.string().optional(),
     runDir: z.string(),
+    class: z.enum(["pass", "product", "infra", "cancelled"]).optional(),
+    cause: z.string().optional(),
+    retried: z.string().optional(),
   }),
-  z.strictObject({ type: z.literal("done"), runs: z.number(), passed: z.number(), failed: z.number(), cancelled: z.number() }),
+  z.strictObject({ type: z.literal("done"), runs: z.number(), passed: z.number(), failed: z.number(), cancelled: z.number(), infra: z.number().optional(), retried: z.number().optional() }),
   z.strictObject({ type: z.literal("status"), text: z.string() }),
   z.strictObject({ type: z.literal("stopping") }),
 ]);

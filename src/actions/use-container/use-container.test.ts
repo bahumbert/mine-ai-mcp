@@ -4,6 +4,7 @@ import test from "node:test";
 import { recordContainerObservation, recordPlacedContainer } from "../../bot-data/index.js";
 import { type ContainerStack, stackText } from "../../test-support/fake-bot/index.js";
 import { CELL, scene } from "../../test-support/use-container-scene.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import { parseUseContainerRequest } from "./contract.js";
 import { formatUseContainerResult } from "./use-container.js";
 
@@ -444,9 +445,10 @@ test("a loaded non-container removes stale memory for that exact location", asyn
 });
 
 test("a chest the bot placed and found gone is forgotten as a placed container too", async (t) => {
-  const { data, use } = scene(t, { block: "stone" });
-  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 1, y: 64, z: 1 } });
-  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 5, y: 64, z: 5 } });
+  const { data, bot, use } = scene(t, { block: "stone" });
+  const families = familyIndexOf(bot);
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 1, y: 64, z: 1 } }, families);
+  recordPlacedContainer(data, { username: "Builder", game: { dimension: "overworld" } }, { name: "chest", position: { x: 5, y: 64, z: 5 } }, families);
 
   const result = await use({ operation: "inspect", x: 1, y: 64, z: 1 });
 

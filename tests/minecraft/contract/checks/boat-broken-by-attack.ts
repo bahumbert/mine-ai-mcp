@@ -26,6 +26,7 @@ import { type ContractSubject, holdsWithin } from "../subject.ts";
 import { getOffAndStand, mountBoat } from "./boat-seat.ts";
 import { TICK_MS } from "./combat-scene.ts";
 import { type Mark, READING_TICKS, markNow, roundTripTicks, tickOf } from "./server-tick-marks.ts";
+import { entityMetadata } from "../../../../src/world/end-fight.ts";
 
 /** What a full hit by hand costs a boat, what it loses a server tick, and the damage it breaks above. */
 const HIT_DAMAGE = 10;
@@ -185,7 +186,20 @@ function boatAt(subject: ContractSubject, x: number, z: number): Entity {
 
 /** Hit `boat` until it is gone and assert it broke when the server's ticks say; the hits. */
 async function breakByHits(subject: ContractSubject, boat: Entity): Promise<Hits> {
-  const hits = await hitUntilGone(subject, boat);
+  const damage: number[] = [];
+  const onUpdate = (entity: Entity) => {
+    const value = entityMetadata(subject.bot, entity, "damage");
+    if (entity === boat && typeof value === "number" && value !== damage.at(-1)) damage.push(value);
+  };
+  subject.bot.on("entityUpdate", onUpdate);
+  let hits: Hits;
+  try {
+    hits = await hitUntilGone(subject, boat);
+  } finally {
+    subject.bot.off("entityUpdate", onUpdate);
+  }
+  assert.ok(damage.some((value, index) => index > 0 && value > damage[index - 1]!), `no received damage increase: ${damage}`);
+  assert.ok(damage.some((value, index) => index > 0 && value === damage[index - 1]! - DECAY_PER_TICK), `no received one-tick damage decay: ${damage}`);
   assert.equal(subject.bot.entities[boat.id], undefined, `${MAX_HITS} hits did not break the boat; the ticks left it at most ${Math.max(...hits.bounds.high).toFixed(1)} damage, ${BREAKS_ABOVE} breaks it (hits ${HIT_EVERY_MS} ms apart are at most ${SWING_RECOVERY_TICKS} ticks apart on a server at 20 ticks a second or fewer, so the client or the server ran late between them: see the ticks read): ${describeHits(hits)}`);
   await assertBrokeWhenTheTicksSay(subject, hits);
   return hits;

@@ -6,8 +6,8 @@ world:
   gamerules: { doMobSpawning: false, naturalRegeneration: false, doDaylightCycle: false }
 geometry:
   # A pond 3 deep in three compartments (east x 5..8, middle 0..3, west -4..-2; z -4..3), walls up to -55 so nothing
-  # is crossed at the surface, joined by one siphon each at the floor: z -4 under x 4, z -1 under x -1. The way up from the
-  # first siphon (11 strokes at the 16 ticks a block counted live, scenario swim-stroke-ticks) is longer than the air left
+  # is crossed at the surface, joined by one siphon each at the floor: z -4 under x 4, z 1 under x -1. The way up from the
+  # first siphon (13 strokes at the 16 ticks a block counted live, scenario swim-stroke-ticks) is longer than the air left
   # minus the dive's reserve and shorter than the air left: the stop is planned, and the return fits the breath.
   - fill: { block: stone, from: [-5, -60, -5], to: [9, -55, 4] }
   - fill: { block: air, from: [-4, -56, -4], to: [8, -55, 3] }
@@ -15,7 +15,9 @@ geometry:
   - fill: { block: stone, from: [4, -59, -4], to: [4, -55, 3] }
   - fill: { block: water, from: [4, -59, -4], to: [4, -58, -4] }
   - fill: { block: stone, from: [-1, -59, -4], to: [-1, -55, 3] }
-  - fill: { block: water, from: [-1, -59, -1], to: [-1, -58, -1] }
+  - fill: { block: water, from: [-1, -59, 1], to: [-1, -58, 1] }
+  # This air-drain trigger is calibrated at 20 tps; long-return covers 10 tps (scenario reds D5, 2026-11-18).
+setup: ["tick rate 20"]
 players:
   - name: Diver
     op: true
@@ -28,7 +30,7 @@ client:
 params:
   breathing: true
   # Laid over the east and middle compartments at depth: the way up is then through both siphons to the west one,
-  # ~11 cells, longer than the air left minus the dive's reserve. Lifted at the breathing report.
+  # ~13 cells, longer than the air left minus the dive's reserve. Lifted at the breathing report.
   roof: { from: [0, -56, -4], to: [8, -56, 3], belowY: -58.5 }
   # The middle compartment's floor, then up to its surface: the next action from where the resumed leg ends.
   legs: [[1, -59, -2], [1, -57, -2]]

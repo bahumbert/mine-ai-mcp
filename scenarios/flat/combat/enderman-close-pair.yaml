@@ -14,6 +14,7 @@ players:
     pos: [0.5, -60, 0.5]
     inventory:
       - { item: diamond_sword, count: 1 }
+      - { item: shield, count: 1 }
       - { item: diamond_pickaxe, count: 1 }
       - { item: diamond_helmet, count: 1 }
       - { item: diamond_chestplate, count: 1 }

@@ -13,59 +13,31 @@
 import { Vec3 } from "vec3";
 import type { Entity } from "prismarine-entity";
 import type { ServerEntities } from "./fake-bot-entities.js";
-import { BURN_DAMAGE, BURN_EVERY_TICKS, FIRE_TICKS, SHOTS, type ShotProjectile, afterOnePhysicsTick, knockbackFrom } from "./fake-bot-combat-rules.js";
+import type { FakeBurn } from "./fake-bot-burn.js";
+import { FIRE_TICKS, SHOTS, type ShotProjectile, afterOnePhysicsTick, knockbackFrom } from "./fake-bot-combat-rules.js";
 import type { FakeBot } from "./fake-bot.js";
 
 /** What the shots need of the fights: the server's ticks and what lands on the bot. */
 export interface ShotParts {
   readonly entities: ServerEntities;
   readonly afterTicks: (count: number, run: () => void) => void;
-  readonly deaths: () => number;
+  readonly burn: FakeBurn;
   readonly hurtTheBot: (amount: number, source: Entity | null, type: string, push: Vec3 | null, hooks?: { readonly beforeEvent?: () => void; readonly afterEvent?: () => void; readonly direct?: Entity }) => { readonly taken: number; readonly opened: boolean };
   readonly pushBot: (velocity: Vec3) => void;
 }
 
 const SPAWN_HEIGHT_OF_SHOOTER = 0.85;
-/** The bit of the entity flags (metadata key 0) that says an entity is on fire. */
-const FIRE_FLAG = 1;
-const FLAGS_KEY = 0;
 /** The shots aim at her chest, as the check's subject does. */
 const CHEST_OF_BOT = 0.7;
 
 /** `shootBot` of the harness: `shooterId` shoots the bot with `projectile`, which costs `amount` once it lands. */
 export function attachFakeShots(bot: FakeBot, parts: ShotParts): (projectile: ShotProjectile, shooterId: number, amount: number) => void {
-  let fireGeneration = 0;
-  const setFire = (burning: boolean) => {
-    const flags = Number(bot.entity.metadata[FLAGS_KEY] ?? 0);
-    Reflect.set(bot.entity.metadata, FLAGS_KEY, burning ? flags | FIRE_FLAG : flags & ~FIRE_FLAG);
-    bot.emit("entityUpdate", bot.entity);
-  };
-  /** Five seconds of fire from now: a burn hurt each second while she lives, the flag out at the end; a later fire makes this one's callbacks do nothing. */
-  const ignite = () => {
-    fireGeneration += 1;
-    const generation = fireGeneration;
-    const lifeStarted = parts.deaths();
-    setFire(true);
-    /** Fire stays with the life it was lit in: a death ends it, and a later fire makes this one's callbacks do nothing. */
-    const burning = () => {
-      if (generation !== fireGeneration) return false;
-      if (parts.deaths() === lifeStarted) return true;
-      fireGeneration += 1;
-      setFire(false);
-      return false;
-    };
-    for (let burn = 1; burn * BURN_EVERY_TICKS < FIRE_TICKS; burn += 1) {
-      parts.afterTicks(burn * BURN_EVERY_TICKS, () => void (burning() && parts.hurtTheBot(BURN_DAMAGE, null, "on_fire", null)));
-    }
-    parts.afterTicks(FIRE_TICKS, () => void (burning() && setFire(false)));
-  };
-
   const land = (projectile: ShotProjectile, shooter: Entity, ball: Entity, amount: number, direction: Vec3) => {
     if (bot.entities[ball.id] !== ball) return;
     const remove = () => parts.entities.remove(ball.id);
     const { setsFire, damageType } = SHOTS[projectile];
     const hit = parts.hurtTheBot(amount, shooter, damageType, null, {
-      beforeEvent: () => setsFire && ignite(),
+      beforeEvent: () => setsFire && parts.burn.igniteFor(FIRE_TICKS),
       afterEvent: remove,
       direct: ball,
     });

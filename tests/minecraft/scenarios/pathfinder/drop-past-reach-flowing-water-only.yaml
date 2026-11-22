@@ -1,0 +1,62 @@
+template: ../../templates/flat-single-action.yaml
+
+name: drop-past-reach-flowing-water-only
+tags: [regression]
+description: >-
+  A bot on a one-wide ledge twelve blocks up, and the only water below is a two-deep flowing channel (a
+  source column with one flowing cell beside the ledge). A fall past the dry maximum drop used to be planned
+  into that channel. Now only source water is a landing for such a fall, so the navigate finds no way
+  down and fails (the ledge is bedrock, so there is no digging down either).
+
+# P4-06b task 4 (spec D6, cause 6), the negative twin of drop-past-reach-into-flowing-water. Same ledge and channel,
+# no source pool: the old code reached the goal through the channel, the new code has no route and says so.
+
+world:
+  type: flat
+  time: noon
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+
+reset:
+  - "fill -4 -62 -8 20 -30 8 air"
+
+geometry:
+  - fill: { block: stone, from: [ -4, -62, -8 ], to: [ 20, -61, 8 ] }
+  # The ledge, one block wide, standing feet at y -47. Bedrock: the bot has no tool and would dig down through stone.
+  - fill: { block: bedrock, from: [ 0, -60, 0 ], to: [ 12, -48, 0 ] }
+  # The channel: a walled corridor at x 7, z 1..2. The source column is at z 2; the cell z 1 is flowing water
+  # (level 1) two deep, set as the flow itself would leave it, so it is settled when the bot plans.
+  - fill: { block: stone, from: [ 6, -60, 1 ], to: [ 8, -59, 3 ] }
+  - fill: { block: "water[level=1]", from: [ 7, -60, 1 ], to: [ 7, -59, 1 ] }
+  - fill: { block: water, from: [ 7, -60, 2 ], to: [ 7, -59, 2 ] }
+
+players:
+  - name: LedgeBot
+    pos: [ 0.5, -47, 0.5 ]
+
+tick:
+  - "gamemode spectator @a[name=!LedgeBot,gamemode=!spectator]"
+
+params:
+  action: navigate
+  input:
+    x: 10
+    y: -60
+    z: 3
+    range: 1.5
+  expect:
+    status: failed
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - kind: health
+      who: LedgeBot
+      health: 20
+    - kind: completion
+      who: LedgeBot

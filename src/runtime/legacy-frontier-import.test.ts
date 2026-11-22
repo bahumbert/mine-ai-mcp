@@ -9,6 +9,7 @@ import { createFakeBot } from "../test-support/fake-bot/index.js";
 import { makeLegacyFrontierFile, type LegacyChunk } from "../test-support/legacy-frontier.js";
 import { attachSessionFrontier } from "./frontier.js";
 import { startLegacyFrontierImport } from "./legacy-frontier-import.js";
+import { SQL_BOT_DATA_SCHEMA_VERSION } from "../bot-data/sql-bot-data.js";
 
 const UUID = "7d2c9f1e-3a4b-4c5d-8e6f-0a1b2c3d4e5f";
 const LEGACY_SCAN = "2026-08-20T00:00:01.000Z";
@@ -37,7 +38,7 @@ const legacyTables = (data: SqlBotData) =>
 test("step 3 renames the tables and drops the views, in O(1)", (t) => {
   const data = openLegacy(persistentBotData(t), "step3", { kind: "bot", botId: UUID }, chunksFrom(0, 3));
 
-  assert.deepEqual(data.read("PRAGMA user_version"), [{ user_version: 3 }]);
+  assert.deepEqual(data.read("PRAGMA user_version"), [{ user_version: SQL_BOT_DATA_SCHEMA_VERSION }]);
   assert.deepEqual(legacyTables(data), ["legacy_frontier_chunk_biomes", "legacy_frontier_chunk_materials", "legacy_frontier_chunks"]);
   assert.equal(count(data, "legacy_frontier_chunks"), 3);
   assert.equal(count(data, "legacy_frontier_chunk_materials"), 3);
@@ -177,7 +178,7 @@ test("two imports into one world at once end with the world rows equal to the di
   assert.deepEqual(legacyTables(ayla).concat(legacyTables(theo)), []);
 });
 
-test("a file of version 0 with the old frontier tables and views reaches version 3 in one open, and its import works", async (t) => {
+test("a file of version 0 with the old frontier tables and views reaches the newest version in one open, and its import works", async (t) => {
   const storage = persistentBotData(t);
   const fresh = storage.open("version-zero", { kind: "bot", botId: UUID });
   const file = persistentFile(fresh);
@@ -190,7 +191,7 @@ test("a file of version 0 with the old frontier tables and views reaches version
   const data = storage.open("version-zero", { kind: "bot", botId: UUID });
   await startLegacyFrontierImport(data, "Ayla").done;
 
-  assert.deepEqual(data.read("PRAGMA user_version"), [{ user_version: 3 }]);
+  assert.deepEqual(data.read("PRAGMA user_version"), [{ user_version: SQL_BOT_DATA_SCHEMA_VERSION }]);
   assert.equal(count(data, "frontier_chunks"), 3);
   assert.deepEqual(legacyTables(data), []);
 });

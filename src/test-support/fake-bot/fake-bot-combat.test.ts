@@ -113,6 +113,38 @@ test("setHealth files health and food and ends in death once; a health above 0 a
   assert.deepEqual(heard, ["health", "health", "death", "health", "health", "spawn"]);
 });
 
+/**
+ * Measured on the real 1.21.4 server (scenario `player-death-runtime-event`, keepInventory false, 3 runs): the client hears
+ * `death_combat_event` with its gear still on, then the inventory clears, and `death` finds the hands, armour and bags
+ * empty.
+ */
+test("a death sends the combat event with the gear on, clears the inventory, then emits death", () => {
+  const harness = fight({ slots: { 36: { name: "iron_sword" }, 5: { name: "iron_helmet" } }, carried: { dirt: 4 } });
+  const { bot } = harness;
+  const gear = () => [bot.heldItem?.name ?? null, bot.inventory.slots[bot.getEquipmentDestSlot("head")]?.name ?? null, bot.inventory.items().length];
+  const seen: [string, unknown][] = [];
+  bot._client.on("death_combat_event", (packet: { playerId: number }) => void seen.push(["death_combat_event", [packet.playerId, ...gear()]]));
+  bot.on("death", () => void seen.push(["death", gear()]));
+  harness.combat.setHealth(0);
+  assert.deepEqual(seen, [
+    ["death_combat_event", [bot.entity.id, "iron_sword", "iron_helmet", 2]],
+    ["death", [null, null, 0]],
+  ]);
+});
+
+test("a death sends one cause packet: the one a test announced, else the fake's own, again in the next life", () => {
+  const { bot, combat } = fight();
+  const messages: unknown[] = [];
+  bot._client.on("death_combat_event", (packet: { message?: unknown }) => void messages.push(packet.message ?? "(none)"));
+
+  bot._client.emit("death_combat_event", { playerId: bot.entity.id, message: "drowned" });
+  combat.setHealth(0);
+  combat.setHealth(20);
+  combat.setHealth(0);
+
+  assert.deepEqual(messages, ["drowned", "(none)"]);
+});
+
 test("a bot hurt down to 2 health still hits: the next attack answers", async () => {
   const harness = fight();
   harness.combat.hurtBot(18, OTHER_ID);
@@ -203,6 +235,20 @@ test("a bite of Mineflayer's own consume keeps usingHeldItem when another slot c
   await harness.clock.advance(100);
   harness.inventory.updateSlot(9, itemOf(harness.bot.registry, "dirt", 1));
   assert.equal(harness.bot.usingHeldItem, true);
+});
+
+test("a bite ends with entity_status 9 while the stack is whole; the effects and the health come after the stack drops (contract check consume-food: stack and effects after the status)", async () => {
+  const harness = fight({ food: 10, slots: { 36: { name: "golden_apple", count: 2 } } });
+  const { bot } = harness;
+  const heard: string[] = [];
+  const applesNow = () => bot.inventory.count(bot.registry.itemsByName.golden_apple!.id, null);
+  bot._client.on("entity_status", (packet: { entityStatus: number }) => void (packet.entityStatus === 9 && heard.push(`status 9 with ${applesNow()} apples`)));
+  bot._client.on("entity_effect", () => void heard.push(`effect with ${applesNow()} apples`));
+  bot._client.on("update_health", () => void heard.push(`health with ${applesNow()} apples`));
+  void bot.consume().catch(() => undefined);
+  await harness.clock.advance(2_000);
+  assert.equal(heard[0], "status 9 with 2 apples", "the end of the bite comes before the stack changes");
+  assert.ok(heard.length > 1 && heard.slice(1).every((text) => text.endsWith("with 1 apples")), `the effects and the health after the stack: ${heard.join("; ")}`);
 });
 
 test("a creature the fixture or the server spawns has its full health in its metadata, as the server's spawn data gives it", () => {
@@ -303,7 +349,8 @@ test("a shot at a bot that dies of it burns no more, and the next action from a 
   await harness.clock.advance(FIREBALL_FLIGHT_MS);
   assert.equal(harness.bot.health, 0);
   await harness.clock.advance(6_000);
-  assert.equal(harness.bot.health, 0, "no burn after death");
+  // She asked to respawn as she died: the server put her back at full health, and the fire of the first life does not follow her.
+  assert.equal(harness.bot.health, 20, "no burn after death: the second life stays whole");
   const alive = shooters();
   alive.combat.shootBot("arrow", SKELETON_ID, 17);
   await alive.clock.advance(300);
@@ -590,4 +637,69 @@ test("a use of the hand ends when the server reads the change of the held item, 
   assert.equal(drawing(), 1, "the server has not read the new slot yet: 100 ms after it was sent");
   await harness.clock.advance(450);
   assert.equal(drawing(), 0, "the server read the new slot and ended the use");
+});
+
+/** The `client_command` packets the client wrote (a respawn request is one with payload 0). */
+const respawnRequests = (harness: FakeHarness) => harness.server.packets.filter(({ name }) => name === "client_command");
+
+test("a death asks the server to respawn at once, and the server puts her at the world's spawn: respawn, position, then full health a tick on", async () => {
+  const spawn = new Vec3(20.5, -60, 5.5);
+  const harness = fight({ spawn });
+  const heard: string[] = [];
+  for (const name of ["respawn", "position", "update_health"]) harness.bot._client.on(name, () => void heard.push(name));
+  harness.combat.setHealth(0);
+  assert.equal(respawnRequests(harness).length, 1, "the request is written as she dies");
+  assert.deepEqual(heard, ["update_health"], "nothing else before the server answers");
+  await harness.clock.advance(500);
+  assert.deepEqual(heard, ["update_health", "respawn", "position", "update_health"]);
+  assert.deepEqual(harness.server.sentPositions, [spawn], "put at the world's spawn, not where she died");
+  assert.deepEqual([harness.bot.health, harness.bot.food], [20, 20]);
+});
+
+test("without a spawn option the world's spawn is where she stood when the bot was made", async () => {
+  const harness = fight({ position: new Vec3(3.5, -60, 4.5) });
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.deepEqual(harness.server.sentPositions, [new Vec3(3.5, -60, 4.5)]);
+});
+
+test("on a server that answers 450 ms late the respawn comes 450 ms after the request, the death in between", async () => {
+  const harness = fight({ lagMs: 450 });
+  harness.combat.setHealth(0);
+  await harness.clock.advance(300);
+  assert.equal(harness.bot.health, 0, "still dead: the server has not read the request");
+  await harness.clock.advance(1_000);
+  assert.equal(harness.bot.health, 20);
+});
+
+test("a health set by hand after a death is the new life: the server's answer to the request finds her alive and sends nothing", async () => {
+  const harness = fight();
+  harness.combat.setHealth(0);
+  harness.combat.setHealth(20, 20);
+  await harness.clock.advance(500);
+  assert.deepEqual(harness.server.sentPositions, [], "no position for a bot that is alive");
+  assert.equal(harness.bot.health, 20);
+});
+
+test("a request of an earlier death is not answered once she has died again: one respawn for the death that is on", async () => {
+  const harness = fight();
+  const heard: string[] = [];
+  for (const name of ["respawn", "position"]) harness.bot._client.on(name, () => void heard.push(name));
+  harness.combat.setHealth(0);
+  harness.combat.setHealth(20, 20);
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.equal(respawnRequests(harness).length, 2, "both deaths asked");
+  assert.deepEqual(heard, ["respawn", "position"], "the server answers the death she is in, not the one she left");
+});
+
+test("a second death in the next life asks again and is answered again", async () => {
+  const harness = fight();
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  harness.combat.setHealth(0);
+  await harness.clock.advance(500);
+  assert.equal(respawnRequests(harness).length, 2);
+  assert.equal(harness.server.sentPositions.length, 2);
+  assert.equal(harness.bot.health, 20);
 });

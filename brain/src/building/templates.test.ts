@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import minecraftData from "minecraft-data";
 import { recipesFor } from "#src/world/smelting.ts";
-import { billOfMaterials, placeBlueprint, type Facing, type MaterialCount, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, placeBlueprint, STRUCTURAL_ROLES, type Facing, type MaterialCount, type WorldCell } from "./blueprint.ts";
 import { catalogueLine, chooseSite, planTemplate } from "./plan.ts";
 import { supportGroups, TEMPLATE_REGISTRY_VERSION, validateBlueprint } from "./support.ts";
 import { classicTemplate, familiesOf, loadTemplates, stagesOf, TEMPLATES, templateFor, templateOfHouse, templateOfKind, type Template } from "./templates.ts";
@@ -28,8 +28,15 @@ const STILT_LAYERS = [
   [".....", "rrrrr", "rrrrr", "rrrrr", "rrrrr", "rrrrr"],
 ];
 
+/** The sign cell beside the doorstep of `layers`: the door's layer, one row in front, the column right of it. */
+function signBesideDoor(layers: readonly (readonly string[])[]): { x: number; y: number; z: number; facing: "north" } {
+  const y = layers.findIndex((layer) => layer.some((row) => row.includes("D")));
+  const z = layers[y]!.findIndex((row) => row.includes("D"));
+  return { x: layers[y]![z]!.indexOf("D") + 1, y, z: z - 1, facing: "north" };
+}
+
 function templateFile(id: string, extra: Record<string, unknown> = {}, layers: readonly (readonly string[])[] = HUT_LAYERS): Record<string, unknown> {
-  return { id, family: "test-land", name: `${id} house`, description: "A square hut of planks under a flat roof.", palette: PALETTE, key: KEY, layers, ...extra };
+  return { id, family: "test-land", name: `${id} house`, description: "A square hut of planks under a flat roof.", palette: PALETTE, sign: signBesideDoor(layers), key: KEY, layers, ...extra };
 }
 
 /** A folder holding the given template files (name -> content), removed after `run`. */
@@ -76,6 +83,46 @@ test("a bad file names itself", () => {
   invalid({ "hut.json": "{ not json" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: /u);
   invalid({ "hut.json": templateFile("hut", { stages: [{ name: "all", top: 2 }] }) }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*stages/u);
   invalid({ "hut.json": templateFile("hut", { stages: [{ name: "a", top: 2 }, { name: "b", top: 2 }] }) }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*stages/u);
+});
+
+test("a template without a sign cell is refused, naming its file and the sign", () => {
+  const { sign: _sign, ...withoutSign } = templateFile("hut");
+  withFolder({ "hut.json": withoutSign }, (directory) => assert.throws(() => loadTemplates(directory), /^Error: \[TEMPLATE_INVALID\] hut\.json: no "sign": every template declares the cell of its claim sign/u));
+});
+
+test("a sign cell that is malformed, not beside the doorstep or inside the house is refused, naming its file", () => {
+  const refused = (sign: unknown, reason: RegExp) => withFolder({ "hut.json": templateFile("hut", { sign }) }, (directory) => assert.throws(() => loadTemplates(directory), reason));
+  // The hut's door is at (2, 1, 1): its doorstep is row 0, the cells beside it are columns 1 and 3.
+  refused({ x: 3, y: 1, z: 0 }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*sign.*facing/su);
+  refused({ x: 3, y: 1, z: 0, facing: "up" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*sign\.facing/su);
+  refused({ x: 4, y: 1, z: 0, facing: "north" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: sign \(4,1,0\) is not beside the doorstep/u);
+  refused({ x: 3, y: 2, z: 0, facing: "north" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: sign \(3,2,0\) is not beside the doorstep/u);
+  refused({ x: 3, y: 1, z: 1, facing: "north" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*sign/u);
+  refused({ x: 2, y: 1, z: 0, facing: "north" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*sign/u);
+  refused({ x: -1, y: 1, z: 0, facing: "north" }, /^Error: \[TEMPLATE_INVALID\] hut\.json: .*sign\.x/su);
+});
+
+test("every shipped template declares a sign cell beside its doorstep, outside its house, against a solid cell", () => {
+  assert.ok(TEMPLATES.size >= 15, `${TEMPLATES.size} shipped templates`);
+  for (const template of TEMPLATES.values()) {
+    const { blueprint } = template;
+    const sign = blueprint.sign;
+    assert.notEqual(sign, undefined, `${template.id} has no sign`);
+    const door = blueprint.cells.find((cell) => cell.role === "door")!;
+    const at = (x: number, y: number, z: number) => blueprint.cells.find((cell) => cell.x === x && cell.y === y && cell.z === z);
+    assert.deepEqual([sign!.y, sign!.z, Math.abs(sign!.x - door.x)], [door.y, door.z - 1, 1], `${template.id}: beside the doorstep, at the door's layer`);
+    assert.ok(sign!.x < blueprint.size.x && sign!.z >= 0, `${template.id}: inside the blueprint frame`);
+    assert.equal(blueprint.cells.some((cell) => cell.role !== "air" && cell.x === sign!.x && cell.y === sign!.y && cell.z === sign!.z), false, `${template.id}: outside every cell of the house`);
+    assert.ok([door.y, door.y + 1].every((y) => (at(door.x, y, door.z - 1)?.role ?? "air") === "air"), `${template.id}: the doorstep in front of the door is free`);
+    const behind = at(sign!.x, sign!.y, sign!.z + 1);
+    assert.ok(behind !== undefined && (STRUCTURAL_ROLES as readonly string[]).includes(behind.role), `${template.id}: the sign faces ${sign!.facing}, the cell behind it is ${behind?.role ?? "empty"}, not a wall to hang on`);
+    assert.equal(sign!.facing, "north", `${template.id}: faces away from the wall behind it`);
+    for (const facing of ["north", "south", "east", "west"] as const) {
+      const plan = planTemplate(template, { door: { x: 0, y: 64, z: 0 }, facing });
+      assert.notEqual(plan.sign, null, `${template.id} ${facing}`);
+      assert.equal(plan.cells.some((cell) => cell.block !== "air" && cell.x === plan.sign!.position.x && cell.y === plan.sign!.position.y && cell.z === plan.sign!.position.z), false, `${template.id} ${facing}: the sign stands outside the house cells`);
+    }
+  }
 });
 
 test("the six classic houses are registered", () => {

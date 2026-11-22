@@ -1,19 +1,21 @@
 import { isIncomingArrow } from "../../perception/combat/shield-projectiles.js";
+import { isIncomingDirectionalProjectile } from "../../perception/combat/directional-projectiles.js";
 import { Vec3 } from "vec3";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { CombatOutcome } from "../../control/combat/contract.js";
+import { tickBudgetWallMs } from "../../control/combat/progress.js";
 import { isRangedAttacker } from "../../perception/combat/observations.js";
 import { targetFacts } from "../../perception/combat/target.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
 import { compareTargets } from "../../policy/combat/target-utility.js";
-import { decideCombatPosition, positionExposed, projectileReachesBody } from "../../positioning/combat/exposure.js";
+import { decideCombatPosition, positionExposed } from "../../positioning/combat/exposure.js";
 import { positionWorld, standingBody } from "../../positioning/combat/geometry.js";
 import { type ProtectionRefusal } from "../../positioning/combat/position.js";
 import { shieldAnswersThreats } from "../../weapons/aim.js";
 import { BOW_DRAW_TICKS, MELEE_RANGE } from "../../weapons/equipment.js";
 import { canMeleeTarget, hasMeleeKnockbackRoom, meleeDistance } from "../../weapons/melee.js";
 import { recoverUnderCover } from "../recover.js";
-import { isCreeper } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
 import type { FightMovement } from "./movement.js";
 import type { FightScene } from "./scene.js";
 import type { FightWeapons } from "./weapons.js";
@@ -59,7 +61,7 @@ export class CoverFight {
           (threat.attack !== "projectile" || (!atProtection && windupNeedsCover(threat.id))),
       );
     const incomingProjectiles = Object.values(this.scene.bot.entities).filter(
-      (entity) => entity.isValid && ((entity.name === "small_fireball" && projectileReachesBody(rays, entity, body)) || isIncomingArrow(this.scene.bot, entity, 0, body)),
+      (entity) => isIncomingDirectionalProjectile(this.scene.bot, entity, body) || isIncomingArrow(this.scene.bot, entity, 0, body),
     );
     const targetWindingUp =
       !atProtection && bow && this.weapons.currentLoadout().shield === null && windupNeedsCover(this.scene.target.id);
@@ -163,7 +165,7 @@ export class CoverFight {
       // A shooter can walk into melee as its old refuge loses cover. Contact
       // defence must run before pricing a replacement building project.
       if (this.weapons.contact() || canMeleeTarget(this.scene.bot, this.scene.target)) return { kind: "proceed" };
-      if (isRangedAttacker(this.scene.target)) this.scene.position.adoptExisting();
+      if (isRangedAttacker(this.scene.bot, this.scene.target)) this.scene.position.adoptExisting();
       const rays = positionWorld(this.scene.navigation.world);
       const exposed = this.scene.position
         .threats()
@@ -202,13 +204,10 @@ export class CoverFight {
     }
     const protectedWindow = this.scene.protectedProgress.enter(plan.protected.toString());
     if (!this.recovering && protectedWindow.exhausted) {
-      this.scene.reportDecision({
-        kind: "position_rejected",
-        targetId: this.scene.target.id,
-        position: plan.protected,
-        reason: `No confirmed quarry damage during ${this.scene.policy.combat.protected_wait_ticks} protected waiting ticks.`,
-      });
-      this.scene.position.rejectCover();
+      const waitTicks = this.scene.policy.combat.protected_wait_ticks;
+      const reason = `No confirmed quarry damage during ${waitTicks} protected waiting ticks or ${tickBudgetWallMs(waitTicks) / 1000} s.`;
+      this.scene.reportDecision({ kind: "position_rejected", targetId: this.scene.target.id, position: plan.protected, reason });
+      this.scene.position.rejectCoverWait(reason);
       this.scene.protectedProgress.leave();
       this.failedPeeks = 0;
       return { kind: "continue" };
@@ -250,7 +249,7 @@ export class CoverFight {
               entry.windingUp &&
               isHostile(entry.entity) &&
               !canBeBystander(this.scene.bot, entry.entity) &&
-              !isCreeper(entry.entity),
+              !hasSelfExplosion(entry.entity.name, this.scene.bot.version),
           );
         candidates.sort(
           (a, b) =>
@@ -289,11 +288,12 @@ export class CoverFight {
             survival: this.scene.survival,
             policy: () => this.scene.policy.effective,
             isProtected: () => !this.scene.settled() && this.scene.position.protected(),
+            extinguish: (cell) => this.scene.position.extinguishFireAt(cell, signal),
             defendIntruder: async () => {
               await this.weapons.defendContact();
             },
             releaseItemUse: () => this.weapons.itemUse.lowerShield(),
-            wait: this.weapons.holdFacing,
+            wait: async (ticks) => { await this.weapons.holdFacing(ticks); },
           }),
         );
         this.weapons.itemUse.invalidateShield();

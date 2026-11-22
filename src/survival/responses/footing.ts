@@ -1,4 +1,5 @@
 import { bucketAvailable, predictWaterLanding, saveWaterLanding, waterLandingActive, type WaterLandingEvidence } from "../../navigation/mineflayer/water-landing.js";
+import { currentVehicle } from "../../actions/navigate/vehicle-sync.js";
 import { readNavigationPolicy } from "../state/navigation-policy.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
@@ -11,10 +12,23 @@ import {
   safeSupportingCell,
 } from "../../navigation/world/block-geometry.js";
 import type { BlockPosition, Position3, WorldView } from "../../navigation/world/world.js";
+import { monotonicNow } from "../../utils/index.js";
+import { waitForTicksOrCancel } from "../../utils/physics-ticks.js";
 import { isReplaceableForPlacement } from "../../world/block-classification.js";
 import { observedEyeHeight } from "../../world/block-visibility.js";
+import { footprintColumns } from "../../world/player-physics.js";
 import { findPlacementSupport, occupiedCell, placeBlock, type BlockPlacementResult } from "../../world/placement.js";
 import { lowerImpulseLanding, projectedFooting } from "../positioning/footing.js";
+import type { ReflexLimits } from "../control/contract.js";
+
+/**
+ * A landing may take 30 s; 5 s without landing, entering water or falling on (the base probe) ends the footing reflex,
+ * then a 2 s pause. The recovery keeps the 30 s as its own bound, so a recovery inside a fight ends there too.
+ */
+export const FOOTING_LIMITS: ReflexLimits = { ceilingTicks: 600, noProgressTicks: 100, standDownTicks: 40 };
+
+// Legacy mixed-phase bound (steering, server-confirmed placement): P4-35.
+const FOOTING_RECOVERY_WALL_MS = 30_000;
 
 const impulseSchema = z.object({
   entityId: z.number(),
@@ -39,6 +53,25 @@ export interface FootingRecoverySnapshot {
   readonly reason?: string;
 }
 
+/** Only an owner's interrupted airborne landing can pass its obligation to another owner. */
+function canReopenRecovery(bot: Bot, parent: AbortSignal, body: AbortSignal): boolean {
+  return parent.aborted && !body.aborted && bot.health > 0 && !currentVehicle(bot) &&
+    !bot.entity.onGround && !Reflect.get(bot.entity, "isInWater") && !Reflect.get(bot.entity, "isInLava");
+}
+
+interface ImpulseLanding {
+  support: BlockPosition;
+  readonly originalSupportY: number;
+  readonly attempted: Set<string>;
+}
+
+/** Correct the outgoing drift toward the currently observed catching floor. */
+function steerTowardSupport(bot: Bot, support: BlockPosition): void {
+  const controls = horizontalControlsToward(bot.entity, { x: support.x + 0.5, y: support.y, z: support.z + 0.5 }, 0.05);
+  for (const control of ["forward", "back", "left", "right"] as const) bot.setControlState(control, controls[control]);
+  for (const control of ["jump", "sprint", "sneak"] as const) bot.setControlState(control, false);
+}
+
 /** Remembers support across owners; only recover() is allowed to drive the body. */
 export class FootingRecovery implements Disposable {
   #support: BlockPosition | null = null;
@@ -55,6 +88,8 @@ export class FootingRecovery implements Disposable {
     bot.on("physicsTick", this.#observe);
     bot.on("respawn", this.#reset);
     bot.on("death", this.#reset);
+    bot.on("mount", this.#changeVehicle);
+    bot.on("dismount", this.#changeVehicle);
     bot._client.on("entity_velocity", this.#impulse);
   }
 
@@ -64,7 +99,7 @@ export class FootingRecovery implements Disposable {
 
   get bucketNeeded(): boolean {
     if (
-      waterLandingActive(this.bot) || !readNavigationPolicy(this.bot).bucket_fall_save || !bucketAvailable(this.bot) ||
+      currentVehicle(this.bot) || waterLandingActive(this.bot) || !readNavigationPolicy(this.bot).bucket_fall_save || !bucketAvailable(this.bot) ||
       this.bot.entity.onGround || this.bot.entity.velocity.y >= -0.1 ||
       Reflect.get(this.bot.entity, "isInWater") || Reflect.get(this.bot.entity, "isInLava")
     ) return false;
@@ -80,15 +115,19 @@ export class FootingRecovery implements Disposable {
     return this.#state;
   }
 
-  readonly #reset = () => {
-    this.#body.abort("The body died or respawned during footing recovery.");
+  #resetContext(reason: string): void {
+    this.#body.abort(reason);
     this.#body = new AbortController();
     this.#support = null;
     this.#peakY = -Infinity;
     if (!this.#running) this.#state = null;
-  };
+  }
+
+  readonly #reset = () => this.#resetContext("The body died or respawned during footing recovery.");
+  readonly #changeVehicle = () => this.#resetContext("The vehicle context changed during footing recovery.");
 
   readonly #observe = () => {
+    if (currentVehicle(this.bot)) return;
     if (!this.bot.entity.onGround) {
       this.#peakY = Math.max(this.#peakY, this.bot.entity.position.y);
       return;
@@ -102,7 +141,7 @@ export class FootingRecovery implements Disposable {
 
   readonly #impulse = (packet: unknown) => {
     const parsed = impulseSchema.safeParse(packet);
-    if (!parsed.success || parsed.data.entityId !== this.bot.entity.id || !this.#support || this.bot.health <= 0)
+    if (!parsed.success || parsed.data.entityId !== this.bot.entity.id || !this.#support || this.bot.health <= 0 || currentVehicle(this.bot))
       return;
     if (
       this.#running ||
@@ -126,106 +165,22 @@ export class FootingRecovery implements Disposable {
     const initial = this.#state;
     if (!initial || !this.needed || this.#running)
       throw new Error("Footing recovery requires one pending impulse and one body owner.");
-    const signal = AbortSignal.any([parentSignal, this.#body.signal]);
+    const bodySignal = this.#body.signal;
+    const signal = AbortSignal.any([parentSignal, bodySignal]);
     signal.throwIfAborted();
     const heldItemName = this.bot.heldItem?.name;
     this.#running = true;
     this.#state = { ...initial, phase: "steering" };
-    const attempted = new Set<string>();
-    let landingSupport = initial.support;
-    const steer = () => {
-      const target = { x: landingSupport.x + 0.5, y: landingSupport.y, z: landingSupport.z + 0.5 };
-      const controls = horizontalControlsToward(this.bot.entity, target, 0.05);
-      for (const control of ["forward", "back", "left", "right"] as const)
-        this.bot.setControlState(control, controls[control]);
-      this.bot.setControlState("jump", false);
-      this.bot.setControlState("sprint", false);
-      this.bot.setControlState("sneak", false);
-    };
+    const landing: ImpulseLanding = { support: initial.support, originalSupportY: initial.support.y, attempted: new Set() };
+    const steer = () => steerTowardSupport(this.bot, landing.support);
     this.bot.on("physicsTick", steer);
     try {
-      if (protect) await protect();
-      else this.bot.deactivateItem();
-      steer();
-      // The velocity packet can precede the physics tick that leaves the floor.
-      await this.bot.waitForTicks(1);
-      while (this.bot.health > 0) {
-        signal.throwIfAborted();
-        if (canReleaseOnObservedGround(this.world, this.bot.entity)) {
-          this.#state = { ...this.#state!, phase: "landed" };
-          return "landed";
-        }
-        if (this.bucketNeeded) {
-          this.bot.off("physicsTick", steer);
-          return await this.#recoverWater(signal);
-        }
-        const position = this.bot.entity.position;
-        if (
-          Reflect.get(this.bot.entity, "isInLava") ||
-          Reflect.get(this.bot.entity, "isInWater")
-        )
-          break;
-        if (position.y < landingSupport.y) {
-          const lower = lowerImpulseLanding(this.world, position, this.bot.entity.velocity, initial.support.y);
-          if (!lower) break;
-          landingSupport = lower;
-        }
-        if (protect) await protect();
-        const landing = projectedFooting(position, this.bot.entity.velocity, landingSupport.y);
-        const cell = { x: Math.floor(landing.x), y: landingSupport.y - 1, z: Math.floor(landing.z) };
-        // Place the first missing cell along the outgoing flight, so each new
-        // block has a real attachment face even when the landing is two cells out.
-        const distance = Math.hypot(landing.x - position.x, landing.z - position.z);
-        const samples = Math.max(1, Math.ceil(distance * 4));
-        for (let step = 0; step <= samples; step++) {
-          cell.x = Math.floor(position.x + ((landing.x - position.x) * step) / samples);
-          cell.z = Math.floor(position.z + ((landing.z - position.z) * step) / samples);
-          if (isSafeSupport(this.world.blockAt(cell.x, cell.y, cell.z))) continue;
-          const key = `${cell.x},${cell.y},${cell.z}`;
-          if (attempted.has(key)) continue;
-          const block = this.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
-          const support = findPlacementSupport(this.bot, cell);
-          const item = preferredScaffoldItem(this.bot);
-          if (!block || !isReplaceableForPlacement(block, this.bot.version) || !support || !item || occupiedCell(this.bot, cell))
-            continue;
-          const face = support.support.position.offset(
-            0.5 + support.face.x / 2,
-            0.5 + support.face.y / 2,
-            0.5 + support.face.z / 2,
-          );
-          if (face.distanceTo(position.offset(0, observedEyeHeight(this.bot.entity), 0)) > 4.5) continue;
-          attempted.add(key);
-          this.#state = { ...this.#state!, phase: "placing", placement: { cell: { ...cell }, result: "pending" } };
-          const result = await placeBlock(this.bot, {
-            item,
-            ...support,
-            expectedCells: [{ ...cell }],
-            signal,
-            matches: (placed) => placed.name === item.name,
-          });
-          this.#state = {
-            ...this.#state!,
-            phase: "steering",
-            placement: {
-              cell: { ...cell },
-              result: result.kind,
-              ...(result.kind === "failed" && { error: result.error }),
-            },
-          };
-          break;
-        }
-        await this.bot.waitForTicks(1);
-      }
-      this.#state = {
-        ...this.#state!,
-        phase: "failed",
-        reason: "No observed catching floor near the original support, or the body entered fluid.",
-      };
-      return "failed";
+      return await this.#landImpulse(landing, signal, steer, protect);
     } catch (cause) {
       this.#state = {
         ...this.#state!,
-        phase: signal.aborted ? "cancelled" : "failed",
+        support: landing.support,
+        phase: canReopenRecovery(this.bot, parentSignal, bodySignal) ? "pending" : signal.aborted ? "cancelled" : "failed",
         reason: String(signal.aborted ? signal.reason : cause),
       };
       throw cause;
@@ -238,6 +193,95 @@ export class FootingRecovery implements Disposable {
         if (item) await this.bot.equip(item, "hand");
       }
     }
+  }
+
+  /** Drive one pending flight until the body lands, enters fluid or exhausts the existing recovery bound. */
+  async #landImpulse(landing: ImpulseLanding, signal: AbortSignal, steer: () => void, protect?: () => Promise<void>): Promise<"landed" | "failed"> {
+    if (protect) await protect();
+    else this.bot.deactivateItem();
+    steer();
+    // The velocity packet can precede the physics tick that leaves the floor.
+    await waitForTicksOrCancel(this.bot, 1, signal);
+    const deadline = monotonicNow() + FOOTING_RECOVERY_WALL_MS;
+    while (this.bot.health > 0) {
+      signal.throwIfAborted();
+      if (monotonicNow() >= deadline) {
+        this.#state = { ...this.#state!, phase: "failed", reason: `footing not recovered in ${FOOTING_RECOVERY_WALL_MS / 1000} s` };
+        return "failed";
+      }
+      if (canReleaseOnObservedGround(this.world, this.bot.entity)) {
+        this.#state = { ...this.#state!, phase: "landed" };
+        return "landed";
+      }
+      if (this.bucketNeeded) {
+        this.bot.off("physicsTick", steer);
+        return await this.#recoverWater(signal);
+      }
+      const position = this.bot.entity.position;
+      if (Reflect.get(this.bot.entity, "isInLava") || Reflect.get(this.bot.entity, "isInWater")) break;
+      if (position.y < landing.support.y) {
+        const lower = lowerImpulseLanding(this.world, position, this.bot.entity.velocity, landing.originalSupportY);
+        if (!lower) break;
+        landing.support = lower;
+      }
+      if (protect) await protect();
+      const projected = projectedFooting(position, this.bot.entity.velocity, landing.support.y);
+      await this.#placeFirstMissingCell(position, projected, landing.support.y, landing.attempted, signal);
+      await waitForTicksOrCancel(this.bot, 1, signal);
+    }
+    this.#state = { ...this.#state!, phase: "failed", reason: "No observed catching floor near the original support, or the body entered fluid." };
+    return "failed";
+  }
+
+  /** Catch each sampled footprint, extending from a real attachment face across column corners (C11, 2026-11-17). */
+  async #placeFirstMissingCell(
+    position: Vec3,
+    landing: Position3,
+    supportY: number,
+    attempted: Set<string>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const distance = Math.hypot(landing.x - position.x, landing.z - position.z);
+    const samples = Math.max(1, Math.ceil(distance * 4));
+    for (let step = 0; step <= samples; step++) {
+      const sample = {
+        x: position.x + ((landing.x - position.x) * step) / samples,
+        y: supportY,
+        z: position.z + ((landing.z - position.z) * step) / samples,
+      };
+      const columns = [...footprintColumns(sample)];
+      if (columns.some(({ x, z }) => isSafeSupport(this.world.blockAt(x, supportY - 1, z)))) continue;
+      columns.sort((a, b) => Math.hypot(a.x + 0.5 - sample.x, a.z + 0.5 - sample.z) -
+        Math.hypot(b.x + 0.5 - sample.x, b.z + 0.5 - sample.z));
+      for (const column of columns)
+        if (await this.#placeCatchingCell({ ...column, y: supportY - 1 }, position, attempted, signal)) return;
+    }
+  }
+
+  /** Try one reachable, unoccupied scaffold cell once, retaining the confirmed placement across owners. */
+  async #placeCatchingCell(cell: BlockPosition, position: Vec3, attempted: Set<string>, signal: AbortSignal): Promise<boolean> {
+    const key = `${cell.x},${cell.y},${cell.z}`;
+    if (attempted.has(key)) return false;
+    const block = this.bot.blockAt(new Vec3(cell.x, cell.y, cell.z));
+    const support = findPlacementSupport(this.bot, cell);
+    const item = preferredScaffoldItem(this.bot);
+    if (!block || !isReplaceableForPlacement(block, this.bot.version) || !support || !item || occupiedCell(this.bot, cell))
+      return false;
+    const face = support.support.position.offset(0.5 + support.face.x / 2, 0.5 + support.face.y / 2, 0.5 + support.face.z / 2);
+    if (face.distanceTo(position.offset(0, observedEyeHeight(this.bot.entity), 0)) > 4.5) return false;
+    attempted.add(key);
+    this.#state = { ...this.#state!, phase: "placing", placement: { cell: { ...cell }, result: "pending" } };
+    const result = await placeBlock(this.bot, {
+      item, ...support, expectedCells: [{ ...cell }], signal,
+      matches: (placed) => placed.name === item.name,
+      // A falling body may be saved inside a foreign region; the ledger retains the cleanup obligation.
+      lifeSaving: true,
+    });
+    this.#state = {
+      ...this.#state!, phase: "steering",
+      placement: { cell: { ...cell }, result: result.kind, ...(result.kind === "failed" && { error: result.error }) },
+    };
+    return true;
   }
 
   async #recoverWater(signal: AbortSignal): Promise<"landed" | "failed"> {
@@ -265,6 +309,8 @@ export class FootingRecovery implements Disposable {
     this.bot.off("physicsTick", this.#observe);
     this.bot.off("respawn", this.#reset);
     this.bot.off("death", this.#reset);
+    this.bot.off("mount", this.#changeVehicle);
+    this.bot.off("dismount", this.#changeVehicle);
     this.bot._client.off("entity_velocity", this.#impulse);
   }
 }

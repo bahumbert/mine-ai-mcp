@@ -91,6 +91,8 @@ export const smeltItemAnnotations = {
 } satisfies ToolAnnotations;
 
 export const smeltItemOutcomes = {
+  notSmeltable: (item: string, inputs: readonly string[]) =>
+    `[SMELT_NOT_SMELTABLE] ${item} has no smelting recipe${inputs.length ? `; it is smelted from ${inputs.join(", ")}` : ""}. Use view_smelting_recipes to find a valid input.`,
   unknownItem: (item: string) => `[UNKNOWN_SMELT_ITEM] Minecraft has no item registry entry named ${item}.`,
   unsupportedFuel: (fuel: string) => `[SMELT_FUEL_UNSUPPORTED] ${fuel} is not a supported furnace fuel.`,
   inputMissing: (item: string, available: number, requested: number) =>

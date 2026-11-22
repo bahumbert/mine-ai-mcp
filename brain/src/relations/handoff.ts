@@ -2,7 +2,9 @@
 import type { Clock } from "../conversation/socialise.ts";
 import { manhattan } from "../conversation/state.ts";
 import type { Position } from "../runtime-client.ts";
-import { findPlayer, giveTo, runStep, type SkillContext, type SkillResult } from "../skills.ts";
+import { runStep, type SkillContext, type SkillResult } from "../skills.ts";
+import { giveTo } from "../skills/give-item.ts";
+import { findPlayer } from "../skills/positions.ts";
 import { carriedOf, holdsBack, sideText, spareFor } from "./items.ts";
 import { type ItemCount, MINUTE_MS } from "./types.ts";
 

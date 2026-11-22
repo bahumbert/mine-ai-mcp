@@ -40,9 +40,9 @@ client:
   command: bun
   args: ["../../src/client-host.ts", "./fortress-twelve-rods.ts"]
 goal:
-  kind: all
+  kind: completion
+  who: FortressHunter
   # Twelve ordinary rods require repeated native spawn cycles and recovery.
   timeout: 900
-  goals:
-    - { kind: hasItem, who: FortressHunter, item: blaze_rod, count: 12 }
-    - { kind: completion, who: FortressHunter }
+
+params: { handBack: [-27.5, 82, 355.5] }

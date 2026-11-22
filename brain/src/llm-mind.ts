@@ -1,29 +1,24 @@
 import { z } from "zod";
-import { describeStep, describeStepError, skillUsage, stepKey, stepSchema, type Step } from "./actions.ts";
+import { describeStep, describeStepError, skillUsage, stepKey, stepSchema } from "./actions.ts";
 import { styleOrDefault } from "./building/plan.ts";
-import { nowCarried } from "./carried-now-note.ts";
 import type { ChatModel, ChatTurn, CompleteOptions } from "./chat-model.ts";
-import type { MindTier, ModelCall } from "./brain-log.ts";
+import type { MindTier, ModelCall, PromptBudgetUse } from "./brain-log.ts";
 import { tierCall, type LineFacts } from "./model-lanes.ts";
 import { conversationBlock, describeGist, describeOpening, gistSystemPrompt, openingSystemPrompt } from "./conversation/prompts.ts";
-import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type EarlierFailure, type Gist, type GistInput, type GoalInput, type KnownPlace, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
+import { FAILED_STEP_MINUTES, MAX_REFUSALS, MAX_STEP_FAILURES, sameWords, type ChatDecision, type ChatInput, type ChatLine, type ChosenObjective, type Gist, type GistInput, type GoalInput, type Mind, type NarrateInput, type OpeningDecision, type OpeningInput, type SignLinesInput, type StepRecord, type WorkDecision, type WorkInput } from "./mind.ts";
 import { askFieldsInstructions, parseAsks, parseGistPartners, requestsBlock, tradeInstructions } from "./relations/prompts.ts";
 import { ACTIVITIES, describeActivity, parseActivity, type Activity } from "./activities.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
-import { describeOpportunities, drawnFirst } from "./opportunities.ts";
 import { orderCapSendBack, speakerOrdersNote, unreadLinesNote } from "./chat-limit-notes.ts";
 import { checkReplyAgainstFacts, MessageTypeHold, SendBack } from "./chat-reply-checks.ts";
 import { addressees, carriesTrade, chatDecisionOf, chatReplySchema, messageTypeInstructions, readListeners, speaksTo } from "./chat-reply.ts";
 import { describePreferences, feelings } from "./preference-feelings.ts";
 import { personaSkills, type Persona, type Stance } from "./persona.ts";
-import type { BotSnapshot, ProtectedArea } from "./runtime-client.ts";
-import { describeTime } from "./time-spent.ts";
-
-/** Inventory stacks shown to the model; enough to answer "do you have X", short enough to stay cheap. */
-/** The player inventory's main slots (hotbar included): a full inventory stops crafting and gathering. */
-const INVENTORY_SLOTS = 36;
-/** Steps of the current objective shown to the work tier: the latest ones are what it needs. */
-const PROMPT_STEPS = 10;
+import { budgetFor, fitPrompt, ModelCalibration, type PromptPart } from "./prompt-budget.ts";
+import { goalParts, historyPart, narrateParts, narrateText, SHRINK_ORDER, situationParts, workParts } from "./prompt-parts.ts";
+import { extractJsonObject, signFlipped } from "./model-reply-checks.ts";
+import { fitSignLines, fittingSignPrefix, signLineProblems } from "./sign-lines.ts";
+export { extractJsonObject } from "./model-reply-checks.ts";
 
 /** A disposition, not a rule: what the character does with a request stays its own call (Rule #0). */
 const STANCE_GUIDE: Readonly<Record<Stance, string>> = {
@@ -57,6 +52,7 @@ const MINECRAFT_FACTS = `- get_items adds to what you carry: ask it only for wha
   animals (cow, pig, chicken, sheep), cooked with get_items (cooked_beef, cooked_porkchop...).
 - Deep water (the sea, wide lakes) is never swum: it is crossed by boat, which go_to does by itself when you carry
   one (get_items oak_boat: 5 planks of one wood); without one, go another way over land.
+- Light: sky light is 15 under the open sky and 0 where no sky reaches; monsters spawn where block light is 0 and it is dark (at night, in caves, under a roof without torches).
 - Items named "unknown" are things this world adds that you cannot use: ignore them; drop_item unknown only when you
   need the room.`;
 
@@ -95,9 +91,34 @@ export class LlmMind implements Mind {
   /** `onCall`: told about every model call (the brain log, read by the monitor). */
   constructor(private readonly models: TierModels, private readonly onCall?: (call: ModelCall) => void, private readonly localizedChat?: LocalizedChat) {}
 
-  /** The lane and the order of the call come from its tier, and for the chat tier from the line (`tierCall`, `model-lanes.ts`). */
-  private ask<T>(tier: MindTier, model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, line?: LineFacts): Promise<T> {
-    return ask(model, system, request, signal, read, tierCall(tier, line), this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call }));
+  /** What each model has shown about its tokens and window: the budget of its next call is fitted to it. */
+  private readonly calibration = new ModelCalibration();
+
+  async signLines(input: SignLinesInput, signal: AbortSignal): Promise<string[]> {
+    const width = input.persona.settings.signLineChars;
+    const prompt = `You put a sign beside the door of ${JSON.stringify(input.what)}; its first line already says ${JSON.stringify(input.owner)}. Write up to three short lines for the rest, in character. The sign is public: never coordinates, stocks or anything private. Each line holds at most ${width} characters, spaces and punctuation included; a longer sentence goes on over the next line.`;
+    return this.ask("sign", this.models.chat, signLinesSystemPrompt(input.persona), [{ key: "occasion", maxLevel: 0, render: () => prompt }], signal, (json, attempt) => {
+      const lines = z.object({ lines: z.array(z.string()) }).parse(json).lines;
+      const fitted = fitSignLines(lines, width);
+      if (attempt === 2) return fittingSignPrefix(lines, width);
+      if (fitted.lines.length <= 3 && fitted.refused.length === 0) return fitted.lines;
+      throw new SendBack(signLineProblems(lines, width, fitted).join("; "));
+    }, { badReplyFallback: [] });
+  }
+
+  /**
+   * One call: the parts fitted to the tier's budget (cut to the model's window, estimated at its own characters per
+   * token), sent as one text that every repair round repeats; the first reply teaches the calibration. The lane and the
+   * order of the call come from its tier, and for the chat tier from the line (`tierCall`, `model-lanes.ts`).
+   */
+  private ask<T>(tier: MindTier, model: ChatModel, system: string, parts: readonly PromptPart[], signal: AbortSignal, read: (json: unknown, attempt: number) => T, extras: { readonly line?: LineFacts; readonly badReplyFallback?: T } = {}): Promise<T> {
+    const { line, badReplyFallback } = extras;
+    const tokens = budgetFor(tier, this.calibration.window(model.name));
+    const fitted = fitPrompt(system, parts, SHRINK_ORDER[tier], tokens, this.calibration.charsPerToken(model.name));
+    const budget: PromptBudgetUse = { tokens, estimated: fitted.estimated, shrunk: fitted.shrunk, overBudget: fitted.overBudget };
+    const condition = parts.find((part) => part.key === "condition")?.render(0);
+    const learn = (promptTokens: number | null, contextTokens: number | null) => this.calibration.learn(model.name, system.length + fitted.text.length, promptTokens, contextTokens);
+    return ask(model, system, fitted.text, signal, read, { report: this.onCall === undefined ? undefined : (call) => this.onCall?.({ tier, ...call, budget, ...(condition === undefined ? {} : { condition }) }), learn, badReplyFallback, call: tierCall(tier, line) });
   }
 
   async chat(input: ChatInput, signal: AbortSignal): Promise<ChatDecision> {
@@ -118,7 +139,7 @@ export class LlmMind implements Mind {
     // plus les skins" after two players' lines on it).
     if (!open && (namesSomeoneElse(input) || conversationGoingOn(input) !== null || othersChatting(input).length > 0)) return { ...leftAlone(), asked: false };
     const canWait = input.canWait ?? true;
-    const request = chatRequest(input, canWait, this.localizedChat);
+    const parts = chatParts(input, canWait, this.localizedChat);
     // Its first reading, when that left her out: a repaired reply keeps it (live 2026-10-04: "nice work today, thanks
     // Vex", read as spoken to Vex, was sent back for answering it, and came back as spoken to the speaker, which let
     // it through).
@@ -131,7 +152,7 @@ export class LlmMind implements Mind {
     // (review 2026-10-19: the greeting the nearest bot claimed went unanswered by all after one send-back).
     let claimed: boolean | undefined;
     const claimEveryoneLine = (): boolean => (claimed ??= input.claimEveryoneLine?.() === true);
-    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk, input.relations?.tradeOn === true), request, signal, (json) => {
+    return this.ask("chat", this.models.chat, chatSystemPrompt(input.persona, canWait, this.localizedChat, inTalk, input.relations?.tradeOn === true), parts, signal, (json) => {
       const reply = chatReplySchema.parse(json);
       const { given, listeners, to } = readListeners(reply.spoken_to, message.username);
       // Not addressed and no conversation going on: hers only when read as spoken to everyone around, and not when the
@@ -175,14 +196,14 @@ export class LlmMind implements Mind {
       }
       if (acts && reply.request.trim() === "") throw new SendBack(`"request" is required when "route" is "${reply.route}"`);
       return chatDecisionOf(input, reply, to, typeHold.type ?? reply.type, this.localizedChat !== undefined && !inTalk);
-    }, { fromAgent: input.fromAgent === true, addressed: message.addressed || message.channel === "whisper" });
+    }, { line: { fromAgent: input.fromAgent === true, addressed: message.addressed || message.channel === "whisper" } });
   }
 
   /** Steps already sent back as a repeat of one that just succeeded, per objective. */
   private readonly resends = new WeakMap<object, Set<string>>();
-  private resent(objective: object): Set<string> {
-    let sent = this.resends.get(objective);
-    if (sent === undefined) this.resends.set(objective, (sent = new Set()));
+  private resent(input: WorkInput): Set<string> {
+    let sent = input.sentBackSteps ?? this.resends.get(input.objective);
+    if (sent === undefined) this.resends.set(input.objective, (sent = new Set()));
     return sent;
   }
 
@@ -190,7 +211,7 @@ export class LlmMind implements Mind {
     const skills = personaSkills(input.persona);
     let signChecked = false;
     const refused = input.refused ?? new Map<string, number>();
-    return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), describeWork(input), signal, (json) => {
+    return this.ask("work", this.models.action, workSystemPrompt(input.persona, input.ownsTemporaryHouse === true), workParts(input), signal, (json) => {
       const reply = workReplySchema.parse(json);
       // "give_up" or "done" written as a skill inside "step" (live 2026-10-03, twice in a row: the reason, "all nearby
       // oak logs are in protected areas", was lost with the rejected reply) is read as what it says.
@@ -214,8 +235,8 @@ export class LlmMind implements Mind {
         // step named the requester): sent back once per step with where it stands.
         const aroundRequester = step.data.skill === "protect_area" ? step.data.player : step.data.skill === "level_area" ? step.data.around : undefined;
         const aroundKey = `around you: ${describeStep(step.data)}`;
-        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input.objective).has(aroundKey)) {
-          this.resent(input.objective).add(aroundKey);
+        if (input.objective.place === "you" && input.objective.requester !== null && aroundRequester?.toLowerCase() === input.objective.requester.toLowerCase() && !this.resent(input).has(aroundKey)) {
+          this.resent(input).add(aroundKey);
           const { x, y, z } = input.snapshot.position;
           throw new SendBack(`the order is around you (at ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}, where you stand): omit "${step.data.skill === "protect_area" ? "player" : "around"}" (or give your own name)`);
         }
@@ -240,8 +261,8 @@ export class LlmMind implements Mind {
         // "give 4 oak_log to Tester" done 9 times, 36 logs; the guards skip a step that gains, the inventory changed).
         const label = describeStep(step.data);
         const last = input.steps.at(-1);
-        if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input.objective).has(label)) {
-          this.resent(input.objective).add(label);
+        if (last !== undefined && last.outcome === "done" && last.step === label && !this.resent(input).has(label)) {
+          this.resent(input).add(label);
           throw new SendBack(`"${label}" just succeeded: if that did what was asked, answer done; send it again only if it must be done once more`);
         }
         const earlier = input.earlierFailures?.find((failure) => failure.key === key && failure.count >= MAX_STEP_FAILURES && !failure.changed);
@@ -269,7 +290,7 @@ export class LlmMind implements Mind {
     let sentBack = false;
     // In our own order, not the chances': the list says what exists, the draw says what is likely.
     const available = ACTIVITIES.filter((activity) => input.chances.some((entry) => entry.activity === activity));
-    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona, available), describeGoal(input), signal, (json) => {
+    return this.ask("goal", this.models.planner, goalSystemPrompt(input.persona, available), goalParts(input), signal, (json) => {
       const { objective, for: purpose } = goalReplySchema.parse(json);
       const failed = input.lastFailed;
       if (failed !== undefined && failed !== null && !sentBack && sameWords(objective, failed.objective)) {
@@ -283,20 +304,12 @@ export class LlmMind implements Mind {
   }
 
   async narrate(input: NarrateInput, signal: AbortSignal): Promise<string> {
-    const news = input.outcome === "done"
-      ? `What you were asked ("${input.objective}") is done: ${input.detail}.`
-      : input.outcome === "failed"
-        ? `You stopped working on "${input.objective}": ${input.detail}.`
-        : `You are working on what you were asked ("${input.objective}"). Now you start ${input.detail}.`;
-    const tell = input.outcome === "progress"
-      ? "If it helps the players around you follow what you do and why, tell them in one short line, in character; if it adds nothing to what was already said, reply with an empty say."
-      : "Tell the players around you in one short line, in character.";
-    const request = [describeHistory(input.history), news, tell].join("\n\n");
-    return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), request, signal, (json) => narrateReplySchema.parse(json).say);
+    const { news, tell } = narrateText(input);
+    return this.ask("narrate", this.models.chat, narrateSystemPrompt(input.persona), narrateParts(input, news, tell), signal, (json) => narrateReplySchema.parse(json).say);
   }
 
   async openConversation(input: OpeningInput, signal: AbortSignal): Promise<OpeningDecision> {
-    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat, input.relations !== undefined), describeOpening(input, this.localizedChat), signal, (json) => {
+    return this.ask("conversation", this.models.chat, openingSystemPrompt(input.persona, this.localizedChat, input.relations !== undefined), requestParts(describeOpening(input, this.localizedChat)), signal, (json) => {
       const reply = openingReplySchema.parse(json);
       // A line is heard as spoken to someone only when it names them (ADR-017): a nameless opening reaches nobody.
       if (reply.open && reply.say.trim() !== "") {
@@ -313,7 +326,7 @@ export class LlmMind implements Mind {
 
   async sumUpConversation(input: GistInput, signal: AbortSignal): Promise<Gist> {
     const withPartners = input.relations !== undefined;
-    return this.ask("conversation", this.models.chat, gistSystemPrompt(input.persona, withPartners), describeGist(input), signal, (json) => {
+    return this.ask("conversation", this.models.chat, gistSystemPrompt(input.persona, withPartners), requestParts(describeGist(input)), signal, (json) => {
       const reply = gistReplySchema.parse(json);
       return { gist: reply.gist.trim(), partners: withPartners ? parseGistPartners(reply.partners) : [] };
     });
@@ -338,47 +351,35 @@ function leftAloneDecision(input: ChatInput): ChatDecision {
   return { ...(named.length > 0 && { to: named }), say: "", route: "ignore", request: "", ...(input.persona.preferences !== undefined && { work: "none" }) };
 }
 
-/** The chat tier's request for one line: her situation, the chat so far, what it shows about the line, then the line. */
-function chatRequest(input: ChatInput, canWait: boolean, localizedChat: LocalizedChat | undefined): string {
-  const { message } = input;
-  const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
-  return [
-    describeSituation(input.snapshot, input.activity, input.places, input.areas),
-    // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
-    // once. The reply is written from what she knows: that it stops now.
-    ...(canWait || input.activity === "idle" ? [] : ["What you are doing now is your own: taking a request on (act) stops it at once: you start right away, gladly or not, and never finish it first."]),
-    describeHistory(input.history),
-    // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
-    // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
-    describeConversation(input),
-    ...(input.conversation === undefined ? [] : [conversationBlock(input.conversation)]),
-    ...(input.relations === undefined || input.relations.block === "" ? [] : [input.relations.block]),
-    ...(input.relations?.requests === undefined ? [] : [requestsBlock(message.username, input.relations.requests)]),
-    // The feelings sit with the line too: in the system prompt alone they were lost under a long situation (ticket 10).
-    ...(input.persona.preferences === undefined ? [] : [`How you feel about work: ${feelings(input.persona)}. Your line may show it about the work asked, even when you take it on.`]),
-    ...(input.unreadLines === undefined || input.unreadLines <= 0 ? [] : [unreadLinesNote(input.unreadLines, message.username)]),
-    ...(input.speakerOrders === undefined ? [] : [speakerOrdersNote(input.speakerOrders, message.username)]),
-    // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
-    // 2026-10-07).
-    `New message: ${message.username} ${channel}${heardFrom(message.distance, input.heardFarAway === true, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)`,
-  ].filter((part) => part !== "").join("\n\n");
+/** A request already written as one text: a single part that is never shrunk. */
+function requestParts(text: string): PromptPart[] {
+  return [{ key: "request", maxLevel: 0, render: () => text }];
 }
 
-async function ask<T>(model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown) => T, call: CompleteOptions, report?: (call: Omit<ModelCall, "tier">) => void): Promise<T> {
+/** `learn` hears the counts of the first reply only (a repair round's count is not a sample), whether `report` is set or not. */
+async function ask<T>(
+  model: ChatModel, system: string, request: string, signal: AbortSignal, read: (json: unknown, attempt: number) => T,
+  options: { report?: (call: Omit<ModelCall, "tier" | "budget">) => void; learn?: (promptTokens: number | null, contextTokens: number | null) => void; badReplyFallback?: T; call: CompleteOptions },
+): Promise<T> {
   const turns: ChatTurn[] = [{ role: "system", content: system }, { role: "user", content: request }];
   const replies: string[] = [];
   const started = monotonicNow();
   let promptTokens: number | null = null;
   let contextTokens: number | null = null;
   let waitMs: number | undefined;
-  const done = (outcome: { result: unknown } | { error: string }) => report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...(waitMs === undefined ? {} : { waitMs }), ...outcome });
+  let replyTokens = 0;
+  let replyTokensKnown = true;
+  const done = (outcome: { result: unknown } | { error: string }) => options.report?.({ model: model.name, ms: elapsedSince(started), turns: [...turns], replies, promptTokens, contextTokens, ...(waitMs === undefined ? {} : { waitMs }), replyTokens: replyTokensKnown ? replyTokens : null, ...outcome });
   let problem = "";
   let formatFailures = 0;
   let sendBacks = 0;
   for (;;) {
     let text: string;
     try {
-      const reply = await model.complete(turns, signal, call);
+      const reply = await model.complete(turns, signal, options.call);
+      if (typeof reply.replyTokens === "number") replyTokens += reply.replyTokens;
+      else replyTokensKnown = false;
+      if (replies.length === 0) options.learn?.(reply.promptTokens, reply.contextTokens ?? null);
       text = reply.text;
       if (reply.waitMs !== undefined) waitMs = (waitMs ?? 0) + reply.waitMs;
       if (reply.promptTokens !== null) promptTokens = Math.max(promptTokens ?? 0, reply.promptTokens);
@@ -389,10 +390,14 @@ async function ask<T>(model: ChatModel, system: string, request: string, signal:
     }
     replies.push(text);
     try {
-      const result = read(JSON.parse(extractJsonObject(text)));
+      const result = read(JSON.parse(extractJsonObject(text)), replies.length);
       done({ result });
       return result;
     } catch (error) {
+      if (options.badReplyFallback !== undefined && replies.length >= 2) {
+        done({ result: options.badReplyFallback });
+        return options.badReplyFallback;
+      }
       problem = error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : String(error);
       if (error instanceof SendBack) sendBacks += 1;
       else formatFailures += 1;
@@ -532,10 +537,14 @@ ${askFieldsInstructions()}
 ` : ""}Understand casual phrasing, typos, slang and other languages.`;
 }
 
-function narrateSystemPrompt(persona: Persona): string {
+export function narrateSystemPrompt(persona: Persona): string {
   return `${personaPrompt(persona)}
 ${persona.preferences === undefined ? "" : "\nYour feelings about the work may show in what you say.\n"}
 Reply with only a JSON object: {"say": "<your chat line>"}.`;
+}
+
+export function signLinesSystemPrompt(persona: Persona): string {
+  return `${personaPrompt(persona)}\nReply with only a JSON object: {"lines": ["..."]}.`;
 }
 
 function skillList(persona: Persona, improveHouse = true): string {
@@ -544,7 +553,7 @@ function skillList(persona: Persona, improveHouse = true): string {
 }
 
 /** The work tier (ADR-011): one step at a time, with the results of the last ones in view. */
-function workSystemPrompt(persona: Persona, ownsTemporaryHouse: boolean): string {
+export function workSystemPrompt(persona: Persona, ownsTemporaryHouse: boolean): string {
   return `${personaPrompt(persona)}
 
 You work towards your current objective one step at a time: pick the next step, see what it did, then pick again.
@@ -573,7 +582,7 @@ or {"give_up": "<why>"}.`;
 }
 
 /** The goal tier (ADR-011): the next concrete objective towards the character's own goal. */
-function goalSystemPrompt(persona: Persona, available: readonly Activity[]): string {
+export function goalSystemPrompt(persona: Persona, available: readonly Activity[]): string {
   const kinds = available.length === 0 ? "none of the kinds of work you know" : `one of ${available.map(describeActivity).join(", ")}`;
   return `${personaPrompt(persona)}
 
@@ -598,73 +607,10 @@ function knownByEarlierExplore(steps: readonly StepRecord[], block: string): str
   for (const record of steps.toReversed()) {
     if (record.step.startsWith("get ") && record.outcome === "failed" && record.step.split(/[^a-z0-9_]+/u).includes(block)) return null;
     if (!record.step.startsWith("explore ") || !record.step.endsWith(` for ${block}`)) continue;
-    // Done or failed: a walk that stopped still names the block it knows (skills.ts adds that before it decides the outcome).
+    // Done or failed: a walk that stopped still names the block it knows (`skills/explore.ts` adds that before it decides the outcome).
     return record.detail.includes("you know of") ? /you know of is (.*?): get_items /u.exec(record.detail)?.[1] ?? record.detail : null;
   }
   return null;
-}
-
-function describeStepRecord(record: StepRecord, index: number): string {
-  return `${index + 1}. ${record.step} -> ${record.outcome}: ${record.detail}`;
-}
-
-function describeWork(input: WorkInput): string {
-  const { objective } = input;
-  const whose = objective.requester === null ? "your own goal" : `asked by ${objective.requester}`;
-  const steps = input.steps.slice(-PROMPT_STEPS);
-  return [
-    describeSituation(input.snapshot, `working on this objective`, input.places, input.areas),
-    `Objective (${whose}): ${JSON.stringify(objective.text)}`,
-    input.paused.length === 0 ? "" : `Set aside until this one ends: ${input.paused.map((paused) => JSON.stringify(paused.text)).join("; ")}`,
-    steps.length === 0 ? "Steps so far: none yet." : `Steps so far, oldest first:\n${steps.map(describeStepRecord).join("\n")}`,
-    describeEarlierFailures((input.earlierFailures ?? []).filter((failure) => failure.objective === objective.text && !failure.changed)),
-    nowCarried(input),
-  ].filter((part) => part !== "").join("\n\n");
-}
-/**
- * Facts before, not corrections after (ADR-017): what already failed for this objective, and why. Other objectives'
- * failures guard by key (rule 2) but are not shown (live 2026-10-11: Theo's junk-drop hint of his own goal buried an
- * order's materials); nor is one whose cause changed (the inventory or the place differs: "no boat is carried" stayed
- * in a prompt while Vex crafted 13 boats).
- */
-function describeEarlierFailures(failures: readonly EarlierFailure[]): string {
-  if (failures.length === 0) return "";
-  const lines = failures.map((failure) => `- ${failure.step}, ${failure.count > 1 ? `failed ${failure.count} times, the last ` : ""}${failure.minutesAgo} minute${failure.minutesAgo === 1 ? "" : "s"} ago${failure.count >= MAX_STEP_FAILURES ? " (refused now)" : ""}: ${failure.detail}`);
-  return `Steps that failed lately in this objective (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):\n${lines.join("\n")}`;
-}
-
-function describeGoal(input: GoalInput): string {
-  return [
-    describeSituation(input.snapshot, "nothing", input.places, input.areas),
-    input.drawn.length === 0 ? "" : `Right now you feel most like ${input.drawn.map(describeActivity).join(", or else ")}.`,
-    `Things that could use doing, by what they are for: ${describeOpportunities(drawnFirst(input.opportunities, input.drawn))}`,
-    `How you spent the last hour: ${describeTime(input.time)}.`,
-    ...(input.relations === undefined || input.relations.length === 0 ? [] : [`What you know of the others:\n${input.relations.map((line) => `- ${line}`).join("\n")}`]),
-    input.lately.length === 0 ? "Lately: nothing yet." : `Lately, oldest first:\n${input.lately.map((line) => `- ${line}`).join("\n")}`,
-  ].filter((part) => part !== "").join("\n\n");
-}
-
-function describeSituation(snapshot: BotSnapshot, activity: string, places: readonly KnownPlace[], areas: readonly ProtectedArea[]): string {
-  const { x, y, z } = snapshot.position;
-  // Every item, stacks of the same item added up, and how full it is: a list cut short hid the junk she could drop
-  // (live 2026-10-02: she dropped the roof's stairs and kept 64 snowballs she never saw).
-  const totals = new Map<string, number>();
-  for (const stack of snapshot.inventory) totals.set(stack.name, (totals.get(stack.name) ?? 0) + stack.count);
-  const inventory = snapshot.inventory.length === 0
-    ? "empty"
-    : `${[...totals].map(([name, count]) => `${count} ${name}`).join(", ")} (${snapshot.inventory.length} of ${INVENTORY_SLOTS} slots used)`;
-  const players = snapshot.players.length === 0
-    ? "none"
-    : snapshot.players.map((player) => player.position === null
-      ? `${player.username} (far away)`
-      : `${player.username} (${Math.round(Math.hypot(player.position.x - x, player.position.y - y, player.position.z - z))} blocks, at ${Math.floor(player.position.x)} ${Math.floor(player.position.y)} ${Math.floor(player.position.z)})`).join(", ");
-  return `Situation:
-- Position ${Math.floor(x)} ${Math.floor(y)} ${Math.floor(z)}; health ${Math.round(snapshot.health)}/20; food ${snapshot.food}/20.
-- Inventory: ${inventory}.
-- Players online: ${players}.
-- Places you know: ${places.length === 0 ? "none" : places.map((place) => `${place.name} (${place.detail})`).join("; ")}.
-- Protected areas (you never dig or place blocks there): ${areas.length === 0 ? "none" : areas.map((area) => `#${area.regionId} ${area.label} (owner ${area.owner}, ${area.min.x} ${area.min.y} ${area.min.z} to ${area.max.x} ${area.max.y} ${area.max.z})`).join("; ")}.
-- Currently doing: ${activity}.`;
 }
 
 /** Lines back a conversation with her still counts as going on... */
@@ -843,38 +789,39 @@ function othersChatting(input: Pick<ChatInput, "message" | "persona" | "history"
   return others;
 }
 
-function describeHistory(history: readonly ChatLine[]): string {
-  if (history.length === 0) return "Recent chat: (none)";
-  // Whom each line spoke to, as she read it then ("unclear" says nothing, so it is left out).
-  const to = (line: ChatLine) => line.to === undefined || line.to.length === 0 || line.to.includes("unclear") ? "" : ` to ${line.to.join(", ")}`;
-  return `Recent chat (with whom each line spoke to, as you read it then):\n${history.map((line) => `${line.speaker}${to(line)}: ${JSON.stringify(line.text)}`).join("\n")}`;
+/** The names the chat prompt never drops from the players list: the speaker, those the history shows, those the message names. */
+function namesToKeep(input: ChatInput): string[] {
+  const inHistory = input.history.flatMap((line) => [line.speaker, ...(line.to ?? [])]);
+  return [input.message.username, ...inHistory, ...knownNamesOf(input).filter((name) => namesWord(input.message.message, name))];
 }
 
-/** Models often wrap JSON in prose or code fences; take the outermost object. */
-export function extractJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end < start) throw new Error("no JSON object in the reply");
-  return text.slice(start, end + 1);
-}
-
-/** How far off a step's coordinates must be before a turned sign is suspected. */
-const SIGN_SUSPECT_DISTANCE = 256;
-/** ... and how close they come with the sign turned. */
-const SIGN_FIXED_DISTANCE = 128;
-
-/** "x 499 is 998 blocks from you; -499 would be 6": a step's x or z whose sign, turned, puts it near; null otherwise. */
-function signFlipped(step: Step, at: { readonly x: number; readonly z: number }): string | null {
-  const target = step as { readonly x?: unknown; readonly z?: unknown };
-  if (typeof target.x !== "number" || typeof target.z !== "number") return null;
-  const { x, z } = target;
-  const far = Math.hypot(x - at.x, z - at.z);
-  if (far < SIGN_SUSPECT_DISTANCE) return null;
-  for (const [name, turned] of [["x", { x: -x, z }], ["z", { x, z: -z }], ["x and z", { x: -x, z: -z }]] as const) {
-    const near = Math.hypot(turned.x - at.x, turned.z - at.z);
-    if (near <= SIGN_FIXED_DISTANCE) {
-      return `${name} ${name === "z" ? z : x}${name === "x and z" ? ` ${z}` : ""} is ${Math.round(far)} blocks from you, but with the sign turned (${turned.x} ${turned.z}) it is ${Math.round(near)} blocks away: check the minus signs`;
-    }
-  }
-  return null;
+/**
+ * The chat tier's user message as parts: the situation, what she is doing, the chat so far, what the history shows about
+ * the message, the conversation, relations and request blocks, the notes on the speaker, and the message itself (never
+ * shrunk).
+ */
+export function chatParts(input: ChatInput, canWait: boolean, localizedChat?: LocalizedChat): PromptPart[] {
+  const { message } = input;
+  const channel = message.channel === "whisper" ? "whispers to you" : message.addressed ? "says in chat, naming you" : "says in chat";
+  const fixed = (key: string, text: string): PromptPart => ({ key, maxLevel: 0, render: () => text });
+  return [
+    ...situationParts(input.snapshot, input.activity, input.places, input.areas, namesToKeep(input)),
+    // Live 2026-10-03, farming on her own goal: "I'll build it right after this harvest!" while taking the order on at
+    // once. The reply is written from what she knows: that it stops now.
+    { key: "taking-on", maxLevel: 0, render: () => canWait || input.activity === "idle" ? "" : "What you are doing now is your own: taking a request on (act) stops it at once: you start right away, gladly or not, and never finish it first." },
+    historyPart(input.history),
+    // What the history shows about this message, as facts the model weighs when it reads who the line is for (spec
+    // 2026-10-09-chat-handling, B): they were corrections sent back after the reply.
+    { key: "conversation", maxLevel: 0, render: () => describeConversation(input) },
+    fixed("this-conversation", input.conversation === undefined ? "" : conversationBlock(input.conversation)),
+    fixed("relations", input.relations === undefined ? "" : input.relations.block),
+    fixed("requests", input.relations?.requests === undefined ? "" : requestsBlock(message.username, input.relations.requests)),
+    // The feelings sit with the line too: in the system prompt alone they were lost under a long situation (ticket 10).
+    fixed("feelings", input.persona.preferences === undefined ? "" : `How you feel about work: ${feelings(input.persona)}. Your line may show it about the work asked, even when you take it on.`),
+    fixed("unread-lines", input.unreadLines === undefined || input.unreadLines <= 0 ? "" : unreadLinesNote(input.unreadLines, message.username)),
+    fixed("speaker-orders", input.speakerOrders === undefined ? "" : speakerOrdersNote(input.speakerOrders, message.username)),
+    // The language rule sits with the line too: in the system prompt alone, French lines got English answers (live
+    // 2026-10-07).
+    { key: "message", maxLevel: 0, render: () => `New message: ${message.username} ${channel}${heardFrom(message.distance, input.heardFarAway === true, localizedChat)}: ${JSON.stringify(message.message)}\n("say" is written in this message's language, the one you name in "language".)` },
+  ];
 }

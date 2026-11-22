@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { z } from "zod";
 import { stackSizeOf } from "../newest-registry.ts";
-import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, FACINGS, placeBlueprint, ROLES, SHAPES, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, blueprintSchema, BUILD_ROLES, cellsCountedOnce, FACINGS, placeBlueprint, ROLES, SHAPES, signCellSchema, type BlockRole, type Blueprint, type Variants, type WorldCell } from "./blueprint.ts";
 import { blockId, DEFAULT_STYLE, findDataDirectory, kebabId, STYLES, variantsSchema } from "./styles.ts";
 import { groupEntryOf, supportGroups, validateBlueprint, type SupportGroup } from "./support.ts";
 
@@ -54,6 +54,7 @@ const templateFileSchema = z.strictObject({
   description: z.string().trim().min(1).max(200),
   palette: z.strictObject(Object.fromEntries(BUILD_ROLES.map((role) => [role, blockId.optional()])) as Record<BlockRole, z.ZodOptional<typeof blockId>>),
   variants: variantsSchema.optional(),
+  sign: signCellSchema,
   key: z.record(z.string().length(1), cellKind),
   layers: z.array(z.array(z.string().min(1)).min(1)).min(1),
   stages: z.array(z.strictObject({ name: z.string().trim().min(1).max(20), top: z.number().int().min(0) })).min(1).optional(),
@@ -62,6 +63,19 @@ const templateFileSchema = z.strictObject({
 type TemplateFile = z.infer<typeof templateFileSchema>;
 
 const invalid = (file: string, reason: string) => new Error(`[TEMPLATE_INVALID] ${file}: ${reason}`);
+
+const SIGN_REQUIRED = 'no "sign": every template declares the cell of its claim sign, {"x","y","z","facing"} in the layers\' frame (x column, y layer, z row): the cell beside the doorstep, one row in front of the door and one column to its side, at the door\'s layer, outside every cell of the house.';
+
+/** The claim sign sits beside the doorstep: at the door's layer, one row in front of it, one column aside (the doorway itself stays free). */
+function signProblem(blueprint: Blueprint): string | null {
+  const { sign } = blueprint;
+  const door = blueprint.cells.find((cell) => cell.role === "door");
+  if (sign === undefined || door === undefined) return SIGN_REQUIRED;
+  if (sign.y !== door.y || sign.z !== door.z - 1 || Math.abs(sign.x - door.x) !== 1) {
+    return `sign (${sign.x},${sign.y},${sign.z}) is not beside the doorstep: the door is at (${door.x},${door.y},${door.z}), the sign goes at its layer ${door.y}, row ${door.z - 1}, column ${door.x - 1} or ${door.x + 1}.`;
+  }
+  return null;
+}
 
 /** The blueprint a file's layers write: `layers[y][z][x]`, `.` and a space are no cell, any other character is a `key` entry. */
 function blueprintOfLayers(file: string, data: TemplateFile): Blueprint {
@@ -81,7 +95,7 @@ function blueprintOfLayers(file: string, data: TemplateFile): Blueprint {
       });
     });
   });
-  const parsed = blueprintSchema.safeParse({ name: data.name, size: { x: width, y: data.layers.length, z: rows }, cells });
+  const parsed = blueprintSchema.safeParse({ name: data.name, size: { x: width, y: data.layers.length, z: rows }, sign: data.sign, cells });
   if (!parsed.success) throw invalid(file, z.prettifyError(parsed.error));
   return parsed.data;
 }
@@ -111,11 +125,14 @@ function parseTemplateFile(file: string, text: string): Template {
   } catch (error) {
     throw invalid(file, `not JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (typeof json === "object" && json !== null && !("sign" in json)) throw invalid(file, SIGN_REQUIRED);
   const parsed = templateFileSchema.safeParse(json);
   if (!parsed.success) throw invalid(file, z.prettifyError(parsed.error));
   const data = parsed.data;
   if (`${data.id}.json` !== file) throw invalid(file, `id "${data.id}" does not match the file name.`);
   const blueprint = blueprintOfLayers(file, data);
+  const signIssue = signProblem(blueprint);
+  if (signIssue !== null) throw invalid(file, signIssue);
   const problems = validateBlueprint(blueprint, data.palette, data.variants ?? {});
   if (problems.length > 0) throw invalid(file, problems.join(" "));
   const staging = stageProblem(blueprint, data);

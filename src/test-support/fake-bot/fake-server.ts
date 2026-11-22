@@ -57,6 +57,8 @@ export interface ReceivedPacket {
 
 export interface FakeServer {
   readonly age: number;
+  /** `/tick rate` changes cadence without resetting game time (native-dig-clock, measured at 20 and 10 tps). */
+  setTickRate(ticksPerSecond: number): void;
   /**
    * The ticks the game has run (`time query gametime`), the one counter every subsystem of the fake counts (`onTick`): `ticksPerSecond` a
    * second of the clock the server ran, none while it is stopped. A stop at 20 ticks a second is caught up at `resume()` (the owed ticks run
@@ -116,6 +118,13 @@ export interface FakeServer {
   /** Where the server has an entity, when it differs from the client's belief (a rider let off at the boat's top). */
   serverPositionOf(entityId: number): Vec3 | null;
   setServerPosition(entityId: number, position: Vec3): void;
+  /**
+   * Where the server puts the player after a death: the world's spawn, or the spot beside the bed she slept in (contract checks
+   * `respawn-after-death` and `respawn-while-asleep`). The world's spawn differs from where she died (8.5 blocks from the origin, 512 from the death in 3 runs).
+   * Null until a bot gives it (`createFakeBot` sets it to her feet, or to its `spawn` option).
+   */
+  readonly respawnPoint: Vec3 | null;
+  setRespawnPoint(point: Vec3): void;
   /** Every `position` packet sent to the client, in order. */
   readonly sentPositions: readonly Vec3[];
   /** Send the client a `position` packet (mineflayer restarts physics on it). */
@@ -137,7 +146,7 @@ interface PendingAnswer {
 function createServerTicks(options: FakeServerOptions) {
   const phaseMs = options.phaseMs ?? 0;
   if (phaseMs < 0 || phaseMs >= ONE_SECOND_MS) throw new RangeError(`phaseMs ${phaseMs}: 0 to 999`);
-  const ticksPerSecond = options.ticksPerSecond ?? ON_TIME_TICKS_PER_SECOND;
+  let ticksPerSecond = options.ticksPerSecond ?? ON_TIME_TICKS_PER_SECOND;
   if (!Number.isInteger(ticksPerSecond) || ticksPerSecond < 1) throw new RangeError(`ticksPerSecond ${ticksPerSecond}: a whole number from 1`);
   if (phaseMs > 0 && ticksPerSecond !== ON_TIME_TICKS_PER_SECOND) throw new RangeError(`phaseMs ${phaseMs} with ticksPerSecond ${ticksPerSecond}: a phase is the packet's place in the second of a server on time (20)`);
   const startAge = options.startAge ?? 24_000;
@@ -145,7 +154,7 @@ function createServerTicks(options: FakeServerOptions) {
   let ticksRun = Math.floor((serverMs * ticksPerSecond) / ONE_SECOND_MS);
   const listeners = new Set<() => void>();
   return {
-    ticksPerSecond,
+    get ticksPerSecond() { return ticksPerSecond; },
     /** The ticks run so far, the ones of the first `phaseMs` ms included. */
     get ticksRun() {
       return ticksRun;
@@ -169,6 +178,11 @@ function createServerTicks(options: FakeServerOptions) {
       return ticksRun - ticksBefore;
     },
     api: {
+      setTickRate(rate: number) {
+        if (!Number.isInteger(rate) || rate < 1) throw new RangeError(`ticksPerSecond ${rate}: a whole number from 1`);
+        serverMs = (serverMs * ticksPerSecond) / rate;
+        ticksPerSecond = rate;
+      },
       get gameTime() {
         return startAge + ticksRun;
       },
@@ -176,7 +190,7 @@ function createServerTicks(options: FakeServerOptions) {
         listeners.add(listener);
         return () => void listeners.delete(listener);
       },
-    } satisfies Pick<FakeServer, "gameTime" | "onTick">,
+    } satisfies Pick<FakeServer, "gameTime" | "onTick" | "setTickRate">,
   };
 }
 
@@ -400,10 +414,15 @@ export function createFakeServer(clock: FakeClock, options: FakeServerOptions = 
     if (outcome === "catch up") catchUp(nowMs - stoppedAtMs);
   };
 
+  let respawnPoint: Vec3 | null = null;
   const server = {
     get isRunning() {
       return running;
     },
+    get respawnPoint() {
+      return respawnPoint;
+    },
+    setRespawnPoint: (point: Vec3) => void (respawnPoint = point.clone()),
     onWeatherPacket: weatherChannel.onWeatherPacket,
     ...createClientPackets(clock),
     ...createPositions(),

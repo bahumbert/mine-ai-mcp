@@ -31,6 +31,7 @@ export function createRunScopedBot(shared: NavigationBot): RunScopedBot {
       return shared.ownedControlCount;
     },
     ...(shared.longestBreakDurationMs && { longestBreakDurationMs: (operation) => shared.longestBreakDurationMs!(operation) }),
+    ...(shared.worldAge && { worldAge: () => shared.worldAge!() }),
     ...(shared.requestCellResync && {
       requestCellResync: async (cell, signal) => (revoked ? "unavailable" : shared.requestCellResync!(cell, signal)),
     }),

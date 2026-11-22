@@ -12,7 +12,7 @@ import { ActionRunner } from "../../../session/action-runner.js";
 import type { FootingRecovery } from "../../responses/footing.js";
 
 /** The selected crystal #42 above the bot; the scene's blocks and carried items are the test's. */
-function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> = {}) {
+function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY" | "slots" | "clock"> = {}) {
   const { bot, clock, combat, entities, server, world } = createFakeBot({
     ...options,
     server: { startAge: 100 },
@@ -25,7 +25,7 @@ function fixture(options: Pick<FakeBotOptions, "carried" | "cells" | "groundY"> 
   const end = new EndCombat(bot, {} as NavigationRuntime, { needed: false } as FootingRecovery);
   const explode = () => bot._client.emit("explosion", { x: 30, y: 80, z: 0 });
   const run = <T>(action: Promise<T>) => clock.settle(action, 60_000);
-  return { bot, combat, entities, server, world, target, end, explode, script, run };
+  return { bot, clock, combat, entities, server, world, target, end, explode, script, run };
 }
 
 /** The server announces a dragon's breath cloud (entity 7) where the bot stands. */
@@ -192,6 +192,31 @@ test("explicit bow refuses before movement when ammunition is unavailable", asyn
   assert.equal(moves, 0);
 });
 
+// B4 (spec P4-17): any item of the family `arrow` (tag `arrows`) is ammunition, not the item `arrow` alone.
+// Review 2026-11-07 S8: arrows held in the off-hand (slot 45) are ammunition too (vanilla shoots them first: unmeasured here).
+const AMMUNITION: Record<string, Pick<FakeBotOptions, "carried" | "slots">> = {
+  spectral_arrow: { carried: { bow: 1, spectral_arrow: 3 } },
+  tipped_arrow: { carried: { bow: 1, tipped_arrow: 3 } },
+  "arrow in the off-hand": { carried: { bow: 1 }, slots: { 45: { name: "arrow", count: 4 } } },
+};
+for (const [ammunition, held] of Object.entries(AMMUNITION)) {
+  test(`explicit bow starts its approach with ${ammunition} as the only ammunition`, async () => {
+    const f = fixture({ ...held, clock: createFakeClock({ mode: "mocked" }) });
+    using _timers = f.clock.install();
+    const navigation = {
+      navigate: async () => ({ status: "failed", reason: "approach started", elapsedMs: 1 }) as const,
+    } as unknown as NavigationRuntime;
+    using observation = new CrystalObservation(f.bot, 42, "bow");
+    const result = await f.run(new EndCombat(f.bot, navigation, { needed: false } as FootingRecovery).crystal(
+      42,
+      new AbortController().signal,
+      observation,
+    ));
+    assert.notEqual(result.outcome, "weapon_unavailable");
+    assert.equal(result.crystal?.usedWeapon, "bow");
+  });
+}
+
 test("crystal bow search accepts distant clear shots without preferring a blocked closer stance", async () => {
   // A tower face between the near stance and the crystal; the far stance's ray passes above it.
   const tower = Object.fromEntries([71, 72, 73, 74, 75].flatMap((y) => [-2, -1, 0, 1, 2].map((z) => [`20,${y},${z}`, "obsidian"])));
@@ -223,7 +248,8 @@ test("crystal bow search accepts distant clear shots without preferring a blocke
 });
 
 test("explicit melee reports staircase supplies instead of falling back to a carried bow", async () => {
-  const f = fixture({ cells: { "30,79,0": "bedrock", "32,76,0": "obsidian" }, carried: { bow: 1, arrow: 8, cobblestone: 32 } });
+  // "30,76,0": the native core 4 under the crystal that the survey requires (first-entry-64510673-tower.fixture.json -42,85,-1, one radius-3 spike; spikeCells in crystal-staircase.test.ts)
+  const f = fixture({ cells: { "30,79,0": "bedrock", "32,76,0": "obsidian", "30,76,0": "obsidian" }, carried: { bow: 1, arrow: 8, cobblestone: 32 } });
   f.target.position.set(30.5, 80, 0.5);
   let moves = 0;
   const navigation = {
@@ -356,7 +382,8 @@ async function shootThroughBreath(f: ReturnType<typeof fixture>, onTick: (ticks:
 }
 
 test("breath cancels only the bow draw, escapes, then destroys the same crystal with one arrow", async () => {
-  const f = fixture({ carried: { bow: 1, arrow: 3 } });
+  const f = fixture({ carried: { bow: 1, arrow: 3 }, clock: createFakeClock({ mode: "mocked" }) });
+  using _timers = f.clock.install();
   const { escapes, releases, result } = await shootThroughBreath(f, () => undefined);
   assert.equal(escapes, 1);
   assert.equal(releases, 1);
@@ -365,7 +392,8 @@ test("breath cancels only the bow draw, escapes, then destroys the same crystal 
 });
 
 test("a crystal destroyed during the resumed draw cancels the draw without firing at its old position", async () => {
-  const f = fixture({ carried: { bow: 1, arrow: 3 } });
+  const f = fixture({ carried: { bow: 1, arrow: 3 }, clock: createFakeClock({ mode: "mocked" }) });
+  using _timers = f.clock.install();
   const { escapes, releases, result } = await shootThroughBreath(f, (ticks) => {
     if (ticks !== 15) return;
     f.entities.remove(42);

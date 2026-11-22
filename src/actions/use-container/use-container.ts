@@ -7,6 +7,7 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { asVec3 } from "../../utils/index.js";
 import { chestOpeningObstruction } from "../../world/chest-clearance.js";
 import { isLocationOwnedContainer } from "../../world/containers.js";
+import { familyIndexOf } from "../../world/item-families.js";
 import type { ObserveRequest } from "../../session/request.js";
 import { defineAction, type ActionContext, type RequestExecution } from "../action.js";
 import { describeNavigation } from "../navigation-result.js";
@@ -382,7 +383,7 @@ async function attemptContainerUse(
 
     const block = bot.blockAt(position);
     if (!block) return { status: "failed", error: useContainerOutcomes.blockUnloaded, target: targetValue };
-    if (!isLocationOwnedContainer(block.name)) {
+    if (!isLocationOwnedContainer(familyIndexOf(bot), block.name)) {
       forgetContainerObservation(data, targetValue);
       return {
         status: "failed",

@@ -12,27 +12,46 @@
  * Heuristics are priced in ticks per axis, following Baritone, because a
  * block upward costs twice a block sideways; the constants below say why.
  */
+import { Vec3 } from "vec3";
+import { shooterSeesBody } from "../../world/entity-geometry.js";
+import { PLAYER_HALF_WIDTH, PLAYER_STANDING_HEIGHT } from "../../world/player-physics.js";
 import type { GeneratedMovement } from "../movements/catalogue.js";
+import { EMPTY_OVERLAY_IDENTITY } from "../search/planning-overlay.js";
 import { navigationFeet } from "../world/block-geometry.js";
+import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { withinItemPickupReach } from "../world/item-geometry.js";
 import {
   samePosition,
   type BlockPosition,
   type EntityObservation,
   type NavigationObservation,
+  type WorldView,
 } from "../world/world.js";
 import type { Goal, GoalEndPredicate, PlanningNode, ResolvedGoal } from "./goal.js";
 type Distance = (position: BlockPosition) => number;
 type Satisfaction = (position: BlockPosition) => boolean;
 
-function staticGoal(name: string, distance: Distance, isSatisfied: Satisfaction): Goal {
+/** Resolve a static target with an optional enumeration tied to its own predicate. */
+function staticGoal(
+  name: string,
+  distance: Distance,
+  satisfiesPosition: Satisfaction,
+  enumerate?: (limit: number) => readonly BlockPosition[] | null,
+): Goal {
   return {
-    resolve: () => ({
-      kind: "active",
-      revision: name,
-      heuristic: (node) => distance(node.feet),
-      isSatisfied: (node) => isSatisfied(node.feet),
-    }),
+    resolve() {
+      const isSatisfied = (node: PlanningNode) => satisfiesPosition(node.feet);
+      return {
+        kind: "active",
+        revision: name,
+        heuristic: (node) => distance(node.feet),
+        isSatisfied,
+        ...(enumerate && { endpoints(limit: number) {
+          const cells = enumerate(limit);
+          return cells === null ? null : { satisfies: isSatisfied, cells };
+        } }),
+      };
+    },
   };
 }
 
@@ -120,6 +139,25 @@ function spatialDistance(left: BlockPosition, right: BlockPosition): number {
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+/** Whether this centre can anchor an enumeration of integer feet cells. */
+function isBlockCentre({ x, y, z }: BlockPosition): boolean {
+  return Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z);
+}
+
+/** Cells within `range` of `centre`, in x, y, z order. A limit requires an integer centre and bounds the whole cube. */
+export function cellsWithin(centre: BlockPosition, range: number): readonly BlockPosition[];
+export function cellsWithin(centre: BlockPosition, range: number, limit?: number): readonly BlockPosition[] | null;
+export function cellsWithin(centre: BlockPosition, range: number, limit?: number): readonly BlockPosition[] | null {
+  const reach = Math.ceil(range);
+  if (limit !== undefined && (!isBlockCentre(centre) || (2 * reach + 1) ** 3 > limit)) return null;
+  const cells: BlockPosition[] = [];
+  for (let dx = -reach; dx <= reach; dx += 1)
+    for (let dy = -reach; dy <= reach; dy += 1)
+      for (let dz = -reach; dz <= reach; dz += 1)
+        cells.push({ x: centre.x + dx, y: centre.y + dy, z: centre.z + dz });
+  return cells.filter((cell) => spatialDistance(centre, cell) <= range);
+}
+
 function targetName(kind: string, target: BlockPosition, range?: number): string {
   const suffix = range === undefined ? "" : `:${range}`;
   return `${kind}:${target.x},${target.y},${target.z}${suffix}`;
@@ -131,6 +169,7 @@ export function exactBlockGoal(target: BlockPosition): Goal {
     name,
     (position) => ticksToReach(position, target),
     (position) => spatialDistance(position, target) === 0,
+    (limit) => limit >= 1 && isBlockCentre(target) ? [target] : null,
   );
 }
 
@@ -140,6 +179,7 @@ export function nearGoal(target: BlockPosition, range: number): Goal {
     name,
     (position) => ticksToReach(position, target, range),
     (position) => spatialDistance(position, target) <= range,
+    (limit) => cellsWithin(target, range, limit),
   );
 }
 
@@ -247,10 +287,10 @@ export function anyGoal(goals: readonly Goal[]): Goal {
         isSatisfied: (node, world) => active.some((candidate) => candidate.isSatisfied(node, world)),
         ...(active.some((candidate) => candidate.finish) &&
           ({
-            finish: (state, context, digContext) => {
+            finish: (state, context, digContext, actualStart) => {
               let cheapest: GeneratedMovement | null = null;
               for (const candidate of active) {
-                const finish = candidate.finish?.(state, context, digContext);
+                const finish = candidate.finish?.(state, context, digContext, actualStart);
                 if (finish && (cheapest === null || finish.cost < cheapest.cost)) cheapest = finish;
               }
               return cheapest;
@@ -348,6 +388,34 @@ function followEntityGoal(
   };
 }
 
+/** A threat's last position and optional geometry for finding cover. */
+export interface SafeFromEntity extends Pick<EntityObservation, "id" | "position"> {
+  readonly cover?: { readonly minRange: number; readonly eyeHeight: number; readonly width: number };
+}
+
+/** Whether every shooter eye is blocked by loaded geometry before it reaches the standing body. */
+function coveredFrom(threat: SafeFromEntity, position: Vec3, world: WorldView): boolean {
+  const cover = threat.cover;
+  if (!cover) return false;
+  let unknown = false;
+  const ray = worldViewRaycaster((x, y, z) => {
+    const obstacles = obstaclesOf(world.blockAt(x, y, z), x, z);
+    if (obstacles === null) unknown = true;
+    return obstacles;
+  });
+  // shooterSeesBody puts the eye at height * 0.85, so the cover's eye height is passed back as a height.
+  const shooter = { position: new Vec3(threat.position.x, threat.position.y, threat.position.z), width: cover.width,
+    height: cover.eyeHeight / 0.85 };
+  const body = { position, width: PLAYER_HALF_WIDTH * 2, height: PLAYER_STANDING_HEIGHT };
+  return !shooterSeesBody(ray, shooter, body) && !unknown;
+}
+
+/** Identify cover geometry alongside each frozen threat position. */
+function coverRevision(threat: SafeFromEntity): string {
+  const { id, position, cover } = threat;
+  return `${id}@${position.x},${position.y},${position.z}${cover ? `:${cover.minRange},${cover.eyeHeight},${cover.width}` : ""}`;
+}
+
 /**
  * Reach a body position in `stance` toward a live entity: within `reach` in the plane and in its height band, so a cell
  * beneath a ledge is no stance for a target on it however near it is in 3-D (a hand-over, `drop-item/hand-over-stance.ts`).
@@ -377,29 +445,53 @@ export function nearEntityGoal(entity: EntityReference, range: number): Goal {
 
 /**
  * Reach a stance at least `range` from every supplied threat, using its current
- * position when observed and the caller's last observation otherwise.
+ * position when observed and the caller's last observation otherwise, unless
+ * snapshot mode freezes the supplied positions.
  *
  * Unlike composing inverted near-entity goals, this gives A* a gradient: the
  * largest remaining distance shortfall. Entity positions are re-read whenever
  * the goal is resolved, so an approaching threat revises the active route.
  * If an entity disappears, separation is still owed from its last observation.
  * The caller removes confirmed-dead threats; absence alone does not establish safety.
+ * Cover counts only on routes with no predicted edits; ahead searches over pending
+ * edits must reach the range instead. The current cell uses the observed body,
+ * other cells their centres. This avoids self-dug cover (40/60 skeleton trials
+ * below the floor, P4-29 a3, 2026-11-16).
  */
 export function safeFromEntitiesGoal(
-  entities: readonly Pick<EntityObservation, "id" | "position">[],
+  entities: readonly SafeFromEntity[],
   range: number,
+  options?: {
+    readonly follow?: "live" | "snapshot";
+    /** A node where this is true is never satisfied, cover or not; `unsafeRevision` names its state for the revision. */
+    readonly unsafe?: (feet: Vec3) => boolean;
+    readonly unsafeRevision?: number;
+  },
 ): Goal {
   if (range < 0 || !Number.isFinite(range))
     throw new RangeError("Safe entity range must be a finite non-negative number.");
-  const known = [...new Map(entities.map((entity) => [entity.id, entity])).values()].sort((a, b) => a.id - b.id);
+  const snapshot = options?.follow === "snapshot";
+  const unsafe = options?.unsafe;
+  const known = [...new Map(entities.map((entity) => [entity.id, snapshot
+    ? { ...entity, position: { ...entity.position } }
+    : entity])).values()].sort((a, b) => a.id - b.id);
   return {
     resolve(observation) {
-      const threats = known.map((lastSeen) => observation.entities.get(lastSeen.id) ?? lastSeen);
-      const revision = `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
+      const threats = snapshot ? known : known.map((lastSeen) => ({ ...lastSeen, ...observation.entities.get(lastSeen.id) }));
+      const current = navigationFeet(observation.position, observation.stance === "supported");
+      const threatRevision = threats.some((threat) => threat.cover)
+        ? `safe-from:${range}:${snapshot ? "snapshot" : "live"}:${threats.map(coverRevision).join("|")}`
+        : snapshot
+        ? `safe-from:${range}:snapshot:${threats.map(({ id, position }) => `${id}@${position.x},${position.y},${position.z}`).join("|")}`
+        : `safe-from:${range}:${threats.map(entityRevision).join("|")}`;
+      const revision = unsafe ? `${threatRevision}|unsafe:${options?.unsafeRevision ?? 0}` : threatRevision;
+      const cache = new Map<string, boolean>();
       const shortfall = (position: BlockPosition): number => {
         let largest = 0;
         for (const threat of threats) {
-          largest = Math.max(largest, range - spatialDistance(position, threat.position));
+          const distance = spatialDistance(position, threat.position);
+          const target = threat.cover?.minRange ?? range;
+          largest = Math.max(largest, target - distance);
         }
         return Math.max(0, largest);
       };
@@ -407,7 +499,22 @@ export function safeFromEntitiesGoal(
         kind: "active",
         revision,
         heuristic: (node) => shortfall(node.feet) * HORIZONTAL_TICKS_PER_BLOCK,
-        isSatisfied: (node) => shortfall(node.feet) === 0,
+        progress: (node) => Math.max(0, ...threats.map((threat) => range - spatialDistance(node.feet, threat.position))) * HORIZONTAL_TICKS_PER_BLOCK,
+        isSatisfied: (node, world) => {
+          const key = `${node.overlayId}|${node.feet.x},${node.feet.y},${node.feet.z}`;
+          const cached = cache.get(key);
+          if (cached !== undefined) return cached;
+          const satisfied = !unsafe?.(new Vec3(node.feet.x, node.feet.y, node.feet.z)) && threats.every((threat) => {
+            const distance = spatialDistance(node.feet, threat.position);
+            return distance >= range || (node.overlayId === EMPTY_OVERLAY_IDENTITY
+              && threat.cover !== undefined && distance >= threat.cover.minRange
+              && coveredFrom(threat, samePosition(node.feet, current)
+                ? new Vec3(observation.position.x, observation.position.y, observation.position.z)
+                : new Vec3(node.feet.x + 0.5, node.feet.y, node.feet.z + 0.5), world));
+          });
+          cache.set(key, satisfied);
+          return satisfied;
+        },
       };
     },
   };

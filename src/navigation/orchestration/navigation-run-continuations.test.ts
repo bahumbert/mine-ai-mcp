@@ -312,8 +312,12 @@ test("a target oscillating between two cells is not mistaken for a repeated sear
     world: flatWorld(),
     bot: actuator,
     createId: () => "oscillating-goal",
+    // One flip per search, on its start: every flip lands while a search is
+    // under way, and its first slice judges the goal against the start it
+    // observed. The number of search slices that fit before arrival depends on
+    // the machine's speed, so a flip per slice made the count depend on it.
     telemetry: onEvent((event) => {
-      if (event.kind !== "search_slice" || flips >= 4) return;
+      if (event.kind !== "search_started" || flips >= 4) return;
       flips += 1;
       actuator.moveTargetTo(flips % 2 === 1 ? 4 : 5);
     }),
@@ -325,11 +329,12 @@ test("a target oscillating between two cells is not mistaken for a repeated sear
     goal: itemPickupGoal({ id: 7 }),
     policy: walking(),
   });
-  // Three flips is the smallest number that returns the target to its first
-  // cell, which is the repeat the guard has to tell apart. How many more happen
-  // depends on how many search slices the machine fits in before arrival.
-  assert.ok(flips >= 3, `expected the target to flip at least three times, saw ${flips}`);
-  assert.equal(outcome.kind, "completed");
+  // Four flips: the target goes to the second cell, back to the first, out
+  // again and back, so the first cell is revisited, which is the repeat the
+  // guard has to tell apart. Each flip starts a new search, so the count does
+  // not depend on how many slices the machine fits before arrival.
+  assert.equal(outcome.kind, "completed", outcome.kind === "failed" ? JSON.stringify(outcome.failure) : outcome.kind);
+  assert.equal(flips, 4, `expected the target to flip four times, saw ${flips}`);
 });
 
 test("a goal revised during execution keeps a route whose terminal state still satisfies it", async () => {

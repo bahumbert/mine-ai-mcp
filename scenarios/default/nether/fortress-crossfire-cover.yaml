@@ -30,4 +30,4 @@ players:
 client:
   command: bun
   args: ["../../src/client-host.ts", "./fortress-crossfire-cover.ts"]
-goal: { kind: completion, who: FortressCover, timeout: 120 }
+goal: { kind: completion, who: FortressCover, timeout: 120, stillTicks: 1520 } # P4-29 a11 T8: longest passing still span 751 ticks at 20 tps over 17 passing trials (2026-11-18); 2x rounded up to 20.

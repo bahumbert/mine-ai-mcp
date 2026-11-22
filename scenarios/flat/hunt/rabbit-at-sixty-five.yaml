@@ -59,5 +59,8 @@ goal:
     - kind: kill
       who: RabbitHunter
       target: rabbit
+    - kind: survive
+      who: RabbitHunter
+      seconds: 1
     - kind: completion
       who: RabbitHunter

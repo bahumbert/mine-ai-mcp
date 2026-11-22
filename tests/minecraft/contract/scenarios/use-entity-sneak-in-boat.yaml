@@ -1,0 +1,30 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-use-entity-sneak-in-boat
+tags: [contract]
+description: Attacks hurt a nearby mob; a false sneak field keeps the rider seated and true gets her off. The same check runs on the shared fake.
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/bot-contract.ts, --without-runtime]
+params:
+  check: use-entity-sneak-in-boat
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+entities:
+  - type: oak_boat
+    pos: [2.5, -60, 0.5]
+  - type: cow
+    pos: [3.5, -60, 2.5]
+    nbt: '{NoAI:1b,Silent:1b,PersistenceRequired:1b}'
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

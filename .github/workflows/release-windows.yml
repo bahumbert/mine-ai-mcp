@@ -1,0 +1,225 @@
+# Release of the Windows setup (MineAI-Setup-<version>.exe), signed by SignPath Foundation.
+#
+# Triggers:
+#   - a push of a tag `pre-alpha-X.Y.Z`: the full release (build, sign, draft release);
+#   - `workflow_dispatch` on a branch: a build-only dry run (job `build`, the unsigned setup uploaded as an artifact;
+#     `sign` and `release` run on a tag only). `workflow_dispatch` on a tag (`gh workflow run release-windows.yml --ref
+#     <tag>`) runs the workflow file as it is at that tag.
+#
+# Jobs, each with the least permissions it needs:
+#   build   (contents: read)   checks the tag, builds the setup with the public personas of packaging/personas, uploads
+#                              it as `unsigned-setup`. Holds no secret and no write token.
+#   sign    (environment release)  sends that artifact to SignPath, waits for the owner's approval in SignPath (up to
+#                              4 hours), checks the signer with signtool, uploads `signed-setup`. It runs only once the
+#                              SIGNPATH_* repository variables exist; until then `release` publishes an unsigned draft.
+#   release (contents: write)  makes the checksum and the notes and creates a DRAFT release. It runs no dependency code.
+# The owner publishes the draft by hand. Specification: .agent/specs/2026-11-07-installer-code-signing.md (D2).
+name: Release Windows setup
+
+on:
+  push:
+    tags:
+      - "pre-alpha-*"
+  workflow_dispatch:
+
+permissions: {}
+
+# Git Bash would turn Inno's /VERYSILENT into a path and leave its wizard waiting on a headless runner.
+env:
+  MSYS_NO_PATHCONV: "1"
+  # Inno Setup 6.7.3 (the version the setup is compiled with, knowledge/facts/packaging.md), from the project's GitHub release.
+  INNO_URL: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
+  INNO_SHA256: 9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732
+
+defaults:
+  run:
+    shell: bash
+
+# A second run for the same ref waits for the first (a draft is made once per tag).
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.guard.outputs.version || steps.manifest.outputs.version }}
+      tagged: ${{ steps.guard.outputs.tagged || 'false' }}
+      artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+      bun-version: ${{ steps.bun.outputs.bun-version }}
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 10
+        with:
+          persist-credentials: false
+      # A tag must be pre-alpha-X.Y.Z; its version is X.Y.Z, the version of the setup (build-windows.ts writes it into the shipped manifest).
+      - name: Tag guard
+        id: guard
+        if: github.ref_type == 'tag'
+        timeout-minutes: 10
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^pre-alpha-([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "release-windows: tag '$GITHUB_REF_NAME' is not pre-alpha-X.Y.Z." >&2
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        id: bun
+        timeout-minutes: 10
+        with:
+          bun-version: 1.4.2
+          no-cache: true
+      - name: Manifest version (branch run)
+        id: manifest
+        if: github.ref_type != 'tag'
+        timeout-minutes: 10
+        run: |
+          version=$(bun -e 'console.log(JSON.parse(require("node:fs").readFileSync("packaging/manifest.json", "utf8")).version)' | tr -d '\r')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install Inno Setup
+        timeout-minutes: 10
+        run: |
+          curl -fL --retry 3 -o "$RUNNER_TEMP/innosetup.exe" "$INNO_URL"
+          echo "$INNO_SHA256  $RUNNER_TEMP/innosetup.exe" | sha256sum -c -
+          "$RUNNER_TEMP/innosetup.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER "/DIR=${RUNNER_TEMP}\\inno"
+          test -f "$RUNNER_TEMP/inno/ISCC.exe"
+          echo "INNO_SETUP=${RUNNER_TEMP}\\inno" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: bun install --frozen-lockfile
+      # No --sign-command: SignPath signs the finished setup in job `sign`.
+      - name: Build the setup
+        timeout-minutes: 60
+        env:
+          VERSION: ${{ steps.guard.outputs.version || steps.manifest.outputs.version }}
+        run: bun launcher/src/build/build-windows.ts --personas packaging/personas --out "$RUNNER_TEMP/out" --version "$VERSION"
+      - uses: actions/upload-artifact@v4
+        id: unsigned
+        timeout-minutes: 10
+        with:
+          name: unsigned-setup
+          path: ${{ runner.temp }}\out\MineAI-Setup-*.exe
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    # Variables can gate a job, secrets cannot: without the SIGNPATH_* variables this job is skipped.
+    if: github.ref_type == 'tag' && vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: windows-2025
+    timeout-minutes: 260
+    environment: release
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Submit the signing request to SignPath and wait for the approval
+        id: sign
+        timeout-minutes: 250
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 14400
+          output-artifact-directory: ${{ runner.temp }}\signed
+      # Any other valid certificate than SignPath Foundation's fails the run.
+      - name: Verify the signature
+        timeout-minutes: 10
+        run: |
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/signed/MineAI-Setup-*.exe)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "release-windows: expected one signed setup in $RUNNER_TEMP/signed, found ${#files[@]}." >&2
+            exit 1
+          fi
+          signtools=("/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe)
+          if [ "${#signtools[@]}" -eq 0 ]; then
+            echo "release-windows: signtool.exe not found under the Windows Kits folder of the runner." >&2
+            exit 1
+          fi
+          signtool=$(printf '%s\n' "${signtools[@]}" | sort -V | tail -n 1)
+          "$signtool" verify /pa /v "$(cygpath -w "${files[0]}")" | tee "$RUNNER_TEMP/verify.txt"
+          grep -q "Issued to: SignPath Foundation" "$RUNNER_TEMP/verify.txt"
+      # A failed `release` job reruns from this artifact, without a second SignPath request.
+      - uses: actions/upload-artifact@v4
+        timeout-minutes: 10
+        with:
+          name: signed-setup
+          path: ${{ runner.temp }}\signed\MineAI-Setup-*.exe
+          if-no-files-found: error
+
+  release:
+    needs: [build, sign]
+    if: always() && github.ref_type == 'tag' && needs.build.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SIGNED: ${{ needs.sign.result == 'success' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        timeout-minutes: 10
+        with:
+          name: ${{ needs.sign.result == 'success' && 'signed-setup' || 'unsigned-setup' }}
+          path: ${{ runner.temp }}/release
+      - name: Checksum and release notes
+        timeout-minutes: 10
+        env:
+          BUN_VERSION: ${{ needs.build.outputs.bun-version }}
+        run: |
+          cd "$RUNNER_TEMP/release"
+          setup="MineAI-Setup-$VERSION.exe"
+          test -f "$setup"
+          sha256sum "$setup" > "$setup.sha256"
+          if [ "$SIGNED" = "true" ]; then
+            signature="signed by SignPath Foundation"
+            signature_note="The setup is signed with a certificate from SignPath Foundation (free code signing provided by [SignPath.io](https://signpath.io))."
+          else
+            signature="unsigned"
+            signature_note="This build is not signed yet."
+          fi
+          {
+            echo "tag: $GITHUB_REF_NAME"
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "bun: $BUN_VERSION"
+            echo "$signature"
+          } > release.txt
+          {
+            echo "Mine AI $VERSION (pre-alpha): companion and rival AI players for Minecraft Java 1.21.4, run by an AI model of your choice."
+            echo
+            echo "Download \`$setup\` and follow the [Windows install guide]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/install/windows.md)."
+            echo
+            echo "$signature_note See the [code signing policy]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/code-signing-policy.md)."
+          } > "$RUNNER_TEMP/release-notes.md"
+      # `gh release view <tag>` does not see drafts, and GitHub accepts two drafts on one tag: list every release.
+      - name: Refuse a second release for this tag
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name == $ENV.GITHUB_REF_NAME) | .html_url')
+          if [ -n "$existing" ]; then
+            echo "release-windows: tag '$GITHUB_REF_NAME' already has a release or draft: $existing. Delete it on GitHub, then rerun this job." >&2
+            exit 1
+          fi
+      # A draft, never a pre-release (releases/latest skips pre-releases); the owner publishes it by hand.
+      - name: Create the draft release
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/release"
+          setup="MineAI-Setup-$VERSION.exe"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "Mine AI $VERSION (pre-alpha)" --notes-file "$RUNNER_TEMP/release-notes.md" "$setup" "$setup.sha256" release.txt

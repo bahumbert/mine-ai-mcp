@@ -17,6 +17,7 @@ import { armSignal, asVec3, elapsedSince, monotonicNow, timeoutSignal, type Posi
 import { defineAction, type ActionContext } from "../action.js";
 import { navigateCheckpointSchema } from "../checkpoint-schemas.js";
 import { formatNavigateResult } from "../navigate/navigate.js";
+import { digCounterOf } from "../navigate/slow-walk.js";
 import type { NavigationEvidence } from "../navigate/contract.js";
 import {
   ENTER_END_PORTAL,
@@ -52,7 +53,17 @@ function position(value: Position3): Position3 {
   return { x: value.x, y: value.y, z: value.z };
 }
 
-function evidence(bot: Bot, request: PortalEntryRequest, start: Position3, startDimension: string, elapsedMs: number, scaffoldBefore: ReadonlyMap<string, number>, bucketBefore: ReturnType<typeof bucketDropTotals>): NavigationEvidence {
+/** What the portal entry carries when it starts, read again at the end for the evidence: scaffold stocks, bucket totals, the call's dig counter. */
+function stocksBefore(bot: Bot, lifetime: AbortSignal) {
+  return {
+    scaffoldBefore: new Map(scaffoldBlockNames(bot).map((item) => [item, bot.inventory.count(bot.registry.itemsByName[item]?.id ?? -1, null)])),
+    bucketBefore: bucketDropTotals(bot),
+    digs: digCounterOf(bot, lifetime),
+  };
+}
+
+function evidence(bot: Bot, request: PortalEntryRequest, start: Position3, startDimension: string, elapsedMs: number, stocks: ReturnType<typeof stocksBefore>): NavigationEvidence {
+  const { scaffoldBefore, bucketBefore, digs } = stocks;
   return {
     startDimension,
     endDimension: bot.game.dimension,
@@ -70,6 +81,7 @@ function evidence(bot: Bot, request: PortalEntryRequest, start: Position3, start
     })),
     bucketDrops: { count: bucketDropTotals(bot).count - bucketBefore.count, waterRecovered: bucketDropTotals(bot).waterRecovered - bucketBefore.waterRecovered },
     missingDigTools: (["shovel", "pickaxe", "axe"] as const).filter((tool) => !bot.inventory.items().some((item) => item.name.endsWith(`_${tool}`))),
+    digs: digs.facts(),
   };
 }
 
@@ -116,9 +128,8 @@ export function beginPortalEntry(
   let died = false;
   let elapsedMs = 0;
   const toolLoss = observeToolTierLoss(bot);
-  const bucketBefore = bucketDropTotals(bot);
-  const scaffoldBefore = new Map(scaffoldBlockNames(bot).map((item) => [item, bot.inventory.count(bot.registry.itemsByName[item]?.id ?? -1, null)]));
-  const receipt = () => evidence(bot, request, start, startDimension, elapsedMs, scaffoldBefore, bucketBefore);
+  const stocks = stocksBefore(bot, lifetime);
+  const receipt = () => evidence(bot, request, start, startDimension, elapsedMs, stocks);
   observe(() => ({
     baseline: { dimension: startDimension, position: { ...start } },
     checkpoint: { destination: { ...position(cell) }, remainingDistance: bot.game.dimension === startDimension ? bot.entity.position.distanceTo(cell) : null, dimension: bot.game.dimension, positionedDimension, died, portal: { block, cell: cell.toString() } },

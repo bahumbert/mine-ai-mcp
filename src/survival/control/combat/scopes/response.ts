@@ -1,12 +1,16 @@
 import type { Bot } from "mineflayer";
+import { familyIndexOf, type ItemFamily } from "../../../../world/item-families.js";
 import type { SurvivalPolicy } from "../../../policy/contract.js";
 import { recoveryHealth } from "../../../policy/combat/health.js";
 import { responsePermissions } from "../../../policy/combat/permissions.js";
-import type { AnsweredScope } from "../../../state/answered.js";
+import type { AnsweredScope, Facts } from "../../../state/answered.js";
 import type { SurvivalResources } from "../../../state/resources.js";
 import { recoveryScope } from "./recovery.js";
 
 export type CombatResponse = "fight" | "hide" | "evade" | "deflect";
+
+/** The families a fight's answered-response record lists: what the bot can hit, shoot or guard with. */
+const FIGHT_TRACE_FAMILIES: readonly ItemFamily[] = ["bow", "crossbow", "arrow", "sword", "axe", "shield"];
 
 export function responseScope(
   bot: Bot,
@@ -18,27 +22,31 @@ export function responseScope(
   return {
     capability: `combat.${kind}`,
     response: kind,
-    scope: kind === "fight" || kind === "deflect" ? `target:${targetId}:cell:${origin}` : `cell:${origin}`,
+    scope: kind === "fight" || kind === "deflect" ? `target:${targetId}` : `cell:${origin}`,
     permissions: () => ({
       ...responsePermissions(policy().combat, kind),
       ...((kind === "fight" || kind === "hide") && { rawFood: { ...policy().food.raw } }),
     }),
-    facts: () => {
+    facts: (): Facts => {
+      const items = bot.inventory.items();
+      if (kind === "deflect") return {};
+      if (kind === "fight") {
+        const index = familyIndexOf(bot);
+        return {
+          weapons: items
+            .filter((item) => index.itemFamilies(item.name).some((family) => FIGHT_TRACE_FAMILIES.includes(family)))
+            .map((item) => ({ name: item.name, available: item.count > 0 }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        };
+      }
       const cells: (number | null)[] = [];
       for (let x = -1; x <= 1; x++)
         for (let z = -1; z <= 1; z++)
           for (let y = -3; y <= 2; y++) cells.push(bot.blockAt(origin.offset(x, y, z))?.stateId ?? null);
-      const items = bot.inventory.items();
       return {
         cells,
         target: targetId === undefined ? null : (bot.entities[targetId]?.position.floored().toString() ?? null),
-        weapons:
-          kind === "fight"
-            ? items
-                .filter((item) => /bow|arrow|sword|axe|shield/.test(item.name))
-                .map((item) => ({ name: item.name, available: item.count > 0 }))
-                .sort((a, b) => a.name.localeCompare(b.name))
-            : [],
+        weapons: [],
         material:
           kind === "hide"
             ? items

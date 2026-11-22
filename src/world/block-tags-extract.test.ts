@@ -34,3 +34,27 @@ test("the same extraction reads the item tags of the jar, block tags left out", 
   const tags = extractTags(JAR, "item");
   assert.deepEqual(tags, { logs: ["oak_log"] });
 });
+
+test("the entity_type kind reads data/minecraft/tags/entity_type/, nested tags resolved", () => {
+  const jar = zip({
+    "data/minecraft/tags/entity_type/arrows.json": JSON.stringify({ values: ["minecraft:arrow", "minecraft:spectral_arrow"] }),
+    "data/minecraft/tags/entity_type/impact_projectiles.json": JSON.stringify({ values: ["#minecraft:arrows", "minecraft:snowball"] }),
+    "data/minecraft/tags/item/arrows.json": JSON.stringify({ values: ["minecraft:arrow"] }),
+  });
+  assert.deepEqual(extractTags(jar, "entity_type"), {
+    arrows: ["arrow", "spectral_arrow"],
+    impact_projectiles: ["arrow", "snowball", "spectral_arrow"],
+  });
+});
+
+test("plural folder jars (1.19.4 to 1.20.6: tags/items, tags/blocks, tags/entity_types) extract like singular ones", () => {
+  const jar = zip({
+    "data/minecraft/tags/items/arrows.json": JSON.stringify({ values: ["minecraft:arrow", "minecraft:tipped_arrow"] }),
+    "data/minecraft/tags/items/planks.json": JSON.stringify({ values: ["minecraft:oak_planks"] }),
+    "data/minecraft/tags/blocks/logs.json": JSON.stringify({ values: ["minecraft:oak_log"] }),
+    "data/minecraft/tags/entity_types/arrows.json": JSON.stringify({ values: ["minecraft:arrow"] }),
+  });
+  assert.deepEqual(extractTags(jar, "item"), { arrows: ["arrow", "tipped_arrow"], planks: ["oak_planks"] });
+  assert.deepEqual(extractTags(jar, "block"), { logs: ["oak_log"] });
+  assert.deepEqual(extractTags(jar, "entity_type"), { arrows: ["arrow"] });
+});

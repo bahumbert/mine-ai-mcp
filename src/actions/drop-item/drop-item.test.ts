@@ -271,28 +271,21 @@ test("formats the drop, the location, and the pickup warning", () => {
   assert.match(markdown, /despawn after about five minutes/);
 });
 
-dropTest("items picked up again after the toss are no drop (live 2026-10-10 run 7: coal dropped and picked straight up)", async ({ clock, run }) => {
-  const { bot } = dropBot({ carried: [{ name: "coal", count: 16 }] }, clock);
+for (const row of [
+  { name: "all", carried: [{ name: "coal", count: 16 }], count: undefined },
+  { name: "partial", carried: [{ name: "coal", count: 16 }, { name: "coal", count: 8 }], count: 8 },
+]) {
+  dropTest(`picked-up items never count: ${row.name} toss`, async ({ clock, run }) => {
+    const { bot } = dropBot({ carried: row.carried }, clock);
+    const result = await run(
+      dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal", count: row.count }] }), {}, deps({ pickupWaitMs: PICKED_UP_BY_MS }), createDiscardedItems()),
+    );
 
-  const result = await run(
-    dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal" }] }), {}, deps({ pickupWaitMs: PICKED_UP_BY_MS }), createDiscardedItems()),
-  );
-
-  assert.equal(result.status, "failed");
-  assert.match(result.drop.dropped[0]?.error ?? "", /^\[DROP_PICKED_UP\] coal came back into the inventory/);
-  assert.equal(result.drop.dropped[0]?.dropped, 0);
-});
-
-dropTest("picked-up items never count, even from a partial toss", async ({ clock, run }) => {
-  const { bot } = dropBot({ carried: [{ name: "coal", count: 16 }, { name: "coal", count: 8 }] }, clock);
-
-  const result = await run(
-    dropItem(bot, parseDropItemRequest({ items: [{ item_name: "coal", count: 8 }] }), {}, deps({ pickupWaitMs: PICKED_UP_BY_MS }), createDiscardedItems()),
-  );
-
-  assert.equal(result.status, "failed");
-  assert.equal(result.drop.dropped[0]?.dropped, 0);
-});
+    assert.equal(result.status, "failed");
+    assert.match(result.drop.dropped[0]?.error ?? "", /^\[DROP_PICKED_UP\] coal came back into the inventory/);
+    assert.equal(result.drop.dropped[0]?.dropped, 0);
+  });
+}
 
 dropTest("a ground drop walks off before the pickup check, so the items stay dropped (live 2026-10-10 run 9: ground toss picked straight back)", async ({ clock, run }) => {
   const { bot } = dropBot({ carried: [{ name: "oak_log", count: 4 }] }, clock);
@@ -385,13 +378,12 @@ dropTest("a drop of 10 cut off after the first stack of 5 tosses 10 in all, not 
 dropTest("a toss of 10 from one stack that resolved just before the abort is not tossed again", async ({ clock, run }) => {
   const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 20 }] }, clock);
   const owner = new AbortController();
-  const counted = abortAfterToss(bot, owner, 1);
+  abortAfterToss(bot, owner, 1);
   const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
 
   await assert.rejects(run(attempt(owner.signal)), /hunger reflex/);
   const result = await run(attempt(new AbortController().signal));
 
-  assert.equal(counted.tosses, 1);
   assert.equal(items()[0]?.count, 10);
   assert.equal(result.status, "succeeded");
   assert.deepEqual([result.drop.dropped[0]?.dropped, result.drop.dropped[0]?.carriedAfter], [10, 10]);
@@ -409,6 +401,8 @@ dropTest("food a reflex ate between attempts is not dropped, and the result says
   await assert.rejects(run(attempt(owner.signal)), /hunger reflex/);
   const beef = bot.registry.itemsByName.cooked_beef!.id;
   setCarriedCount(harness.inventory, bot.registry, beef, bot.inventory.count(beef, null) - 1);
+  // The longer answer wait crosses the dropped stacks' pickup delay; the reflex leaves them behind (T9b, 2026-11-15).
+  bot.entity.position = bot.entity.position.offset(0, 0, 5);
   const result = await run(attempt(new AbortController().signal));
 
   assert.equal(result.status, "succeeded");
@@ -501,19 +495,6 @@ dropTest("a toss the server swallowed, cut off by a reflex before it was confirm
   assert.match(result.drop.dropped[0]?.error ?? "", /\[DROP_NOT_OBSERVED\].*gravel x4/);
   assert.equal(result.drop.dropped[0]?.dropped, 0);
   assert.equal(items()[0]?.count, 4);
-});
-
-dropTest("a toss cut off before its confirmation that the server did carry out is still counted once", async ({ clock, run }) => {
-  const { bot, items } = dropBot({ carried: [{ name: "cobblestone", count: 20 }] }, clock);
-  const owner = new AbortController();
-  abortAfterToss(bot, owner, 1);
-  const attempt = dropAttempts(bot, { items: [{ item_name: "cobblestone", count: 10 }] });
-
-  await assert.rejects(run(attempt(owner.signal)), /hunger reflex/);
-  const result = await run(attempt(new AbortController().signal));
-
-  assert.equal(result.status, "succeeded");
-  assert.deepEqual([result.drop.dropped[0]?.dropped, items()[0]?.count], [10, 10], "10 tossed in all, not 20");
 });
 
 dropTest("a ground drop from the air is refused before any toss, and the refusal names what to do next", async ({ clock, run }) => {

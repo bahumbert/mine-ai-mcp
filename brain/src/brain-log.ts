@@ -8,6 +8,7 @@ import type { MessageType, Place, Route } from "./mind.ts";
 import type { Opportunity } from "./opportunities.ts";
 import type { RelationEvent, TradeEvent } from "./relations/types.ts";
 import type { ActivityTotal } from "./time-spent.ts";
+import type { SituationKind } from "./agent/situations.ts";
 
 /**
  * The brain's log, read by the monitor's Mind tab (spec 2026-10-02-monitor-shows-the-mind): one JSON line per event,
@@ -19,7 +20,15 @@ export const PREVIOUS_BRAIN_LOG_FILE = "brain.prev.jsonl";
 const MAX_BYTES = 20 * 1024 * 1024;
 
 /** Which part of the mind a model call was for. */
-export type MindTier = "chat" | "work" | "goal" | "narrate" | "conversation";
+export type MindTier = "chat" | "work" | "goal" | "narrate" | "conversation" | "sign";
+
+/** What the budget did to one prompt: the tokens allowed, the first turn's estimate, the parts shown shorter, still over. */
+export interface PromptBudgetUse {
+  readonly tokens: number;
+  readonly estimated: number;
+  readonly shrunk: readonly string[];
+  readonly overBudget: boolean;
+}
 
 export interface ModelCall {
   readonly tier: MindTier;
@@ -34,8 +43,14 @@ export interface ModelCall {
   readonly replies: readonly string[];
   /** The largest prompt of the attempts, in tokens as the server counted them; null when it does not say. */
   readonly promptTokens?: number | null;
+  /** Reply tokens of all attempts, summed as counted by the server; null when any count is unknown. */
+  readonly replyTokens?: number | null;
   /** The context window the model ran with; null when unknown. A prompt near it was probably cut. */
   readonly contextTokens?: number | null;
+  /** The prompt budget the first turn was fitted to (spec 2026-11-06-p4-02a-prompt-budget); absent in older logs. */
+  readonly budget?: PromptBudgetUse;
+  /** The first turn's condition line; absent for narrate calls and older logs. */
+  readonly condition?: string;
   /** The decision read from the last reply, or why none could be. */
   readonly result?: unknown;
   readonly error?: string;
@@ -48,6 +63,7 @@ export interface StackEntry {
 
 export type BrainEvent =
   | ({ readonly kind: "model" } & ModelCall)
+  | { readonly kind: "situation"; readonly event: "raised" | "decided" | "ended" | "skipped"; readonly situation: SituationKind; readonly text: string; readonly options?: readonly string[]; readonly hidden?: readonly string[]; readonly reason?: string; readonly weigh?: readonly string[]; readonly running?: string | null; readonly setAside?: StackEntry | null; readonly answer?: string; readonly detail?: string; readonly latencyMs?: number }
   | {
     readonly kind: "objective";
     /** taken: on top now; queued: after the current one; own: from its own goal; finished: done or failed. */

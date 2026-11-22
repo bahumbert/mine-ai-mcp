@@ -105,7 +105,8 @@ test("find with the singular log fails as an unknown name; logs finds natural lo
 });
 
 test("find on a version with no shipped tags knows block names only", () => {
-  const bot = fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }, { version: "1.19.4" });
+  // The shared fake builds no registry older than 1.19.4 (every version from 1.19.4 has shipped tags): only the version string changes.
+  const bot = Object.assign(fakeBot({ [key(3, 64, 0)]: { name: "oak_log" } }), { version: "1.18.2" });
   assert.equal(viewBlocks(bot, { find: { blockNames: ["logs"], limit: 12 }, box: null, cells: [] }).status, "failed");
   assert.equal(viewBlocks(bot, { find: { blockNames: ["oak_log"], limit: 12 }, box: null, cells: [] }).status, "succeeded");
 });
@@ -116,7 +117,7 @@ test("kinds give each named block's game data, harvest tools cheapest tier first
   const result = viewBlocks(fakeBot({}), request);
   assert.equal(result.status, "succeeded");
   const kinds = result.blocks.kinds!;
-  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, tags: undefined });
+  assert.deepEqual({ ...kinds.dirt!, tags: undefined }, { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: undefined });
   assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
   assert.ok(kinds.stone!.tags.includes("mineable/pickaxe"));
   assert.equal(kinds.stone!.tool, "pickaxe");
@@ -162,42 +163,65 @@ test("a box is drawn top layer first as one grid per layer with a legend", () =>
   assert.match(markdown, /Legend: \. air \(24\), A stone \(2\), ~ water \(1\)/);
 });
 
-test("cells report shape, liquid level, and waterlogging", () => {
+test("cells report shape, liquid level, waterlogging, and whether they hold water (the key is absent, never false)", () => {
   const bot = fakeBot({
     [key(1, 64, 1)]: { name: "water", properties: { level: 0 } },
     [key(2, 64, 1)]: { name: "water", properties: { level: 3 } },
     [key(3, 64, 1)]: { name: "oak_slab", properties: { waterlogged: true, type: "bottom" } },
     [key(4, 64, 1)]: { name: "stone" },
+    [key(6, 64, 1)]: { name: "kelp" },
     [key(40, 64, 1)]: { name: "void" },
   });
   const result = viewBlocks(bot, {
     find: null,
     box: null,
-    cells: [
-      { x: 1, y: 64, z: 1 },
-      { x: 2, y: 64, z: 1 },
-      { x: 3, y: 64, z: 1 },
-      { x: 4, y: 64, z: 1 },
-      { x: 5, y: 64, z: 1 },
-      { x: 40, y: 64, z: 1 },
-    ],
+    cells: [1, 2, 3, 4, 5, 6, 40].map((x) => ({ x, y: 64, z: 1 })),
   });
   assert.equal(result.status, "succeeded");
   assert.deepEqual(
-    result.blocks.cells.map((cell) => [cell.name, cell.shape, cell.level, cell.waterlogged]),
+    result.blocks.cells.map((cell) => [cell.name, cell.shape, cell.level, cell.waterlogged, "holds_water" in cell ? cell.holds_water : "absent"]),
     [
-      ["water", "liquid", 0, undefined],
-      ["water", "liquid", 3, undefined],
-      ["oak_slab", "solid", undefined, true],
-      ["stone", "solid", undefined, undefined],
-      ["air", "open", undefined, undefined],
-      ["unloaded", "open", undefined, undefined],
+      ["water", "liquid", 0, undefined, true],
+      ["water", "liquid", 3, undefined, true],
+      ["oak_slab", "solid", undefined, true, true],
+      ["stone", "solid", undefined, undefined, "absent"],
+      ["air", "open", undefined, undefined, "absent"],
+      ["kelp", "open", undefined, undefined, true],
+      ["unloaded", "open", undefined, undefined, "absent"],
     ],
   );
   const markdown = formatViewBlocksResult(result);
-  assert.match(markdown, /- 1, 64, 1: water \(source\)/);
+  assert.match(markdown, /- 1, 64, 1: water \(source\)\n/, "a liquid says it is water already");
   assert.match(markdown, /- 2, 64, 1: water \(flowing level 3\)/);
-  assert.match(markdown, /- 3, 64, 1: oak_slab \(solid, waterlogged\)/);
+  assert.match(markdown, /- 3, 64, 1: oak_slab \(solid, waterlogged\)\n/, "waterlogged says it once");
+  assert.match(markdown, /- 6, 64, 1: kelp \(open, holds water\)/, "a water plant is no liquid and says so");
+});
+
+test("find says a block under water or roofed over so; an open one, and the water itself, have no situation key", () => {
+  const bot = fakeBot({
+    [key(3, 64, 0)]: { name: "oak_log" },
+    [key(3, 65, 0)]: { name: "water", properties: { level: 0 } },
+    [key(5, 64, 0)]: { name: "oak_log" },
+    [key(5, 66, 0)]: { name: "stone" },
+    [key(7, 64, 0)]: { name: "oak_log" },
+    [key(9, 64, 0)]: { name: "oak_stairs", properties: { waterlogged: true } },
+  });
+  const find = (blockName: string) => viewBlocks(bot, { find: { blockNames: [blockName], limit: 12 }, box: null, cells: [] });
+  const logs = find("oak_log");
+  assert.equal(logs.status, "succeeded");
+  assert.deepEqual(
+    logs.blocks.find![0]!.listed.map((hit) => [hit.x, "situation" in hit ? hit.situation : "absent"]),
+    [[3, "under_water"], [5, "roofed"], [7, "absent"]],
+  );
+  const markdown = formatViewBlocksResult(logs);
+  assert.match(markdown, /- oak_log at 3, 64, 0, 3 blocks away \(solid, under water\); above water/);
+  assert.match(markdown, /- oak_log at 5, 64, 0, 5 blocks away \(solid, roofed over\); above air/);
+  assert.match(markdown, /- oak_log at 7, 64, 0, 7 blocks away \(solid\); above air/);
+  assert.match(formatViewBlocksResult(find("oak_stairs")), /- oak_stairs at 9, 64, 0, 9 blocks away \(solid, waterlogged, under water\)/);
+  // The water block is the water, not a block under it: no "under water" on a line that says "source".
+  const [water] = find("water").blocks.find![0]!.listed;
+  assert.deepEqual([water!.shape, "situation" in water!], ["liquid", false]);
+  assert.match(formatViewBlocksResult(find("water")), /- water at 3, 65, 0, 3\.2 blocks away \(source\); above air/);
 });
 
 test("kinds say whether a block is a full cube, from the runtime's own geometry", () => {
@@ -210,4 +234,34 @@ test("kinds say whether a block is a full cube, from the runtime's own geometry"
   const text = formatViewBlocksResult(viewBlocks(bot, request));
   assert.match(text, /- dirt: solid, full cube,/u);
   assert.match(text, /- oak_stairs: solid, not a full cube,/u);
+});
+
+test("box kinds give hardness, fluid, tags and known from game data", () => {
+  const bot = fakeBot({
+    [key(14, 64, 2)]: { name: "dirt" },
+    [key(15, 64, 2)]: { name: "bedrock" },
+    [key(14, 64, 1)]: { name: "water", properties: { level: "0" } },
+    [key(15, 64, 1)]: { name: "oak_leaves" },
+    [key(14, 64, 3)]: { name: "seagrass" },
+  });
+  const request = parseViewBlocksRequest({ box: { x: 15, y: 64, z: 2, half_width: 1, half_height: 0 } });
+  const kinds = viewBlocks(bot, request).blocks.box!.kinds;
+  assert.deepEqual([kinds.dirt!.hardness, kinds.dirt!.fluid, kinds.dirt!.known], [0.5, false, true]);
+  assert.ok(kinds.dirt!.tags.includes("mineable/shovel"));
+  assert.equal(kinds.bedrock!.hardness, null, "unbreakable: hardness -1 in the registry");
+  assert.equal(kinds.water!.fluid, true);
+  assert.ok(kinds.oak_leaves!.tags.includes("leaves"));
+  // seagrass: the runtime's own reading (navigation's holdsWater, a water plant) says it holds water.
+  assert.equal(kinds.seagrass!.fluid, true);
+  assert.deepEqual(kinds.unloaded, { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: false, tags: [], known: false });
+  assert.equal(kinds.air!.known, true, "air is a block the registry knows");
+});
+
+test("a kinds read gives the registry hardness, and a fluid is told apart by `fluid`", () => {
+  const request = parseViewBlocksRequest({ kinds: ["obsidian", "water"] });
+  const kinds = viewBlocks(fakeBot({}), request).blocks.kinds!;
+  assert.equal(kinds.obsidian!.hardness, 50);
+  // The 1.21.4 registry lists water as diggable at hardness 100: not a null hardness.
+  assert.equal(kinds.water!.hardness, 100);
+  assert.equal(kinds.water!.fluid, true);
 });

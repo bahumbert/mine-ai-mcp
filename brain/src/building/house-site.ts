@@ -1,5 +1,6 @@
 // Where a house goes: the box it protects, the box its site touches, and the nearest clear site when a protected area is in
 // the way (moved out of skills.ts, unchanged; also used by farm plots through `nearestClearSpot`).
+import { isCanopy } from "../block-kinds.ts";
 import { areaKey, type BotRuntime, type Position, type ProtectedArea } from "../runtime-client.ts";
 import { overlapsOf } from "../protected-areas.ts";
 import { planTemplate, siteAt, type HousePlan, type Site } from "./plan.ts";
@@ -58,7 +59,7 @@ export function nearestClearSite(areas: readonly ProtectedArea[], template: Temp
 const GROUND_SEARCH = 16;
 
 /**
- * `door` moved to the walking level of its column: the feet cell over the highest solid block (leaves are not ground)
+ * `door` moved to the walking level of its column: the feet cell over the highest solid block (canopy is not ground)
  * within {@link GROUND_SEARCH} of its height, as the walk to the site needs a cell to stand on (live 2026-10-11: a
  * door suggested at 70 over ground at 66, and the `go to` there failed NAVIGATION_TARGET_UNSUPPORTED). Unchanged when
  * the column shows no ground in that range.
@@ -67,7 +68,7 @@ export async function groundedDoor(runtime: BotRuntime, door: Position): Promise
   const area = await runtime.blocksIn({ x: door.x, y: door.y - GROUND_SEARCH, z: door.z }, { x: door.x, y: door.y + GROUND_SEARCH, z: door.z });
   const solid = (y: number) => {
     const block = area.blocks.get(areaKey(door.x, y, door.z));
-    return block !== undefined && !block.endsWith("_leaves") && area.kinds[block]?.solid === true;
+    return block !== undefined && area.kinds[block]?.solid === true && !isCanopy(area.kinds[block]);
   };
   for (let y = door.y + GROUND_SEARCH; y >= door.y - GROUND_SEARCH; y -= 1) {
     if (solid(y)) return { ...door, y: y + 1 };

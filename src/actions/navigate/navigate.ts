@@ -25,10 +25,11 @@ import { defineAction, type ActionContext } from "../action.js";
 import { observeToolTierLoss } from "../../world/tool-loss.js";
 import { carriesBoat, crossByBoat, deepWaterOnTheWay, launchSpot } from "./boat-crossing.js";
 import { keptScaffoldOption, scaffoldFallbackFor } from "./keep-items.js";
-import { boatLeftEvidence, retryBoatTakeBack } from "./boat-left-retry.js";
+import { boatLeftEvidence, boatTakeBackBlocked, retryBoatTakeBack } from "./boat-left-retry.js";
 import { describeBoatLeft } from "./boat-take-back.js";
 import { describeEscape } from "./describe-escape.js";
 import { startFromSeat } from "./seated-leg.js";
+import { digCounterOf, walkLegDistance, walkWindowOf, withWalkLeg, withoutWalkWindow, type DigFacts } from "./slow-walk.js";
 import { standsAtSea, watchSwim } from "./swim-watch.js";
 import { groundBelow, highestFloor, SHORE_SEARCH_RADIUS, shoreNear, standable, surfaceAt, targetSupported } from "./target-ground.js";
 
@@ -51,6 +52,7 @@ import {
 export interface NavigateDependencies {
   readonly createMovements: typeof createMovements;
   readonly navigate: Navigate;
+  readonly events?: Pick<NavigationRuntime, "onEvent">;
 }
 
 function productionDependencies(navigate: Navigate): NavigateDependencies {
@@ -76,9 +78,9 @@ function navigationEvidence(
   start: Position3,
   startDimension: string,
   elapsedMs: number,
-  scaffoldInventoryBefore: ReadonlyMap<string, number>,
-  bucketBefore: ReturnType<typeof bucketDropTotals>,
+  stocks: { scaffoldBefore: ReadonlyMap<string, number>; bucketBefore: ReturnType<typeof bucketDropTotals>; digs: DigFacts },
 ): NavigationEvidence {
+  const { scaffoldBefore: scaffoldInventoryBefore, bucketBefore, digs } = stocks;
   const target = { x: request.x, y: request.y, z: request.z };
   // GoalNear settles integral path nodes rather than the entity's fractional
   // centre, so the postcondition measures that same node. An unresolved
@@ -106,6 +108,7 @@ function navigationEvidence(
           (tool) => !bot.inventory.items().some((item) => item.name.endsWith(`_${tool}`)),
         )
       : [],
+    digs,
   };
 }
 
@@ -195,7 +198,8 @@ function startLeg(
   options: LegOptions,
 ): NavigateLeg {
   const toolLoss = request.dig ? toolLossObserverOf(bot, lifetime) : null;
-  return {
+  digCounterOf(bot, lifetime); // counts from the first leg, so a later leg's evidence holds the whole call's digs
+  const leg: NavigateLeg = {
     bot,
     request,
     dependencies,
@@ -213,39 +217,58 @@ function startLeg(
     destination: request.y === null ? null : { x: request.x, y: request.y, z: request.z },
     swimFree: options.unbudgeted ?? false,
   };
+  walkWindowOf(leg).resetLeg(walkLegDistance(leg), request.range);
+  return leg;
 }
 
 /** The progress a resumable navigate reports: its baseline, its current destination and whether it is there. */
 function observeNavigateProgress(leg: NavigateLeg, observe: ObserveRequest): void {
   const { bot, request, start, startDimension } = leg;
-  observe(() => ({
-    baseline: { dimension: startDimension, position: { ...start } },
-    checkpoint: {
-      destination: leg.destination,
-      remainingDistance: leg.destination && bot.game.dimension === startDimension
-        ? bot.entity.position.distanceTo(asVec3(leg.destination)) : null,
-      dimension: bot.game.dimension,
-      positionedDimension: startDimension,
-      died: false,
-      portal: null,
-    },
-    completion: {
-      kind: "current",
-      observed:
-        leg.destination !== null &&
-        bot.game.dimension === startDimension &&
-        asVec3(navigationFeet(bot.entity.position, bot.entity.onGround)).distanceTo(asVec3(leg.destination)) <=
-          request.range &&
-        (bot.entity.onGround || canOccupyWater(bot, navigationFeet(bot.entity.position, bot.entity.onGround))),
-      owes: "Current destination distance and supported footing or admitted water.",
-    },
-  }));
+  observe(() => {
+    const remainingDistance = leg.destination && bot.game.dimension === startDimension
+      ? bot.entity.position.distanceTo(asVec3(leg.destination)) : null;
+    const arrived = arrivedAt(leg);
+    return {
+      baseline: { dimension: startDimension, position: { ...start } },
+      objective: remainingDistance === null ? null : { remaining: remainingDistance, tolerance: Math.max(1, request.range) },
+      goalMet: arrived,
+      checkpoint: {
+        destination: leg.destination,
+        remainingDistance,
+        dimension: bot.game.dimension,
+        positionedDimension: startDimension,
+        died: false,
+        portal: null,
+      },
+      completion: {
+        kind: "current",
+        observed: arrived,
+        owes: "Current destination distance and supported footing or admitted water.",
+      },
+    };
+  });
+}
+
+/** Whether the leg's body stands at its destination now: the feet cell within range, in the start dimension, on footing or admitted water. */
+function arrivedAt(leg: NavigateLeg): boolean {
+  const { bot, request, startDimension } = leg;
+  const feet = navigationFeet(bot.entity.position, bot.entity.onGround);
+  return (
+    leg.destination !== null &&
+    bot.game.dimension === startDimension &&
+    asVec3(feet).distanceTo(asVec3(leg.destination)) <= request.range &&
+    (bot.entity.onGround || canOccupyWater(bot, feet))
+  );
 }
 
 /** The evidence of the leg as it stands, measured against its resolved destination once there is one. */
 function legEvidence(leg: NavigateLeg): NavigationEvidence {
   const request = leg.destination ? { ...leg.request, ...leg.destination } : leg.request;
-  return navigationEvidence(leg.bot, request, leg.start, leg.startDimension, leg.elapsedMs, leg.scaffoldInventoryBefore, leg.bucketBefore);
+  return navigationEvidence(leg.bot, request, leg.start, leg.startDimension, leg.elapsedMs, {
+    scaffoldBefore: leg.scaffoldInventoryBefore,
+    bucketBefore: leg.bucketBefore,
+    digs: digCounterOf(leg.bot, leg.lifetime).facts(),
+  });
 }
 
 /** Why the destination itself refuses entry: an active portal is entered by its own action. */
@@ -267,10 +290,14 @@ type LandLegOutcome =
 
 /** The route, led by a swim to the nearest land when the bot starts at sea with no boat. */
 async function navigateLeg(leg: NavigateLeg, context: ActionContext): Promise<NavigateResult> {
-  const fromSeat = await startFromSeat(leg.bot, leg.request, context.signal, (water) =>
-    crossByBoatFromHere(leg, { status: "failed", error: navigateOutcomes.deepWater(leg.request, water.start, water.length), navigation: legEvidence(leg) }, water, context));
+  return withWalkLeg(leg, () => navigateLegBody(leg, context));
+}
+
+async function navigateLegBody(leg: NavigateLeg, context: ActionContext): Promise<NavigateResult> {
+  const fromSeat = await withoutWalkWindow(leg, () => startFromSeat(leg.bot, leg.request, context.signal, (water) =>
+    crossByBoatFromHere(leg, { status: "failed", error: navigateOutcomes.deepWater(leg.request, water.start, water.length), navigation: legEvidence(leg) }, water, context)));
   if (fromSeat !== null) return fromSeat;
-  const land = await swimToLandFirst(leg, context);
+  const land = await withoutWalkWindow(leg, () => swimToLandFirst(leg, context));
   const result = await routeToDestination(leg, context);
   if (land.kind === "none") return result;
   const navigation = { ...result.navigation, start: leg.start, elapsedMs: result.navigation.elapsedMs + land.elapsedMs };
@@ -313,7 +340,9 @@ async function routeToDestination(leg: NavigateLeg, context: ActionContext): Pro
   if (refused) return refused;
   const byBoat = await crossByBoatFirst(leg, context);
   if (byBoat) return byBoat;
-  const planned = await planRoute(leg, context, startedAt);
+  const planned = leg.swimFree
+    ? await withoutWalkWindow(leg, () => planRoute(leg, context, startedAt))
+    : await planRoute(leg, context, startedAt);
   if (planned.kind === "ended") return planned.result;
   return judgeRoute(leg, planned.route, planned.swim, context);
 }
@@ -371,6 +400,7 @@ function resolveSurfaceDestination(leg: NavigateLeg, surface: NonNullable<Return
     if (nearY === null || surface.floors.length === 0) return { kind: "invalid", observation: surface.observation };
     const floor = [...surface.floors].sort((a, b) => Math.abs(a - nearY) - Math.abs(b - nearY))[0]!;
     leg.destination = { x: request.x, y: floor, z: request.z };
+    walkWindowOf(leg).resetLeg(walkLegDistance(leg), request.range);
     return null;
   }
   const shore = shoreNear(bot, request);
@@ -380,6 +410,7 @@ function resolveSurfaceDestination(leg: NavigateLeg, surface: NonNullable<Return
     return { kind: "invalid", observation: "No standable surface was observed in the destination column." };
   }
   leg.destination = { x: shore.x, y: ground.y + 1, z: shore.z };
+  walkWindowOf(leg).resetLeg(walkLegDistance(leg), request.range);
   return null;
 }
 
@@ -413,7 +444,7 @@ async function planRoute(leg: NavigateLeg, context: ActionContext, startedAt: nu
   const goal = destinationGoal(leg);
   const swim = leg.swimFree || carriesBoat(bot) ? null : watchSwim(bot);
   try {
-    const stopSignals = [toolLoss?.signal, swim?.signal].filter((signal) => signal !== undefined);
+    const stopSignals = [toolLoss?.signal, swim?.signal, walkWindowOf(leg).signal].filter((signal) => signal !== undefined);
     const stopSignal = stopSignals.length > 0 ? AbortSignal.any(stopSignals) : undefined;
     let route = await attemptRoute(leg, goal, context, stopSignal, false);
     // No path and none of the policy's scaffold blocks carried (a bot stranded on a perch with only stone): plan
@@ -484,7 +515,11 @@ async function judgeRoute(
     return { status: "failed", error: navigateOutcomes.deepWater(request, swum.start, swum.blocks), navigation: evidence };
   }
   if (route.status === "stopped") {
+    const slow = walkWindowOf(leg).reason();
+    if (slow !== null) return { status: "failed", error: slow, navigation: evidence };
     const stopped: NavigateResult = { status: "failed", error: navigateOutcomes.stopped(route.reason), navigation: evidence };
+    // The caller refused this route and said why: a climb, swim or boat leg would answer a question nobody asked.
+    if (route.routeRefused) return stopped;
     return (await climbOutFirst(leg, stopped, context)) ?? crossDeepWater(leg, stopped, route, context);
   }
   if (leg.destination === null) {
@@ -596,7 +631,7 @@ async function crossByBoatFromHere(
   const from = bot.entity.position;
   const length = Math.hypot(request.x - from.x, request.z - from.z);
   // At most to the target: across to it, not on over open sea; with no land by then she stays there, in her boat.
-  const crossed = await crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length);
+  const crossed = await withoutWalkWindow(leg, () => crossByBoat(bot, { x: (request.x - from.x) / length, z: (request.z - from.z) / length }, context.signal, length));
   context.signal?.throwIfAborted();
   if (crossed.status !== "crossed") {
     // Where the ride left her, not where the route had stopped before it.
@@ -608,8 +643,8 @@ async function crossByBoatFromHere(
     }
     return { ...stopped, navigation, status: "failed", error: navigateOutcomes.boatCrossingFailed(crossed.detail) };
   }
-  const boatLeft = await retryBoatTakeBack(bot, crossed, context.signal);
-  const onward = await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
+  const boatLeft = await withoutWalkWindow(leg, () => retryBoatTakeBack(bot, crossed, context.signal));
+  const onward = boatLeft?.cause === "still_there" ? boatTakeBackBlocked(bot, stopped, boatLeft) : await nextLeg(leg, request, { crossings: leg.crossings + 1 }, context);
   const boatBlocks = crossed.blocks + (onward.navigation.boatBlocks ?? 0);
   return { ...onward, navigation: { ...onward.navigation, start: stopped.navigation.start, boatBlocks, ...boatLeftEvidence(onward.navigation.boatLeft, boatLeft) } };
 }
@@ -660,6 +695,6 @@ export function createNavigateAction(
       openWorldHint: true,
     },
     parse: parseNavigateRequest,
-    begin: (request, lifetime, observe) => beginNavigate(bot, request, dependencies, lifetime, { observe }),
+    begin: (request, lifetime, observe) => beginNavigate(bot, request, { ...dependencies, events: navigation }, lifetime, { observe }),
   });
 }

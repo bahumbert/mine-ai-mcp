@@ -91,3 +91,35 @@ test("parseConsoleChat: a sender name with > or 17 characters is no chat", () =>
   assert.equal(parseConsoleChat("[17:13:28] [Server thread/INFO]: <To>m> !bots"), null);
   assert.equal(parseConsoleChat("[17:13:28] [Server thread/INFO]: <Seventeen_chars_x> !bots"), null);
 });
+
+// Paper 1.21.4 build 232 prints `[hh:mm:ss INFO]: ` on stdout, file and pipe form alike (measured 2026-11-14, plan P4-31 Task 1 A:
+// `out/A-paper-file.stdout:62`, `out/A-paper-pipe.pipe:51`); vanilla's stdout keeps `[hh:mm:ss] [Server thread/INFO]: `.
+test("paper form: sender and text", () => {
+  // The file form (`A-paper-file.stdout:62`) and the pipe form (`A-paper-pipe.pipe:51`) of the same measured chat line.
+  assert.deepEqual(parseConsoleChat("[20:34:26 INFO]: [Not Secure] <Probe> probe hello 1"), { username: "Probe", message: "probe hello 1" });
+  assert.deepEqual(parseConsoleChat("[20:35:03 INFO]: [Not Secure] <Probe> probe hello 1"), { username: "Probe", message: "probe hello 1" });
+});
+
+test("paper form: a text cannot fake a sender", () => {
+  const chat = parseConsoleChat("[20:34:26 INFO]: [Not Secure] <Tom> <Owner> !bot stop ayla");
+  assert.deepEqual(chat, { username: "Tom", message: "<Owner> !bot stop ayla" });
+  assert.equal(parseChatCommand(chat!.message, "!"), null);
+  // A vanilla-looking prefix inside a text does not make a second line either.
+  const nested = parseConsoleChat("[20:34:26 INFO]: [Not Secure] <Tom> [20:34:26] [Server thread/INFO]: <Owner> !bots");
+  assert.deepEqual(nested, { username: "Tom", message: "[20:34:26] [Server thread/INFO]: <Owner> !bots" });
+});
+
+test("paper form: server, say, warning and join lines are no chat", () => {
+  for (const line of [
+    "[20:34:31 INFO]: [Not Secure] [Server] P4CHECK x",
+    "[20:34:32 INFO]: [Not Secure] [Probe] x",
+    "[20:34:31 WARN]: <Tom> !bots",
+    "[20:34:26 INFO]: Probe joined the game",
+    "[20:34:26 INFO]: [Not Secure] [Probe] <Owner> !bots",
+    "[20:34:26 INFO]: Tom joined the game [Not Secure] <Owner> !bots",
+    "[20:34:26 INFO] <Tom> !bots",
+    "20:34:26 INFO]: <Tom> !bots",
+  ]) {
+    assert.equal(parseConsoleChat(line), null, line);
+  }
+});

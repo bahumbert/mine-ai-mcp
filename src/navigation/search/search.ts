@@ -28,9 +28,10 @@ import type { ResolvedGoal } from "../goals/goal.js";
 import type { PlannedStep, RoutePlan } from "../movements/movement.js";
 import type { ClosestNodeEvidence, SearchLimitEvidence } from "../orchestration/outcome.js";
 import type { PartialRouteCheckpoint, SearchLimits, SearchEvidence } from "./search-result.js";
-import { lavaWatchCells } from "../world/lava-watch.js";
-import { blockKey, packKey } from "../world/world.js";
-import type { GenerationContext, MovementCatalogue, PlanningState } from "../movements/catalogue.js";
+import { lavaWatchCells, routeLavaDependencies } from "../world/lava-watch.js";
+import { blockKey, packKey, type NavigationObservation, type WorldView } from "../world/world.js";
+import { breakRemovesEdgeSupport } from "../world/body-support.js";
+import type { GenerationContext, MovementCatalogue, PlanningState, RouteFeet } from "../movements/catalogue.js";
 import { digContextAt } from "./dig-context.js";
 import { ArrivalFrontier } from "./arrival-frontier.js";
 import { endsStrandedUnderWater } from "./stranded-segment.js";
@@ -92,7 +93,7 @@ interface ProgressSelection {
 /**
  * The best node seen for one appetite for spending.
  *
- * A node scores `heuristic + cost / coefficient`. A small coefficient charges
+ * A node scores `progress + cost / coefficient`. A small coefficient charges
  * the cost nearly in full, so the slot holds a node that got nearer the goal
  * cheaply; a large one barely charges it, so the slot holds whatever is
  * nearest the goal at almost any price.
@@ -116,7 +117,7 @@ interface Candidate {
 class PartialRouteCandidates {
   readonly #store: NodeStore;
   readonly #candidates: readonly Candidate[];
-  /** The nearest node seen by heuristic alone, whatever it cost: the limit of the family. */
+  /** The nearest node by progress alone, whatever it cost: the limit of the family. */
   #nearest = NO_NODE;
   #nearestHeuristic = Number.POSITIVE_INFINITY;
   /** The best node by the most permissive score, kept even when it never beat the root, so a checkpoint can say how far short it fell. */
@@ -128,12 +129,12 @@ class PartialRouteCandidates {
     readonly root: number,
   ) {
     this.#store = store;
-    const estimate = store.estimate[root]!;
+    const estimate = store.progress[root]!;
     this.#candidates = PROGRESS_COEFFICIENTS.map((coefficient) => ({ coefficient, node: root, score: estimate }));
   }
 
   consider(node: number): void {
-    const heuristic = this.#store.heuristic[node]!;
+    const heuristic = this.#store.progress[node]!;
     const cost = this.#store.cost[node]!;
     if (heuristic < this.#nearestHeuristic) {
       this.#nearest = node;
@@ -197,10 +198,25 @@ export interface SearchContext extends GenerationContext {
 interface SearchOptions {
   readonly id: string;
   readonly start: PlanningState;
+  /** Physical root provenance, independent of its coordinates or predicted edits. */
+  readonly observedStart?: NavigationObservation;
   readonly goal: Extract<ResolvedGoal, { kind: "active" }>;
   readonly context: SearchContext;
   readonly limits?: SearchLimits;
   readonly now?: () => number;
+}
+
+/** Keep the actual body's edge support until a movement has carried it elsewhere. */
+function rootMovementRetainsSupport(step: PlannedStep, actualStart: NavigationObservation | undefined, world: WorldView): boolean {
+  if (!actualStart) return true;
+  const { position, stance } = actualStart;
+  for (const operation of step.operations) {
+    if (operation.kind === "move") break;
+    if (operation.kind !== "break") continue;
+    if (breakRemovesEdgeSupport(position, stance === "swimming", operation.position,
+      (x, y, z) => world.blockAt(x, y, z))) return false;
+  }
+  return true;
 }
 
 /** The nodes from the first step out of the root to `node`, in walking order. */
@@ -215,6 +231,18 @@ function routeNodes(store: NodeStore, node: number): readonly number[] {
   return nodes;
 }
 
+/** Build the route's feet lazily, only when a dig needs them. */
+function routeFeetOf(store: NodeStore, node: number): RouteFeet {
+  let feet: Set<number> | undefined;
+  return { has(key) {
+    if (!feet) {
+      feet = new Set();
+      for (let cursor = node; cursor !== NO_NODE; cursor = store.parent[cursor]!) feet.add(store.key[cursor]!);
+    }
+    return feet.has(key);
+  } };
+}
+
 function reconstructStep(options: SearchOptions, store: NodeStore, node: number): PlannedStep | null {
   const finish = store.finish[node];
   if (finish) return finish.step;
@@ -223,12 +251,15 @@ function reconstructStep(options: SearchOptions, store: NodeStore, node: number)
   const state = store.state[parent]!;
   const key = store.key[node]!;
   const remaining = store.remaining[node]!;
-  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state));
+  const movements = options.context.catalogue.generate(state, options.context, digContextAt(options.context, state), routeFeetOf(store, parent));
   for (let index = 0; index < movements.length; index += 1) {
     if (movements.remainingScaffolds[index] !== remaining) continue;
     if (packKey(movements.toX[index]!, movements.toY[index]!, movements.toZ[index]!) !== key) continue;
     if (!movements.settle(index)) continue;
-    return movements.movement(index).step;
+    const step = movements.movement(index).step;
+    const actualStart = store.parent[parent] === NO_NODE ? options.observedStart : undefined;
+    if (!rootMovementRetainsSupport(step, actualStart, options.context.world)) continue;
+    return step;
   }
   return null;
 }
@@ -273,6 +304,7 @@ function buildPlan(
     endNode: endState.node,
     steps: Object.freeze(steps),
     dependencies,
+    lavaDependencies: routeLavaDependencies(steps.map((step) => step.to)),
     totalCost: steps.reduce((total, step) => total + step.cost.total, 0),
     complete: complete && steps.length === route.length,
   });
@@ -334,7 +366,7 @@ export class IncrementalSearch {
   readonly #arrivals = new ArrivalFrontier(this.#store);
   readonly #root: number;
   readonly #candidates: PartialRouteCandidates;
-  /** The lowest-estimate node expanded so far, ties to the cheaper route; what a failure points at. */
+  /** The lowest-progress node expanded so far, ties to the cheaper route; what a failure points at. */
   #closest: number;
   /** The cheapest goal-satisfying node generated so far, offered first when a partial route is cut. */
   #bestGoal = NO_NODE;
@@ -367,6 +399,7 @@ export class IncrementalSearch {
     this.#goal = {
       ...options.goal,
       heuristic: (node) => options.goal.heuristic(node) * options.context.policy.heuristicWeight,
+      progress: (node) => (options.goal.progress ?? options.goal.heuristic)(node) * options.context.policy.heuristicWeight,
     };
     const heuristic = this.#goal.heuristic(options.start.node);
     this.#root = this.#store.add(
@@ -379,6 +412,7 @@ export class IncrementalSearch {
       NO_NODE,
       null,
     );
+    this.#store.progress[this.#root] = this.#goal.progress!(options.start.node);
     this.#open.push(this.#root);
     this.#arrivals.keep(this.#root);
     this.#closest = this.#root;
@@ -544,8 +578,8 @@ export class IncrementalSearch {
   #noteClosest(current: number): void {
     const store = this.#store;
     const closest = this.#closest;
-    const heuristic = store.heuristic[current]!;
-    const closestHeuristic = store.heuristic[closest]!;
+    const heuristic = store.progress[current]!;
+    const closestHeuristic = store.progress[closest]!;
     if (
       heuristic < closestHeuristic ||
       (heuristic === closestHeuristic && store.cost[current]! < store.cost[closest]!)
@@ -572,7 +606,8 @@ export class IncrementalSearch {
     const state = store.state[current]!;
     const depth = store.depth[current]! + 1;
     const digContext = digContextAt(this.#options.context, state);
-    const finish = this.#goal.finish?.(state, context, digContext);
+    const actualStart = current === this.#root ? this.#options.observedStart : undefined;
+    const finish = this.#goal.finish?.(state, context, digContext, actualStart);
     if (finish && this.#withinRadius(finish.to.x, finish.to.y, finish.to.z)) {
       const cost = store.cost[current]! + finish.cost;
       // A terminal excavation changes the world without changing feet. It
@@ -587,13 +622,14 @@ export class IncrementalSearch {
         current,
         finish,
       );
+      store.progress[terminal] = this.#goal.progress!(finish.state.node);
       if (this.#bestGoal === NO_NODE || cost < store.cost[this.#bestGoal]!) this.#bestGoal = terminal;
       this.#open.push(terminal);
       this.#generated += 1;
     }
     // The catalogue's rows are read by index, and a movement is only made for
     // a row that improves on a known arrival; about half of them do not.
-    const movements = context.catalogue.generate(state, context, digContext);
+    const movements = context.catalogue.generate(state, context, digContext, routeFeetOf(store, current));
     for (let index = 0; index < movements.length; index += 1) {
       const x = movements.toX[index]!;
       const y = movements.toY[index]!;
@@ -606,10 +642,13 @@ export class IncrementalSearch {
       // the dear part of a dig and can only refuse the row, never reprice it,
       // so the rows a known arrival beats are never asked.
       if (!movements.settle(index)) continue;
+      const movement = movements.movement(index);
+      if (actualStart && !rootMovementRetainsSupport(movement.step, actualStart, context.world)) continue;
       this.#generated += 1;
-      const arrival = movements.movement(index).state;
+      const arrival = movement.state;
       const heuristic = this.#goal.heuristic(arrival.node);
       const node = store.add(key, arrival, cost, heuristic, cost + heuristic, depth, current, null);
+      store.progress[node] = this.#goal.progress!(arrival.node);
       this.#arrivals.keep(node);
       if (
         this.#goal.isSatisfied(arrival.node, arrival.overlay.view(this.#options.context.world)) &&
@@ -665,7 +704,7 @@ export class IncrementalSearch {
         mostPermissiveProgress: {
           coefficient: permissive.coefficient,
           score: permissive.score,
-          requiredBelow: this.#store.estimate[this.#root]!,
+          requiredBelow: this.#store.progress[this.#root]!,
           node: this.#nodeEvidence(permissive.node),
         },
       }),

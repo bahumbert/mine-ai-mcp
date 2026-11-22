@@ -15,6 +15,7 @@ import type { Entity } from "prismarine-entity";
 import { Vec3 } from "vec3";
 import type { MineflayerBlock } from "../../navigation/mineflayer/world.js";
 import type { FakeBot } from "./fake-bot.js";
+import type { FakeCombat } from "./fake-bot-combat.js";
 import type { FakeEntities } from "./fake-bot-items.js";
 import { onServerTick } from "./fake-bot-server-ticks.js";
 import type { FakeServer } from "./fake-server.js";
@@ -46,6 +47,8 @@ interface ChatLine {
 
 /** `entity_action` 2: leave the bed (`bed.js:wake`). */
 const LEAVE_BED = 2;
+/** The `animation` packet that shows a player leaving her bed (`entities.js:14-18`: 2 is `entityWake`). */
+const LEAVE_BED_ANIMATION = 2;
 /** The player's `pose` values (`entities.js:483`): standing and sleeping. */
 const POSE_STANDING = 0;
 const POSE_SLEEPING = 2;
@@ -74,6 +77,7 @@ interface Sleeper {
 export interface FakeSleepParts {
   readonly server: FakeServer;
   readonly world: FakeWorld;
+  readonly combat: Pick<FakeCombat, "beforeBotHurt">;
 }
 
 /** The keys of a player's metadata the version names, `-1` when it has none. */
@@ -164,6 +168,35 @@ function setOccupied(world: FakeWorld, cell: Vec3, occupied: boolean): void {
   world.setCell(cell, { name: block.name, properties: { ...(block.getProperties() as Record<string, string>), occupied: String(occupied) } });
 }
 
+/**
+ * Where the server stands a player who leaves the bed and where it respawns her: the cell beside the head, on the side the head offset turned a quarter
+ * round (a bed facing east: one block south of the head, feet level with it; contract check `respawn-while-asleep`, 3 runs, one bed facing). Other facings
+ * follow the same turn, unmeasured.
+ */
+function standUpPoint(head: Vec3, foot: Vec3): Vec3 {
+  const toHead = head.minus(foot);
+  return head.offset(0.5 - toHead.z, 0, 0.5 + toHead.x);
+}
+
+/** What the client hears of her leaving the bed: both halves free, the standing pose and the leave-bed animation (`entities.js:142-146`). */
+function tellLeftBed(bot: FakeBot, world: FakeWorld, { head, foot }: Pick<Sleeper, "head" | "foot">): void {
+  setOccupied(world, head, false);
+  setOccupied(world, foot, false);
+  hearPlayerMetadata(bot, bot.entity, POSE_STANDING, null);
+  bot._client.emit("animation", { entityId: bot.entity.id, animation: LEAVE_BED_ANIMATION });
+  bot.emit("entityWake", bot.entity);
+}
+
+/**
+ * A hurt wakes a sleeper before the damage is told, in the same tick: the leave-bed animation, then a `position` that stands her beside the bed, then the
+ * `damage_event` (contract check `respawn-while-asleep`, real 1.21.4, 3 runs: a hit of 3 and a hit of 100 both). The wake is
+ * measured for hits that take health; a hit inside the hurt window is not (it sent no `damage_event`, and the wake had already happened).
+ */
+function wakeForHurt(bot: FakeBot, world: FakeWorld, server: FakeServer, bed: Pick<Sleeper, "head" | "foot">): void {
+  tellLeftBed(bot, world, bed);
+  server.sendPosition(standUpPoint(bed.head, bed.foot));
+}
+
 /** Give `bot` beds, weather and `activateBlock`, and the server its answers to them. */
 export function attachFakeSleep(bot: FakeBot, parts: FakeSleepParts): void {
   const { server, world } = parts;
@@ -178,6 +211,7 @@ export function attachFakeSleep(bot: FakeBot, parts: FakeSleepParts): void {
   /** The server seats her in the bed whose head is `head`: pose and bed in her metadata, both halves occupied. */
   const startSleeping = (head: Vec3, foot: Vec3) => {
     sleeper = { head, foot, ticks: 0 };
+    server.setRespawnPoint(standUpPoint(head, foot)); // a night in a bed makes it her spawn (contract check `respawn-while-asleep`: she came back beside it)
     setOccupied(world, head, true);
     setOccupied(world, foot, true);
     hearPlayerMetadata(bot, bot.entity, POSE_SLEEPING, { x: head.x, y: head.y, z: head.z });
@@ -186,16 +220,17 @@ export function attachFakeSleep(bot: FakeBot, parts: FakeSleepParts): void {
   /** She leaves the bed (`wake`, or the skip): the server's record first, what the client hears after. */
   const wakeUp = () => {
     if (sleeper === null) return;
-    const { head, foot } = sleeper;
+    const bed = sleeper;
     sleeper = null;
-    server.answer(() => {
-      setOccupied(world, head, false);
-      setOccupied(world, foot, false);
-      hearPlayerMetadata(bot, bot.entity, POSE_STANDING, null);
-      // The leave-bed animation (`entities.js:144-148`, animation 2).
-      bot.emit("entityWake", bot.entity);
-    });
+    server.answer(() => tellLeftBed(bot, world, bed));
   };
+
+  parts.combat.beforeBotHurt(() => {
+    if (sleeper === null) return;
+    const bed = sleeper;
+    sleeper = null;
+    wakeForHurt(bot, world, server, bed);
+  });
 
   /** `BedBlock.useWithoutItem` and `Player.startSleepInBed`, in the order the game asks. */
   const answerBedUse = (clicked: MineflayerBlock) => {

@@ -3,7 +3,8 @@ import test from "node:test";
 import { flatWorld, observation, planningStart, WELL_FED } from "../../test-support/navigation.js";
 import { excavateGoal } from "../goals/excavate.js";
 import { createMovementCatalogue } from "./catalogue.js";
-import { DIG_REACH, prepareExcavation, stanceSight } from "./excavation.js";
+import { DIG_REACH, fallingColumnBodyHazard, prepareExcavation, stanceSight } from "./excavation.js";
+import { packKey } from "../world/world.js";
 import { STANDING_EYE_HEIGHT, visibleBlockAim } from "../../world/block-visibility.js";
 import { obstaclesOf, worldViewRaycaster } from "../world/line-of-sight.js";
 import { MemoryWorld } from "../world/memory-world.js";
@@ -26,8 +27,8 @@ test("opening a water pocket from beside its lid preserves the miner's own dry s
   const target = { x: 0, y: 62, z: 0 };
   world.load(target, { stateId: 1 });
   world.load({ x: 0, y: 61, z: 0 }, { stateId: 2, collisionShapes: [], traits: { empty: true, liquid: "water", liquidSource: true } });
-  assert.match(refusal(prepare(world, target)), /dry footing above water/);
-  assert.equal(prepare(world, target, { standing: { x: 1.5, y: 63, z: 0.5 } }).kind, "prepared");
+  for (const [x, expected] of [[0.5, "unavailable"], [1.15, "unavailable"], [1.3, "prepared"], [1.5, "prepared"]] as const)
+    assert.equal(prepare(world, target, { standing: { x, y: 63, z: 0.5 } }).kind, expected, `x=${x}`);
 });
 
 test("stationary mining does not wake a suspended gravel floor beneath its stance", () => {
@@ -39,6 +40,10 @@ test("stationary mining does not wake a suspended gravel floor beneath its stanc
   assert.match(refusal(prepare(world, target)), /no observed stable support/);
   world.load({ x: 0, y: 61, z: 0 }, { stateId: 1 });
   assert.equal(prepare(world, target).kind, "prepared");
+  world.load({ x: 1, y: 62, z: 0 }, { stateId: 124, traits: { falling: true } });
+  world.load({ x: 1, y: 61, z: 0 }, { stateId: 0 });
+  assert.match(refusal(prepare(world, target, { standing: { x: 0.85, y: 63, z: 0.5 } })), /no observed stable support/);
+  assert.equal(prepare(world, target, { standing: { x: 0.7, y: 63, z: 0.5 } }).kind, "prepared");
 });
 
 /** Prepare the excavation of one cell, at the shipped prices unless the fixture names others. */
@@ -129,7 +134,7 @@ test("collection and traversal charge each dig of the same falling column exactl
   assert.ok(traverse);
   assert.deepEqual(
     collection.step.operations.filter((op) => op.kind === "break"),
-    traverse.step.operations.filter((op) => op.kind === "break"),
+    traverse.step.operations.filter((op) => op.kind === "break").map((op) => ({ ...op, retainSupport: true })),
   );
   assert.equal(collection.cost, 36);
   assert.equal(traverse.cost - policy.movementTicks.walk, collection.cost);
@@ -149,6 +154,40 @@ test("a column beside the bot comes down from the top; from underneath, its supp
   // From directly below, the sand is hidden behind the coal, and taking the
   // coal first would drop the sand onto the bot.
   assert.match(refusal(prepare(world, target)), /would drop the falling block above it onto the bot/);
+});
+
+test("falling-block excavation protects every overlapped body column, even with its centre in air", () => {
+  const target = { x: 1, y: 65, z: 1 };
+  for (const [x, z, expected] of [
+    [0.85, 1.5, "unavailable"], [1.5, 0.85, "unavailable"],
+    [0.85, 0.85, "unavailable"], [0.7, 1.5, "prepared"],
+  ] as const) {
+    const world = excavationWorld();
+    world.load(target, { stateId: 1 });
+    for (let y = 66; y <= 72; y++) world.load({ ...target, y }, { stateId: 2, traits: { falling: true } });
+    world.load({ ...target, y: 73 }, { stateId: 0 });
+    assert.equal(prepare(world, target, { standing: { x, y: 63, z } }).kind, expected, `${x},${z}`);
+  }
+});
+
+test("the falling-column hazard reads a live body: an off-centre footprint over the column refuses, a centred one does not", () => {
+  // The 2026-11-16 coal-under-sand incident: the body at z 0.10 spans z -0.20..0.40, over the column z -1 of the coal.
+  const world = excavationWorld();
+  const target = { x: 0, y: 65, z: -1 };
+  world.load(target, { stateId: 1 });
+  world.load({ x: 0, y: 66, z: -1 }, { stateId: 2, traits: { falling: true } });
+  const read = world.blockAt.bind(world);
+  assert.match(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, target) ?? "", /would drop the falling block above it onto the bot/);
+  assert.equal(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.5 }, target), null);
+  assert.equal(fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, target, [packKey(0, 66, -1)]), null);
+  // The height bound: a falling block over a target below the feet cannot reach the body; at feet height or above it can.
+  for (const [y, expected] of [[62, "null"], [63, "hazard"], [65, "hazard"]] as const) {
+    const column = { x: 0, y, z: -1 };
+    world.load(column, { stateId: 1 });
+    world.load({ ...column, y: y + 1 }, { stateId: 2, traits: { falling: true } });
+    const hazard = fallingColumnBodyHazard(read, { x: 0.5, y: 63, z: 0.10 }, column);
+    assert.equal(hazard === null ? "null" : "hazard", expected, `target y ${y} under standing y 63`);
+  }
 });
 
 test("a falling column is taken from its highest reachable block, which brings the hidden remainder down", () => {
@@ -204,6 +243,57 @@ test("a dig the eye cannot see or the arm cannot reach is not executable work, h
   const distant = { x: 7, y: 63, z: 0 };
   far.load(distant, { stateId: 1 });
   assert.equal(prepare(far, distant).kind, "unavailable");
+});
+
+/** The cause of a refusal, or `none` when the refusal names no stance: the caller reads it to exclude one stance or the block. */
+function refusalCause(result: ReturnType<typeof prepare>): string {
+  if (result.kind !== "unavailable") throw new Error("Expected a refusal, but the excavation was prepared.");
+  return result.cause ?? "none";
+}
+
+test("a refusal that holds only from this stance says so; one that holds from every cell names no stance (D39)", () => {
+  // Hidden behind a two-high wall: the sight refusal is this stance's.
+  const hidden = excavationWorld();
+  const target = { x: 2, y: 63, z: 0 };
+  hidden.load(target, { stateId: 1 });
+  for (const y of [63, 64]) hidden.load({ x: 1, y, z: 0 }, { stateId: 3 });
+  assert.match(refusal(prepare(hidden, target)), /cannot be seen within reach/);
+  assert.equal(refusalCause(prepare(hidden, target)), "stance");
+
+  // Out of reach is the same refusal from this stance.
+  const far = excavationWorld();
+  for (let x = 1; x <= 7; x += 1) for (const y of [63, 64]) far.load({ x, y, z: 0 }, { stateId: 0 });
+  far.load({ x: 7, y: 63, z: 0 }, { stateId: 1 });
+  assert.equal(refusalCause(prepare(far, { x: 7, y: 63, z: 0 })), "stance");
+
+  // A body hazard: the dug cell's column is over the body, with a falling block above it.
+  const hazard = excavationWorld();
+  const column = { x: 0, y: 65, z: 0 };
+  hazard.load(column, { stateId: 1 });
+  hazard.load({ x: 0, y: 66, z: 0 }, { stateId: 2, traits: { falling: true } });
+  hazard.load({ x: 0, y: 67, z: 0 }, { stateId: 3 });
+  assert.match(refusal(prepare(hazard, column, { standing: { x: 0.5, y: 63, z: 0.5 } })), /onto the bot|falling/);
+  assert.equal(refusalCause(prepare(hazard, column)), "stance");
+
+  // A falling column under the stance with no stable support: this stance's.
+  const unstable = excavationWorld();
+  const side = { x: 1, y: 63, z: 0 };
+  unstable.load(side, { stateId: 1 });
+  unstable.load({ x: 0, y: 62, z: 0 }, { stateId: 124, traits: { falling: true } });
+  unstable.load({ x: 0, y: 61, z: 0 }, { stateId: 0 });
+  assert.match(refusal(prepare(unstable, side)), /no observed stable support/);
+  assert.equal(refusalCause(prepare(unstable, side)), "stance");
+
+  // Not loaded, digging disabled, a prohibited break: the same from every cell, so no cause.
+  const open = excavationWorld();
+  assert.equal(refusalCause(prepare(open, { x: 50, y: 63, z: 50 })), "none");
+  open.load(side, { stateId: 1 });
+  assert.equal(refusalCause(prepare(open, side, { policy: createMovementPolicy({ allowDigging: false }) })), "none");
+  const prohibited = createMovementPolicy({
+    evaluateBreak: () => ({ decision: { kind: "prohibited", reason: "never here" }, tool: { itemType: null, expectedTicks: 1 } }),
+  });
+  assert.equal(refusalCause(prepare(open, side, { policy: prohibited })), "none");
+  assert.equal(prepare(open, side).kind, "prepared");
 });
 
 /**

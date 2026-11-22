@@ -1,0 +1,24 @@
+{
+  "spigot.yml": {
+    "world-settings": {
+      "default": {
+        "entity-activation-range": {
+          "animals": 32,
+          "monsters": 32,
+          "raiders": 64,
+          "misc": 16,
+          "water": 16,
+          "villagers": 32,
+          "flying-monsters": 32
+        }
+      }
+    }
+  },
+  "config/paper-world-defaults.yml": {
+    "entities": {
+      "spawning": {
+        "per-player-mob-spawns": true
+      }
+    }
+  }
+}

@@ -112,6 +112,10 @@ export interface ScenarioServerConfig {
   readonly templateCopyBoundMs: number;
   /** Where the finished templates live (`<key>/`): on ext4, shared by every daemon and worktree. */
   readonly templateDir: string;
+  /** 1 puts each templated lane server's whole root in RAM (`worldRamDir`), only its logs on disk (spec 2026-11-15-scenario-disk-stalls D1); 0 keeps every root on disk, as before. */
+  readonly worldRam: number;
+  /** The tmpfs the RAM roots live in. `/dev/shm` is tmpfs on Linux and WSL (half of the RAM at most). */
+  readonly worldRamDir: string;
   readonly socketPath: string;
 }
 
@@ -161,12 +165,14 @@ const NUMBER_CONSTANTS: { readonly [K in NumberKey]: readonly [suffix: string, f
   templateLanes: ["TEMPLATE_LANES", 28],
   templateBuildBoundMs: ["TEMPLATE_BUILD_BOUND_MS", 180_000],
   templateCopyBoundMs: ["TEMPLATE_COPY_BOUND_MS", 52_131],
+  worldRam: ["WORLD_RAM", 1, 1, true],
 };
 
 const ENV_PREFIX = "MINE_AI_SCENARIO_";
 const DEFAULT_SOCKET = "/tmp/mine-ai-scenarios.sock";
 const DEFAULT_MIRROR_DIR = join(homedir(), ".cache/mine-ai/scenario-mirror");
 const DEFAULT_TEMPLATE_DIR = join(homedir(), ".cache/mine-ai/world-templates");
+const DEFAULT_WORLD_RAM_DIR = "/dev/shm";
 
 /** The env variables the daemon reads for itself (MINE_AI_SCENARIO_EVIDENCE and the like belong to the clients). */
 export const SCENARIO_SERVER_ENV_NAMES: ReadonlySet<string> = new Set([
@@ -174,6 +180,7 @@ export const SCENARIO_SERVER_ENV_NAMES: ReadonlySet<string> = new Set([
   `${ENV_PREFIX}SOCKET_PATH`,
   `${ENV_PREFIX}MIRROR_DIR`,
   `${ENV_PREFIX}TEMPLATE_DIR`,
+  `${ENV_PREFIX}WORLD_RAM_DIR`,
 ]);
 
 function numberFromEnv(env: Record<string, string | undefined>, suffix: string, fallback: number, max: number | undefined, zeroAllowed: boolean): number {
@@ -196,10 +203,11 @@ export function loadScenarioServerConfig(env: Record<string, string | undefined>
   if (!Number.isInteger(numbers.clientBootFailureLimit)) throw new Error(`${ENV_PREFIX}CLIENT_BOOT_FAILURE_LIMIT=${numbers.clientBootFailureLimit} is not a whole number from 1`);
   if (!Number.isInteger(numbers.mirror)) throw new Error(`${ENV_PREFIX}MIRROR=${numbers.mirror} is not 0 or 1`);
   if (!Number.isInteger(numbers.worldTemplate)) throw new Error(`${ENV_PREFIX}WORLD_TEMPLATE=${numbers.worldTemplate} is not 0 or 1`);
+  if (!Number.isInteger(numbers.worldRam)) throw new Error(`${ENV_PREFIX}WORLD_RAM=${numbers.worldRam} is not 0 or 1`);
   if (!Number.isInteger(numbers.templateLanes)) throw new Error(`${ENV_PREFIX}TEMPLATE_LANES=${numbers.templateLanes} is not a whole number from 1`);
   return {
     ...numbers, socketPath: env[`${ENV_PREFIX}SOCKET_PATH`] || DEFAULT_SOCKET, mirrorDir: env[`${ENV_PREFIX}MIRROR_DIR`] || DEFAULT_MIRROR_DIR,
-    templateDir: env[`${ENV_PREFIX}TEMPLATE_DIR`] || DEFAULT_TEMPLATE_DIR,
+    templateDir: env[`${ENV_PREFIX}TEMPLATE_DIR`] || DEFAULT_TEMPLATE_DIR, worldRamDir: env[`${ENV_PREFIX}WORLD_RAM_DIR`] || DEFAULT_WORLD_RAM_DIR,
   };
 }
 

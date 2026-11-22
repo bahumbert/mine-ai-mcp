@@ -20,6 +20,7 @@
       "slab": "stone_brick_slab"
     }
   },
+  "sign": { "x": 7, "y": 1, "z": 2, "facing": "north" },
   "key": {
     "D": {
       "role": "door"

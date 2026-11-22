@@ -20,6 +20,7 @@
       "slab": "spruce_slab"
     }
   },
+  "sign": { "x": 5, "y": 1, "z": 0, "facing": "north" },
   "key": {
     "D": {
       "role": "door"

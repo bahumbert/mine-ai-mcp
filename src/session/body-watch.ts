@@ -1,12 +1,15 @@
 // The limits an owner of the body is held to (no physics tick, a ceiling, no progress) and how a watched run ends.
-import { watchForStall, type StallClock } from "../actions/stall-watch.js";
+import type { StallClock } from "../actions/stall-watch.js";
+import { MS_PER_ON_TIME_TICK, serverPacedWallMs, serverTickDeadline, type ServerTickDeadline } from "../world/world-age.js";
 import type { BodyAbort, ReflexLimitKind } from "./abort.js";
 
 /** The first limit an owner of the body ran into; the owner's controller was aborted with `abort`. */
 export interface BodyLimitHit {
   readonly limit: ReflexLimitKind;
-  /** How long the limit measured: the silence since the last tick or the first check owing one (`physics_stalled`), the claim's age (`ceiling`), the window (`no_progress`). */
+  /** How long the limit measured: the silence since the last tick or the first check owing one (`physics_stalled`), the claim's age (`ceiling`), the window (`no_progress`: from its last mark to the check that tripped). */
   readonly elapsedMs: number;
+  /** World ticks the ceiling or the window counted when it tripped; null for the stall limit and while no world age was heard. */
+  readonly elapsedTicks: number | null;
   readonly abort: BodyAbort;
 }
 
@@ -18,14 +21,16 @@ export interface BodyWatchOptions {
   readonly signal: AbortSignal;
   /** Aborted with `abortFor`'s abort when a limit trips: this is how a limit tells the owner to stop. */
   readonly controller: AbortController;
-  /** The monotonic clock every limit reads: limits that wait for a tick are blind in exactly the case they guard. */
+  /** The monotonic clock every limit reads, and the real-time backstop of the tick limits: limits that wait for a tick are blind in exactly the case they guard. */
   readonly clock: StallClock;
-  /** How long the owner may go without a physics tick while `physicsExpected()`; unset: no stall limit, no cancel grace. */
+  /** The server's world age (`bot.time.age`), null before any time packet; absent: the tick limits run on the clock alone, 50 ms a tick. */
+  readonly worldAge?: () => number | null;
+  /** How long the owner may go without a physics tick while `physicsExpected()`; unset: no stall limit, no cancel grace. Real time: the client's own physics. */
   readonly stallMs?: number;
-  /** How long the owner may hold the body, however well it progresses; unset: none. */
-  readonly ceilingMs?: number;
-  /** How long `marks()` may stay unchanged; any change of the count is progress; unset: none. */
-  readonly noProgress?: { readonly ms: number; readonly marks: () => number };
+  /** World ticks the owner may hold the body, however well it progresses; unset: none. */
+  readonly ceilingTicks?: number;
+  /** World ticks `marks()` may stay unchanged; any change of the count is progress; unset: none. */
+  readonly noProgress?: { readonly ticks: number; readonly marks: () => number };
   /** How long an owner told to stop (a limit, a cancel with no tick) has to settle before the body is released anyway. */
   readonly cancelGraceMs: number;
   /** The clock reading of the last physics tick, read at every check. */
@@ -38,7 +43,7 @@ export interface BodyWatchOptions {
   /** Ends the watch without a verdict when it aborts: the connection ended, the pending work can never settle. */
   readonly abandon?: AbortSignal;
   /** The abort a limit tells the owner to stop with (its cause and its text). */
-  readonly abortFor: (limit: ReflexLimitKind, elapsedMs: number) => BodyAbort;
+  readonly abortFor: (limit: ReflexLimitKind, elapsedMs: number, elapsedTicks: number | null) => BodyAbort;
   readonly cancelledWithoutTicks: (owner: string, reason: string) => string;
   /** Called once, right after the owner's controller is aborted: the caller records it and restarts physics. */
   readonly onLimit: (hit: BodyLimitHit) => void;
@@ -57,19 +62,35 @@ export type BodyWatchEnd<Value> =
 /** How often the limits are checked: a quarter of the shortest one, 10 to 250 ms. */
 const checkEveryMs = (shortestMs: number) => Math.max(10, Math.min(250, Math.floor(shortestMs / 4)));
 
-/** Calls `onStalled` once when `marks()` stays unchanged for `noProgress.ms`; returns the stop. */
-function watchNoProgress(noProgress: NonNullable<BodyWatchOptions["noProgress"]>, clock: StallClock, onStalled: () => void): () => void {
-  // The position is not read: `watchForStall` only reports how far the body walked in its description.
-  const stalled = watchForStall({
-    work: noProgress.marks,
-    position: () => ({ x: 0, y: 0, z: 0 }),
-    stallMs: noProgress.ms,
-    sampleMs: checkEveryMs(noProgress.ms),
-    clock,
-    describe: () => "no progress",
-  });
-  stalled.signal.addEventListener("abort", onStalled, { once: true });
-  return stalled.close;
+const ticksAsMs = (ticks: number | undefined) => (ticks === undefined ? undefined : ticks * MS_PER_ON_TIME_TICK);
+
+type TickLimitHit =Pick<BodyLimitHit, "limit" | "elapsedMs" | "elapsedTicks">;
+
+/**
+ * The ceiling and the no-progress window of one watch, counted in world ticks (`serverTickDeadline`, the age read at
+ * the start plus one time packet, a real-time wall of `serverPacedWallMs`, so a 10 tps server gives the same game time).
+ * The ceiling has no stopped-clock term (its wall ends it); the window has the default one, so a clock that stands
+ * still is no progress. Returns the check: call it at each look; the window restarts from the age cached at the check
+ * that reads a changed `marks()`.
+ */
+function tickLimitCheck(options: BodyWatchOptions, startedAt: number): (now: number) => TickLimitHit | null {
+  const { ceilingTicks, noProgress, worldAge = () => null } = options;
+  const ceiling = ceilingTicks === undefined ? null
+    : serverTickDeadline(worldAge, ceilingTicks, startedAt, { origin: "packet", wallMs: serverPacedWallMs(ceilingTicks), stoppedMs: null });
+  const windowFrom = (at: number): ServerTickDeadline | null => noProgress === undefined ? null
+    : serverTickDeadline(worldAge, noProgress.ticks, at, { origin: "packet", wallMs: serverPacedWallMs(noProgress.ticks) });
+  let window = windowFrom(startedAt);
+  let windowStartedAt = startedAt;
+  let lastMarks = noProgress?.marks();
+  return (now) => {
+    const marks = noProgress?.marks();
+    if (marks !== lastMarks) {
+      [lastMarks, windowStartedAt, window] = [marks, now, windowFrom(now)];
+    }
+    if (ceiling?.passed(now)) return { limit: "ceiling", elapsedMs: now - startedAt, elapsedTicks: ceiling.elapsed(now).ticks };
+    if (window?.passed(now)) return { limit: "no_progress", elapsedMs: now - windowStartedAt, elapsedTicks: window.elapsed(now).ticks };
+    return null;
+  };
 }
 
 /**
@@ -87,8 +108,8 @@ function watchNoProgress(noProgress: NonNullable<BodyWatchOptions["noProgress"]>
  * for want of ticks is released after the grace too. Every timer stops when the watch ends, on any path.
  */
 export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOptions): Promise<BodyWatchEnd<Value>> {
-  const { clock, stallMs, ceilingMs, noProgress } = options;
-  if (stallMs === undefined && ceilingMs === undefined && noProgress === undefined) {
+  const { clock, stallMs, ceilingTicks, noProgress } = options;
+  if (stallMs === undefined && ceilingTicks === undefined && noProgress === undefined) {
     return run.then(
       (value): BodyWatchEnd<Value> => ({ kind: "settled", value, hit: null }),
       (cause: unknown): BodyWatchEnd<Value> => ({ kind: "threw", cause, hit: null }),
@@ -109,9 +130,10 @@ export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOpt
       for (const stop of stops) stop();
       resolve(end);
     };
-    const trip = (limit: ReflexLimitKind, elapsedMs: number) => {
+    const tickLimits = tickLimitCheck(options, startedAt);
+    const trip = (limit: ReflexLimitKind, elapsedMs: number, elapsedTicks: number | null = null) => {
       if (hit !== null || finished) return;
-      hit = { limit, elapsedMs, abort: options.abortFor(limit, elapsedMs) };
+      hit = { limit, elapsedMs, elapsedTicks, abort: options.abortFor(limit, elapsedMs, elapsedTicks) };
       hitAt = clock.now();
       options.controller.abort(hit.abort);
       options.onLimit(hit);
@@ -140,11 +162,12 @@ export function watchBodyOwner<Value>(run: Promise<Value>, options: BodyWatchOpt
           return;
         }
       }
-      if (ceilingMs !== undefined && now - startedAt >= ceilingMs) trip("ceiling", now - startedAt);
+      const tickLimit = tickLimits(now);
+      if (tickLimit !== null) trip(tickLimit.limit, tickLimit.elapsedMs, tickLimit.elapsedTicks);
     };
-    const shortest = Math.min(...[stallMs, ceilingMs].filter((ms): ms is number => ms !== undefined));
-    if (Number.isFinite(shortest)) stops.push(clock.every(check, checkEveryMs(shortest)));
-    if (noProgress !== undefined) stops.push(watchNoProgress(noProgress, clock, () => trip("no_progress", noProgress.ms)));
+    // One check for every limit set, at a quarter of the shortest one (a tick is 50 ms on a server on time).
+    const limitsMs = [stallMs, ticksAsMs(ceilingTicks), ticksAsMs(noProgress?.ticks)].filter((ms): ms is number => ms !== undefined);
+    stops.push(clock.every(check, checkEveryMs(Math.min(...limitsMs))));
     const onAbandon = () => finish({ kind: "released", hit, cancelled: null });
     if (options.abandon?.aborted) onAbandon();
     options.abandon?.addEventListener("abort", onAbandon, { once: true });

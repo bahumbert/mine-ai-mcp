@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import { elapsedSince, monotonicNow } from "../../../utils/index.js";
 import { dragonPhase, entityHealth, isDragonLanding, isDragonPerched } from "../../../world/end-fight.js";
+import { swingReadiness } from "../../weapons/swing-readiness.js";
 
 /** One requested perch window, including the ticks spent under a reflex. */
 export class PerchObservation implements Disposable {
@@ -28,8 +29,7 @@ export class PerchObservation implements Disposable {
   private perchedTicks = 0;
   private minimumHealth: number;
   private readonly stageTicks: Partial<Record<PerchObservation["stage"], number>> = {};
-  #ticks = 0;
-  #readyAt = 0;
+  #cooldownTicks = 0;
   #health: number | null;
   #bodyHealth: number;
 
@@ -50,7 +50,6 @@ export class PerchObservation implements Disposable {
   }
 
   readonly #tick = () => {
-    this.#ticks++;
     this.refresh();
     this.stageTicks[this.stage] = (this.stageTicks[this.stage] ?? 0) + 1;
     if (this.target && isDragonPerched(dragonPhase(this.bot, this.target))) this.perchedTicks++;
@@ -109,14 +108,15 @@ export class PerchObservation implements Disposable {
       stageTicks: { ...this.stageTicks }, minimumHealth: this.minimumHealth, lastAttackBlocker: this.lastAttackBlocker };
   }
   get ready(): boolean {
-    return this.#ticks >= this.#readyAt;
+    return swingReadiness(this.bot).ready(this.#cooldownTicks);
   }
-  resetReadiness(ticks: number): void {
-    this.#readyAt = this.#ticks + ticks;
+  requireCooldown(ticks: number): void {
+    this.#cooldownTicks = ticks;
   }
   swung(cooldownTicks: number): void {
     this.attacks++;
-    this.resetReadiness(cooldownTicks);
+    this.requireCooldown(cooldownTicks);
+    swingReadiness(this.bot).restart();
   }
 
   [Symbol.dispose](): void {

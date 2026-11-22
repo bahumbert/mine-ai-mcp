@@ -3,6 +3,12 @@ import type { Scenario } from "mine-labs";
 import { parseGameruleAnswer } from "./placement.ts";
 import type { ScenarioServer } from "./scenario-server.ts";
 
+export class ProbeFailed extends Error {
+  constructor(readonly version: string, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
 export class GameruleDefaultsCache {
   readonly #byVersion = new Map<string, Record<string, string>>();
 
@@ -18,12 +24,16 @@ export class GameruleDefaultsCache {
     const known = this.#byVersion.get(version) ?? {};
     const missing = [...new Set(names)].filter(name => !(name in known));
     if (missing.length === 0) return [];
-    const server = await this.probe(version, example);
     const unknown: string[] = [];
-    for (const name of missing) {
-      const value = parseGameruleAnswer(await server.command(`gamerule ${name}`));
-      if (value === null) unknown.push(name);
-      else known[name] = value;
+    try {
+      const server = await this.probe(version, example);
+      for (const name of missing) {
+        const value = parseGameruleAnswer(await server.command(`gamerule ${name}`));
+        if (value === null) unknown.push(name);
+        else known[name] = value;
+      }
+    } catch (error) {
+      throw new ProbeFailed(version, error);
     }
     this.#byVersion.set(version, known);
     return unknown;

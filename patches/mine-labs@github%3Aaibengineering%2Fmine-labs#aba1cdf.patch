@@ -1,8 +1,8 @@
 diff --git a/src/client/node.ts b/src/client/node.ts
-index 43f15733adeb8a84289eedaa0763355829b27173..4444d28082dc899a59e402ee399776ecd1283707 100644
+index 43f15733adeb8a84289eedaa0763355829b27173..75f23dcc4cef0b41b0114b325796e2f140bb886f 100644
 --- a/src/client/node.ts
 +++ b/src/client/node.ts
-@@ -29,6 +29,8 @@ export interface NodeClientSession {
+@@ -29,12 +29,15 @@ export interface NodeClientSession {
    username: string;
    version: string;
    scenario: ScenarioDefinition;
@@ -11,7 +11,14 @@ index 43f15733adeb8a84289eedaa0763355829b27173..4444d28082dc899a59e402ee399776ec
    arranged: Promise<void>;
    start: Promise<void>;
    signal: AbortSignal;
-@@ -83,6 +85,7 @@ export async function runNodeClient(client: (session: NodeClientSession) => void
+   ready(): void;
+   prepared(): void;
+   log(message: string): void;
++  progress(reason: string): void;
+   chat(message: string): void;
+   finish(completion: ClientCompletion): void;
+ }
+@@ -83,6 +86,7 @@ export async function runNodeClient(client: (session: NodeClientSession) => void
      username: init.username,
      version: init.version,
      scenario: init.scenario,
@@ -19,8 +26,55 @@ index 43f15733adeb8a84289eedaa0763355829b27173..4444d28082dc899a59e402ee399776ec
      arranged: arranged.promise,
      start: started.promise,
      signal: cancellation.signal,
+@@ -97,6 +101,7 @@ export async function runNodeClient(client: (session: NodeClientSession) => void
+       send({ type: "prepared" });
+     },
+     log: (message) => send({ type: "log", message }),
++    progress: (reason) => send({ type: "progress", reason }),
+     chat: (message) => send({ type: "chat", message }),
+     finish: (completion) => {
+       if (finished) return;
+diff --git a/src/client/process.test.ts b/src/client/process.test.ts
+index 4f0f235bb75292c3f6578c9c71d3d55336629af8..010c259f3506b337583d1ba8bb1d45cd79de9984 100644
+--- a/src/client/process.test.ts
++++ b/src/client/process.test.ts
+@@ -5,6 +5,34 @@ import { launchScenarioClient } from "./process.js";
+ import type { ClientCompletion } from "./protocol.js";
+ import { scenarioSchema } from "../scenario/schema.js";
+ 
++test("the Node session sends progress through child stdout to its process dispatcher", async () => {
++  const module = new URL("./node.ts", import.meta.url).href;
++  const source = `import { runNodeClient } from ${JSON.stringify(module)};
++    await runNodeClient(async session => {
++      session.ready();
++      await session.arranged; session.prepared(); await session.start;
++      session.progress("hit"); session.finish({ status: "succeeded" });
++      await new Promise(resolve => session.signal.addEventListener("abort", resolve, { once: true }));
++      session.progress("after-stop");
++    });`;
++  const scenario = scenarioSchema.parse({ client: { command: process.execPath, args: ["-e", source] }, players: [{ name: "Actor" }], goal: { kind: "completion" } });
++  const { client: command, ...definition } = scenario;
++  const reasons: string[] = [];
++  const completed = Promise.withResolvers<void>();
++  const client = launchScenarioClient({
++    client: command, scenario: definition, host: "127.0.0.1", port: 1, username: "Actor", version: "1.21.4", artifactsDirectory: "unused",
++    log: () => {}, onChat: () => {}, onProgress: reason => reasons.push(reason), onCompletion: () => completed.resolve(),
++  });
++  try {
++    await client.ready;
++    client.arranged();
++    await client.prepared;
++    client.start();
++    await completed.promise;
++  } finally { await client.stop("test complete"); }
++  assert.deepEqual(reasons, ["hit"]);
++});
++
+ test("a language-neutral client observes arrangement before start", async () => {
+   const fixture = fileURLToPath(new URL("./test-fixtures/protocol-client.mjs", import.meta.url));
+   const logs: string[] = [];
 diff --git a/src/client/process.ts b/src/client/process.ts
-index b35d72148c0810f13b8bc591c190b50dfbffbefb..5f331bada829f97cdce37ddc415b7e0cd2d3be98 100644
+index b35d72148c0810f13b8bc591c190b50dfbffbefb..242ae53fe7447a593a3018732759589b04ad8b48 100644
 --- a/src/client/process.ts
 +++ b/src/client/process.ts
 @@ -28,6 +28,40 @@ import {
@@ -64,7 +118,7 @@ index b35d72148c0810f13b8bc591c190b50dfbffbefb..5f331bada829f97cdce37ddc415b7e0c
  export interface ScenarioClientProcess {
    readonly ready: Promise<void>;
    readonly prepared: Promise<void>;
-@@ -44,6 +78,12 @@ export interface LaunchScenarioClientOptions {
+@@ -44,10 +78,17 @@ export interface LaunchScenarioClientOptions {
    username: string;
    version: string;
    artifactsDirectory: string;
@@ -77,65 +131,312 @@ index b35d72148c0810f13b8bc591c190b50dfbffbefb..5f331bada829f97cdce37ddc415b7e0c
    readyTimeoutMs?: number;
    preparedTimeoutMs?: number;
    log: (message: string) => void;
-@@ -59,8 +99,11 @@ const SIGNAL_GRACE_MS = 5_000;
+   onChat: (message: string) => void;
++  onProgress?: (reason: string) => void;
+   onCompletion: (completion: ClientCompletion) => void;
+ }
+ 
+@@ -59,107 +100,126 @@ const SIGNAL_GRACE_MS = 5_000;
  
  /** Launch one scenario client behind the language-neutral JSON-lines protocol. */
  export function launchScenarioClient(options: LaunchScenarioClientOptions): ScenarioClientProcess {
 -  const child = spawnClient(options.client, options.artifactsDirectory);
 -  registerManagedChild(child);
+-  const ready = Promise.withResolvers<void>();
+-  const prepared = Promise.withResolvers<void>();
+-  const exited = Promise.withResolvers<void>();
+-  let becameReady = false;
+-  let arrangementSent = false;
+-  let becamePrepared = false;
+-  let reportedCompletion = false;
+-  let stopping = false;
+-  let preparedTimer: ReturnType<typeof setTimeout> | undefined;
+-
+-  const readyTimer = setTimeout(() => {
+-    ready.reject(new Error(`client '${options.username}' did not become ready within ${(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS) / 1000}s`));
 +  const provided = pickClientAhead(options);
 +  const failure = provided && handoverFailure(provided);
 +  if (provided && failure) return failedHandover(provided, failure, options);
 +  const spawned = provided ?? spawnClientAhead(options.client, { MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory });
 +  const { child } = spawned;
-   const ready = Promise.withResolvers<void>();
-   const prepared = Promise.withResolvers<void>();
-   const exited = Promise.withResolvers<void>();
-@@ -75,8 +118,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
-     ready.reject(new Error(`client '${options.username}' did not become ready within ${(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS) / 1000}s`));
++  const state = createClientLifecycle(options);
++  const dropped = spawned.takeOver(({ stream, line }) =>
++    stream === "stdout" ? dispatchClientLine(options, state, line) : options.log(`client '${options.username}' stderr: ${line}`),
++  );
++  if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
++  child.stdin.on("error", (error) => {
++    if (!state.stopping) options.log(`client '${options.username}' stdin error: ${error.message}`);
++  });
++  observeClientExit(child, options, state);
++  sendClientInit(child, options, Boolean(provided));
++  return {
++    ready: state.ready.promise,
++    prepared: state.prepared.promise,
++    arranged: () => arrangeClient(child, options, state),
++    start() {
++      if (state.stopping) return;
++      state.started = true;
++      send(child, { type: "start" });
++    },
++    stop: reason => stopClient(child, options, state, reason),
++  };
++}
++
++interface ClientLifecycle {
++  ready: PromiseWithResolvers<void>;
++  prepared: PromiseWithResolvers<void>;
++  exited: PromiseWithResolvers<void>;
++  becameReady: boolean;
++  arrangementSent: boolean;
++  becamePrepared: boolean;
++  reportedCompletion: boolean;
++  stopping: boolean;
++  started: boolean;
++  readyTimer?: ReturnType<typeof setTimeout>;
++  preparedTimer?: ReturnType<typeof setTimeout>;
++}
++
++/** Allocate the handshake promises and bound the first answer. */
++function createClientLifecycle(options: LaunchScenarioClientOptions): ClientLifecycle {
++  const state: ClientLifecycle = {
++    ready: Promise.withResolvers<void>(), prepared: Promise.withResolvers<void>(), exited: Promise.withResolvers<void>(),
++    becameReady: false, arrangementSent: false, becamePrepared: false, reportedCompletion: false, stopping: false, started: false,
++  };
++  state.readyTimer = setTimeout(() => {
++    state.ready.reject(new Error(`client '${options.username}' did not become ready within ${(options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS) / 1000}s`));
    }, options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
++  return state;
++}
  
 -  const output = createInterface({ input: child.stdout });
 -  output.on("line", (line) => {
-+  const onStdoutLine = (line: string): void => {
-     let event;
-     try {
-       event = parseClientEvent(line);
-@@ -114,10 +156,11 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
-         options.onCompletion(event.completion);
+-    let event;
+-    try {
+-      event = parseClientEvent(line);
+-    } catch {
+-      options.log(`client '${options.username}' stdout: ${line}`);
++/** Dispatch the same parsed event path for replayed and live stdout. */
++function dispatchClientLine(options: LaunchScenarioClientOptions, state: ClientLifecycle, line: string): void {
++  let event;
++  try { event = parseClientEvent(line); }
++  catch { options.log(`client '${options.username}' stdout: ${line}`); return; }
++  switch (event.type) {
++    case "ready":
++      if (!state.becameReady) {
++        state.becameReady = true;
++        clearTimeout(state.readyTimer);
++        state.ready.resolve();
++      }
+       return;
+-    }
+-    switch (event.type) {
+-      case "ready":
+-        if (!becameReady) {
+-          becameReady = true;
+-          clearTimeout(readyTimer);
+-          ready.resolve();
+-        }
+-        return;
+-      case "prepared":
+-        if (!arrangementSent) {
+-          options.log(`client '${options.username}' ignored premature prepared report`);
+-          return;
+-        }
+-        if (!becamePrepared) {
+-          becamePrepared = true;
+-          if (preparedTimer) clearTimeout(preparedTimer);
+-          prepared.resolve();
+-        }
+-        return;
+-      case "log":
+-        options.log(`client '${options.username}': ${event.message}`);
++    case "prepared":
++      if (!state.arrangementSent) {
++        options.log(`client '${options.username}' ignored premature prepared report`);
          return;
-     }
+-      case "chat":
+-        options.onChat(event.message);
+-        return;
+-      case "finish":
+-        reportedCompletion = true;
+-        options.onCompletion(event.completion);
+-        return;
+-    }
 -  });
 -
 -  const errors = createInterface({ input: child.stderr });
 -  errors.on("line", (line) => options.log(`client '${options.username}' stderr: ${line}`));
-+  };
-+  const dropped = spawned.takeOver(({ stream, line }) =>
-+    stream === "stdout" ? onStdoutLine(line) : options.log(`client '${options.username}' stderr: ${line}`),
-+  );
-+  if (dropped > 0) options.log(`client '${options.username}': ${dropped} earlier output lines dropped before the handover`);
-   child.stdin.on("error", (error) => {
-     if (!stopping) options.log(`client '${options.username}' stdin error: ${error.message}`);
-   });
-@@ -148,8 +191,6 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+-  child.stdin.on("error", (error) => {
+-    if (!stopping) options.log(`client '${options.username}' stdin error: ${error.message}`);
+-  });
++      }
++      if (!state.becamePrepared) {
++        state.becamePrepared = true;
++        clearTimeout(state.preparedTimer);
++        state.prepared.resolve();
++      }
++      return;
++    case "log": options.log(`client '${options.username}': ${event.message}`); return;
++    case "chat": options.onChat(event.message); return;
++    case "progress":
++      if (state.started && !state.stopping) options.onProgress?.(event.reason);
++      return;
++    case "finish":
++      state.reportedCompletion = true;
++      options.onCompletion(event.completion);
++      return;
++  }
++}
+ 
+-  /**
+-   * Fail whichever handshake phase is still outstanding, and report whether
+-   * there was one. A client that dies mid-handshake must fail the phase the
+-   * trial is waiting on rather than leave it hanging — but only one phase is
+-   * ever outstanding, and once `stop` has resolved `prepared` deliberately,
+-   * nothing is owed at all.
+-   */
+-  const rejectPendingPhase = (cause: Error): boolean => {
+-    clearTimeout(readyTimer);
+-    if (preparedTimer) clearTimeout(preparedTimer);
+-    if (!becameReady) {
+-      ready.reject(cause);
+-      return true;
+-    }
+-    if (arrangementSent && !becamePrepared && !stopping) {
+-      prepared.reject(cause);
+-      return true;
+-    }
+-    return false;
+-  };
++/** Fail only the outstanding phase; a stopped client's prepared promise is already settled. */
++function rejectPendingPhase(state: ClientLifecycle, cause: Error): boolean {
++  clearTimeout(state.readyTimer);
++  clearTimeout(state.preparedTimer);
++  if (!state.becameReady) { state.ready.reject(cause); return true; }
++  if (state.arrangementSent && !state.becamePrepared && !state.stopping) {
++    state.prepared.reject(cause);
++    return true;
++  }
++  return false;
++}
+ 
++/** Preserve reported completion while failing a client that exits during its handshake or work. */
++function observeClientExit(child: ChildProcessWithoutNullStreams, options: LaunchScenarioClientOptions, state: ClientLifecycle): void {
+   child.once("error", (error) => {
+-    rejectPendingPhase(error);
++    rejectPendingPhase(state, error);
      options.log(`client '${options.username}' process error: ${error.message}`);
    });
    child.once("exit", (code, signal) => {
 -    output.close();
 -    errors.close();
      const detail = `client '${options.username}' exited${code === null ? "" : ` with code ${code}`}${signal ? ` (${signal})` : ""}`;
-     // A prepared client that exits cannot report an unfinished outcome later.
-     // Preserve its first reported completion and keep normal teardown quiet.
-@@ -168,6 +209,7 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
+-    // A prepared client that exits cannot report an unfinished outcome later.
+-    // Preserve its first reported completion and keep normal teardown quiet.
+-    if (!rejectPendingPhase(new Error(detail)) && !stopping) {
++    if (!rejectPendingPhase(state, new Error(detail)) && !state.stopping) {
+       options.log(detail);
+-      if (!reportedCompletion) options.onCompletion({ status: "failed", detail });
++      if (!state.reportedCompletion) options.onCompletion({ status: "failed", detail });
+     }
+-    exited.resolve();
++    state.exited.resolve();
+   });
++}
+ 
++/** A handed-over child receives the trial's environment through init instead of spawn. */
++function sendClientInit(child: ChildProcessWithoutNullStreams, options: LaunchScenarioClientOptions, provided: boolean): void {
+   send(child, {
+     type: "init",
+     protocolVersion: CLIENT_PROTOCOL_VERSION,
+@@ -168,70 +228,134 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
      username: options.username,
      version: options.version,
      scenario: options.scenario,
 +    ...(provided && { env: { ...options.client.env, MINE_LABS_ARTIFACTS_DIR: options.artifactsDirectory } }),
    });
++}
  
-   return {
-@@ -225,13 +267,101 @@ export function launchScenarioClient(options: LaunchScenarioClientOptions): Scen
-   };
+-  return {
+-    ready: ready.promise,
+-    prepared: prepared.promise,
+-    arranged() {
+-      if (arrangementSent) return;
+-      arrangementSent = true;
+-      preparedTimer = setTimeout(() => {
+-        prepared.reject(
+-          new Error(
+-            `client '${options.username}' did not observe scenario arrangement within ${(options.preparedTimeoutMs ?? DEFAULT_PREPARED_TIMEOUT_MS) / 1000}s`,
+-          ),
+-        );
+-      }, options.preparedTimeoutMs ?? DEFAULT_PREPARED_TIMEOUT_MS);
+-      send(child, { type: "arranged" });
+-    },
+-    start() {
+-      send(child, { type: "start" });
+-    },
+-    /**
+-     * Bring the client down, escalating until it is actually gone.
+-     *
+-     * Every wait here is bounded, because a wedged client used to be able to
+-     * hang the whole harness. It would ignore the stop handoff, ignore the
+-     * SIGTERM that followed, and the trial would then wait forever on an exit
+-     * that was never coming — with the goal already decided and the server
+-     * still running. A trial that has finished judging must always be able to
+-     * finish.
+-     */
+-    async stop(reason: string) {
+-      if (child.exitCode !== null || child.signalCode !== null) return;
+-      stopping = true;
+-      if (preparedTimer) clearTimeout(preparedTimer);
+-      prepared.resolve();
+-      send(child, { type: "stop", reason });
+-      if (await settledWithin(exited.promise, STOP_GRACE_MS)) return;
+-
+-      child.kill();
+-      if (await settledWithin(exited.promise, SIGNAL_GRACE_MS)) return;
+-
+-      // SIGTERM is advisory, and a client blocked in a native call can miss it
+-      // entirely.
+-      child.kill("SIGKILL");
+-      if (await settledWithin(exited.promise, SIGNAL_GRACE_MS)) return;
+-
+-      // Nothing left to escalate to. Detach the pipes so an abandoned child
+-      // cannot hold the harness open, and let the trial finish reporting.
+-      options.log(`client '${options.username}' ignored SIGKILL; abandoning it`);
+-      child.stdin.destroy();
+-      child.stdout.destroy();
+-      child.stderr.destroy();
+-      child.unref();
+-    },
+-  };
++/** Bound fixture observation independently from connection readiness. */
++function arrangeClient(child: ChildProcessWithoutNullStreams, options: LaunchScenarioClientOptions, state: ClientLifecycle): void {
++  if (state.arrangementSent) return;
++  state.arrangementSent = true;
++  state.preparedTimer = setTimeout(() => {
++    state.prepared.reject(new Error(`client '${options.username}' did not observe scenario arrangement within ${(options.preparedTimeoutMs ?? DEFAULT_PREPARED_TIMEOUT_MS) / 1000}s`));
++  }, options.preparedTimeoutMs ?? DEFAULT_PREPARED_TIMEOUT_MS);
++  send(child, { type: "arranged" });
++}
++
++/** Escalate an uncooperative child, then abandon its pipes so teardown always returns. */
++async function stopClient(child: ChildProcessWithoutNullStreams, options: LaunchScenarioClientOptions, state: ClientLifecycle, reason: string): Promise<void> {
++  state.stopping = true;
++  if (child.exitCode !== null || child.signalCode !== null) return;
++  clearTimeout(state.preparedTimer);
++  state.prepared.resolve();
++  send(child, { type: "stop", reason });
++  if (await settledWithin(state.exited.promise, STOP_GRACE_MS)) return;
++  child.kill();
++  if (await settledWithin(state.exited.promise, SIGNAL_GRACE_MS)) return;
++  child.kill("SIGKILL");
++  if (await settledWithin(state.exited.promise, SIGNAL_GRACE_MS)) return;
++  options.log(`client '${options.username}' ignored SIGKILL; abandoning it`);
++  child.stdin.destroy();
++  child.stdout.destroy();
++  child.stderr.destroy();
++  child.unref();
  }
  
 -function spawnClient(client: ClientCommandSpec, artifactsDirectory: string): ChildProcessWithoutNullStreams {
@@ -240,7 +541,7 @@ index b35d72148c0810f13b8bc591c190b50dfbffbefb..5f331bada829f97cdce37ddc415b7e0c
  
  function send(child: ChildProcessWithoutNullStreams, command: ClientCommand): void {
 diff --git a/src/client/protocol.ts b/src/client/protocol.ts
-index 20fe378258fced675c6a8d35c541531c9f985d84..2d6ae6a526a8fa913f84a8964894ff2eeade07bc 100644
+index 20fe378258fced675c6a8d35c541531c9f985d84..2d6aca3b0e8a30de7054d914f395345dd4230332 100644
 --- a/src/client/protocol.ts
 +++ b/src/client/protocol.ts
 @@ -33,6 +33,8 @@ export type ClientCommand =
@@ -252,7 +553,15 @@ index 20fe378258fced675c6a8d35c541531c9f985d84..2d6ae6a526a8fa913f84a8964894ff2e
      }
    | { type: "arranged" }
    | { type: "start" }
-@@ -59,6 +61,7 @@ const clientCommandSchema = z.discriminatedUnion("type", [
+@@ -42,6 +44,7 @@ export type ClientEvent =
+   | { type: "ready" }
+   | { type: "prepared" }
+   | { type: "log"; message: string }
++  | { type: "progress"; reason: string }
+   | { type: "chat"; message: string }
+   | { type: "finish"; completion: ClientCompletion };
+ 
+@@ -59,6 +62,7 @@ const clientCommandSchema = z.discriminatedUnion("type", [
      username: z.string(),
      version: z.string(),
      scenario: scenarioDefinitionSchema,
@@ -260,6 +569,14 @@ index 20fe378258fced675c6a8d35c541531c9f985d84..2d6ae6a526a8fa913f84a8964894ff2e
    }),
    z.object({ type: z.literal("arranged") }),
    z.object({ type: z.literal("start") }),
+@@ -69,6 +73,7 @@ const clientEventSchema = z.discriminatedUnion("type", [
+   z.object({ type: z.literal("ready") }),
+   z.object({ type: z.literal("prepared") }),
+   z.object({ type: z.literal("log"), message: z.string() }),
++  z.object({ type: z.literal("progress"), reason: z.string().min(1).max(64) }),
+   z.object({ type: z.literal("chat"), message: z.string() }),
+   z.object({ type: z.literal("finish"), completion: completionSchema }),
+ ]);
 diff --git a/src/index.ts b/src/index.ts
 index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1e99b8567 100644
 --- a/src/index.ts
@@ -302,8 +619,372 @@ index 7f0cb7e5d6e7cec864bbd217f1c40fd76644cd41..ec90fa97b13513b8cc9367d20aa237a1
  } from "./scenario/schema.js";
 +export type { ArenaTrialOptions } from "./trial/arena.js";
 +export { CHECKED_COMMAND_PREFIX } from "./util/minecraft.js";
+diff --git a/src/player/prepare.test.ts b/src/player/prepare.test.ts
+index 7c681e01ae60e6fa308ba47ec838a68e64df0794..3d514528b165df6d56974a0dc137d2deb4344aaa 100644
+--- a/src/player/prepare.test.ts
++++ b/src/player/prepare.test.ts
+@@ -2,6 +2,34 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import { preparePlayerForTrial, type PlayerCommandHost } from "./prepare.js";
+ 
++test("declared effects are applied before teleport and after reusable cleanup", async () => {
++  for (const resetReusablePlayer of [false, true]) {
++    const host = new FakePlayerHost();
++    await preparePlayerForTrial({ commands: host, resetReusablePlayer,
++      player: { name: "Collector", pos: [0, -59, 0], inventory: [], op: false,
++        effects: [{ effect: "absorption", seconds: 120, amplifier: 4 }] },
++    });
++    const effect = host.commands.indexOf("effect give Collector minecraft:absorption 120 4 true");
++    assert.ok(effect >= 0);
++    assert.ok(effect < host.commands.indexOf("tp Collector 0 -59 0"));
++    if (resetReusablePlayer) assert.ok(effect > host.commands.indexOf("effect clear Collector"));
++  }
++});
++
++test("a wound read one point high is refused when game time did not move", async () => {
++  const host = new FakePlayerHost();
++  const command = host.command.bind(host);
++  host.command = async (value) => value.endsWith(" Health")
++    ? "Wounded has the following entity data: 12.0f"
++    : command(value);
++  await assert.rejects(preparePlayerForTrial({
++    commands: host,
++    player: { name: "Wounded", pos: [192.5, 49, -19.5], inventory: [], op: false, health: 11 },
++    dimension: "the_nether",
++    resetReusablePlayer: false,
++  }), /health did not settle at 11/u);
++});
++
+ test("equipment follows reusable cleanup and precedes inventory grants and teleport", async () => {
+   const host = new FakePlayerHost();
+   await preparePlayerForTrial({ commands: host, resetReusablePlayer: true,
+@@ -83,9 +111,15 @@ class FakePlayerHost implements PlayerCommandHost {
+   readonly inventory: string[] = [];
+   /** Queued answers to `data get entity <name> Fire`; a settled body answers -20s. */
+   readonly fire: string[] = [];
++  gameTime = 0;
++  private health = 20;
+ 
+   async command(command: string): Promise<string> {
+     this.commands.push(command);
++    if (command.endsWith(" active_effects")) return "Found no elements matching active_effects";
++    if (command === "time query gametime") return `The time is ${this.gameTime}`;
++    if (command.startsWith("damage ")) this.health = 20 - Number(command.split(" ")[2]);
++    if (command.endsWith(" Health")) return `Player has the following entity data: ${this.health.toFixed(1)}f`;
+     const fire = /^data get entity (\S+) Fire$/u.exec(command);
+     if (fire) return this.fire.shift() ?? `${fire[1]} has the following entity data: -20s`;
+     if (command === "clear Collector") this.inventory.length = 0;
+@@ -122,7 +156,10 @@ test("a declared starting health wounds a fresh body before it leaves the overwo
+     resetReusablePlayer: false,
+   });
+   assert.deepEqual(host.commands, [
++    "time query gametime",
+     "damage Wounded 9 minecraft:magic",
++    "data get entity Wounded Health",
++    "time query gametime",
+     "execute in minecraft:the_nether run tp Wounded 192.5 49 -19.5",
+   ]);
+ });
+diff --git a/src/player/prepare.ts b/src/player/prepare.ts
+index 05d608a7f027d3622f07ef54fff29b119dfa01b5..50bae723303a7e655ffe960524f8314180fd2bfc 100644
+--- a/src/player/prepare.ts
++++ b/src/player/prepare.ts
+@@ -18,6 +18,9 @@ import { posToCommand } from "../scenario/schema.js";
+ import { inDimension, resourceId } from "../util/minecraft.js";
+ 
+ const MINECRAFT_TAG = /^[A-Za-z0-9_.+-]+$/u;
++const RESTORE_EFFECTS = ["minecraft:instant_health", "minecraft:saturation"] as const;
++// 2026-11-16 heal-order probe: 20/10 tps each min=max=1 tick, n=10; worst x2.
++const RESTORE_TICKS = 2;
+ const EQUIPMENT_SLOTS = {
+   head: "armor.head", chest: "armor.chest", legs: "armor.legs", feet: "armor.feet",
+   mainhand: "weapon.mainhand", offhand: "weapon.offhand",
+@@ -33,6 +36,10 @@ export interface PreparePlayerForTrialOptions {
+   /** The arena dimension a declared `pos` is in. A player joins in the overworld. */
+   dimension?: Dimension;
+   resetReusablePlayer: boolean;
++  goalStallMs?: number;
++  signal?: AbortSignal;
++  now?: () => number;
++  sleep?: (ms: number) => Promise<void>;
+ }
+ 
+ /**
+@@ -40,7 +47,9 @@ export interface PreparePlayerForTrialOptions {
+  * Cleanup must finish before declared inventory is provisioned or ctx.start resolves.
+  */
+ export async function preparePlayerForTrial(options: PreparePlayerForTrialOptions): Promise<void> {
+-  const { commands, player } = options;
++  options.signal?.throwIfAborted();
++  const { player } = options;
++  const commands = { command: (command: string) => preparationCommand(options, command) };
+   if (options.resetReusablePlayer) await resetReusablePlayer(commands, player.name);
+   // Equip first so a main-hand declaration cannot overwrite an inventory grant.
+   for (const [slot, item] of Object.entries(player.equipment ?? {})) {
+@@ -51,31 +60,137 @@ export async function preparePlayerForTrial(options: PreparePlayerForTrialOption
+     await commands.command(`give ${player.name} ${resourceId(stack.item)} ${stack.count}`);
+   }
+   if (player.op) await commands.command(`op ${player.name}`);
++  for (const { effect, seconds, amplifier } of player.effects ?? []) {
++    await commands.command(`effect give ${player.name} ${resourceId(effect)} ${seconds} ${amplifier} true`);
++  }
+   const teleport = player.pos
+     ? inDimension(options.dimension ?? "overworld", `tp ${player.name} ${posToCommand(player.pos)}`)
+     : null;
+   if (options.resetReusablePlayer) {
+     // Still a spectator, so the rejoin cell cannot burn or hurt it on the way out.
+     if (teleport) await commands.command(teleport);
+-    await returnReusablePlayer(commands, player.name);
++    await returnReusablePlayer(options);
+     // After the vitals restore, so a reused body is wounded from full health
+     // rather than from whatever the last trial left it with.
+-    await woundToDeclaredHealth(commands, player);
++    await woundToDeclaredHealth(options);
++    await drainToDeclaredFood(options);
+     return;
+   }
+   // Before the teleport: for a moment after a change of dimension the player
+   // is in neither level, and a command aimed at it then finds nobody.
+-  await woundToDeclaredHealth(commands, player);
++  await woundToDeclaredHealth(options);
++  await drainToDeclaredFood(options);
+   if (teleport) await commands.command(teleport);
+ }
+ 
+-/** Magic damage ignores armour, so the declared inventory cannot change the result. */
+-async function woundToDeclaredHealth(commands: PlayerCommandHost, player: PlayerSpec): Promise<void> {
+-  if (player.health !== undefined && player.health < 20) {
+-    await commands.command(`damage ${player.name} ${20 - player.health} minecraft:magic`);
++// First food decrease came about 53–67 ticks after action start in T5's lane trace; 200 is ~3x (2026-11-15).
++const FOOD_STILL_TICKS = 200;
++
++/** One monotonic clock for preparation's independent stall deadlines and polling. */
++function preparationClock(options: PreparePlayerForTrialOptions) {
++  return {
++    now: options.now ?? (() => performance.now()),
++    sleep: options.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))),
++  };
++}
++
++/** Check cancellation on both sides of a sent command; its answer still completes. */
++async function preparationCommand(options: PreparePlayerForTrialOptions, command: string): Promise<string> {
++  options.signal?.throwIfAborted();
++  const answer = await options.commands.command(command);
++  options.signal?.throwIfAborted();
++  return answer;
++}
++
++/** Unreadable game time supplies no evidence of progress. */
++async function preparationTick(options: PreparePlayerForTrialOptions): Promise<number | undefined> {
++  const answer = await options.commands.command("time query gametime").catch(() => "");
++  options.signal?.throwIfAborted();
++  const tick = Number(/^The time is (\d+)\s*$/u.exec(answer)?.[1] ?? NaN);
++  return Number.isSafeInteger(tick) ? tick : undefined;
++}
++
++/** Instant restore effects must be consumed before a wound or hunger can overwrite them. */
++async function awaitRestoreApplied(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { now, sleep } = preparationClock(options);
++  let movedAt = now();
++  let baseline: number | undefined;
++  let lastTick: number | undefined;
++  for (;;) {
++    const effects = await preparationCommand(options, `data get entity ${options.player.name} active_effects`);
++    if (!RESTORE_EFFECTS.some(effect => effects.includes(`id: "${effect}"`))) return;
++    const tick = await preparationTick(options);
++    if (tick !== undefined) {
++      baseline ??= tick;
++      if (lastTick === undefined || tick > lastTick) movedAt = now();
++      lastTick = tick;
++    }
++    if ((lastTick !== undefined && baseline !== undefined && lastTick - baseline > RESTORE_TICKS) ||
++      now() - movedAt >= (options.goalStallMs ?? 30_000)) {
++      throw new Error(`${options.player.name}'s restore was not applied (at tick ${lastTick ?? "unknown"})`);
++    }
++    await sleep(50);
++    options.signal?.throwIfAborted();
+   }
+ }
+ 
++/** Drain the declared food after restoring vitals, always releasing the fixture's hunger effect. */
++async function drainToDeclaredFood(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { player } = options;
++  if (player.food === undefined) return;
++  const commands = { command: (command: string) => preparationCommand(options, command) };
++  const { now, sleep } = preparationClock(options);
++  let movedAt = now();
++  let lastTick: number | undefined;
++  let foodTick: number | undefined;
++  let lastFood: number | undefined;
++  // The restore's one-second Saturation must not keep refilling food while it is being drained.
++  await commands.command(`effect clear ${player.name} minecraft:saturation`);
++  options.signal?.throwIfAborted();
++  try {
++    await commands.command(`effect give ${player.name} minecraft:hunger infinite 255 true`);
++    for (;;) {
++      options.signal?.throwIfAborted();
++      const answer = await commands.command(`data get entity ${player.name} foodLevel`);
++      const food = Number(/: (\d+)\s*$/u.exec(answer)?.[1] ?? NaN);
++      options.signal?.throwIfAborted();
++      if (Number.isFinite(food) && food <= player.food) {
++        const reserve = await commands.command(`data get entity ${player.name} foodSaturationLevel`);
++        const saturation = Number(/: (\d+(?:\.\d+)?)f\s*$/u.exec(reserve)?.[1] ?? NaN);
++        options.signal?.throwIfAborted();
++        if (saturation === 0) return;
++      }
++      const tick = await preparationTick(options);
++      if (tick !== undefined) {
++        if (tick !== lastTick) movedAt = now();
++        if (foodTick === undefined || (Number.isFinite(food) && (lastFood === undefined || food < lastFood))) foodTick = tick;
++        lastTick = tick;
++      }
++      if (Number.isFinite(food)) lastFood = food;
++      if ((lastTick !== undefined && foodTick !== undefined && lastTick - foodTick >= FOOD_STILL_TICKS) || now() - movedAt >= (options.goalStallMs ?? 30_000)) {
++        throw new Error(`food did not fall to ${player.food} (at ${lastFood ?? "unknown"})`);
++      }
++      await sleep(250);
++    }
++  } finally {
++    await options.commands.command(`effect clear ${player.name} minecraft:hunger`);
++  }
++}
++
++/** Magic damage ignores armour, so the declared inventory cannot change the result. */
++async function woundToDeclaredHealth(options: PreparePlayerForTrialOptions): Promise<void> {
++  const { player } = options;
++  if (player.health === undefined || player.health >= 20) return;
++  const before = await preparationTick(options);
++  await preparationCommand(options, `damage ${player.name} ${20 - player.health} minecraft:magic`);
++  const answer = await preparationCommand(options, `data get entity ${player.name} Health`);
++  const health = Number(/: (\d+(?:\.\d+)?)f\s*$/u.exec(answer)?.[1] ?? NaN);
++  const after = await preparationTick(options);
++  if (health === player.health) return;
++  if (before !== undefined && after !== undefined && after > before && health > player.health && health <= player.health + 1) return;
++  throw new Error(`${player.name}'s health did not settle at ${player.health} (at ${Number.isFinite(health) ? health : "unknown"})`);
++}
++
+ /**
+  * A reused server keeps the player's body across trials, and it rejoins where
+  * the last trial left it — a cell the restored arena may have filled with lava
+@@ -101,7 +216,9 @@ const RETURN_POLL_MS = 50;
+  * health never regenerates on no-regeneration fixtures. Reading `Fire` also
+  * waits out a change of dimension, during which the player cannot be found.
+  */
+-async function returnReusablePlayer(commands: PlayerCommandHost, name: string): Promise<void> {
++async function returnReusablePlayer(options: PreparePlayerForTrialOptions): Promise<void> {
++  const commands = { command: (command: string) => preparationCommand(options, command) };
++  const name = options.player.name;
+   for (let attempt = 1; ; attempt += 1) {
+     const answer = await commands.command(`data get entity ${name} Fire`);
+     const ticks = /(-?\d+)s\s*$/u.exec(answer.trim())?.[1];
+@@ -112,8 +229,8 @@ async function returnReusablePlayer(commands: PlayerCommandHost, name: string):
+     await new Promise((resolve) => setTimeout(resolve, RETURN_POLL_MS));
+   }
+   await commands.command(`gamemode survival ${name}`);
+-  await commands.command(`effect give ${name} minecraft:instant_health 1 9 true`);
+-  await commands.command(`effect give ${name} minecraft:saturation 1 9 true`);
++  for (const effect of RESTORE_EFFECTS) await commands.command(`effect give ${name} ${effect} 1 9 true`);
++  await awaitRestoreApplied(options);
+ }
+ 
+ /** Parse both bracketed older responses and Minecraft 1.21.4's comma-separated tag response. */
+diff --git a/src/scenario/compile.test.ts b/src/scenario/compile.test.ts
+index 8f0f652646a1eff091dcd65d461c63e170de9625..2829d732cd2e14aa447ff0df1e182882c04f3157 100644
+--- a/src/scenario/compile.test.ts
++++ b/src/scenario/compile.test.ts
+@@ -105,11 +105,11 @@ test("an arena with no declared reset is snapshotted and restored verbatim", ()
+   // Both halves raise the block limit themselves: `save` runs before the setup
+   // list, so it cannot rely on the gamerule that list sets.
+   assert.deepEqual(snapshot.save, [
+-    "gamerule commandModificationBlockLimit 1000000",
++    "gamerule commandModificationBlockLimit 32768",
+     "clone -8 -64 -8 20 -43 20 532 -64 -8",
+   ]);
+   assert.deepEqual(snapshot.restore, [
+-    "gamerule commandModificationBlockLimit 1000000",
++    "gamerule commandModificationBlockLimit 32768",
+     "clone 532 -64 -8 560 -43 20 -8 -64 -8",
+   ]);
+ });
+@@ -132,17 +132,6 @@ test("the scratch copy never overlaps the arena it backs up", () => {
+   }
+ });
+ 
+-test("an explicit reset still snapshots client block changes", () => {
+-  const scenario = scenarioSchema.parse({
+-    name: "self-cleaning",
+-    client: { command: "test-client" },
+-    reset: ["fill -8 -59 -8 8 -40 8 air"],
+-    geometry: [{ setblock: { block: "stone", at: [0, -59, 0] } }],
+-    goal: { kind: "survive", seconds: 1 },
+-  });
+-  assert.ok(compileScenario(scenario).snapshot);
+-});
+-
+ test("entity-only resets and fractional player coordinates retain a restorable arena", () => {
+   const scenario = scenarioSchema.parse({
+     name: "fractional-arena", client: { command: "test-client" },
+@@ -158,17 +147,48 @@ test("entity-only resets and fractional player coordinates retain a restorable a
+   assert.equal(compiled.region?.maxZ, 8);
+ });
+ 
+-test("large arenas permit snapshots beyond one million blocks", () => {
+-  const scenario = scenarioSchema.parse({
+-    name: "progression-snapshot", client: { command: "test-client" },
+-    reset: ["fill -64 -64 -64 96 -40 64 air"],
+-    goal: { kind: "survive", seconds: 1 },
++for (const [name, reset] of [
++    ["large", "fill -58 -60 -40 58 -40 40 air"],
++    ["wide-section", "fill 0 -60 -800 0 250 800 air"],
++    ["small", "fill -16 -60 -18 16 -40 18 air"],
++    ["million", "fill -64 -64 -64 96 -40 64 air"],
++  ]) {
++  test(`${name} snapshot clones cover the arena in bounded non-overlapping boxes`, () => {
++    const maxCandidate = 131072;
++    const { region, snapshot } = compileScenario(scenarioSchema.parse({
++      name, client: { command: "test-client" }, reset: [reset], goal: { kind: "survive", seconds: 1 },
++    }));
++    assert.ok(region && snapshot);
++    const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
++    if (name === "large") assert.equal(volume, 528941);
++    if (name === "small") assert.equal(volume, 106477);
++    if (name === "million") assert.ok(volume > 1000000);
++    if (name === "wide-section") assert.ok((region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1) > maxCandidate);
++    const boxes = snapshot.save.filter((line) => line.startsWith("clone ")).map((line) => {
++      const numbers = line.split(" ").slice(1).map(Number);
++      const [x1, y1, z1, x2, y2, z2] = numbers as [number, number, number, number, number, number];
++      return { x1, y1, z1, x2, y2, z2, volume: (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1) };
++    });
++    const saves = snapshot.save.filter((line) => line.startsWith("clone "));
++    const restores = snapshot.restore.filter((line) => line.startsWith("clone "));
++    assert.equal(restores.length, saves.length);
++    for (const [i, command] of saves.entries()) {
++      const [x1, y1, z1, x2, y2, z2, sx, sy, sz] = command.split(" ").slice(1).map(Number) as [number, number, number, number, number, number, number, number, number];
++      assert.equal(restores[i], `clone ${sx} ${sy} ${sz} ${sx + x2 - x1} ${sy + y2 - y1} ${sz + z2 - z1} ${x1} ${y1} ${z1}`);
++    }
++    assert.ok(boxes.every((b) => b.volume <= maxCandidate), `${name}: oversized clone`);
++    for (const [i, a] of boxes.entries()) {
++      assert.ok(a.x1 >= region.minX && a.x2 <= region.maxX && a.y1 >= region.minY && a.y2 <= region.maxY && a.z1 >= region.minZ && a.z2 <= region.maxZ);
++      for (const b of boxes.slice(i + 1)) {
++        assert.ok(a.x2 < b.x1 || b.x2 < a.x1 || a.y2 < b.y1 || b.y2 < a.y1 || a.z2 < b.z1 || b.z2 < a.z1, `${name}: overlapping clones`);
++      }
++    }
++    assert.equal(boxes.reduce((sum, b) => sum + b.volume, 0), volume);
++    if (name === "small") assert.equal(boxes.length, 1);
++    assert.equal(snapshot.save[0], `gamerule commandModificationBlockLimit ${Math.max(32768, ...boxes.map((b) => b.volume))}`);
++    assert.equal(snapshot.restore[0], snapshot.save[0]);
+   });
+-  const { snapshot } = compileScenario(scenario);
+-  assert.ok(snapshot);
+-  assert.equal(snapshot.save[0], "gamerule commandModificationBlockLimit 1052265");
+-  assert.equal(snapshot.restore[0], snapshot.save[0]);
+-});
++}
+ 
+ test("a Nether scenario points every world edit at the Nether and leaves server settings bare", () => {
+   const scenario = scenarioSchema.parse({
 diff --git a/src/scenario/compile.ts b/src/scenario/compile.ts
-index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609b609f116 100644
+index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..a82d2eb748122ab4878ef1c115992c0e4c5a6e6d 100644
 --- a/src/scenario/compile.ts
 +++ b/src/scenario/compile.ts
 @@ -17,7 +17,7 @@ import { join } from "node:path";
@@ -362,7 +1043,16 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
    const dimensions = [...new Set(regions.map((region) => region.dimension))];
    return dimensions.map((dimension) => inDimension(dimension, "forceload remove all"));
  }
-@@ -165,6 +194,21 @@ const ALLOW_LARGE_FIXTURE_COMMANDS = "gamerule commandModificationBlockLimit 100
+@@ -150,6 +179,8 @@ const BUILD_LIMITS: Record<Dimension, { minY: number; maxY: number }> = {
+ // is added to the arena's own width so they cannot, at any arena size.
+ const SCRATCH_GAP = 512;
+ 
++// Restore clones measured at load1 8.06, n=5: 131072 blocks max 381.13 ms.
++const SNAPSHOT_SLAB_BLOCKS = 131072;
+ 
+ // Scenario arenas can exceed vanilla's 32,768-block /fill ceiling. Setup and
+ // teardown happen outside the measured trial, so allow one command to cover a
+@@ -165,6 +196,21 @@ const ALLOW_LARGE_FIXTURE_COMMANDS = "gamerule commandModificationBlockLimit 100
  // it silences — so this does not affect anything `Rcon` reads back.
  const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
  
@@ -384,7 +1074,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  /**
   * Turn a scenario into world-mutation commands:
   * - geometry/setup → rcon setup commands (runs once, right after boot)
-@@ -172,12 +216,20 @@ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
+@@ -172,12 +218,20 @@ const QUIET_COMMAND_FEEDBACK = "gamerule sendCommandFeedback false";
   * - scenario.tick → a datapack with a `#minecraft:tick` function so commands
   *   fire reliably every tick (rcon spam would starve the server loop)
   */
@@ -407,7 +1097,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  
    for (const g of s.geometry) {
      if ("fill" in g) {
-@@ -209,15 +261,15 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -209,15 +263,15 @@ export function compileScenario(s: Scenario): CompiledScenario {
  
    // Entities first: the reset clears blocks, and anything the scenario summoned
    // would otherwise be left standing in the cleared space.
@@ -428,7 +1118,7 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
  
    return { setup, activation, teardown, region, snapshot };
  }
-@@ -237,17 +289,17 @@ export function compileScenario(s: Scenario): CompiledScenario {
+@@ -237,17 +291,36 @@ export function compileScenario(s: Scenario): CompiledScenario {
   * setup list, so it cannot rely on the gamerule that list sets, and a 32,768
   * block default would silently truncate the copy of a large arena.
   */
@@ -436,21 +1126,44 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
 +function arenaSnapshot(region: SetupRegion | null, raiseBlockLimit: boolean): ArenaSnapshot | null {
    if (!region) return null;
    const scratch = scratchRegion(region);
-   // Snapshot the actual expanded arena, which can exceed the setup fill size.
-   const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
+-  // Snapshot the actual expanded arena, which can exceed the setup fill size.
+-  const volume = (region.maxX - region.minX + 1) * (region.maxY - region.minY + 1) * (region.maxZ - region.minZ + 1);
 -  const allowSnapshot = `gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`;
-+  const allowSnapshot = raiseBlockLimit ? [`gamerule commandModificationBlockLimit ${Math.max(1000000, volume)}`] : [];
-   const arenaBox = `${region.minX} ${region.minY} ${region.minZ} ${region.maxX} ${region.maxY} ${region.maxZ}`;
-   const scratchBox = `${scratch.minX} ${scratch.minY} ${scratch.minZ} ${scratch.maxX} ${scratch.maxY} ${scratch.maxZ}`;
+-  const arenaBox = `${region.minX} ${region.minY} ${region.minZ} ${region.maxX} ${region.maxY} ${region.maxZ}`;
+-  const scratchBox = `${scratch.minX} ${scratch.minY} ${scratch.minZ} ${scratch.maxX} ${scratch.maxY} ${scratch.maxZ}`;
++  const save: string[] = [];
++  const restore: string[] = [];
++  let largest = 32768;
++  // Split the x slabs first; when a whole y-z section is too large, split z,
++  // then y, so even a section wider than the cap cannot make an oversized box.
++  const yStep = Math.min(region.maxY - region.minY + 1, SNAPSHOT_SLAB_BLOCKS);
++  for (let y = region.minY; y <= region.maxY; y += yStep) {
++    const yEnd = Math.min(y + yStep - 1, region.maxY);
++    const height = yEnd - y + 1;
++    const zStep = Math.min(region.maxZ - region.minZ + 1, Math.floor(SNAPSHOT_SLAB_BLOCKS / height));
++    for (let z = region.minZ; z <= region.maxZ; z += zStep) {
++      const zEnd = Math.min(z + zStep - 1, region.maxZ);
++      const depth = zEnd - z + 1;
++      const xStep = Math.floor(SNAPSHOT_SLAB_BLOCKS / (height * depth));
++      for (let x = region.minX; x <= region.maxX; x += xStep) {
++        const xEnd = Math.min(x + xStep - 1, region.maxX);
++        const scratchX = scratch.minX + x - region.minX;
++        largest = Math.max(largest, (xEnd - x + 1) * height * depth);
++        save.push(inDimension(region.dimension, `clone ${x} ${y} ${z} ${xEnd} ${yEnd} ${zEnd} ${scratchX} ${y} ${z}`));
++        restore.push(inDimension(region.dimension, `clone ${scratchX} ${y} ${z} ${scratchX + xEnd - x} ${yEnd} ${zEnd} ${x} ${y} ${z}`));
++      }
++    }
++  }
++  const allowSnapshot = raiseBlockLimit ? [`gamerule commandModificationBlockLimit ${largest}`] : [];
    return {
 -    save: [allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
 -    restore: [allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
-+    save: [...allowSnapshot, inDimension(region.dimension, `clone ${arenaBox} ${scratch.minX} ${scratch.minY} ${scratch.minZ}`)],
-+    restore: [...allowSnapshot, inDimension(region.dimension, `clone ${scratchBox} ${region.minX} ${region.minY} ${region.minZ}`)],
++    save: [...allowSnapshot, ...save],
++    restore: [...allowSnapshot, ...restore],
      pin: [region, scratch],
    };
  }
-@@ -414,3 +466,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
+@@ -414,3 +487,77 @@ export async function writeDatapack(s: Scenario, worldDir: string): Promise<void
      JSON.stringify({ values: [`${ns}:tick`] }, null, 2),
    );
  }
@@ -528,8 +1241,77 @@ index 54fe9804b643867d528cc7f5dd2ac618ef7c379f..f84b5c7c44696e2dd5d53c285e110609
 +function snbtString(text: string): string {
 +  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 +}
+diff --git a/src/scenario/goal-schema.ts b/src/scenario/goal-schema.ts
+index 1d07d4d379277d1e78b0806753744dccf6c46826..88c751e7eb61dda32eb930ab97c7d123a66be715 100644
+--- a/src/scenario/goal-schema.ts
++++ b/src/scenario/goal-schema.ts
+@@ -8,7 +8,7 @@
+  * types keep coming straight from their own schemas instead of being manually
+  * restated.
+  *
+- * One asymmetry is deliberate: `timeout` exists only on the root goal. A nested
++ * One asymmetry is deliberate: `timeout` and `stillTicks` exist only on the root goal. A nested
+  * condition with its own deadline would make the trial's overall time
+  * ambiguous, so nesting decides *what* is measured and only the root decides
+  * how long it is allowed to take.
+@@ -140,6 +140,7 @@ const goalConditionSchema: z.ZodType<GoalCondition> = z.discriminatedUnion("kind
+ 
+ const rootGoalFields = {
+   timeout: z.number().positive().optional(),
++  stillTicks: z.number().int().positive().optional(),
+ };
+ 
+ /** A recursive goal condition plus the runner timeout for settling the whole trial. */
+diff --git a/src/scenario/schema.test.ts b/src/scenario/schema.test.ts
+index f4c37c45f6877faa2d5dda1de5b3eb1e575f1281..4b46f5ef8075413df2e400d8fdd9b983fbca1654 100644
+--- a/src/scenario/schema.test.ts
++++ b/src/scenario/schema.test.ts
+@@ -7,6 +7,17 @@ import {
+   type ScenarioInput,
+ } from "./schema.js";
+ 
++test("player effects accept valid values and reject unsafe commands", () => {
++  const scenario = (effect: unknown) => ({
++    client: { command: "test-client" }, goal: { kind: "completion" },
++    players: [{ name: "player1", effects: [effect] }],
++  });
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "minecraft:absorption", seconds: 120, amplifier: 4 })).success, true);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption run say x", seconds: 120, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 0, amplifier: 4 })).success, false);
++  assert.equal(scenarioSchema.safeParse(scenario({ effect: "absorption", seconds: 120, amplifier: 256 })).success, false);
++});
++
+ test("scenario parsing turns optional input into a complete runner scenario", () => {
+   const input: ScenarioInput = {
+     client: { command: "test-client" },
+diff --git a/src/scenario/schema.ts b/src/scenario/schema.ts
+index d7a0ad6fef9ea04eb8c4d3b7b74e33a33e653b5f..a8e5ebd482721ac67791811b7c0b4043c8e254a6 100644
+--- a/src/scenario/schema.ts
++++ b/src/scenario/schema.ts
+@@ -108,6 +108,12 @@ const playerSpecSchema = z.strictObject({
+   pos: posSchema.optional(),
+   /** Items Mine Labs gives after reusable-player cleanup and before ctx.start. */
+   inventory: z.array(inventoryItemSchema).default([]),
++  /** Effects to apply after cleanup and before the player is teleported. */
++  effects: z.array(z.strictObject({
++    effect: z.string().regex(minecraftResourceId),
++    seconds: z.number().int().positive(),
++    amplifier: z.number().int().min(0).max(255),
++  })).optional(),
+   /** One item per equipped slot, applied before inventory grants and client start. */
+   equipment: equipmentSchema.optional(),
+   /** Grant operator rights to the client player as part of scenario setup. */
+@@ -118,6 +124,8 @@ const playerSpecSchema = z.strictObject({
+    * arrangement is visible in the scenario and finished before `start`.
+    */
+   health: z.number().min(1).max(20).optional(),
++  /** Food points at start, with saturation drained before the trial begins. */
++  food: z.number().int().min(0).max(20).optional(),
+ });
+ export type PlayerSpec = z.infer<typeof playerSpecSchema>;
+ 
 diff --git a/src/server/rcon.ts b/src/server/rcon.ts
-index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c8e0851bf 100644
+index 0baaaf1da393b7176ce747d589ea43722846f633..7806cedda3296cffaa0d3002e77cff4fc39fa0f2 100644
 --- a/src/server/rcon.ts
 +++ b/src/server/rcon.ts
 @@ -28,7 +28,7 @@ import RconClientModule from "rcon-srcds";
@@ -541,7 +1323,58 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
  
  interface RconTransport {
    authenticate(password: string): Promise<boolean>;
-@@ -127,7 +127,7 @@ export class Rcon {
+@@ -53,6 +53,15 @@ export class Rcon {
+   private readonly client: RconTransport;
+   private queryQueue: Promise<void> = Promise.resolve();
+   private queryObjectivesReady?: Promise<void>;
++  private failureCount = 0;
++  private readonly failures: string[] = [];
++
++  get transportFailures(): number { return this.failureCount; }
++
++  failureSince(count: number): string | null {
++    if (this.failureCount <= count) return null;
++    return this.failures[Math.max(0, count - (this.failureCount - this.failures.length))]!;
++  }
+ 
+   constructor(host: string, port: number, private password: string) {
+     this.client = new RconClient({ host, port, encoding: "utf8", timeout: 5_000 });
+@@ -103,18 +112,25 @@ export class Rcon {
+ 
+   /** `protected` so a test can fake the transport while exercising the real queue/depth logic in `command()`. */
+   protected async rawCommand(cmd: string): Promise<string> {
+-    if (this.socketFailure) throw new Error(`rcon connection lost: ${this.socketFailure.message}`);
+-    const c = cmd.startsWith("/") ? cmd.slice(1) : cmd;
++    try {
++      if (this.socketFailure) throw new Error(`rcon connection lost: ${this.socketFailure.message}`);
++      const c = cmd.startsWith("/") ? cmd.slice(1) : cmd;
+     // The transport's own `timeout` option only sets a socket idle timeout
+     // during `connect()`, which nothing ever subscribes to — it does not
+     // bound `execute()`. Without this, a lost response hangs forever.
+-    const response = await withTimeout(
+-      this.client.execute(c),
+-      COMMAND_TIMEOUT_MS,
+-      `rcon command timed out after ${COMMAND_TIMEOUT_MS}ms: ${c}`,
+-    );
+-    if (typeof response !== "string") throw new Error(`rcon returned no text response for: ${c}`);
+-    return response;
++      const response = await withTimeout(
++        this.client.execute(c),
++        COMMAND_TIMEOUT_MS,
++        `rcon command timed out after ${COMMAND_TIMEOUT_MS}ms: ${c}`,
++      );
++      if (typeof response !== "string") throw new Error(`rcon returned no text response for: ${c}`);
++      return response;
++    } catch (error) {
++      this.failureCount++;
++      this.failures.push(error instanceof Error ? error.message : String(error));
++      if (this.failures.length > 20) this.failures.shift();
++      throw error;
++    }
+   }
+ 
+   /** Execute one world-arrangement command and verify Minecraft accepted it. */
+@@ -127,7 +143,7 @@ export class Rcon {
        // `execute ... run /setworldspawn ...`, which is a parse error and
        // reported as "setup command failed" against a command that is fine.
        const inner = cmd.startsWith("/") ? cmd.slice(1) : cmd;
@@ -551,10 +1384,24 @@ index 0baaaf1da393b7176ce747d589ea43722846f633..73400f9756772f12eec215903714792c
        if (!succeeded && !options.acceptedNoOp?.test(output)) {
          throw new Error(`setup command failed: ${inner}${output ? ` → ${output}` : ""}`);
 diff --git a/src/server/server.ts b/src/server/server.ts
-index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d1e6ba168 100644
+index 51aeb8961776014337dacca592d98d9d0d3889a7..a16f58828ce7dff08ff9f42ac02f890d0f290f1f 100644
 --- a/src/server/server.ts
 +++ b/src/server/server.ts
-@@ -94,6 +94,42 @@ export interface ServerConfig {
+@@ -19,10 +19,11 @@
+ 
+ import { spawn } from "node:child_process";
+ import type { ChildProcess } from "node:child_process";
+-import { link, mkdir, rm, writeFile } from "node:fs/promises";
++import { link, mkdir, rename, rm, writeFile } from "node:fs/promises";
+ import { randomUUID } from "node:crypto";
+ import { existsSync } from "node:fs";
+-import { join } from "node:path";
++import { tmpdir } from "node:os";
++import { delimiter, join } from "node:path";
+ import { Rcon } from "./rcon.js";
+ import { mineLabsHome, writeTextFile, delay } from "../util/fs.js";
+ import { reserveFreePortPair, type PortPairLease } from "./ports.js";
+@@ -94,6 +95,64 @@ export interface ServerConfig {
    structures: boolean;
    operators: OperatorProfile[];
    maxPlayers?: number;
@@ -594,10 +1441,32 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
 +/** The arguments `java` is started with: heap bounds, then the server jar. */
 +export function serverJavaArgs(cfg: Pick<ServerConfig, "maxHeap">, jar: string): string[] {
 +  return ["-Xms512M", `-Xmx${cfg.maxHeap ?? DEFAULT_MAX_HEAP}`, "-jar", jar, "nogui"];
++}
++
++/** Put the hardware-probe stub on the JVM's PATH without changing the parent environment. */
++async function serverEnvironment(log: (message: string) => void): Promise<NodeJS.ProcessEnv> {
++  const env = { ...process.env };
++  if (process.platform === "win32") return env;
++  try {
++    const dir = join(tmpdir(), "mine-ai-stubs");
++    await mkdir(dir, { recursive: true });
++    const partial = join(dir, `lshw.${randomUUID()}.tmp`);
++    try {
++      await writeFile(partial, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
++      await rename(partial, join(dir, "lshw"));
++    } finally {
++      await rm(partial, { force: true });
++    }
++    const entries = (env.PATH ?? "").split(delimiter).filter(Boolean);
++    env.PATH = (entries[0] === dir ? entries : [dir, ...entries]).join(delimiter);
++  } catch (error) {
++    log(`lshw stub not installed (${error instanceof Error ? error.message : String(error)}): server JVMs may stall on oshi's lshw, see knowledge/05-testing-and-ops.md "WSL clock and VM stalls"`);
++  }
++  return env;
  }
  
  export class MinecraftServer {
-@@ -135,10 +171,16 @@ export class MinecraftServer {
+@@ -135,10 +194,16 @@ export class MinecraftServer {
      seed?: number | string;
      structures?: boolean;
      maxPlayers?: number;
@@ -614,7 +1483,7 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
      await linkServerRuntime(opts.root, opts.version);
      const host = opts.host ?? "127.0.0.1";
      const ports = await reserveFreePortPair(opts.preferPort ?? 25565, host);
-@@ -153,6 +195,10 @@ export class MinecraftServer {
+@@ -153,6 +218,10 @@ export class MinecraftServer {
        seed: opts.seed,
        structures: opts.structures ?? false,
        maxPlayers: opts.maxPlayers,
@@ -625,7 +1494,7 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
        operators: [...operators, ...(opts.spectatorNames ?? []).map((name): OperatorProfile => ({
          name, uuid: offlinePlayerUuid(name), level: 2, bypassesPlayerLimit: true,
        }))],
-@@ -205,9 +251,11 @@ export class MinecraftServer {
+@@ -205,9 +274,11 @@ export class MinecraftServer {
        "view-distance=8",
        "simulation-distance=8",
        `max-players=${this.cfg.maxPlayers ?? 10}`,
@@ -638,15 +1507,17 @@ index 51aeb8961776014337dacca592d98d9d0d3889a7..7a826ee32aa4497d2f8e929cd2af420d
      // The vanilla server gates on eula.txt, not the server.properties key.
      await writeTextFile(join(root, "eula.txt"), "eula=true\n");
      await writeTextFile(join(root, "ops.json"), `${JSON.stringify(this.cfg.operators, null, 2)}\n`);
-@@ -221,7 +269,7 @@ export class MinecraftServer {
+@@ -221,8 +292,9 @@ export class MinecraftServer {
      const javaName = process.platform === "win32" ? "javaw.exe" : "java";
      const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin", javaName) : javaName;
      this.log(`starting ${this.cfg.version} server on ${this.cfg.host}:${this.cfg.gamePort} (rcon :${this.cfg.rconPort})`);
 -    this.proc = spawn(java, ["-Xms512M", "-Xmx2G", "-jar", this.jar, "nogui"], {
 +    this.proc = spawn(java, serverJavaArgs(this.cfg, this.jar), {
        cwd: root,
++      env: await serverEnvironment(this.log),
        stdio: ["ignore", "pipe", "pipe"],
        windowsHide: true,
+     });
 diff --git a/node_modules/mine-labs/src/trial/arena.ts b/src/trial/arena.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..02bc518048e62b92393e1c15e73b0cd555dc8637
@@ -725,8 +1596,129 @@ index 0000000000000000000000000000000000000000..02bc518048e62b92393e1c15e73b0cd5
 +  await rcon.command(clearEntitiesOf(lane));
 +  if (lane) await rcon.command(clearEntitiesOf(lane));
 +}
+diff --git a/src/trial/goals.test.ts b/src/trial/goals.test.ts
+index 8a80c59717ae5b2ef229684b633613e0f15bf58a..80d2d36f7bbeba73b19de82e9763b53aca21fa20 100644
+--- a/src/trial/goals.test.ts
++++ b/src/trial/goals.test.ts
+@@ -15,7 +15,8 @@ function context(
+     observer,
+     chat: new Map(),
+     completions,
+-    startedAt: Date.now(),
++    gameTicks: () => 0,
++    startTick: 0,
+     state,
+   };
+ }
+@@ -232,7 +233,7 @@ test("a survive goal with who observes only that declared player", async () => {
+     },
+   };
+   const goalContext = context(new Map(), observer);
+-  goalContext.startedAt = Date.now() - 2_000;
++  goalContext.gameTicks = () => 40;
+ 
+   const result = await evaluateGoal(
+     { kind: "survive", who: "Collector", seconds: 1 },
+diff --git a/src/trial/goals.ts b/src/trial/goals.ts
+index 052057a11a930836d966d21b8e3ac20db05370e9..aa5496f2220d7e396a6d1fe0be28cd6b3670d20d 100644
+--- a/src/trial/goals.ts
++++ b/src/trial/goals.ts
+@@ -40,7 +40,8 @@ export interface GoalContext {
+   chat: Map<string, string[]>;
+   /** client name -> first terminal completion reported by its process. */
+   completions: ReadonlyMap<string, ClientCompletion>;
+-  startedAt: number;
++  gameTicks(): number;
++  startTick: number;
+   /** mutable per-goal scratch state (keyed by goal identity). */
+   state: Map<GoalCondition, Record<string, unknown>>;
+ }
+@@ -51,6 +52,14 @@ export interface GoalResult {
+   children?: GoalResult[];
+ }
+ 
++/** Keep measured goal changes, excluding a survive leaf's passage of time (scenario-ticks T6, 2026-11-15). */
++export function progressKey(goal: GoalCondition, result: GoalResult): string {
++  if ((goal.kind === "all" || goal.kind === "any") && result.children) {
++    return JSON.stringify(goal.goals.map((child, index) => progressKey(child, result.children![index]!)));
++  }
++  return goal.kind === "survive" ? result.detail.split(" ", 1)[0]! : result.detail;
++}
++
+ /** Capture kill targets that actually exist immediately before clients start. */
+ export async function observeInitialGoalState(
+   goal: GoalCondition,
+@@ -164,11 +173,11 @@ export async function evaluateGoal(goal: GoalCondition, ctx: GoalContext): Promi
+     }
+     case "survive": {
+       const secs = goal.seconds;
+-      const elapsed = (Date.now() - ctx.startedAt) / 1000;
++      const elapsed = (ctx.gameTicks() - ctx.startTick) / 20;
+       const players = goal.who === undefined ? ctx.players : [goal.who];
+       const deaths = await Promise.all(players.map((name) => ctx.observer.playerDeaths(name)));
+       const alive = deaths.every((count) => count === 0);
+-      return observed(alive && elapsed >= secs, `alive ${elapsed.toFixed(0)}/${secs}s`);
++      return observed(alive && elapsed >= secs, `${alive ? "alive" : "dead"} ${elapsed.toFixed(0)}/${secs}s`);
+     }
+     case "all":
+     case "any": {
+diff --git a/src/trial/run.test.ts b/src/trial/run.test.ts
+index 1972e636589472673c03c9c035b25b3f8b235fc7..7bc46aeb2fc86c598df952304abd573944e68037 100644
+--- a/src/trial/run.test.ts
++++ b/src/trial/run.test.ts
+@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import { mkdtemp, readFile, rm } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+-import { join, resolve } from "node:path";
++import { join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import type { ClientCompletion } from "../client/protocol.js";
+ import { awaitScenarioGoal, runScenarioTrial } from "./run.js";
+ import { scenarioSchema } from "../scenario/schema.js";
+@@ -30,6 +31,8 @@ test("a completion reported while the goal is being read still settles the trial
+   // that is already in flight, which is exactly the interleaving that reported
+   // a physically successful run as "has not reported completion".
+   const observer = {
++    // Vanilla RCON wording measured by the audit section 6.3 prototype (2026-11-15).
++    command: async () => "The time is 100",
+     countEntities: async () => 0,
+     playerWithin: async () => true,
+     playerFarFromEntities: async () => true,
+@@ -60,7 +63,7 @@ test("a completion reported while the goal is being read still settles the trial
+   assert.equal(settlement.goal.state, "passed");
+ });
+ 
+-test("a failed snapshot never arranges or tears down an unsaved arena", async () => {
++test("a failed snapshot skips arrangement and restore while still clearing trial entities", async () => {
+   const commands: string[] = [];
+   const fixture = scenarioSchema.parse({
+     name: "snapshot-failure", players: [{ name: "Builder", pos: [0.5, -60, 0.5] }],
+@@ -80,9 +83,10 @@ test("a failed snapshot never arranges or tears down an unsaved arena", async ()
+   const result = await runScenarioTrial({ runDir: "unused-snapshot-failure", scenario: fixture, server, reuseServer: true, log: () => {} });
+   assert.equal(result.outcome, "error");
+   assert.equal(result.error, "snapshot refused");
+-  assert.ok(commands.some((command) => command.startsWith("clone ")));
+-  assert.equal(commands.at(-1), "forceload remove all");
+-  assert.ok(!commands.some((command) => /^(fill|kill|reload)(?: |$)/u.test(command)));
++  assert.equal(commands.filter((command) => command.startsWith("clone ")).length, 1, "no restore follows the failed snapshot");
++  assert.ok(commands.includes("forceload remove all"));
++  assert.ok(commands.includes("kill @e[type=!minecraft:player]"), "end-of-trial cleanup still runs (contract-batch T9, 2026-11-01)");
++  assert.ok(!commands.some((command) => /^(fill|reload)(?: |$)/u.test(command)));
+ });
+ 
+ test("a prepared world is frozen before setup and cancellation never launches its clients", async () => {
+@@ -127,7 +131,7 @@ test("world and client gates precede observer arrival, activation, and thaw", as
+   const fixture = scenarioSchema.parse({
+     name: "frozen-start", players: [{ name: "Tester" }], tick: ["say started"],
+     entities: [{ type: "zombie", pos: [0, -60, 0] }],
+-    client: { command: "bun", args: [resolve("src/client/test-fixtures/protocol-client.mjs")] }, goal: { kind: "completion" },
++    client: { command: "bun", args: [fileURLToPath(new URL("../client/test-fixtures/protocol-client.mjs", import.meta.url))] }, goal: { kind: "completion" },
+   });
+   const server = {
+     worldDir: join(root, "world"), host: "127.0.0.1", operatorNames: [], gamePort: 12345,
 diff --git a/src/trial/run.ts b/src/trial/run.ts
-index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5b7761a79 100644
+index 2465cf9c9b2f22c55e754543ec34d44f60b11202..33cb7410ac353e6ebadf215a3ac603bf73b6b12c 100644
 --- a/src/trial/run.ts
 +++ b/src/trial/run.ts
 @@ -31,16 +31,16 @@ import {
@@ -738,8 +1730,9 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
    type ArenaSnapshot,
    type SetupRegion,
  } from "../scenario/compile.js";
+-import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
 +import { assertLaneTrial, clearTrialEntities, compileOptionsOf, laneContextOf, type ArenaTrialOptions, type LaneContext } from "./arena.js";
- import { evaluateGoal, describeGoal, observeInitialGoalState, type GoalResult } from "./goals.js";
++import { evaluateGoal, describeGoal, observeInitialGoalState, progressKey, type GoalResult } from "./goals.js";
  import { preparePlayerForTrial } from "../player/prepare.js";
  import { watchOperatorSpectators } from "../player/operators.js";
  import { delay } from "../util/fs.js";
@@ -748,7 +1741,15 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
  import type { ClientCompletion } from "../client/protocol.js";
  
  export interface RunResult {
-@@ -87,6 +87,13 @@ export interface ScenarioTrialOptions {
+@@ -68,6 +68,7 @@ export interface RunResult {
+   goal: GoalResult;
+   goalText: string;
+   error?: string;
++  transportFailure?: string;
+   /** Game port the server listened on during this run (for client spectators). */
+   gamePort?: number;
+ }
+@@ -87,6 +88,20 @@ export interface ScenarioTrialOptions {
    onGoalProgress?: (goal: GoalResult) => void;
    /** The arranged clients are waiting at the start line; a managed spectator may connect now. */
    onPrepared?: () => void | Promise<void>;
@@ -759,10 +1760,17 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
 +   * restore runs).
 +   */
 +  onArranged?: () => void | Promise<void>;
++  /**
++   * The wait after the arrangement, before the clients join: 1500 ms as upstream when not given. A test that runs
++   * trials on a fake clock passes 0 (or the wait it needs); production passes nothing.
++   */
++  arrangeSettleMs?: number;
++  /** Runs the arrangement's settle wait (default: the module's `delay`); a test passes a stub that records `ms`. */
++  settle?: (ms: number) => Promise<void>;
    /** World setup is complete; hold here before players join the frozen standby. */
    onWorldPrepared?: () => void | Promise<void>;
    /** Keep a speculative fixture frozen until its observer has joined. */
-@@ -101,6 +108,15 @@ export interface ScenarioTrialOptions {
+@@ -101,11 +116,24 @@ export interface ScenarioTrialOptions {
    waitForSpectator?: boolean;
    /** Clear server-side player state and non-player entities before a reused-server trial. */
    reuseServer?: boolean;
@@ -775,31 +1783,65 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
 +  arena?: ArenaTrialOptions;
 +  /** Hands a trial's client a process booted earlier (see `LaunchScenarioClientOptions.clientProvider`). */
 +  clientProvider?: ClientProvider;
++  /** Monotonic wall time without a game-time advance before the goal times out. */
++  goalStallMs?: number;
    startedAt?: number;
    signal?: AbortSignal;
  }
-@@ -151,6 +167,7 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
- /** Arrange and measure one trial on an already-running Mine Labs server. */
- export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
-   const { scenario, server, log } = opts;
-+  assertLaneTrial(opts);
-   const startedAt = opts.startedAt ?? Date.now();
-   const result = emptyResult(scenario, startedAt);
-   result.gamePort = server.gamePort;
-@@ -158,8 +175,10 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
-   let clientsPrepared = false;
-   // Armed before the world is arranged, so a human who is already connected —
-   // or who joins while the fixture is being built — is a spectator before the
+ 
+ const GOAL_POLL_MS = 250;
++/** The wait after a scenario's arrangement, before its clients join (upstream's value). */
++const ARRANGE_SETTLE_MS = 1500;
+ 
+ /** Run one isolated scenario with a fresh server and world. */
+ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+@@ -148,37 +176,48 @@ export async function runScenario(opts: RunOptions): Promise<RunResult> {
+   }
+ }
+ 
+-/** Arrange and measure one trial on an already-running Mine Labs server. */
+-export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
+-  const { scenario, server, log } = opts;
+-  const startedAt = opts.startedAt ?? Date.now();
+-  const result = emptyResult(scenario, startedAt);
+-  result.gamePort = server.gamePort;
+-  const clients = createTrialClientState();
+-  let clientsPrepared = false;
+-  // Armed before the world is arranged, so a human who is already connected —
+-  // or who joins while the fixture is being built — is a spectator before the
 -  // mobs exist rather than a survival body standing in the arrangement.
 -  const operatorWatch = server.rcon
-+  // mobs exist rather than a survival body standing in the arrangement. A lane
-+  // has no spectator (it is headless) and one watch per lane would poll the
-+  // shared server's RCON every two seconds for nothing.
-+  const operatorWatch = server.rcon && !opts.arena
++/** Arm the spectator before arrangement, except on headless shared lanes. */
++function watchTrialOperators(opts: ScenarioTrialOptions, viewpointReady: () => boolean) {
++  const { server, scenario, log } = opts;
++  return server.rcon && !opts.arena
      ? watchOperatorSpectators({
          commands: server.rcon,
          operatorNames: server.operatorNames,
-@@ -175,10 +194,12 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+         clientPlayerNames: scenario.players.map((player) => player.name),
+         viewpointPlayer: scenario.players[0]?.name,
+-        viewpointReady: () => clientsPrepared,
++        viewpointReady,
+         log,
+       })
+     : undefined;
++}
++
++/** Arrange and measure one trial on an already-running Mine Labs server. */
++export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunResult> {
++  const { scenario, server, log } = opts;
++  const rcon = server.rcon;
++  const startCount = rcon?.transportFailures ?? 0;
++  assertLaneTrial(opts);
++  const startedAt = opts.startedAt ?? Date.now();
++  const result = emptyResult(scenario, startedAt);
++  result.gamePort = server.gamePort;
++  const clients = createTrialClientState();
++  let clientsPrepared = false;
++  const operatorWatch = watchTrialOperators(opts, () => clientsPrepared);
+ 
+   // Taken before anything touches the world and held for the `finally` below.
+   // If arrangement itself fails halfway the arena is already dirty, and that is
    // exactly when the next trial most needs it put back — so this cannot be the
    // return value of `arrangeScenario`, which a throw would discard.
    let arenaBackup: ArenaSnapshot | null = null;
@@ -810,11 +1852,14 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
 -    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld));
 +    lane = laneContextOf(opts.arena, scenario);
 +    if (opts.reuseServer) arenaBackup = await snapshotArena(server, scenario, log, lane);
-+    const releaseArena = await arrangeScenario(server, scenario, log, Boolean(opts.reuseServer), Boolean(opts.holdPreparedWorld), lane, opts.onArranged);
++    const releaseArena = await arrangeScenario(server, scenario, log, {
++      reuseServer: Boolean(opts.reuseServer), holdPreparedWorld: Boolean(opts.holdPreparedWorld), lane, onArranged: opts.onArranged,
++      settle: { ms: opts.arrangeSettleMs ?? ARRANGE_SETTLE_MS, wait: opts.settle ?? delay },
++    });
      try {
        await waitForClientPhase(Promise.resolve(opts.onWorldPrepared?.()), opts.signal, "trial cancelled while world was prepared");
        await connectScenarioClients({ ...opts, clients });
-@@ -210,11 +231,16 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
+@@ -210,15 +249,22 @@ export async function runScenarioTrial(opts: ScenarioTrialOptions): Promise<RunR
    } finally {
      result.elapsedMs = Date.now() - startedAt;
      operatorWatch?.stop();
@@ -832,15 +1877,350 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
        if (opts.deferReset) opts.deferReset(restore);
        else await restore(log);
      }
-@@ -296,6 +322,7 @@ async function connectScenarioClients(
+   }
++  const failure = rcon?.failureSince?.(startCount);
++  if (failure != null) result.transportFailure = failure;
+   return result;
+ }
+ 
+@@ -267,6 +313,7 @@ interface TrialClientState {
+   processes: Map<string, ScenarioClientProcess>;
+   chat: Map<string, string[]>;
+   completions: Map<string, ClientCompletion>;
++  progress?: Set<string>;
+ }
+ 
+ function createTrialClientState(): TrialClientState {
+@@ -274,6 +321,7 @@ function createTrialClientState(): TrialClientState {
+     processes: new Map(),
+     chat: new Map(),
+     completions: new Map(),
++    progress: new Set(),
+   };
+ }
+ 
+@@ -296,8 +344,10 @@ async function connectScenarioClients(
        username: player.name,
        version: scenario.minecraft.version,
        artifactsDirectory,
 +      clientProvider: opts.clientProvider,
        log,
        onChat: (message) => clients.chat.get(player.name)?.push(message),
++      onProgress: (reason) => { if (!opts.signal?.aborted) clients.progress?.add(reason); },
        onCompletion: (completion) => recordClientCompletion(player.name, completion, clients, log),
-@@ -443,9 +470,10 @@ async function snapshotArena(
+     });
+     clients.processes.set(player.name, client);
+@@ -312,6 +362,8 @@ async function connectScenarioClients(
+       player,
+       dimension: scenario.world.dimension,
+       resetReusablePlayer: Boolean(opts.reuseServer),
++      goalStallMs: opts.goalStallMs,
++      signal: opts.signal,
+     });
+     await server.rcon.preparePlayerMetrics(player.name);
+     if (player.pos) await delay(300);
+@@ -349,77 +401,252 @@ interface GoalSettlement {
+   log: string;
+ }
+ 
++/** Parse vanilla's RCON gametime answer (audit 6.3, scenario-ticks spec, 2026-11-15). */
++export function parseGameTime(answer: string): number | null {
++  const match = /^The time is (\d+)\s*$/u.exec(answer);
++  if (!match) return null;
++  const tick = Number(match[1]);
++  return Number.isSafeInteger(tick) ? tick : null;
++}
++
++interface GoalClock {
++  tick?: number;
++  startTick?: number;
++  movedAt: number;
++}
++
++interface GoalProgress {
++  key?: string;
++  changedAt?: number;
++  sampledAt?: number;
++  longest: number;
++  positions: Map<string, string>;
++  reasons: Set<string>;
++  loggedReasons: Map<string, number>;
++}
++
++/** Consume client evidence at the current observed server tick, independently of log throttling. */
++function recordClientProgress(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, tick: number): void {
++  if (progress.reasons.size === 0) return;
++  progress.changedAt = tick;
++  for (const reason of progress.reasons) {
++    const loggedAt = progress.loggedReasons.get(reason);
++    if (loggedAt !== undefined && tick - loggedAt < 20) continue;
++    progress.loggedReasons.set(reason, tick);
++    options.log?.(`progress: ${reason}`);
++  }
++  progress.reasons.clear();
++}
++
++/** Malformed/missing position observations leave the previous evidence intact, never inventing movement. */
++async function readPlayerBlockPositions(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress): Promise<void> {
++  for (const player of options.scenario.players) {
++    if (options.signal?.aborted) return;
++    const answer = await options.server.rcon!.command(`data get entity ${player.name} Pos`).catch(() => "");
++    if (options.signal?.aborted) return;
++    const coordinates = /: \[([^\]]+)\]\s*$/u.exec(answer)?.[1]?.split(",").map(value => Number(value.trim().replace(/d$/u, "")));
++    if (coordinates?.length === 3 && coordinates.every(Number.isFinite)) {
++      progress.positions.set(player.name, coordinates.map(Math.floor).join(","));
++    }
++  }
++}
++
++/** Observe goal and block-position changes; sample positions once per game second. */
++async function recordGoalProgress(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): Promise<void> {
++  if (clock.tick === undefined || options.signal?.aborted) return;
++  if (progress.sampledAt === undefined || clock.tick - progress.sampledAt >= 20) {
++    await readPlayerBlockPositions(options, progress);
++    if (options.signal?.aborted) return;
++    progress.sampledAt = clock.tick;
++  }
++  const key = JSON.stringify([progressKey(options.scenario.goal, goal), options.scenario.players.map(player => progress.positions.get(player.name) ?? null)]);
++  progress.longest = Math.max(progress.longest, clock.tick - (progress.changedAt ?? clock.tick));
++  recordClientProgress(options, progress, clock.tick);
++  if (key === progress.key) return;
++  progress.key = key;
++  progress.changedAt = clock.tick;
++  options.log?.(`goal progress at tick ${clock.tick}`);
++}
++
++// Two server time packets cover an answer after a send: src/world/world-age.ts:73-74 (scenario-ticks T4, 2026-11-15).
++const COMPLETION_SETTLE_TICKS = 40;
++
++// Twice Task 7's longest passing span without an override (258 ticks), rounded up to 20 (2026-11-16).
++const STILL_TICKS_DEFAULT = 520;
++
++/** Fail a pending goal only after a full window of observed game time without progress. */
++function stillGoal(options: Parameters<typeof awaitScenarioGoal>[0], progress: GoalProgress, clock: GoalClock, goal: GoalResult): GoalSettlement | null {
++  const stillTicks = options.scenario.goal.stillTicks ?? STILL_TICKS_DEFAULT;
++  if (clock.tick === undefined || progress.changedAt === undefined || clock.tick - progress.changedAt < stillTicks) return null;
++  return { outcome: "fail", goal, log: `no progress for ${stillTicks} game ticks: ${goal.detail}` };
++}
++
++/** Cancellation takes priority even when it arrives during an RCON read. */
++function cancelledGoal(signal: AbortSignal | undefined): GoalSettlement | null {
++  if (!signal?.aborted) return null;
++  const reason = typeof signal.reason === "string" ? signal.reason : "operator request";
++  const goal = { state: "pending", detail: `trial cancelled: ${reason}` } as const;
++  return { outcome: "cancelled", goal, log: goal.detail };
++}
++
++/** Both goal waits use the same last-advance deadline and diagnostic. */
++function stoppedGoalClock(clock: GoalClock, now: number, stallMs: number, goal: GoalResult): GoalSettlement | null {
++  if (now - clock.movedAt < stallMs) return null;
++  return { outcome: "timeout", goal, log: `goal not satisfied: the server's game time stood still for ${stallMs} ms: ${goal.detail}` };
++}
++
++/** Let the server handle the final client packets, bounded by the existing stopped-clock deadline. */
++async function waitForCompletionTicks(
++  options: Parameters<typeof awaitScenarioGoal>[0],
++  clock: GoalClock,
++  now: () => number,
++  sleep: (ms: number) => Promise<void>,
++  goal: GoalResult,
++  stallMs: number,
++  progress: GoalProgress,
++): Promise<GoalSettlement | null> {
++  let startTick: number | undefined;
++  for (;;) {
++    const beforeRead = cancelledGoal(options.signal);
++    if (beforeRead) return beforeRead;
++    const freshTick = await readGoalClock(options.server, clock, now);
++    const cancelled = cancelledGoal(options.signal);
++    if (cancelled) return cancelled;
++    if (freshTick !== null) startTick ??= freshTick;
++    await recordGoalProgress(options, progress, clock, goal);
++    const cancelledAfterProgress = cancelledGoal(options.signal);
++    if (cancelledAfterProgress) return cancelledAfterProgress;
++    if (startTick !== undefined && freshTick !== null && freshTick - startTick >= COMPLETION_SETTLE_TICKS) return null;
++    const stopped = stoppedGoalClock(clock, now(), stallMs, goal);
++    if (stopped) return stopped;
++    await sleep(GOAL_POLL_MS);
++  }
++}
++
++/** Unreadable or rejected RCON reads leave the last observation and its stall deadline intact. */
++async function readGoalClock(server: MinecraftServer, clock: GoalClock, now: () => number): Promise<number | null> {
++  const tick = await server.rcon!.command("time query gametime").then(parseGameTime).catch(() => null);
++  if (tick === null) return null;
++  clock.startTick ??= tick;
++  if (tick !== clock.tick) clock.movedAt = now();
++  clock.tick = tick;
++  return tick;
++}
++
++/** Re-evaluate the completion race once all clients have supplied their terminal report. */
++async function settleCompletedGoal(
++  options: Parameters<typeof awaitScenarioGoal>[0],
++  context: Parameters<typeof evaluateGoal>[1],
++  clock: GoalClock,
++  now: () => number,
++  sleep: (ms: number) => Promise<void>,
++  stallMs: number,
++  progress: GoalProgress,
++): Promise<GoalSettlement> {
++  let goal = await evaluateGoal(options.scenario.goal, context);
++  const cancelled = cancelledGoal(options.signal);
++  if (cancelled) return cancelled;
++  if (goal.state === "pending") {
++    const stopped = await waitForCompletionTicks(options, clock, now, sleep, goal, stallMs, progress);
++    if (stopped) return stopped;
++    goal = await evaluateGoal(options.scenario.goal, context);
++    const cancelledAfterRead = cancelledGoal(options.signal);
++    if (cancelledAfterRead) return cancelledAfterRead;
++  }
++  options.onGoalProgress?.(goal);
++  await recordGoalProgress(options, progress, clock, goal);
++  const cancelledAfterProgress = cancelledGoal(options.signal);
++  if (cancelledAfterProgress) return cancelledAfterProgress;
++  return goal.state === "passed"
++    ? { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` }
++    : { outcome: "fail", goal, log: `goal not satisfied on client completion: ${goal.detail}` };
++}
++
++/** Verification trials must keep every player inside the declared starting radius. */
++async function verifyScenarioRadius(options: Parameters<typeof awaitScenarioGoal>[0]): Promise<GoalSettlement | null> {
++  if (!options.scenario.verification) return null;
++  for (const player of options.scenario.players) {
++    const pos = player.pos;
++    if (!Array.isArray(pos)) throw new Error("verification requires an absolute player position");
++    if (await options.server.rcon!.playerWithinHorizontalRadius(
++      player.name, pos[0], pos[2], options.scenario.verification.radius,
++    )) continue;
++    const deaths = await options.server.rcon!.playerDeaths(player.name);
++    const detail = `${player.name} was not observed within its verification radius; recorded deaths: ${deaths}`;
++    const goal = { state: "failed", detail } as const;
++    return { outcome: "fail", goal, log: goal.detail };
++  }
++  return null;
++}
++
+ /** Exported for the settlement test; production callers go through `runScenarioTrial`. */
+ export async function awaitScenarioGoal(options: {
+   onGoalProgress?: (goal: GoalResult) => void;
++  log?: (message: string) => void;
+   scenario: Scenario;
+   server: MinecraftServer;
+   clients: TrialClientState;
+   initialGoalState?: Map<GoalCondition, Record<string, unknown>>;
+   signal?: AbortSignal;
++  goalStallMs?: number;
++  now?: () => number;
++  sleep?: (ms: number) => Promise<void>;
+ }): Promise<GoalSettlement> {
+   if (!options.server.rcon) throw new Error("rcon unavailable while evaluating the goal");
+   const timeout = options.scenario.goal.timeout ?? 120;
+-  const deadline = Date.now() + timeout * 1000;
++  const now = options.now ?? (() => performance.now());
++  const sleep = options.sleep ?? delay;
++  const stallMs = options.goalStallMs ?? 30_000;
++  const clock: GoalClock = { movedAt: now() };
++  const progress: GoalProgress = { longest: 0, positions: new Map(), reasons: options.clients.progress ?? new Set(), loggedReasons: new Map() };
++  if (!options.signal?.aborted) await readGoalClock(options.server, clock, now);
+   const context = {
+     players: options.scenario.players.map((player) => player.name),
+     dimension: options.scenario.world.dimension,
+     observer: options.server.rcon,
+     chat: options.clients.chat,
+     completions: options.clients.completions,
+-    startedAt: Date.now(),
++    gameTicks: () => clock.tick ?? 0,
++    get startTick() { return clock.startTick ?? 0; },
+     state: options.initialGoalState ?? new Map<GoalCondition, Record<string, unknown>>(),
+   };
+ 
+-  for (;;) {
+-    if (options.signal?.aborted) {
+-      const reason = typeof options.signal.reason === "string" ? options.signal.reason : "operator request";
+-      const goal = { state: "pending", detail: `trial cancelled: ${reason}` } as const;
+-      return { outcome: "cancelled", goal, log: goal.detail };
+-    }
+-    if (options.scenario.verification) {
+-      for (const player of options.scenario.players) {
+-        const pos = player.pos;
+-        if (!Array.isArray(pos)) throw new Error("verification requires an absolute player position");
+-        if (!(await options.server.rcon.playerWithinHorizontalRadius(
+-          player.name, pos[0], pos[2], options.scenario.verification.radius,
+-        ))) {
+-          const deaths = await options.server.rcon.playerDeaths(player.name);
+-          const detail = `${player.name} was not observed within its verification radius; recorded deaths: ${deaths}`;
+-          const goal = { state: "failed", detail } as const;
+-          return { outcome: "fail", goal, log: goal.detail };
+-        }
++  try {
++    for (;;) {
++      if (!options.signal?.aborted) await readGoalClock(options.server, clock, now);
++      const cancelled = cancelledGoal(options.signal);
++      if (cancelled) return cancelled;
++      const radiusFailure = await verifyScenarioRadius(options);
++      if (radiusFailure) return radiusFailure;
++      const goal = await evaluateGoal(options.scenario.goal, context);
++      await recordGoalProgress(options, progress, clock, goal);
++      const cancelledAfterProgress = cancelledGoal(options.signal);
++      if (cancelledAfterProgress) return cancelledAfterProgress;
++      options.onGoalProgress?.(goal);
++      if (goal.state === "passed") return { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` };
++      if (goal.state === "failed") return { outcome: "fail", goal, log: `goal failed: ${goal.detail}` };
++      const allClientsCompleted =
++        options.scenario.players.length > 0 &&
++        options.scenario.players.every((player) => options.clients.completions.has(player.name));
++      if (allClientsCompleted) {
++        // A completion arriving during evaluation invalidates its snapshot; the server may still be handling the last packets.
++        return await settleCompletedGoal(options, context, clock, now, sleep, stallMs, progress);
+       }
+-    }
+-    const goal = await evaluateGoal(options.scenario.goal, context);
+-    options.onGoalProgress?.(goal);
+-    if (goal.state === "passed") return { outcome: "pass", goal, log: `goal satisfied: ${goal.detail}` };
+-    if (goal.state === "failed") return { outcome: "fail", goal, log: `goal failed: ${goal.detail}` };
+-    const allClientsCompleted =
+-      options.scenario.players.length > 0 &&
+-      options.scenario.players.every((player) => options.clients.completions.has(player.name));
+-    if (allClientsCompleted) {
+-      // `goal` above was measured before the clients finished: its completion
+-      // child reads the map synchronously while its sibling checks are still
+-      // out on rcon, so a client that reports inside that window is invisible
+-      // to it and visible here. Every client is now done and nothing further
+-      // will move, so one more evaluation settles the trial on what actually
+-      // happened rather than on a snapshot the race already invalidated.
+-      const settled = await evaluateGoal(options.scenario.goal, context);
+-      options.onGoalProgress?.(settled);
+-      if (settled.state === "passed") {
+-        return { outcome: "pass", goal: settled, log: `goal satisfied: ${settled.detail}` };
++      if (context.gameTicks() - context.startTick > timeout * 20) {
++        return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s of game time (${timeout * 20} ticks): ${goal.detail}` };
+       }
+-      return {
+-        outcome: "fail",
+-        goal: settled,
+-        log: `goal not satisfied on client completion: ${settled.detail}`,
+-      };
+-    }
+-    if (Date.now() > deadline) {
+-      return { outcome: "timeout", goal, log: `goal not satisfied within ${timeout}s: ${goal.detail}` };
++      const stopped = stoppedGoalClock(clock, now(), stallMs, goal);
++      if (stopped) return stopped;
++      const still = stillGoal(options, progress, clock, goal);
++      if (still) return still;
++      await sleep(GOAL_POLL_MS);
+     }
+-    await delay(GOAL_POLL_MS);
++  } finally {
++    delete options.clients.progress;
++    progress.reasons.clear();
++    const tick = clock.tick ?? 0;
++    const longest = Math.max(progress.longest, tick - (progress.changedAt ?? tick));
++    options.log?.(`goal still spans: longest ${longest} ticks at tick ${tick}`);
+   }
+ }
+ 
+@@ -443,9 +670,10 @@ async function snapshotArena(
    server: MinecraftServer,
    scenario: Scenario,
    log: (message: string) => void,
@@ -852,7 +2232,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
    if (!snapshot) throw new Error("Reused scenarios need absolute arena coordinates; use an isolated server for an undeclared arena");
    const pinned = await pinRegions(server.rcon, snapshot.pin, log);
    if (!pinned) throw new Error("Arena exceeds the force-load limit; use an isolated server for this scenario");
-@@ -455,7 +483,7 @@ async function snapshotArena(
+@@ -455,7 +683,7 @@ async function snapshotArena(
      }
      return snapshot;
    } finally {
@@ -861,7 +2241,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
    }
  }
  
-@@ -465,15 +493,22 @@ async function clearScenario(
+@@ -465,15 +693,22 @@ async function clearScenario(
    scenario: Scenario,
    backup: ArenaSnapshot,
    log: (message: string) => void,
@@ -889,7 +2269,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
    try {
      for (const command of [...teardown, ...backup.restore]) {
        try {
-@@ -485,7 +520,8 @@ async function clearScenario(
+@@ -485,7 +720,8 @@ async function clearScenario(
        }
      }
    } finally {
@@ -899,13 +2279,28 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
    }
    if (failures.length) throw new AggregateError(failures, "Arena cleanup failed; refusing to reuse the dirty world");
  }
-@@ -502,34 +538,87 @@ async function arrangeScenario(
+@@ -496,40 +732,100 @@ async function clearScenario(
+  * far-off arena — the Nether, say — then lands in chunks that are already
+  * loaded, rather than in ones the server is still generating around it.
+  */
++/** What a trial hands its arrangement besides the server, the scenario and the log. */
++interface ArrangeOptions {
++  reuseServer: boolean;
++  holdPreparedWorld: boolean;
++  lane: LaneContext | undefined;
++  onArranged: (() => void | Promise<void>) | undefined;
++  settle: { ms: number; wait: (ms: number) => Promise<void> };
++}
++
+ async function arrangeScenario(
+   server: MinecraftServer,
+   scenario: Scenario,
    log: (message: string) => void,
-   reuseServer: boolean,
-   holdPreparedWorld = false,
-+  lane?: LaneContext,
-+  onArranged?: () => void | Promise<void>,
+-  reuseServer: boolean,
+-  holdPreparedWorld = false,
++  options: ArrangeOptions,
  ): Promise<() => Promise<void>> {
++  const { reuseServer, holdPreparedWorld, lane, onArranged, settle } = options;
    const rcon = server.rcon;
    if (!rcon) throw new Error("rcon unavailable before arrangement");
 -  if (reuseServer) await rcon.command(CLEAR_ENTITIES);
@@ -945,7 +2340,8 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
 +    if (lane) await stopTickBlocks(rcon, lane, log, []);
      throw error;
    }
-   await delay(1500);
+-  await delay(1500);
++  await settle.wait(settle.ms);
    return release;
  }
  
@@ -994,7 +2390,7 @@ index 2465cf9c9b2f22c55e754543ec34d44f60b11202..bb7a581abbc979ff16cfc79e80ec21b5
  /** Spawn the scenario's live entities only after every client is prepared. */
  async function activateScenario(server: MinecraftServer, scenario: Scenario, deferredTick: boolean): Promise<void> {
    if (!server.rcon) throw new Error("rcon unavailable before activation");
-@@ -586,8 +675,8 @@ async function pinRegions(
+@@ -586,8 +882,8 @@ async function pinRegions(
  const REGION_LOAD_TIMEOUT_MS = 30_000;
  
  /** Release what `pinRegions` pinned, in every dimension it pinned. */

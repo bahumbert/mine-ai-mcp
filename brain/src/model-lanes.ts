@@ -36,6 +36,7 @@ export function tierCall(tier: MindTier, line?: LineFacts): { readonly lane: Mod
       return { lane: "chat", priority: line.addressed ? 0 : 1 };
     case "conversation":
     case "narrate":
+    case "sign":
       return { lane: "shared", priority: 3 };
     case "goal":
     case "work":

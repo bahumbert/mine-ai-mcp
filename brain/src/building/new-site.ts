@@ -1,6 +1,6 @@
 // What a new house's site meets before anything is protected or dug: the protected areas in the way and where the nearest
 // clear site is, and what the new house would do to the unfinished one on record.
-import { describeWay } from "../gathering.ts";
+import { describeWay } from "../gathering/fetch-farther.ts";
 import { describeSiteBlocker, earlierProtections, overlapsOf } from "../protected-areas.ts";
 import type { Position, ProtectedArea } from "../runtime-client.ts";
 import type { SkillContext, SkillResult, UnfinishedHouse } from "../skills.ts";

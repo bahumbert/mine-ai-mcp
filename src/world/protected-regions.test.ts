@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { describeProtectedRegion, protectedRegionAt, type ProtectedRegion } from "./protected-regions.js";
+import { createFakeBot } from "../test-support/fake-bot/index.js";
+import {
+  anyRegionAt,
+  cellsOutsideRegionsFirst,
+  describeProtectedRegion,
+  foreignRegionAt,
+  protectedRegionAt,
+  regionChangeRefusal,
+  regionRefusalText,
+  setProtectedRegionsProvider,
+  type ProtectedRegion,
+} from "./protected-regions.js";
 
 const house: ProtectedRegion = {
   regionId: 1, dimension: "overworld", min: { x: 0, y: 63, z: 0 }, max: { x: 6, y: 70, z: 4 }, owner: "Ayla", label: "small medieval house",
@@ -107,4 +118,47 @@ test("regions across chunk borders and negative coordinates are found through th
   }
   assert.equal(protectedRegionAt(regions, "overworld", 16, 5, 16), null);
   assert.equal(protectedRegionAt(regions, "overworld", -18, 5, 0), null);
+});
+
+// The bot-aware reads (plan 2026-11-07-p4-06a-threat T5a): own regions never refuse a placement, others' do.
+const toms: ProtectedRegion = { ...house, regionId: 2, owner: "Tom", label: "Tom's place" };
+const insideHouse = { x: 3, y: 65, z: 2 };
+
+function botWith(regions: readonly ProtectedRegion[], options: { username?: string; dimension?: string } = {}) {
+  const { bot } = createFakeBot({ username: options.username ?? "Ayla", dimension: options.dimension ?? "overworld" });
+  setProtectedRegionsProvider(bot, () => regions);
+  return bot;
+}
+
+test("foreignRegionAt skips the bot's own region whatever the name's case, finds another owner's even behind it, and stops at the dimension", () => {
+  assert.equal(foreignRegionAt(botWith([house], { username: "Ayla" }), insideHouse), null);
+  assert.equal(foreignRegionAt(botWith([house], { username: "AYLA" }), insideHouse), null);
+  assert.equal(foreignRegionAt(botWith([house], { username: "Tom" }), insideHouse), house);
+  const nested = { ...toms, min: house.min, max: house.max };
+  assert.equal(foreignRegionAt(botWith([house, nested]), insideHouse), nested);
+  assert.equal(foreignRegionAt(botWith([toms], { dimension: "the_nether" }), insideHouse), null);
+  assert.equal(foreignRegionAt(botWith([toms]), { x: 30, y: 65, z: 2 }), null);
+});
+
+test("anyRegionAt finds the bot's own region too, and a refusal names the region", () => {
+  assert.equal(anyRegionAt(botWith([house]), insideHouse), house);
+  assert.equal(anyRegionAt(botWith([]), insideHouse), null);
+  assert.equal(regionRefusalText(toms), "inside protected region #2 'Tom's place' (owner Tom)");
+});
+
+test("regionChangeRefusal names the cell and the region for a dig and for a placement, and is null for the bot's own region", () => {
+  const dig = regionChangeRefusal(botWith([toms]), insideHouse, "dig");
+  assert.equal(dig, "Dig cell (3, 65, 2) is inside protected region #2 'Tom's place' (owner Tom): dig elsewhere or ask its owner.");
+  const place = regionChangeRefusal(botWith([toms]), insideHouse, "placement");
+  assert.equal(place, "Placement cell (3, 65, 2) is inside protected region #2 'Tom's place' (owner Tom): build elsewhere or ask its owner.");
+  assert.equal(regionChangeRefusal(botWith([house]), insideHouse, "dig"), null);
+  assert.equal(regionChangeRefusal(botWith([toms]), { x: 30, y: 65, z: 2 }, "dig"), null);
+});
+
+test("cells outside every region come first, the bot's own region's next, a foreign one's last", () => {
+  const own = { ...house, regionId: 3, min: { x: 10, y: 63, z: 0 }, max: { x: 12, y: 70, z: 4 } };
+  const foreign = { ...toms, min: { x: 20, y: 63, z: 0 }, max: { x: 22, y: 70, z: 4 } };
+  const bot = botWith([own, foreign]);
+  const cells = [{ x: 20, y: 65, z: 1 }, { x: 11, y: 65, z: 1 }, { x: 0, y: 65, z: 1 }, { x: 1, y: 65, z: 1 }];
+  assert.deepEqual(cellsOutsideRegionsFirst(bot, cells).map((cell) => cell.x), [0, 1, 11, 20]);
 });

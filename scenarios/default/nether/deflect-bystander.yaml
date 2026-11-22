@@ -1,0 +1,27 @@
+name: deflect-bystander
+tags: [regression]
+description: A ghast-owned fireball already inside a neutral Enderman's line must be withheld, with an existing alternative response recorded and no bot-attributed Enderman damage.
+minecraft: { version: "1.21.4" }
+world:
+  type: default
+  dimension: the_nether
+  seed: "-5335131384818472281"
+  difficulty: normal
+  gamerules: { doMobSpawning: false, naturalRegeneration: false, mobGriefing: false }
+setup:
+  - fill -12 79 -12 20 90 12 air
+  - fill -12 79 -12 20 79 12 netherrack
+  - setblock 4 81 0 netherrack
+entities:
+  - { type: ghast, pos: [14.5, 80, 0.5], nbt: '{NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Tags:["deflect_shooter"]}' }
+  - { type: enderman, pos: [4.8, 80, 0.9], nbt: '{NoAI:1b,PersistenceRequired:1b,Tags:["deflect_bystander"]}' }
+players:
+  - name: DeflectBystander
+    pos: [0.5, 80, 0.5]
+    op: true
+    inventory:
+      - { item: iron_sword, count: 1 }
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./deflect-bystander.ts"]
+goal: { kind: completion, who: DeflectBystander, timeout: 60 }

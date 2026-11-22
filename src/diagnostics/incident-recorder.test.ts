@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeIncidentArtifact, type IncidentReference } from "../bot-data/incident-log.js";
-import { IncidentRecorder, type IncidentCapture } from "./incident-recorder.js";
+import { createFakeClock } from "../test-support/fake-bot/fake-clock.js";
+import { INCIDENT_HISTORY_BYTES, IncidentRecorder, type IncidentCapture } from "./incident-recorder.js";
 
 function text(capture: IncidentCapture): string {
   return Buffer.concat(capture.contents).toString();
@@ -39,6 +40,25 @@ test("capture freezes facts and retains the committed plan beyond the history wi
   assert.match(text(saved[0]!), /old-but-still-committed/);
   assert.match(text(saved[0]!), /"x":1}/);
   assert.doesNotMatch(text(saved[0]!), /expired|"x":100/);
+});
+
+test("the ring ages its rows by the injected wall clock", async () => {
+  const budget = { durationMs: 1_000, bytes: INCIDENT_HISTORY_BYTES };
+  // Each recorder has its own clock: one reads the age exactly (kept: expiry is strictly older), one a millisecond past it.
+  async function executionRowKept(ageMs: number): Promise<boolean> {
+    const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+    const saved: IncidentCapture[] = [];
+    const recorder = new IncidentRecorder({}, async (capture) => {
+      saved.push(capture);
+      return receipt;
+    }, () => {}, budget, undefined, clock.now);
+    recorder.record("execution", {});
+    await clock.advance(ageMs);
+    await recorder.capture("operator", null);
+    return text(saved[0]!).includes('"kind":"execution"');
+  }
+  assert.equal(await executionRowKept(1_000), true, "A row exactly as old as the history window is kept.");
+  assert.equal(await executionRowKept(1_001), false, "A row older than the history window has aged out.");
 });
 
 test("fine-grained events retain their facts without duplicating physics context", async () => {
@@ -225,4 +245,158 @@ test("slow persistence does not defer the next damage snapshot beyond its captur
   now = 140_000;
   assert.equal((await recorder.capture("non_entity_damage", 1)).kind, "completed");
   assert.equal(saved.length, 3);
+});
+
+// The production byte budget (8 MiB). Physics rows every 50 ms at 30 kB each (about 600 kB/s, a t00431-like burst)
+// fill it in about 14 s, so an unsaved damage row is evicted by bytes before the 20 s window ends (D13).
+test("a damage row evicted by bytes is checkpointed before it leaves the ring", async () => {
+  const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+  const saved: IncidentCapture[] = [];
+  const recorder = new IncidentRecorder(
+    {},
+    async (capture) => {
+      saved.push(capture);
+      return receipt;
+    },
+    () => {},
+    undefined,
+    undefined,
+    clock.now,
+  );
+  for (let ms = 0; ms <= 45_000; ms += 50) {
+    if (ms % 1_000 === 0) {
+      recorder.record("trigger", { trigger: "non_entity_damage", hit: ms / 1_000 });
+      await recorder.capture("non_entity_damage", 1);
+    }
+    recorder.record("physics", { payload: "x".repeat(30_000) });
+    await clock.advance(50);
+  }
+  await recorder.capture("death", 2);
+  await recorder.flush();
+  const artifacts = saved.map(text);
+  const lost: number[] = [];
+  for (let hit = 0; hit <= 45; hit++) if (!artifacts.some((a) => a.includes(`"hit":${hit}}`))) lost.push(hit);
+  assert.deepEqual(lost, [], "every damage row of the run is in some artifact");
+  // The run ends at 45 s with a terminal capture: its tail (40-45 s) is in that artifact.
+  const terminal = text(saved[saved.length - 1]!);
+  for (let hit = 41; hit <= 45; hit++) assert.match(terminal, new RegExp(`"hit":${hit}\\}`), `hit ${hit} in the terminal artifact`);
+});
+
+// A writer blocked on its first snapshot; damage keeps coming and the ring passes its byte budget while that write
+// is pending. The unsaved rows must survive into a later snapshot: a pending snapshot is never replaced, and the drop
+// waits for the writer (D13).
+test("unsaved damage rows wait for the pending checkpoint and survive into a later artifact", async () => {
+  const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+  const saved: IncidentCapture[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const recorder = new IncidentRecorder(
+    {},
+    async (capture) => {
+      saved.push(capture);
+      if (saved.length === 1) await blocked;
+      return receipt;
+    },
+    () => {},
+    { durationMs: 20_000, bytes: 4_000 },
+    undefined,
+    clock.now,
+  );
+  recorder.record("trigger", { trigger: "non_entity_damage", hit: 0 });
+  const results = [recorder.capture("non_entity_damage", 1)];
+  // About 6.7 kB of rows: over the 4 kB budget, under the 8 kB hard cap that bounds a wait on a slow writer.
+  for (let hit = 1; hit <= 3; hit++) {
+    for (let row = 0; row < 20; row++) recorder.record("physics", { payload: "x".repeat(60) });
+    recorder.record("trigger", { trigger: "non_entity_damage", hit });
+    results.push(recorder.capture("non_entity_damage", 1));
+  }
+  release();
+  await Promise.all(results);
+  await recorder.capture("death", 2);
+  await recorder.flush();
+  const artifacts = saved.map(text);
+  const lost: number[] = [];
+  for (let hit = 0; hit <= 3; hit++) if (!artifacts.some((a) => a.includes(`"hit":${hit}}`))) lost.push(hit);
+  assert.deepEqual(lost, [], "every damage row of the run is in some artifact");
+});
+
+// A terminal capture is pending while the writer is busy, and a damage hit is coalesced behind it: the cadence keeps
+// the pending terminal snapshot (a damage capture never replaces it). The row is kept, not dropped, until a snapshot
+// that holds it is written (D13).
+test("a coalesced damage row behind a pending terminal capture survives into a later artifact", async () => {
+  const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+  const saved: IncidentCapture[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const recorder = new IncidentRecorder(
+    {},
+    async (capture) => {
+      saved.push(capture);
+      if (saved.length === 2) await blocked;
+      return receipt;
+    },
+    () => {},
+    { durationMs: 20_000, bytes: 400 },
+    undefined,
+    clock.now,
+  );
+  recorder.record("trigger", { trigger: "non_entity_damage", hit: 0 });
+  assert.equal((await recorder.capture("non_entity_damage", 1)).kind, "completed");
+  recorder.record("physics", { payload: "x".repeat(60) });
+  const operator = recorder.capture("operator", 2);
+  recorder.record("trigger", { trigger: "non_entity_damage", hit: 1 });
+  assert.equal((await recorder.capture("non_entity_damage", 1)).kind, "coalesced");
+  const death = recorder.capture("death", 3);
+  recorder.record("trigger", { trigger: "non_entity_damage", hit: 2 });
+  assert.equal((await recorder.capture("non_entity_damage", 1)).kind, "coalesced");
+  for (let step = 0; step < 4; step++) recorder.record("physics", { payload: "x".repeat(60) });
+  release();
+  assert.equal((await operator).kind, "completed");
+  assert.equal((await death).kind, "completed");
+  await recorder.capture("operator", 4);
+  await recorder.flush();
+  assert.equal(saved.find((capture) => capture.trigger === "death")!.requestId, 3);
+  assert.ok(saved.some((capture) => text(capture).includes('"hit":2}')), "hit 2 is in some artifact");
+});
+
+// The second write fails. Only the rows that failed write held can be lost: a failed write releases its coverage, so the
+// next trim that would drop unsaved damage queues a retry first (D13).
+test("a failed checkpoint is retried by the next trim that drops unsaved damage", async () => {
+  const clock = createFakeClock({ mode: "manual", startMs: 1_000_000 });
+  const saved: IncidentCapture[] = [];
+  let attempts = 0;
+  const recorder = new IncidentRecorder(
+    {},
+    async (capture) => {
+      attempts += 1;
+      saved.push(capture);
+      if (attempts === 2) return { ...receipt, artifact: { kind: "failed" as const, error: "unavailable" } };
+      return receipt;
+    },
+    () => {},
+    { durationMs: 20_000, bytes: 4_000 },
+    undefined,
+    clock.now,
+  );
+  for (let ms = 0; ms <= 45_000; ms += 50) {
+    if (ms % 1_000 === 0) {
+      recorder.record("trigger", { trigger: "non_entity_damage", hit: ms / 1_000 });
+      await recorder.capture("non_entity_damage", 1);
+    }
+    recorder.record("physics", { payload: "x".repeat(60) });
+    await clock.advance(50);
+  }
+  await recorder.capture("death", 2);
+  await recorder.flush();
+  assert.equal(recorder.status().writeFailures, 1);
+  assert.ok(attempts > 3, `the trims that dropped unsaved damage retried after the failure (attempts ${attempts})`);
+  const failedHits = [...text(saved[1]!).matchAll(/"hit":(\d+)\}/g)].map((m) => Number(m[1]));
+  const kept = saved.filter((_, i) => i !== 1).map(text);
+  const lost: number[] = [];
+  for (let hit = 0; hit <= 45; hit++) if (!kept.some((a) => a.includes(`"hit":${hit}}`))) lost.push(hit);
+  for (const hit of lost) assert.ok(failedHits.includes(hit), `hit ${hit} lost but not in the failed write`);
 });

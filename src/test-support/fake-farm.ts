@@ -1,7 +1,7 @@
 // A fake farm body for the tend_crops tests: soil at y 63 and what stands on it at y 64, changed the way the server would.
 import minecraftData from "minecraft-data";
 import { Vec3 } from "vec3";
-import type { CellBlock, PlotFacts, FarmBody, TillFailure } from "../actions/tend-crops/tend-plot.js";
+import type { CellBlock, PlotFacts, FarmBody, PlantFailure, TillFailure } from "../actions/tend-crops/tend-plot.js";
 import { cellBlockOf, isGroundCover, isTilledSoil } from "../actions/tend-crops/farm-body.js";
 import { type FakeCell, createFakeBot } from "./fake-bot/index.js";
 
@@ -36,6 +36,8 @@ export const block = (name: string, properties: CellBlock["properties"] = {}, tr
 export const PLOT_FACTS: PlotFacts = {
   // A live block gives its age as the registry lists the value (`"7"`, Prismarine `propValue`); `block()` takes a number.
   isRipe: (cell) => (cell.name === "wheat" || cell.name === "carrots" ? String(cell.properties.age) === "7" : null),
+  // Ripe at age 7 for both, the loot tables' `age` condition (`src/world/block-drops.test.ts`).
+  ripeAge: (name) => (name === "wheat" || name === "carrots" ? 7 : null),
   seedOf: (name) => ({ wheat: "wheat_seeds", carrots: "carrot" })[name] ?? null,
   isGroundCover: (name) => isGroundCover(name, "1.21.4"),
   isTilledSoil,
@@ -64,6 +66,14 @@ export class FakeFarm implements FarmBody {
   useFails: string | null = null;
   /** Cells (x,z) where the use went out and the server was not seen to answer in time. */
   unconfirmed = new Set<string>();
+  /** Cells (x,z) where the seed was taken and the crop stands, but the use's answer came after the wait. */
+  plantUnconfirmed = new Set<string>();
+  /** Cells (x,z) where the server never answered the seed's use: nothing changes. */
+  plantSilent = new Set<string>();
+  /** Cells (x,z) where the seed's use fails with an error. */
+  plantFailsAt = new Set<string>();
+  /** Cells (x,z) where the server answers the seed's use with no change and keeps the seed. */
+  plantRefusedAt = new Set<string>();
   private tilledCells = 0;
 
   set(x: number, z: number, soil: string, above = "air", age?: number): void {
@@ -106,13 +116,22 @@ export class FakeFarm implements FarmBody {
     return null;
   }
 
-  async plant(cell: { x: number; y: number; z: number }, item: string): Promise<string | null> {
-    this.calls.push(`plant ${item} ${cell.x},${cell.z}`);
-    // Only seeds take on farmland; the server leaves anything else in the hand.
-    if (item !== "wheat_seeds" && item !== "carrot") return "nothing grew";
+  async plant(cell: { x: number; y: number; z: number }, item: string): Promise<PlantFailure | null> {
+    const key = `${cell.x},${cell.z}`;
+    this.calls.push(`plant ${item} ${key}`);
+    if (this.useFails !== null) return { kind: "error", error: this.useFails };
+    // A use that went out and was refused or thrown before an answer: the body's "error".
+    if (this.plantFailsAt.has(key)) return { kind: "error", error: "boom" };
+    // The server never answered within the 10 s wall bound: nothing changes (unmeasured: a server silent that long is not in the logs).
+    if (this.plantSilent.has(key)) return { kind: "unconfirmed" };
+    // A refusal the server answered, the seed kept (unmeasured for a real seed: the game's own refusal of a seed is not logged).
+    if (this.plantRefusedAt.has(key)) return { kind: "unchanged" };
+    // Only seeds take on farmland; the server leaves anything else in the hand (live 2026-10-03: "wheat").
+    if (item !== "wheat_seeds" && item !== "carrot") return { kind: "unchanged" };
     this.inventory.set(item, (this.inventory.get(item) ?? 0) - 1);
     this.#put({ ...cell, y: cell.y + 1 }, { name: item === "carrot" ? "carrots" : "wheat", properties: { age: 0 } });
-    return null;
+    // The measured shape of a late answer: seed gone and crop standing, but the answer came after the wait (spec 2026-11-14-tests-phase4-sibling: t00181, t00240, t00241).
+    return this.plantUnconfirmed.has(key) ? { kind: "unconfirmed" } : null;
   }
 
   async collectDrops(): Promise<{ readonly left: readonly string[] }> {

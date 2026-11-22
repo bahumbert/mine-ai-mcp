@@ -5,13 +5,43 @@ import minecraftData from "minecraft-data";
 import type { Bot } from "mineflayer";
 import { blockClass, liveBlockReader, observeMineflayerBlock } from "../mineflayer/world.js";
 import { offsetBlocks } from "../../world/block-offset.js";
-import { describeBlockGeometry, heldByBlockAt, isSafeSupport, observationBits, standsOnDryGround } from "./block-geometry.js";
+import { describeBlockGeometry, heldByBlockAt, isSafeSupport, knockbackCorridorHazard, observationBits, standsOnDryGround } from "./block-geometry.js";
 import { collisionBoxesAt } from "./world.js";
 import { createFakeBot } from "../../test-support/fake-bot/index.js";
 import { loadNamedBlock } from "../../test-support/layered-world.js";
 
 /** A big dripleaf's flat leaf: full width, an eighth short of full height, so a tread by shape alone. */
 const LEAF_SHAPE = [{ minX: 0, minY: 0.6875, minZ: 0, maxX: 1, maxY: 0.9375, maxZ: 1 }];
+
+/** A supported northbound corridor, with a column edited independently of the hazard reader. */
+function knockbackWorld(cells: readonly [number, number, string][]) {
+  const { bot } = createFakeBot();
+  const world = new MemoryWorld();
+  for (let z = -4; z <= 1; z++)
+    for (let y = 63; y <= 65; y++) loadNamedBlock(world, bot, { x: 0, y, z }, y === 63 ? "stone" : "air");
+  for (const [y, z, name] of cells) loadNamedBlock(world, bot, { x: 0, y, z }, name);
+  return world;
+}
+
+for (const { name, cells, health = 20, want } of [
+  { name: "a corridor whose feet cells are lava is a lava hazard", cells: [[64, -2, "lava"]], want: "lava" },
+  { name: "lava two cells down below a one-block drop is a lava hazard", cells: [[63, -2, "air"], [62, -2, "air"], [61, -2, "lava"]], want: "lava" },
+  { name: "lava behind a one-block lip is a lava hazard", cells: [[64, -1, "stone"], [64, -2, "lava"], [64, -3, "lava"]], want: "lava" },
+  { name: "a corridor stopped by a two-high wall before the lava is no hazard", cells: [[64, -1, "stone"], [65, -1, "stone"], [64, -2, "lava"]], want: null },
+  { name: "a 4-block drop at full health is no hazard", cells: [...Array.from({ length: 4 }, (_, i): [number, number, string] => [63 - i, -2, "air"]), [59, -2, "stone"]], want: null },
+  { name: "a 6-block drop at health 2 is a drop hazard", cells: [...Array.from({ length: 6 }, (_, i): [number, number, string] => [63 - i, -2, "air"]), [57, -2, "stone"]], health: 2, want: "drop" },
+  { name: "a drop past the bucket depth is a drop hazard", cells: Array.from({ length: 81 }, (_, i): [number, number, string] => [63 - i, -2, "air"]), want: "drop" },
+  { name: "a drop into two deep source water cells is no hazard", cells: [...Array.from({ length: 12 }, (_, i): [number, number, string] => [63 - i, -2, "air"]), [51, -2, "water"], [50, -2, "water"]], want: null },
+  { name: "a damaging floor is no hazard", cells: [[63, -2, "magma_block"]], want: null },
+] satisfies { name: string; cells: [number, number, string][]; health?: number; want: "lava" | "drop" | null }[]) {
+  test(name, () => {
+    assert.equal(knockbackCorridorHazard(knockbackWorld(cells), { x: 0.5, y: 64, z: 0.5 }, { x: 0, y: 0, z: -3 }, health), want);
+  });
+}
+
+test("an unloaded corridor cell is no hazard", () => {
+  assert.equal(knockbackCorridorHazard(new MemoryWorld(), { x: 0.5, y: 64, z: 0.5 }, { x: 0, y: 0, z: -3 }, 20), null);
+});
 
 test("a yielding tread is not support, though the same shape is", () => {
   const world = new MemoryWorld();

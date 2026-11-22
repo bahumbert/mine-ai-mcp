@@ -1,0 +1,44 @@
+template: ../../templates/flat-single-action.yaml
+name: hostile-near-shore-take-back
+tags: [regression]
+description: >-
+  A hostile hurts a seated actor beside the launch beach. The response gets off, takes back the boat,
+  answers the hostile, and the next navigate reaches dry land.
+world:
+  time: midnight
+  gamerules: { naturalRegeneration: false }
+geometry:
+  - fill: { block: water, from: [1, -63, -45], to: [100, -61, 45] }
+  - fill: { block: stone, from: [2, -63, 2], to: [5, -61, 2] }
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    inventory: [{ item: oak_boat, count: 1 }, { item: iron_sword, count: 1 }]
+setup:
+  - "difficulty normal"
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  - 'execute as @a[name=Actor,x=3,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle unless entity @s[tag=hurtOnce] at @s run summon oak_boat ~2 ~ ~ {Passengers:[{id:"minecraft:zombie",Tags:["attacker"],NoAI:1b,Silent:1b,PersistenceRequired:1b}]}'
+  - "execute as @a[name=Actor,x=3,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle unless entity @s[tag=hurtOnce] on passengers run damage @s 1 minecraft:mob_attack by @e[tag=attacker,limit=1]"
+  - "execute as @a[name=Actor,x=3,y=-62,z=-2,dx=2,dy=5,dz=4] on vehicle run tag @s add hurtOnce"
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/hostile-boat.ts]
+params:
+  approach: { x: 40, y: -61, z: 0 }
+  target: { x: -3, y: -60, z: 0 }
+  atSea: false
+  # Post-T12/T15 shared + locked hurt-to-effect ms: 6293, 6560, 6417, 5979, 6112; 6141, 6474, 6908, 6799, 6588.
+  # Original 7928 ms bound still covers these and the 6955 ms baseline maximum; retain it (2026-11-10, T17e).
+  # Same budget in server ticks: ceil(7928 / 50) = 159 (20 tps baseline above).
+  responseWithinTicks: 159
+  # Hurt-to-off ms: 1747, 1946, 1832, 1399, 1546; 1599, 1911, 2368, 2254, 2004.
+  # Include baseline max 2373: ceil(2373 * 1.5) = 3560 ms; T12 now settles the cancelled ride before shift.
+  # WSL /tmp/p4f-t17e-{shared,locked-before,measure,measure-locked}; record: navigation-and-boats.md T17e.
+  # Same budget in server ticks: ceil(3560 / 50) = 72.
+  offWithinTicks: 72
+goal:
+  kind: all
+  timeout: 180
+  goals: [{ kind: completion, who: Actor }]

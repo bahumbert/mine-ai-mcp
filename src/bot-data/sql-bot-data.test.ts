@@ -60,6 +60,41 @@ test("async call migration preserves historical replies and publishes execution 
   assert.deepEqual(migrated.read("PRAGMA foreign_key_check"), []);
 });
 
+test("an old bot_inventory, bot_status and bot_tools without the family columns (bot_tools: `tier`, no `rank`) are re-created, not altered", (t) => {
+  const storage = persistentBotData(t);
+  const original = storage.open("families-migration");
+  original.transaction((db) => {
+    db.exec(`PRAGMA user_version = 3;
+      DROP TABLE bot_inventory; DROP TABLE bot_status; DROP TABLE bot_tools;
+      CREATE TABLE bot_tools (
+        bot_id TEXT NOT NULL, class TEXT NOT NULL, category TEXT NOT NULL CHECK (category IN ('tool', 'armour')),
+        tier TEXT NOT NULL, item_name TEXT, slot INTEGER, durability_left INTEGER, maximum_durability INTEGER,
+        updated_at TEXT NOT NULL, PRIMARY KEY (bot_id, class)
+      ) STRICT;
+      INSERT INTO bot_tools VALUES ('Old', 'pickaxe', 'tool', 'stone', 'stone_pickaxe', 9, 131, 131, '2026-11-06T00:00:00Z');
+      CREATE TABLE bot_status (
+        bot_id TEXT PRIMARY KEY, dimension TEXT NOT NULL, game_mode TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL,
+        z REAL NOT NULL, chunk_x INTEGER NOT NULL, chunk_z INTEGER NOT NULL, yaw REAL NOT NULL, pitch REAL NOT NULL,
+        on_ground INTEGER NOT NULL, in_water INTEGER NOT NULL, health REAL NOT NULL, food INTEGER NOT NULL,
+        saturation REAL NOT NULL, time_of_day INTEGER NOT NULL, is_sleeping INTEGER NOT NULL, is_raining INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE bot_inventory (
+        bot_id TEXT NOT NULL, slot INTEGER NOT NULL, location TEXT NOT NULL, item_name TEXT NOT NULL,
+        count INTEGER NOT NULL, held INTEGER NOT NULL, PRIMARY KEY (bot_id, slot)
+      ) STRICT;
+      INSERT INTO bot_inventory VALUES ('Old', 9, 'main', 'stick', 1, 0);`);
+  });
+  original.close();
+  const migrated = storage.open("families-migration");
+  const columns = (table: string) => migrated.read(`SELECT name FROM pragma_table_info('${table}')`).map((row) => row.name);
+  assert.ok(columns("bot_inventory").includes("families"));
+  assert.ok(columns("bot_status").includes("item_families_json"));
+  assert.ok(columns("bot_tools").includes("rank") && !columns("bot_tools").includes("tier"));
+  assert.deepEqual(migrated.read("SELECT * FROM bot_inventory"), [], "a snapshot table: the runtime's next status write refills it");
+  assert.deepEqual(migrated.read("SELECT * FROM bot_tools"), [], "bot_tools too");
+});
+
 test("runtime lock contention reports an error without consuming the watchdog allowance", (t) => {
   const storage = persistentBotData(t);
   const data = storage.open("locked-runtime");
@@ -70,7 +105,7 @@ test("runtime lock contention reports an error without consuming the watchdog al
   });
 
   writer.exec("BEGIN IMMEDIATE");
-  const began = performance.now();
+  assert.equal(data.read("PRAGMA busy_timeout")[0]?.timeout, 0);
   assert.throws(
     () => data.transaction(() => {}, { name: "recordActionResponse", requestId: 115 }),
     (error) => {
@@ -86,9 +121,6 @@ test("runtime lock contention reports an error without consuming the watchdog al
       return true;
     },
   );
-  // A broad one-second ceiling distinguishes immediate rejection from the
-  // observed five-second synchronous SQLite wait, without timing normal SQL.
-  assert.ok(performance.now() - began < 1000, "Lock contention must not block the runtime for seconds.");
   assert.equal(data.diagnostics().lockFailures, 1, "Diagnostic reads must work while the other writer holds its lock.");
   assert.equal(data.read("PRAGMA query_only")[0]?.query_only, 1);
   writer.exec("ROLLBACK");

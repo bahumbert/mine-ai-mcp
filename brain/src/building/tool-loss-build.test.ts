@@ -9,7 +9,7 @@ const RECIPES = {
   stick: { makes: 4, needs: [{ item: "oak_planks", count: 2 }] },
   wooden_pickaxe: { makes: 1, needs: [{ item: "oak_planks", count: 3 }, { item: "stick", count: 2 }] },
 };
-const LOST = "[TOOL_TIER_LOST] stone_pickaxe was lost at -732,111,87; no pickaxe remains.";
+const LOST = "[TOOL_TIER_LOST] stone_pickaxe was lost at -732,111,87; family: pickaxe; no pickaxe remains.";
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, style: "medieval", ...extra };
@@ -138,7 +138,7 @@ test("the pickaxe lost again in the same step ends the build, saying what was re
     effect: () => {
       runtime.addItem("stone_pickaxe", -1);
       // The new one wears out on the part done again.
-      runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains.", effect: () => runtime.addItem("wooden_pickaxe", -1) };
+      runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; family: pickaxe; no pickaxe remains.", effect: () => runtime.addItem("wooden_pickaxe", -1) };
     },
   };
   const context = contextFor(runtime, { building: { unfinished: null as UnfinishedHouse | null } });

@@ -25,6 +25,7 @@ export function scenarioTestContext(parts: ScenarioTestContextParts): ScenarioCo
     ...(parts.username !== undefined && { username: parts.username }),
     arena: parts.arena ?? arenaFrame(ZERO_ARENA),
     bot,
+    progress: () => {},
     waitForTicks: async () => {},
     physics: { pause: () => {}, resume: () => {} },
     client: {

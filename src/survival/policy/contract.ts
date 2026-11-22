@@ -51,6 +51,7 @@ export const DEFAULT_FOOD_POLICY: Readonly<FoodPolicy> = Object.freeze({
 });
 
 export const navigationPolicySchema = z.strictObject({
+  report_open_sky: z.boolean().describe("Report the first foreground route destination without solid non-leaf cover in view_status; never change the route. Default false."),
   scaffold_blocks: z
     .array(z.string().min(1))
     .max(16)
@@ -84,6 +85,7 @@ export const DEFAULT_NAVIGATION_POLICY: Readonly<NavigationPolicy> = Object.free
   bucket_fall_save: true,
   bucket_drops: true,
   dig_straight_down: true,
+  report_open_sky: false,
 });
 
 export const survivalPolicySchema = z.strictObject({

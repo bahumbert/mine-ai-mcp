@@ -76,6 +76,8 @@ tick:
 goal:
   kind: all
   timeout: 120
+  # Twice the longest still span, 620 ticks (t00412 at 20 tps; t00400 reached 616 at 10 tps).
+  stillTicks: 1240
   goals:
     # The model's navigate actually moved the bot, which is the whole point of
     # handing the body back.

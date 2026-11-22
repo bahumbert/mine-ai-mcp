@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { lostToolClass, ToolLosses, toolToMake, type ToolLossDeps } from "./tool-loss.ts";
 
-const LOST = "[TOOL_TIER_LOST] stone_pickaxe was lost at -732,111,87; no pickaxe remains.";
+const LOST = "[TOOL_TIER_LOST] stone_pickaxe was lost at -732,111,87; family: pickaxe; no pickaxe remains.";
 
-function deps(carried: { name: string; count: number }[], reserved: { item: string; count: number }[] = []): ToolLossDeps & { asked: string[] } {
+function deps(carried: { name: string; count: number; families?: string[] }[], reserved: { item: string; count: number }[] = []): ToolLossDeps & { asked: string[] } {
   const asked: string[] = [];
   return {
     asked,
@@ -18,10 +18,12 @@ function deps(carried: { name: string; count: number }[], reserved: { item: stri
   };
 }
 
-test("the lost tool's class comes from the error, whatever its tier", () => {
+test("the lost tool's class comes from the failure's family, whatever its tier or name; no family named (an older runtime) is no class", () => {
   assert.equal(lostToolClass(LOST), "pickaxe");
-  assert.equal(lostToolClass("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains."), "shovel");
-  assert.equal(lostToolClass("[TOOL_TIER_LOST] iron_axe was lost at 1,2,3; no axe remains."), "axe");
+  assert.equal(lostToolClass("[TOOL_TIER_LOST] mythril_digger was lost at 1,2,3; family: pickaxe; no pickaxe remains."), "pickaxe");
+  assert.equal(lostToolClass("[TOOL_TIER_LOST] stone_pickaxe was lost at 1,2,3; no pickaxe remains."), null, "the class is not guessed from the name");
+  assert.equal(lostToolClass("[TOOL_TIER_LOST] wooden_shovel was lost; family: shovel; no shovel remains."), "shovel");
+  assert.equal(lostToolClass("[TOOL_TIER_LOST] iron_axe was lost at 1,2,3; family: axe; no axe remains."), "axe");
   assert.equal(lostToolClass("[BUILD_INCOMPLETE] 2 cells still wrong"), null);
   assert.equal(lostToolClass(null), null);
 });
@@ -47,7 +49,7 @@ test("a tool lost mid-build is made again from what is carried, once per class",
   assert.match(second.status === "refused" ? second.note : "", /wooden_pickaxe was remade earlier in this step and lost again/u);
   assert.deepEqual(context.asked, ["wooden_pickaxe"]);
   // Another class has its own allowance.
-  const shovel = await losses.handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context);
+  const shovel = await losses.handle("[TOOL_TIER_LOST] wooden_shovel was lost; family: shovel; no shovel remains.", context);
   assert.deepEqual(shovel, { status: "remade", item: "wooden_shovel" });
 });
 
@@ -62,7 +64,7 @@ test("the house's own cobblestone is not spent on a stone tool", async () => {
 
 test("a tool that is carried again needs no making; other errors are not a lost tool", async () => {
   const losses = new ToolLosses();
-  const context = deps([{ name: "wooden_pickaxe", count: 1 }]);
+  const context = deps([{ name: "wooden_pickaxe", count: 1, families: ["pickaxe"] }]);
   assert.deepEqual(await losses.handle(LOST, context), { status: "remade", item: "wooden_pickaxe" });
   assert.deepEqual(context.asked, []);
   assert.deepEqual(await new ToolLosses().handle("[BUILD_INCOMPLETE] 2 cells still wrong", context), { status: "none" });
@@ -90,8 +92,8 @@ test("a step may allow several losses per class and in all; the one past either 
 
   const total = new ToolLosses({ perClass: 5, total: 2 });
   assert.equal((await total.handle(LOST, context)).status, "remade");
-  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context)).status, "remade");
-  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_axe was lost; no axe remains.", context)).status, "refused");
+  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_shovel was lost; family: shovel; no shovel remains.", context)).status, "remade");
+  assert.equal((await total.handle("[TOOL_TIER_LOST] wooden_axe was lost; family: axe; no axe remains.", context)).status, "refused");
 });
 
 test("a loss is told to the caller, and a tool no work is left for is not made", async () => {
@@ -99,7 +101,7 @@ test("a loss is told to the caller, and a tool no work is left for is not made",
   const context = { ...deps([{ name: "oak_planks", count: 8 }]), onLost: (toolClass: string) => lost.push(toolClass), stillNeeded: (toolClass: string) => toolClass !== "pickaxe" };
   assert.deepEqual(await new ToolLosses().handle(LOST, context), { status: "unneeded" });
   assert.deepEqual(context.asked, []);
-  assert.deepEqual((await new ToolLosses().handle("[TOOL_TIER_LOST] wooden_shovel was lost; no shovel remains.", context)).status, "remade");
+  assert.deepEqual((await new ToolLosses().handle("[TOOL_TIER_LOST] wooden_shovel was lost; family: shovel; no shovel remains.", context)).status, "remade");
   assert.deepEqual(lost, ["pickaxe", "shovel"]);
 });
 
@@ -111,4 +113,11 @@ test("the cobblestone a trade owes is not spent on a stone tool, as the levellin
   assert.deepEqual(await new ToolLosses().handle(LOST, partly), { status: "remade", item: "stone_pickaxe" }, "5 carried, 2 owed: the 3 spare make the tool");
   const reservedToo = { ...deps([{ name: "cobblestone", count: 45 }], [{ item: "cobblestone", count: 40 }]), owed: owedCobble(3) };
   assert.deepEqual(await new ToolLosses().handle(LOST, reservedToo), { status: "remade", item: "wooden_pickaxe" }, "45 carried, 40 reserved and 3 owed: 2 spare");
+});
+
+test("a tool of the lost class already carried is found by its family, whatever its name", async () => {
+  const context = deps([{ name: "mythril_digger", count: 1, families: ["pickaxe"] }]);
+  const outcome = await new ToolLosses().handle("[TOOL_TIER_LOST] stone_pickaxe was lost at 1,2,3; family: pickaxe; mythril_digger remains.", context);
+  assert.deepEqual(outcome, { status: "remade", item: "mythril_digger" });
+  assert.deepEqual(context.asked, []);
 });

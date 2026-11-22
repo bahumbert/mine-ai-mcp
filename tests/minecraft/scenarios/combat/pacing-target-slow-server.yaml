@@ -1,0 +1,57 @@
+template: ../../templates/flat-single-action.yaml
+name: pacing-target-slow-server
+tags: [regression, reliability, exclusive]
+description: At ten ticks per second, a 600-tick no-damage fight records a target answer. Re-offering the same zombie in reach must not reclaim it during the next 600 ticks.
+world:
+  type: flat
+  time: midnight
+  gamerules:
+    doDaylightCycle: false
+    doMobSpawning: false
+    keepInventory: true
+    naturalRegeneration: false
+    randomTickSpeed: 0
+reset:
+  - "kill @e[type=!minecraft:player]"
+  - "fill -5 -60 -5 5 -55 5 air"
+setup:
+  - "difficulty normal"
+  - "tick rate 10"
+  - "fill -4 -60 -4 4 -60 -4 oak_fence"
+  - "fill -4 -60 4 4 -60 4 oak_fence"
+  - "fill -4 -60 -4 -4 -60 4 oak_fence"
+  - "fill 4 -60 -4 4 -60 4 oak_fence"
+entities:
+  - type: zombie
+    # The driver activates the pacing only after its execution observer is attached.
+    pos: [32.5, -60, 0.5]
+    nbt: "{PersistenceRequired:1b,NoAI:1b,Invulnerable:1b}"
+players:
+  - name: Actor
+    op: true
+    pos: [0.5, -60, 0.5]
+    inventory:
+      - { item: diamond_sword, count: 1 }
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  # Tick functions tolerate an already-existing objective on a reused server; each new mob resets its phase once.
+  - "execute unless entity @e[type=zombie,tag=pace_ready] run scoreboard objectives add pace dummy"
+  - "execute unless entity @e[type=zombie,tag=pace_ready] run scoreboard players set phase pace 0"
+  - "tag @e[type=zombie] add pace_ready"
+  - "scoreboard players add phase pace 1"
+  - "execute if score phase pace matches 1..20 run tp @e[type=zombie,tag=pacing_active,tag=!pacing_reoffered] 2.5 -60 0.5"
+  - "execute if score phase pace matches 21..40 run tp @e[type=zombie,tag=pacing_active,tag=!pacing_reoffered] 1.5 -60 0.5"
+  - "execute if score phase pace matches 40.. run scoreboard players set phase pace 0"
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/pacing-target.ts]
+goal:
+  kind: completion
+  who: Actor
+  # T28, 2026-11-18, n=3/rate: driver spans 1220 ticks at 20 tps, 1212-1217 at 10.
+  # 1.5 x 1220 rounded up to 20 = 1840 ticks, or 184 seconds at this server's 10 tps.
+  timeout: 184
+  # Longest still spans (--lock --lanes 1): 622-642 ticks at 20 tps, 621-622 at 10, n=3 each.
+  # 2 x 642 rounded up to 20 = 1300 ticks; the regular sibling uses the same game-time guard.
+  stillTicks: 1300

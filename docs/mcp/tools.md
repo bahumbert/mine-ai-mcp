@@ -66,6 +66,17 @@ fire, breath, and footing reflexes remain independent. See the
 [policy contract](../../src/survival/policy/contract.ts) and the
 [survival policy guide](../survival/survival-policy.md).
 
+`combat.fight_margin` (default `1.5`, finite range `0`–`10`) is the minimum
+melee advantage for an automatic fight: effective health divided by the
+estimated health lost while clearing the contacts. Below it the bot evades
+as `outmatched`. A usable permitted bow bypasses this melee estimate while
+no contact is in melee reach. A hunt's quarry and immediate contact defence
+keep their own rules. After an answered evade, the bot hides if possible or
+defends in reach. Explosive contacts use measured explosion data: a weapon no
+stronger than bare hands, or multiple explosives without a permitted usable
+ranged weapon, trigger `explosive`. The interruption explains the estimate;
+completed combat notifications show the margin, threshold and carried weapon.
+
 `navigation.hostile_avoidance_multiplier` scales capped hostile proximity
 costs during ordinary navigation and evasion: `1` is normal, `2` doubles the
 cost, `0.5` halves it, and `0` removes proximity cost. It accepts finite,
@@ -120,13 +131,42 @@ Use `view_status` to obtain an instantaneous snapshot of the bot's live
 state before planning or after physical execution. It accepts no tool-specific
 arguments. Success proves the bot sampled its vitals, world time, exact
 position, compass heading, carried items (each carried food with the hunger points and saturation one
-restores, from game data), best tool/armour tiers, and nearby entities, while refreshing
+restores, from game data), best tool/armour (item, rank in its family, durability), and nearby entities, while refreshing
 the `bot_status`, `bot_inventory`, and `bot_tools` tables in SQLite. Nearby entities are the
 players online, the hostiles the combat policy counts within sixteen blocks, every
 loaded dropped item nearest first (up to sixteen), and a summary of every loaded mob
 species with its count, whether it is in the game's hostile category (the one `collect_mob_drop` refuses without
 a shield), and the nearest one's entity ID, distance and position, at any distance. Defined in
 [src/actions/view-status/contract.ts](../../src/actions/view-status/contract.ts).
+
+Each nearby hostile's `threat` gives estimated damage per hit, hits to kill the bot and hits the bot needs,
+and whether it explodes. `nearby.fight` is null with no nearby hostiles; otherwise it reports the best carried
+melee weapon, margin, estimated health lost and ticks to clear damaging contacts, ticks to die, current
+`fightMargin`, effective health including absorption, and the combat data source. A null margin or damage
+means it could not be priced, not that a threat is safe. `unknownMelee` marks varying melee damage with no observed hit;
+an unknown contact makes the combined margin unknown and refuses automatic melee engagement. The totals include damaging contacts within contact
+range or observed attacking, not explosives; observed hits override attribute damage when available.
+
+Every inventory stack carries `families` (sorted, empty when none): the item's
+kinds such as `sword`, `pickaxe`, `helmet`, `food` or `bed`, taken from the
+server's tags, else the tags shipped for the bot's version, plus the vanilla
+override of items no tag groups. The result's `item_families` says which:
+`{ source: "server" | "shipped" | "none", version, overrides }`, and the text
+prints it as "Item families: server tags (1.21.4) + override minecraft". The
+same data is in `bot_inventory.families` (JSON array) and
+`bot_status.item_families_json`.
+
+The condition facts (plan p4-03) are read in the game, never advice. `vitals.armour` and
+`vitals.armourToughness` are the server's armour points (0 with no piece worn, null when a piece is worn and
+the server told none). `armourWorn` is the four slots (`head`, `torso`, `legs`, `feet`) with the item or null;
+`armourCarried` lists the armour pieces carried in the inventory and hotbar, not worn, summed per item with the
+slot each is for (`gear`/`tools.armour` is the best carried piece, worn or not: not "worn"). `light` is the
+sky and block light at the feet and, when the feet are below full sky light, `openSkyAbove`, the blocks up to the first cell of
+full sky light; each is null where the client holds no light data (never 0 for unknown). `combat` is the fight
+reflex's gear: `melee` (null: bare hands), the best `bow` with or without arrows, the `arrows` carried and the
+`shield`, and `exposure`, the share of fight risk left by its gear (0.15–1; 1 means no gear). `respawn` is the bed slept in this session, else where the bot last woke after a death, else the world spawn,
+with its distance (null in another dimension). The last wake is an observation, not a promise of the next respawn.
+The text carries the other condition facts as one `Condition facts:` line under the best tools; exposure is in the structured result.
 
 The `mobility` section answers what the carried inventory unlocks, which the
 stack list alone does not say: a route falls at most three blocks unassisted,
@@ -209,6 +249,37 @@ of unread events and atomically advanced the bot's read cursor to the highest
 returned event ID. It remains available during foreground execution; its event
 cursor is independent of foreground result retrieval. Defined in
 [src/actions/read-recent-events/contract.ts](../../src/actions/read-recent-events/contract.ts).
+
+### `place_sign`
+
+Place one carried sign at integer `x`, `y`, `z`, with its front toward `facing`
+(`north`, `south`, `east`, or `west`). `attach` defaults to `ground`; `wall`
+uses the full supporting block behind the text. `sign_item` selects a carried
+registry member of the sign family, otherwise the first carried member is used.
+Supply `lines` with one to four strings, each at most 45 characters without CR
+or LF; omitted lines become empty strings.
+
+The action waits for the server's editor permission before writing and confirms
+the four front lines from a new block entity answer. Its `sign` evidence gives
+the target, observed block and lines, requested facing and attachment, `placed`,
+and `confirmed`. A placed sign without confirmed text returns `partial`
+`PLACE_SIGN_TEXT_UNCONFIRMED`; read it before deciding what to do next. Missing
+items list the family's `members`. Occupied cells return `existing` (including
+front and back lines for a sign). With `fill_blank: true`, an existing sign known
+blank on both sides is opened with one click and filled without using a sign item;
+its evidence has `placed: false`. Text on either side refuses with `CELL_TAKEN`.
+Unknown text refuses with `PLACE_SIGN_TEXT_UNKNOWN`; no editor after the click
+returns `PLACE_SIGN_NO_EDITOR`. A cut preserves the one-click budget, and an
+unconfirmed edit is read back before another write is considered.
+Unloaded targets, missing support and foreign protected regions refuse placement.
+
+### `read_signs`
+
+Read one loaded cell with all of `x`, `y`, and `z`, or scan nearby loaded signs with `max_distance` (1–64, default 16) and `limit` (1–32, default 16). Each reading includes the block, position, four front and back lines, and `known`, which is false when the sign's text has not loaded. An unloaded cell is refused.
+
+### `view_item_family`
+
+Use `view_item_family` with `family` (an item family such as `sign`) to list its `members` in registry order. The result includes the requested `family` and does not change the world.
 
 ### `view_crafting_requirements`
 
@@ -384,7 +455,7 @@ the native portal cooldown indefinitely. Leave the opening, allow the cooldown
 to expire, then call the same portal action for the return.
 
 Entry to the Nether or End returns `PORTAL_LOW_SUPPLIES` before movement
-when fewer than **16 auto-edible food items** or **32 regular arrows** are
+when fewer than **16 auto-edible food items** or **32 arrows** (regular, spectral or tipped) are
 carried. Food uses the hunger reflex's allowed foods; counts are items, not
 stacks or hunger points. The response includes both observed counts. Retry
 with `allow_low_supplies: true` to proceed deliberately despite the warning.
@@ -419,7 +490,7 @@ may require a wider baseline and another bearing. It stops before the journey.
 The result includes straight-line distance and walking minutes at 4.3 blocks/s;
 this is a baseline, not a computed path or terrain-aware ETA.
 
-Prepare for the Ender Dragon: carved pumpkin, bow, 64 regular arrows, 16
+Prepare for the Ender Dragon: carved pumpkin, bow, 64 arrows (regular, spectral or tipped), 16
 auto-edible food items, iron-or-better helmet/chestplate/leggings/boots and
 sword or axe, and a shield. Equipped items count. `phase: "locate"` checks this
 same checklist and reports missing items before moving. Supply them or set
@@ -518,7 +589,7 @@ Defined in
 
 ### `pick_up_items`
 
-`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, and disappearance without a confirmed gain.
+`pick_up_items` sweeps currently loaded dropped-item entities. Supply `item` to filter by exact registry name, or `x`, `y`, `z`, and `radius` (maximum 32) to choose an area. `recover_death_items: true` instead uses the retained last death in the current dimension with radius 16. The result reports net inventory gains and distinguishes unreachable items, full inventory, a confirmed take by another entity (`taken_by_other`, with its name in nullable `takenBy`), and disappearance without a confirmed gain.
 
 Recovery refuses after five minutes of wall time as a conservative boundary. Minecraft advances a dropped item's despawn age only while its chunk is loaded, so wall-clock age cannot establish that older drops have despawned.
 
@@ -555,7 +626,7 @@ is reached, collection releases navigation and reports partial gains with
 drop the bot has stood in for three seconds without an inventory gain is given
 up rather than held until the server despawns it.
 
-A target with water beside or above it is mined; a target with lava against it
+A target touching water needs a drainable face, dry working ground and enough carried building blocks before any walk; water directly above remains refused. `[TARGETS_UNDER_WATER]` means every match was refused in water and none was walked to; carry the named blocks or choose another area. A target with lava against it
 is mined once each lava face has been closed with a carried block, so
 collecting obsidian means carrying a stack of cobblestone. A target that cannot
 be taken says why in numbers — `3 lava faces, 1 block carried` — rather than
@@ -591,7 +662,7 @@ registry's own category, so it covers the species whose narrower `type` field
 misreads them - hoglins, phantoms, slimes, magma cubes, ghasts - alongside the
 obvious skeletons and creepers; passive quarry is never gated. The refusal is
 `HUNT_NO_SHIELD` with termination `shield_required`, and it is re-checked on
-every leg, so a shield that breaks mid-hunt stops the next one. Passing
+every leg, so a shield that breaks mid-hunt stops the next one, and that refusal reads `Refused to go on: no shield remains after the hunt began` with the drops already carried. Passing
 `allow_without_shield: true` admits the same request as a deliberate choice to
 take unblocked hits; it is not a fallback to retry the refusal with.
 The walk to the chosen mob is the hunt's own navigation process: it selects the
@@ -620,7 +691,10 @@ supplies or explore for unloaded mobs. By default it returns when no loaded
 quarry remains. Its evidence lists the quarry the client holds at return,
 nearest first, and the drops still lying loaded at return; drops picked up or
 gone are counted, not listed. `observe_for_ms` opts into a finite wait in the action, measured
-from the first absence; fights and reflex suspension do not renew that window.
+from the first absence; fights and reflex suspension do not renew that window. It is game
+time at 20 ticks a second (45 000 = 900 world ticks at any server speed), ending at the first
+server time packet after it; a wall-clock backstop of 3 x (ticks + 20) x 50 ms ends it on a
+stopped server; with no server time heard it is real milliseconds.
 
 `camp_spawner: true` additionally remembers the nearest loaded spawner at
 admission and requires a positive `observe_for_ms`. After an absence wait, it
@@ -636,8 +710,8 @@ lighting, space and spawn rules permit spawning. Missing/destroyed spawners and
 failed return routes produce `spawner_unavailable` or `spawner_unreachable`.
 
 For example, `{ "mob_name": "blaze", "drop_name": "blaze_rod", "count": 12,
-"camp_spawner": true, "observe_for_ms": 45000 }` waits at most 45 seconds away
-before returning, then at most 45 seconds at the source without quarry.
+"camp_spawner": true, "observe_for_ms": 45000 }` waits at most 45 seconds of game
+time (900 world ticks) away before returning, then the same at the source without quarry.
 
 The result separates `termination`, explaining collection's end, from `handoff`,
 which records observed safety or an unsafe/interrupted withdrawal under the same policy. Success proves
@@ -715,6 +789,15 @@ End combat actions yield to ordinary hostile defense when another mob threatens
 the bot. Such a takeover returns `[HOSTILE_CONTACT]` cancellation to the caller;
 after defense releases the body, the caller may select its next action. A
 cancelled perch request does not silently start a new perch window.
+
+For resumable body requests, an exhausted automatic evade or an unreflected
+deflection keeps the request suspended through the hostile reflex's next
+decision. A further response decides resume or return. A decision with no
+response resumes on stand-down, no contact or no sensed hostile when no incoming
+projectile remains. Its receipt says the reflex stood down and names each live
+held target and its current distance, including targets beyond sensing range.
+Other non-response decisions return the request with its last receipt. The result's `interruptions` records
+the ordered response receipts and the final chain summary, also on resume.
 
 ### `attack_dragon_perch`
 
@@ -832,10 +915,14 @@ are the caller's: a cell that is not soil is reported, not changed. Its routes
 never dig farmland or crops and place no scaffold. Success means no cell was
 left for a reason other than growing crops or water; the result counts what was
 harvested, cleared, tilled and planted, the items gained, the cells skipped by
-reason, and the plot afterwards (crops by block and age, empty farmland,
-farmland not hydrated, water). `[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
+reason, the plot as it was found (`before.crops`, read once at the start of
+the call, by block and age) and the plot afterwards (`after`: crops by block and
+age, `ripeAge` — the age each standing crop block is ripe at, from its loot
+table or else its last age —, empty farmland, farmland not hydrated, water).
+`[TEND_NO_HOE]` and `[TEND_PLANT_MISSING]`
 refuse before any work; `[TEND_STALLED]` ends a run where no cell changed for
-180 s. Defined in
+3 600 world ticks (180 s at 20 tps), with a 180 s bound when the server clock stops
+and a 543 s wall backstop. The result names both real seconds and observed world ticks. Defined in
 [src/actions/tend-crops/contract.ts](../../src/actions/tend-crops/contract.ts).
 
 ## Tools that craft and smelt items
@@ -849,6 +936,9 @@ a table already in inventory, even if one exists nearby; otherwise it returns
 and whether pickup was observed. Failed crafting also attempts pickup. If
 pickup fails, the call cannot succeed and reports `WORKSTATION_NOT_RECOVERED`.
 Cancellation releases control promptly and can leave the table behind.
+
+A temporary furnace also requires a carried harvest tool; otherwise
+`WORKSTATION_NO_HARVEST_TOOL` refuses before placement.
 
 Use `craft_item` to craft finished goods through the recursive recipe
 planner. The argument is `items`, a list of target item names and counts. When
@@ -865,6 +955,9 @@ Defined in
 [src/actions/craft-item/contract.ts](../../src/actions/craft-item/contract.ts).
 
 ### `smelt_item`
+
+An input without a shipped furnace recipe is refused with `SMELT_NOT_SMELTABLE`;
+if it is a smelting output, the refusal lists its recipe inputs.
 
 Use `smelt_item` to smelt raw ores or cook food inside an empty furnace.
 Arguments are `item_name`, input `count`, `fuel_item_name`, and furnace

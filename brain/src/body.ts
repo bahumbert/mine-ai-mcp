@@ -1,6 +1,6 @@
-import { setTimeout as sleep } from "node:timers/promises";
+import { sleepMs } from "./wall-timers.ts";
 import { elapsedSince, monotonicNow } from "./monotonic-clock.ts";
-import type { ActionStatus, BotRuntime, ForegroundState, ForegroundTool } from "./runtime-client.ts";
+import { errorCode, type ActionStatus, type BotRuntime, type ForegroundState, type ForegroundTool } from "./runtime-client.ts";
 
 /** How long one MCP wait may block; also the reaction time to stop, speech, and re-plan checks. */
 export const WAIT_SLICE_MS = 1_000;
@@ -35,6 +35,8 @@ const MAX_SHOUT_LENGTH = 249;
 export interface ActOutcome {
   readonly status: ActionStatus | "refused";
   readonly error: string | null;
+  /** The runtime refusal code, or the action contract's outcome code. */
+  readonly code: string | null;
   /** The body cancelled the action itself: to speak, or because `interruptWhen` asked to. */
   readonly preempted: boolean;
   /** The action's whole result, when the runtime returned one. */
@@ -53,6 +55,8 @@ export interface TypingPace {
   readonly msPerChar: number;
   /** A long line never waits longer than this. */
   readonly maxMs: number;
+  /** Wait for typing time; injectable so a test clock advances the same wait as the body. */
+  readonly sleep?: (ms: number) => Promise<void>;
 }
 
 /** About eight characters a second, a quick typist; thinking time already spent counts as typing. */
@@ -70,18 +74,23 @@ export const INSTANT_TYPING: TypingPace = { msPerChar: 0, maxMs: 0 };
 export class Body {
   private queue: Promise<unknown> = Promise.resolve();
   private speech: Promise<unknown> = Promise.resolve();
-  /** Told about every foreground action once it ends, with how long it ran (the time per activity counts it). */
-  onAction: ((tool: ForegroundTool, input: Readonly<Record<string, unknown>>, ms: number) => void) | null = null;
+  /**
+   * Told about every foreground action once it ends, with how long it ran (the time per activity counts it) and how it
+   * ended (null: the run threw; the death watch reads a `cancelled` one).
+   */
+  onAction: ((tool: ForegroundTool, input: Readonly<Record<string, unknown>>, ms: number, outcome: ActOutcome | null) => void) | null = null;
 
   constructor(private readonly runtime: BotRuntime, private readonly log: (line: string) => void, private readonly typing: TypingPace = HUMAN_TYPING, private readonly pace: StopPace = { recancelMs: RECANCEL_MS, giveUpMs: STOP_GIVE_UP_MS }) {}
 
   act(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions = {}): Promise<ActOutcome> {
     return this.exclusive(async () => {
       const started = monotonicNow();
+      let outcome: ActOutcome | null = null;
       try {
-        return await this.run(tool, input, rationale, options);
+        outcome = await this.run(tool, input, rationale, options);
+        return outcome;
       } finally {
-        this.onAction?.(tool, input, elapsedSince(started));
+        this.onAction?.(tool, input, elapsedSince(started), outcome);
       }
     });
   }
@@ -100,7 +109,7 @@ export class Body {
       let from = since;
       for (const message of messages) {
         const wait = Math.min(message.length * this.typing.msPerChar, this.typing.maxMs) - (monotonicNow() - from);
-        if (wait > 0) await sleep(wait);
+        if (wait > 0) await (this.typing.sleep ?? sleepMs)(wait);
         const outcome = await this.runtime.say(message, to, shouted);
         if (outcome.status !== "succeeded") this.log(`say failed (${outcome.status}): ${outcome.error ?? ""}`);
         from = monotonicNow();
@@ -117,7 +126,7 @@ export class Body {
   }
 
   private async run(tool: ForegroundTool, input: Readonly<Record<string, unknown>>, rationale: string, options: ActOptions): Promise<ActOutcome> {
-    if (options.signal?.aborted) return { status: "cancelled", error: "stopped before it started", preempted: false };
+    if (options.signal?.aborted) return { status: "cancelled", error: "stopped before it started", code: null, preempted: false };
     let state = await this.submit(tool, input, rationale, options.signal);
     let cancelled = false;
     let preempted = false;
@@ -136,7 +145,7 @@ export class Body {
         const waited = monotonicNow() - cancelledAt;
         if (waited >= this.pace.giveUpMs) {
           this.log(`${tool} ${state.actionId} did not stop ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
-          return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+          return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, code: null, preempted };
         }
         if (monotonicNow() - lastCancel >= this.pace.recancelMs) {
           lastCancel = monotonicNow();
@@ -148,12 +157,12 @@ export class Body {
       if (slice === GAVE_UP) {
         const waited = monotonicNow() - cancelledAt;
         this.log(`${tool} did not answer ${Math.round(waited / 1_000)} s after its cancel; giving the step back`);
-        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, preempted };
+        return { status: "failed", error: `the action did not stop ${Math.round(waited / 1_000)} s after it was cancelled`, code: null, preempted };
       }
       state = slice;
     }
-    if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, preempted: false };
-    return { status: state.status, error: state.error, preempted, ...(state.result !== undefined && { result: state.result }) };
+    if (state.state === "refused") return { status: "refused", error: `${state.code}: ${state.error}`, code: state.code, preempted: false };
+    return { status: state.status, error: state.error, code: errorCode(state.error), preempted, ...(state.result !== undefined && { result: state.result }) };
   }
 
   /**
@@ -199,7 +208,7 @@ export class Body {
         continue;
       }
       if (state.code !== "ACTION_BUSY" || blocking !== null || monotonicNow() >= deadline || signal?.aborted) return state;
-      await sleep(WAIT_SLICE_MS, undefined, { signal }).catch(() => undefined);
+      await sleepMs(WAIT_SLICE_MS, signal).catch(() => undefined);
     }
   }
 

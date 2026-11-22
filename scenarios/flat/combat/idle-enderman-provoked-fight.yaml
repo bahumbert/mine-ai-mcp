@@ -55,6 +55,7 @@ tick:
 goal:
   kind: all
   timeout: 120
+  stillTicks: 2080 # P4-29 a11 T8: longest passing still span 1035 ticks (20 tps 1035, 10 tps 446; n 3 and 8); 2x rounded up to 20.
   goals:
     - kind: survive
       who: EnderAngryBot

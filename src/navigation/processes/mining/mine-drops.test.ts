@@ -4,54 +4,83 @@ import { Vec3 } from "vec3";
 import { createFakeBot } from "../../../test-support/fake-bot/index.js";
 import { MineDropTracker } from "./mine-drops.js";
 
-function trackerWith(drops: Record<number, Vec3>) {
+function trackerWith(drops: Record<number, Vec3>, cells: Record<string, string> = {}) {
   const { bot, entities: server } = createFakeBot({
     position: new Vec3(0, 64, 0),
+    cells,
     entities: Object.fromEntries(Object.entries(drops).map(([id, position]) => [id, { name: "item", position }])),
   });
-  const tracker = new MineDropTracker(bot, { observedInventoryGain: () => 0 }, new Set(), new Set());
+  let lostDrops = 0;
+  const tracker = new MineDropTracker(
+    bot,
+    { observedInventoryGain: () => 0, onLostDrop: () => { lostDrops += 1; } },
+    new Set(),
+    new Set(),
+  );
   /** The server spawns a drop of the block just broken, after the bot was made. */
   const spawnDrop = (id: number, position: Vec3) => server.spawn({ id, name: "item", position, item: { name: "cobblestone", count: 1 } });
-  return { tracker, entities: bot.entities, spawnDrop };
+  /** Breaks whose drop never appeared, as the caller of the tracker hears them through `onLostDrop`. */
+  return { tracker, entities: bot.entities, spawnDrop, lost: () => lostDrops, blockAt: (x: number, z: number) => bot.blockAt(new Vec3(x, 64, z)) };
 }
 
 describe("MineDropTracker anticipated drops", () => {
   test("a drop spawning 2 s after the break (server behind) is still a target and then followed", () => {
-    const { tracker, spawnDrop } = trackerWith({});
+    const { tracker, spawnDrop, lost } = trackerWith({});
     tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0);
     assert.deepEqual(tracker.update([], 2_000).map((t) => t.kind), ["anticipated_drop"]);
     spawnDrop(7, new Vec3(5.5, 64, 5.5));
     assert.partialDeepStrictEqual(tracker.update([], 2_100), [{ kind: "drop", entityId: 7 }]);
-    assert.equal(tracker.lostDrops, 0);
+    tracker.update([], 9_000);
+    assert.equal(lost(), 0);
   });
 
-  test("no spawn within 5 s expires the anticipation and counts it lost", () => {
-    const { tracker } = trackerWith({});
+  test("no spawn within 5 s expires the anticipation and reports it lost once", () => {
+    const { tracker, lost } = trackerWith({});
     tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0);
     assert.equal(tracker.update([], 4_999).length, 1);
+    assert.equal(lost(), 0);
     assert.equal(tracker.update([], 5_000).length, 0);
     assert.equal(tracker.anticipating, false);
-    assert.equal(tracker.lostDrops, 1);
+    assert.equal(lost(), 1);
+    tracker.update([], 9_000);
+    assert.equal(lost(), 1, "an expired anticipation is not counted again");
+  });
+
+  test("a block with no loot data is counted lost when no drop appears, as before", () => {
+    const { tracker, lost, blockAt } = trackerWith({}, { "5,64,5": "bedrock" });
+    tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0, blockAt(5, 5));
+    tracker.update([], 5_000);
+    assert.equal(lost(), 1);
+  });
+
+  test("a stone broken by hand loiters like any break but, expiring with a dirt break, only the dirt counts lost", () => {
+    const { tracker, lost, blockAt } = trackerWith({}, { "5,64,5": "stone", "9,64,5": "dirt" });
+    tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0, blockAt(5, 5));
+    tracker.noteBreak({ x: 9, y: 64, z: 5 }, 0, blockAt(9, 5));
+    assert.equal(tracker.update([], 2_000).length, 2, "both are provisional targets while they loiter");
+    tracker.update([], 5_000);
+    assert.equal(tracker.anticipating, false);
+    assert.equal(lost(), 1);
   });
 
   test("once the item entity appeared and vanished, the break is no longer anticipated", () => {
-    const { tracker, entities } = trackerWith({ 7: new Vec3(5.5, 64, 5.5) });
+    const { tracker, entities, lost } = trackerWith({ 7: new Vec3(5.5, 64, 5.5) });
     tracker.noteBreak({ x: 5, y: 64, z: 5 }, 0);
     tracker.update([], 100);
     delete entities[7];
     const kinds = tracker.update([], 3_000).map((t) => t.kind);
     assert.ok(!kinds.includes("anticipated_drop"));
-    assert.equal(tracker.lostDrops, 0);
+    assert.equal(lost(), 0);
   });
 
   test("20 breaks with late drops gain 20", () => {
-    const { tracker, spawnDrop } = trackerWith({});
+    const { tracker, spawnDrop, lost } = trackerWith({});
     for (let i = 0; i < 20; i++) tracker.noteBreak({ x: i * 10, y: 64, z: 0 }, 0);
     assert.equal(tracker.update([], 2_000).filter((t) => t.kind === "anticipated_drop").length, 20);
     for (let i = 0; i < 20; i++) spawnDrop(100 + i, new Vec3(i * 10 + 0.5, 64, 0.5));
     const drops = tracker.update([], 2_100).filter((t) => t.kind === "drop");
     assert.equal(drops.length, 20);
-    assert.equal(tracker.lostDrops, 0);
+    assert.equal(lost(), 0);
   });
 });
 

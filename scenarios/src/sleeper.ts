@@ -1,4 +1,5 @@
 /** Run one sleep request and judge its observable world effects. */
+import { monotonicNow } from "../../src/utils/monotonic-clock.ts";
 import type { Bot } from "mineflayer";
 import type { ClientCompletion } from "mine-labs/client";
 import { Vec3 } from "vec3";
@@ -29,8 +30,8 @@ function expectedPosition(value: unknown, name: string): Vec3 {
 }
 
 async function waitUntil(check: () => boolean, timeoutMs = 2_000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (!check() && Date.now() < deadline) {
+  const deadline = monotonicNow() + timeoutMs;
+  while (!check() && monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return check();

@@ -1,0 +1,43 @@
+# Runtime capability check for entering a capped pit and completing the shelter calls.
+template: ../../templates/flat-single-action.yaml
+name: shelter-enter-capped-pit
+tags: [acceptance]
+description: >-
+  The runtime enters the supported bottom cell of a capped pit, digs down, roofs the shelter and climbs out.
+
+reset:
+  - "fill -16 -64 -16 20 -40 16 air"
+
+geometry:
+  - fill: { block: bedrock, from: [-6, -64, -6], to: [6, -64, 6] }
+  - fill: { block: dirt, from: [-3, -63, -3], to: [3, -56, 3] }
+  - fill: { block: air, from: [1, -58, 0], to: [1, -56, 0] }
+  - fill: { block: dirt, from: [1, -55, 0], to: [1, -54, 0] }
+  - fill: { block: air, from: [0, -58, 0], to: [0, -57, 0] }
+
+players:
+  - name: Actor
+    pos: [0.5, -58, 0.5]
+    inventory:
+      - { item: dirt, count: 4 }
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - { action: navigate, input: { x: 1, y: -58, z: 0, range: 0 } }
+    - { action: raw_action, input: { operation: dig, x: 1, y: -59, z: 0 } }
+    - { action: raw_action, waitServerTicks: 20, input: { operation: dig, x: 1, y: -60, z: 0 } }
+    - { action: raw_action, waitServerTicks: 20, input: { operation: place, block_name: dirt, x: 2, y: -58, z: 0, face: west } }
+    - { action: raw_action, input: { operation: dig, x: 1, y: -58, z: 0 } }
+    - { action: navigate, input: { x: 1, y: -57, z: 0, range: 1 } }
+
+goal:
+  kind: all
+  timeout: 55
+  goals:
+    - { kind: reach, who: Actor, pos: [1.5, -57, 0.5], radius: 1.5 }
+    - { kind: completion, who: Actor }

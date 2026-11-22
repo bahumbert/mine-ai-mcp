@@ -2,6 +2,8 @@ import { describeActivity, type Activity } from "./activities.ts";
 import type { BlockRole } from "./building/blueprint.ts";
 import { resumeStep } from "./building/templates.ts";
 import type { KnownFarm } from "./memory.ts";
+import { describeNearTend, ripeInNearMinutes, type Near } from "./farming/growth.ts";
+import { HINTS } from "./prompt-budget.ts";
 import type { BotSnapshot, Position } from "./runtime-client.ts";
 import type { UnfinishedHouse } from "./skills.ts";
 
@@ -15,6 +17,8 @@ export interface Opportunity {
   /** The kinds of work it would take; several when there are several ways (food: farming, hunting or cooking). */
   readonly activities: readonly Activity[];
   readonly text: string;
+  /** Urgent (a tool about to break, no tools, food): never dropped when the prompt budget shrinks the hint list. */
+  readonly pressing?: boolean;
 }
 
 /** A material a house of her own still needs, and the work that gets it (as `get_items` would). */
@@ -28,6 +32,7 @@ export interface OpportunityFacts {
   readonly now: number;
   readonly snapshot: BotSnapshot;
   readonly farms: readonly KnownFarm[];
+  readonly nearMinutes?: (farm: KnownFarm) => Near | null;
   readonly unfinished: UnfinishedHouse | null;
   /** Whether she knows a house she built for herself. */
   readonly ownHome: boolean;
@@ -50,8 +55,8 @@ export interface OpportunityFacts {
   readonly tradeNeeds?: { readonly items: readonly string[]; readonly partners: readonly string[]; readonly offer: readonly { readonly item: string; readonly count: number }[] };
 }
 
-/** Shown to the goal tier at most: more is a list to read, not a hint. */
-export const MAX_OPPORTUNITIES = 6;
+/** Shown to the goal tier at most: more is a list to read, not a hint (the one cap on hints, `prompt-budget.ts`). */
+export const MAX_OPPORTUNITIES = HINTS.lines;
 /** A tool with this share of its uses left or fewer is nearly worn out. */
 const WORN_SHARE = 0.1;
 /** ... or with this many uses left or fewer, whatever its tier. */
@@ -63,7 +68,7 @@ const WORN_USES = 16;
 const ENOUGH_FOOD_POINTS = 20;
 /** Hunger at or under this is starving: sprinting stops at 6 (the game's rule). */
 const STARVING = 6;
-/** A farm left this long may have ripened (wheat takes about half an hour near water). */
+/** Fallback while no pace is measured (spec 2026-11-07-p4-08b-crops, open choice 3); measured r35 growth: reports/2026-11-08-p4-08b-crop-growth.md. */
 const FARM_RECHECK_MINUTES = 20;
 
 function wornTools(facts: OpportunityFacts): Opportunity[] {
@@ -123,12 +128,25 @@ function where(farm: KnownFarm, facts: OpportunityFacts): string {
   return `your ${farm.crop} farm around ${farm.centre.x} ${farm.centre.y} ${farm.centre.z}, ${away} blocks away,`;
 }
 
+/** Farms with ripe crops observed, a ripe estimate from near time, or the no-pace fallback. */
 function farmsToHarvest(facts: OpportunityFacts): Opportunity[] {
-  return facts.farms.flatMap((farm) => {
-    const minutes = minutesSince(farm.tendedAt, facts.now);
-    if (minutes < FARM_RECHECK_MINUTES && farm.state.ripe === 0) return [];
-    return [{ activities: ["farming"], text: `${where(farm, facts)} was tended ${minutes} min ago (${farm.state.ripe} ripe then)` }];
-  });
+  return facts.farms.flatMap((farm) => farmToHarvest(farm, facts));
+}
+
+/** One farm worth checking, using its observed ripe cells or measured growth; no pace keeps the old fallback. */
+function farmToHarvest(farm: KnownFarm, facts: OpportunityFacts): Opportunity[] {
+  const minutes = minutesSince(farm.tendedAt, facts.now);
+  const near = facts.nearMinutes?.(farm) ?? null;
+  const remaining = ripeInNearMinutes(farm, near);
+  const estimatedRipe = remaining !== null && remaining <= 0;
+  if (farm.state.ripe === 0 && !estimatedRipe && (farm.pace !== undefined || minutes < FARM_RECHECK_MINUTES)) return [];
+  const distance = Math.round(Math.hypot(farm.centre.x - facts.snapshot.position.x, farm.centre.z - facts.snapshot.position.z));
+  const shortWhere = `your ${farm.crop} farm ${distance} blocks away`;
+  if (estimatedRipe) return [{ activities: ["farming"], text: `${shortWhere}: ripe by now at seen pace (${describeNearTend(farm, minutes, near)})` }];
+  if (farm.pace !== undefined) return [{ activities: ["farming"], text: `${shortWhere} was tended ${minutes} min ago (${farm.state.ripe} ripe then; ${describeNearTend(farm, minutes, near)})` }];
+  const { stage, ripeAge } = farm.state;
+  if (stage !== undefined && ripeAge !== undefined) return [{ activities: ["farming"], text: `${shortWhere} was tended ${minutes} min ago (${farm.state.ripe} ripe then; stage ${stage.toFixed(1)} of ${ripeAge}; no pace known yet)` }];
+  return [{ activities: ["farming"], text: `${where(farm, facts)} was tended ${minutes} min ago (${farm.state.ripe} ripe then)` }];
 }
 
 function farmsToSow(facts: OpportunityFacts): Opportunity[] {
@@ -225,7 +243,7 @@ function missingTools(facts: OpportunityFacts): Opportunity[] {
 
 /**
  * The gear she has, once she has tools at all (owner, 2026-10-07: Vex carried 100 raw iron and fought with a stone
- * sword, never thinking of better gear): what each first tool and armour piece is, from the runtime's view of her
+ * sword, never thinking of better gear): what each first tool is, from the runtime's view of her
  * inventory; the model sees what she carries and judges whether better is within reach.
  */
 function gear(facts: OpportunityFacts): Opportunity[] {
@@ -236,7 +254,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
   const named = (entries: readonly { readonly class: string; readonly item: string | null }[]) => entries.map((entry) => entry.item ?? `no ${entry.class}`).join(", ");
   return [{
     activities: ["crafting"],
-    text: `your gear: ${named(tools)}; armour: ${named(gearSeen.armour)} (better tools and armour are crafted from what you mine and smelt)`,
+    text: `your gear: ${named(tools)} (better tools are crafted from what you mine and smelt)`,
   }];
 }
 
@@ -246,7 +264,7 @@ function gear(facts: OpportunityFacts): Opportunity[] {
  * "no farm yet" never reached the prompt behind the house and bed lines (run 11, 2026-10-14).
  */
 export function findOpportunities(facts: OpportunityFacts, drawn: readonly Activity[] = []): Opportunity[] {
-  const pressing = [tradeNeeds, offersAsked, wornTools, missingTools, lowFood].flatMap((finder) => finder(facts));
+  const pressing = [tradeNeeds, offersAsked, wornTools, missingTools, lowFood].flatMap((finder) => finder(facts)).map((found) => ({ ...found, pressing: true }));
   const rest = [farmsToHarvest, unfinishedHouse, farmsToSow, noHome, temporaryHouse, noFarm, noBed, gear].flatMap((finder) => finder(facts));
   return [...pressing, ...drawnFirst(rest, drawn)].slice(0, MAX_OPPORTUNITIES);
 }
@@ -260,5 +278,10 @@ export function drawnFirst(opportunities: readonly Opportunity[], drawn: readonl
 /** One line each, `- (farming) ...`, for the goal tier's situation. */
 export function describeOpportunities(opportunities: readonly Opportunity[]): string {
   if (opportunities.length === 0) return "none that you know of";
-  return opportunities.map((opportunity) => `\n- (${opportunity.activities.map(describeActivity).join(", ")}) ${opportunity.text}`).join("");
+  return opportunities.map((opportunity) => `\n${opportunityLine(opportunity)}`).join("");
+}
+
+/** One hint as the goal tier reads it, `- (farming) ...`; the prompt budget counts its characters from here too. */
+export function opportunityLine(opportunity: Opportunity): string {
+  return `- (${opportunity.activities.map(describeActivity).join(", ")}) ${opportunity.text}`;
 }

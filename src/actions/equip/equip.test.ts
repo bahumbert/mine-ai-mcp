@@ -3,6 +3,8 @@ import test from "node:test";
 import type { Item } from "prismarine-item";
 import { type FakeBot, createFakeBot, itemOf } from "../../test-support/fake-bot/index.js";
 import { beginEquip, formatEquipResult, equip } from "./equip.js";
+import { familyIndexOf } from "../../world/item-families.js";
+import { watchServerTags } from "../../world/server-tags.js";
 import { inferEquipmentDestination, parseEquipRequest } from "./contract.js";
 
 const HEAD = 5;
@@ -40,16 +42,58 @@ function equipBot(carried: readonly string[], rejects: string | null = null) {
   return bot;
 }
 
+/** A request parsed with the bot's own family index, as the action does. */
+function parseFor(bot: FakeBot, input: unknown) {
+  return parseEquipRequest(input, familyIndexOf(bot));
+}
+
+/** The slot rule the code had before families (contract.ts:45-52 of 2026-11-06), copied as the reference. */
+function slotBySuffix(itemName: string): string {
+  if (itemName.endsWith("_helmet") || itemName === "carved_pumpkin") return "head";
+  if (itemName.endsWith("_chestplate") || itemName === "elytra") return "torso";
+  if (itemName.endsWith("_leggings")) return "legs";
+  if (itemName.endsWith("_boots")) return "feet";
+  if (itemName === "shield") return "off-hand";
+  return "hand";
+}
+
+for (const version of ["1.19.4", "1.20.1", "1.20.4", "1.20.6", "1.21.1", "1.21.4"]) {
+  test(`every vanilla item today's suffixes place keeps its slot (${version})`, () => {
+    const { bot } = createFakeBot({ version });
+    const families = familyIndexOf(bot);
+    const differences = bot.registry.itemsArray
+      .map((item) => ({ name: item.name, from: slotBySuffix(item.name), to: inferEquipmentDestination(item.name, families) }))
+      .filter((slot) => slot.from !== slot.to)
+      .map((slot) => `${slot.name}: ${slot.from} -> ${slot.to}`);
+    assert.deepEqual(differences, []);
+  });
+}
+
+test("an item a datapack adds to head_armor goes to the head slot, and back to the hand when the next packet drops it", () => {
+  const harness = createFakeBot();
+  watchServerTags(harness.bot);
+  const id = harness.bot.registry.itemsByName.stick!.id;
+  assert.equal(inferEquipmentDestination("stick", familyIndexOf(harness.bot)), "hand");
+  harness.emitTags([{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:head_armor", entries: [id] }] }]);
+  assert.equal(inferEquipmentDestination("stick", familyIndexOf(harness.bot)), "head");
+  assert.equal(parseFor(harness.bot, { items: [{ item_name: "stick" }] }).items[0]!.destination, "head");
+  harness.emitTags([{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:head_armor", entries: [] }] }]);
+  assert.equal(inferEquipmentDestination("stick", familyIndexOf(harness.bot)), "hand");
+});
+
 test("infers armor, shield, and hand destinations from item names", () => {
-  assert.equal(inferEquipmentDestination("iron_helmet"), "head");
-  assert.equal(inferEquipmentDestination("diamond_chestplate"), "torso");
-  assert.equal(inferEquipmentDestination("elytra"), "torso");
-  assert.equal(inferEquipmentDestination("golden_leggings"), "legs");
-  assert.equal(inferEquipmentDestination("netherite_boots"), "feet");
-  assert.equal(inferEquipmentDestination("shield"), "off-hand");
-  assert.equal(inferEquipmentDestination("iron_sword"), "hand");
+  const { bot } = createFakeBot();
+  const families = familyIndexOf(bot);
+  assert.equal(inferEquipmentDestination("iron_helmet", families), "head");
+  assert.equal(inferEquipmentDestination("carved_pumpkin", families), "head");
+  assert.equal(inferEquipmentDestination("diamond_chestplate", families), "torso");
+  assert.equal(inferEquipmentDestination("elytra", families), "torso");
+  assert.equal(inferEquipmentDestination("golden_leggings", families), "legs");
+  assert.equal(inferEquipmentDestination("netherite_boots", families), "feet");
+  assert.equal(inferEquipmentDestination("shield", families), "off-hand");
+  assert.equal(inferEquipmentDestination("iron_sword", families), "hand");
   assert.deepEqual(
-    parseEquipRequest({ items: [{ item_name: "Shield" }, { item_name: "torch", destination: "off-hand" }] }),
+    parseFor(bot, { items: [{ item_name: "Shield" }, { item_name: "torch", destination: "off-hand" }] }),
     {
       items: [
         { itemName: "shield", destination: "off-hand" },
@@ -63,7 +107,7 @@ test("equips a full set and reports every slot afterwards", async () => {
   const bot = equipBot(["iron_helmet", "iron_chestplate", "shield", "iron_sword"]);
   const result = await equip(
     bot,
-    parseEquipRequest({
+    parseFor(bot, {
       items: [
         { item_name: "iron_helmet" },
         { item_name: "iron_chestplate" },
@@ -89,7 +133,7 @@ test("reports each item that is not carried or was refused, and the rest as equi
   const bot = equipBot(["iron_sword", "shield"], "shield");
   const result = await equip(
     bot,
-    parseEquipRequest({
+    parseFor(bot, {
       items: [{ item_name: "iron_sword" }, { item_name: "shield" }, { item_name: "iron_boots" }],
     }),
     {},
@@ -110,7 +154,7 @@ test("reports each item that is not carried or was refused, and the rest as equi
 
 test("already equipped armor and shield succeed when absent from carried inventory", async () => {
   const bot = equipBot(["iron_helmet", "shield"]);
-  const request = parseEquipRequest({ items: [{ item_name: "iron_helmet" }, { item_name: "shield" }] });
+  const request = parseFor(bot, { items: [{ item_name: "iron_helmet" }, { item_name: "shield" }] });
   await equip(bot, request, {});
   assert.deepEqual(bot.inventory.items(), [], "worn, the armor and the shield are out of the inventory's carried slots");
   bot.equip = async () => {
@@ -128,7 +172,7 @@ test("an explicit source slot replaces a worn shield with the selected copy", as
   const fresh = shieldWorn(bot, 0);
   setSlot(bot, OFF_HAND, worn);
   setSlot(bot, 24, fresh);
-  const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
+  const result = await equip(bot, parseFor(bot, { items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "succeeded");
   assert.equal(bot.inventory.slots[OFF_HAND], fresh);
   assert.equal(result.equip.equipped[0]!.sourceSlot, 24);
@@ -138,7 +182,7 @@ test("an explicit source slot replaces a worn shield with the selected copy", as
 test("a stale source slot refuses rather than choosing another matching shield", async () => {
   const bot = equipBot(["shield"]);
   setSlot(bot, 24, itemOf(bot.registry, "torch"));
-  const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
+  const result = await equip(bot, parseFor(bot, { items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "failed");
   assert.match(result.equip.equipped[0]!.error!, /EQUIP_SOURCE_MISMATCH/);
   assert.equal(result.equip.equipment.offHand, null);
@@ -149,15 +193,15 @@ test("a matching name alone cannot confirm an explicitly selected item's equip",
   setSlot(bot, OFF_HAND, shieldWorn(bot, 319));
   setSlot(bot, 24, shieldWorn(bot, 0));
   bot.clickWindow = async () => {};
-  const result = await equip(bot, parseEquipRequest({ items: [{ item_name: "shield", source_slot: 24 }] }), {});
+  const result = await equip(bot, parseFor(bot, { items: [{ item_name: "shield", source_slot: 24 }] }), {});
   assert.equal(result.status, "failed");
   assert.match(result.equip.equipped[0]!.error!, /EQUIP_NOT_OBSERVED/);
-  assert.throws(() => parseEquipRequest({ items: [{ item_name: "shield", source_slot: 0 }] }));
+  assert.throws(() => parseFor(bot, { items: [{ item_name: "shield", source_slot: 0 }] }));
 });
 
 /** One request's attempts: `begin` once, then an executor call per attempt with its own signal. */
 function equipAttempts(bot: FakeBot, items: readonly object[]) {
-  const run = beginEquip(bot, parseEquipRequest({ items }), () => {});
+  const run = beginEquip(bot, parseFor(bot, { items }), () => {});
   return (signal?: AbortSignal) => run({ signal });
 }
 

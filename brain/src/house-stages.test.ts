@@ -9,19 +9,25 @@ import { houseBox } from "./building/house-site.ts";
 import { builderStand, planTemplate, type HousePlan } from "./building/plan.ts";
 import { billFrom } from "./building/stage-progress.ts";
 import { outOfReachFromGround } from "./building/stand-columns.ts";
-import { describeWay } from "./gathering.ts";
+import { describeWay } from "./gathering/fetch-farther.ts";
 import { TEMPLATES, templateFor, type Template } from "./building/templates.ts";
 import type { KnownPlace } from "./mind.ts";
 import { BodyDown, type BotSnapshot } from "./runtime-client.ts";
 import { runStep, type SkillContext, type UnfinishedHouse } from "./skills.ts";
 import { DEFAULT_POLICY, FakeRuntime, MEDIEVAL_SMALL_HIGH_ROOF, SMALL_MEDIEVAL_HOUSE as SMALL_MEDIEVAL, TEMPLATES_WITH_HIGH_ROOF } from "./testing.ts";
 
+/** A template with its claim sign cell taken out: these tests are about stages and fetches, so the houses they build make no claim (claims: skills/build-house-claim.test.ts). */
+function withoutSign(template: Template): Template {
+  const { sign: _sign, ...blueprint } = template.blueprint;
+  return { ...template, blueprint };
+}
+
 /** The small medieval house with its roof raised (`MEDIEVAL_SMALL_HIGH_ROOF`): the real roof is within the eye's reach from the door's level and needs no block to stand on. */
-const medievalSmall = MEDIEVAL_SMALL_HIGH_ROOF;
+const medievalSmall = withoutSign(MEDIEVAL_SMALL_HIGH_ROOF);
 const { classic: _classic, ...medievalShape } = medievalSmall;
 /** A house of another family than the shipped ones (Task 6 ships the regional files): the small medieval house's shape under its own name. */
 const RONDAVEL: Template = { ...medievalShape, id: "rondavel", family: "africa", name: "rondavel", kind: "rondavel", description: "a round hut" };
-const FIXTURES = new Map([...TEMPLATES_WITH_HIGH_ROOF, [RONDAVEL.id, RONDAVEL]]);
+const FIXTURES = new Map([...[...TEMPLATES_WITH_HIGH_ROOF].map(([id, template]): [string, Template] => [id, withoutSign(template)]), [RONDAVEL.id, RONDAVEL]]);
 
 function contextFor(runtime: FakeRuntime, extra: Partial<SkillContext> = {}): SkillContext {
   return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, style: "medieval", templates: FIXTURES, ...extra };
@@ -58,7 +64,7 @@ test("a build by template builds that template and remembers it by id and family
   standingWith(runtime, SMALL_MEDIEVAL);
   const result = await runStep(rondavel(), contextFor(runtime, { remember: (place) => places.push(place) }));
   assert.match(detailOf(result), /^built a rondavel, door at -?\d+ 64 -?\d+ facing north$/u);
-  assert.deepEqual(places[0]!.house, { template: "rondavel", family: "africa", door: { x: 0, y: 64, z: 2 }, facing: "north", materials: {} });
+  assert.deepEqual(places[0]!.house, { template: "rondavel", family: "africa", door: { x: 0, y: 64, z: 2 }, facing: "north", materials: {}, dimension: "minecraft:overworld" });
 });
 
 test("a build stops between stages for materials and goes on at the next stage when they are carried", async () => {
@@ -590,7 +596,7 @@ const MEANS_RECIPES = {
   oak_door: { makes: 3, needs: [{ item: "oak_planks", count: 6 }] },
 };
 const TABLE_AT = { x: 6, z: 3 };
-const PICKAXE_LOST = { error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; no pickaxe remains." };
+const PICKAXE_LOST = { error: "[TOOL_TIER_LOST] wooden_pickaxe was lost; family: pickaxe; no pickaxe remains." };
 const navigatesOf = (runtime: FakeRuntime) => runtime.submitted.filter((call) => call.tool === "navigate").map((call) => call.input);
 const walksToTable = (runtime: FakeRuntime) => navigatesOf(runtime).filter((walk) => walk.x === TABLE_AT.x && walk.z === TABLE_AT.z);
 
@@ -678,7 +684,7 @@ async function levelingToolLossWalks(house: boolean) {
   runtime.world.set("22,64,21", "grass_block");
   runtime.world.set("33,64,3", "crafting_table");
   runtime.snapshot = { ...runtime.snapshot, inventory: [{ name: "wooden_shovel", count: 1 }, { name: "oak_planks", count: 8 }] };
-  runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 22,64,21; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
+  runtime.failNext.build_structure = { error: "[TOOL_TIER_LOST] wooden_shovel was lost at 22,64,21; family: shovel; no shovel remains.", effect: () => runtime.addItem("wooden_shovel", -1) };
   const result = await runStep(stepSchema.parse({ skill: "level_area", markers: "gold_block" }), context);
   assert.equal(result.status, "done", detailOf(result));
   return navigatesOf(runtime).filter((walk) => walk.x === 33 && walk.z === 3);
@@ -758,12 +764,12 @@ test("the walls' calls reserve the roof's scaffold; the roof's own calls reserve
 const stageCellsOf = (plan: HousePlan, name: string) => cellsCountedOnce(plan.batches).slice(plan.stages.find((stage) => stage.name === name)!.first, plan.stages.find((stage) => stage.name === name)!.last + 1).flat().filter((cell) => cell.block !== "air");
 
 test("a stage that needs scaffold itself sends no reserve (the saltbox's roof stands past the eye's reach; its next stage's check says what is short)", async () => {
-  const saltbox = templateFor("saltbox")!;
+  const saltbox = withoutSign(templateFor("saltbox")!);
   const site = { door: { x: 0, y: 64, z: 2 }, facing: "north" as const };
   const plan = planTemplate(saltbox, site);
   const runtime = new FakeRuntime();
   standingWithPolicy(runtime, [...billFrom(plan, 0).map(({ item, count }) => ({ name: item, count })), { name: "dirt", count: 64 }]);
-  await runStep(stepSchema.parse({ skill: "build", template: "saltbox" }), contextFor(runtime, { building: { unfinished: null }, templates: TEMPLATES }));
+  await runStep(stepSchema.parse({ skill: "build", template: "saltbox" }), contextFor(runtime, { building: { unfinished: null }, templates: new Map([...TEMPLATES, [saltbox.id, saltbox]]) }));
   const calls = buildCalls(runtime);
   const roof = stageCellsOf(plan, "roof");
   const high = roof.filter((cell) => outOfReachFromGround(cell, site.door.y));

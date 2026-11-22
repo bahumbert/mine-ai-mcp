@@ -52,6 +52,23 @@ test("a tool nearly worn out is a crafting opportunity; a fresh one is not", () 
   assert.deepEqual(texts({ ...facts, snapshot: { ...facts.snapshot, inventory } }), ["(crafting) your stone_pickaxe has 12 uses left"]);
 });
 
+test("pressing hints are marked: a worn tool, no tools, low food; the others are not", () => {
+  const facts = settled({
+    farms: [],
+    ownHome: false,
+    snapshot: snapshot({ food: 10, inventory: [{ name: "stone_pickaxe", count: 1, durability: { remaining: 3, maximum: 131 } }] }),
+  });
+  const found = findOpportunities(facts);
+  const pressing = found.filter((entry) => entry.pressing === true).map((entry) => entry.text);
+  assert.equal(pressing.length, 3);
+  assert.match(pressing[0]!, /stone_pickaxe has 3 uses left/u);
+  assert.match(pressing[1]!, /you carry no sword/u);
+  assert.match(pressing[2]!, /you carry no food/u);
+  const others = found.filter((entry) => entry.pressing !== true);
+  assert.ok(others.length > 0);
+  assert.ok(others.every((entry) => entry.pressing === undefined), "an unmarked hint carries no marker at all");
+});
+
 test("food carried for less than a day is an opportunity to farm, hunt or cook", () => {
   const facts = settled({ snapshot: snapshot({ food: 14, inventory: [{ name: "bread", count: 2 }, { name: "red_bed", count: 1 }, ...TOOLS], foods: [{ name: "bread", count: 2, points: 5, saturation: 6 }] }) });
   assert.deepEqual(texts(facts), ["(farming, hunting, cooking) you carry food for 10 hunger points (2 bread); your hunger is 14/20"]);
@@ -67,6 +84,20 @@ test("a farm tended a while ago, or left with ripe crops, could be harvested; on
   assert.deepEqual(texts(settled({ farms: [farm()] })), ["(farming) your wheat_seeds farm around 10 63 -5, 11 blocks away, was tended 40 min ago (0 ripe then)"]);
   assert.deepEqual(texts(settled({ farms: [farm({ tendedAt: minutesAgo(5), state: { planted: 70, ripe: 10, empty: 0 } })] })), ["(farming) your wheat_seeds farm around 10 63 -5, 11 blocks away, was tended 5 min ago (10 ripe then)"]);
   assert.deepEqual(texts(settled({ farms: [farm({ tendedAt: minutesAgo(5) })] })), []);
+});
+
+test("a farm with a pace shows once it can be ripe; without pace it keeps the 20-minute fallback", () => {
+  const known = farm({ centre: { x: 40, y: 63, z: 0 }, tendedAt: minutesAgo(30), pace: 1, state: { planted: 8, ripe: 0, empty: 0, stage: 2, ripeAge: 7 } });
+  const facts = settled({ farms: [known], nearMinutes: () => ({ near: 6, unknown: 0, since: 30 }) });
+  assert.deepEqual(texts(facts), ["(farming) your wheat_seeds farm 40 blocks away: ripe by now at seen pace (stage 2.0/7; tend 30 min ago; near 6 min)"]);
+  assert.deepEqual(texts({ ...facts, nearMinutes: () => ({ near: 4, unknown: 0, since: 30 }) }), []);
+  assert.deepEqual(texts({ ...facts, nearMinutes: () => null }), [], "a restart cannot estimate ripe from elapsed wall time");
+  assert.deepEqual(texts({ ...facts, farms: [{ ...known, pace: undefined }] }), ["(farming) your wheat_seeds farm 40 blocks away was tended 30 min ago (0 ripe then; stage 2.0 of 7; no pace known yet)"]);
+  assert.deepEqual(texts({ ...facts, farms: [{ ...known, pace: undefined, tendedAt: minutesAgo(19) }] }), []);
+  assert.ok(texts({ ...facts, farms: [{ ...known, tendedAt: minutesAgo(1), state: { ...known.state, ripe: 2 } }], nearMinutes: () => null })[0]?.includes("2 ripe then"));
+  const ripe = texts({ ...facts, farms: [{ ...known, pace: 0.1, state: { ...known.state, ripe: 2 } }] })[0]!;
+  assert.ok(ripe.includes("near 6 min"));
+  assert.ok(!ripe.includes("near time unknown"), "a known near tally must not be called unknown");
 });
 
 test("empty farmland with no crop item carried is a farming opportunity (the seeds are for the farm)", () => {
@@ -131,14 +162,14 @@ test("no sword, pickaxe or axe carried is a crafting opportunity, in stone once 
   assert.match(texts(settled({ snapshot: snapshot({ inventory: stone, foods: [{ name: "bread", count: 8, points: 5, saturation: 6 }] }) }))[0]!, /get_items stone_sword, stone_axe /u);
 });
 
-test("with tools, her gear is said, so better gear can be thought of; with none, the missing tools say it", () => {
+test("the gear hint no longer names armour; with no tools, the missing tools say it", () => {
   // Owner, 2026-10-07: Vex carried 100 raw iron and a stone sword, never thinking of better gear.
   const gear = {
     tools: [{ class: "pickaxe", item: "stone_pickaxe" }, { class: "axe", item: null }, { class: "sword", item: "stone_sword" }, { class: "shovel", item: null }],
     armour: [{ class: "helmet", item: null }, { class: "chestplate", item: "leather_chestplate" }, { class: "leggings", item: null }, { class: "boots", item: null }],
   };
   assert.deepEqual(texts(settled({ snapshot: { ...settled().snapshot, gear } })), [
-    "(crafting) your gear: stone_pickaxe, no axe, stone_sword; armour: no helmet, leather_chestplate, no leggings, no boots (better tools and armour are crafted from what you mine and smelt)",
+    "(crafting) your gear: stone_pickaxe, no axe, stone_sword (better tools are crafted from what you mine and smelt)",
   ]);
   const bare = { ...gear, tools: gear.tools.map((entry) => ({ ...entry, item: null })) };
   assert.equal(texts(settled({ snapshot: { ...settled().snapshot, gear: bare } })).length, 0);

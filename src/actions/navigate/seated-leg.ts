@@ -5,7 +5,7 @@
 import type { Bot } from "mineflayer";
 import { deepWaterOnTheWay, type DeepWaterLine } from "./boat-crossing.js";
 import { isBoatEntity } from "./boat-entities.js";
-import { leaveBoatSeat } from "../../session/prepare-body.js";
+import { leaveBoatSeatForMovement } from "../../session/prepare-body.js";
 import { currentVehicle } from "./vehicle-sync.js";
 
 export type SeatedLeg =
@@ -35,6 +35,6 @@ export async function startFromSeat<T>(
   ride: (water: DeepWaterLine) => Promise<T>,
 ): Promise<T | null> {
   const plan = seatedLegPlan(bot, target);
-  if (plan.kind === "get_off") await leaveBoatSeat(bot, signal);
+  if (plan.kind === "get_off") await leaveBoatSeatForMovement(bot, signal);
   return plan.kind === "ride_on" ? ride(plan.water) : null;
 }

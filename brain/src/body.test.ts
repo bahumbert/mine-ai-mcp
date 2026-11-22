@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Body, INSTANT_TYPING, REFLEX_WAIT_MS, toChatLines } from "./body.ts";
+import { Body, INSTANT_TYPING, REFLEX_WAIT_MS, toChatLines, type ActOutcome } from "./body.ts";
 import { FakeRuntime, steppedClocks, until } from "./testing.ts";
+import { createFakeClock } from "../../src/test-support/fake-bot/fake-clock.ts";
 
 test("chat lines are single-line, never commands, and fit the 256-character limit", () => {
   assert.deepEqual(toChatLines("  /op me\nplease §cnow "), ["op me please cnow"]);
@@ -44,7 +45,7 @@ test("a result left unretrieved by an earlier brain run is settled before the ne
   const runtime = new FakeRuntime();
   runtime.refuseNext = { state: "refused", code: "RESULT_NOT_RETRIEVED", error: "retrieve it", activeActionId: null, unretrievedActionId: "old" };
   const outcome = await new Body(runtime, () => undefined).act("navigate", { x: 1, z: 1 }, "test");
-  assert.deepEqual(outcome, { status: "succeeded", error: null, preempted: false });
+  assert.deepEqual(outcome, { status: "succeeded", error: null, code: null, preempted: false });
   assert.deepEqual(runtime.cancelled, ["old"]);
   assert.equal(runtime.submitted.length, 1);
 });
@@ -54,6 +55,7 @@ test("a refusal without a blocking action is reported, not retried", async () =>
   runtime.refuseNext = { state: "refused", code: "NOT_CONNECTED", error: "offline", activeActionId: null, unretrievedActionId: null };
   const outcome = await new Body(runtime, () => undefined).act("navigate", { x: 1, z: 1 }, "test");
   assert.equal(outcome.status, "refused");
+  assert.equal(outcome.code, "NOT_CONNECTED");
   assert.equal(runtime.submitted.length, 0);
 });
 
@@ -85,16 +87,19 @@ test("speech runs beside the work in progress: it neither cancels it nor waits f
 });
 
 test("a reply waits as long as typing it would take, thinking time included, and lines keep their order", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
   const runtime = new FakeRuntime();
-  const body = new Body(runtime, () => undefined, { msPerChar: 10, maxMs: 200 });
+  const body = new Body(runtime, () => undefined, { msPerChar: 10, maxMs: 200, sleep: (ms) => clock.sleep(ms) });
   const started = performance.now();
   const first = body.say("0123456789", started - 60);
   const second = body.say("hi");
-  await Promise.all([first, second]);
+  await clock.advance(39, 1);
+  assert.deepEqual(runtime.said, []);
+  await clock.advance(1, 1);
+  await clock.settle(Promise.all([first, second]), 0);
   assert.deepEqual(runtime.said, ["0123456789", "hi"]);
   // The first line types 100 ms minus the 60 ms already spent thinking; "hi" was typed meanwhile.
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed >= 35 && elapsed < 400, `took ${elapsed} ms`);
 });
 
 test("aborting the signal cancels a non-interruptible action", async () => {
@@ -133,6 +138,24 @@ test("a shout is sent with shout; with a whisper target it is a plain whisper", 
     { message: "psst", to: "Tom" },
     { message: "plain" },
   ]);
+});
+
+test("onAction gets the outcome: a cancelled action says so, a thrown run gives null (plan 2026-11-07-p4-02c T2)", async () => {
+  const runtime = new FakeRuntime();
+  runtime.durations.collect_block = 1_000;
+  runtime.throwNext.craft_item = "[BODY_RESTARTED] the body restarted";
+  const body = new Body(runtime, () => undefined);
+  const outcomes: (ActOutcome | null)[] = [];
+  body.onAction = (_tool, _input, _ms, outcome) => outcomes.push(outcome);
+  const controller = new AbortController();
+  const collecting = body.act("collect_block", { block_name: "oak_log" }, "test", { signal: controller.signal });
+  await until(() => runtime.submitted.length === 1);
+  controller.abort();
+  await collecting;
+  await assert.rejects(body.act("craft_item", { items: [] }, "test"), /BODY_RESTARTED/u);
+  assert.equal(outcomes.length, 2);
+  assert.deepEqual([outcomes[0]?.status, outcomes[0]?.preempted], ["cancelled", false]);
+  assert.equal(outcomes[1], null);
 });
 
 // Plan 2026-10-27-p1-monotonic-clock T7: WSL steps its wall clock; the typing pace and the reflex wait are durations.

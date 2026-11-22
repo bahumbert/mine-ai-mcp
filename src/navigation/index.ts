@@ -36,14 +36,18 @@ export type {
 } from "./execution/in-place-break.js";
 export { SupportedPositionController } from "./execution/supported-position-controller.js";
 export { setSneaking, writeShiftKey } from "./mineflayer/sneak.js";
+export { observeNavigationDigs, reportNavigationDig, type NavigationDig } from "./mineflayer/dig-observer.js";
 export { enterPortal, portalApproachGoal, type PortalBlock } from "./processes/portal-entry.js";
 export { createNavigationRuntime, createMovements } from "./runtime.js";
 export { RouteOutcomes } from "./route-outcomes.js";
 export type { NavigationRuntime } from "./runtime.js";
+export type { CoverExit } from "./cover-watch.js";
 export { centerOnCell, horizontalControlsToward, steeringPortFor } from "./steering/local-steering.js";
+export { bucketAvailable, placeWaterInto, waterLandingSupply, waterableLanding } from "./mineflayer/water-landing.js";
 export { SupportedPositionHold } from "./steering/supported-position.js";
-export { hasSupportedCorridor, heldByBlockAt } from "./world/block-geometry.js";
+export { dropColumn, hasSupportedCorridor, heldByBlockAt, knockbackCorridorHazard, MAXIMUM_BUCKET_DROP, type KnockbackHazard } from "./world/block-geometry.js";
 export { isDry, isDryAir, isLiquid, isPassable, isHeadPassable, isSafeSupport, isWater, standsOnDryGround } from "./world/block-geometry.js";
+export { bodyDependsOnBlock } from "./world/body-support.js";
 
 // The navigation transaction.
 export { DEFAULT_CONTINUATION_SEARCH_LIMITS, DEFAULT_SEARCH_LIMITS } from "./navigate.js";
@@ -60,6 +64,7 @@ export {
   HORIZONTAL_TICKS_PER_BLOCK,
   advanceGoal,
   anyGoal,
+  cellsWithin,
   customGoal,
   exactBlockGoal,
   itemPickupGoal,
@@ -71,17 +76,24 @@ export {
   inEntityStance,
   stanceBesideEntityGoal,
 } from "./goals/index.js";
-export { packKey, type BlockPosition, type WorldView } from "./world/world.js";
+export { packKey, type BlockPosition, type LoadedBlock, type WorldView } from "./world/world.js";
 
 // Movement policy: what a route may do, and what it costs.
 export { STANDARD_SCAFFOLD_ITEMS, TERRAIN_BREAK_PENALTY } from "./mineflayer/movement-policy.js";
+export { selectHarvestTool } from "./mineflayer/movement-policy.js";
 export { longestBreakDurationMs } from "./mineflayer/break-duration.js";
 export { SWIM_UP_TICKS } from "./world/swimming.js";
 export { liveBlockReader, observeMineflayerBlock } from "./mineflayer/world.js";
+export { cellHoldsWater, waterAtOf } from "./world/deep-water.js";
 export type { MineflayerBlock } from "./mineflayer/world.js";
 export { BREAK_OPENS_INTO_LIQUID } from "./movements/policy.js";
 export type { MovementPolicy } from "./movements/policy.js";
 export type { StepField, StepFieldProvider } from "./step-field.js";
+export type { RouteAdmission, RouteAdmissionProvider } from "./route-admission.js";
+// What a caller's route admission needs to judge a planned route: the steps and a world that holds their edits.
+export type { MovementKind, PlannedOperation, PlannedStep, PredictedWorldEffect } from "./movements/movement.js";
+export { OverlayInterner, PlanningOverlay } from "./search/planning-overlay.js";
+export { NO_OBSTACLE, obstaclesOf, worldViewRaycaster } from "./world/line-of-sight.js";
 
 export type { NavigationEvent } from "./telemetry/index.js";
 
@@ -89,3 +101,6 @@ export { canOccupyWater } from "./mineflayer/water.js";
 
 export { canAccessLiquid, liquidAccessGoal } from "./goals/liquid-access.js";
 export { dryLandGoal } from "./goals/dry-land.js";
+export { DIG_REACH } from "./movements/excavation.js";
+export { watchServerChange } from "./mineflayer/server-block-changes.js";
+export { installNativeDigClock, nativeDigTicks } from "./mineflayer/native-dig-clock.js";

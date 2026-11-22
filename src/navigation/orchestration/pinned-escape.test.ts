@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { type FakeBot, createFakeBot } from "../../test-support/fake-bot/index.js";
-import { layeredWorld, loadNamedBlock } from "../../test-support/layered-world.js";
+import { layeredWorld, loadLavaAtDiagonals, loadNamedBlock } from "../../test-support/layered-world.js";
 import { DIRK_CAVE, DIRK_START, SANA_CAVE, SANA_START, dirkItems, dirkPocket, sanaItems, sanaPocket } from "../../test-support/frozen-pockets.js";
 import { FakeNavigationBot, flatWorld, observation, onEvent, settle } from "../../test-support/navigation.js";
 import { exactBlockGoal } from "../goals/index.js";
@@ -140,6 +140,27 @@ test("lava beside the opened cell is never let through", async () => {
   assert.ok(!kinds(run.events).includes("route_committed"));
   // The escape lifts no lava refusal, so the start is not "shut in by what an escape sets aside": no escape search is started.
   assert.ok(!kinds(run.events).includes("escape_relaxed"), "an escape search that cannot succeed was started");
+});
+
+/**
+ * Open flat ground with a lava source in each diagonal cell of the start (run 15, `spreading-lava-obstacle-course`):
+ * every cell beside the bot has lava beside it, so lava flows into it on its next update and a normal route refuses it.
+ */
+const LAVA_START = { x: 0, y: 63, z: 0 } as const;
+const LAVA_GOAL = { x: 3, y: 63, z: 0 } as const;
+function flatGroundWithLavaAtDiagonals(bot: FakeBot): MemoryWorld {
+  const world = flatWorld();
+  loadLavaAtDiagonals(world, bot, LAVA_START);
+  return world;
+}
+
+test("every exit beside spreading lava: the run ends with the escape leg's route, not no_path", async () => {
+  // The dig down is allowed, so the style override sets nothing aside: only the lava can start the escape leg.
+  const run = await leavePocket(flatGroundWithLavaAtDiagonals, LAVA_START, LAVA_GOAL, { digDown: true });
+  const kind = kinds(run.events);
+  assert.equal(kind.filter((entry) => entry === "escape_relaxed").length, 1, "the escape leg started");
+  assert.ok(kind.indexOf("route_committed") > kind.indexOf("escape_relaxed"), "a route follows the escape");
+  assert.ok(!(run.outcome.kind === "failed" && run.outcome.failure.kind === "no_path"), JSON.stringify(run.outcome));
 });
 
 /**

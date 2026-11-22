@@ -36,7 +36,7 @@ test("consume-food fails when a consume is rejected for any other reason than th
   );
 });
 
-test("consume-food returns the lateness it allowed for the end's reading, for the trial's completion detail", async () => {
+test("consume-food returns the lateness it allowed for the end's reading and whether the held apple carries a consumable component, for the trial's completion detail", async () => {
   const note = await runOnFake(consumeFood);
-  assert.match(String(note), /^late-reading: tookTicks=\d+ roundTripMs=\d+ lateTicks=\d+ catchUpUsed=-?\d+$/u);
+  assert.match(String(note), /^late-reading: tookTicks=\d+ roundTripMs=\d+ lateTicks=\d+ catchUpUsed=-?\d+; consumable-component=(present|absent|no-component-map)$/u);
 });

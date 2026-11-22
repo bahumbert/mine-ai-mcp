@@ -55,6 +55,7 @@ test("a persona's skills decide: build alone is building, collect_block the four
   assert.deepEqual(new Set(availableActivities(["craft_item"], snapshot(), [])), new Set(["crafting", "cooking"]));
   assert.deepEqual(new Set(availableActivities(["get_items"], snapshot(), [])), new Set(["woodcutting", "mining", "digging", "foraging", "crafting", "cooking"]));
   assert.deepEqual(availableActivities(["go_to", "follow_player", "give_item"], snapshot(), []), []);
+  assert.deepEqual(availableActivities(["dig_shelter"], snapshot(), []), []);
 });
 
 test("SKILL_ACTIVITIES covers every skill and every activityOf answer is one the skill is listed for", () => {

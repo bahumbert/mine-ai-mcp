@@ -1,5 +1,5 @@
 name: skeleton-knockback-bridge
-description: Native skeleton arrows push an unshielded bot sideways off a one-block-wide bridge above lava.
+description: The bridge run begins only after a native arrow from the released skeleton is witnessed in flight toward the unshielded bot above lava.
 minecraft: { version: "1.21.4" }
 world:
   type: flat
@@ -29,4 +29,4 @@ client:
   args: ["../../src/client-host.ts", "./enderman-idle-ledge.ts"]
 goal: { kind: completion, who: LedgeFighter, timeout: 45 }
 
-params: { mob: skeleton, arrival: [-136.5, 47, 197.61474899858322] }
+params: { mob: skeleton, arrival: [-136.5, 47, 197.61474899858322], requireNativeArrow: true, stimulusWithinTicks: 200, observeWithinTicks: 400 }

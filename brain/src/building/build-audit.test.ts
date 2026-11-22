@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { endedForWantOfRoute } from "./build-audit.ts";
+import { endedForWantOfRoute } from "../skills/structure-audit.ts";
 
 const audit = (left: unknown[]) => ({ structure: { left } });
 

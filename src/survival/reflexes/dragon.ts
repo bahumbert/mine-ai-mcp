@@ -10,7 +10,7 @@ import { decideEndResponse } from "../policy/combat/end-decision.js";
 import { responsePermissions } from "../policy/combat/permissions.js";
 
 /** An evade may take 2 min; 30 s without moving or being hit ends it, then a 10 s pause (owner 2026-10-19). */
-const DRAGON_LIMITS: ReflexLimits = { ceilingMs: 120_000, noProgressMs: 30_000, standDownMs: 10_000 };
+const DRAGON_LIMITS: ReflexLimits = { ceilingTicks: 2_400, noProgressTicks: 600, standDownTicks: 200 };
 
 /** The same End executor answers hazards between requests. */
 export function attachDragonReflex(

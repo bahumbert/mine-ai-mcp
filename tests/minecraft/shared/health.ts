@@ -9,19 +9,27 @@ export function parseTickQuery(answer: string): TickReading | null {
   return mean && p95 ? { meanMs: Number(mean[1]), p95Ms: Number(p95[1]) } : null;
 }
 
-/** A server silent for `stallAfterMs` is stalled (RCON times out each command, so silence means it stopped ticking or died). */
+/**
+ * A server that was asked and has not answered for `stallAfterMs` is stalled (RCON times out each command, so silence means it stopped ticking or died).
+ * The silence counts from the first question after the last answer, not from the last answer: time nobody asked the server (the sampler was
+ * blocked, or had not sampled it yet) is not its silence (spec 2026-11-15 F3).
+ */
 export class StallWatch {
-  #lastAnswerAt: number;
+  #firstAskedAt: number | null = null;
 
-  constructor(private readonly stallAfterMs: number, startedAt: number) {
-    this.#lastAnswerAt = startedAt;
+  constructor(private readonly stallAfterMs: number) {}
+
+  /** A question was sent at `at`; the first one since the last answer starts the silence. */
+  asked(at: number): void {
+    this.#firstAskedAt ??= at;
   }
 
-  answered(at: number): void {
-    this.#lastAnswerAt = at;
+  /** An answer, whatever it said: nothing is pending any more. */
+  answered(_at: number): void {
+    this.#firstAskedAt = null;
   }
 
   isStalled(now: number): boolean {
-    return now - this.#lastAnswerAt >= this.stallAfterMs;
+    return this.#firstAskedAt !== null && now - this.#firstAskedAt >= this.stallAfterMs;
   }
 }

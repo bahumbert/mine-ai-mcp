@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { setDefaultTimeout } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import { loadPaperSettings } from "../install/paper-settings.ts";
 import { APP_ASSETS, bundleEntries, copyAssets, ENTRY_POINTS, minecraftDataFiles, packageApp, WORKER_ENTRY_POINTS, WORKER_FOLDER } from "./bundle.ts";
 
 // Real `Bun.build` of the repository into a temp folder under the OS temp dir: no `node_modules` above it, so a module
@@ -101,7 +102,7 @@ test("the trimmed minecraft-data gives the 1.21.4 data the bots read, from a fol
   assert.equal(version, MINECRAFT_VERSION);
 });
 
-// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills.ts` for the
+// The brain asks for minecraft-data's NEWEST registry (`brain/src/boats.ts` for the boat recipes, `brain/src/skills/explore.ts` for the
 // entity types), not the server's version: a copy trimmed to 1.21.4 alone threw in play, from the first boat or creature
 // question (task review 2026-10-31; `brain --help` never calls them).
 test("the trimmed minecraft-data also gives the newest registry the brain reads for boat recipes and entity types", () => {
@@ -146,6 +147,29 @@ test("copyAssets copies the manifest, styles, personas, bun.exe and licence, and
     for (const folder of [stage, app, secondApp]) rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("the real pack ships the Paper settings file where the install step and the stack read it, and it loads", () => {
+  assert.ok(appFiles().includes("packaging/paper-settings.json"));
+  assert.ok(Object.keys(loadPaperSettings(join(appDir, "packaging", "paper-settings.json"))).length > 0);
+});
+
+test("the real pack ships THIRD-PARTY-NOTICES.txt in the app folder only, with the libraries, minecraft-data and Bun", () => {
+  assert.equal(existsSync(join(repoRoot, "THIRD-PARTY-NOTICES.txt")), false, "the checkout must stay clean");
+  assert.ok(appFiles().includes("THIRD-PARTY-NOTICES.txt"));
+  const text = readFileSync(join(appDir, "THIRD-PARTY-NOTICES.txt"), "utf8");
+  const titles = text.split("\n").filter((line) => line.startsWith("===== ")).map((line) => line.slice(6, -6));
+  for (const name of ["mineflayer", "@modelcontextprotocol/sdk", "minecraft-data"]) assert.ok(titles.some((title) => title.startsWith(`${name}@`)), name);
+  assert.ok(titles.filter((title) => title.startsWith("ajv@")).length >= 2, `both ajv versions: ${titles.filter((title) => title.startsWith("ajv@"))}`);
+  assert.ok(titles.includes(`Bun ${bunVersionOfManifest()}`), "Bun");
+  assert.ok(text.includes("JavaScriptCore"), "Bun's own licence text, which names JavaScriptCore");
+  assert.ok(titles.length > 100, `${titles.length} sections`);
+});
+
+/** The Bun version the manifest pins, from its download URL (`bun-v<x.y.z>`). */
+function bunVersionOfManifest(): string {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, "packaging", "manifest.json"), "utf8")) as { bun: { url: string } };
+  return /bun-v(\d+\.\d+\.\d+)\//u.exec(manifest.bun.url)![1]!;
+}
 
 test("the real repository packs into an app folder of under 300 files with no node_modules but minecraft-data and no source file", () => {
   // 11,034 files shipped before the bundle (10,282 under node_modules); measured now: 95 with bun.exe and one persona.

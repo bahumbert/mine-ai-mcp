@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Vec3 } from "vec3";
 import { z } from "zod";
 import type { ClientCompletion } from "mine-labs/client";
-import { builtBefore } from "#brain/building/build-audit.ts";
+import { builtBefore } from "#brain/skills/house-parts.ts";
 import { FACINGS, type WorldCell } from "#brain/building/blueprint.ts";
 import { planTemplate, type HousePlan } from "#brain/building/plan.ts";
 import { callWorks, scaffoldNeed, scaffoldReserve, stageCells, type ScaffoldNeed } from "#brain/building/stage-progress.ts";

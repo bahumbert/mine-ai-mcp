@@ -19,7 +19,8 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
     && claude --version
 ENV DISABLE_AUTOUPDATER=1
 ARG MINECRAFT_VERSION=1.21.4
-RUN bun docker/download-server.mjs ${MINECRAFT_VERSION}
+ARG MINECRAFT_SERVER=paper
+RUN bun docker/download-server.mjs ${MINECRAFT_VERSION} ${MINECRAFT_SERVER}
 ENV MINECRAFT_VERSION=${MINECRAFT_VERSION}
 ENV CLAUDE_CONFIG_DIR=/private/claude
 ENV HOME=/private

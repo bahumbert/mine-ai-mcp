@@ -16,6 +16,7 @@
   "variants": {
     "roof": { "stairs": "acacia_stairs", "slab": "acacia_slab" }
   },
+  "sign": { "x": 5, "y": 1, "z": 0, "facing": "north" },
   "key": {
     "i": { "role": "roof", "shape": "stairs", "facing": "east", "half": "bottom" },
     "j": { "role": "roof", "shape": "stairs", "facing": "south", "half": "bottom" },

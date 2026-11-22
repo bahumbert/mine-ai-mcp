@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Vec3 } from "vec3";
 import { createFakeBot, createFakeClock } from "../test-support/fake-bot/index.js";
+import { protectedRegion } from "../test-support/protected-region.js";
 import { cellKey } from "../utils/index.js";
 import { findStandingSpot, placeCarriedBlockNearby } from "./nearby-placement.js";
-import { setProtectedRegionsProvider } from "./protected-regions.js";
+import { setProtectedRegionsProvider, type ProtectedRegion } from "./protected-regions.js";
 
 /** Every cell of the box becomes `name`; later calls overwrite earlier ones. */
 function fill(cells: Record<string, string>, name: string, [x0, y0, z0]: number[], [x1, y1, z1]: number[]): void {
@@ -110,6 +111,60 @@ test("the cell is reported right before the placement packet, so an aborted plac
   assert.ok(reported![0]!.distanceTo(bot.entity.position) <= 4);
 });
 
+/**
+ * Solid rock around a bot standing at (0, 62, 0) with two free pockets beside it, east (1, 62, 0) and west (-1, 62, 0):
+ * the only cells a table can go in. Creative, so the placement needs no count; a mocked clock drives the server's answer.
+ */
+function pocketBot(pockets: readonly Vec3[], regions: readonly ProtectedRegion[]) {
+  const cells: Record<string, string> = {};
+  fill(cells, "stone", [-6, 50, -6], [6, 66, 6]);
+  fill(cells, "air", [0, 62, 0], [0, 63, 0]);
+  for (const pocket of pockets) cells[cellKey(pocket)] = "air";
+  const harness = createFakeBot({
+    cells, groundY: null, position: { x: 0.5, y: 62, z: 0.5 }, carried: { crafting_table: 1 },
+    username: "Ayla", gameMode: "creative", clock: createFakeClock({ mode: "mocked" }),
+  });
+  setProtectedRegionsProvider(harness.bot, () => regions);
+  return harness;
+}
+
+const EAST = new Vec3(1, 62, 0);
+const WEST = new Vec3(-1, 62, 0);
+const boxAround = (cell: Vec3, owner: string): ProtectedRegion => protectedRegion({
+  regionId: 5, dimension: "overworld", min: { x: cell.x, y: 60, z: cell.z }, max: { x: cell.x, y: 70, z: cell.z }, owner, label: "a build",
+});
+
+test("a table is put in a free cell outside every region, never in a foreign one", async () => {
+  const { bot, clock } = pocketBot([EAST, WEST], [boxAround(EAST, "Tom")]);
+  using _timers = clock.install();
+  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 50);
+  assert.equal(result.kind, "placed");
+  if (result.kind === "placed") assert.deepEqual(result.position, WEST);
+});
+
+test("when the only free cell lies in a foreign region nothing is placed", async () => {
+  const { bot, clock, server } = pocketBot([EAST], [boxAround(EAST, "Tom")]);
+  using _timers = clock.install();
+  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 50);
+  assert.equal(result.kind, "no_cell");
+  assert.equal(server.packets.filter((packet) => packet.name === "block_place").length, 0);
+});
+
+test("when the only free cell lies in the bot's own region the second pass takes it", async () => {
+  const { bot, clock } = pocketBot([EAST], [boxAround(EAST, "ayla")]);
+  using _timers = clock.install();
+  const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 50);
+  assert.equal(result.kind, "placed");
+  if (result.kind === "placed") assert.deepEqual(result.position, EAST);
+});
+
+test("a standing spot is not offered when its only free cells are foreign, and is when they are the bot's own", () => {
+  const foreign = pocketBot([EAST], [boxAround(EAST, "Tom")]).bot;
+  assert.equal(findStandingSpot(foreign, 1), null);
+  const own = pocketBot([EAST], [boxAround(EAST, "Ayla")]).bot;
+  assert.notEqual(findStandingSpot(own, 1), null);
+});
+
 test("a placement cut before the packet is sent reports no cell: nothing of it is ours", async () => {
   const bot = craftingTableBot();
   const controller = new AbortController();
@@ -177,11 +232,11 @@ test("a bot swimming beside the area whose free cells are all inside it is not t
   });
 });
 
-test("a block put down to stay still goes inside an area another player owns", async () => {
+test("a block put down to stay still is not put inside an area another player owns (ADR-012)", async () => {
   const { bot, clock } = craftingBotAmong("Finn", AROUND_THE_BOT);
   using _installed = clock.install();
   const result = await clock.settle(placeCarriedBlockNearby(bot, "crafting_table"), 2_000);
-  assert.equal(result.kind, "placed");
+  assert.equal(result.kind, "no_cell");
 });
 
 test("a block to take back is put down inside the bot's own area, the owner's name in another case", async () => {

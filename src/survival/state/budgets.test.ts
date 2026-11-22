@@ -51,3 +51,33 @@ test("incidental defence cannot renew a requested-target progress window", () =>
   }
   assert.deepEqual(budgets.snapshot(), []);
 });
+
+test("a wall twin ends a tick budget on its own clock and renews with its objective", () => {
+  let tick = 0;
+  let wallMs = 1_000;
+  const budgets = new Budgets();
+  using window = budgets.progress({
+    name: "wait",
+    scope: "target:7",
+    unit: "ticks",
+    limit: 300,
+    measure: () => tick,
+    wall: { limitMs: 30_000, measure: () => wallMs },
+    exhaustion: "wait_over",
+    progress: "target_damage:7",
+  });
+  tick = 150;
+  wallMs = 30_999;
+  assert.equal(window.exhausted, false, "the twin counts from the window's start, not from clock zero");
+  wallMs = 31_000;
+  assert.equal(window.exhausted, true, "300 ticks are not spent, 30 s are");
+  assert.equal(window.remaining, 0);
+  assert.equal(budgets.snapshot()[0]?.remaining, 0);
+  window.observe("target_damage:7");
+  assert.equal(window.exhausted, false);
+  assert.equal(window.remaining, 300, "a renewed window starts both counters again");
+  wallMs = 60_999;
+  assert.equal(window.exhausted, false);
+  wallMs = 61_000;
+  assert.equal(window.exhausted, true);
+});

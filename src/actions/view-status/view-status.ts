@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import type { CoverExit } from "../../navigation/index.js";
 import { Vec3 } from "vec3";
 import {
   CARRIED_SLOT_COUNT,
@@ -15,8 +16,13 @@ import {
   preferredScaffoldItem,
 } from "../../navigation/mineflayer/movement-policy.js";
 import { waterLandingSupply } from "../../navigation/mineflayer/water-landing.js";
-import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies, observeHostileContact } from "../../survival/perception/combat/threats.js";
+import { HOSTILE_OBSERVATION_RANGE, isHostileSpecies } from "../../survival/perception/combat/threats.js";
+import { statusThreatLines, statusThreats } from "./status-threat.js";
+import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
+import type { HostileContext } from "../../survival/control/combat/context.js";
 import { readNavigationPolicy } from "../../survival/state/navigation-policy.js";
+import { isBurning } from "../../survival/perception/body.js";
+import { burnLeft } from "../../survival/perception/burn.js";
 import type { Position3 } from "../../utils/index.js";
 import { airSupplyTicks } from "../../world/air-supply.js";
 import { readDragonClouds } from "../../world/dragon-hazards.js";
@@ -30,7 +36,8 @@ import {
 import { dayPhase, ticksToMinutes, ticksUntilDay, ticksUntilNight } from "../../world/index.js";
 import { isItemEntity } from "../../world/item-pickup.js";
 import { observeMobAge } from "../../world/mob-age.js";
-import { currentVehicle } from "../navigate/vehicle-sync.js";
+import { observeVehicle } from "./vehicle.js";
+import { conditionFactsLine, observeConditionFacts } from "./condition-facts.js";
 import { defineAction } from "../action.js";
 import {
   DRAGON_PHASE_NAMES,
@@ -48,6 +55,7 @@ import {
 } from "./contract.js";
 
 type LiveNearby = LiveSituation["nearby"];
+const EMPTY_COMBAT_CONTEXT: HostileContext = { resolvedIds: new Set(), attackerIds: new Set() };
 export type ObserveStatusActivity = () => LiveSituation["activity"];
 
 /** Refresh the queryable status rows, then report the same facts plus what is loaded nearby. */
@@ -55,6 +63,9 @@ export function observeLiveSituation(
   bot: Bot,
   data: SqlBotData,
   observeActivity: ObserveStatusActivity,
+  observeCoverExit: () => CoverExit | null = () => null,
+  fightMargin: () => number = () => DEFAULT_COMBAT_POLICY.fight_margin,
+  combatContext: HostileContext = EMPTY_COMBAT_CONTEXT,
 ): LiveSituation {
   const snapshot = snapshotBotStatus(bot);
   updateBotStatus(data, snapshot);
@@ -66,6 +77,7 @@ export function observeLiveSituation(
     phase === null ? null : phase === "night" ? ticksUntilDay(snapshot.timeOfDay) : ticksUntilNight(snapshot.timeOfDay);
   const carried = carriedStacks(snapshot.inventory);
   const lastDeath = readLastDeath(data, bot.username);
+  const { vitals: armourVitals, ...conditionFacts } = observeConditionFacts(bot);
   return {
     botId: snapshot.botId,
     observedAt: snapshot.updatedAt ?? new Date().toISOString(),
@@ -79,13 +91,17 @@ export function observeLiveSituation(
       cause: lastDeath.cause,
     } : null,
     activity: observeActivity(),
+    navigation: { reportOpenSky: readNavigationPolicy(bot).report_open_sky, coverExit: observeCoverExit() },
     vitals: {
       health: round(snapshot.health, 1),
       food: snapshot.food,
       saturation: round(snapshot.saturation, 1),
       airSupplyTicks: air,
       burning: flags === null ? null : (flags & 1) !== 0,
+      burn: isBurning(bot) ? burnLeft(bot) : null,
+      ...armourVitals,
     },
+    ...conditionFacts,
     mobility: observeMobility(bot),
     clock: {
       timeOfDay: snapshot.timeOfDay,
@@ -110,34 +126,40 @@ export function observeLiveSituation(
     inventory: {
       usedSlots: carried.length,
       freeSlots: CARRIED_SLOT_COUNT - carried.length,
-      stacks: [...snapshot.inventory],
+      stacks: snapshot.inventory.map((stack) => ({ ...stack, families: [...stack.families] })),
       foods: carriedFoods(bot, carried),
     },
     tools: snapshot.tools!,
-    nearby: observeNearby(bot),
-    endFight: {
-      dragons: Object.values(bot.entities)
-        .filter((e) => e.isValid && e.name === "ender_dragon")
-        .map((e) => {
-          const observedPhase = dragonPhase(bot, e);
-          const head = perchedDragonHead(bot, e);
-          const landingHead = predictedLandingHeadPosition(bot, e);
-          return {
-            entityId: e.id,
-            position: roundedPosition(e.position),
-            health: entityHealth(bot, e),
-            phase: observedPhase,
-            phaseName: dragonPhaseName(observedPhase),
-            perched: isDragonPerched(observedPhase),
-            headEstimate: head ? roundedPosition(head.position) : null,
-            landingHeadEstimate: landingHead ? roundedPosition(landingHead) : null,
-          };
-        }),
-      crystals: Object.values(bot.entities)
-        .filter((e) => e.isValid && e.name === "end_crystal")
-        .map((e) => ({ entityId: e.id, position: roundedPosition(e.position), cage: crystalCage(bot, e.position) })),
-      clouds: readDragonClouds(bot),
-    },
+    item_families: { ...snapshot.itemFamilies!, overrides: [...snapshot.itemFamilies!.overrides] },
+    nearby: observeNearby(bot, fightMargin(), combatContext),
+    endFight: observeEndFight(bot),
+  };
+}
+
+/** Loaded End fight entities only: the dragons, the crystals and the breath clouds. */
+function observeEndFight(bot: Bot): LiveSituation["endFight"] {
+  return {
+    dragons: Object.values(bot.entities)
+      .filter((e) => e.isValid && e.name === "ender_dragon")
+      .map((e) => {
+        const observedPhase = dragonPhase(bot, e);
+        const head = perchedDragonHead(bot, e);
+        const landingHead = predictedLandingHeadPosition(bot, e);
+        return {
+          entityId: e.id,
+          position: roundedPosition(e.position),
+          health: entityHealth(bot, e),
+          phase: observedPhase,
+          phaseName: dragonPhaseName(observedPhase),
+          perched: isDragonPerched(observedPhase),
+          headEstimate: head ? roundedPosition(head.position) : null,
+          landingHeadEstimate: landingHead ? roundedPosition(landingHead) : null,
+        };
+      }),
+    crystals: Object.values(bot.entities)
+      .filter((e) => e.isValid && e.name === "end_crystal")
+      .map((e) => ({ entityId: e.id, position: roundedPosition(e.position), cage: crystalCage(bot, e.position) })),
+    clouds: readDragonClouds(bot),
   };
 }
 
@@ -152,12 +174,6 @@ export function observeLiveSituation(
  * sources the policy reads, so a blocked movement names the thing to fix
  * rather than leaving the model to guess from an empty slot.
  */
-/** The vehicle the client view says she sits in; null on foot. */
-function observeVehicle(bot: Bot): LiveSituation["vehicle"] {
-  const vehicle = currentVehicle(bot);
-  return vehicle === null ? null : { name: vehicle.name ?? "unknown", id: vehicle.id };
-}
-
 function observeMobility(bot: Bot): LiveSituation["mobility"] {
   const navigation = readNavigationPolicy(bot);
   const { waterBuckets, dimensionHoldsWater } = waterLandingSupply(bot);
@@ -227,25 +243,22 @@ function headingDegrees(yaw: number): number {
 /** Each carried food kind once, with what one restores from game data, most filling first. */
 function carriedFoods(bot: Bot, carried: readonly InventoryStack[]): LiveSituation["inventory"]["foods"] {
   const counts = new Map<string, number>();
-  for (const stack of carried) if (bot.registry.foodsByName[stack.name]) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
+  for (const stack of carried) if (stack.families.includes("food")) counts.set(stack.name, (counts.get(stack.name) ?? 0) + stack.count);
   return [...counts]
-    .map(([name, count]) => {
-      const food = bot.registry.foodsByName[name]!;
-      return { name, count, points: food.foodPoints, saturation: food.saturation };
+    .flatMap(([name, count]) => {
+      // The food family is the registry's food list (item-families.ts); a server tag cannot add an item with no hunger value.
+      const food = bot.registry.foodsByName[name];
+      return food ? [{ name, count, points: food.foodPoints, saturation: food.saturation }] : [];
     })
     .sort((left, right) => right.points - left.points || right.saturation - left.saturation || left.name.localeCompare(right.name));
 }
 
-function observeNearby(bot: Bot): LiveNearby {
+function observeNearby(bot: Bot, fightMargin: number, context: HostileContext): LiveNearby {
   const origin = bot.entity?.position ?? { x: 0, y: 0, z: 0 };
   return {
     rangeBlocks: HOSTILE_OBSERVATION_RANGE,
     players: observePlayers(bot, origin),
-    hostiles: observeHostileContact(bot).map((threat) => ({
-      name: threat.name,
-      distance: round(threat.distance, 1),
-      position: roundedPosition(threat.position),
-    })),
+    ...statusThreats(bot, fightMargin, context),
     mobs: observeMobs(bot, origin),
     droppedItems: observeDroppedItems(bot, origin),
   };
@@ -354,9 +367,8 @@ function round(value: number, digits: number): number {
 
 export function formatViewStatusResult(result: ViewStatusResult): string {
   const { situation } = result;
-  const { vitals, mobility, clock, position, inventory, nearby, tools } = situation;
+  const { vitals, mobility, clock, position, inventory, nearby } = situation;
   const yesNo = (value: boolean | null) => (value === null ? "unknown" : value ? "yes" : "no");
-  const at = (point: Position3) => `\`${point.x}, ${point.y}, ${point.z}\``;
   const phaseChange =
     clock.phase === "night"
       ? `day breaks in ${clock.ticksUntilChange} ticks (~${clock.minutesUntilChange} min)`
@@ -365,35 +377,8 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     situation.dimension === "the_nether" || situation.dimension === "the_end"
       ? "no daylight cycle in this dimension"
       : "daylight cycle unknown for this dimension";
-  const held = inventory.stacks.find((stack) => stack.held);
-  const worn = inventory.stacks.filter((stack) => !isCarried(stack));
-  const carried = groupCarried(inventory.stacks.filter(isCarried));
   const lines = [
-    ...(situation.endFight.dragons.length || situation.endFight.crystals.length || situation.endFight.clouds.length
-      ? [
-          "### End fight (loaded observations)",
-          ...situation.endFight.dragons.map(
-            (d) =>
-              `- Dragon #${d.entityId}: health ${d.health ?? "unknown"}, phase ${d.phase ?? "unknown"} (${d.phaseName ?? "unknown"}), perched ${d.perched}; at ${at(d.position)}${d.headEstimate ? `; estimated head ${at(d.headEstimate)}` : ""}`,
-          ),
-          ...situation.endFight.dragons.flatMap((d) =>
-            d.landingHeadEstimate
-              ? [`- Predicted head after landing: ${at(d.landingHeadEstimate)}; direction may change.`]
-              : [],
-          ),
-          ...(situation.endFight.dragons.length
-            ? ["- Perch hint: use `prepare_dragon_perch` before the first landing; it opens a low staging sightline and yields on observed landing. Then use `attack_dragon_perch` to follow the settled head. The head can turn, and breath can enter tunnels. A roofed first scan can leave the dragon treating you as unseen even after the roof is removed, shortening later perches."]
-            : []),
-          ...situation.endFight.crystals.map((c) => `- Crystal #${c.entityId} at ${at(c.position)}; cage ${c.cage.replaceAll("_", " ")}`),
-          ...(situation.endFight.crystals.length
-            ? ["- Bow tip: bows can hit caged crystals through gaps, but may waste arrows. Prefer exposed crystals when arrows are scarce."]
-            : []),
-          ...situation.endFight.clouds.map(
-            (c) => `- Dragon breath #${c.id}: radius ${c.radius.toFixed(1)} at ${at(c)}`,
-          ),
-          "",
-        ]
-      : []),
+    ...endFightLines(situation.endFight),
     `**${situation.botId}** in \`${situation.dimension}\` (${situation.gameMode}), observed ${situation.observedAt}.`,
     "",
     "### Vitals",
@@ -427,27 +412,8 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
     ...(situation.vehicle ? [`- Riding ${situation.vehicle.name} #${situation.vehicle.id}`] : []),
     `- Last death: ${situation.lastDeath ? `${at(situation.lastDeath.position)} in \`${situation.lastDeath.dimension}\` at ${situation.lastDeath.observedAt}${situation.lastDeath.cause ? ` (${situation.lastDeath.cause})` : ""}` : "none recorded"}`,
     "",
-    `### Inventory (${inventory.usedSlots} of ${CARRIED_SLOT_COUNT} slots used, ${inventory.freeSlots} free)`,
-    `- Held: ${held ? `${held.name} x${held.count}` : "nothing"}`,
-    `- Worn: ${worn.length > 0 ? worn.map((stack) => `${stack.location} ${stack.name}`).join(", ") : "nothing"}`,
-    ...(carried.length > 0
-      ? carried.map(
-          (group) =>
-            `- ${group.name} x${group.count} (${group.slots.length > 1 ? "slots" : "slot"} ${group.slots.join(", ")})`,
-        )
-      : ["- Carrying nothing"]),
-    ...inventory.stacks.flatMap((stack) =>
-      stack.durability === null
-        ? []
-        : [
-            `- Durability: ${stack.name} (slot ${stack.slot}, ${stack.location}) ${stack.durability.remaining}/${stack.durability.maximum} remaining`,
-          ],
-    ),
-    "- Durability is unavailable or not applicable for stacks without a durability entry.",
-    `- Food carried: ${inventory.foods.length > 0 ? inventory.foods.map((food) => `${food.name} x${food.count} (${food.points} hunger points, ${food.saturation} saturation each)`).join("; ") : "none"}`,
-    "",
-    "### Best tools and armour",
-    ...[...tools.tools, ...tools.armour].map((entry) => `- ${entry.class}: ${entry.tier}${entry.item ? ` (${entry.item}, slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : ""}`),
+    ...inventoryLines(inventory, situation.item_families),
+    ...bestToolsLines(situation),
     "",
     `### Nearby (within ${nearby.rangeBlocks} blocks)`,
     `- Players: ${
@@ -461,13 +427,7 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
             .join("; ")
         : "none online"
     }`,
-    `- Hostiles: ${
-      nearby.hostiles.length > 0
-        ? nearby.hostiles
-            .map((hostile) => `${hostile.name} ${hostile.distance} blocks away at ${at(hostile.position)}`)
-            .join("; ")
-        : "none"
-    }`,
+    ...statusThreatLines(nearby),
     `- Loaded mobs (every loaded chunk, any distance):${nearby.mobs.length > 0 ? "" : " none"}`,
     ...nearby.mobs.map(
       (mob) =>
@@ -485,6 +445,18 @@ export function formatViewStatusResult(result: ViewStatusResult): string {
   ];
   if (result.status !== "succeeded") lines.push("", `**Observed stop:** ${result.error}`);
   return lines.join("\n");
+}
+
+/** The best carried tool per class, then the one line of condition facts (armour, light, fight gear, respawn). */
+function bestToolsLines(situation: LiveSituation): string[] {
+  const entries = [...situation.tools.tools, ...situation.tools.armour];
+  const facts = conditionFactsLine(situation);
+  return [
+    "",
+    "### Best tools and armour",
+    ...entries.map((entry) => `- ${entry.class}: ${entry.item ? `${entry.item} (slot ${entry.slot}${entry.durabilityLeft === null ? "" : `, ${entry.durabilityLeft}/${entry.maximumDurability} durability`})` : "none"}`),
+    ...(facts === null ? [] : [facts]),
+  ];
 }
 
 /**
@@ -526,6 +498,66 @@ function blockedBecause(blockers: readonly MobilityBlocker[]): string {
   return blockers.map((blocker) => MOBILITY_BLOCKER_TEXT[blocker]).join("; ");
 }
 
+const at = (point: Position3) => `\`${point.x}, ${point.y}, ${point.z}\``;
+
+/** The End-fight section, empty when no dragon, crystal or breath cloud is loaded. */
+function endFightLines(endFight: LiveSituation["endFight"]): string[] {
+  if (!endFight.dragons.length && !endFight.crystals.length && !endFight.clouds.length) return [];
+  return [
+    "### End fight (loaded observations)",
+    ...endFight.dragons.map(
+      (d) =>
+        `- Dragon #${d.entityId}: health ${d.health ?? "unknown"}, phase ${d.phase ?? "unknown"} (${d.phaseName ?? "unknown"}), perched ${d.perched}; at ${at(d.position)}${d.headEstimate ? `; estimated head ${at(d.headEstimate)}` : ""}`,
+    ),
+    ...endFight.dragons.flatMap((d) =>
+      d.landingHeadEstimate ? [`- Predicted head after landing: ${at(d.landingHeadEstimate)}; direction may change.`] : [],
+    ),
+    ...(endFight.dragons.length
+      ? ["- Perch hint: use `prepare_dragon_perch` before the first landing; it opens a low staging sightline and yields on observed landing. Then use `attack_dragon_perch` to follow the settled head. The head can turn, and breath can enter tunnels. A roofed first scan can leave the dragon treating you as unseen even after the roof is removed, shortening later perches."]
+      : []),
+    ...endFight.crystals.map((c) => `- Crystal #${c.entityId} at ${at(c.position)}; cage ${c.cage.replaceAll("_", " ")}`),
+    ...(endFight.crystals.length
+      ? ["- Bow tip: bows can hit caged crystals through gaps, but may waste arrows. Prefer exposed crystals when arrows are scarce."]
+      : []),
+    ...endFight.clouds.map((c) => `- Dragon breath #${c.id}: radius ${c.radius.toFixed(1)} at ${at(c)}`),
+    "",
+  ];
+}
+
+/** The inventory section: held, worn and carried stacks, durability, carried food, and where the families come from. */
+function inventoryLines(inventory: LiveSituation["inventory"], families: LiveSituation["item_families"]): string[] {
+  const held = inventory.stacks.find((stack) => stack.held);
+  const worn = inventory.stacks.filter((stack) => !isCarried(stack));
+  const carried = groupCarried(inventory.stacks.filter(isCarried));
+  return [
+    `### Inventory (${inventory.usedSlots} of ${CARRIED_SLOT_COUNT} slots used, ${inventory.freeSlots} free)`,
+    `- Held: ${held ? `${held.name} x${held.count}` : "nothing"}`,
+    `- Worn: ${worn.length > 0 ? worn.map((stack) => `${stack.location} ${stack.name}`).join(", ") : "nothing"}`,
+    ...(carried.length > 0
+      ? carried.map(
+          (group) =>
+            `- ${group.name} x${group.count} (${group.slots.length > 1 ? "slots" : "slot"} ${group.slots.join(", ")})`,
+        )
+      : ["- Carrying nothing"]),
+    ...inventory.stacks.flatMap((stack) =>
+      stack.durability === null
+        ? []
+        : [
+            `- Durability: ${stack.name} (slot ${stack.slot}, ${stack.location}) ${stack.durability.remaining}/${stack.durability.maximum} remaining`,
+          ],
+    ),
+    "- Durability is unavailable or not applicable for stacks without a durability entry.",
+    `- Food carried: ${inventory.foods.length > 0 ? inventory.foods.map((food) => `${food.name} x${food.count} (${food.points} hunger points, ${food.saturation} saturation each)`).join("; ") : "none"}`,
+    `- Item families: ${itemFamiliesLine(families)}; each stack's \`families\` is in the structured result and in \`main.bot_inventory.families\``,
+  ];
+}
+
+/** "server tags (1.21.4) + override minecraft": where the families of the stacks (structured result) come from. */
+function itemFamiliesLine(families: LiveSituation["item_families"]): string {
+  const origin = families.source === "none" ? `no tags known for ${families.version}` : `${families.source} tags (${families.version})`;
+  return families.overrides.length > 0 ? `${origin} + override ${families.overrides.join(", ")}` : origin;
+}
+
 function isCarried(stack: LiveSituation["inventory"]["stacks"][number]): boolean {
   return stack.location === "main" || stack.location === "hotbar";
 }
@@ -543,7 +575,7 @@ function groupCarried(
   return [...groups.values()].sort((left, right) => right.count - left.count || left.name.localeCompare(right.name));
 }
 
-export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity) {
+export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivity: ObserveStatusActivity, observeCoverExit: () => CoverExit | null = () => null, fightMargin: () => number = () => DEFAULT_COMBAT_POLICY.fight_margin, combatContext: HostileContext = EMPTY_COMBAT_CONTEXT) {
   return defineAction({
     name: VIEW_STATUS,
     description: VIEW_STATUS_DESCRIPTION,
@@ -553,6 +585,6 @@ export function createViewStatusAction(bot: Bot, data: SqlBotData, observeActivi
     execution: { kind: "information" },
     annotations: viewStatusAnnotations,
     parse: parseViewStatusRequest,
-    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity) }),
+    execute: async () => ({ status: "succeeded", situation: observeLiveSituation(bot, data, observeActivity, observeCoverExit, fightMargin, combatContext) }),
   });
 }

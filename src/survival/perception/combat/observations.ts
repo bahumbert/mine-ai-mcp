@@ -1,12 +1,15 @@
 import type { Bot, BotEvents } from "mineflayer";
+import { onBodyTick } from "../../../runtime/body-ticks.js";
 import { SHIELD_READY_TICKS } from "../../weapons/item-use.js";
 import { entityDimensions } from "../../../world/entity-dimensions.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
 import type { PositionThreat } from "../../positioning/combat/exposure.js";
-import { bowDrawAimedAtBot, isDrawingBow } from "./attention.js";
+import { bowDrawAimedAtBot, holdsBow, isDrawingBow } from "./attention.js";
 import { incomingBlazeProjectiles, isIncomingBlazeProjectile } from "./blaze-projectiles.js";
-import { readProjectileSpawn } from "./projectile-spawn.js";
-import { isCreeper } from "./creepers.js";
+import { holdsRangedWeapon } from "./contact.js";
+import { readProjectileHit, readProjectileSpawn } from "./projectile-spawn.js";
+import { hasSelfExplosion } from "../../../world/combat-data.js";
+import { ObservedHits } from "./observed-hits.js";
 import { canBeBystander, isHostile } from "./threats.js";
 import { trackArrowFlights } from "./arrow-flight.js";
 import { bowReleaseInTicks, trackBowDraws } from "./bow-timing.js";
@@ -17,9 +20,6 @@ const BLAZE_CHARGING_FLAG = 1;
 const BLAZE_MELEE_RANGE = 2;
 /** Vanilla's first blaze shot follows sixty ticks after a newly observed charge. */
 const BLAZE_CHARGE_TICKS = 60;
-function hasBow(entity: Entity): boolean {
-  return entity.heldItem?.name === "bow";
-}
 
 function blazeCharged(bot: Bot, entity: Entity): boolean | null {
   const index = bot.registry.entitiesByName.blaze?.metadataKeys?.indexOf("flags") ?? -1;
@@ -27,9 +27,9 @@ function blazeCharged(bot: Bot, entity: Entity): boolean | null {
   return typeof flags === "number" ? (flags & BLAZE_CHARGING_FLAG) !== 0 : null;
 }
 
-/** Whether the target shoots: a bow in hand, or a species that shoots by nature. */
-export function isRangedAttacker(entity: Entity): boolean {
-  return hasBow(entity) || RANGED_SPECIES.has(entity.name ?? "");
+/** Whether the target holds a ranged weapon or shoots by nature. */
+export function isRangedAttacker(bot: Bot, entity: Entity): boolean {
+  return holdsRangedWeapon(bot, entity) || RANGED_SPECIES.has(entity.name ?? "");
 }
 
 /**
@@ -79,8 +79,8 @@ const MELEE_CLOSING_ALLOWANCE = Math.ceil(SHIELD_READY_TICKS * MOB_CLOSING_SPEED
  * fuse - blast defence owns that, and needs the hands.
  */
 export function meleeImminent(bot: Bot, entity: Entity): boolean {
-  if (!isHostile(entity) || canBeBystander(bot, entity) || isCreeper(entity)) return false;
-  if (isRangedAttacker(entity) || hasBow(entity)) return false;
+  if (!isHostile(entity) || canBeBystander(bot, entity) || hasSelfExplosion(entity.name, bot.version)) return false;
+  if (isRangedAttacker(bot, entity)) return false;
   if (entity.position.distanceTo(bot.entity.position) > MELEE_REACH + MELEE_CLOSING_ALLOWANCE) return false;
   return hasExposedBody(bot, entity);
 }
@@ -94,7 +94,7 @@ export function meleeImminent(bot: Bot, entity: Entity): boolean {
  * the mob is winding up, and whether the bot is what it is winding up at.
  */
 export function isWindingUpAtBot(bot: Bot, entity: Entity): boolean {
-  if (hasBow(entity)) return bowDrawAimedAtBot(bot, entity);
+  if (holdsBow(bot, entity)) return bowDrawAimedAtBot(bot, entity);
   return isWindingUp(bot, entity);
 }
 
@@ -104,7 +104,7 @@ export function isWindingUpAtBot(bot: Bot, entity: Entity): boolean {
  */
 
 export function isWindingUp(bot: Bot, entity: Entity): boolean {
-  if (hasBow(entity)) {
+  if (holdsBow(bot, entity)) {
     return isDrawingBow(bot, entity);
   }
   if (entity.name === "blaze") {
@@ -115,7 +115,7 @@ export function isWindingUp(bot: Bot, entity: Entity): boolean {
 }
 
 export function positionThreat(bot: Bot, entity: Entity): PositionThreat {
-  const projectile = entity.name === "blaze" || entity.heldItem?.name === "bow" || entity.heldItem?.name === "crossbow";
+  const projectile = isRangedAttacker(bot, entity);
   // These modes are not stopped by a sight-line claim alone. Leave their
   // existing responses in charge until the cover contract models them.
   const unmodelled = [
@@ -148,13 +148,15 @@ export interface ObservedThreat extends PositionThreat {
   readonly firstShotInTicks: number | null;
   readonly lastSeenTick: number | null;
   readonly lastShotTick: number | null;
+  /** The world age the bot had heard when that shot was observed; null with no shot or no age heard. */
+  readonly lastShotAge: number | null;
   readonly phase: "winding_up" | "shot_observed" | "unknown";
   /** Hand to hand, this one can hurt the bot with its next action. */
   readonly meleeImminent: boolean;
   readonly hasHitUs: boolean;
 }
 
-/** Packet facts belong to this connection; consumers share one lazy table per physics tick. */
+/** Packet facts belong to this connection; consumers share one lazy table per body tick, including while seated. */
 export class CombatPerception implements Disposable {
   readonly creeperClearance: CreeperClearance;
   get tick(): number { return this.#tick; }
@@ -162,21 +164,25 @@ export class CombatPerception implements Disposable {
   readonly attackerIds = new Set<number>();
   readonly #owners = new Map<number, number>();
   readonly #lastSeen = new Map<number, number>();
-  readonly #lastShot = new Map<number, number>();
+  /** The client tick and the world age the bot had heard (null with none) when each shooter's last shot was observed. */
+  readonly #lastShot = new Map<number, { readonly tick: number; readonly age: number | null }>();
   readonly #charges = new Map<number, { entity: Entity; charged: boolean | null; startedAt: number | null }>();
   #tick = 0;
   #snapshot: readonly ObservedThreat[] | null = null;
   #incoming: Entity[] | null = null;
   readonly #listeners = new DisposableStack();
+  readonly #hits: ObservedHits;
 
   constructor(readonly bot: Bot) {
     this.creeperClearance = new CreeperClearance(bot);
+    this.#hits = new ObservedHits(bot, () => this.#tick);
     const invalidate = () => {
       this.#snapshot = null;
       this.#incoming = null;
     };
     const tick = () => {
       this.#tick++;
+      this.#hits.checkReach();
       invalidate();
       for (const [id, owner] of this.#owners) {
         const projectile = bot.entities[id];
@@ -184,6 +190,7 @@ export class CombatPerception implements Disposable {
       }
     };
     const hurt: BotEvents["entityHurt"] = (entity, source) => {
+      this.#hits.hurt(entity, source);
       if (isHostile(source)) {
         if (entity.id === bot.entity.id) this.attackerIds.add(source.id);
         // Neutral Endermen can switch to the dragon or another victim. Their
@@ -193,6 +200,7 @@ export class CombatPerception implements Disposable {
       invalidate();
     };
     const gone: BotEvents["entityGone"] = (entity) => {
+      this.#hits.forget(entity);
       for (const set of [this.resolvedIds, this.attackerIds]) set.delete(entity.id);
       this.#owners.delete(entity.id);
       this.#lastSeen.delete(entity.id);
@@ -210,14 +218,13 @@ export class CombatPerception implements Disposable {
       if (!spawn) return;
       if (spawn.ownerId !== null) {
         this.#owners.set(spawn.projectileId, spawn.ownerId);
-        this.#lastShot.set(spawn.ownerId, this.#tick);
+        this.#rememberShot(spawn.ownerId);
       }
       // Remove when Mineflayer retains the 1.21.4 spawn packet's initial velocity.
       bot.entities[spawn.projectileId]?.velocity.update(spawn.velocity);
       invalidate();
     };
-    bot.on("physicsTick", tick);
-    this.#listeners.defer(() => bot.off("physicsTick", tick));
+    this.#listeners.defer(onBodyTick(bot, tick));
     bot.on("entitySpawn", invalidate);
     this.#listeners.defer(() => bot.off("entitySpawn", invalidate));
     bot.on("entityHurt", hurt);
@@ -229,13 +236,39 @@ export class CombatPerception implements Disposable {
     const explosion = (packet: unknown) => this.creeperClearance.exploded(packet, this.#tick);
     bot._client.on("explosion", explosion);
     this.#listeners.defer(() => bot._client.off("explosion", explosion));
-    const respawn = () => this.creeperClearance.reset();
+    const respawn = () => { this.creeperClearance.reset(); this.#hits.reset(); };
     bot.on("respawn", respawn);
     this.#listeners.defer(() => bot.off("respawn", respawn));
     bot._client.on("spawn_entity", shot);
     this.#listeners.defer(() => bot._client.off("spawn_entity", shot));
+    const hit = (packet: unknown) => this.recordProjectileHit(packet);
+    bot._client.on("damage_event", hit);
+    this.#listeners.defer(() => bot._client.off("damage_event", hit));
     this.#listeners.use(trackArrowFlights(bot));
     this.#listeners.use(trackBowDraws(bot));
+    const health = (packet: { health: number }) => this.#hits.recordHealth(packet.health);
+    bot._client.on("update_health", health);
+    this.#listeners.defer(() => bot._client.off("update_health", health));
+  }
+
+  /** Keep confirmed shot evidence after the projectile disappears on impact. */
+  private recordProjectileHit(packet: unknown): void {
+    const shooter = readProjectileHit(this.bot, packet);
+    if (shooter === null) return;
+    this.#rememberShot(shooter);
+    this.#snapshot = null;
+    this.#incoming = null;
+  }
+
+  /** The tick counts client physics; the age counts the server's own ticks, which a slow server spreads out (evade shot window). */
+  #rememberShot(shooterId: number): void {
+    const age = this.bot.time?.age;
+    this.#lastShot.set(shooterId, { tick: this.#tick, age: typeof age === "number" ? age : null });
+  }
+
+  /** The measured cost of this entity's hits to this bot, forgotten with the body or life. */
+  observedHits(entityId: number): { damage: number | null; intervalTicks: number | null } {
+    return this.#hits.read(entityId);
   }
 
   incoming(): readonly Entity[] {
@@ -280,7 +313,8 @@ export class CombatPerception implements Disposable {
         const offset = entity.position.minus(this.bot.entity.position);
         const angle = Math.atan2(-offset.x, -offset.z) - this.bot.entity.yaw;
         const windingUp = isWindingUp(this.bot, entity);
-        const lastShotTick = this.#lastShot.get(entity.id) ?? null;
+        const lastShot = this.#lastShot.get(entity.id);
+        const lastShotTick = lastShot?.tick ?? null;
         const seenTick = () => {
           visible();
           return this.#lastSeen.get(entity.id) ?? null;
@@ -299,6 +333,7 @@ export class CombatPerception implements Disposable {
             return seenTick();
           },
           lastShotTick,
+          lastShotAge: lastShot?.age ?? null,
           meleeImminent: meleeImminent(this.bot, entity),
           // Without sight a blaze can retain its charge indefinitely. No inferred cooldown promise.
           phase: windingUp ? "winding_up" : lastShotTick === this.#tick ? "shot_observed" : "unknown",

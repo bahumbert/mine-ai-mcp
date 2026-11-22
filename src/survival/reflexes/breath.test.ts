@@ -2,11 +2,12 @@ import type { Bot } from "mineflayer";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { Vec3 } from "vec3";
+import { installNativeDigClock, longestBreakDurationMs } from "../../navigation/index.js";
 import type { ActionRunnerOptions } from "../../session/action-runner.js";
 import { type FakeClock, type FakeWorld, createFakeClock, itemOf } from "../../test-support/fake-bot/index.js";
-import { waterFixture } from "../../test-support/water.js";
-import { type SurvivalTransition } from "../control/contract.js";
-import { SURFACE_MAXIMUM_TICKS } from "../policy/environment.js";
+import { type WaterFixtureOptions, waterFixture } from "../../test-support/water.js";
+import { LETHAL_REFLEX_RETRY_TICKS, type SurvivalTransition } from "../control/contract.js";
+import { watchAirHistory } from "../../world/air-supply.js";
 import { attachBreathReflex } from "./breath.js";
 
 /** One bubble of the air bar is this many ticks on the server's meter. */
@@ -27,8 +28,8 @@ function setAirTicks(bot: Bot, ticks: number): void {
 const setAir = (bot: Bot, points: number) => setAirTicks(bot, points * AIR_TICKS_PER_POINT);
 
 /** A bot at (0, 64, 0) in the shared fake with a reflex driver, its clock and the controls it set in order. */
-function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}, clock: FakeClock = createFakeClock({ mode: "manual" })) {
-  const fixture = waterFixture(t, {}, runnerOptions, { clock });
+function diver(t: TestContext, runnerOptions: ActionRunnerOptions = {}, clock: FakeClock = createFakeClock({ mode: "manual" }), server?: WaterFixtureOptions["server"]) {
+  const fixture = waterFixture(t, {}, runnerOptions, { clock, server });
   return { ...fixture, clock };
 }
 
@@ -220,6 +221,47 @@ test("a swimmer sealed under a roof digs it with the best tool it carries", asyn
   await control[Symbol.asyncDispose]();
 });
 
+// The roof dig inside the claim (plan 2026-11-16-reflex-limits-ticks C5), with the production dig clock (`installNativeDigClock`).
+// The swimmer's eyes are in water and she is off the ground, so her stone pickaxe takes the game's own 25 times longer on
+// netherrack (`digging.js` digTime: x5 in water, x5 airborne; `roofDigFits` prices the same flags): the server mines the roof
+// for the ticks of that digTime (about 80) and answers the removal then, 4 s at 20 tps and 8 s at 10 tps. The 5 s no-progress
+// window counts world ticks now (100, ended at A + 120), so the slower server's 8 s dig is not cut at 5 s, and its end
+// (`diggingCompleted`) is the claim's progress; the old wall window cut it at 5 s and left a `no_progress` receipt.
+for (const ticksPerSecond of [20, 10]) {
+  test(`a roof dig the server mines for about 80 ticks finishes inside the surfacing's window (${ticksPerSecond} tps)`, async (t) => {
+    const clock = createFakeClock({ mode: "mocked" });
+    using _timers = clock.install();
+    const fixture = diver(t, {}, clock, { ticksPerSecond });
+    const { bot, harness, entity } = fixture;
+    installNativeDigClock(bot);
+    const { digs } = sealedPocket(fixture, true);
+    fill(harness.world, "water", new Vec3(0, 64, 0), new Vec3(0, 65, 0)); // the head is under water, the roof (0, 66, 0) above it
+    Object.assign(entity, { onGround: false });
+    // The dig the reflex prices (`roofDigFits`), with the pickaxe it will equip; the fake server's own digTime must agree once it is held.
+    const digTicks = Math.ceil(longestBreakDurationMs(bot, new Vec3(0, 66, 0), itemOf(bot.registry, "stone_pickaxe").type)! / 50);
+    assert.ok(digTicks >= 70 && digTicks <= 90, `the pickaxe's game-data dig of the roof is ${digTicks} server ticks`);
+    const outcomes: Array<{ outcome: { kind?: string; limit?: string } }> = [];
+    let startedTick: number | undefined;
+    let dugTick: number | undefined;
+    let dugAtMs: number | undefined;
+    fixture.reflex.onTransition((event) => {
+      if (event.kind === "outcome") outcomes.push(event.evidence as never);
+    });
+    harness.server.onPacket("block_dig", (packet) => void ((packet as { status: number }).status === 0 && (startedTick ??= harness.server.gameTime)));
+    bot.on("diggingCompleted", () => {
+      dugTick ??= harness.server.gameTime;
+      dugAtMs ??= clock.now();
+    });
+    const control = attachBreathReflex(bot, fixture.reflex);
+    await clock.advance(digTicks * (1_000 / ticksPerSecond) + 3_000);
+    assert.deepEqual(digs, ["roof"], "the dig ended");
+    assert.ok(dugTick! - startedTick! >= digTicks, `the server mined the roof ${dugTick! - startedTick!} ticks, its digTime of ${digTicks}`);
+    assert.ok(dugAtMs! >= digTicks * (1_000 / ticksPerSecond), `the dig ended ${dugAtMs} ms in: ${ticksPerSecond === 10 ? "past" : "inside"} the old 5 000 ms window`);
+    assert.deepEqual(outcomes.filter((outcome) => outcome.outcome.kind === "limit"), [], "no limit receipt");
+    await control[Symbol.asyncDispose]();
+  });
+}
+
 test("a dry bot under the same roof is left alone by the breath reflex", async (t) => {
   const fixture = diver(t);
   const { digs } = sealedPocket(fixture, false);
@@ -361,69 +403,84 @@ test("an owned dive with the air metadata missing reports unknown and does not f
   await control[Symbol.asyncDispose]();
 });
 
-test("a stuck surfacing in still water is tried again 2 s later", async (t) => {
+// A pause counts world ticks (plan 2026-11-16-reflex-limits-ticks T3): the packet of the age `A + ticks + 20` after the age
+// cached when the pause was remembered. The server's first packet is at 0 ms, one per 20 ticks after it.
+const START_AGE = 1_000;
+const RATES = [
+  { ticksPerSecond: 20, msPerTick: 50 },
+  { ticksPerSecond: 10, msPerTick: 100 },
+] as const;
+
+/** Move the clock 50 ms at a time until the world age reaches `age`, asserting `before` at each step that still lies short of it. */
+async function advanceToAge(fixture: ReturnType<typeof diver>, age: number, before: () => void): Promise<void> {
+  while (fixture.bot.time.age < age) {
+    before();
+    await fixture.clock.advance(50);
+  }
+}
+
+// A failed surfacing in still water cannot be reached with real progress here: under bedrock nothing is dug (the fake's
+// `diggingCompleted` follows only an active dig's air update, `fake-bot-digging.ts`), and a surfacing without progress is cut
+// by its no-progress window first. So the 40-tick retry pause is tested where it is built: `driver.test.ts` "retried after the
+// packet of age A + 60" (both rates, stopped server) on a failing definition, and here only that the breath reflex declares it.
+test("the breath reflex declares the 40-tick retry pause of a failed surfacing", async (t) => {
   const fixture = diver(t);
-  const { clock } = fixture;
-  sealedPocket(fixture, true, false);
-  const claims: number[] = [];
-  fixture.reflex.onTransition((event) => {
-    if (event.kind === "claim") claims.push(clock.now());
+  let declared: number | undefined;
+  const register = fixture.reflex.register.bind(fixture.reflex);
+  Object.defineProperty(fixture.reflex, "register", {
+    value: (definition: { retryAfterFailureTicks?: number }) => {
+      declared = definition.retryAfterFailureTicks;
+      return register(definition as never);
+    },
   });
   const control = attachBreathReflex(fixture.bot, fixture.reflex);
-  let stuckAt: number | undefined;
-  fixture.reflex.onTransition((event) => {
-    if (event.kind === "outcome") stuckAt ??= clock.now();
-  });
-  const ticks = (count: number) => clock.advance(50 * count);
-  await ticks(5);
-  assert.equal(claims.length, 1);
-  // The clock cannot stand still on the fake: a surfacing that makes no progress is cut by its 5 s window long before
-  // its 600 ticks (the next test). A dug block every 4 s (the dig's event) keeps it alive until the tick budget ends it.
-  for (let tick = 0; tick < SURFACE_MAXIMUM_TICKS + 5; tick++) {
-    if (tick % 80 === 40) fixture.bot.emit("diggingCompleted", {} as never);
-    await clock.advance(50);
-  }
-  assert.equal(fixture.reflex.answered.snapshot()[0]?.failure.kind, "stuck", "no way to air: the surfacing ended stuck");
-  const failedAt = stuckAt!;
-  await ticks(10);
-  assert.equal(claims.length, 1, "the same cells within 2 s: still answered");
-  await clock.advance(failedAt + 1_999 - clock.now());
-  assert.equal(claims.length, 1);
-  await clock.advance(2);
-  await ticks(10);
-  assert.equal(claims.length, 2, "the bot is still drowning in the same cells: it tries again");
+  assert.equal(declared, LETHAL_REFLEX_RETRY_TICKS);
+  assert.equal(LETHAL_REFLEX_RETRY_TICKS, 40);
   await control[Symbol.asyncDispose]();
 });
 
-test("under an undiggable roof the surfacing is released after 5 s without progress and tried again 2 s later", async (t) => {
-  const fixture = diver(t, { cancelGraceMs: 500 });
-  const { clock } = fixture;
-  sealedPocket(fixture, true, false);
-  const outcomes: Array<{ outcome: { kind?: string; limit?: string } }> = [];
-  const claims: number[] = [];
-  let releasedAt: number | undefined;
-  fixture.reflex.onTransition((event) => {
-    if (event.kind === "claim") claims.push(clock.now());
-    if (event.kind === "outcome") {
-      outcomes.push(event.evidence as never);
-      releasedAt ??= clock.now();
-    }
+for (const { ticksPerSecond, msPerTick } of RATES) {
+
+  test(`under an undiggable roof the surfacing is released after 100 ticks without progress and tried again 60 ticks later (${ticksPerSecond} tps)`, async (t) => {
+    const fixture = diver(t, { cancelGraceMs: 500 }, undefined, { startAge: START_AGE, ticksPerSecond });
+    const { clock } = fixture;
+    sealedPocket(fixture, true, false);
+    const outcomes: Array<{ outcome: { kind?: string; limit?: string } }> = [];
+    const claims: number[] = [];
+    let releasedAt: number | undefined;
+    let releasedAge: number | undefined;
+    let claimAge: number | undefined;
+    fixture.reflex.onTransition((event) => {
+      if (event.kind === "claim") {
+        claims.push(clock.now());
+        claimAge ??= fixture.bot.time.age;
+      }
+      if (event.kind === "outcome") {
+        outcomes.push(event.evidence as never);
+        releasedAt ??= clock.now();
+        releasedAge ??= fixture.bot.time.age;
+      }
+    });
+    const control = attachBreathReflex(fixture.bot, fixture.reflex);
+    await clock.advance(250);
+    assert.equal(claims.length, 1);
+    // The 100-tick window ends at the packet of age A + 120 (A the age cached at the claim), read at the first check after it.
+    const windowEnd = claimAge! + 120;
+    await advanceToAge(fixture, claimAge! + 100, () => assert.equal(outcomes.length, 0, `age ${fixture.bot.time.age} at ${clock.now()} ms (old code: its 5 000 ms ended it)`));
+    await advanceToAge(fixture, windowEnd, () => assert.equal(outcomes.length, 0, "the last packet before the window's end"));
+    await clock.advance(400);
+    assert.equal(outcomes[0]?.outcome.limit, "no_progress", "the 600-tick budget would have held it 30 s");
+    assert.equal(fixture.reflex.runner.status().owner, "idle");
+    const released = releasedAt!;
+    const readAge = releasedAge!;
+    assert.equal(readAge, windowEnd);
+    await advanceToAge(fixture, readAge + 60, () => assert.equal(claims.length, 1, `within the stand-down at age ${fixture.bot.time.age}`));
+    await clock.advance(250);
+    assert.equal(claims.length, 2, "the bot is still drowning: it surfaces again");
+    assert.ok(claims[1]! - released >= 40 * msPerTick);
+    await control[Symbol.asyncDispose]();
   });
-  const control = attachBreathReflex(fixture.bot, fixture.reflex);
-  await clock.advance(4_800);
-  assert.equal(claims.length, 1, "claimed once, still within the 5 s window");
-  assert.equal(outcomes.length, 0);
-  await clock.advance(1_000);
-  assert.equal(outcomes[0]?.outcome.limit, "no_progress", "the 600-tick budget would have held it 30 s");
-  assert.equal(fixture.reflex.runner.status().owner, "idle");
-  const released = releasedAt!;
-  await clock.advance(Math.max(0, released + 1_900 - clock.now()));
-  assert.equal(claims.length, 1, "within the 2 s stand-down");
-  await clock.advance(400);
-  assert.equal(claims.length, 2, "the bot is still drowning: it surfaces again");
-  assert.ok(claims[1]! - released >= 2_000);
-  await control[Symbol.asyncDispose]();
-});
+}
 
 test("a rising swimmer keeps the surfacing alive past the 5 s window", async (t) => {
   const fixture = diver(t, { cancelGraceMs: 500 });
@@ -458,5 +515,30 @@ test("the air rising is progress, and a dug block is progress", async (t) => {
     await clock.advance(50);
   }
   assert.equal(outcomes.length, 0, "a rise at 3 s and a dug block at 7 s keep a 5 s window open for 12 s");
+  await control[Symbol.asyncDispose]();
+});
+
+// A bot that never went under water has full air the server never sent (plan 2026-11-18-scenario-reds-part5 T31a): the reflex senses
+// it as a breathing body, while the same absent metadata on a bot that was wet stays unknown.
+for (const body of ["untracked", "tracked dry", "tracked wet"] as const) test(`absent own air is ${body === "tracked dry" ? "full" : "unknown"} to the reflex: ${body}`, async (t) => {
+  const fixture = diver(t);
+  const { bot, clock, harness } = fixture;
+  Reflect.set(bot.entity, "metadata", []);
+  if (body !== "untracked") watchAirHistory(bot);
+  bot.emit("login");
+  if (body === "tracked wet") {
+    // The server holds the meter and sends nothing of it (the fake's own loss is reported at once, so it is held and cleared).
+    harness.breath.hold(300);
+    harness.world.setCell(new Vec3(0, 65, 0), "water");
+    await clock.advance(50);
+    bot.emit("physicsTick");
+    harness.world.setCell(new Vec3(0, 65, 0), "air");
+    Reflect.set(bot.entity, "metadata", []);
+  }
+  await clock.advance(3_000);
+  const control = attachBreathReflex(bot, fixture.reflex);
+  await clock.advance(500);
+  assert.equal(fixture.reflex.snapshot()[0]?.missing, body === "tracked dry" ? null : "own_air_metadata");
+  assert.equal(fixture.reflex.runner.status().owner, "idle", "no response from a body that is not in water");
   await control[Symbol.asyncDispose]();
 });

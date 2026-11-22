@@ -6,18 +6,14 @@ import { callWorks, scaffoldReserve, stageAt, stageCellsNow } from "./building/s
 import { templateFor, templateOfKind, TEMPLATES } from "./building/templates.ts";
 import { billOfMaterials, type MaterialCount } from "./building/blueprint.ts";
 import { sameDimension } from "./bot-data-sql.ts";
-import { describeWay } from "./gathering.ts";
+import { describeWay } from "./gathering/fetch-farther.ts";
 import type { ItemCount, Position } from "./runtime-client.ts";
 import type { SkillContext } from "./skills.ts";
+import { navigateInput } from "./skills/positions.ts";
 import { isNoPath, NO_KEEP, walkKeepInput, walkRelaxing, type WalkKeep } from "./walk-keep.ts";
 
 /** `get_items` walks back to where it started when it ends farther than this, and a failed one names the way back past it. */
 export const RETURN_RANGE = 3;
-
-/** The `navigate` input that walks to the block `target` stands in, within `range` blocks. */
-export function navigateInput(target: Position, range: number): Record<string, unknown> {
-  return { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z), range };
-}
 
 /**
  * Walks to `to` (within `range`, default 1) without laying what the work there needs: `keep` goes to `navigate` as `keep_items` (names: never

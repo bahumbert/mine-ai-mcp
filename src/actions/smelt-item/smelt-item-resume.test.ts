@@ -6,7 +6,9 @@ import type { NavigationRuntime } from "../../navigation/index.js";
 import type { RequestEvidence } from "../../session/request.js";
 import { carriedCountField } from "../../test-support/carried-counts.js";
 import { type FakeClock, createFakeClock } from "../../test-support/fake-bot/index.js";
-import { ANSWERED_ATTEMPT_MS, observedFurnace } from "../../test-support/furnace.js";
+import { listenersAddedSince } from "../../test-support/fake-bot/listener-counts.js";
+import { answeredAttemptMs, observedFurnace } from "../../test-support/furnace.js";
+import { watch } from "../../test-support/pending.js";
 import type { WorldBlock } from "../../world/placement.js";
 import type { WorkstationOperations } from "../temporary-workstation.js";
 import { beginSmeltItem, type SmeltItemDependencies } from "./index.js";
@@ -59,6 +61,69 @@ function reflexAt(fixture: Fixture, attempts: readonly { readonly at: number; re
 
 const freshAttempt = () => ({ signal: new AbortController().signal });
 
+test("an abort during a harvest answer adds no answer wait, and the next attempt finishes without counting an ingot twice", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const fixture = sticksFurnace(clock);
+  const added = listenersAddedSince(fixture.bot._client);
+  const first = new AbortController();
+  const click = fixture.bot.clickWindow;
+  let abortAt = -1;
+  fixture.bot.clickWindow = async (...args) => {
+    await click(...args);
+    if (args[0] === 2 && abortAt < 0) clock.after(50, () => {
+      abortAt = clock.now();
+      first.abort(new Error("reflex during take answer"));
+    });
+  };
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {});
+  const pending = run({ signal: first.signal });
+  await clock.advance(50);
+  await assert.rejects(clock.settle(pending, 2_050), /reflex during take answer/);
+  assert.ok(clock.now() - abortAt <= 2_050, "only the existing returned-input answer can delay the reflex");
+  assert.equal(carried(fixture, "iron_ingot"), 3);
+  assert.equal(carried(fixture, "raw_iron"), 5);
+  for (const event of ["set_slot", "window_items", "set_cursor_item"]) assert.equal(added(event), 0);
+  fixture.bot.clickWindow = click;
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(2));
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.smelt.produced, 8);
+  assert.equal(carried(fixture, "iron_ingot"), 8);
+});
+
+test("a server close between output and input stops recovery without closing a dead window, and the next attempt clears its leftovers", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const options = { clock, cookMs: 2_000, stopAfter: 1 as number | undefined, raw: 3, coal: 2 };
+  const fixture = observedFurnace(options);
+  const added = listenersAddedSince(fixture.bot._client);
+  const window = fixture.furnace;
+  const clicks: number[] = [];
+  const click = fixture.bot.clickWindow;
+  let deadCloses = 0;
+  const close = window.close;
+  window.close = () => { if (fixture.bot.currentWindow !== window as never) deadCloses++; close(); };
+  fixture.bot.clickWindow = async (...args) => {
+    clicks.push(args[0]);
+    await click(...args);
+    if (args[0] === 2) clock.after(50, () => { fixture.bot.currentWindow = null; window.emit("close"); });
+  };
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_3_COAL, fixture.dependencies, () => {});
+  const stopped = await clock.settle(run(freshAttempt()), answeredAttemptMs(1));
+  assert.equal(stopped.status, "partial");
+  assert.match(stopped.status === "partial" ? stopped.error : "", /furnace window closed/i);
+  assert.deepEqual(clicks, [2], "no input or fuel click after the server closed the window");
+  assert.equal(deadCloses, 0);
+  for (const event of ["set_slot", "window_items", "set_cursor_item"]) assert.equal(added(event), 0);
+  fixture.bot.clickWindow = click;
+  options.stopAfter = undefined;
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(2));
+  assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
+  assert.equal(result.smelt.produced, 3);
+  assert.equal(carried(fixture, "iron_ingot"), 3);
+  assert.equal(carried(fixture, "raw_iron"), 0);
+});
+
 test("an attempt aborted mid-cook leaves the next to smelt only what is left, with fuel for that", async () => {
   const clock = mockedClock();
   using _installed = clock.install();
@@ -68,8 +133,8 @@ test("an attempt aborted mid-cook leaves the next to smelt only what is left, wi
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex took the body/);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(2));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 8);
@@ -81,6 +146,48 @@ test("an attempt aborted mid-cook leaves the next to smelt only what is left, wi
   assert.equal(result.smelt.inputInventoryBefore, 8);
   assert.equal(result.smelt.inputInventoryAfter, 0);
   assert.equal(result.smelt.fuelInserted, 26);
+});
+
+test("an abort during a resumed clear releases the window without an answer wait and leaves the next attempt counted once", async () => {
+  const clock = mockedClock();
+  using _installed = clock.install();
+  const fixture = observedFurnace({ clock, cookMs: 100, raw: 3, coal: 2 });
+  const loads = recordLoads(fixture);
+  const first = new AbortController();
+  const put = fixture.furnace.putInput;
+  fixture.furnace.putInput = async (...args) => {
+    await put(...args);
+    first.abort(new Error("interrupted loading"));
+    throw new Error("loading stopped");
+  };
+  const run = beginSmeltItem(fixture.bot, navigation, SMELT_3_COAL, fixture.dependencies, () => {});
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(0)), /interrupted loading/);
+  fixture.furnace.putInput = put;
+  const added = listenersAddedSince(fixture.bot._client);
+  const second = new AbortController();
+  const click = fixture.bot.clickWindow;
+  fixture.bot.clickWindow = async (...args) => {
+    await click(...args);
+    fixture.harness.server.stop();
+    clock.after(50, () => second.abort(new Error("abort during clear")));
+  };
+  const pending = run({ signal: second.signal });
+  const seen = watch(pending);
+  const startedAt = clock.now();
+  // Drain the old stopped-clock path too, so the red proof leaves no pending operation.
+  await assert.rejects(clock.settle(pending, 20_050), /abort during clear/);
+  assert.equal(seen.over, true);
+  assert.ok(clock.now() - startedAt <= 100, "no returned-input settlement exists before this attempt loads");
+  assert.equal(fixture.bot.currentWindow, null);
+  for (const event of ["set_slot", "window_items", "set_cursor_item"]) assert.equal(added(event), 0);
+  assert.deepEqual(loads.inputs, [3], "the aborted clear never starts loading another batch");
+  fixture.bot.clickWindow = click;
+  fixture.harness.server.resume();
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(1));
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.smelt.produced, 3);
+  assert.equal(carried(fixture, "iron_ingot"), 3);
+  assert.deepEqual(loads.inputs, [3, 3]);
 });
 
 test("an abort between loading the input and the fuel gives the input back and the next attempt loads once", async () => {
@@ -96,11 +203,11 @@ test("an abort between loading the input and the fuel gives the input back and t
   };
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(1)), /reflex took the body/);
   assert.equal(carried(fixture, "raw_iron"), 8, "the unburnt input came back");
   assert.equal(loads.fuels.length, 0);
   fixture.furnace.putInput = putInput;
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(3));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 8);
@@ -122,9 +229,9 @@ test("two reflexes in a row make three attempts and one total", async () => {
     () => {},
   );
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
-  await assert.rejects(clock.settle(run({ signal: second.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex/);
+  await assert.rejects(clock.settle(run({ signal: second.signal }), answeredAttemptMs(2)), /reflex/);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(1));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 8);
@@ -149,8 +256,8 @@ test("a request that already produced everything returns its success without ope
   const loads = recordLoads(fixture);
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, dependencies, () => {});
 
-  assert.equal((await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS)).status, "succeeded");
-  const again = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  assert.equal((await clock.settle(run(freshAttempt()), answeredAttemptMs(3))).status, "succeeded");
+  const again = await clock.settle(run(freshAttempt()), answeredAttemptMs(0));
 
   assert.equal(again.status, "succeeded");
   assert.equal(again.smelt.produced, 8);
@@ -165,9 +272,9 @@ test("a furnace broken between attempts ends the request partial with what was p
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex/);
   fixture.bot.blockAt = (position) => ({ name: "air", position }) as WorldBlock;
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(0));
 
   assert.equal(result.status, "partial");
   assert.match(result.error, /FURNACE_NOT_PRESENT/);
@@ -183,9 +290,9 @@ test("another bot's contents in the furnace between attempts are never touched: 
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex/);
   fixture.furnace.inputItem = () => ({ name: "sand", count: 4 }) as never;
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(0));
 
   assert.equal(result.status, "partial");
   assert.match(result.error, /FURNACE_NOT_EMPTY/);
@@ -207,10 +314,10 @@ test("input left in the furnace by an attempt cut off while loading is taken bac
   };
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(0)), /reflex took the body/);
   assert.equal(carried(fixture, "raw_iron"), 0, "the input is still in the furnace");
   fixture.furnace.putInput = putInput;
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(4));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 8);
@@ -229,7 +336,7 @@ test("the progress read by the runner covers the whole request after an attempt 
     read = reader;
   });
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex/);
 
   assert.equal(observed, 1, "begin observes once, not once per attempt");
   assert.deepEqual(read?.().baseline, { input: 8, fuel: 40 });
@@ -264,6 +371,7 @@ test("a temporary furnace placed by an aborted attempt is reused, never placed t
   using _installed = clock.install();
   const fixture = sticksFurnace(clock);
   carriedFurnaces(fixture).count = 1;
+  carriedCountField(fixture.harness, "wooden_pickaxe").count = 1;
   const calls: string[] = [];
   const first = new AbortController();
   const run = beginSmeltItem(
@@ -275,9 +383,9 @@ test("a temporary furnace placed by an aborted attempt is reused, never placed t
     furnaceOperations(fixture, calls),
   );
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex/);
   assert.deepEqual(calls, ["place"], "an aborted attempt leaves the furnace standing");
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(2));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 8);
@@ -298,9 +406,9 @@ test("a resumed attempt counts the fuel still burning in the furnace and loads n
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_3_COAL, reflexAt(fixture, [{ at: 12_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(1)), /reflex took the body/);
   assert.equal(carried(fixture, "coal"), 0, "the one coal is burning in the furnace, none is carried");
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(1));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.equal(result.smelt.produced, 3);
@@ -317,8 +425,8 @@ test("a resumed attempt does not count on a flame shorter than one item, and say
   const request = { ...SMELT_3_COAL, count: 8 };
   const run = beginSmeltItem(fixture.bot, navigation, request, reflexAt(fixture, [{ at: 75_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(3)), /reflex took the body/);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(0));
 
   assert.equal(result.status, "partial");
   assert.match(result.status === "partial" ? result.error : "", /SMELT_FUEL_MISSING/);
@@ -346,8 +454,8 @@ for (const { at, inputs, window } of [
     const first = new AbortController();
     const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at, signal: first }]), () => {});
 
-    await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
-    const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+    await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex took the body/);
+    const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(2));
 
     assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
     assert.deepEqual(loads.inputs, inputs);
@@ -368,10 +476,10 @@ test("a recovery that leaves input in the slot does not count it as cooked, and 
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex took the body/);
   assert.equal(carried(fixture, "raw_iron"), 2);
   options.recoverInputCount = undefined;
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(3));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.deepEqual(loads.inputs, [8, 5]);
@@ -390,10 +498,10 @@ test("ingots the furnace cooks from input left in its slot while the bot is away
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 35_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex took the body/);
   options.recoverInputCount = undefined;
   for (const ms of [10_000, 10_000, 1]) await fixture.dependencies.pause(ms);
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(3));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.deepEqual(loads.inputs, [8, 3]);
@@ -411,8 +519,8 @@ test("an ingot the window hid at the abort is taken by the next attempt's clear 
   const first = new AbortController();
   const run = beginSmeltItem(fixture.bot, navigation, SMELT_8, reflexAt(fixture, [{ at: 40_000, signal: first }]), () => {});
 
-  await assert.rejects(clock.settle(run({ signal: first.signal }), ANSWERED_ATTEMPT_MS), /reflex took the body/);
-  const result = await clock.settle(run(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  await assert.rejects(clock.settle(run({ signal: first.signal }), answeredAttemptMs(2)), /reflex took the body/);
+  const result = await clock.settle(run(freshAttempt()), answeredAttemptMs(3));
 
   assert.equal(result.status, "succeeded", result.status === "succeeded" ? "" : result.error);
   assert.deepEqual(loads.inputs, [8, 4]);
@@ -425,7 +533,7 @@ test("with a recovery error the attempt keeps the window's count and reports the
   using _installed = clock.install();
   // The takes at 30 s and 60 s move 3 each; the final take of the last 2 fails, so they stay in the furnace, uncounted.
   const fixture = observedFurnace({ clock, cookMs: 10_000, raw: 8, coal: 40, fuel: "stick", outputClickFailsAt: 3 });
-  const result = await clock.settle(beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {})(freshAttempt()), ANSWERED_ATTEMPT_MS);
+  const result = await clock.settle(beginSmeltItem(fixture.bot, navigation, SMELT_8, fixture.dependencies, () => {})(freshAttempt()), answeredAttemptMs(2));
 
   assert.equal(result.status, "partial");
   assert.match(result.status === "partial" ? result.error : "", /window closed under the take/);

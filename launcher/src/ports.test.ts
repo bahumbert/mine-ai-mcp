@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:net";
 import test from "node:test";
 import { freePort, PORT_SEARCH_SPAN } from "./ports.ts";
+import { freeTestPort } from "./cli-test-support.ts";
 
 function listen(port: number, host = "127.0.0.1"): Promise<Server> {
   return new Promise((resolve, reject) => {
@@ -13,16 +14,8 @@ function listen(port: number, host = "127.0.0.1"): Promise<Server> {
 
 const close = (server: Server): Promise<void> => new Promise((resolve) => server.close(() => resolve()));
 
-/** A port nothing holds right now. */
-async function unusedPort(): Promise<number> {
-  const probe = await listen(0);
-  const port = (probe.address() as { port: number }).port;
-  await close(probe);
-  return port;
-}
-
-test("freePort returns the start port when nothing holds it", async () => {
-  const port = await unusedPort();
+test("freePort returns the start port when nothing holds it (the start is a freeTestPort port)", async () => {
+  const port = await freeTestPort();
   assert.equal(await freePort(port), port);
 });
 
@@ -43,7 +36,7 @@ for (const holderAddress of ["127.0.0.1", "0.0.0.0", "::"]) {
 }
 
 test("freePort skips the ports in taken, even though they are free", async () => {
-  const port = await unusedPort();
+  const port = await freeTestPort();
   const found = await freePort(port, new Set([port]));
   assert.ok(found > port);
 });

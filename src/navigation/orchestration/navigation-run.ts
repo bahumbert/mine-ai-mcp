@@ -55,6 +55,7 @@ import type { MovementPolicy, PolicyDecision, ScaffoldSelection } from "../movem
 import { EMPTY_OVERLAY_IDENTITY, OverlayInterner, PlanningOverlay } from "../search/planning-overlay.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { IncrementalSearch } from "../search/search.js";
+import type { RouteAdmission } from "../route-admission.js";
 import type { StepField, StepFieldProvider } from "../step-field.js";
 import { forRun, type RunTelemetry, type TelemetrySink } from "../telemetry/index.js";
 import { navigationFeet } from "../world/block-geometry.js";
@@ -65,6 +66,7 @@ import { digOutOfPartialCell } from "./partial-cell-dig-out.js";
 import { isSurfaceBobbing } from "./surface-bobbing.js";
 import { ArrivalRepeat } from "./arrival-repeat.js";
 import { describeAbort } from "./describe-abort.js";
+import { provenEndpoints } from "./endpoint-proof.js";
 import { PlanningStall } from "./planning-stall.js";
 import { searchFinishedEvent } from "./search-events.js";
 import { awaitLanding } from "./landing-wait.js";
@@ -159,20 +161,31 @@ interface PendingContinuation {
 }
 /** What walking a plan reports: the same as planning, minus a plan. */
 type ExecutionResult = Exclude<PlanningResult, { readonly kind: "plan" }>;
-/** What one search said when it stopped, before the run decides what that means. */
-type SearchAnswer =
-  | { readonly kind: "plan"; readonly plan: RoutePlan; readonly latestGoal: ActiveGoal }
+/** A search that calculated a plan or exhausted its options. */
+type SearchCalculation =
+  | { readonly kind: "plan"; readonly plan: RoutePlan; readonly plannedGoal: ActiveGoal; readonly latestGoal: ActiveGoal }
   | {
       readonly kind: "calculation_failed";
       readonly failure: NavigationCalculationFailure;
       readonly observation: NavigationObservation;
-    }
+    };
+type SearchInterruption =
   | { readonly kind: "stale" }
   | { readonly kind: "start_changed" }
   | { readonly kind: "arrived"; readonly node: PlanningNode; readonly observation: NavigationObservation }
   | { readonly kind: "goal_invalid"; readonly failure: NavigationFailure }
   | { readonly kind: "planning_stalled"; readonly failure: NavigationFailure }
   | { readonly kind: "stopped" };
+/** What one search said when it stopped, before the run decides what that means. */
+type SearchAnswer =
+  | (SearchCalculation & { readonly identity: string })
+  | SearchInterruption
+  | { readonly kind: "repeated"; readonly identity: string }
+  | { readonly kind: "refused"; readonly observation: string; readonly goalRevision: string };
+
+type SearchObservation =
+  | Extract<SearchAnswer, { readonly kind: "start_changed" | "goal_invalid" | "arrived" }>
+  | { readonly kind: "continue"; readonly observation: NavigationObservation; readonly latestGoal: ActiveGoal };
 
 /** Releases one run will attempt before a ceiling that keeps coming back is reported instead. */
 const PIN_RELEASE_LIMIT = 3;
@@ -208,6 +221,8 @@ export interface RunContext extends RouteContext {
    * supplies the field or whether the caller opted out.
    */
   readonly stepField: StepFieldProvider | null;
+  /** The caller's route veto, read afresh for each admission check; absent or null when no obligation holds. */
+  readonly routeAdmission?: () => RouteAdmission | null;
   /** What this bot's earlier runs failed on, priced as refused by every search here. */
   readonly failedEdges?: FailedEdges;
   /** Whether the run was abandoned and its view of the bot withdrawn; its deferred cleanup then leaves shared state alone. */
@@ -251,6 +266,8 @@ export class NavigationRun {
   };
   /** Whether the world subscription is still installed; the one thing execute itself can leak. */
   #subscribed = false;
+  /** The admission's text when the step boundary just refused the rest of the route; read by the `goal_revised` branch. */
+  #boundaryRefusal: string | null = null;
   readonly #searchIdentities = new Set<string>();
   readonly #planningStall: PlanningStall;
   readonly #arrivalRepeat: ArrivalRepeat;
@@ -269,7 +286,9 @@ export class NavigationRun {
   readonly #visitedFeet = new Set<number>();
   /** What the committed route being walked depends on. */
   #routeDependencies: ReadonlySet<number> = new Set<number>();
+  #routeLavaDependencies: ReadonlySet<number> = new Set<number>();
   #routeExecutor: RouteExecutor | undefined;
+  readonly #terminated = new AbortController();
   /** The search running alongside the route being walked, held so settlement can stop and drain it. */
   #pending: PendingContinuation | null = null;
   #goalRevision = "unresolved";
@@ -323,7 +342,7 @@ export class NavigationRun {
     // Only a committed route owns an execution dependency worth stopping.
     // Every selected step checks its concrete preconditions again before it
     // moves, so an old search result cannot execute stale world assumptions.
-    const classification = this.context.ledger.classify(change, this.#routeDependencies, monotonicNow());
+    const classification = this.context.ledger.classify(change, this.#routeDependencies, monotonicNow(), this.#routeLavaDependencies);
     this.#counters[CHANGE_COUNTER[classification]] += 1;
     this.#events.emit({ kind: "world_change", classification, change });
     this.#arrivalRepeat.worldChanged(change);
@@ -338,9 +357,7 @@ export class NavigationRun {
     return this.#failed({ kind: "internal_error", message: describeError(cause) });
   }
   /** The world ended or another owner will steer; release the route without waiting for its landing. */
-  terminate(): void {
-    this.#routeExecutor?.invalidate();
-  }
+  terminate(): void { this.#terminated.abort(); this.#routeExecutor?.terminate(); }
 
   /** Own setup through settlement, including partial setup and failed cleanup. */
   async #navigateWithResources(): Promise<NavigationOutcome> {
@@ -428,7 +445,6 @@ export class NavigationRun {
   async #planFromHere(
     goal: ActiveGoal,
     node: PlanningNode,
-    observation: NavigationObservation,
     reason: SearchReason,
   ): Promise<PlanningResult> {
     const pending = this.#pending;
@@ -465,7 +481,7 @@ export class NavigationRun {
         return planned;
       }
     }
-    return this.#plan(goal, node, observation, reason);
+    return this.#plan(goal, node, reason);
   }
   /** Stop the plan-ahead search, if any, and wait until it has: one search runs at a time, and none outlives its use. */
   async #abandonPending(): Promise<void> {
@@ -476,12 +492,11 @@ export class NavigationRun {
     if (this.#pending === pending) this.#pending = null;
   }
   /** Start the plan-ahead search from where a partial segment will end, stoppable on its own. */
-  #startContinuation(goal: ActiveGoal, plan: RoutePlan, observation: NavigationObservation): PendingContinuation {
+  #startContinuation(goal: ActiveGoal, plan: RoutePlan): PendingContinuation {
     const control = new AbortController();
     const result = this.#plan(
       goal,
       plan.endNode,
-      observation,
       "segment_continuation",
       AbortSignal.any([this.context.signal, control.signal]),
       { effects: plan.steps.flatMap((step) => step.effects) },
@@ -557,7 +572,7 @@ export class NavigationRun {
       if (stalled) return stalled;
       // Plan: reuse the segment searched while walking, if the bot ended where
       // that search assumed; otherwise search from here.
-      const planning = await this.#planFromHere(goal, node, observation, searchReason);
+      const planning = await this.#planFromHere(goal, node, searchReason);
       if (planning.kind === "outcome") return planning.outcome;
       if (planning.kind === "retry") {
         searchReason = planning.reason;
@@ -570,7 +585,7 @@ export class NavigationRun {
       // it from, so that is the one worth running early.
       this.#pending = planning.plan.complete
         ? null
-        : this.#startContinuation(planning.latestGoal, planning.plan, observation);
+        : this.#startContinuation(planning.latestGoal, planning.plan);
       // Execute: walk one immutable plan. What the executor reports decides
       // whether the loop goes round again, hands arrival to the process, or
       // settles.
@@ -670,7 +685,6 @@ export class NavigationRun {
   async #plan(
     goal: ActiveGoal,
     node: PlanningNode,
-    observation: NavigationObservation,
     reason: SearchReason,
     signal: AbortSignal = this.context.signal,
     ahead: PlanAhead | null = null,
@@ -680,51 +694,43 @@ export class NavigationRun {
     // model blocks only, so without the fingerprint a hostile that has walked
     // two blocks would be answered as a repeat of the question it changed.
     const field = this.context.stepField?.() ?? null;
-    const identity =
-      `${goal.revision}|${blockKey(node.feet)}|${observation.worldRevision}|${observation.resourceRevision}` +
-      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|escape:${this.#relaxedRules.length}|field:${field?.fingerprint ?? "none"}`;
-    if (this.#searchIdentities.has(identity))
-      return {
-        kind: "outcome",
-        outcome: this.#failed({ kind: "no_progress", reason: "repeated_search", observation: identity }),
-      };
-    this.#searchIdentities.add(identity);
-    const release = () => this.#searchIdentities.delete(identity);
-
     const answer = await this.#searchWithBodyOwnership(goal, node, reason, signal, field, ahead);
     switch (answer.kind) {
       case "stopped":
-        release();
         return { kind: "outcome", outcome: this.#stopped() };
+      case "refused":
+        if (this.context.signal.aborted) return { kind: "outcome", outcome: this.#stopped() };
+        return this.#refused(answer.goalRevision, null, answer.observation);
       case "goal_invalid":
       case "planning_stalled":
         return { kind: "outcome", outcome: this.#failed(answer.failure) };
       case "arrived":
         return this.#resolveArrival(answer.node, answer.observation);
+      case "repeated":
+        return {
+          kind: "outcome",
+          outcome: this.#failed({ kind: "no_progress", reason: "repeated_search", observation: answer.identity }),
+        };
       case "start_changed":
-        release();
         return { kind: "retry", reason: "start_changed" };
       case "stale":
-        release();
         return { kind: "retry", reason: "world_changed" };
       case "calculation_failed":
         // Baritone's failed plan-ahead calculation is `NEXT_CALC_FAILED`, not
         // the process-facing `CALC_FAILED`. The current route keeps moving and,
         // once it ends, pathing calculates inline from the actual endpoint.
         if (ahead) {
-          release();
+          this.#searchIdentities.delete(answer.identity);
           return { kind: "retry", reason: "calculation_failure" };
         }
         return this.#resolveCalculationFailure(answer.failure, answer.observation);
-      case "plan":
+      case "plan": {
         // Speculative calculation is not physical admission. Its endpoint may
         // no longer be occupied when the foreground comes to use this result.
-        if (ahead) release();
-        if (this.#goalRevisesRoute(goal, answer.latestGoal, answer.plan, node)) {
-          release();
-          return { kind: "retry", reason: "goal_revised" };
-        }
-        return { kind: "plan", plannedGoal: goal, latestGoal: answer.latestGoal, plan: answer.plan };
+        const revised = this.#goalRevisesRoute(answer.plannedGoal, answer.latestGoal, answer.plan, node);
+        if (ahead || revised) this.#searchIdentities.delete(answer.identity);
+        return revised ? { kind: "retry", reason: "goal_revised" } : answer;
+      }
     }
   }
   async #searchWithBodyOwnership(
@@ -743,23 +749,15 @@ export class NavigationRun {
       return await this.#search(goal, node, reason, signal, field, null);
     } finally {
       try {
-        // An impulse can invalidate the search's start mid-flight. Keep its hold through the
-        // wall-bounded landing wait, cancel included, before another owner takes over.
-        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, null);
+        // Keep the hold through cancellation or replanning, but an admitted successor must
+        // be free to establish the landing itself (P4-29 a10, 2026-11-17).
+        if (this.context.bot.observe().stance === "airborne") await awaitLanding(this.context.bot, this.#terminated.signal);
       } finally {
         release();
       }
     }
   }
-  /**
-   * Run one incremental search to its end, in slices.
-   *
-   * Between slices the run yields to the event loop so physics keeps moving,
-   * then looks at the bot again: the goal may have been reached, or become
-   * invalid, while the search was thinking, and either ends it early. Changes
-   * to the world are the search's own business; it answers `stale` when what
-   * it read no longer holds.
-   */
+  /** Establish the actual search inputs after the position hold and prelude. */
   async #search(
     goal: ActiveGoal,
     node: PlanningNode,
@@ -768,42 +766,47 @@ export class NavigationRun {
     field: StepField | null,
     ahead: PlanAhead | null,
   ): Promise<SearchAnswer> {
-    const searchId = `${this.context.runId}:search:${++this.#counters.searches}`;
     const searchStart = this.context.bot.observe();
-    if (!ahead) this.#planningStall.begin(searchStart);
-    if (reason === "segment_continuation" || reason === "arrival_continuation" || reason === "alternate_arrival")
-      this.#counters.continuations += 1;
-    else if (reason !== "initial") this.#counters.replans += 1;
-    this.#events.emit({ kind: "search_started", searchId, reason, goal: goal.revision });
-    let overlay = new PlanningOverlay(new OverlayInterner());
-    for (const effect of ahead?.effects ?? []) overlay = overlay.apply(effect);
-    const search = new IncrementalSearch({
-      id: searchId,
-      start: { node: { ...node, overlayId: overlay.identity }, overlay },
-      goal,
-      context: {
-        world: this.context.world,
-        catalogue: this.context.catalogue,
-        policy: this.#policy,
-        // Read fresh: food drains over a long run, and a route planned while
-        // sprinting is not executable once it stops being available.
-        player: this.context.bot.observe().player,
-        protectedFeet: this.#visitedFeet,
-        stepField: field,
-      },
-      // The larger budget belongs to a search that shares its time with
-      // movement. The same segment searched standing still, after a plan-ahead
-      // result was abandoned, is a pause the bot's operator can see.
-      limits: ahead ? (this.request.continuationSearchLimits ?? this.request.searchLimits) : this.request.searchLimits,
-    });
-    this.status({ kind: "planning", runId: this.context.runId, goalRevision: goal.revision, searchId });
-    for (;;) {
-      // Every slice, the first included, starts on a fresh turn of the event
-      // loop. Physics keeps ticking between slices, and whoever started this
-      // run gets a turn before any work is done, so a stop issued straight
-      // after asking is honoured rather than raced by a search small enough
-      // to finish in one slice.
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    let root = searchStart;
+    if (!ahead) {
+      if (!samePosition(node.feet, navigationFeet(searchStart.position, searchStart.stance === "supported")))
+        return { kind: "start_changed" };
+      this.#planningStall.begin(searchStart);
+      const prelude = await this.#beforeInlineSearch(node, searchStart, signal);
+      if (prelude.kind !== "continue") return prelude;
+      goal = prelude.latestGoal;
+      root = prelude.observation;
+    }
+    const identity = this.#searchIdentity(goal, node, root, field, ahead);
+    if (this.#searchIdentities.has(identity)) return { kind: "repeated", identity };
+    this.#searchIdentities.add(identity);
+    const { search, searchId } = this.#beginSearch(goal, node, reason, field, ahead, root);
+    const answer = await this.#advanceSearch(search, searchId, goal, node, searchStart, signal, ahead);
+    if (answer.kind === "plan" || answer.kind === "calculation_failed") return { ...answer, identity };
+    if (answer.kind === "stopped" || answer.kind === "start_changed" || answer.kind === "stale")
+      this.#searchIdentities.delete(identity);
+    return answer;
+  }
+  /** Key the resolved goal and root the search uses, including support changes within one feet cell. */
+  #searchIdentity(goal: ActiveGoal, node: PlanningNode, root: NavigationObservation, field: StepField | null, ahead: PlanAhead | null): string {
+    return `${goal.revision}|${blockKey(node.feet)}|${root.worldRevision}|${root.resourceRevision}` +
+      (ahead ? "" : `|pose:${root.position.x},${root.position.y},${root.position.z}:${root.stance}`) +
+      `|movement-failures:${this.#movementFailures.size}|own-regions:${this.#ownRegionsOpened}|escape:${this.#relaxedRules.length}|field:${field?.fingerprint ?? "none"}`;
+  }
+  /** Advance in slices so physics runs and the live goal and position can be checked between slices. */
+  async #advanceSearch(
+    search: IncrementalSearch,
+    searchId: string,
+    goal: ActiveGoal,
+    node: PlanningNode,
+    searchStart: NavigationObservation,
+    signal: AbortSignal,
+    ahead: PlanAhead | null,
+  ): Promise<SearchCalculation | SearchInterruption> {
+    for (let yieldBeforeSlice = ahead !== null; ; yieldBeforeSlice = true) {
+      // The inline prelude already gave physics and cancellation a turn before
+      // the first slice. Plan-ahead and later slices still yield here.
+      if (yieldBeforeSlice) await new Promise<void>((resolve) => setImmediate(resolve));
       if (signal.aborted) {
         search.cancel();
         return { kind: "stopped" };
@@ -845,8 +848,60 @@ export class NavigationRun {
               : { kind: "search_limit", search: update.evidence, limit: update.limit, ...after },
         };
       }
-      return { kind: "plan", plan: update.plan, latestGoal: judged.latestGoal };
+      return { kind: "plan", plan: update.plan, plannedGoal: goal, latestGoal: judged.latestGoal };
     }
+  }
+  /** Give cancellation and fresh world observations a turn before asking an admission for an inline proof. */
+  async #beforeInlineSearch(node: PlanningNode, start: NavigationObservation, signal: AbortSignal): Promise<
+    SearchObservation | Extract<SearchAnswer, { kind: "stopped" | "planning_stalled" | "refused" }>
+  > {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (signal.aborted) return { kind: "stopped" };
+    const observation = this.context.bot.observe();
+    const stall = this.#planningStall.check(observation);
+    if (stall) return { kind: "planning_stalled", failure: stall };
+    const judged = this.#judgeSliceObservation(node, start, null, observation);
+    if (judged.kind !== "continue") return judged;
+
+    // A search may keep its old root through a surface bob, but the proof needs the observed feet.
+    if (!samePosition(node.feet, navigationFeet(observation.position, observation.stance === "supported"))) return judged;
+    const world = this.context.world;
+    const endpoints = provenEndpoints({
+      goal: judged.latestGoal, observation, world, policy: this.#policy,
+      hasCalculationFallback: this.request.onCalculationFailure !== undefined,
+    });
+    if (endpoints === null) return judged;
+    const refusal = this.context.routeAdmission?.()?.refuteEndpoints?.({ start: node.feet, endpoints }, world) ?? null;
+    return refusal === null ? judged : { kind: "refused", observation: refusal, goalRevision: judged.latestGoal.revision };
+  }
+  /** Allocate and announce the actual search once the run has cleared its prelude. */
+  #beginSearch(goal: ActiveGoal, node: PlanningNode, reason: SearchReason, field: StepField | null,
+    ahead: PlanAhead | null, root: NavigationObservation) {
+    const searchId = `${this.context.runId}:search:${++this.#counters.searches}`;
+    if (reason === "segment_continuation" || reason === "arrival_continuation" || reason === "alternate_arrival")
+      this.#counters.continuations += 1;
+    else if (reason !== "initial") this.#counters.replans += 1;
+    this.#events.emit({ kind: "search_started", searchId, reason, goal: goal.revision });
+    let overlay = new PlanningOverlay(new OverlayInterner());
+    for (const effect of ahead?.effects ?? []) overlay = overlay.apply(effect);
+    const search = new IncrementalSearch({
+      id: searchId,
+      start: { node: { ...node, overlayId: overlay.identity }, overlay },
+      goal,
+      observedStart: ahead ? undefined : root,
+      context: {
+        world: this.context.world,
+        catalogue: this.context.catalogue,
+        policy: this.#policy,
+        player: root.player,
+        protectedFeet: this.#visitedFeet,
+        stepField: field,
+      },
+      // The larger budget belongs to a search that shares its time with movement.
+      limits: ahead ? (this.request.continuationSearchLimits ?? this.request.searchLimits) : this.request.searchLimits,
+    });
+    this.status({ kind: "planning", runId: this.context.runId, goalRevision: goal.revision, searchId });
+    return { search, searchId };
   }
   /**
    * Look at the body and the goal once after a search slice: the start the search assumed may have been knocked away,
@@ -856,10 +911,8 @@ export class NavigationRun {
     node: PlanningNode,
     searchStart: NavigationObservation,
     ahead: PlanAhead | null,
-  ):
-    | Extract<SearchAnswer, { readonly kind: "start_changed" | "goal_invalid" | "arrived" }>
-    | { readonly kind: "continue"; readonly observation: NavigationObservation; readonly latestGoal: ActiveGoal } {
-    const observation = this.context.bot.observe();
+    observation = this.context.bot.observe(),
+  ): SearchObservation {
     // Holding controls cannot prevent an external impulse from moving the
     // starting body. Plan-ahead deliberately searches from a future endpoint.
     if (
@@ -877,7 +930,18 @@ export class NavigationRun {
       return { kind: "arrived", node: resolved.node, observation };
     return { kind: "continue", observation, latestGoal: resolved.goal };
   }
+  /** The text the caller's route admission refuses `steps` with, read afresh from the provider; null when admitted. */
+  #admissionRefusal(start: BlockPosition, steps: readonly PlannedStep[]): string | null {
+    return this.context.routeAdmission?.()?.check({ start, steps }, this.context.world) ?? null;
+  }
+  /** End the run after one refusal, leaving the body wherever it last settled. */
+  #refused(goalRevision: string, planId: string | null, observation: string): ExecutionResult {
+    this.#events.emit({ kind: "route_refused", planId, goalRevision, observation });
+    return { kind: "outcome", outcome: this.#failed({ kind: "no_progress", reason: "route_refused", observation }) };
+  }
   async #executePlan(goal: ActiveGoal, plan: RoutePlan): Promise<ExecutionResult> {
+    const refusal = this.#admissionRefusal(plan.start, plan.steps);
+    if (refusal !== null) return this.#refused(plan.goalRevision, plan.id, refusal);
     this.#planningStall.committed();
     this.#arrivalRepeat.reset();
     this.#counters.plans += 1;
@@ -885,6 +949,7 @@ export class NavigationRun {
     this.#lastMovementFailure = null;
     this.#executed = true;
     this.#routeDependencies = plan.dependencies;
+    this.#routeLavaDependencies = plan.lavaDependencies;
     this.#events.emit({
       kind: "route_committed",
       planId: plan.id,
@@ -919,6 +984,8 @@ export class NavigationRun {
       case "invalidated":
         return { kind: "retry", reason: "world_changed" };
       case "goal_revised":
+        // A step boundary that refused the rest of the route also returns "goal_revised" (the executor's one early stop).
+        if (this.#boundaryRefusal !== null) return this.#refused(plan.goalRevision, plan.id, this.#boundaryRefusal);
         return { kind: "retry", reason: "goal_revised" };
       case "goal_satisfied": {
         const observation = this.context.bot.observe();
@@ -983,6 +1050,12 @@ export class NavigationRun {
     if (revised.kind === "invalid") return "goal_revised";
     if (revised.goal.isSatisfied(revised.node, this.context.world)) return "goal_satisfied";
     if (this.#goalRevisesRoute(goal, revised.goal, plan, revised.node)) return "goal_revised";
+    // Last: a goal that finished or revised the route settles it first, and a replanned route is judged at its own commit.
+    const remaining = plan.steps.slice(plan.steps.indexOf(step) + 1);
+    if (remaining.length > 0) {
+      this.#boundaryRefusal = this.#admissionRefusal(arrival, remaining);
+      if (this.#boundaryRefusal !== null) return "goal_revised";
+    }
     return "continue";
   }
   /** A complete route promises arrival; a partial route promises useful progress. */

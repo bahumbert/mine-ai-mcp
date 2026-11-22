@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import type { CraftApplication } from "../utils/craft-plan.js";
+import { raceSignal } from "../utils/race-signal.js";
 import { sleepMs } from "../utils/wall-timers.js";
 import { sameItemVariant } from "./item-variant.js";
 
@@ -69,17 +70,31 @@ async function craftOnce(
   bot: Bot,
   recipe: CraftApplication["recipe"],
   craftingTable: NonNullable<Parameters<Bot["craft"]>[2]> | null,
+  signal?: AbortSignal,
+  onCrafted?: (output: { readonly id: number; readonly count: number }) => void,
 ): Promise<void> {
   const output = recipe.result as { readonly id: number; readonly count: number };
   const before = bot.inventory.count(output.id, null);
+  const crafting = bot.craft(recipe, 1, craftingTable ?? undefined);
+  // A craft the race below gave up on (a death, a reflex) is still the server's: it is credited the moment its own call
+  // resolves, abort or not, so a resume never crafts it twice. Registered before the race, it runs before the abort unwinds.
+  let credited = false;
+  const credit = () => {
+    if (credited) return;
+    credited = true;
+    onCrafted?.(output);
+  };
+  void crafting.then(credit, () => undefined);
   try {
-    await bot.craft(recipe, 1, craftingTable ?? undefined);
+    await raceSignal(crafting, signal);
   } catch (cause) {
+    signal?.throwIfAborted();
     if (!/did not update crafting result/u.test(String(cause))) throw cause;
     bot.closeWindow(bot.currentWindow ?? bot.inventory);
     await sleepMs(UNSEEN_RESULT_SETTLE_MS);
     if (bot.inventory.count(output.id, null) < before + output.count) throw cause;
   }
+  credit();
 }
 
 /**
@@ -101,8 +116,7 @@ export async function executeCraftPlan(
       for (let made = 0; made < application.applications; made += 1) {
         signal?.throwIfAborted();
         requireApplicationRoom(bot, application.recipe);
-        await craftOnce(bot, application.recipe, craftingTable);
-        onCrafted?.(application.recipe.result as { readonly id: number; readonly count: number });
+        await craftOnce(bot, application.recipe, craftingTable, signal, onCrafted);
       }
       completedSteps += 1;
     }

@@ -5,10 +5,13 @@
  * default, `bun run check origin/main` for the whole branch. A changed data file (a scenario YAML...) counts as a change
  * of the module declaring that it reads it (`// check-reads: <glob>`, `scripts/data-readers.ts`): its importers' tests run.
  * `bun run test` (`--all`): every project present in this checkout (the monitor is not in every one); arguments after
- * `--all` go to its `bun test` call (`bun run test -- --coverage`).
+ * `--all` go to its `bun test` call (`bun run test -- --coverage`). It queues for the unit slot as `test:fast` does
+ * (the same lock; `--no-slot` skips the queue).
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import * as os from "node:os";
+import { join, resolve } from "node:path";
+import { enforceModules } from "./modules-guard.ts";
 import {
   aliasesFromPackageJson,
   buildReverseGraph,
@@ -21,15 +24,17 @@ import {
 } from "./import-graph.js";
 import { dataReadReport, malformedReport, planDataReads, unmatchedReport, type DataReadPlan } from "./data-readers.js";
 import { configFiles, configTypechecks, TSCONFIG_FILE, tsconfigExtends } from "./tsconfig-selection.js";
+import { DEFAULT_TEST_TIMEOUT_MS } from "./test-limit.js";
+import { needsSlot, releaseHolder, runInSlot, slotLockPath, writeHolder } from "./test-fast-slot.js";
 
-const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: string }[] = [
-  { dir: "src/", typecheck: "typecheck", tests: "./src" },
-  { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: "./scenarios/src" },
-  { dir: "tests/", typecheck: "typecheck:tests", tests: "./tests" },
-  { dir: "brain/", typecheck: "typecheck:brain", tests: "./brain" },
-  { dir: "launcher/", typecheck: "typecheck:launcher", tests: "./launcher" },
-  { dir: "monitor/", typecheck: "typecheck:monitor", tests: "./monitor" },
-  { dir: "scripts/", typecheck: "typecheck:scripts", tests: "./scripts" },
+export const PROJECTS: readonly { readonly dir: string; readonly typecheck: string; readonly tests: readonly string[] }[] = [
+  { dir: "src/", typecheck: "typecheck", tests: ["./src"] },
+  { dir: "scenarios/", typecheck: "typecheck:scenarios", tests: ["./scenarios/src", "./scenarios/default"] },
+  { dir: "tests/", typecheck: "typecheck:tests", tests: ["./tests"] },
+  { dir: "brain/", typecheck: "typecheck:brain", tests: ["./brain"] },
+  { dir: "launcher/", typecheck: "typecheck:launcher", tests: ["./launcher"] },
+  { dir: "monitor/", typecheck: "typecheck:monitor", tests: ["./monitor"] },
+  { dir: "scripts/", typecheck: "typecheck:scripts", tests: ["./scripts"] },
 ];
 
 /**
@@ -156,9 +161,14 @@ function dataReadsOrExit(changedRaw: readonly string[], files: readonly string[]
   return plan;
 }
 
-/** Path prefixes of the suite's test paths (`src/`, `scenarios/src/`...), for the projects present in this checkout. */
-function suiteTestRoots(): string[] {
-  return PROJECTS.filter((project) => existsSync(project.dir)).map((project) => `${project.tests.slice(2)}/`);
+/** Test paths of projects present in this checkout. */
+export function suiteTestPaths(): string[] {
+  return PROJECTS.filter((project) => existsSync(project.dir)).flatMap((project) => project.tests);
+}
+
+/** Path prefixes of suite test paths, including `scenarios/src/` and `scenarios/default/`. */
+export function suiteTestRoots(): string[] {
+  return suiteTestPaths().map((path) => `${path.slice(2)}/`);
 }
 
 /** `x.test.ts` beside each changed `x.ts` (a changed test is itself), inside the suite's test paths only: `check` runs no test CI does not. */
@@ -203,18 +213,60 @@ export function typecheckPlan(
   });
 }
 
-/** The suite's `bun test` call: every test path, then the arguments given after `--all` (`--coverage ...` in CI). */
-export function suiteTestCommand(testPaths: readonly string[], extraArgs: readonly string[]): string[] {
-  return ["bun", "test", ...testPaths, ...extraArgs];
+/**
+ * Every `bun test` call of check: the suite's 30 s limit first (Bun 1.4.2 applies the preload default to the first file
+ * only), then the test paths, then the arguments given after `--all` (`--coverage ...` in CI).
+ */
+function bunTestCommand(testPaths: readonly string[], extraArgs: readonly string[]): string[] {
+  return ["bun", "test", "--timeout", String(DEFAULT_TEST_TIMEOUT_MS), ...testPaths, ...extraArgs];
 }
 
-/** `bun run test [-- <bun test args>]`: every typecheck, then every test path. */
-function runAll(extraArgs: readonly string[]): never {
+/** The `--all` suite's `bun test` call (`bun run test [-- <bun test args>]`): every test root, then the extra arguments. */
+export function suiteTestCommand(testRoots: readonly string[], extraArgs: readonly string[]): string[] {
+  return bunTestCommand(testRoots, extraArgs);
+}
+
+/** The quick loop's `bun test` call: the changed files' test files, each as `./<file>`. */
+export function importerTestCommand(testFiles: readonly string[]): string[] {
+  return bunTestCommand(testFiles.map((file) => `./${file}`), []);
+}
+
+/** What `check` runs: the quick loop, or `--all` (`bun run test`) with its own `--no-slot`; the other arguments go to `bun test`. */
+export type CheckRun = { readonly mode: "quick" } | { readonly mode: "all"; readonly slot: boolean; readonly testArgs: readonly string[] };
+
+export function checkRun(argv: readonly string[]): CheckRun {
+  if (argv[0] !== "--all") return { mode: "quick" };
+  const rest = argv.slice(1);
+  return { mode: "all", slot: !rest.includes("--no-slot"), testArgs: rest.filter((arg) => arg !== "--no-slot") };
+}
+
+/** `--all` in this process: every typecheck, then every test path; 1 at the first failure. */
+function runAllHere(testArgs: readonly string[]): number {
   const present = PROJECTS.filter((project) => existsSync(project.dir));
   for (const project of present) {
-    if (!run(["bun", "run", "--silent", project.typecheck])) process.exit(1);
+    if (!run(["bun", "run", "--silent", project.typecheck])) return 1;
   }
-  process.exit(run(suiteTestCommand(present.map((project) => project.tests), extraArgs)) ? 0 : 1);
+  return run(suiteTestCommand(suiteTestPaths(), testArgs)) ? 0 : 1;
+}
+
+export interface AllRunSlot {
+  readonly slot: boolean;
+  readonly env: NodeJS.ProcessEnv;
+  readonly lock: string;
+  readonly say: (line: string) => void;
+  /** The command that runs the suite in the slot: this script again, which runs it with the slot held. */
+  readonly queued: readonly string[];
+  /** The suite run in this process. */
+  readonly here: () => number;
+}
+
+/**
+ * `bun run test` queues for the unit slot as `test:fast` does (`runInSlot`, the same lock); its exit is the run's exit.
+ * `--no-slot`, and a run already holding the slot (`MINE_AI_TEST_SLOT_HELD=1`), run `here` at once.
+ */
+export function runAllInSlot(options: AllRunSlot): Promise<number> {
+  if (!needsSlot(options.slot, options.env)) return Promise.resolve(options.here());
+  return runInSlot(options.queued, options.lock, options.env, options.say);
 }
 
 function parsedArgsOrExit(): ReturnType<typeof parseCheckArgs> {
@@ -226,8 +278,24 @@ function parsedArgsOrExit(): ReturnType<typeof parseCheckArgs> {
   }
 }
 
-function main(): never {
-  if (process.argv[2] === "--all") runAll(process.argv.slice(3));
+async function main(): Promise<never> {
+  if (!enforceModules(resolve(import.meta.dir, ".."))) process.exit(1);
+  const allRun = checkRun(process.argv.slice(2));
+  if (allRun.mode === "all") {
+    const root = join(import.meta.dir, "..");
+    const lock = slotLockPath(process.env, os.homedir());
+    const here = (): number => {
+      // a queued run names itself in the holder file, so a waiter says whom it waits for (as test:fast does)
+      if (allRun.slot && process.env.MINE_AI_TEST_SLOT_HELD === "1") {
+        writeHolder(lock, root);
+        process.once("exit", () => releaseHolder(lock));
+      }
+      return runAllHere(allRun.testArgs);
+    };
+    process.exit(
+      await runAllInSlot({ slot: allRun.slot, env: process.env, lock, say: console.log, queued: [process.execPath, import.meta.path, "--all", ...allRun.testArgs], here }),
+    );
+  }
   const args = parsedArgsOrExit();
   const base = args.base === undefined ? "HEAD" : git("merge-base", "HEAD", args.base)[0] ?? "HEAD";
   const changedRaw = changedPaths(base);
@@ -258,10 +326,10 @@ function main(): never {
     if (typecheck.reason !== "changed") console.log(`check: ${typecheck.script}: ${typecheck.reason}`);
     ok = run(["bun", "run", "--silent", typecheck.script]) && ok;
   }
-  if (tests.length > 0) ok = run(["bun", "test", ...tests.map((file) => `./${file}`)]) && ok;
+  if (tests.length > 0) ok = run(importerTestCommand(tests)) && ok;
   else if (config.pointer === undefined) console.log("check: no test file next to or importing the changed files (bun run test for everything)");
   console.log(`check: ${new Set([...changedAll, ...configFiles(changedRaw), ...dataReads.reads.map((read) => read.data)]).size} changed file(s), ${tests.length} test file(s): ${ok ? "OK" : "FAILED"}`);
   process.exit(ok ? 0 : 1);
 }
 
-if (import.meta.main) main();
+if (import.meta.main) void main();

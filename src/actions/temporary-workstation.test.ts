@@ -77,6 +77,16 @@ test("missing carried workstation refuses before placement or crafting", async (
   assert.deepEqual(f.calls, []);
 });
 
+test("a temporary furnace without a harvest tool is refused before placement", async () => {
+  const f = fixture();
+  f.counts.set(f.bot.registry.itemsByName.furnace!.id, 1);
+  const result = await useTemporaryWorkstation(f.bot, "furnace", {}, f.operations, async () => ({ status: "succeeded" }), f.failure);
+  assert.notEqual(result.status, "succeeded");
+  if (result.status === "succeeded") throw new Error("expected refusal");
+  assert.match(result.error ?? "", /WORKSTATION_NO_HARVEST_TOOL/);
+  assert.deepEqual(f.calls, []);
+});
+
 test("a full inventory refuses before placement: the workstation could not be picked back up", async () => {
   const f = fixture();
   (f.bot.inventory as { emptySlotCount?: () => number }).emptySlotCount = () => 0;

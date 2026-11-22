@@ -6,18 +6,16 @@
  * block is safe to break, the policy prices the dig (protected regions refuse it) as exactly one dig (a falling column is
  * refused), and the break is confirmed in the world. What each escape counts, says and tries again stays with it.
  */
+import { pinReleaseTicks } from "../execution/confirmation-deadline.js";
 import { executeWorldEffect } from "../execution/world-effect.js";
 import type { AttemptToken } from "../execution/mutations.js";
 import { priceExcavation } from "../movements/excavation.js";
 import { airMatcher, stateMatcher } from "../movements/movement.js";
 import type { MovementPolicy } from "../movements/policy.js";
-import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import type { BlockPosition } from "../world/world.js";
 import type { RunContext } from "./navigation-run.js";
 
-/** How long a break to free a held body may take: a hand on a leaf is instant, a hand on stone is not. */
-const HELD_CELL_DEADLINE_MS = 15_000;
 /** Ticks to wait for the world to show the body free once the break has completed. */
 const SETTLE_TICKS = 40;
 /** A real-time bound on the wait: the physics ticks stop when the server does. */
@@ -74,7 +72,7 @@ export async function breakHeldCell(options: {
     token,
     operation: { kind: "break", position: cell, expectedStateId: dig.stateId, toolType: dig.toolType, brings: [] },
     targets: [{ position: cell, before: stateMatcher(dig.stateId), after: airMatcher }],
-    deadlineMs: monotonicNow() + Math.max(HELD_CELL_DEADLINE_MS, dig.expectedTicks * 100),
+    deadlineTicks: pinReleaseTicks(dig.expectedTicks),
   });
   if (signal.aborted) return "stopped";
   if (result.kind === "confirmed") return "confirmed";

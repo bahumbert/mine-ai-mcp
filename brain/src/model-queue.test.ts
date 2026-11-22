@@ -151,7 +151,7 @@ test("history keeps the last hour and at most 4000 samples", async () => {
   const dir = mkdtempSync(join(tmpdir(), "model-queue-"));
   const file = join(dir, "queue.json");
   let clock = 0;
-  const queue = new ModelQueue({ slots: 1, file, now: () => clock });
+  const queue = new ModelQueue({ slots: null, file, now: () => clock });
   queue.started("old");
   clock = 10;
   queue.started("older");

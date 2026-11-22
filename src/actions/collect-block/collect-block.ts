@@ -30,6 +30,7 @@ import type { ObserveRequest } from "../../session/request.js";
 import { asVec3 } from "../../utils/index.js";
 import { blockDropsData, ordinaryDrops } from "../../world/block-drops.js";
 import { findLoadedBlockPositions } from "../../world/index.js";
+import { situationReader } from "../../world/target-situation.js";
 import { createDiscardedItems, type DiscardedItems } from "../../world/discarded-items.js";
 import { droppedItemName } from "../../world/item-pickup.js";
 import { useItemAt } from "../../world/item-use.js";
@@ -42,7 +43,7 @@ import { blockMatchesSelector, expectedDropName, inventoryCounts, inventoryGains
 import { createCollectionMovements } from "./collection-movements.js";
 import {
   cellLabel,
-  COLLECT_STALL_MS,
+  COLLECT_STALL_TICKS,
   decimal,
   HIGHLIGHT_COLOURS,
   MAX_EXTRA_BREAKS,
@@ -55,6 +56,7 @@ import {
   type BrokenCell,
   type CollectBlockRequest,
   type CollectBlockResult,
+  type NearestBeyondRange,
 } from "./contract.js";
 
 const sumValues = (record: Record<string, number>): number => Object.values(record).reduce((total, n) => total + n, 0);
@@ -198,9 +200,10 @@ export async function collectBlock(
   request: CollectBlockRequest,
   context: ActionContext,
   discarded: DiscardedItems = createDiscardedItems(),
+  mineRun: typeof mine = mine,
 ): Promise<CollectBlockResult> {
   const lifetime = new AbortController();
-  try { return await beginCollectBlock(bot, navigation, request, discarded, () => {}, lifetime.signal)(context); }
+  try { return await beginCollectBlock(bot, navigation, request, discarded, () => {}, lifetime.signal, mineRun)(context); }
   finally { lifetime.abort("Collection request settled."); }
 }
 
@@ -214,18 +217,24 @@ interface CollectionAttempt {
   readonly inventoryBefore: Record<string, number>;
   readonly start: Vec3;
   readonly broken: MineResult["broken"][number][];
+  /** Broken sources whose drop never appeared, counted over every run of the request (a resume adds to it). */
+  lostDrops: number;
+  /** The mine process; a test passes a fake that reports what a physical run would. */
+  readonly mineRun: typeof mine;
   readonly toolLoss: ReturnType<typeof observeToolTierLoss>;
   /** Net inventory gain of the collectable items since the request began. */
   readonly gained: () => number;
 }
 
-function beginCollectBlock(
+/** Calling the returned function again resumes the request: its attempt (breaks, lost drops, start) is kept. */
+export function beginCollectBlock(
   bot: Bot,
   navigation: NavigationRuntime,
   request: CollectBlockRequest,
   discarded: DiscardedItems,
   observe: ObserveRequest = () => {},
   lifetime?: AbortSignal,
+  mineRun: typeof mine = mine,
 ) {
   const inventoryBefore = inventoryCounts(bot);
   const target = collectionTarget(bot, request);
@@ -233,6 +242,8 @@ function beginCollectBlock(
     bot, navigation, request, discarded, target, inventoryBefore,
     start: bot.entity.position.clone(),
     broken: [],
+    lostDrops: 0,
+    mineRun,
     toolLoss: observeToolTierLoss(bot),
     gained: () => sumValues(inventoryGains(bot, inventoryBefore, target.itemNames)),
   };
@@ -284,7 +295,8 @@ function showTargets(pursued: () => readonly MineTarget[], signal: AbortSignal):
 async function runCollection(attempt: CollectionAttempt, context: ActionContext): Promise<CollectBlockResult> {
   const { bot, navigation, request, target, broken, gained } = attempt;
   const collectable = target.itemNames;
-  const finish = (result: MineResult) => settle(bot, request, attempt.inventoryBefore, collectable, attempt.start, result);
+  const finish = (result: MineResult) =>
+    settle(bot, request, attempt.inventoryBefore, collectable, attempt.start, result, attempt.lostDrops);
   context.signal?.throwIfAborted();
   // A name that is no block and no tag has nothing to find: refuse before any walking, digging or exploring.
   if (!selectorKnown(bot, request.selector)) {
@@ -308,14 +320,15 @@ async function runCollection(attempt: CollectionAttempt, context: ActionContext)
     work: () => `${broken.length}:${gained()}`,
     position: () => bot.entity.position,
     inWater: () => isInWater(bot),
-    stallMs: COLLECT_STALL_MS,
-    describe: ({ seconds, walked }) =>
-      outcomes.stalled(seconds, walked, Math.round(bot.entity.position.distanceTo(attempt.start))),
+    stallTicks: COLLECT_STALL_TICKS,
+    worldAge: () => bot.time.age ?? null,
+    describe: ({ seconds, ticks, walked }) =>
+      outcomes.stalled(seconds, ticks, walked, Math.round(bot.entity.position.distanceTo(attempt.start))),
   });
   const highlights = new AbortController();
   showTargets(() => pursued, highlights.signal);
   try {
-    const result = await mine(bot, mineRequest(attempt, {
+    const result = await attempt.mineRun(bot, mineRequest(attempt, {
       movements, canMine, buildingBlocks,
       signal: AbortSignal.any([...(context.signal ? [context.signal] : []), capacity.signal, stall.signal]),
       onTargets: (targets) => { pursued = targets; },
@@ -378,6 +391,7 @@ function mineRequest(
     ...(request.onToolLoss === "stop" && { stopSignal: toolLoss.signal }),
     onTargets: live.onTargets,
     onBroken: (position) => broken.push(position),
+    onLostDrop: () => { attempt.lostDrops += 1; },
   };
 }
 
@@ -409,12 +423,29 @@ function withinRange(request: CollectBlockRequest, start: Vec3, position: { read
   return request.maxDistance === null || Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z) <= request.maxDistance;
 }
 
-/** The nearest loaded matching block beyond the range, and its horizontal distance from the start. */
-function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3) {
-  const positions = findLoadedBlockPositions(bot, { center: start, stateIds: collectionTarget(bot, request).blockStateIds, limit: 256 });
-  const beyond = positions.find((position) => !withinRange(request, start, position));
-  if (beyond === undefined) return null;
-  return { position: { x: beyond.x, y: beyond.y, z: beyond.z }, distance: Math.round(Math.hypot(beyond.x + 0.5 - start.x, beyond.z + 0.5 - start.z)) };
+/** The scan's limit: how many loaded matches `nearestBeyondRange` looks at. */
+const NEAREST_BEYOND_SCAN_LIMIT = 256;
+
+/**
+ * The nearest loaded matching block beyond the range, its horizontal distance from the start, and how it lies
+ * (`targetSituation`). A nearest one under water or roofed over comes with the nearest beyond the range that is in the
+ * open, when the scan holds one: nothing is hidden, the model is told which one is worth the trip.
+ */
+function nearestBeyondRange(bot: Bot, request: CollectBlockRequest, start: Vec3): NearestBeyondRange | null {
+  const stateIds = collectionTarget(bot, request).blockStateIds;
+  const positions = findLoadedBlockPositions(bot, { center: start, stateIds, limit: NEAREST_BEYOND_SCAN_LIMIT });
+  const beyond = positions.filter((position) => !withinRange(request, start, position));
+  const first = beyond[0];
+  if (first === undefined) return null;
+  const told = (position: Vec3) => ({
+    position: { x: position.x, y: position.y, z: position.z },
+    distance: Math.round(Math.hypot(position.x + 0.5 - start.x, position.z + 0.5 - start.z)),
+  });
+  const situationAt = situationReader(bot, stateIds);
+  const situation = situationAt(first);
+  if (situation === "open") return { ...told(first), situation };
+  const openOne = beyond.slice(1).find((position) => situationAt(position) === "open");
+  return { ...told(first), situation, open: openOne === undefined ? null : told(openOne), capped: positions.length >= NEAREST_BEYOND_SCAN_LIMIT };
 }
 
 /** Why the mine process stopped, in the words of the request that asked for it. */
@@ -426,7 +457,8 @@ function stopReason(bot: Bot, request: CollectBlockRequest, start: Vec3, result:
       if (request.maxDistance !== null) return outcomes.noTargetInRange(request.selector, request.maxDistance, nearestBeyondRange(bot, request, start));
       return outcomes.noLoadedTargets(request.selector);
     case "unreachable":
-      return outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
+      return result.underWater ? outcomes.targetsUnderWater(request.selector, result.reason ?? "")
+        : outcomes.targetsUnreachable(request.selector, result.reason ?? "no route was found");
     case "exhausted":
       return outcomes.dropAttemptsExhausted(result.broken.length, gained, request.requested);
     case "stopped":
@@ -441,6 +473,7 @@ export function settle(
   collectable: ReadonlySet<string>,
   start: Vec3,
   result: MineResult,
+  lostDrops = 0,
 ): CollectBlockResult {
   const gainedByItem = inventoryGains(bot, inventoryBefore, collectable);
   const gained = sumValues(gainedByItem);
@@ -462,7 +495,7 @@ export function settle(
     z: cell.z,
     distanceFromStart: decimal(asVec3(cell).offset(0.5, 0.5, 0.5).distanceTo(start)),
   }));
-  const collected = { requested: request.requested, gained, gainedByItem, blocksBroken: brokenAt.length, brokenAt };
+  const collected = { requested: request.requested, gained, gainedByItem, blocksBroken: brokenAt.length, brokenAt, lostDrops };
   if (status === "succeeded") return { status, collected };
   return {
     status,
@@ -494,6 +527,7 @@ export function formatCollectBlockResult(result: CollectBlockResult): string {
     `- Inventory gained: ${collected.gained}`,
     `- Matching blocks broken: ${collected.blocksBroken}`,
     ...(brokenAt ? [brokenAt] : []),
+    ...(collected.lostDrops ? [`- Expected drops never seen: ${collected.lostDrops}`] : []),
     "- Gains by item:",
     gains || "  - None observed",
   ].join("\n");

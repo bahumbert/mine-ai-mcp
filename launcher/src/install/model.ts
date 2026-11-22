@@ -4,9 +4,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fetchErrorText } from "../fetch-error.ts";
 import type { Manifest } from "../manifest.ts";
+import { modelBytesToPull, realModelStoreDeps, type DiskDeps } from "./disk.ts";
 import { idleWatch, type IdleWatch } from "./idle-watch.ts";
 import { ServeUnavailableError, listModelNames, ollamaServeEnv, realServeDeps, withLatestTag, withOurOllamaServe, type OurServe, type ServeDeps } from "./ollama-serve.ts";
 import { ollamaExeFor } from "./ollama.ts";
+import { failureIfNoRoom, freeSpaceHint, spaceGuardFor } from "./space-guard.ts";
 import { loadInstallState, saveInstallState } from "./state.ts";
 import { failure, type InstallContext, type StepFailure, type StepResult } from "./step.ts";
 
@@ -15,6 +17,10 @@ const NO_OLLAMA_HINT = "Install Ollama first (the Ollama step of the installer),
 
 export interface ModelDeps extends ServeDeps {
   ollamaExe(): string | null;
+  /** The fetch of the model-size read (the registry's manifest); the global one when absent. */
+  registryFetch?: typeof fetch;
+  /** The free-space reads of the guard; the real disk when absent. */
+  disk?: DiskDeps;
 }
 
 /**
@@ -26,11 +32,16 @@ export interface ModelDeps extends ServeDeps {
  * `D:/mine-ai-w5/recheck/h0.txt`).
  */
 export function modelOnDisk(root: string, manifest: Manifest, env: Record<string, string | undefined> = process.env, home: string = homedir()): boolean {
-  const store = ollamaServeEnv(manifest, manifest.ollama.port, loadInstallState(root)).OLLAMA_MODELS ?? env.OLLAMA_MODELS ?? join(home, ".ollama", "models");
-  return existsSync(join(store, "manifests", ...manifestFileParts(manifest.ollama.model)));
+  return existsSync(join(modelStore(root, manifest, env, home), "manifests", ...manifestFileParts(manifest.ollama.model)));
 }
 
-function manifestFileParts(model: string): string[] {
+/** The models folder our serve would use: the recorded store of our own Ollama, else `OLLAMA_MODELS` of `env`, else `<home>/.ollama/models`. */
+export function modelStore(root: string, manifest: Manifest, env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
+  return ollamaServeEnv(manifest, manifest.ollama.port, loadInstallState(root)).OLLAMA_MODELS ?? env.OLLAMA_MODELS ?? join(home, ".ollama", "models");
+}
+
+/** `[host, ...namespace and name, tag]` of a model as the registry and the store's `manifests/` folder spell it (`gemma4:12b` is `registry.ollama.ai/library/gemma4/12b`). */
+export function manifestFileParts(model: string): string[] {
   const separator = model.lastIndexOf(":");
   const slash = model.lastIndexOf("/");
   const [name, tag] = separator > slash ? [model.slice(0, separator), model.slice(separator + 1)] : [model, "latest"];
@@ -57,9 +68,20 @@ async function ensureModel(ctx: InstallContext, serve: OurServe, deps: ModelDeps
     saveInstallState(ctx.root, { ...state, modelPulledByUs: state.modelPulledByUs ?? false });
     return { ok: true, detail: `Model ${tag} is already installed.` };
   }
+  // a reused serve is the player's own Ollama: its store may not be the one measured here
+  const noRoom = serve.reused ? null : await failureIfNoRoomForModel(ctx, tag, deps);
+  if (noRoom !== null) return noRoom;
   // recorded before the pull: a pull cut half way leaves layers that a later uninstall must still clean up
   saveInstallState(ctx.root, { ...loadInstallState(ctx.root), modelPulledByUs: true });
   return await pullModel(ctx, serve, tag, deps);
+}
+
+/** The failure when the model's store cannot hold what the pull would still download (the registry's sizes minus what is there); null when it fits or the size is unknown. */
+async function failureIfNoRoomForModel(ctx: InstallContext, tag: string, deps: ModelDeps): Promise<StepFailure | null> {
+  const store = modelStore(ctx.root, ctx.manifest);
+  const bytes = await modelBytesToPull(manifestFileParts(tag), store, { ...realModelStoreDeps, fetchImpl: deps.registryFetch ?? fetch });
+  const guard = spaceGuardFor(ctx, deps.disk, freeSpaceHint(), (pullBytes) => [{ what: `the model ${tag}`, folder: store, bytes: pullBytes }]);
+  return bytes === null ? null : await failureIfNoRoom(guard, bytes);
 }
 
 /**

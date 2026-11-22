@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
+import { monotonicNow } from "../clocks.ts";
 import { DownloadError, downloadFailureHint, downloadVerified } from "./download.ts";
 
 const payload = Buffer.from("the bytes of a pinned download ".repeat(5000));
@@ -188,9 +189,9 @@ test("a connection that stalls mid-body is cut after the idle timeout, keeps its
   const host = serve({ supportsRange: true, stallAfter: half });
   const dest = scratch();
   try {
-    const started = Date.now();
+    const started = monotonicNow();
     await assert.rejects(downloadVerified(host.url, dest, { sha256 }, undefined, fetch, 300), (error: unknown) => error instanceof DownloadError && error.kind === "stalled");
-    assert.ok(Date.now() - started < 3_000, "the idle timeout fires");
+    assert.ok(monotonicNow() - started < 3_000, "the idle timeout fires");
     assert.equal(statSync(`${dest}.part`).size, half);
     await downloadVerified(host.url, dest, { sha256 }, undefined, fetch, 300);
     assert.deepEqual(readFileSync(dest), payload);
@@ -262,4 +263,85 @@ test("a body cut by the network names the file and the host too, and keeps the .
   }) as unknown as typeof fetch;
   await assert.rejects(downloadVerified("https://ollama.com/download/OllamaSetup.exe", dest, { sha256 }, undefined, failing), /OllamaSetup\.exe.*ollama\.com.*connection reset/su);
   assert.equal(statSync(`${dest}.part`).size, 500);
+});
+
+/** A fetch answering 200 with `payload` as a stream; `cancelled()` says whether the caller cancelled the body, `contentLength: false` sends none (chunked). */
+function streamedPayload(options: { contentLength?: boolean } = {}): { fetchImpl: typeof fetch; cancelled(): boolean } {
+  let cancelled = false;
+  const fetchImpl = (async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(payload);
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    return new Response(stream, { status: 200, headers: options.contentLength === false ? {} : { "content-length": String(payload.length) } });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, cancelled: () => cancelled };
+}
+
+test("beforeBody gets the whole file's size and where the body starts (0, or the bytes a resumed .part holds), before a byte of a fresh download is written", async () => {
+  for (const [resumeFrom, startsAt] of [[0, 0], [1000, 1000]]) {
+    const host = serve({ supportsRange: true });
+    const dest = scratch();
+    if (resumeFrom > 0) writeFileSync(`${dest}.part`, payload.subarray(0, resumeFrom));
+    const calls: [number, number][] = [];
+    try {
+      await downloadVerified(host.url, dest, { sha256 }, undefined, undefined, undefined, {
+        beforeBody: (total, from) => {
+          calls.push([total, from]);
+          if (resumeFrom === 0) assert.equal(existsSync(`${dest}.part`), false, "nothing written yet");
+        },
+      });
+      assert.deepEqual(calls, [[payload.length, startsAt]]);
+      assert.deepEqual(readFileSync(dest), payload);
+    } finally {
+      host.stop();
+    }
+  }
+});
+
+test("a beforeBody that throws cancels the body, writes nothing, keeps the .part as it was and passes its error on", async () => {
+  const dest = scratch();
+  writeFileSync(`${dest}.part`, "earlier part");
+  const { fetchImpl, cancelled } = streamedPayload();
+  const stop = new Error("not enough space");
+  await assert.rejects(
+    downloadVerified("https://example.test/file", dest, { sha256 }, undefined, fetchImpl, undefined, { beforeBody: async () => { throw stop; } }),
+    (error: unknown) => error === stop,
+  );
+  assert.equal(cancelled(), true);
+  assert.equal(readFileSync(`${dest}.part`, "utf8"), "earlier part");
+  assert.equal(existsSync(dest), false);
+});
+
+test("a beforeBody error reaches the step even when the body had already failed: the player reads the disk text, not the network's", async () => {
+  let body!: ReadableStreamDefaultController;
+  const failedBody = (async () => new Response(new ReadableStream({ start: (controller) => void (body = controller) }), { status: 200, headers: { "content-length": String(payload.length) } })) as unknown as typeof fetch;
+  const stop = new Error("not enough space");
+  await assert.rejects(
+    downloadVerified("https://example.test/file", scratch(), { sha256 }, undefined, failedBody, undefined, { beforeBody: async () => { body.error(new Error("connection reset")); throw stop; } }),
+    (error: unknown) => error === stop,
+  );
+});
+
+test("a download with no Content-Length does not call beforeBody and goes on", async () => {
+  const dest = scratch();
+  const { fetchImpl } = streamedPayload({ contentLength: false });
+  let called = false;
+  await downloadVerified("https://example.test/file", dest, { sha256 }, undefined, fetchImpl, undefined, { beforeBody: () => void (called = true) });
+  assert.equal(called, false);
+  assert.deepEqual(readFileSync(dest), payload);
+});
+
+test("a dest that already has the right hash makes no request and does not call beforeBody", async () => {
+  const dest = scratch();
+  writeFileSync(dest, payload);
+  let called = false;
+  const neverCalled = (async () => { throw new Error("no request expected"); }) as unknown as typeof fetch;
+  await downloadVerified("https://example.test/file", dest, { sha256 }, undefined, neverCalled, undefined, { beforeBody: () => void (called = true) });
+  assert.equal(called, false);
 });

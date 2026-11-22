@@ -1,6 +1,8 @@
 import type { Bot } from "mineflayer";
 import { z } from "zod";
 import type { IncidentRecorder } from "./incident-recorder.js";
+import { observeBoatPackets } from "./boat-packets.js";
+import { observeItemUseAssignments } from "./item-use-assignments.js";
 
 const rotation = z.object({ yaw: z.number(), pitch: z.number() });
 const outgoing: Record<string, z.ZodType> = {
@@ -11,6 +13,8 @@ const outgoing: Record<string, z.ZodType> = {
   held_item_slot: z.object({ slotId: z.number() }),
   arm_animation: z.object({ hand: z.number() }),
   entity_action: z.object({ entityId: z.number(), actionId: z.number() }),
+  use_entity: z.object({ target: z.number(), mouse: z.number(), sneaking: z.boolean().optional() }),
+  vehicle_move: rotation.extend({ x: z.number(), y: z.number(), z: z.number() }),
 };
 
 /** Observe protocol writes, never change them. A returned write is not server acknowledgement. */
@@ -24,31 +28,13 @@ export function observeCombatPackets(bot: Bot, recorder: IncidentRecorder, flags
   const record = (direction: "outgoing" | "incoming", packet: string, fields: unknown, outcome?: string) => {
     const atMs = Date.now();
     const entry = { atMs, order: ++order, packet, fields };
-    recorder.record("packet", { direction, order: entry.order, packet, fields, ...(outcome ? { outcome } : {}) }, atMs);
+    const target = direction === "outgoing" && packet === "use_entity" ? boats.target(fields) : undefined;
+    recorder.record("packet", { direction, order: entry.order, packet, fields, ...(target ? { target } : {}), ...(outcome ? { outcome } : {}) }, atMs);
     return entry;
   };
   const client = bot._client;
-  // Observe the assignment itself: an event listener runs too late to identify
-  // which Mineflayer callback cleared the flag. Preserve its data-property semantics.
-  const descriptor = Object.getOwnPropertyDescriptor(bot, "usingHeldItem");
-  let using = bot.usingHeldItem;
-  const getUsing = () => using;
-  const setUsing = (value: boolean) => {
-    const before = using;
-    using = value;
-    if (active && before !== value) record("incoming", "item_use_transition", {
-      before, after: value, origin: "local_assignment",
-      stack: new Error().stack?.split("\n").slice(2, 9),
-      mainHand: bot.heldItem?.name ?? null, offHand: bot.inventory?.slots?.[45]?.name ?? null,
-    });
-  };
-  if (descriptor?.configurable && "value" in descriptor && descriptor.writable)
-    Object.defineProperty(bot, "usingHeldItem", { configurable: true, enumerable: descriptor.enumerable, get: getUsing, set: setUsing });
-  const heldChanged = () => { record("incoming", "held_item_changed", {
-    mainHand: bot.heldItem?.name ?? null, count: bot.heldItem?.count ?? null,
-    offHand: bot.inventory?.slots?.[45]?.name ?? null, usingHeldItem: bot.usingHeldItem,
-  }); };
-  bot.on("heldItemChanged", heldChanged);
+  const boats = observeBoatPackets(bot, record);
+  const assignments = observeItemUseAssignments(bot, record);
   const originalWrite = client.write;
   const write: typeof client.write = function (this: typeof client, name, params) {
     if (!active) return originalWrite.call(this, name, params);
@@ -106,10 +92,9 @@ export function observeCombatPackets(bot: Bot, recorder: IncidentRecorder, flags
       serverBlockingConfirmed: false,
     }),
     [Symbol.dispose]() {
+      boats[Symbol.dispose]();
+      assignments[Symbol.dispose]();
       active = false;
-      if (Object.getOwnPropertyDescriptor(bot, "usingHeldItem")?.get === getUsing)
-        Object.defineProperty(bot, "usingHeldItem", { ...descriptor, value: using });
-      bot.off("heldItemChanged", heldChanged);
       if (client.write === write) client.write = originalWrite;
       client.off("entity_metadata", metadata);
       client.off("entity_status", status);

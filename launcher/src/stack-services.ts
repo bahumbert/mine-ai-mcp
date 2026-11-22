@@ -2,9 +2,11 @@
 import { join } from "node:path";
 import { fetchErrorText } from "./fetch-error.ts";
 import { javaPath } from "./install/java.ts";
+import { serverJarName } from "./install/server.ts";
 import { ollamaServeEnv } from "./install/ollama-serve.ts";
 import { loadInstallState } from "./install/state.ts";
 import { runnersLeftBy, type StopResult } from "./processes.ts";
+import type { ServerProgram } from "./settings.ts";
 import { isStopRequested, logFile, waitUntilReady, type StackState } from "./stack-state.ts";
 
 /** The remote check is one ping and one login; a server that needs longer is not one to start bots against. */
@@ -15,7 +17,7 @@ const SERVER_START_HEAP = "-Xms1G";
 const STOPPED_WHILE_STARTING = "Stopped while Mine AI was starting.";
 const SERVER_LOG_LINES_IN_PROBLEM = 3;
 const OLLAMA_STOP_TIMEOUT_MS = 10_000;
-/** Vanilla prints `Done (3.2s)! For help, type "help"` when the world is loaded and players can join. */
+/** Both programs print `Done (3.2s)! For help, type "help"` when the world is loaded and players can join (Paper's stdout form: `[hh:mm:ss INFO]: Done (...`; facts `paper-server.md` part A). */
 const SERVER_READY_LINE = /\bDone \(/u;
 
 /** The remote server must answer, run the right version and have online-mode off; otherwise the problem line and no bot. */
@@ -99,20 +101,45 @@ async function warmModel(state: StackState): Promise<string | null> {
   return `Ollama could not load the model ${model} (HTTP ${answer.status}: ${body}). If it is missing, run \`mine-ai install model\`.`;
 }
 
-/** The Minecraft server in `<root>/server`, ready when it prints its `Done (` line. Returns the problem line, or null. */
+/** The problem line when the jar of the chosen program is not in the server folder, else null. */
+function missingServerJar(state: StackState, dir: string, jarName: string, program: ServerProgram): string | null {
+  if (state.deps.fileExists(join(dir, jarName))) return null;
+  return `${program === "paper" ? "The Paper server" : "The Minecraft server"} is not installed (${jarName} is missing from ${dir}). Run \`mine-ai install server --accept-eula\`.`;
+}
+
+/**
+ * Merges the app's Paper settings into the config files of `dir` before the start (the install did it once; a first play or
+ * a hand edit may have changed them since). Returns the problem line, or null.
+ */
+async function applyPaperSettingsBeforeStart(state: StackState, dir: string): Promise<string | null> {
+  try {
+    await state.deps.applyPaperSettings(dir);
+    return null;
+  } catch (error) {
+    return `The Paper server was not started: its settings could not be applied (${error instanceof Error ? error.message : String(error)}). Fix the file the message names, or reinstall Mine AI when it is its own packaging/paper-settings.json, then start again.`;
+  }
+}
+
+/** The Minecraft server (vanilla or Paper, as `settings.server.program` says) in `<root>/server`, ready when it prints its `Done (` line. Returns the problem line, or null. */
 export async function startLocalServer(state: StackState): Promise<string | null> {
   const { settings, manifest, deps, root } = state;
   if (settings.server.kind !== "local") return null;
   const java = javaPath(root);
   const dir = join(root, "server");
+  const { program } = settings.server;
+  const jarName = serverJarName(manifest, program);
   if (!deps.fileExists(java)) return "Java is not installed. Run `mine-ai install java`.";
-  if (!deps.fileExists(join(dir, "server.jar"))) return "The Minecraft server is not installed. Run `mine-ai install server --accept-eula`.";
+  const missing = missingServerJar(state, dir, jarName, program);
+  if (missing !== null) return missing;
+  // Only Paper awaits here: a vanilla start keeps its timing, which the stop of a launcher without a console races.
+  const settingsProblem = program === "paper" ? await applyPaperSettingsBeforeStart(state, dir) : null;
+  if (settingsProblem !== null) return settingsProblem;
   if (isStopRequested(state)) return STOPPED_WHILE_STARTING;
   let ready = false;
   const lastLines: string[] = [];
   const log = logFile(state, "server");
   deps.say("Starting the Minecraft server...");
-  const child = state.children.spawn("server", java, [SERVER_START_HEAP, `-Xmx${settings.server.memoryMb}M`, "-jar", "server.jar", "nogui"], {
+  const child = state.children.spawn("server", java, [SERVER_START_HEAP, `-Xmx${settings.server.memoryMb}M`, "-jar", jarName, "nogui"], {
     env: {},
     cwd: dir,
     logFile: log,

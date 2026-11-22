@@ -1,11 +1,15 @@
 /** A contract check's fixture built on the shared fake bot, in the lane a frame names: what `bot-contract.test.ts` and the tests of one check's edge cases run on. */
 import { Vec3 } from "vec3";
+import { installNativeDigClock } from "../../../src/navigation/index.ts";
 import { type FakeEntitySpec, type FakeServerOptions, createFakeBot, createFakeClock } from "../../../src/test-support/fake-bot/index.ts";
 import type { ArenaFrame } from "../arena/frame.ts";
 import type { ContractFixture } from "./checks.ts";
 
 /** Entity ids the fixture's entities get on the fake (the bot is 1). */
 const FIRST_FIXTURE_ENTITY_ID = 100;
+
+/** The fake's world spawn is this far east of the fixture's feet: the real one is never where a check's bot stands except in lane 0, which dies inside the spawn area (spawn plus or minus 10; 512 blocks from a lane's start in lanes 1 and up; contract check `respawn-after-death`). */
+const WORLD_SPAWN_AWAY_BLOCKS = 8;
 
 /** Server ticks between the seat's `position` packet and the passenger list of a mount (`FakeServerOptions.seatPositionLeadTicks`): the gap one red of a loaded server showed, not measured on a server on time. */
 const SEAT_POSITION_LEAD_TICKS = 2;
@@ -23,9 +27,10 @@ export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, serv
   /** A fixture map keyed by `"x,y,z"` (cells, containers), keyed by the lane's cells. */
   const inLane = <T>(byCell: Readonly<Record<string, T>> | undefined) =>
     byCell && Object.fromEntries(Object.entries(byCell).map(([key, value]) => [frame.world(key.split(",").map(Number) as [number, number, number]).join(","), value]));
-  return createFakeBot({
+  const harness = createFakeBot({
     clock: createFakeClock({ mode: "mocked" }),
     position: point(fixture.position),
+    spawn: point(fixture.position).offset(WORLD_SPAWN_AWAY_BLOCKS, 0, 0),
     cells: inLane(fixture.cells),
     carried: fixture.carried,
     containers: inLane(fixture.containers),
@@ -34,4 +39,6 @@ export function fakeHarnessFor(fixture: ContractFixture, frame: ArenaFrame, serv
     simulatePhysics,
     server: { timeOfDay: fixture.timeOfDay, weather: fixture.weather, ticksPerSecond: fixture.tickRate, seatPositionLeadTicks: SEAT_POSITION_LEAD_TICKS, ...server },
   });
+  installNativeDigClock(harness.bot);
+  return harness;
 }

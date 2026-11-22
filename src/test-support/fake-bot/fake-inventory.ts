@@ -56,6 +56,8 @@ export interface FakeInventoryControls {
   onQuickBarSlotChanged(listener: (slot: number) => void): () => void;
   /** Empty the stack's slot; returns what left the window. */
   tossStack(item: Item): TossedStack[];
+  /** Every slot emptied (hands, armour, off hand, bags), each announced: the clear a death sends without keepInventory. */
+  clearAll(): void;
 }
 
 export type FakeInventory = Bot["inventory"] & FakeInventoryControls;
@@ -188,6 +190,11 @@ export function createFakeInventory(registry: Registry, options: FakeInventoryOp
     },
     toss: (type, count) => tossFromWindow(window, registry, type, count),
     tossStack: (item) => [takeFromSlot(window, registry, item.slot, item.count)],
+    clearAll() {
+      window.slots.forEach((stack, slot) => {
+        if (stack !== null && stack !== undefined) window.updateSlot(slot, null);
+      });
+    },
   };
   return Object.defineProperties(window, Object.getOwnPropertyDescriptors(controls)) as unknown as FakeInventory;
 }

@@ -7,6 +7,10 @@ import { ACTIVITIES, NEUTRAL_ACTIVITIES } from "./activities.ts";
 export const STANCES = ["companion", "neutral", "rival"] as const;
 export type Stance = (typeof STANCES)[number];
 
+/** how much risk the character takes, low to high; shown to the model as a fact in a situation event (spec 2026-11-15-p4-18 D7), never turned into a sentence. */
+export const BOLDNESS = ["cautious", "steady", "bold"] as const;
+export type Boldness = (typeof BOLDNESS)[number];
+
 /** How a character feels about activities, strongest liking first (ADR-015). */
 export const FEELINGS = ["loves", "likes", "dislikes", "hates"] as const;
 export type Feeling = (typeof FEELINGS)[number];
@@ -48,6 +52,7 @@ export const personaSchema = z.strictObject({
   stance: z.enum(STANCES),
   description: z.string().trim().min(1).max(1_000),
   traits: z.array(z.string().trim().min(1).max(40)).max(8).default([]),
+  boldness: z.enum(BOLDNESS).default("steady"),
   voice: z.string().trim().min(1).max(400),
   /** What it prefers and avoids doing; none: it feels the same about everything. */
   preferences: preferencesSchema.optional(),
@@ -65,6 +70,7 @@ export const personaSchema = z.strictObject({
   skills: z.array(z.enum(SKILL_NAMES)).min(1).optional(),
   /** Preferences as settings, not code paths (ADR-011). */
   settings: z.strictObject({
+    signLineChars: z.number().int().min(5).max(45).default(15),
     /** Model calls per minute for its own goal; orders and chat are never held back. */
     goalCallsPerMinute: z.number().int().min(1).max(120).default(6),
     /** Steps one objective may take before the character gives it up. */
@@ -100,11 +106,10 @@ export const personaSchema = z.strictObject({
     }).prefault({}),
     /** Players never dig the block under their feet: routes then descend by staircase (runtime survival policy). */
     digStraightDown: z.boolean().default(false),
-    /**
-     * TEMPORARY (owner, 2026-10-07, until real night awareness): at night, unless on an order, it digs a roofed hole
-     * and waits there for the day (brain/src/night-shelter.ts).
-     */
-    shelterAtNight: z.boolean().default(true),
+    /** Ignored since P4-18 (spec D7), as `maxStepMinutes`; persona files that still carry it parse. */
+    shelterAtNight: z.boolean().optional(),
+    /** Health below which a situation asks the model; otherwise the runtime's critical_health applies (P4-18 D1). */
+    lowHealthAt: z.number().min(1).max(19).optional(),
     /**
      * How strongly each feeling pulls when it picks its own objective (spec 2026-10-09-activity-draw): the chance of an
      * activity is its feeling's multiplier over the sum of them all. A character may be more or less driven by its

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EventEmitter } from "node:events";
+import { EventEmitter, getEventListeners } from "node:events";
 import type { Bot } from "mineflayer";
 import { blockClass, observeMineflayerBlock } from "../navigation/mineflayer/world.js";
 import { UNLOADED } from "../navigation/world/world.js";
@@ -8,7 +8,23 @@ import { Vec3 } from "vec3";
 import { MemoryWorld } from "../navigation/world/memory-world.js";
 import { type FakeBotOptions, type FakeClock, createFakeBot, createFakeClock, flush, itemOf } from "../test-support/fake-bot/index.js";
 import { decideFootingResponse } from "../survival/policy/environment.js";
-import { bucketAvailable, bucketDropTotals, predictWaterLanding, saveWaterLanding, waterLandingActive, waterableLanding } from "../navigation/mineflayer/water-landing.js";
+import { bucketAvailable, bucketDropTotals, placeWaterInto, predictWaterLanding, saveWaterLanding, waterLandingActive, waterableLanding } from "../navigation/mineflayer/water-landing.js";
+
+test("a water pour cancelled during aim releases its wait and cannot issue after aim finishes", async () => {
+  const { bot } = createFakeBot({ carried: { water_bucket: 1 } });
+  let finishAim!: () => void;
+  bot.lookAt = () => new Promise<void>(resolve => { finishAim = resolve; });
+  const abort = new AbortController();
+  const result = placeWaterInto(bot, bot.entity.position.floored(), abort.signal).then(() => null, error => error);
+  await flush();
+  abort.abort(new Error("cancel aim"));
+  assert.match((await result).message, /cancel aim/);
+  assert.equal(getEventListeners(abort.signal, "abort").length, 0, "cancelled ownership must release its listener even if aim never answers");
+  finishAim();
+  await flush();
+  assert.equal(bot.inventory.items().find(item => item.name === "water_bucket")?.count, 1);
+  assert.equal(bot.blockAt(bot.entity.position.floored())?.name, "air");
+});
 function floor(y: number) {
   const world = new MemoryWorld();
   for (let x = -3; x <= 40; x++)

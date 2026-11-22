@@ -7,7 +7,7 @@ import { acquireLauncherLock, releaseLauncherLock, setLockControlPort, startCont
 import { attachKillOnClose } from "./job-object.ts";
 import type { Manifest } from "./manifest.ts";
 import { Children, cleanupStale, type StaleReport } from "./processes.ts";
-import { loadSettings, type Settings } from "./settings.ts";
+import { clearKeyMigrationLine, loadSettings, realSettingsOptions, saveSettings, settingsPath, type Settings, type SettingsOptions } from "./settings.ts";
 import { bringUpStack, createStack, describeStack, realStackDeps, startBot, stopBot, stopStack, type ChildRunner, type StackDeps, type StackState } from "./stack.ts";
 import { checkUpdate, type AvailableUpdate } from "./update-check.ts";
 
@@ -33,6 +33,8 @@ export interface StartDeps {
   sleep(ms: number): Promise<void>;
   /** Calls `handler` with the signal's name on SIGINT, SIGTERM, SIGBREAK or SIGHUP; returns the function that removes the listeners. */
   onSignal(handler: (signal: string) => void): () => void;
+  /** How the API key is protected on this system (DPAPI on Windows); tests pass a fake Windows. */
+  settings: SettingsOptions;
 }
 
 /** What the first stop line says for each signal. A signal not listed is named as it is. */
@@ -59,6 +61,7 @@ export function realStartDeps(): StartDeps {
       for (const [signal, listener] of listeners) process.on(signal, listener);
       return () => listeners.forEach(([signal, listener]) => process.off(signal, listener));
     },
+    settings: realSettingsOptions(),
   };
 }
 
@@ -95,7 +98,7 @@ export async function runStartCommand(context: CliContext, deps: StartDeps = rea
   const manifest = context.loadManifest();
   let settings: Settings;
   try {
-    settings = loadSettings(context.root, manifest);
+    settings = loadSettings(context.root, manifest, deps.settings);
   } catch (error) {
     context.err((error as Error).message);
     return 1;
@@ -124,6 +127,7 @@ async function runLauncher(context: CliContext, manifest: Manifest, settings: Se
   describeLeftovers(await deps.cleanupStale(context.root)).forEach(say);
   const warning = deps.guardChildren();
   if (warning) say(`Warning: ${warning}. If Mine AI is killed from Task Manager, its bots, server and Ollama are not ended with it: end them by hand.`);
+  encryptClearKey(context.root, settings, deps.settings, say);
   const stack = createStack(settings, manifest, deps.createChildren(context.root), context.root, deps.stackDeps(say, context.root));
   let finish: () => void = () => {};
   const finished = new Promise<void>((resolve) => (finish = resolve));
@@ -138,6 +142,21 @@ async function runLauncher(context: CliContext, manifest: Manifest, settings: Se
   removeSignalHandler();
   await control.close();
   return stack.problem === null ? 0 : 1;
+}
+
+/**
+ * A key that settings.json holds in clear on Windows is saved encrypted before the stack starts, and the player is told
+ * once (owner rule: an automatic change is said). A save that fails is said too and the start goes on with the key read.
+ */
+function encryptClearKey(root: string, settings: Settings, options: SettingsOptions, say: (line: string) => void): void {
+  try {
+    const line = clearKeyMigrationLine(root, settings);
+    if (line === null) return;
+    saveSettings(root, settings, options);
+    say(line);
+  } catch (error) {
+    say(`Could not encrypt the API key in ${settingsPath(root)}: ${(error as Error).message}. It stays in the file as it was and Mine AI starts with it. Start Mine AI again to retry, or enter the key again with mine-ai configure --llm-remote <url> <key> <model>.`);
+  }
 }
 
 /** A launcher the console started has no stop trigger until a console attaches: without one it would run headless for good. */

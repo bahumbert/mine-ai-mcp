@@ -20,3 +20,12 @@ test("chest clearance distinguishes deepslate from transparent and partial block
     assert.equal(chestOpeningObstruction(bot, "barrel", at), null);
   }
 });
+
+test("under deepslate, the chest block family (chest, trapped, ender) is blocked and a shulker box or hopper is not", () => {
+  const at = new Vec3(-115, -50, 9);
+  const { bot } = createFakeBot({ position: at.offset(0.5, 0, 0.5), cells: { "-115,-49,9": "deepslate" } });
+  for (const name of ["chest", "trapped_chest", "ender_chest"]) {
+    assert.match(chestOpeningObstruction(bot, name, at) ?? "", new RegExp(`CHEST_BLOCKED.*${name}`));
+  }
+  for (const name of ["shulker_box", "hopper"]) assert.equal(chestOpeningObstruction(bot, name, at), null);
+});

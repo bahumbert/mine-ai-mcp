@@ -29,6 +29,8 @@ export interface SeaOptions {
   /** A block in the air over the water from this z on, which a boat on the water runs into: the server puts the boat back. */
   readonly barrierFromZ?: number;
   readonly lagMs?: number;
+  /** Server tick rate; defaults to 20. */
+  readonly ticksPerSecond?: number;
   /** Move the body by Mineflayer's physics (she swims after a boat's item). */
   readonly physics?: boolean;
   /** Entities in view from the start, by id (a boat to sit in, a threat). */
@@ -65,6 +67,7 @@ export function seaHarness(options: SeaOptions = {}): FakeHarness {
     cells: seaCells(options),
     carried,
     lagMs: options.lagMs,
+    server: { ticksPerSecond: options.ticksPerSecond },
     entities: options.entities,
     simulatePhysics: options.physics,
   });
@@ -120,6 +123,8 @@ export interface ShoreOptions {
   readonly waterDepth?: number;
   /** Cells written after the sea, `"x,y,z"` to the block (a carpet on the land, a cell not loaded). */
   readonly cells?: Readonly<Record<string, FakeCell>>;
+  /** The fake server's own settings (`ticksPerSecond`: a server behind its schedule). */
+  readonly server?: FakeBotOptions["server"];
 }
 
 /** Land (stone up to y 62) with a sea from x 10 to 40 (water y 50 to 62), 17 rows wide along z (deep water is read with room to the sides): what the shore-reading functions look along. */
@@ -137,6 +142,7 @@ export function shoreSea(options: ShoreOptions = {}): FakeHarness {
     carried: options.carried,
     entities: options.boat === undefined ? undefined : { [SEATED_BOAT_ID]: { name: "oak_boat", position: options.boat } },
     simulatePhysics: options.physics,
+    server: options.server,
   });
 }
 

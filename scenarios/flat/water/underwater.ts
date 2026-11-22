@@ -2,6 +2,7 @@ import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
 import { airSupplyTicks } from "../../../src/world/air-supply.ts";
+import { waitServerTicks } from "../../../tests/minecraft/drivers/server-ticks.ts";
 
 const paramsSchema = z.object({
   legs: z.array(z.tuple([z.number(), z.number(), z.number()])).default([]),
@@ -61,6 +62,49 @@ interface Observed {
   readonly reflexTick: number | null; readonly requestsOverTick: number;
 }
 
+interface LegObservation {
+  events: Record<string, number>;
+  leg: number | null;
+  completed: number;
+  heldDepth: number | null;
+  firstReflex: { leg: number | string; air: number | null; position: { x: number; y: number; z: number }; events: Record<string, number> } | null;
+  firstLegReflex: LegObservation["firstReflex"];
+}
+
+/** Reports a reflex that took the body during the breathing stop's first leg. */
+function breathingReflexFailure(seen: LegObservation): string | null {
+  const reflex = seen.firstLegReflex;
+  return reflex ? `Breathing stop failed: breath reflex took over during leg ${reflex.leg} at air ${reflex.air}, position ${reflex.position.x},${reflex.position.y},${reflex.position.z}` : null;
+}
+
+/** Runs each navigation leg and judges the breathing stop in its own proof window. */
+async function runLegs(runtime: Runtime, bot: Bot, params: Params, signal: AbortSignal, cancel: AbortController,
+  seen: LegObservation, log: (line: string) => void): Promise<string | null> {
+  for (const [index, [x, y, z]] of params.legs.entries()) {
+    seen.heldDepth = params.holdDepth && bot.entity.position.floored().y === y ? y + 0.2 : null;
+    seen.leg = index + 1;
+    const action = runtime.actions.find((action) => action.name === "navigate")!;
+    const output = await runtime.run(action, { x, y, z, range: 0.1, dig: false, scaffold: false }, AbortSignal.any([signal, cancel.signal]));
+    seen.leg = null;
+    seen.completed = index + 1;
+    log(JSON.stringify(output));
+    if (params.breathing && index === 0) {
+      const failure = breathingReflexFailure(seen);
+      if (failure) return failure;
+    }
+    if (params.reject || params.cancel) {
+      const mismatch = refusalMismatch(output.result, params.refusal);
+      if (mismatch) return mismatch;
+    } else if (output.result.status !== "succeeded" || bot.entity.position.floored().x !== x ||
+      bot.entity.position.floored().y !== y || bot.entity.position.floored().z !== z)
+      return `Arrival at ${x},${y},${z} failed: ${JSON.stringify(output)}`;
+    if (params.breathing && index === 0 && !seen.events.breathing)
+      return `Breathing stop never fired (air ${airSupplyTicks(bot)}, leg ${index + 1})`;
+    seen.heldDepth = null;
+  }
+  return null;
+}
+
 /** Why the case-specific behaviour was not proved, or null. */
 function caseFailure(params: Params, seen: Observed): string | null {
   if (params.minYAbove !== undefined && seen.minY <= params.minYAbove)
@@ -83,16 +127,17 @@ function fillRoof(bot: Bot, roof: NonNullable<Params["roof"]>, block: string, re
 /** Whether the server reports a full breath, or reports none and the eyes are in air. */
 const hasFullBreath = (bot: Bot) => airSupplyTicks(bot) === 300 || (airSupplyTicks(bot) === null && bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name === "air");
 
-/** Waits up to `ticks` game ticks for a body still under water, or short of air, to come back to full air. */
-async function waitForFullAir(bot: Bot, ticks: number): Promise<void> {
-  for (let waited = 0; waited < ticks && ((airSupplyTicks(bot) ?? 300) < 300 ||
-    bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name === "water"); waited++) await bot.waitForTicks(1);
+/** Waits for dry eyes and full air within the server-tick budget and its stale-packet allowance. */
+export async function waitForFullAir(bot: Bot, ticks: number, signal: AbortSignal): Promise<"settled" | "budget-exhausted" | "stalled" | "timeout"> {
+  const result = await waitServerTicks(bot, ticks, { signal, until: () => (airSupplyTicks(bot) ?? 300) >= 300 &&
+    bot.blockAt(bot.entity.position.offset(0, 1.62, 0))?.name !== "water" });
+  return result === "until" ? "settled" : result === "moved" ? "budget-exhausted" : result;
 }
 
-export const run: MineAiScenario = async (context) => {
+export const run = async (context: Parameters<MineAiScenario>[0], opener: typeof openRuntime = openRuntime): ReturnType<MineAiScenario> => {
   const { bot, log, signal } = context;
   const params = paramsSchema.parse(context.scenario.params);
-  const runtime = await openRuntime(context, context.scenario.name ?? "underwater");
+  const runtime = await opener(context, context.scenario.name ?? "underwater");
   const cancel = new AbortController();
   const events: Record<string, number> = {};
   let tick = 0;
@@ -102,17 +147,26 @@ export const run: MineAiScenario = async (context) => {
   let reflexSeen = false;
   let reflexTick: number | null = null;
   let changedAtDepth = 0;
-  let heldDepth: number | null = null;
+  const legs: LegObservation = { events, leg: null, completed: 0, heldDepth: null, firstReflex: null, firstLegReflex: null };
   let maxDepthError = 0;
   let obstruction: { x: number; y: number; z: number } | null = null;
   const observe = () => {
     minAir = Math.min(minAir, airSupplyTicks(bot) ?? 300);
     minY = Math.min(minY, bot.entity.position.y);
-    if (heldDepth !== null) maxDepthError = Math.max(maxDepthError, Math.abs(bot.entity.position.y - heldDepth));
+    if (legs.heldDepth !== null) maxDepthError = Math.max(maxDepthError, Math.abs(bot.entity.position.y - legs.heldDepth));
+    if (runtime.status().survival.owner.current === "breath_reflex") {
+      const position = bot.entity.position;
+      const reflex = { leg: legs.leg ?? `between legs ${legs.completed} and ${legs.completed + 1}`,
+        air: airSupplyTicks(bot), position: { x: position.x, y: position.y, z: position.z }, events: { ...events } };
+      if (!legs.firstReflex) {
+        legs.firstReflex = reflex;
+        log(JSON.stringify({ firstBreathReflex: reflex.position, leg: reflex.leg, air: reflex.air, events: reflex.events }));
+      }
+      if (legs.leg === 1 && !legs.firstLegReflex) legs.firstLegReflex = reflex;
+    }
     if (!reflexSeen && runtime.status().survival.owner.current === "breath_reflex") {
       reflexSeen = true;
       reflexTick = tick;
-      log(JSON.stringify({ firstBreathReflex: bot.entity.position, air: airSupplyTicks(bot), events }));
     }
     if (!injected && bot.entity.position.y < -58.5 && (params.replan || params.backstop)) {
       const at = params.backstop ? bot.entity.position.floored().offset(0, 3, 0) : obstruction;
@@ -143,24 +197,14 @@ export const run: MineAiScenario = async (context) => {
   try {
     const collected = params.collect === undefined ? null : await collectSand(runtime, bot, params, params.collect, signal, log);
     if (collected) return { status: "failed", detail: collected };
-    for (const [x, y, z] of params.legs) {
-      heldDepth = params.holdDepth && bot.entity.position.floored().y === y ? y + 0.2 : null;
-      const action = runtime.actions.find((action) => action.name === "navigate")!;
-      const output = await runtime.run(action, { x, y, z, range: 0.1, dig: false, scaffold: false }, AbortSignal.any([signal, cancel.signal]));
-      log(JSON.stringify(output));
-      if (params.reject || params.cancel) {
-        const mismatch = refusalMismatch(output.result, params.refusal);
-        if (mismatch) return { status: "failed", detail: mismatch };
-      } else if (output.result.status !== "succeeded" || bot.entity.position.floored().x !== x ||
-        bot.entity.position.floored().y !== y || bot.entity.position.floored().z !== z)
-        return { status: "failed", detail: `Arrival at ${x},${y},${z} failed: ${JSON.stringify(output)}` };
-      heldDepth = null;
-    }
+    const legFailure = await runLegs(runtime, bot, params, signal, cancel, legs, log);
+    if (legFailure) return { status: "failed", detail: legFailure };
     const requestsOverTick = tick;
     // Keep the real runtime alive to observe the action-to-idle survival handoff.
     // The backstop's body rests under a closed column: the breath reflex has a longer bound to take it to air.
-    await waitForFullAir(bot, params.backstop ? BACKSTOP_TAKEOVER_TICKS : SETTLE_TICKS);
-    const failure = caseFailure(params, { events, reflexSeen, injected, changedAtDepth, maxDepthError, minY, reflexTick, requestsOverTick });
+    const airRecovery = await waitForFullAir(bot, params.backstop ? BACKSTOP_TAKEOVER_TICKS : SETTLE_TICKS, signal);
+    const failure = caseFailure(params, { events, reflexSeen: params.breathing ? legs.firstLegReflex !== null : reflexSeen, injected, changedAtDepth, maxDepthError, minY, reflexTick, requestsOverTick });
+    if (airRecovery !== "settled") return { status: "failed", detail: JSON.stringify({ airRecovery, failure, minY, minAir, health: bot.health, air: airSupplyTicks(bot), events, reflexSeen, injected, changedAtDepth, maxDepthError }) };
     if (failure) return { status: "failed", detail: failure };
     return { status: bot.health === 20 && hasFullBreath(bot) ? "succeeded" : "failed",
       detail: JSON.stringify({ minY, minAir, health: bot.health, air: airSupplyTicks(bot), events, reflexSeen, injected, changedAtDepth, maxDepthError }) };

@@ -24,15 +24,15 @@
  * the body to stand up.
  */
 import { type BlockPosition, type Position3, type WorldView, collisionBoxesAt } from "./world.js";
+import { PLAYER_STANDING_HEIGHT } from "../../world/player-physics.js";
 
-const STANDING_HEIGHT = 1.8;
 /** The shortest pose the server can keep a player in; a box below this is a floor or a wall, not a ceiling. */
 const CRAWLING_HEIGHT = 0.6;
 const HALF_WIDTH = 0.3;
 
 /** The cell whose collision holds a standing body down at `position`, or null when the body fits where it is. */
 export function overheadPinningCell(world: WorldView, position: Position3): BlockPosition | null {
-  const top = position.y + STANDING_HEIGHT;
+  const top = position.y + PLAYER_STANDING_HEIGHT;
   const clearance = position.y + CRAWLING_HEIGHT;
   const feetY = Math.floor(position.y);
   const minX = position.x - HALF_WIDTH;

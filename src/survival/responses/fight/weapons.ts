@@ -3,10 +3,15 @@ export type GuardOutcome = "volley_finished" | "fight_ended" | "windup_limit" | 
 import type { Bot } from "mineflayer";
 import type { Item } from "prismarine-item";
 import { Vec3 } from "vec3";
-import { waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { monotonicNow } from "../../../utils/index.js";
+import { PhysicsStoppedError, waitForPhysicsTicks } from "../../../utils/physics-ticks.js";
+import { tickBudgetWallMs } from "../../control/combat/progress.js";
+import { serverPacedWallMs } from "../../../world/world-age.js";
+import { attackAndRestart, swingReadiness } from "../../weapons/swing-readiness.js";
 import { observedEyeHeight, STANDING_EYE_HEIGHT } from "../../../world/block-visibility.js";
 import { exposedBodyFrom, nearestBodyPoint } from "../../../world/entity-geometry.js";
 import { hasExposedBody } from "../../../world/entity-visibility.js";
+import { familyIndexOf, hasItemFamily } from "../../../world/item-families.js";
 import { isRangedAttacker, positionThreat } from "../../perception/combat/observations.js";
 import { arrowImpact, incomingShieldProjectiles } from "../../perception/combat/shield-projectiles.js";
 import { arrowFlight } from "../../perception/combat/arrow-flight.js";
@@ -21,13 +26,17 @@ import {
   BOW_DRAW_TICKS,
   equipCombatLoadout,
   MELEE_RANGE,
+  permittedMeleeLoadout,
   selectCombatLoadout,
   selectMeleeLoadout,
   selectRangedLoadout,
+  shieldInOffHand,
   type CombatLoadout,
 } from "../../weapons/equipment.js";
 import { assessBowWindow } from "../../weapons/bow-window.js";
 import { CombatItemUse } from "../../weapons/item-use.js";
+import { drawUntilFull } from "../../weapons/draw-progress.js";
+import { serverTickPace, type TickMark } from "../../../world/server-tick-pace.js";
 import {
   canMeleeTarget,
   combatItemsForTarget,
@@ -36,31 +45,34 @@ import {
   meleeDistance,
 } from "../../weapons/melee.js";
 import { shieldCoverage, shieldFacing } from "../../weapons/shield-facing.js";
-import { isCreeper } from "../../perception/combat/creepers.js";
+import { hasSelfExplosion, mobCombatData } from "../../../world/combat-data.js";
 import type { FightScene } from "./scene.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
-/** Weapon use and readiness belong to this fight; movement can interrupt a wait. */
+/** Credit a volley's server ticks while keeping a real-time exit if packets or client physics stop. */
+function volleyBudget(bot: Bot, ticks: number): { readonly wallEnd: number; spent(): boolean } {
+  const pace = serverTickPace(bot), mark = pace.mark();
+  const wallEnd = mark.ms + serverPacedWallMs(ticks);
+  return { wallEnd, spent: () => pace.creditedSince(mark) >= ticks || monotonicNow() >= wallEnd };
+}
+
+/** Weapon use belongs to this fight; connection-wide recovery survives interrupted fights. */
 export class FightWeapons {
   readonly itemUse: CombatItemUse;
-  weaponReadyAt = 0;
-  volleyTicksRemaining: number;
+  readonly readiness;
+  private volleyReleasedAt: TickMark | null = null;
   constructor(
     readonly scene: FightScene,
     readonly interruptions: { recoverFooting(): Promise<void>; returnToCover(): boolean },
   ) {
-    this.itemUse = new CombatItemUse(scene.bot, (ticks) => this.holdFacing(ticks),
+    this.readiness = swingReadiness(scene.bot);
+    this.itemUse = new CombatItemUse(scene.bot, (ticks, wallEnd) => this.holdFacing(ticks, wallEnd),
       (event) => scene.reportDecision({ kind: "response", evidence: { boundary: "item_use", ...event } }));
-    this.volleyTicksRemaining =
-      (scene.perception.read().find((entry) => entry.id === scene.target.id)?.windingUp ?? false)
-        ? ARROW_RELEASE_GRACE_TICKS
-        : 0;
+    this.observeVolley();
   }
   observeVolley() {
-    this.volleyTicksRemaining =
-      (this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp ?? false)
-        ? ARROW_RELEASE_GRACE_TICKS
-        : Math.max(0, this.volleyTicksRemaining - 1);
+    if (this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp)
+      this.volleyReleasedAt = serverTickPace(this.scene.bot).mark();
   }
   readonly contact = (): Entity | null => {
     const distance = canMeleeTarget(this.scene.bot, this.scene.target)
@@ -72,7 +84,7 @@ export class FightWeapons {
             entity.id !== this.scene.target.id &&
             !this.scene.dead.has(entity.id) &&
             isThreat(this.scene.bot, entity, this.scene.perception) &&
-            !isCreeper(entity) &&
+            !hasSelfExplosion(entity.name, this.scene.bot.version) &&
             meleeDistance(this.scene.bot, entity) < distance,
         )
         .sort((a, b) => meleeDistance(this.scene.bot, a) - meleeDistance(this.scene.bot, b))
@@ -122,7 +134,8 @@ export class FightWeapons {
         } });
       }
       await this.raiseGuard();
-      for (let tick = 0; tick < this.scene.policy.combat.volley_wait_ticks && !this.scene.settled(); tick++) {
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
+      while (!budget.spent() && !this.scene.settled()) {
         const guarded = this.itemUse.shieldRaised;
         await this.maintainGuard();
         if (guarded && !this.itemUse.shieldRaised) return true;
@@ -138,7 +151,7 @@ export class FightWeapons {
         }
         await this.scene.bot.lookAt(defence.facing, true);
         this.scene.signal.throwIfAborted();
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+        if (!(await this.waitTickBefore(budget.wallEnd))) break;
       }
       return this.scene.settled();
     });
@@ -151,7 +164,9 @@ export class FightWeapons {
       this.scene.reportDecision({ kind: "response", evidence: {
         boundary: "final_volley", stage: "started", projectileIds: [...pending].map((entity) => entity.id),
       } });
-      while (pending.size) {
+      // Bounded like the guard loop: a projectile that never clears cannot hold the body past the volley budget.
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
+      while (pending.size && !budget.spent()) {
         await this.scene.responsiveness.checkpoint(this.scene.signal);
         this.scene.signal.throwIfAborted();
         await this.maintainGuard();
@@ -171,22 +186,50 @@ export class FightWeapons {
         this.scene.signal.throwIfAborted();
         await this.itemUse.raiseShield();
         // holdFacing intentionally stops at target death; this wait follows projectile lifetime instead.
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+        if (!(await this.waitTickBefore(budget.wallEnd))) break;
       }
       this.scene.reportDecision({ kind: "response", evidence: {
         boundary: "final_volley", stage: "ended", reason: pending.size ? "guard_unavailable" : "volley_clear",
       } });
     });
   };
-  readonly holdFacing = async (ticks: number): Promise<void> => {
-    for (let held = 0; held < ticks && !this.scene.settled(); held += 1) {
+  /**
+   * Hold `ticks` physics ticks, but never past their wall twin (`tickBudgetWallMs`): slow or stopped ticks end the hold
+   * early. Only the time spent waiting for ticks counts: a shield re-equip or a footing recovery in between is not
+   * the server being slow, and must not cost the hold its ticks.
+   */
+  readonly holdFacing = async (ticks: number, wallEnd = Infinity): Promise<"held" | "interrupted"> => {
+    const limitMs = Math.min(tickBudgetWallMs(ticks), wallEnd - monotonicNow());
+    let waitedMs = 0;
+    for (let held = 0; held < ticks; held += 1) {
+      this.scene.signal.throwIfAborted();
+      if (waitedMs >= limitMs || monotonicNow() >= wallEnd || this.scene.settled() || this.interruptions.returnToCover()) return "interrupted";
       await this.maintainGuard();
       if (this.scene.footingRecovery.needed) await this.interruptions.recoverFooting();
-      if (this.interruptions.returnToCover()) break;
+      if (this.scene.settled() || this.interruptions.returnToCover()) return "interrupted";
       if (this.itemUse.shieldRaised) await this.faceGuard();
       else await this.face();
-      await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
+      const waitStart = monotonicNow();
+      const ticked = await this.waitTickBefore(Math.min(wallEnd, waitStart + limitMs - waitedMs));
+      waitedMs += monotonicNow() - waitStart;
+      if (!ticked) return "interrupted";
     }
+    return "held";
+  };
+  /**
+   * Wait one physics tick, at most until `wallEnd` on `monotonicNow()`. False when the wall time ran out first (the
+   * ticks stopped or crawled): the caller leaves its loop. An abort still rejects with the signal's reason.
+   */
+  private readonly waitTickBefore = async (wallEnd: number): Promise<boolean> => {
+    const wallMs = wallEnd - monotonicNow();
+    if (wallMs <= 0) return false;
+    try {
+      await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal, { wallMs });
+    } catch (cause) {
+      if (cause instanceof PhysicsStoppedError) return false;
+      throw cause;
+    }
+    return true;
   };
   readonly equip = async (loadout: CombatLoadout) => {
     const previous = this.scene.bot.heldItem?.name ?? null;
@@ -195,30 +238,31 @@ export class FightWeapons {
     // resets vanilla attack strength even if the previous swing was long ago.
     if (previous !== (this.scene.bot.heldItem?.name ?? null)) {
       this.itemUse.invalidateShield();
-      if (loadout.kind === "melee") this.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
     }
   };
-  readonly readyWeapon = () =>
+  readonly readyWeapon = (loadout = this.currentLoadout()) =>
     this.scene.execution.run(this.itemUse.shieldRaised ? "guard" : "hold", async () => {
-      while (
-        this.scene.elapsedTicks < this.weaponReadyAt &&
-        !this.scene.settled() &&
-        !this.interruptions.returnToCover()
-      )
-        await this.holdFacing(this.weaponReadyAt - this.scene.elapsedTicks);
+      this.scene.signal.throwIfAborted();
+      if (loadout.kind !== "melee") return "held" as const;
+      const wallEnd = monotonicNow() + serverPacedWallMs(loadout.cooldownTicks);
+      while (!this.readiness.ready(loadout.cooldownTicks)) {
+        if (monotonicNow() >= wallEnd || this.scene.settled() || this.interruptions.returnToCover()) return "interrupted" as const;
+        if (await this.holdFacing(this.readiness.clientTicksUntilReady(loadout.cooldownTicks), wallEnd) === "interrupted")
+          return "interrupted" as const;
+      }
+      return "held" as const;
     });
   /** One ready hit, without owning a cooldown wait or stopping locomotion.
    * Sword attacks retain the active off-hand guard and reassert it afterward. */
   readonly strike = (target: Entity, loadout: Extract<CombatLoadout, { kind: "melee" }>): boolean => {
     this.scene.signal.throwIfAborted();
-    if (!this.scene.policy.combat.melee || this.scene.elapsedTicks < this.weaponReadyAt ||
+    if (!this.scene.policy.combat.melee || !this.readiness.ready(loadout.cooldownTicks) ||
       this.scene.bot.heldItem?.name !== loadout.weapon?.name ||
       this.scene.settled() || !target.isValid || this.scene.dead.has(target.id) ||
       !canMeleeTarget(this.scene.bot, target) ||
-      (loadout.weapon?.name.endsWith("_sword") && hasSweepBystander(this.scene.bot, target))) return false;
-    this.scene.bot.attack(target);
+      (loadout.weapon && hasItemFamily(this.scene.bot, loadout.weapon.name, "sword") && hasSweepBystander(this.scene.bot, target))) return false;
+    attackAndRestart(this.scene.bot, target);
     this.scene.attacks++;
-    this.weaponReadyAt = this.scene.elapsedTicks + loadout.cooldownTicks;
     this.scene.stylesUsed.add(loadout.shield ? "shielded_melee" : "melee");
     this.scene.weaponsUsed.add(loadout.weapon?.name ?? "hand");
     if (loadout.shield) this.itemUse.activateShield();
@@ -233,8 +277,8 @@ export class FightWeapons {
   readonly guardRangedAttack = async (): Promise<GuardOutcome> =>
     this.scene.execution.run("guard", async () => {
       this.scene.projectileGuards += 1;
-      let held = 0;
       await this.raiseGuard();
+      const budget = volleyBudget(this.scene.bot, this.scene.policy.combat.volley_wait_ticks);
       return await this.itemUse.guardUntil<GuardOutcome>(() => {
         if (this.scene.settled()) return "fight_ended";
         if (this.interruptions.returnToCover()) return "return_to_cover";
@@ -242,12 +286,16 @@ export class FightWeapons {
           this.scene.execution.progress.volleyFinished();
           return "volley_finished";
         }
-        return held++ >= this.scene.policy.combat.volley_wait_ticks ? "windup_limit" : null;
+        return budget.spent() ? "windup_limit" : null;
       });
     });
   readonly clearShot = (feet = this.scene.bot.entity.position) => {
     const eye = feet.offset(0, observedEyeHeight(this.scene.bot.entity), 0);
-    const trajectory = bowTrajectory(eye.offset(0, -0.1, 0), aimPoint(this.scene.bot, this.scene.target));
+    const trajectory = bowTrajectory(
+      eye.offset(0, -0.1, 0),
+      aimPoint(this.scene.bot, this.scene.target),
+      this.scene.targetMotion.velocity(this.scene.target.id).scaled(serverTickPace(this.scene.bot).toServerTicks(1)),
+    );
     return trajectory &&
       clearBowTrajectory(trajectory, (from, direction, distance) =>
         this.scene.bot.world.raycast(from, direction, distance),
@@ -278,17 +326,18 @@ export class FightWeapons {
       const admission = await guardIfUnsafe(BOW_DRAW_TICKS, "admission");
       if (admission) return admission;
       using draw = this.itemUse.drawBow();
-      for (let drawn = 0; drawn < BOW_DRAW_TICKS; drawn += 1) {
+      const drawn = await drawUntilFull<GuardOutcome | "obstructed">(this.scene.bot, draw, async remaining => {
         if (this.interruptions.returnToCover()) return "return_to_cover";
         if (this.scene.settled()) {
           // The target is gone mid-draw; the arrow would fly at nothing.
           return "fight_ended";
         }
-        const interrupted = await guardIfUnsafe(BOW_DRAW_TICKS - drawn, "drawing");
+        const interrupted = await guardIfUnsafe(remaining, "drawing");
         if (interrupted) return interrupted;
         if (!(await this.aimBow())) return "obstructed";
-        await waitForPhysicsTicks(this.scene.bot, 1, this.scene.signal);
-      }
+        return "continue";
+      }, this.scene.signal);
+      if (drawn !== "full") return drawn;
       this.scene.signal.throwIfAborted();
       if (this.scene.settled()) return "fight_ended";
       // A target can disappear behind a ledge on the final draw tick. Disposal
@@ -300,45 +349,46 @@ export class FightWeapons {
       this.scene.attacks += 1;
       return "shot";
     });
-  readonly defendContact = async (): Promise<boolean> => {
+  readonly defendContact = async (canStrike: (defender: Entity) => boolean = () => true): Promise<boolean> => {
     // The shared tactic admitted this attack window and interrupts it if a
     // fuse becomes urgent. The quarry's species cannot veto another attacker.
     if (!this.scene.policy.combat.melee) return false;
     const defender = this.contact();
     if (!defender) return false;
     return this.scene.execution.run("defend", async () => {
-      const loadout = selectMeleeLoadout(
-        permittedCombatItems(combatItemsForTarget(this.scene.bot, defender), this.scene.policy.combat),
-      );
+      const loadout = permittedMeleeLoadout(this.scene.bot, combatItemsForTarget(this.scene.bot, defender), this.scene.policy.combat);
       await this.equip(loadout);
       if (loadout.shield) await this.raiseGuard();
-      await this.readyWeapon();
+      if (await this.readyWeapon(loadout) === "interrupted") return true;
       if (loadout.shield) await this.faceGuard();
       else await this.face(defender);
       if (
         this.scene.settled() ||
         !defender.isValid ||
         this.scene.dead.has(defender.id) ||
-        !canMeleeTarget(this.scene.bot, defender)
+        !canMeleeTarget(this.scene.bot, defender) ||
+        !canStrike(defender)
       )
         return true;
       if (!this.strike(defender, loadout)) return true;
-      await this.holdFacing(loadout.cooldownTicks);
+      await this.readyWeapon(loadout);
       return true;
     });
   };
   readonly loadoutFrom = (feet: Vec3) => {
     // Endermen evade arrows by teleporting; a carried bow cannot answer this target.
+    const index = familyIndexOf(this.scene.bot);
     const available = permittedCombatItems(
+      index,
       combatItemsForTarget(this.scene.bot, this.scene.target),
       this.scene.policy.combat,
-    ).filter((item) => this.scene.target.name !== "enderman" || item.name !== "bow");
+    ).filter((item) => this.scene.target.name !== "enderman" || !index.itemFamilies(item.name).includes("bow"));
     if (this.scene.position.plan || this.scene.movement === "hold") {
       const eye = feet.offset(0, STANDING_EYE_HEIGHT, 0);
       // Holding a position forbids chasing. The six-block open-ground
       // weapon cutoff must not strand an otherwise reachable bow target.
       if (nearestBodyPoint(eye, positionThreat(this.scene.bot, this.scene.target)).distanceTo(eye) > MELEE_RANGE) {
-        const ranged = selectRangedLoadout(available);
+        const ranged = selectRangedLoadout(index, available);
         if (ranged) return ranged;
       }
     }
@@ -346,24 +396,40 @@ export class FightWeapons {
     // when it can actually connect, rather than repeatedly choosing a bow
     // whose centre-directed trajectory is blocked by the ledge.
     if (!this.scene.policy.combat.melee) {
-      const ranged = selectRangedLoadout(available);
+      const ranged = selectRangedLoadout(index, available);
+      if (ranged) return ranged;
+    }
+    // The fight was admitted as a ranged one: a second explosive beside the target makes a sword approach
+    // light a fuse the bow fight cannot answer, so the bow stays in hand for it (the blast's own counter keeps melee).
+    if (this.explosiveNeighbourBeside()) {
+      const ranged = selectRangedLoadout(index, available);
       if (ranged) return ranged;
     }
     if (feet.equals(this.scene.bot.entity.position) && canMeleeTarget(this.scene.bot, this.scene.target))
-      return selectMeleeLoadout(available);
+      return selectMeleeLoadout(index, available);
     // The six-block cutoff anticipates a walking melee attacker closing
     // during the draw. A shooter outside swing reach can be answered here
     // when its bow trajectory is already clear, including a hovering blaze.
-    if (isRangedAttacker(this.scene.target) && this.clearShot(feet)) {
-      const ranged = selectRangedLoadout(available);
+    if (isRangedAttacker(this.scene.bot, this.scene.target) && this.clearShot(feet)) {
+      const ranged = selectRangedLoadout(index, available);
       if (ranged) return ranged;
     }
-    return selectCombatLoadout(available, this.scene.target.position.minus(feet));
+    return selectCombatLoadout(index, available, this.scene.target.position.minus(feet));
+  };
+  /** Another live, unresolved threat whose game data has an explosion, within twice its radius of the target. */
+  readonly explosiveNeighbourBeside = (): boolean => {
+    const { bot, perception } = this.scene;
+    return Object.values(bot.entities).some((entity) => {
+      if (entity.id === this.scene.target.id || this.scene.dead.has(entity.id)) return false;
+      if (!isThreat(bot, entity, perception) || entity.name === undefined) return false;
+      const explosion = mobCombatData(entity.name, bot.version)?.explosion;
+      return explosion != null && entity.position.distanceTo(this.scene.target.position) <= 2 * explosion.radius;
+    });
   };
   readonly currentLoadout = () => this.loadoutFrom(this.scene.bot.entity.position);
   /** A commanded guard is not proof that the off-hand item survived a hit. */
   readonly maintainGuard = async (): Promise<void> => {
-    if (!this.itemUse.shieldRaised || this.scene.bot.inventory.slots[45]?.name === "shield") return;
+    if (!this.itemUse.shieldRaised || shieldInOffHand(this.scene.bot)) return;
     this.itemUse.invalidateShield();
     this.scene.signal.throwIfAborted();
     await this.raiseGuard();
@@ -371,14 +437,14 @@ export class FightWeapons {
   readonly raiseGuard = async () => {
     if (!this.scene.policy.combat.shield) return;
     const shield = this.currentLoadout().shield;
-    if (!shield || (this.itemUse.shieldRaised && this.scene.bot.inventory.slots[45]?.name === "shield")) return;
+    if (!shield || (this.itemUse.shieldRaised && shieldInOffHand(this.scene.bot))) return;
     return this.scene.execution.run("guard", async () => {
-      if (shield && this.scene.bot.inventory.slots[45]?.name !== "shield") {
+      if (shield && !shieldInOffHand(this.scene.bot)) {
         await this.scene.bot.equip(shield, "off-hand");
         this.itemUse.invalidateShield();
       }
       this.scene.signal.throwIfAborted();
-      await this.itemUse.raiseShield();
+      await this.itemUse.raiseShield(() => this.scene.settled() || this.interruptions.returnToCover());
     });
   };
   readonly canAttackFrom = (feet: Vec3) => {
@@ -398,6 +464,8 @@ export class FightWeapons {
     if (incomingShieldProjectiles(this.scene.bot).length > 0) return true;
     const windingUp =
       this.scene.perception.read().find((entry) => entry.id === this.scene.target.id)?.windingUp ?? false;
-    return (windingUp || this.volleyTicksRemaining > 0) && hasExposedBody(this.scene.bot, this.scene.target);
+    const grace = this.volleyReleasedAt !== null &&
+      serverTickPace(this.scene.bot).creditedSince(this.volleyReleasedAt) < ARROW_RELEASE_GRACE_TICKS;
+    return (windingUp || grace) && hasExposedBody(this.scene.bot, this.scene.target);
   };
 }

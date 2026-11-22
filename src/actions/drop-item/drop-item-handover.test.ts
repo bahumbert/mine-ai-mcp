@@ -1,210 +1,100 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import test from "node:test";
-import { Vec3 } from "vec3";
-import { botFixture, EQUIPMENT_SLOTS, type FakeStack } from "../../test-support/bot.js";
-import { elapsedSince, monotonicNow } from "../../utils/monotonic-clock.js";
+import type { Entity } from "prismarine-entity";
+import { setCarriedCount } from "../../test-support/carried-counts.js";
+import { type FakeBot, type FakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
 import { createDiscardedItems } from "../../world/discarded-items.js";
 import { parseDropItemRequest } from "./contract.js";
-import { formatDropItemResult, dropItem, type DropItemDependencies } from "./drop-item.js";
+import { formatDropItemResult, dropItem } from "./drop-item.js";
+import { deps, dropBot, dropTest, type Stack } from "./drop-item-fixtures.test.js";
 import { handOverLine, PLAYER_EYE_HEIGHT, tossAimHeight } from "./hand-over.js";
 
 interface Collect {
   readonly by: "recipient" | "giver" | "other";
+  /** Clock time after the toss at which the server announces the pickup. */
   readonly afterMs: number;
   /** The packet's `pickupItemCount`; the tossed stack's count when omitted. */
   readonly count?: number;
 }
 
+const RECIPIENT_ID = 42;
 const OTHER_PLAYER_ID = 5_000;
 
-interface DropBotOptions {
-  readonly carried: readonly FakeStack[];
-  readonly worn?: Partial<Record<"head" | "torso" | "legs" | "feet" | "off-hand", string>>;
-  readonly held?: string;
-  /** Toss this item name throws instead of removing it. */
-  readonly rejects?: string;
-  /** Toss this item name silently succeeds without the inventory changing. */
-  readonly swallows?: string;
-  readonly players?: Record<string, { id: number; position: { x: number; y: number; z: number } }>;
-  readonly position?: { x: number; y: number; z: number };
-  /** Item entities already on the ground before the action runs. */
-  readonly existingItems?: readonly { id: number; name: string; distance?: number }[];
-  /** Entity id the server spawns for each successful toss, as the real one does. */
-  readonly spawnsEntityId?: number;
-  /** The tossed items come back into the inventory (picked up again) this long after the toss. */
-  readonly returnsAfterMs?: number;
-  /** With `returnsAfterMs`: the items come back only if the bot is then within this many blocks of where it tossed them. */
-  readonly returnsWithin?: number;
+interface HandOverOptions {
+  readonly carried?: readonly Stack[];
+  /** The server takes this long (clock time) to accept a toss (unmeasured: a stopgap of this test, not a game answer). */
+  readonly tossDelayMs?: number;
   /** The server announces these pickups (raw `collect` packets) after the toss; the giver's also puts the items back in its inventory. */
   readonly collects?: Collect | readonly Collect[];
-  /** Stack count the spawned item entity reports. */
-  readonly spawnedCount?: number;
-  /** The server takes this long (wall clock) to accept a toss, as a busy machine or a slow link does (unmeasured: a stopgap of this old fixture, not a game answer). */
-  readonly tossDelayMs?: number;
 }
 
-function dropBot(options: DropBotOptions) {
-  const items = options.carried.map((stack) => ({ ...stack }));
-  const lookedAt: { x: number; y: number; z: number }[] = [];
-  const slots: Record<number, { name: string } | null> = {};
-  for (const [slot, name] of Object.entries(options.worn ?? {})) {
-    if (name) slots[EQUIPMENT_SLOTS[slot]!] = { name };
-  }
+/** The giver walks off the toss, as the action's own walk does, so the server's pickup delay does not hand it back its toss. */
+const stepAway = (bot: FakeBot) => {
+  bot.entity.position.x -= 3;
+  return { status: "completed", elapsedMs: 5 };
+};
 
-  /** Mineflayer tosses one identified stack, not "n of this name", so the fake must too. */
-  const removeFrom = (stack: FakeStack, count: number) => {
-    stack.count -= Math.min(stack.count, count);
-    if (stack.count === 0 && items.includes(stack)) items.splice(items.indexOf(stack), 1);
-  };
-  /** A toss the server accepts leaves the inventory, spawns an entity, may come back and may be announced picked up. */
-  const tossOut = async (stack: FakeStack, count: number) => {
-    if (options.tossDelayMs) await new Promise((resolve) => setTimeout(resolve, options.tossDelayMs));
-    if (stack.name === options.rejects) throw new Error("server refused");
-    if (stack.name === options.swallows) return;
-    const thrown = { ...stack, count };
-    removeFrom(stack, count);
-    spawnTossed(stack.name);
-    comeBack(thrown);
-    announceCollect(thrown);
-  };
-
-  const entities: Record<number, unknown> = {};
-  for (const existing of options.existingItems ?? []) {
-    entities[existing.id] = itemEntity(existing.id, existing.name, options.spawnedCount, existing.distance);
-  }
-  /** A successful toss makes the server spawn the item beside the bot. */
-  const spawnTossed = (name: string) => {
-    if (options.spawnsEntityId === undefined) return;
-    entities[options.spawnsEntityId] = itemEntity(options.spawnsEntityId, name, options.spawnedCount);
-  };
-  const client = new EventEmitter();
-  const announceCollect = (stack: FakeStack) => emitCollect({ bot, client, items, entities, options }, stack);
-  for (const [name, player] of Object.entries(options.players ?? {})) {
-    entities[player.id] = { id: player.id, username: name, name: "player" };
-  }
-  entities[OTHER_PLAYER_ID] = { id: OTHER_PLAYER_ID, username: "Other", name: "player" };
-
-  // eslint-disable-next-line prefer-const
-  let bot: ReturnType<typeof botFixture>;
-  const comeBack = (stack: FakeStack) => {
-    if (options.returnsAfterMs === undefined) return;
-    const tossedFrom = bot.entity.position.clone();
-    setTimeout(() => {
-      if (options.returnsWithin === undefined || bot.entity.position.distanceTo(tossedFrom) <= options.returnsWithin) items.push(stack);
-    }, options.returnsAfterMs);
-  };
-
-  bot = botFixture(
+/** A giver on the shared fake with a recipient `Dev` beside it; the server announces the pickups `options.collects` lists. */
+function handOver(clock: FakeClock, options: HandOverOptions = {}) {
+  const made = dropBot(
     {
-      items,
-      slots,
-      entities,
-      position: options.position,
-      players: Object.fromEntries(
-        Object.entries(options.players ?? {}).map(([name, player]) => [
-          name,
-          { entity: { id: player.id, username: name, height: 1.8, position: new Vec3(player.position.x, player.position.y, player.position.z) } },
-        ]),
-      ),
-    },
-    {
-      _client: client,
-      heldItem: options.held ? { name: options.held } : null,
-      lookAt: async (position: { x: number; y: number; z: number }) => {
-        lookedAt.push({ x: position.x, y: position.y, z: position.z });
+      carried: options.carried ?? [{ name: "oak_log", count: 3 }],
+      players: {
+        Dev: { id: RECIPIENT_ID, position: { x: 0, y: 64, z: 1.5 } },
+        Other: { id: OTHER_PLAYER_ID, position: { x: 20, y: 64, z: 20 } },
       },
-      tossStack: async (stack: FakeStack) => tossOut(stack, stack.count),
-      toss: async (type: number, _metadata: number | null, count: number) => {
-        const stack = items.find((candidate) => candidate.type === type);
-        if (stack) await tossOut(stack, count);
-      },
+      tossWaitsForSpawn: true,
     },
+    clock,
   );
-  return { bot, items, lookedAt, entities };
-}
-
-/** A dropped-item entity `distance` blocks from the bot, reporting a stack of `count`. */
-function itemEntity(id: number, name: string, count = 1, distance = 1) {
-  return { id, name: "item", position: new Vec3(0, 64, distance), getDroppedItem: () => ({ name, count }) };
-}
-
-interface CollectFake {
-  readonly bot: ReturnType<typeof botFixture>;
-  readonly client: EventEmitter;
-  readonly items: FakeStack[];
-  readonly entities: Record<number, unknown>;
-  readonly options: DropBotOptions;
-}
-
-/** The server tells the bot who picked a tossed item up, with the count it took; the giver's pickup puts it back in its inventory. */
-function emitCollect({ bot, client, items, entities, options }: CollectFake, stack: FakeStack): void {
-  if (options.spawnsEntityId === undefined || !entities[options.spawnsEntityId]) return;
-  for (const collect of [options.collects ?? []].flat()) {
-    setTimeout(() => {
-      if (collect.by === "giver") items.push({ ...stack, count: collect.count ?? stack.count });
-      const collectorEntityId = { giver: 1, other: OTHER_PLAYER_ID, recipient: Object.values(bot.players)[0]?.entity?.id ?? 0 }[collect.by];
-      client.emit("collect", { collectedEntityId: options.spawnsEntityId, collectorEntityId, pickupItemCount: collect.count ?? stack.count });
-    }, collect.afterMs);
-  }
-}
-
-/** The world age moves in jumps of 20 ticks, each announced by a `time` packet, as the server sends them. */
-function advanceAge(bot: ReturnType<typeof botFixture>, ticks: number): void {
-  for (let moved = 0; moved < ticks; moved += 20) {
-    (bot.time as { age: number }).age += 20;
-    bot.emit("time");
-  }
-}
-
-/** Runs `then` `afterMs` after the giver first listens for the server's `time` packets, wherever the call is by then. */
-function onceWatchingTime(bot: ReturnType<typeof botFixture>, afterMs: number, then: () => void): void {
-  const emitter = bot as unknown as EventEmitter;
-  const onListener = (event: string) => {
-    if (event !== "time") return;
-    emitter.off("newListener", onListener);
-    setTimeout(then, afterMs);
+  const { bot, harness } = made;
+  const afterTossRuns: (() => void)[] = [];
+  /** Runs `then` `afterMs` of clock after the toss went out. */
+  const afterToss = (afterMs: number, then: () => void) => afterTossRuns.push(() => void setTimeout(then, afterMs));
+  const seen = new Set<number>(Object.values(bot.entities).map((entity) => entity.id));
+  const announce = (collect: Collect, entity: Entity, name: string, stackCount: number) => {
+    const count = collect.count ?? stackCount;
+    const collector = { giver: bot.entity, other: bot.entities[OTHER_PLAYER_ID]!, recipient: bot.entities[RECIPIENT_ID]! }[collect.by];
+    if (collect.by === "giver") {
+      const type = bot.registry.itemsByName[name]!.id;
+      setCarriedCount(harness.inventory, bot.registry, type, bot.inventory.count(type, null) + count);
+    }
+    harness.entities.takenBy(collector, entity, count);
   };
-  emitter.on("newListener", onListener);
-}
-
-/**
- * The server's age moves `afterMs` after the giver starts listening for it, not after the call began: how long the toss
- * and the walk before the wait take is a matter of the machine, and an age that moved before the wait read its start age
- * would never move again for it.
- */
-const advanceAgeOnceWatched = (bot: ReturnType<typeof botFixture>, ticks: number, afterMs: number) =>
-  onceWatchingTime(bot, afterMs, () => advanceAge(bot, ticks));
-
-function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDependencies {
-  return {
-    navigate: async () => ({ status: "completed", elapsedMs: 10 }) as never,
-    breakInPlace: async () => ({ status: "broken" }),
-    placeInto: async () => ({ kind: "failed", error: "not placed in this test" }),
-    createMovements: (() => ({})) as never,
-    settleMs: 50,
-    pickupWaitMs: 150,
-    handoverWallMs: 100,
-    // This fixture's bot has no world ticks to count stillness on; the recipient stands still here.
-    awaitStillRecipient: async () => "still",
-    ...overrides,
+  const tossed = () => {
+    const entity = Object.values(bot.entities).find((candidate) => candidate.name === "item" && !seen.has(candidate.id) && candidate.getDroppedItem());
+    if (entity) {
+      seen.add(entity.id);
+      const stack = entity.getDroppedItem()!;
+      for (const collect of [options.collects ?? []].flat()) afterToss(collect.afterMs, () => announce(collect, entity, stack.name, stack.count));
+    }
+    for (const run of afterTossRuns.splice(0)) run();
   };
+  const tossStack = bot.tossStack.bind(bot);
+  bot.tossStack = async (stack) => {
+    if (options.tossDelayMs) await clock.sleep(options.tossDelayMs);
+    await tossStack(stack);
+    tossed();
+  };
+  const toss = bot.toss.bind(bot);
+  bot.toss = async (type, metadata, count) => {
+    if (options.tossDelayMs) await clock.sleep(options.tossDelayMs);
+    await toss(type, metadata, count);
+    tossed();
+  };
+  return { ...made, afterToss };
 }
 
-const handOver = (options: Partial<DropBotOptions> = {}) =>
-  dropBot({
-    carried: [{ name: "oak_log", count: 3, type: 1 }],
-    players: { Dev: { id: 42, position: { x: 0, y: 64, z: 1.5 } } },
-    spawnsEntityId: 90,
-    spawnedCount: 3,
-    ...options,
-  });
 const handOverRequest = parseDropItemRequest({ items: [{ item_name: "oak_log" }], to_player: "Dev" });
+/** The dependencies of a hand-over: the giver steps away from the toss; `handoverWallMs` is the wall bound on the clock the test moves. */
+const handOverDeps = (bot: FakeBot, handoverWallMs: number, navigate: () => Promise<unknown> | unknown = () => stepAway(bot)) =>
+  deps({ handoverWallMs, navigate: (async () => navigate()) as never });
+/** The server's age moves 20 ticks per second of clock: a wall bound above this ends no wait before the 100 ticks that settle it. */
+const WELL_PAST_SETTLING_MS = 30_000;
 
-
-test("hand-over: the recipient collects -> succeeded, collected true", async () => {
-  const { bot } = handOver({ collects: { by: "recipient", afterMs: 40 } });
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 1_000 }), createDiscardedItems());
+dropTest("hand-over: the recipient collects -> succeeded, collected true", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "recipient", afterMs: 40 } });
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 1_000), createDiscardedItems()));
   assert.equal(result.status, "succeeded");
   assert.equal(result.drop.recipient?.collected, true);
   assert.equal(result.drop.recipient?.settled, true);
@@ -213,9 +103,9 @@ test("hand-over: the recipient collects -> succeeded, collected true", async () 
   assert.match(formatDropItemResult(result), /Handed to \*\*Dev\*\*/);
 });
 
-test("hand-over: the giver collects its toss back -> failed [DROP_PICKED_UP]", async () => {
-  const { bot } = handOver({ collects: { by: "giver", afterMs: 40 } });
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 1_000 }), createDiscardedItems());
+dropTest("hand-over: the giver collects its toss back -> failed [DROP_PICKED_UP]", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "giver", afterMs: 40 } });
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 1_000), createDiscardedItems()));
   assert.equal(result.status, "failed");
   assert.ok(result.drop.dropped[0]?.error?.startsWith("[DROP_PICKED_UP]"));
   assert.equal(result.drop.recipient?.collected, false);
@@ -224,98 +114,92 @@ test("hand-over: the giver collects its toss back -> failed [DROP_PICKED_UP]", a
 // A toss the server accepts late (60 ms) is the case the old wall timer lost: it moved the age 30 ms after the call began,
 // before the wait read its start age, and only the wall bound ended the wait.
 for (const tossDelayMs of [0, 60]) {
-  test(`hand-over: nobody takes it (toss accepted after ${tossDelayMs} ms) and the world age moves 100 ticks -> settled, nothing taken, before the wall bound`, async () => {
-    const { bot } = handOver({ tossDelayMs });
-    const startedAt = monotonicNow();
-    advanceAgeOnceWatched(bot, 100, 30);
-    const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+  dropTest(`hand-over: nobody takes it (toss accepted after ${tossDelayMs} ms) and the world age moves 100 ticks -> settled, nothing taken, before the wall bound`, async ({ clock, run }) => {
+    const { bot } = handOver(clock, { tossDelayMs });
+    const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, WELL_PAST_SETTLING_MS), createDiscardedItems()));
     assert.equal(result.status, "succeeded");
     assert.equal(result.drop.recipient?.collected, false);
     assert.equal(result.drop.recipient?.collectedCount, 0);
-    assert.equal(result.drop.recipient?.settled, true);
-    assert.ok(elapsedSince(startedAt) < 1_000, "the server's age ended the wait, not the wall clock");
+    assert.equal(result.drop.recipient?.settled, true, "the server's age ended the wait, not the wall bound");
     assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 0 of 3/);
   });
 }
 
-test("hand-over: the world age never moves -> the wall bound ends the wait unsettled", async () => {
-  const { bot } = handOver();
-  const startedAt = monotonicNow();
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 200 }), createDiscardedItems());
+dropTest("hand-over: the world age has not moved 100 ticks when the wall bound ends the wait -> unsettled", async ({ clock, run }) => {
+  const { bot } = handOver(clock);
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 200), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, false);
-  assert.ok(elapsedSince(startedAt) < 1_000, "the wait is bounded on the wall clock");
   assert.match(formatDropItemResult(result), /Tossed to \*\*Dev\*\*; the server has not said yet whether they took them \(0 of 3 seen taken\)/);
 });
 
-test("hand-over: no world age at the toss -> only the wall bound ends the wait, unsettled", async () => {
-  const { bot } = handOver();
-  (bot.time as { age?: number }).age = undefined;
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 150 }), createDiscardedItems());
+dropTest("hand-over: no world age at the toss -> only the wall bound ends the wait, unsettled", async ({ clock, run }) => {
+  const { bot } = handOver(clock);
+  // Mineflayer's `time.js` reads null for everything until the first `update_time` packet (the fake answers so with `timePacketYet: false`).
+  Object.defineProperty(bot, "time", { configurable: true, value: { age: null } });
+  // The wait for a still recipient counts world age too: with none it would end the call before the toss, so it is answered here.
+  const stillRecipient = { ...handOverDeps(bot, 150), awaitStillRecipient: async () => "still" as const };
+  const result = await run(dropItem(bot, handOverRequest, {}, stillRecipient, createDiscardedItems()));
   assert.equal(result.drop.recipient?.settled, false);
 });
 
-test("hand-over: a server that lags keeps the wait open until the pickup packet arrives (review B1)", async () => {
-  const { bot } = handOver({ collects: { by: "recipient", afterMs: 500 } });
+dropTest("hand-over: a server that lags keeps the wait open until the pickup packet arrives (review B1)", async ({ clock, run }) => {
+  const { bot, afterToss } = handOver(clock, { collects: { by: "recipient", afterMs: 500 } });
   let ended = false;
-  // Time went by on the wall clock, but the server's age moved only one jump: nothing is settled.
-  advanceAgeOnceWatched(bot, 20, 100);
-  const run = dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 3_000 }), createDiscardedItems()).finally(() => {
-    ended = true;
+  let endedBeforePacket: boolean | null = null;
+  // Only one jump of the server's age (20 ticks) has passed when this reads: nothing is settled, the packet has not come.
+  afterToss(400, () => {
+    endedBeforePacket = ended;
   });
-  await new Promise((resolve) => setTimeout(resolve, 400));
-  assert.equal(ended, false, "still waiting for the server's answer");
-  const result = await run;
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 3_000), createDiscardedItems()).finally(() => {
+    ended = true;
+  }));
+  assert.equal(endedBeforePacket, false, "still waiting for the server's answer");
   assert.equal(result.drop.recipient?.collected, true);
   assert.equal(result.drop.recipient?.settled, true);
 });
 
-test("hand-over: a partial pickup counts what the packet says, not the whole stack (review 6)", async () => {
-  const { bot } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "recipient", afterMs: 30, count: 2 } });
-  advanceAgeOnceWatched(bot, 100, 80);
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+dropTest("hand-over: a partial pickup counts what the packet says, not the whole stack (review 6)", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { carried: [{ name: "oak_log", count: 4 }], collects: { by: "recipient", afterMs: 30, count: 2 } });
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, WELL_PAST_SETTLING_MS), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collectedCount, 2);
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, true);
   assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
 });
 
-test("hand-over: two partial pickups of one stack add up and end the wait as taken", async () => {
-  const { bot } = handOver({
-    carried: [{ name: "oak_log", count: 4, type: 1 }],
-    spawnedCount: 4,
+dropTest("hand-over: two partial pickups of one stack add up and end the wait as taken", async ({ clock, run }) => {
+  const { bot } = handOver(clock, {
+    carried: [{ name: "oak_log", count: 4 }],
     collects: [{ by: "recipient", afterMs: 30, count: 2 }, { by: "recipient", afterMs: 60, count: 2 }],
   });
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 5_000), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collectedCount, 4);
   assert.equal(result.drop.recipient?.collected, true);
   assert.equal(result.drop.recipient?.settled, true);
 });
 
-test("hand-over: another player takes it all -> not the recipient's, and the wait ends at once", async () => {
-  const { bot } = handOver({ collects: { by: "other", afterMs: 30 } });
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+dropTest("hand-over: another player takes it all -> not the recipient's, and the wait ends at once", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "other", afterMs: 30 } });
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 5_000), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collectedCount, 0);
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(result.drop.recipient?.settled, true);
 });
 
-test("hand-over: another player takes part of it -> the recipient took nothing, settled at 100 ticks", async () => {
-  const { bot } = handOver({ carried: [{ name: "oak_log", count: 4, type: 1 }], spawnedCount: 4, collects: { by: "other", afterMs: 30, count: 1 } });
-  advanceAgeOnceWatched(bot, 100, 80);
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+dropTest("hand-over: another player takes part of it -> the recipient took nothing, settled at 100 ticks", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { carried: [{ name: "oak_log", count: 4 }], collects: { by: "other", afterMs: 30, count: 1 } });
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, WELL_PAST_SETTLING_MS), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collectedCount, 0);
   assert.equal(result.drop.recipient?.settled, true);
 });
 
-test("hand-over: the giver picking back what was not taken leaves 'took X of N' at the toss, not the net drop (review 2026-10-24, 3)", async () => {
-  const { bot } = handOver({
-    carried: [{ name: "oak_log", count: 4, type: 1 }],
-    spawnedCount: 4,
+dropTest("hand-over: the giver picking back what was not taken leaves 'took X of N' at the toss, not the net drop (review 2026-10-24, 3)", async ({ clock, run }) => {
+  const { bot } = handOver(clock, {
+    carried: [{ name: "oak_log", count: 4 }],
     collects: [{ by: "recipient", afterMs: 30, count: 2 }, { by: "giver", afterMs: 60, count: 2 }],
   });
-  advanceAgeOnceWatched(bot, 100, 120);
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 5_000 }), createDiscardedItems());
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, WELL_PAST_SETTLING_MS), createDiscardedItems()));
   assert.equal(result.drop.dropped[0]?.dropped, 2, "the net drop counts what came back");
   assert.equal(result.drop.recipient?.tossedCount, 4);
   assert.match(formatDropItemResult(result), /Left at \*\*Dev\*\*'s feet: they took 2 of 4/);
@@ -329,61 +213,54 @@ test("hand-over lines: settled partial, unsettled and collected", () => {
   assert.match(handOverLine({ ...recipient, collected: true, collectedCount: 4 }, at), /Handed to \*\*Dev\*\* from 1.5 blocks away/);
 });
 
-test("hand-over: the giver aims the toss at the recipient", async () => {
-  const { bot, lookedAt } = handOver({ collects: { by: "recipient", afterMs: 10 } });
-  await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 500 }), createDiscardedItems());
+dropTest("hand-over: the giver aims the toss at the recipient", async ({ clock, run }) => {
+  const { bot, lookedAt } = handOver(clock, { collects: { by: "recipient", afterMs: 10 } });
+  await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 500), createDiscardedItems()));
   assert.equal(lookedAt.length, 1);
   assert.equal(lookedAt[0]!.y, 64 + tossAimHeight(Math.hypot(0.5, 1)), "aimed at the height that lands the toss at their feet");
 });
 
-test("hand-over: the giver steps away after the toss", async () => {
-  const { bot } = handOver({ collects: { by: "recipient", afterMs: 10 } });
+dropTest("hand-over: the giver steps away after the toss", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "recipient", afterMs: 10 } });
   let routes = 0;
-  await dropItem(
-    bot,
-    handOverRequest,
-    {},
-    deps({
-      handoverWallMs: 500,
-      navigate: (async () => {
+  await run(
+    dropItem(
+      bot,
+      handOverRequest,
+      {},
+      handOverDeps(bot, 500, () => {
         routes += 1;
-        return { status: "completed", elapsedMs: 5 };
-      }) as never,
-    }),
-    createDiscardedItems(),
+        return stepAway(bot);
+      }),
+      createDiscardedItems(),
+    ),
   );
   assert.ok(routes > 0, "the giver routed away from the toss (the recipient was already in reach, so no approach route)");
 });
 
-test("hand-over: abort during the wait removes the collect and time listeners", async () => {
-  const { bot } = handOver();
+dropTest("hand-over: abort during the wait removes the collect and time listeners", async ({ clock, run }) => {
+  const { bot, afterToss } = handOver(clock);
   const controller = new AbortController();
+  const addedToClient = listenersAddedSince(bot._client);
+  const addedToBot = listenersAddedSince(bot);
   let listeningWhenAborted = 0;
-  onceWatchingTime(bot, 50, () => {
-    listeningWhenAborted = bot.listenerCount("time");
+  afterToss(50, () => {
+    listeningWhenAborted = addedToBot("time");
     controller.abort();
   });
-  await assert.rejects(dropItem(bot, handOverRequest, { signal: controller.signal }, deps({ handoverWallMs: 5_000 }), createDiscardedItems()));
+  await assert.rejects(run(dropItem(bot, handOverRequest, { signal: controller.signal }, handOverDeps(bot, 5_000), createDiscardedItems())));
   assert.equal(listeningWhenAborted, 1, "the abort came while the wait was listening");
-  assert.equal((bot as unknown as { _client: EventEmitter })._client.listenerCount("collect"), 0);
-  assert.equal(bot.listenerCount("time"), 0);
+  assert.equal(addedToClient("collect"), 0);
+  assert.equal(addedToBot("time"), 0);
 });
 
-test("hand-over: a pickup announced while the giver walks away still counts", async () => {
-  const { bot } = handOver({ collects: { by: "recipient", afterMs: 20 } });
-  const result = await dropItem(
-    bot,
-    handOverRequest,
-    {},
-    deps({
-      handoverWallMs: 1_000,
-      navigate: (async () => {
-        await new Promise((resolve) => setTimeout(resolve, 80));
-        return { status: "completed", elapsedMs: 80 };
-      }) as never,
-    }),
-    createDiscardedItems(),
-  );
+dropTest("hand-over: a pickup announced while the giver walks away still counts", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "recipient", afterMs: 20 } });
+  const walk = async () => {
+    await clock.sleep(80);
+    return stepAway(bot);
+  };
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 1_000, walk), createDiscardedItems()));
   assert.equal(result.drop.recipient?.collected, true);
   assert.equal(result.drop.recipient?.collectedCount, 3);
 });
@@ -398,19 +275,18 @@ test("hand-over: the aim height makes the toss land at the recipient's feet, fro
   assert.equal(tossAimHeight(6), PLAYER_EYE_HEIGHT, "beyond the toss reach the aim is level");
 });
 
-test("hand-over: a toss nobody took is no deliberate discard any more, so pick_up_items can take it back (F6, trade s1d)", async () => {
-  const { bot } = handOver();
+dropTest("hand-over: a toss nobody took is no deliberate discard any more, so pick_up_items can take it back (F6, trade s1d)", async ({ clock, run }) => {
+  const { bot } = handOver(clock);
   const discarded = createDiscardedItems();
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 100 }), discarded);
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 100), discarded));
   assert.equal(result.drop.recipient?.collected, false);
   assert.equal(discarded.ignored().size, 0);
 });
 
-test("hand-over: a toss the recipient took stays a remembered discard", async () => {
-  const { bot } = handOver({ collects: { by: "recipient", afterMs: 40 } });
+dropTest("hand-over: a toss the recipient took stays a remembered discard", async ({ clock, run }) => {
+  const { bot } = handOver(clock, { collects: { by: "recipient", afterMs: 40 } });
   const discarded = createDiscardedItems();
-  const result = await dropItem(bot, handOverRequest, {}, deps({ handoverWallMs: 1_000 }), discarded);
+  const result = await run(dropItem(bot, handOverRequest, {}, handOverDeps(bot, 1_000), discarded));
   assert.equal(result.drop.recipient?.collected, true);
   assert.ok(discarded.ignored().size > 0);
 });
-

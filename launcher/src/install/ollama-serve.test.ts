@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import { monotonicNow } from "../clocks.ts";
 import { fakeOllama } from "./fixtures/fake-ollama.ts";
 import { tempDataRoot, testManifest } from "./fixtures/install-test-support.ts";
 import { ollamaServeEnv, startServeProcess, withOurOllamaServe } from "./ollama-serve.ts";
@@ -50,12 +51,12 @@ test("a serve that never answers fails after waits.ollamaUpMs naming the port an
 
 test("a serve that exits before answering fails with its exit code and last output instead of waiting out the timeout", async () => {
   const ollama = fakeOllama({ exitsWith: 3, output: "Error: listen tcp 127.0.0.1:11435: bind: address already in use" });
-  const started = Date.now();
+  const started = monotonicNow();
   await assert.rejects(
     withOurOllamaServe("C:/ollama.exe", testManifest({}, { ollamaUpMs: 60_000 }), noState, async () => "unreachable", ollama.deps),
     (error: Error) => error.message.includes("code 3") && error.message.includes("address already in use"),
   );
-  assert.ok(Date.now() - started < 5_000);
+  assert.ok(monotonicNow() - started < 5_000);
 });
 
 test("the serve is killed when the work throws", async () => {
@@ -72,8 +73,8 @@ test("the real process adapter collects stdout and stderr and its kill ends the 
   const serve = startServeProcess(process.execPath, {}, ["-e", script]);
   let text = "";
   serve.onOutput((chunk) => (text += chunk));
-  const deadline = Date.now() + 10_000;
-  while (!(text.includes("out line") && text.includes("err line")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  const deadline = monotonicNow() + 10_000;
+  while (!(text.includes("out line") && text.includes("err line")) && monotonicNow() < deadline) await new Promise((r) => setTimeout(r, 20));
   assert.match(text, /out line/);
   assert.match(text, /err line/);
   serve.kill();

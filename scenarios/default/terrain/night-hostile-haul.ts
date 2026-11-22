@@ -15,6 +15,7 @@
  *
  * The driver submits one request. The production session owns its continuation.
  */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { NAVIGATE, navigateResultSchema } from "@aibengineering/mine-ai-mcp";
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
@@ -70,7 +71,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     // only an unambiguous column. Floor selection remains outside navigation.
     const request = { x: target.x, y: params.destinationHeight, z: target.z, range: params.range };
 
-    const startedAt = Date.now();
+    const startedAt = monotonicNow();
     let output: Awaited<ReturnType<typeof runtime.run>>;
     try {
       output = await runtime.run(navigateAction, request, context.signal);
@@ -79,7 +80,7 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
     }
     const interruptions = output.interruptions ?? [];
     const result = navigateResultSchema.safeParse(output.result);
-    const elapsedMs = Date.now() - startedAt;
+    const elapsedMs = monotonicNow() - startedAt;
 
     let visited = 0;
     let computeMs = 0;

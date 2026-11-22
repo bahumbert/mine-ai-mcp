@@ -27,6 +27,7 @@ client:
   args: ["../../src/client-host.ts", "./withdraw-navigation.ts"]
 goal:
   kind: all
+  stillTicks: 120 # P4-29 a5 T2: longest passing still span 56 ticks (20 tps 51, 10 tps 56; n 5 and 3); 2x rounded up to 20.
   timeout: 120
   goals:
     - { kind: completion, who: WithdrawBot }

@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { BUILD_ROLES, describeMaterials } from "./building/blueprint.ts";
-import { catalogueLine } from "./building/plan.ts";
 import { CLASSIC_SIZES, familiesOf, TEMPLATES, type Template } from "./building/templates.ts";
 import { FARM_SIZES } from "./farming/plot.ts";
+import { FAR_TRIES } from "./gathering/limits.ts";
 
 const playerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/u, "a Minecraft username");
 const minecraftId = z.string().regex(/^[a-z0-9_]+$/u, "a Minecraft id such as oak_log");
@@ -61,6 +61,7 @@ export const stepSchema = z.discriminatedUnion("skill", [
   z.strictObject({ skill: z.literal("eat"), food: minecraftId }),
   z.strictObject({ skill: z.literal("equip"), item: minecraftId }),
   z.strictObject({ skill: z.literal("sleep") }),
+  z.strictObject({ skill: z.literal("dig_shelter"), minutes: z.number().int().min(1).max(15).optional() }),
   z.strictObject({ skill: z.literal("hunt"), mob: minecraftId, drop: minecraftId, count: z.number().int().min(1).max(16).default(1) }),
   z.strictObject({
     skill: z.literal("protect_area"),
@@ -135,32 +136,39 @@ export function dropEntries(step: Extract<Step, { skill: "drop_item" }>): readon
 }
 
 export const SKILL_NAMES = [
-  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "abandon_house", "list_houses", "farm",
+  "follow_player", "go_to_player", "go_to", "explore", "collect_block", "give_item", "drop_item", "craft_item", "get_items", "eat", "equip", "sleep", "dig_shelter", "hunt", "protect_area", "release_area", "level_area", "build", "improve_house", "abandon_house", "list_houses", "farm",
 ] as const satisfies readonly SkillName[];
 
+/** How a situation's answer may treat a running step, spec 2026-11-15-p4-18 D2. */
+export const SKILL_TRAITS: Record<SkillName, { readonly finishesInPlace?: true; readonly answersNight?: true }> = {
+  follow_player: {}, go_to_player: {}, go_to: {}, explore: {}, collect_block: {}, give_item: {}, drop_item: {}, craft_item: {}, get_items: {},
+  eat: { finishesInPlace: true }, equip: { finishesInPlace: true }, sleep: { finishesInPlace: true }, dig_shelter: { answersNight: true },
+  hunt: {}, protect_area: {}, release_area: {}, level_area: {}, build: {}, improve_house: {}, abandon_house: {}, list_houses: {}, farm: {},
+};
+
 /**
- * The `build` line: the houses of the character's own family, one line each (what each is made of and what its first
- * stage takes, so the model can weigh a house, never to fetch it: the build result names what to fetch), then the other
- * families and the step that reads their houses.
+ * The `build` line: the ids of the character's own family's houses, then the step that gives each one's details
+ * (`list_houses`, which reads any family, the character's own included), then the other families and the step that
+ * reads their houses. The details are not in this line: one line per house made the work tier over its budget.
  */
 function buildUsage(family: string, templates: ReadonlyMap<string, Template>): string {
   const own = [...templates.values()].filter((template) => template.family === family);
   const others = familiesOf(templates).filter((other) => other !== family);
   const lookup = (lead: string) => `${lead} house families you know: ${others.join(", ")}: {"skill":"list_houses","family":"<family>"} shows their houses.`;
+  const details = `{"skill":"list_houses","family":"<family>"} gives each one's size, materials, what its first stage takes and description.`;
   const houses = own.length > 0
-    ? `Your ${family} houses:\n    ${own.map(catalogueLine).join("\n    ")}${others.length > 0 ? `\n${lookup("Other")}` : ""}`
+    ? `Your ${family} houses: ${own.map((template) => template.id).join(", ")}; ${details}${others.length > 0 ? ` ${lookup("Other")}` : ""}`
     : `You know no ${family} houses${others.length > 0 ? `; ${lookup("other")}` : "."}`;
-  const separator = own.length > 0 && others.length === 0 ? "\n" : " ";
-  return `{"skill":"build","template":"<id>"}  build a house where you stand, its door facing whoever asked; add "x","y","z" (the door, at walking level) to build it at a given place: it walks there itself; it levels its own site first (trees, slopes, holes) and builds in stages (floor, walls, roof...): send it first, before fetching anything: it starts when you carry the first stage's blocks, and otherwise its result names exactly what the next stage lacks (fetch exactly the items it names, and at least the blocks to stand on it names); it stops between stages the same way, and the step its result gives goes on. ${houses}${separator}{"skill":"build","size":"<${CLASSIC_SIZES.join("|")}>"} is short for your own ${CLASSIC_SIZES.join(" or ")} house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: ${BUILD_ROLES.join(", ")}) to build some parts with other blocks you carry (a full block for every role but window, door, accent and railing; window, accent and railing may be "air"; a door must be a door block); those parts are built with full blocks, and the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is to be yours (you were asked to build yourself a house, or it is for your own goal): it is then your own house, not the asker's`;
+  return `{"skill":"build","template":"<id>"}  build a house where you stand, door facing whoever asked; add "x","y","z" (the door, at walking level) to build it there: it walks there itself; it levels the site first (trees, slopes, holes) and builds in stages (floor, walls, roof...). Send it first, before fetching anything: it starts once you carry the first stage's blocks, else its result names exactly what the next stage lacks (fetch exactly those items, and at least the blocks to stand on); it stops between stages the same way; the step its result gives goes on. ${houses} {"skill":"build","size":"<${CLASSIC_SIZES.join("|")}>"} is short for your own ${CLASSIC_SIZES.join(" or ")} house (give template or size, not both). Add "materials":{"<role>":"<block id>"} (roles: ${BUILD_ROLES.join(", ")}) to build parts with other blocks you carry (a full block for every role but a door, which must be a door block, and window, accent and railing, which may be "air"); the house is then temporary: improve_house later swaps them for the house's own; add "own":true when the house is yours (asked to build yourself one, or for your own goal), not the asker's`;
 }
 
 /**
  * One line per skill for the prompts: exact JSON shape, then what it does. `family` is the character's own family of
- * houses: the `build` line lists its houses, and names the families of `templates` besides it.
+ * houses: the `build` line lists the ids of its houses, and names the families of `templates` besides it.
  */
 export function skillUsage(skill: SkillName, family: string, templates: ReadonlyMap<string, Template> = TEMPLATES): string {
   switch (skill) {
-    case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3,"minutes":5}  follow that player: asked by them, leave "minutes" out and it lasts until they stop talking to you for 10 minutes (or say stop); on your own, "minutes" (1-15) says how long`;
+    case "follow_player": return `{"skill":"follow_player","player":"<username>","distance":3}  follow that player: asked by them, it lasts until they stop talking to you for 10 minutes (or say stop); on your own, add "minutes":<1-15> for how long`;
     case "go_to_player": return `{"skill":"go_to_player","player":"<username>"}  walk up to that player once`;
     case "go_to": return `{"skill":"go_to","x":0,"y":64,"z":0}  walk to block coordinates`;
     case "explore": return `{"skill":"explore","toward":"<${COMPASS_WORDS.join("|")}>","chunks":<1-${MAX_EXPLORE_CHUNKS}>,"for":"<block or creature id, optional: leave it out to just explore>"}  walk that way past the edge of the land you know (a chunk is 16 blocks; 4 chunks take about a minute), to find what you know of nowhere ("for": it stops once one is within reach and says where; for a block you already know of, get_items goes there by itself; for an animal or monster such as sheep, it stops as soon as one is in sight and says where, and get_items hunts it for its drops); it does not set off toward water you have seen there; you stay where it ends, so fetch or build there, or go back`;
@@ -168,10 +176,11 @@ export function skillUsage(skill: SkillName, family: string, templates: Readonly
     case "give_item": return `{"skill":"give_item","player":"<username>","item":"<item id>","count":<1-64>}  walk to the player and hand over items you carry`;
     case "drop_item": return `{"skill":"drop_item","items":[{"item":"<item id>","count":<n>}, ...]}  get rid of items you carry (buried in a small hole beside you, so you do not pick them up again), up to ${MAX_DROP_ITEMS} kinds in one step (no "count": all of that item), e.g. to make room: crafting and gathering stop when all 36 inventory slots are taken, and a slot is freed only when a whole stack goes, so drop all of everything you do not need at once; what you drop is lost`;
     case "craft_item": return `{"skill":"craft_item","item":"<item id>","count":<1-64>}  craft from your inventory; intermediate items (planks, sticks) are crafted automatically and a carried crafting_table is placed when needed; it never gathers missing materials`;
-    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; it fetches within 64 blocks only: when something is not near, it says where you last saw some (or that you never did), and going there is a go_to step of its own, worth it or not; takes minutes`;
+    case "get_items": return `{"skill":"get_items","items":[{"item":"<item id>","count":<n>}]}  get <n> more of up to ${MAX_GET_ITEMS} kinds of items the way a player would: chop, dig (crafting a wooden pickaxe when stone is needed), craft with a carried crafting table and smelt in a carried furnace (glass, ingots from raw ore, charcoal, stone: it gathers the input and the fuel and crafts the furnace itself), keeping everything you already carry, then come back here; it fetches within 64 blocks, else walks to the nearest places where you saw some (up to ${FAR_TRIES}) and gathers there; when it knows of none, it says so (explore for it); takes minutes`;
     case "eat": return `{"skill":"eat","food":"<carried food id>"}  eat something you carry`;
     case "equip": return `{"skill":"equip","item":"<carried item id>"}  hold or wear a carried item (armour goes to its slot)`;
-    case "sleep": return `{"skill":"sleep"}  sleep in a nearby bed (night or thunderstorm only)`;
+    case "sleep": return `{"skill":"sleep"}  sleep in a bed, which also makes it your respawn point: a free bed nearby, else the one you carry, placed on flat ground nearby and left there (sleeping at night or in a thunderstorm only; by day it only sets the respawn point)`;
+    case "dig_shelter": return `{"skill":"dig_shelter"}  dig a closed hole near you (about 20 s; not with a monster on you), roof it with a carried block and wait inside until day, then climb out; add "minutes":<1-15> only to come out sooner, or to hide by day`;
     case "hunt": return `{"skill":"hunt","mob":"<entity id>","drop":"<item id>","count":<1-16>}  kill nearby mobs of that type until you picked up that many drops (hostile mobs need a carried shield)`;
     case "level_area": return `{"skill":"level_area","markers":"<block id>"}  flatten (level, terraform) the zone between the nearest 2-4 blocks of that kind a player placed as markers: it finds the markers itself (do not look for them first) and keeps them, digs everything above their level and fills holes below, with the right tool for each block; add "y":<walking level> for another height. Or {"skill":"level_area","around":"<username>","radius":<2-16>} for a square around a player at their level (your own name for around yourself, never the speaker's name for "around you"), or "x1","z1","x2","z2" corners with "y" (they keep no block: when a player placed markers, use "markers" so they stay, even after walking up to them); at most 32 by 32; holes, water and drops get a one-block floor of dirt (or cobblestone), or of the block in "fill":"<block id>" when one is asked for; takes minutes`;
     case "protect_area": return `{"skill":"protect_area","player":"<username>","radius":8,"label":"<short name>"}  never dig or place blocks within radius (1-${MAX_AREA_RADIUS}) of where that player stands, or give "x","y","z" instead of "player"; omit "player" (or give your own name) for the area around yourself, never the speaker's name for "around you"; e.g. around a build someone asked you to respect; you can still walk there`;
@@ -180,7 +189,7 @@ export function skillUsage(skill: SkillName, family: string, templates: Readonly
     case "build": return buildUsage(family, templates);
     case "improve_house": return `{"skill":"improve_house","roles":["<role>", ...]}  swap the temporary parts of your own house (all of them, or the roles listed) for the house's own blocks, in place; every block needed must be carried first`;
     case "abandon_house": return `{"skill":"abandon_house"}  give up your unfinished house for good: it is no longer tracked and its protected area is released; what stands stays`;
-    case "list_houses": return `{"skill":"list_houses","family":"<family>"}  read the houses of another family you know (one line each, as above); each line ends with the step that builds it`;
+    case "list_houses": return `{"skill":"list_houses","family":"<family>"}  read the houses of a family you know, your own too (one line each: size, floors, blocks, main materials, what its first stage takes, description); each line ends with the step that builds it`;
   }
 }
 
@@ -226,6 +235,7 @@ export function describeStep(step: Step): string {
     case "eat": return `eat ${step.food}`;
     case "equip": return `equip ${step.item}`;
     case "sleep": return "sleep";
+    case "dig_shelter": return step.minutes === undefined ? "dig in and wait for the day" : `dig in for ${step.minutes} min`;
     case "hunt": return `hunt ${step.mob} for ${step.count} ${step.drop}`;
     case "level_area": return `level ${step.markers !== undefined ? `the zone between the ${step.markers} markers` : step.around !== undefined ? `${step.radius} blocks around ${step.around}` : `${step.x1} ${step.z1} to ${step.x2} ${step.z2}`}${step.y === undefined ? "" : ` at y ${step.y}`}${step.fill === undefined ? "" : `, filled with ${step.fill}`}`;
     case "protect_area": return `protect ${step.label} (${step.radius} blocks around ${step.player ?? `${step.x} ${step.y} ${step.z}`})`;

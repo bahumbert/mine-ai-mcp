@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { entityDimensions } from "../../../world/entity-dimensions.js";
 import { nearestBodyPoint } from "../../../world/entity-geometry.js";
+import { hasItemFamily } from "../../../world/item-families.js";
 
 type Entity = Parameters<Bot["attack"]>[0];
 
@@ -20,8 +21,13 @@ export function lookingAtBot(bot: Bot, entity: Entity, eyeHeight: number): boole
   return nearestBodyPoint(aimed, body).distanceTo(aimed) <= distance * Math.sin((4 * Math.PI) / 256);
 }
 
+/** Whether the entity holds a bow (family `bow`). */
+export function holdsBow(bot: Bot, entity: Entity): boolean {
+  return !!entity.heldItem && hasItemFamily(bot, entity.heldItem.name, "bow");
+}
+
 export function isDrawingBow(bot: Bot, entity: Entity): boolean {
-  if (entity.heldItem?.name !== "bow") return false;
+  if (!holdsBow(bot, entity)) return false;
   const keys = bot.registry.entitiesByName[entity.name ?? ""]?.metadataKeys;
   const index = keys?.indexOf("living_entity_flags") ?? 8;
   const flags: unknown = entity.metadata?.[index];

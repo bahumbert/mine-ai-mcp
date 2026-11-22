@@ -2,6 +2,7 @@ import type { Bot } from "mineflayer";
 import type { Vec3 } from "vec3";
 import { observedEyeHeight } from "../../world/block-visibility.js";
 import { clearCombatRay } from "../../world/entity-geometry.js";
+import { foreignRegionAt } from "../../world/protected-regions.js";
 import { fireAt } from "../perception/body.js";
 
 /** Clear observed fire without excavating terrain or changing equipment. */
@@ -15,6 +16,8 @@ export async function extinguishFireAt(
   if (!digAllowed) return "blocked";
   const block = bot.blockAt(cell)!;
   if (!bot.canDigBlock(block)) return "blocked";
+  // Another owner's region (ADR-012): the fire stays, and the caller tries its next cell as for any cell it cannot dig.
+  if (foreignRegionAt(bot, cell) !== null) return "blocked";
   const aim = cell.offset(0.5, 0.5, 0.5);
   const eye = bot.entity.position.offset(0, observedEyeHeight(bot.entity), 0);
   if (!clearCombatRay(bot.world, eye, aim)) return "blocked";

@@ -1,28 +1,143 @@
 import assert from "node:assert/strict";
-import test, { mock } from "node:test";
+import test, { mock, type TestContext } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { sameDimensionSql } from "./bot-data-sql.ts";
-import { BodyDown, McpBotRuntime, type ToolClient } from "./runtime-client.js";
+import { BodyDown, McpBotRuntime, newToolClient, parsePlaceSign, type ToolClient } from "./runtime-client.js";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+test("readSigns parses four lines a side and preserves unknown text", async () => {
+  const position = { x: 3, y: 64, z: -2 };
+  for (const known of [true, false]) {
+    const reading = { position, block: "oak_sign", known, front: ["owner", "home", "", ""], back: ["back", "", "", ""] };
+    const client: ToolClient = {
+      callTool: async (input) => {
+        assert.equal(input.name, "read_signs");
+        assert.deepEqual({ x: input.arguments?.x, y: input.arguments?.y, z: input.arguments?.z }, position);
+        return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", signs: [reading] } } } } };
+      }, close: async () => {},
+    };
+    assert.deepEqual(await McpBotRuntime.over(client).readSigns(position), [reading]);
+  }
+  for (const length of [3, 5]) for (const side of ["front", "back"]) {
+    const reading = { position, block: "oak_sign", known: true, front: ["", "", "", ""], back: ["", "", "", ""], [side]: Array(length).fill("") };
+    const client: ToolClient = { callTool: async () => ({ structuredContent: { response: { format: "json", data: { result: { status: "succeeded", signs: [reading] } } } } }), close: async () => {} };
+    await assert.rejects(McpBotRuntime.over(client).readSigns(position));
+  }
+});
+
+test("parsePlaceSign preserves confirmation, fill evidence and every refusal", () => {
+  const sign = { target: { x: 3, y: 64, z: -2 }, block: "oak_sign", facing: "north", attach: "ground", lines: ["owner", "", "", ""], confirmed: true, placed: true };
+  assert.deepEqual(parsePlaceSign({ status: "succeeded", sign }), { status: "succeeded", error: null, code: null, sign });
+  const fill = { ...sign, confirmed: false, placed: false };
+  assert.deepEqual(parsePlaceSign({ status: "succeeded", sign: { ...sign, placed: false } }).sign, { ...sign, placed: false });
+  assert.deepEqual(parsePlaceSign({ status: "partial", error: "[PLACE_SIGN_TEXT_UNCONFIRMED] Read it.", sign: fill }),
+    { status: "partial", error: "[PLACE_SIGN_TEXT_UNCONFIRMED] Read it.", code: "PLACE_SIGN_TEXT_UNCONFIRMED", sign: fill });
+  for (const code of ["NO_SIGN_ITEM", "CELL_TAKEN", "NO_SUPPORT", "LINES", "UNLOADED", "TEXT_UNKNOWN", "NO_EDITOR", "FAILED"]) {
+    const error = `[PLACE_SIGN_${code}] Refused.`;
+    const existing = { block: "oak_sign", front: ["other", "", "", ""], back: ["", "", "", ""] };
+    const outcome = parsePlaceSign({ status: "failed", error, sign: fill, existing, members: ["oak_sign"] });
+    assert.equal(outcome.code, `PLACE_SIGN_${code}`);
+    assert.deepEqual(outcome.existing, existing);
+    assert.deepEqual(outcome.members, ["oak_sign"]);
+  }
+  for (const length of [3, 5]) {
+    const invalid = Array(length).fill("");
+    assert.throws(() => parsePlaceSign({ status: "succeeded", sign: { ...sign, lines: invalid } }));
+    for (const side of ["front", "back"]) {
+      assert.throws(() => parsePlaceSign({ status: "failed", error: "[PLACE_SIGN_CELL_TAKEN] Refused.", sign, existing: { block: "oak_sign", [side]: invalid } }));
+    }
+  }
+});
+
+test("itemFamily parses members", async () => {
+  let request: unknown;
+  const client: ToolClient = {
+    callTool: async (input) => {
+      request = input;
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded", family: "sign", members: ["oak_sign", "spruce_sign"] } } } } };
+    },
+    close: async () => {},
+  };
+  assert.deepEqual(await McpBotRuntime.over(client).itemFamily("sign"), ["oak_sign", "spruce_sign"]);
+  assert.equal((request as { name: string }).name, "view_item_family");
+  assert.equal((request as { arguments: { family: string } }).arguments.family, "sign");
+});
 
 function dropsClient(sources: readonly Record<string, unknown>[]): ToolClient {
   const data = { result: { drops: { items: [{ item: "wheat", sources, mobs: [] }], blocks: [] } } };
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
 
-test("a planted drop source carries the seed the runtime names, a wild one has none", async () => {
-  const runtime = McpBotRuntime.over(dropsClient([{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }]));
-  const sources = (await runtime.blockSources(["wheat"]))["wheat"]!;
-  assert.deepEqual(sources, [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }]);
+test("drop sources preserve planted seeds, wild sources and replies from an older runtime", async () => {
+  for (const { sources, expected } of [
+    { sources: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }],
+      expected: [{ block: "wheat", chance: 1, planted: true, seed: "wheat_seeds" }, { block: "grass", chance: 0.1, planted: false }] },
+    { sources: [{ block: "wheat", chance: 1, planted: true }], expected: [{ block: "wheat", chance: 1, planted: true }] },
+  ]) {
+    assert.deepEqual((await McpBotRuntime.over(dropsClient(sources)).blockSources(["wheat"]))["wheat"], expected);
+  }
 });
 
-test("a source from a runtime that names no seed still parses", async () => {
-  const runtime = McpBotRuntime.over(dropsClient([{ block: "wheat", chance: 1, planted: true }]));
-  assert.deepEqual((await runtime.blockSources(["wheat"]))["wheat"], [{ block: "wheat", chance: 1, planted: true }]);
+function boxClient(kinds: Record<string, unknown>): ToolClient {
+  const data = { result: { blocks: { box: { layers: [{ y: 64, rows: [{ z: 0, blocks: ["dirt", "water"] }] }], kinds }, find: null } } };
+  return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
+}
+
+test("box kinds preserve new runtime facts and the exact shape of older replies", async () => {
+  for (const { kinds, expected } of [
+    { kinds: {
+      dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
+      water: { tool: null, solid: false, full_cube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
+    }, expected: {
+      dirt: { tool: "shovel", solid: true, fullCube: true, harvest: null, hardness: 0.5, fluid: false, tags: ["mineable/shovel"], known: true },
+      water: { tool: null, solid: false, fullCube: false, harvest: null, hardness: null, fluid: true, tags: [], known: true },
+    } },
+    { kinds: { dirt: { tool: "shovel", solid: true, full_cube: true, harvest: null } },
+      expected: { dirt: { tool: "shovel", solid: true, fullCube: true, harvest: null } } },
+  ]) {
+    const area = await McpBotRuntime.over(boxClient(kinds)).blocksIn({ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 });
+    assert.deepEqual(area.kinds, expected);
+  }
+});
+
+/** A client that records the `view_blocks` input and answers with `cells` (the order the runtime reads them in). */
+function cellsClient(cells: readonly Record<string, unknown>[]): ToolClient & { inputs: unknown[] } {
+  const client = {
+    inputs: [] as unknown[],
+    callTool: async (request: { arguments?: Record<string, unknown> }) => {
+      client.inputs.push(request.arguments);
+      return { structuredContent: { response: { format: "json", data: { result: { blocks: { box: null, find: null, cells } } } } } };
+    },
+    close: async () => {},
+  };
+  return client;
+}
+
+test("cellsAt reads the exact cells and says per cell whether it holds water and whether it is loaded", async () => {
+  const client = cellsClient([
+    { x: 1, y: 61, z: 0, name: "oak_stairs", shape: "solid", waterlogged: true, holds_water: true },
+    { x: 0, y: 61, z: 0, name: "dirt", shape: "solid" },
+    { x: 2, y: 61, z: 0, name: "unloaded", shape: "open" },
+  ]);
+  const cells = await McpBotRuntime.over(client).cellsAt([{ x: 0, y: 61, z: 0 }, { x: 1, y: 61, z: 0 }, { x: 2, y: 61, z: 0 }]);
+  assert.deepEqual(cells, [
+    { name: "dirt", holdsWater: false, loaded: true },
+    { name: "oak_stairs", holdsWater: true, loaded: true },
+    { name: "unloaded", holdsWater: false, loaded: false },
+  ], "in the order asked, whatever order the runtime answers in");
+  assert.match(JSON.stringify(client.inputs), /"cells":\[\{"x":0,"y":61,"z":0\},\{"x":1,"y":61,"z":0\},\{"x":2,"y":61,"z":0\}\]/u);
+});
+
+test("cellsAt: a cell the runtime does not answer is not loaded", async () => {
+  const cells = await McpBotRuntime.over(cellsClient([])).cellsAt([{ x: 0, y: 61, z: 0 }]);
+  assert.deepEqual(cells, [{ name: "unloaded", holdsWater: false, loaded: false }]);
 });
 
 function craftingClient(plan: Record<string, unknown>): ToolClient {
@@ -54,6 +169,19 @@ function sessionClient(replies: readonly (() => Promise<Record<string, unknown>>
   return client;
 }
 
+test("findBlocks carries under-water and roofed situations and leaves an open entry unchanged", async () => {
+  const listed = [
+    { x: 1, y: 60, z: 0, name: "oak_log", situation: "under_water" },
+    { x: 2, y: 60, z: 0, name: "oak_log", situation: "roofed" },
+    { x: 3, y: 64, z: 0, name: "oak_log" },
+  ];
+  const client: ToolClient = {
+    callTool: async () => ({ structuredContent: { response: { format: "json", data: { result: { blocks: { box: null, find: [{ listed }] } } } } } }),
+    close: async () => {},
+  };
+  assert.deepEqual(await McpBotRuntime.over(client).findBlocks("oak_log", 8), listed);
+});
+
 // check-reads: src/bot-data/bot-data.sql
 const dropsReply = () => ({ structuredContent: { response: { format: "json", data: { result: { drops: { items: [{ item: "wheat", sources: [], mobs: [] }], blocks: [] } } } } } });
 const lost = () => Promise.reject(new Error("Streamable HTTP error: 404 session not found"));
@@ -68,16 +196,20 @@ test("a call that met a lost session reconnects and fails as a restarted body; t
   assert.equal(fresh.calls, 1);
 });
 
-test("a reconnect that fails throws the original error, and the next call tries again", async () => {
-  let attempts = 0;
-  const fresh = sessionClient([async () => dropsReply()]);
-  const runtime = McpBotRuntime.over(sessionClient([lost]), async () => {
-    if (++attempts === 1) throw new Error("connection refused");
-    return fresh;
-  });
-  await assert.rejects(runtime.blockSources(["wheat"]), /404 session not found/u);
-  assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
-  assert.equal(attempts, 2);
+test("a failed reconnect preserves the original session or connection error, then retries on the next call", async () => {
+  for (const { error, expected } of [
+    { error: new Error("Streamable HTTP error: 404 session not found"), expected: /404 session not found/u },
+    { error: new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) }), expected: /fetch failed/u },
+  ]) {
+    let attempts = 0;
+    const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(error)]), async () => {
+      if (++attempts === 1) throw new Error("connection refused");
+      return sessionClient([async () => dropsReply()]);
+    });
+    await assert.rejects(runtime.blockSources(["wheat"]), expected);
+    assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
+    assert.equal(attempts, 2);
+  }
 });
 
 test("a reply that names an unresponsive or exited runtime is a lost body too", async () => {
@@ -115,17 +247,6 @@ test("only a gone session, a lost connection or a killed runtime reconnects; oth
     assert.equal(message, error.message);
     assert.equal(reopened, 0, `${error.message} must not reopen a live session`);
   }
-});
-
-test("a refused connection whose reconnect also fails throws the original error, and the next call retries", async () => {
-  const refused = new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) });
-  let attempts = 0;
-  const runtime = McpBotRuntime.over(sessionClient([() => Promise.reject(refused)]), async () => {
-    if (++attempts === 1) throw new Error("still down");
-    return sessionClient([async () => dropsReply()]);
-  });
-  await assert.rejects(runtime.blockSources(["wheat"]), /fetch failed/u);
-  assert.deepEqual(await runtime.blockSources(["wheat"]), { wheat: [] });
 });
 
 // Plan 2026-11-08-runtime-restart-recovery Task 3: the supervisor's saved failure rides in the JSON-RPC error's `data`.
@@ -262,26 +383,6 @@ function queryClient(rows: readonly (readonly (string | number | null)[])[]): To
 
 const AT = { x: 8, y: 64, z: 0 };
 
-test("knownContainers reads only containers the bot placed (placed_containers), with the observed slots when opened", async () => {
-  // Review 2026-10-19 #8: a chest the bot only opened (a village chest, another bot's) took the deposit.
-  const client = queryClient([[10, 64, -3, "chest", 27, 4], [12, 64, 5, "barrel", null, null]]);
-  const found = await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
-  assert.deepEqual(found, [
-    { x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 },
-    { x: 12, y: 64, z: 5, blockName: "barrel", slotCount: null, usedSlots: 0 },
-  ]);
-  assert.match(client.queries[0]!, /FROM placed_containers p LEFT JOIN observed_containers c ON c\.container_key = p\.container_key/u);
-  assert.match(client.queries[0]!, /p\.placed_by_bot_id = 'Tester'/u);
-  assert.doesNotMatch(client.queries[0]!, /observed_by_bot_id/u);
-});
-
-test("knownContainers also takes a container the bot opened inside a protected region it owns (owner 2026-10-19)", async () => {
-  const client = queryClient([]);
-  await McpBotRuntime.over(client).knownContainers("Tester", AT, 32, "overworld");
-  assert.match(client.queries[0]!, /JOIN protected_regions r ON .*lower\(r\.owner\) = lower\('Tester'\)/u);
-  assert.match(client.queries[0]!, /c\.block_x BETWEEN r\.min_x AND r\.max_x AND c\.block_y BETWEEN r\.min_y AND r\.max_y AND c\.block_z BETWEEN r\.min_z AND r\.max_z/u);
-});
-
 test("knownContainers reads the rows of a real Minecraft username (letters, digits, underscore, 1-16)", async () => {
   // Review 2026-10-18 #4: the check was /^w{1,16}$/ (the letter w), so every real name got [] and the chest deposit never ran live.
   const client = queryClient([[10, 64, -3, "chest", 27, 4]]);
@@ -289,8 +390,6 @@ test("knownContainers reads the rows of a real Minecraft username (letters, digi
   for (const owner of ["Tester", "Dirk_77", "a", "x".repeat(16)]) {
     assert.deepEqual(await runtime.knownContainers(owner, AT, 32, "overworld"), [{ x: 10, y: 64, z: -3, blockName: "chest", slotCount: 27, usedSlots: 4 }], owner);
   }
-  assert.equal(client.queries.length, 4);
-  assert.match(client.queries[0]!, /placed_by_bot_id = 'Tester'/u);
 });
 
 test("knownContainers refuses a name or a dimension that could break the SQL literal, without querying", async () => {
@@ -305,17 +404,6 @@ test("knownContainers refuses a name or a dimension that could break the SQL lit
   assert.deepEqual(client.queries, []);
 });
 
-test("knownContainers in the Nether asks the Nether: an overworld row is never matched", async () => {
-  const client = queryClient([]);
-  const runtime = McpBotRuntime.over(client);
-  await runtime.knownContainers("Tester", AT, 32, "the_nether");
-  await runtime.knownContainers("Tester", AT, 32, "minecraft:overworld");
-  assert.match(client.queries[0]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'the_nether'/u);
-  assert.doesNotMatch(client.queries[0]!, /overworld/u);
-  // Either spelling the server reports for the overworld asks for the same rows.
-  assert.match(client.queries[1]!, /replace\(p\.dimension, 'minecraft:', ''\) = 'overworld'/u);
-});
-
 test("sameDimensionSql strips minecraft: on both sides and refuses a value that could break the literal", () => {
   assert.equal(sameDimensionSql("p.dimension", "minecraft:the_nether"), "replace(p.dimension, 'minecraft:', '') = 'the_nether'");
   assert.equal(sameDimensionSql("dimension", "overworld"), "replace(dimension, 'minecraft:', '') = 'overworld'");
@@ -323,30 +411,155 @@ test("sameDimensionSql strips minecraft: on both sides and refuses a value that 
   assert.equal(sameDimensionSql("dimension", "custom:the_deep-1.5/x"), "replace(dimension, 'minecraft:', '') = 'custom:the_deep-1.5/x'");
 });
 
-function statusClient(situation: Record<string, unknown>): ToolClient {
-  const data = { result: { situation: { position: { x: 0, y: 64, z: 0 }, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] }, ...situation } } };
+function statusClient(situation: Record<string, unknown>, survivalPolicy?: Record<string, unknown>): ToolClient {
+  const data = { result: { situation: { position: { x: 0, y: 64, z: 0 }, vitals: { health: 20, food: 20 }, inventory: { stacks: [] }, nearby: { players: [] }, ...situation } }, ...(survivalPolicy === undefined ? {} : { survivalPolicy }) };
   return { callTool: async () => ({ structuredContent: { response: { format: "json", data } } }), close: async () => {} };
 }
+
+test("status rejects malformed optional cover reports from a newer runtime", async () => {
+  const at = { x: 4, y: 64, z: 0 };
+  await assert.rejects(McpBotRuntime.over(statusClient({ navigation: { coverExit: { at, plannedAt: "now", reached: "yes" } } })).status());
+});
+
+function policyClient(): ToolClient & { readonly calls: { readonly name: string; readonly arguments: Record<string, unknown> }[] } {
+  const client = {
+    calls: [] as { readonly name: string; readonly arguments: Record<string, unknown> }[],
+    callTool: async (request: { name: string; arguments?: Record<string, unknown> }) => {
+      client.calls.push({ name: request.name, arguments: request.arguments ?? {} });
+      return { structuredContent: { response: { format: "json", data: { result: { status: "succeeded" } } } } };
+    },
+    close: async () => {},
+  };
+  return client;
+}
+
+test("setReportOpenSky sends navigation.report_open_sky with the revision it read (plan 2026-11-07-p4-05a-shelter T9a)", async () => {
+  for (const [on, revision] of [[true, "r7"], [false, "r8"]] as const) {
+    const client = policyClient();
+    assert.equal(await McpBotRuntime.over(client).setReportOpenSky(on, revision), true);
+    assert.equal(client.calls.length, 1);
+    assert.equal(client.calls[0]!.name, "set_survival_policy");
+    assert.equal(client.calls[0]!.arguments.expected_revision, revision);
+    assert.deepEqual(client.calls[0]!.arguments.changes, { navigation: { report_open_sky: on } });
+  }
+});
+
+test("status reads coverExit and the policy's reportOpenSky (plan 2026-11-07-p4-05a-shelter T9a)", async () => {
+  const exit = { at: { x: 6, y: -60, z: 512 }, plannedAt: "2026-11-09T00:00:00.000Z", reached: true };
+  for (const [reportOpenSky, navExit] of [[true, exit], [false, null]] as const) {
+    const policy = { revision: "r3", effective: { navigation: { dig_straight_down: false, scaffold_blocks: ["cobblestone"], report_open_sky: reportOpenSky } } };
+    const status = await McpBotRuntime.over(statusClient({ navigation: { coverExit: navExit } }, policy)).status();
+    assert.deepEqual(status.coverExit, navExit);
+    assert.deepEqual(status.policy, { revision: "r3", digStraightDown: false, scaffoldBlocks: ["cobblestone"], reportOpenSky });
+  }
+});
+
+test("status reads the condition facts", async () => {
+  const worn = [{ slot: "head", item: "iron_helmet" }, { slot: "torso", item: null }];
+  const carried = [{ item: "iron_chestplate", count: 2 }];
+  const light = { sky: 0, block: null, openSkyAbove: 85 };
+  const combat = { melee: "iron_sword", bow: "bow", arrows: 12, shield: "shield" };
+  const respawn = { kind: "bed", position: { x: 100, y: 64, z: 0 }, distance: null };
+  const burn = { ticks: 70, hp: 3 };
+  const result = await McpBotRuntime.over(statusClient({ vitals: { health: 6.5, food: 8, saturation: 0.5, armour: 7, armourToughness: 8, burn }, armourWorn: worn, armourCarried: carried, light, combat, respawn })).status();
+  assert.deepEqual({ saturation: result.saturation, armourPoints: result.armourPoints, armourToughness: result.armourToughness, burn: result.burn, armour: result.armour, light: result.light, combat: result.combat, respawn: result.respawn }, { saturation: 0.5, armourPoints: 7, armourToughness: 8, burn, armour: { worn, carried }, light, combat, respawn });
+});
+
+test("status retains gear exposure and accepts older combat readouts without it", async () => {
+  const combat = { melee: "iron_sword", bow: null, arrows: 0, shield: "shield" };
+  const current = await McpBotRuntime.over(statusClient({ combat: { ...combat, exposure: 0.53 } })).status();
+  assert.equal(current.combat?.exposure, 0.53);
+  const older = await McpBotRuntime.over(statusClient({ combat })).status();
+  assert.equal(older.combat?.exposure, undefined);
+});
+
+test("status accepts last wake and world spawn respawn records", async () => {
+  for (const kind of ["last_wake", "world_spawn"] as const) {
+    const respawn = { kind, position: { x: 1, y: 64, z: 2 }, distance: 12.4 };
+    assert.deepEqual((await McpBotRuntime.over(statusClient({ respawn })).status()).respawn, respawn);
+  }
+});
+
+test("an older view_status parses; nullable condition facts stay unknown", async () => {
+  const older = await McpBotRuntime.over(statusClient({})).status();
+  assert.equal(older.position.y, 64);
+  for (const field of ["saturation", "armourPoints", "armourToughness", "burn", "armour", "light", "combat", "respawn"]) assert.equal(field in older, false, field);
+  const unknown = await McpBotRuntime.over(statusClient({ vitals: { health: 20, food: 20, armour: null, armourToughness: null, burn: null }, armourWorn: null, armourCarried: null, light: null, combat: null, respawn: null })).status();
+  assert.equal(unknown.armourPoints, null);
+  assert.equal(unknown.armourToughness, null);
+  assert.equal(unknown.burn, null);
+  assert.equal(unknown.respawn, null);
+  assert.equal(unknown.armour, undefined);
+  assert.equal(unknown.light, undefined);
+  assert.equal(unknown.combat, undefined);
+  // An older view_status without coverExit or report_open_sky: both stay unset (plan 2026-11-07-p4-05a-shelter T9a).
+  const olderPolicy = await McpBotRuntime.over(statusClient({}, { revision: "r1", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] } } })).status();
+  assert.equal("coverExit" in olderPolicy, false);
+  assert.equal(olderPolicy.policy?.revision, "r1");
+  assert.equal("reportOpenSky" in (olderPolicy.policy ?? {}), false);
+});
+
+test("status reads time of day, sleeping, vehicle and footing; an older status without them parses and leaves them unset (plan 2026-11-15-p4-18-night-reflex-l2 T1)", async () => {
+  // 12100 is day; the night (12542) is 442 ticks, 0.4 minutes, on (`src/world/daylight.ts:11-12,37-38`).
+  const clock = { phase: "day", minutesUntilChange: 0.4, timeOfDay: 12100, sleeping: false };
+  const position = { x: 0, y: 64, z: 0, onGround: false, inWater: true, inLava: null };
+  const status = await McpBotRuntime.over(statusClient({ clock, vehicle: { name: "oak_boat", id: 7 }, position })).status();
+  assert.deepEqual(status.clock, clock);
+  assert.deepEqual(status.vehicle, { name: "oak_boat" });
+  assert.deepEqual(status.footing, { onGround: false, inWater: true, inLava: null });
+  assert.deepEqual(status.position, { x: 0, y: 64, z: 0 }, "position keeps x, y and z only");
+  const onLand = await McpBotRuntime.over(statusClient({ vehicle: null, position: { x: 0, y: 64, z: 0, onGround: true, inWater: false } })).status();
+  assert.equal(onLand.vehicle, null, "no vehicle is null, not unset");
+  assert.deepEqual(onLand.footing, { onGround: true, inWater: false, inLava: null }, "inLava defaults to null");
+  const older = await McpBotRuntime.over(statusClient({ clock: { phase: "day", minutesUntilChange: 9 } }, { revision: "r1", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] } } })).status();
+  assert.deepEqual(older.clock, { phase: "day", minutesUntilChange: 9 });
+  for (const field of ["vehicle", "footing"]) assert.equal(field in older, false, field);
+  assert.equal("criticalHealth" in (older.policy ?? {}), false);
+  for (const field of ["timeOfDay", "sleeping"]) assert.equal(field in (older.clock ?? {}), false, field);
+});
+
+test("status reads the effective critical health (plan 2026-11-15-p4-18-night-reflex-l2 T1)", async () => {
+  const policy = { revision: "r4", effective: { navigation: { dig_straight_down: true, scaffold_blocks: [] }, combat: { critical_health: 12 } } };
+  assert.equal((await McpBotRuntime.over(statusClient({}, policy)).status()).policy?.criticalHealth, 12);
+});
+
+test("families parse from the runtime's stacks; a runtime that sends none means empty", async () => {
+  const stacks = [{ name: "diamond_sword", count: 1, families: ["sword"] }, { name: "cobblestone", count: 3 }];
+  const status = await McpBotRuntime.over(statusClient({ inventory: { stacks } })).status();
+  assert.deepEqual(status.inventory.map(({ name, families }) => [name, families]), [["diamond_sword", ["sword"]], ["cobblestone", []]]);
+});
 
 test("status carries the dimension view_status names; a runtime that names none is the overworld", async () => {
   assert.equal((await McpBotRuntime.over(statusClient({ dimension: "the_nether" })).status()).dimension, "the_nether");
   assert.equal((await McpBotRuntime.over(statusClient({})).status()).dimension, "minecraft:overworld");
 });
 
+test("status carries view_status's lastDeath with its age; null stays null; a runtime that sends none leaves it unset (plan 2026-11-07-p4-02c T2)", async () => {
+  const lastDeath = { dimension: "overworld", position: { x: 1, y: 70, z: -2 }, observedAt: "2026-11-07T10:00:00.000Z", cause: "Zombie" };
+  const died = await McpBotRuntime.over(statusClient({ observedAt: "2026-11-07T10:07:30.000Z", lastDeath })).status();
+  assert.deepEqual(died.lastDeath, { ...lastDeath, minutesAgo: 7 });
+  assert.equal((await McpBotRuntime.over(statusClient({ lastDeath: null })).status()).lastDeath, null);
+  const older = await McpBotRuntime.over(statusClient({})).status();
+  assert.equal("lastDeath" in older, false, "no key: the death watch stays off");
+});
+
 test("knownContainers' SQL runs on the real bot-data schema: placed, never opened, another bot's, opened only, in an own region, other dimension", async () => {
   // A stub `call` cannot see a typo in the SQL (review 2026-10-18 #4: a regex typo passed every test and killed the deposit live).
   const database = new DatabaseSync(":memory:");
   database.exec(readFileSync(new URL("../../src/bot-data/bot-data.sql", import.meta.url), "utf8"));
-  const placed = (dimension: string, x: number, bot: string) => database.prepare("INSERT INTO placed_containers VALUES (?, ?, ?, 64, 0, 'chest', ?, 'now')").run(`${dimension}|${x}|64|0`, dimension, x, bot);
+  const placed = (dimension: string, x: number, bot: string, block = "chest") => database.prepare("INSERT INTO placed_containers VALUES (?, ?, ?, 64, 0, ?, ?, 'now')").run(`${dimension}|${x}|64|0`, dimension, x, block, bot);
   const opened = (dimension: string, x: number, used: number) => database.prepare("INSERT INTO observed_containers VALUES (?, ?, ?, 64, 0, 'chest', 27, ?, 'Tester', 'now')").run(`${dimension}|${x}|64|0`, dimension, x, JSON.stringify(Array.from({ length: used }, () => ({}))));
   placed("minecraft:overworld", 10, "Tester");
   opened("minecraft:overworld", 10, 4);
-  placed("overworld", 12, "Tester");
+  placed("overworld", 12, "Tester", "barrel");
   placed("overworld", 14, "Mira");
   opened("overworld", 16, 2);
   opened("overworld", 20, 5);
   placed("the_nether", 11, "Tester");
   database.exec("INSERT INTO protected_regions (dimension, min_x, min_y, min_z, max_x, max_y, max_z, owner, label, reason, created_by_bot_id, created_at) VALUES ('overworld', 18, 60, -3, 24, 70, 3, 'tester', 'house', 'x', 'Tester', 'now')");
+  for (const [x, y, z] of [[25, 64, 0], [20, 71, 0], [20, 64, 4]]) {
+    database.prepare("INSERT INTO observed_containers VALUES (?, 'overworld', ?, ?, ?, 'chest', 27, '[]', 'Tester', 'now')").run(`overworld|${x}|${y}|${z}`, x, y, z);
+  }
   const client: ToolClient = {
     callTool: async (call) => {
       const rows = database.prepare(String((call.arguments as { sql: string }).sql)).all().map((row) => Object.values(row));
@@ -357,7 +570,11 @@ test("knownContainers' SQL runs on the real bot-data schema: placed, never opene
   const runtime = McpBotRuntime.over(client);
   const near = { x: 8, y: 64, z: 0 };
   const overworld = await runtime.knownContainers("Tester", near, 32, "overworld");
-  assert.deepEqual(overworld.map(({ x, slotCount, usedSlots }) => [x, slotCount, usedSlots]), [[10, 27, 4], [12, null, 0], [20, 27, 5]]);
+  assert.deepEqual(overworld, [
+    { x: 10, y: 64, z: 0, blockName: "chest", slotCount: 27, usedSlots: 4 },
+    { x: 12, y: 64, z: 0, blockName: "barrel", slotCount: null, usedSlots: 0 },
+    { x: 20, y: 64, z: 0, blockName: "chest", slotCount: 27, usedSlots: 5 },
+  ]);
   assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "minecraft:overworld")).map(({ x }) => x), [10, 12, 20], "either spelling of the overworld asks the same rows");
   assert.deepEqual((await runtime.knownContainers("Tester", near, 32, "the_nether")).map(({ x }) => x), [11]);
   assert.deepEqual((await runtime.knownContainers("Tester", near, 5, "overworld")).map(({ x }) => x), [10, 12], "the reach bounds it, nearest first");
@@ -383,7 +600,7 @@ function worldClient(dimension: string, answer: (sql: string) => readonly (reado
 const ORIGIN = { x: 0, y: 64, z: 0 };
 const FAR = { x: 200, y: 64, z: 0 };
 
-test("the five frontier-map queries ask the dimension the bot is in, never a literal overworld (T6 of the review #8 pattern)", async () => {
+test("the six frontier-map queries ask the dimension the bot is in, never a literal overworld (T6 of the review #8 pattern)", async () => {
   for (const [dimension, bare] of [["the_nether", "the_nether"], ["minecraft:overworld", "overworld"], ["overworld", "overworld"]] as const) {
     const client = worldClient(dimension, () => []);
     const runtime = McpBotRuntime.over(client);
@@ -392,7 +609,8 @@ test("the five frontier-map queries ask the dimension the bot is in, never a lit
     await runtime.waterAlong(ORIGIN, FAR);
     await runtime.unseenAlong(ORIGIN, FAR);
     await runtime.nearestLand(ORIGIN);
-    assert.equal(client.queries.length, 5, dimension);
+    await runtime.chunkWater(ORIGIN);
+    assert.equal(client.queries.length, 6, dimension);
     for (const sql of client.queries) {
       const asksIt = sql.includes(`replace(c.dimension, 'minecraft:', '') = '${bare}'`) || sql.includes(`replace(dimension, 'minecraft:', '') = '${bare}'`);
       assert.ok(asksIt, `${dimension}: ${sql}`);
@@ -432,13 +650,19 @@ test("the frontier-map queries run on the real bot-data schema, each in the dime
   database.exec(sql("frontier-views.sql"));
   const asked = (dimension: string) => McpBotRuntime.over(worldClient(dimension, (sql) => database.prepare(sql).all().map((row) => Object.values(row).map((cell) => (typeof cell === "bigint" ? Number(cell) : (cell as string | number | null))))));
   const overworld = asked("minecraft:overworld");
-  assert.deepEqual((await overworld.seenPlaces("oak_log", ORIGIN, 0, 5)).map(({ x }) => x), [88, 200], "both spellings stored, nearest first");
+  assert.equal(await overworld.chunkWater({ x: 88, y: -20, z: 8 }), 0.9);
+  assert.equal(await overworld.chunkWater(ORIGIN), null, "no explored chunk is unknown, not dry");
+  assert.deepEqual(await overworld.seenPlaces("oak_log", ORIGIN, 0, 5), [
+    { dimension: "overworld", x: 88, z: 8, waterShare: 0.9 },
+    { dimension: "overworld", x: 200, z: 8, waterShare: 0.1 },
+  ], "seenPlaces carries the chunk's surface water share, both dimension spellings, nearest first");
   assert.deepEqual(await overworld.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5), [], "a nether record is not an overworld place");
   assert.equal((await overworld.waterAlong(ORIGIN, { x: 120, y: 64, z: 8 }))?.share, 0.9);
   assert.equal(await overworld.waterAlong(ORIGIN, { x: 50, y: 64, z: 8 }), null, "chunks 0-3 of the overworld were never explored; the nether's are not counted");
   assert.deepEqual(await overworld.nearestLand(ORIGIN), { x: 200, z: 8 });
   assert.equal(await overworld.unseenAlong({ x: 90, y: 64, z: 8 }, { x: 150, y: 64, z: 8 }), 30, "chunk 7 of the overworld (30 blocks on) is the first one never seen");
   const nether = asked("the_nether");
+  assert.equal(await nether.chunkWater({ x: 56, y: 64, z: 8 }), 0, "zero is known dry ground");
   assert.deepEqual((await nether.seenPlaces("nether_quartz_ore", ORIGIN, 0, 5)).map(({ x }) => x), [56]);
   assert.deepEqual(await nether.seenPlaces("oak_log", ORIGIN, 0, 5), [], "an overworld record is not a nether place");
   assert.deepEqual(await nether.seenAt("oak_log", ORIGIN, 0), { dimension: "overworld", x: 88, z: 8 }, "seen only in another dimension: that one, named");
@@ -468,4 +692,61 @@ test("readEvents returns messages and hurts in one pass, reading on while events
   const { messages, hurts } = await McpBotRuntime.over(client).readEvents();
   assert.deepEqual(messages.map((m) => m.message), ["hi"]);
   assert.deepEqual(hurts, [{ attacker: "Theo", direct: null, at: 5 }, { attacker: "Ayla", direct: "arrow", at: 9 }]);
+});
+
+// Spec 2026-10-25-memory-per-bot C1: the SDK's default output-schema validator cost ~1.2 GB and 13 s per Client at listTools.
+const NUMBER_OUTPUT = { type: "object", properties: { n: { type: "number" } }, required: ["n"] } as const;
+
+/** A low-level MCP server listing one tool with `outputSchema`, answering every `tools/call` with `reply`; returns the transport for the client. */
+async function serverListing(outputSchema: Record<string, unknown>, reply: Record<string, unknown>): Promise<InMemoryTransport> {
+  const server = new Server({ name: "schema-server", version: "1" }, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [{ name: "probe", description: "probe", inputSchema: { type: "object" as const }, outputSchema: outputSchema as { type: "object" } }],
+  }));
+  server.setRequestHandler(CallToolRequestSchema, async () => reply as { content: [] });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  return clientTransport;
+}
+
+const mismatchedReply = { content: [], structuredContent: { response: { data: { n: "not a number" } } } };
+
+/** `client` connected to a server listing the tool; closed when the test ends, passed or failed. */
+async function connectedTo(t: TestContext, client: Client, outputSchema: Record<string, unknown>, reply: Record<string, unknown>): Promise<Client> {
+  t.after(() => client.close());
+  await client.connect(await serverListing(outputSchema, reply));
+  return client;
+}
+
+const defaultClient = () => new Client({ name: "default-validator", version: "0.1.0" });
+
+test("a reply that breaks the listed output schema still reaches the brain's parser", async (t) => {
+  // Run twice on a fresh client: a reconnect opens a new one through the same `newToolClient`.
+  for (const attempt of ["first client", "reconnected client"]) {
+    const client = await connectedTo(t, newToolClient("schema-test"), NUMBER_OUTPUT, mismatchedReply);
+    await client.listTools();
+    const reply = await client.callTool({ name: "probe", arguments: {} });
+    assert.deepEqual(reply.structuredContent, mismatchedReply.structuredContent, attempt);
+  }
+  const withDefault = await connectedTo(t, defaultClient(), NUMBER_OUTPUT, mismatchedReply);
+  await withDefault.listTools();
+  await assert.rejects(
+    withDefault.callTool({ name: "probe", arguments: {} }),
+    (error: unknown) => error instanceof McpError && error.code === ErrorCode.InvalidParams,
+    "the SDK default validator refuses the same reply, so the first half proves the switch",
+  );
+});
+
+test("a tool with an output schema that answers without structured content still throws", async (t) => {
+  const client = await connectedTo(t, newToolClient("schema-test"), NUMBER_OUTPUT, { content: [{ type: "text", text: "x" }] });
+  await client.listTools();
+  await assert.rejects(client.callTool({ name: "probe", arguments: {} }), /has an output schema but did not return structured content/u);
+});
+
+test("listing the tools compiles nothing", async (t) => {
+  const uncompilable = { type: "object", properties: { a: { $ref: "#/nowhere" } } };
+  const client = await connectedTo(t, newToolClient("schema-test"), uncompilable, { content: [] });
+  assert.deepEqual((await client.listTools()).tools.map((tool: { name: string }) => tool.name), ["probe"]);
+  const withDefault = await connectedTo(t, defaultClient(), uncompilable, { content: [] });
+  await assert.rejects(withDefault.listTools(), /can't resolve reference #\/nowhere/u, "AJV refuses the schema at listing, so the first half proves the switch");
 });

@@ -1,6 +1,9 @@
 // SQL the brain asks of the bot's own data: the dimension condition, its own containers, and the explored-chunk map by dimension.
 import type { Position } from "./runtime-client.ts";
 
+/** Above this surface water share a chunk is mostly water; below it, mostly land. */
+export const MOSTLY_WATER = 0.5;
+
 /**
  * A SQL condition true for rows of `column` in `dimension`, whichever spelling the server stored (`overworld` or
  * `minecraft:overworld`: `use_container` stores `bot.game.dimension`); null for a value that could break the literal.
@@ -60,7 +63,7 @@ export function seenPlacesSql(block: string, from: Position, beyond: number, lim
   if (!isBlockId(block) || here === null) return null;
   const squared = chunkDistanceSql("c.", from.x, from.z);
   const far = Math.floor(beyond);
-  return "SELECT c.chunk_x * 16 + 8, c.chunk_z * 16 + 8 FROM frontier_chunk_materials m JOIN frontier_chunks c ON c.chunk_key = m.chunk_key " +
+  return "SELECT c.chunk_x * 16 + 8, c.chunk_z * 16 + 8, c.surface_water_fraction FROM frontier_chunk_materials m JOIN frontier_chunks c ON c.chunk_key = m.chunk_key " +
     `WHERE m.material = '${block}' AND ${here} AND ${squared} > ${far * far} ORDER BY ${squared} LIMIT ${Math.max(1, Math.floor(limit))}`;
 }
 
@@ -81,7 +84,7 @@ export function exploredChunksSql(chunks: readonly (readonly [number, number])[]
 /** The middle (`x, z`) of the explored chunk of `dimension` nearest to `from` whose surface is mostly land. */
 export function nearestLandSql(from: Position, dimension: string): string | null {
   const here = sameDimensionSql("dimension", dimension);
-  return here === null ? null : `SELECT chunk_x * 16 + 8, chunk_z * 16 + 8 FROM frontier_chunks WHERE ${here} AND surface_water_fraction < 0.5 ORDER BY ${chunkDistanceSql("", from.x, from.z)} LIMIT 1`;
+  return here === null ? null : `SELECT chunk_x * 16 + 8, chunk_z * 16 + 8 FROM frontier_chunks WHERE ${here} AND surface_water_fraction < ${MOSTLY_WATER} ORDER BY ${chunkDistanceSql("", from.x, from.z)} LIMIT 1`;
 }
 
 /** Whether two dimension names are the same dimension, whichever spelling (`overworld`, `minecraft:overworld`). */

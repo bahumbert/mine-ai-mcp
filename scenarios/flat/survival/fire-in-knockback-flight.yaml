@@ -1,0 +1,28 @@
+name: fire-in-knockback-flight
+tags: [regression]
+description: A fire claim during a real knockback flight lands the open footing obligation and resumes the walk.
+minecraft: { version: "1.21.4" }
+world:
+  type: flat
+  difficulty: normal
+  time: noon
+  gamerules: { doDaylightCycle: false, doMobSpawning: false, naturalRegeneration: false, keepInventory: true, doFireTick: false }
+reset: ["fill -14 -59 -4 5 -50 4 air"]
+geometry:
+  - fill: { block: lava, from: [-14, -60, -4], to: [5, -60, 4] }
+  - fill: { block: nether_bricks, from: [-12, -59, 0], to: [1, -55, 0] }
+  - fill: { block: nether_bricks, from: [-2, -59, -2], to: [-2, -55, -2] }
+entities:
+  - type: minecraft:cow
+    pos: [-1.5, -54, -1.5]
+    nbt: '{NoAI:1b,Silent:1b}'
+players:
+  - name: FireFlight
+    op: true
+    pos: [0.8, -54, 0.8]
+    inventory: [{ item: cobblestone, count: 4 }, { item: iron_pickaxe, count: 1 }]
+client:
+  command: bun
+  args: ["../../src/client-host.ts", "./fire-in-knockback-flight.ts"]
+params: { mode: impulse }
+goal: { kind: completion, who: FireFlight, timeout: 40 }

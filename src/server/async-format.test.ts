@@ -20,8 +20,8 @@ test("large build objectives summarize cells without losing current progress or 
       combatResources: { arrowsFired: 0, arrowsRecovered: 0, durabilityUsed: [], shieldBlocks: 0, foodEaten: 0, scaffoldPlaced: 0, weaponChanges: [] }, reflexActivity: [],
       checkpointDelta: { correct: 26 }, toolChanges: [{
       class: "pickaxe", reason: "durability_used",
-      before: { class: "pickaxe", tier: "iron", item: "iron_pickaxe", slot: 36, durabilityLeft: 9, maximumDurability: 250 },
-      now: { class: "pickaxe", tier: "iron", item: "iron_pickaxe", slot: 36, durabilityLeft: 4, maximumDurability: 250 },
+      before: { class: "pickaxe", rank: 3, item: "iron_pickaxe", slot: 36, durabilityLeft: 9, maximumDurability: 250 },
+      now: { class: "pickaxe", rank: 3, item: "iron_pickaxe", slot: 36, durabilityLeft: 4, maximumDurability: 250 },
     }] },
   });
   assert.match(markdown, /100 cells: 80 cobblestone, 20 air/);

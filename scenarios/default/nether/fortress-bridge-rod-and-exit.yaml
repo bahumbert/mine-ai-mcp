@@ -28,6 +28,8 @@ players:
       - { item: diamond_boots, count: 1 }
       - { item: diamond_sword, count: 1 }
       - { item: diamond_pickaxe, count: 1 }
+      # The hunt's admission asks a shield against a hostile mob (shield-gate.ts).
+      - { item: shield, count: 1 }
       - { item: bow, count: 1 }
       - { item: arrow, count: 64 }
       - { item: cooked_beef, count: 64 }

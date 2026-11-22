@@ -4,6 +4,7 @@
  * per-bot provider, like the navigation policy, so every route, collect and automatic response obeys the same list.
  */
 import type { Bot } from "mineflayer";
+import { isRecordedLifeSavingBlock } from "./life-saving-placements.js";
 
 export interface BlockCorner {
   readonly x: number;
@@ -140,4 +141,50 @@ export function describeProtectedRegion(region: DescribedRegion): string {
   return region.peer === true
     ? `${region.heldBy ?? "another bot"}'s protected area '${region.label}' (owner ${region.owner})`
     : `protected region #${region.regionId} '${region.label}' (owner ${region.owner})`;
+}
+
+/** A region of someone else holding the cell, or null; the bot's own regions never refuse. Read at each call. */
+export function foreignRegionAt(bot: Bot, cell: BlockCorner): ProtectedRegion | null {
+  return protectedRegionAt(readProtectedRegions(bot), bot.game.dimension, cell.x, cell.y, cell.z, bot.username);
+}
+
+/** Any region (own included) holding the cell: for choosers that prefer cells outside every region. */
+export function anyRegionAt(bot: Bot, cell: BlockCorner): ProtectedRegion | null {
+  return protectedRegionAt(readProtectedRegions(bot), bot.game.dimension, cell.x, cell.y, cell.z);
+}
+
+/** Why a placement or dig was refused here, without the action's own words around it. */
+export function regionRefusalText(region: ProtectedRegion): string {
+  return `inside ${describeProtectedRegion(region)}`;
+}
+
+/**
+ * The refusal text for a dig or a placement at a cell inside someone else's region, or null when the cell is free to
+ * change (outside every region, or in the bot's own). The one wording every world change outside navigation's routes
+ * uses (plan 2026-11-07-p4-06a-threat T5b), so a model reads the same words wherever the change was refused.
+ */
+export function regionChangeRefusal(bot: Bot, cell: BlockCorner, change: "dig" | "placement"): string | null {
+  if (change === "dig" && isRecordedLifeSavingBlock(bot, cell)) return null;
+  const region = foreignRegionAt(bot, cell);
+  if (region === null) return null;
+  const where = `(${cell.x}, ${cell.y}, ${cell.z}) is ${regionRefusalText(region)}`;
+  return change === "dig"
+    ? `Dig cell ${where}: dig elsewhere or ask its owner.`
+    : `Placement cell ${where}: build elsewhere or ask its owner.`;
+}
+
+/**
+ * The cells in the order a chooser should try them: outside every region, then in the bot's own, then in someone
+ * else's (which the placement core refuses). Stable inside each group.
+ */
+export function cellsOutsideRegionsFirst<T extends BlockCorner>(bot: Bot, cells: readonly T[]): T[] {
+  const regions = readProtectedRegions(bot);
+  const rank = (cell: BlockCorner): number => {
+    if (protectedRegionAt(regions, bot.game.dimension, cell.x, cell.y, cell.z) === null) return 0;
+    return protectedRegionAt(regions, bot.game.dimension, cell.x, cell.y, cell.z, bot.username) === null ? 1 : 2;
+  };
+  return cells
+    .map((cell, index) => ({ cell, index, rank: rank(cell) }))
+    .sort((left, right) => left.rank - right.rank || left.index - right.index)
+    .map(({ cell }) => cell);
 }

@@ -1,0 +1,237 @@
+diff --git a/lib/plugins/craft.js b/lib/plugins/craft.js
+index f09298c0d3a6366889b30ea60a4f87caffc50fda..ee4b23516b8dacd9797ba2af9a4106919f15aa8e 100644
+--- a/lib/plugins/craft.js
++++ b/lib/plugins/craft.js
+@@ -3,14 +3,40 @@ const { once } = require('../promise_utils')
+ 
+ module.exports = inject
+ 
++// ms to wait for the result slot to hold the recipe's result; the same bound as inventory.js WINDOW_TIMEOUT
++const CRAFTING_RESULT_TIMEOUT = 5000
++// ms to wait for the server's answer to a tab_complete sent after a click (measured on Paper and vanilla: 1-10 ms)
++const ROUND_TRIP_TIMEOUT = 2000
++
+ function inject (bot) {
+   const Item = require('prismarine-item')(bot.registry)
+   const Recipe = require('prismarine-recipe')(bot.registry).Recipe
+   let windowCraftingTable
+ 
++  // One click can be answered by several packets, each with a new stateId (Paper: nine within 3 ms after one
++  // click). The next click is written with the last stateId received (inventory.js window_click); a server that is
++  // already further along ignores it and resyncs, which leaves the client's model wrong (a craft that "put away" its
++  // result while the server kept it on the cursor). The server handles packets in order and a tab_complete reply
++  // (as chat.js uses it) comes after every packet sent before it, so once it arrives the answers to our last click
++  // have arrived too. A server that does not answer it (or a bot without chat) costs ROUND_TRIP_TIMEOUT once: the
++  // rest of this craft call goes without the round trip, as clicks always did, and only the wait for the result
++  // slot (waitForRecipeResult) protects the take.
++  let serverAnswersRoundTrips = true
++  async function settled (clicking) {
++    const result = await clicking
++    if (!serverAnswersRoundTrips) return result
++    try {
++      await bot.tabComplete('/', false, false, ROUND_TRIP_TIMEOUT)
++    } catch (err) {
++      serverAnswersRoundTrips = false
++    }
++    return result
++  }
++
+   async function craft (recipe, count, craftingTable) {
+     assert.ok(recipe)
+     count = parseInt(count ?? 1, 10)
++    serverAnswersRoundTrips = true
+     if (recipe.requiresTable && !craftingTable) {
+       throw new Error('Recipe requires craftingTable, but one was not supplied: ' + JSON.stringify(recipe))
+     }
+@@ -99,9 +125,9 @@ function inject (bot) {
+           const sourceItem = window.findInventoryItem(ingredient.id, ingredient.metadata)
+           if (!sourceItem) throw new Error('missing ingredient')
+           if (originalSourceSlot == null) originalSourceSlot = sourceItem.slot
+-          await bot.clickWindow(sourceItem.slot, 0, 0)
++          await settled(bot.clickWindow(sourceItem.slot, 0, 0))
+         }
+-        await bot.clickWindow(destSlot, 1, 0)
++        await settled(bot.clickWindow(destSlot, 1, 0))
+         await nextShapeClick()
+       }
+ 
+@@ -115,9 +141,9 @@ function inject (bot) {
+           const sourceItem = window.findInventoryItem(ingredient.id, ingredient.metadata)
+           if (!sourceItem) throw new Error('missing ingredient')
+           if (originalSourceSlot == null) originalSourceSlot = sourceItem.slot
+-          await bot.clickWindow(sourceItem.slot, 0, 0)
++          await settled(bot.clickWindow(sourceItem.slot, 0, 0))
+         }
+-        await bot.clickWindow(destSlot, 1, 0)
++        await settled(bot.clickWindow(destSlot, 1, 0))
+         if (++ingredientIndex < recipe.ingredients.length) {
+           await nextIngredientsClick()
+         } else {
+@@ -128,12 +154,41 @@ function inject (bot) {
+       async function putMaterialsAway () {
+         const start = window.inventoryStart
+         const end = window.inventoryEnd
+-        await bot.putSelectedItemRange(start, end, window, originalSourceSlot)
++        await settled(bot.putSelectedItemRange(start, end, window, originalSourceSlot))
+         await grabResult()
+       }
+ 
++      // A server may answer a grid click with a slot 0 update that is not yet the recipe's result (Paper: an empty
++      // one first, the result a few ms after the next click), and clickWindow returns on that first update. Wait for
++      // the result itself before taking it, bounded; past the bound the assert below says what it always said.
++      // With the round trip of settled() the result is already there on Paper (measured: inside the burst); this wait
++      // is what remains when the round trip is off, and for a result sent in a later tick (not measured).
++      function waitForRecipeResult () {
++        const holdsRecipeResult = () => {
++          const item = window.slots[0]
++          return !!item && item.type === recipe.result.id && item.count === recipe.result.count
++        }
++        if (holdsRecipeResult()) return Promise.resolve()
++        return new Promise(resolve => {
++          const finish = () => {
++            clearTimeout(timer)
++            window.removeListener('updateSlot:0', onSlotZero)
++            bot.removeListener('windowClose', onClose)
++            bot._client.removeListener('end', finish)
++            resolve()
++          }
++          const onSlotZero = () => { if (holdsRecipeResult()) finish() }
++          const onClose = closed => { if (closed === window) finish() }
++          const timer = setTimeout(finish, CRAFTING_RESULT_TIMEOUT)
++          window.on('updateSlot:0', onSlotZero)
++          bot.on('windowClose', onClose)
++          bot._client.on('end', finish)
++        })
++      }
++
+       async function grabResult () {
+         assert.strictEqual(window.selectedItem, null)
++        await waitForRecipeResult()
+         const result = window.slots[0]
+         assert.ok(result && result.type === recipe.result.id && result.count === recipe.result.count,
+           'Server did not supply the expected crafting result')
+@@ -156,10 +211,10 @@ function inject (bot) {
+         }
+         // Taking the output also consumes its grid. Predict both in the same
+         // click, before sending changedSlots, rather than correcting it later.
+-        await bot._takeCraftingResult(remaining, resultUpdates)
+-        await bot.putSelectedItemRange(window.inventoryStart, window.inventoryEnd, window, null)
++        await settled(bot._takeCraftingResult(remaining, resultUpdates))
++        await settled(bot.putSelectedItemRange(window.inventoryStart, window.inventoryEnd, window, null))
+         for (const { slot, item } of remaining) {
+-          if (item) await bot.putAway(slot)
++          if (item) await settled(bot.putAway(slot))
+         }
+       }
+ 
+diff --git a/lib/plugins/digging.js b/lib/plugins/digging.js
+--- a/lib/plugins/digging.js
++++ b/lib/plugins/digging.js
+@@ -9,6 +9,7 @@
+ function inject (bot) {
+   let swingInterval = null
+   let waitTimeout = null
++  let cancelServerDig = null
+ 
+   let diggingTask = createDoneTask()
+ 
+@@ -134,7 +135,8 @@
+       location: block.position,
+       face: bot.targetDigFace // default face is 1 (top)
+     })
+-    waitTimeout = setTimeout(finishDigging, waitTime)
++    const serverClock = bot._startServerDig
++    if (!serverClock) waitTimeout = setTimeout(finishDigging, waitTime)
+     bot.targetDigBlock = block
+     bot.swingArm()
+ 
+@@ -155,17 +157,20 @@
+           face: bot.targetDigFace // always the same as the start face
+         })
+       }
+-      bot.targetDigBlock = null
+-      bot.targetDigFace = null
+-      bot.lastDigTime = performance.now()
+-      bot._updateBlockState(block.position, 0)
++      if (!serverClock) {
++        bot.targetDigBlock = null
++        bot.targetDigFace = null
++        bot.lastDigTime = performance.now()
++        bot._updateBlockState(block.position, 0)
++      }
+     }
+ 
+     const eventName = `blockUpdate:${block.position}`
+-    bot.on(eventName, onBlockUpdate)
++    if (!serverClock) bot.on(eventName, onBlockUpdate)
+ 
+     const currentBlock = block
+-    bot.stopDigging = () => {
++    bot.stopDigging = stopDigging
++    function stopDigging (error = new Error('Digging aborted')) {
+       if (!bot.targetDigBlock) return
+ 
+       // Replicate the odd vanilla cancellation face value.
+@@ -174,23 +179,31 @@
+       const cancellationDiggingFace = !stoppedBecauseOfNewDigRequest ? bot.targetDigFace : 0
+ 
+       bot.removeListener(eventName, onBlockUpdate)
++      cancelServerDig?.()
++      cancelServerDig = null
+       clearInterval(swingInterval)
+       clearTimeout(waitTimeout)
+       swingInterval = null
+       waitTimeout = null
+-      bot._client.write('block_dig', {
+-        sequence: nextInteractionSequence(bot),
+-        status: 1, // cancel digging
+-        location: bot.targetDigBlock.position,
+-        face: cancellationDiggingFace
+-      })
+       const block = bot.targetDigBlock
+       bot.targetDigBlock = null
+       bot.targetDigFace = null
+       bot.lastDigTime = performance.now()
+-      bot.emit('diggingAborted', block)
+       bot.stopDigging = noop
+-      diggingTask.cancel(new Error('Digging aborted'))
++      try {
++        bot._client.write('block_dig', {
++          sequence: nextInteractionSequence(bot),
++          status: 1, // cancel digging
++          location: block.position,
++          face: cancellationDiggingFace
++        })
++      } finally {
++        try {
++          bot.emit('diggingAborted', block)
++        } finally {
++          diggingTask.cancel(error)
++        }
++      }
+     }
+ 
+     function onBlockUpdate (oldBlock, newBlock) {
+@@ -199,6 +212,8 @@
+       // All block update listeners receive (null, null) when the world is unloaded. So newBlock can be null.
+       if (newBlock?.type !== 0) return
+       bot.removeListener(eventName, onBlockUpdate)
++      cancelServerDig?.()
++      cancelServerDig = null
+       clearInterval(swingInterval)
+       clearTimeout(waitTimeout)
+       swingInterval = null
+@@ -210,6 +225,13 @@
+       diggingTask.finish()
+     }
+ 
++    if (serverClock) {
++      cancelServerDig = serverClock(block, waitTime, {
++        finish: finishDigging,
++        complete: newBlock => onBlockUpdate(block, newBlock),
++        fail: stopDigging
++      })
++    }
+     await diggingTask.promise
+   }
+ 

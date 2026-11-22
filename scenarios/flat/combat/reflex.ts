@@ -6,9 +6,10 @@ import {
 import { z } from "zod";
 import type { Runtime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
+import { pollServerWindow } from "./idle-reflex-window.ts";
 
 const encounterSchema = z.object({
-  response: z.enum(["fight", "evade", "hide"]),
+  response: z.enum(["fight", "evade", "hide", "deflect"]),
   outcome: z.string(),
   reason: z.string(),
   interrupted: z.object({ action: z.string(), startedAt: z.string() }).nullable(),
@@ -36,6 +37,12 @@ const encounterSchema = z.object({
     .nullish(),
 });
 export type Encounter = z.output<typeof encounterSchema>;
+const limitSchema = z.object({ kind: z.literal("limit"), limit: z.enum(["physics_stalled", "ceiling", "no_progress"]),
+  elapsedMs: z.number(), lastProgress: z.string().nullable() });
+const failureSchema = z.object({ response: z.string(), kind: z.enum(["execution_failed", "cancelled"]), why: z.string() });
+export type ReflexOutcome = ({ kind: "encounter" } & Encounter)
+  | ({ response: string } & z.output<typeof limitSchema>)
+  | { kind: "failed"; response: string; failure: "execution_failed" | "cancelled"; why: string };
 
 /**
  * Count the explosions the server announces to this client.
@@ -68,7 +75,7 @@ export function watchExplosions(context: MineAiScenarioContext): { count(): numb
  * counters record what it asked for; this records what the server did.
  */
 // @function-metrics size=6 branches=1 fan-out=3 depth=2 interface=1 fan-in=3
-export function watchShield(context: MineAiScenarioContext): { summary(): string; close(): void } {
+export function watchShield(context: MineAiScenarioContext): { counts(): { hurt: number; blocked: number }; summary(): string; close(): void } {
   const LIVING_ENTITY_FLAGS_INDEX = 8;
   // The entity status the server sends for the bot's own entity on a block;
   // damage arrives as its own event, which Mineflayer surfaces as entityHurt.
@@ -103,6 +110,7 @@ export function watchShield(context: MineAiScenarioContext): { summary(): string
   context.bot.on("entitySpawn", onSpawn);
   context.bot._client.on("entity_status", onStatus);
   return {
+    counts: () => ({ hurt, blocked }),
     summary: () => `shield up ${raised}/${sampled} ticks; blocked ${blocked}; hurt ${hurt}; arrows loosed ${loosed}`,
     close: () => {
       context.bot.off("physicsTick", onTick);
@@ -139,21 +147,49 @@ export async function waitForIdle(context: MineAiScenarioContext, runtime: Runti
  */
 // @function-metrics size=6 branches=3 fan-out=7 depth=4 interface=3 fan-in=3
 export async function readEncounters(
-  context: MineAiScenarioContext,
+  context: Pick<MineAiScenarioContext, "signal">,
   runtime: Runtime,
   ignoreOutcomes: readonly string[] = [],
 ): Promise<readonly Encounter[]> {
+  return (await readReflexOutcomes(context, runtime, ignoreOutcomes)).encounters;
+}
+
+/** Read each published hostile-reflex outcome without treating limits as encounters. */
+export async function readReflexOutcomes(
+  context: Pick<MineAiScenarioContext, "signal">,
+  runtime: Runtime,
+  ignoreOutcomes: readonly string[] = [],
+): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[] }> {
+  const { encounters, limits, failures } = await readOrderedReflexOutcomes(context, runtime, ignoreOutcomes);
+  return { encounters, limits, failures };
+}
+
+/** The same read, plus every outcome in the order the events were recorded (the three lists cannot say which came first). */
+export async function readOrderedReflexOutcomes(
+  context: Pick<MineAiScenarioContext, "signal">,
+  runtime: Runtime,
+  ignoreOutcomes: readonly string[] = [],
+): Promise<{ encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[]; ordered: ReflexOutcome[] }> {
   const readEvents = runtime.actions.find((action) => action.name === READ_RECENT_EVENTS);
   if (!readEvents) throw new Error("The reflex scenarios require the recent-events action.");
-  const seen: Encounter[] = [];
+  // `ordered` keeps every outcome in the order the events were recorded: the three lists alone cannot say which came first.
+  const seen: { encounters: Encounter[]; limits: Extract<ReflexOutcome, { kind: "limit" }>[]; failures: Extract<ReflexOutcome, { kind: "failed" }>[]; ordered: ReflexOutcome[] } =
+    { encounters: [], limits: [], failures: [], ordered: [] };
   for (;;) {
     const output = await runtime.run(readEvents, { limit: 100 }, context.signal);
+    if (output.result.status !== "succeeded") throw new Error(output.result.error);
     const result = readRecentEventsResultSchema.parse(output.result);
     for (const event of result.events) {
       if (event.type !== "survival_outcome" || event.payload.source !== "hostile_reflex") continue;
-      const encounter = parseEncounterEvidence(event.payload.evidence);
-      if (!encounter) continue;
-      if (!ignoreOutcomes.includes(encounter.outcome)) seen.push(encounter);
+      const outcome = parseReflexOutcome(event.payload.evidence);
+      if (!outcome) continue;
+      if (outcome.kind !== "encounter" || !ignoreOutcomes.includes(outcome.outcome)) seen.ordered.push(outcome);
+      if (outcome.kind === "limit") seen.limits.push(outcome);
+      else if (outcome.kind === "failed") seen.failures.push(outcome);
+      else {
+        const { kind: _, ...encounter } = outcome;
+        if (!ignoreOutcomes.includes(encounter.outcome)) seen.encounters.push(encounter);
+      }
     }
     if (result.remainingEventCount === 0) break;
   }
@@ -162,12 +198,24 @@ export async function readEncounters(
 
 /** Equipment preparation shares the reflex, but is not a completed fight. */
 export function parseEncounterEvidence(value: unknown): Encounter | null {
+  const outcome = parseReflexOutcome(value);
+  if (!outcome || outcome.kind !== "encounter") return null;
+  const { kind: _, ...encounter } = outcome;
+  return encounter;
+}
+
+/** Parse the published limit, execution failure or completed response. */
+export function parseReflexOutcome(value: unknown): ReflexOutcome | null {
+  const failure = failureSchema.safeParse(value);
+  if (failure.success) return { kind: "failed", response: failure.data.response, failure: failure.data.kind, why: failure.data.why };
+  const limited = z.object({ response: z.string(), outcome: limitSchema }).safeParse(value);
+  if (limited.success) return { response: limited.data.response, ...limited.data.outcome };
   if (z.object({ response: z.literal("prepare_shield") }).safeParse(value).success) return null;
   const evidence = z.object({
     outcome: encounterSchema.omit({ interrupted: true }),
     interrupted: encounterSchema.shape.interrupted,
   }).parse(value);
-  return { ...evidence.outcome, interrupted: evidence.interrupted };
+  return { kind: "encounter", ...evidence.outcome, interrupted: evidence.interrupted };
 }
 
 /**
@@ -180,9 +228,8 @@ export function parseEncounterEvidence(value: unknown): Encounter | null {
  * the events matters for a crowd, where the bot goes briefly idle between one
  * kill and naming the next target.
  */
-// @function-metrics size=9 branches=3 fan-out=5 depth=5 interface=4 fan-in=2
 export async function awaitEncounters(
-  context: MineAiScenarioContext,
+  context: Pick<MineAiScenarioContext, "bot" | "signal">,
   runtime: Runtime,
   count: number,
   ticks: number,
@@ -190,17 +237,19 @@ export async function awaitEncounters(
 ): Promise<readonly Encounter[]> {
   // Events arrive oldest-first, so this stays in the order they happened.
   const seen: Encounter[] = [];
-  for (let waited = 0; waited < ticks; waited += 5) {
+  const readSettled = async () => {
     context.signal.throwIfAborted();
-    if (!runtime.status().busy) {
+    if (runtime.status().busy) return false;
+    try {
       seen.push(...(await readEncounters(context, runtime, ignoreOutcomes)));
-      if (seen.length >= count) return seen;
+    } finally {
+      context.signal.throwIfAborted();
     }
-    await context.bot.waitForTicks(5);
-  }
-  // A kill can finish during that final sleep. Read its settled evidence before
-  // reporting an empty log and closing a physically successful runtime.
-  if (!runtime.status().busy) seen.push(...(await readEncounters(context, runtime, ignoreOutcomes)));
+    return seen.length >= count;
+  };
+  const { ended } = await pollServerWindow(context.bot, ticks, readSettled, context.signal);
+  // A kill can finish during the last wait. Read its settled evidence before closing the runtime.
+  if (ended === "ticks") await readSettled();
   return seen;
 }
 
@@ -213,16 +262,27 @@ export async function awaitEncounters(
  * somewhere a long way from the cause - which is exactly how the first attempt
  * at the hide fixture behaved.
  */
-// @function-metrics size=8 branches=2 fan-out=5 depth=2 interface=3 fan-in=2
-export async function hurt(context: MineAiScenarioContext, target: number): Promise<boolean> {
-  const { bot } = context;
-  bot.chat(`/damage @s ${Math.max(1, Math.round(bot.health - target))} minecraft:magic`);
-  for (let waited = 0; waited < 100; waited += 1) {
-    context.signal.throwIfAborted();
-    if (bot.health <= target) return true;
-    await bot.waitForTicks(1);
+export async function hurt(context: Pick<MineAiScenarioContext, "bot" | "signal">, target: number): Promise<boolean> {
+  const { bot, signal } = context;
+  signal.throwIfAborted();
+  // Arranged-health fixtures freeze game time, but the damage command still answers with a health packet.
+  const wounded = new AbortController();
+  const confirmed = Symbol("wounded health observed");
+  const health = () => {
+    if (bot.health <= target) wounded.abort(confirmed);
+  };
+  bot.on("health", health);
+  try {
+    bot.chat(`/damage @s ${Math.max(1, Math.round(bot.health - target))} minecraft:magic`);
+    const { ended } = await pollServerWindow(bot, 100, async () => bot.health <= target, AbortSignal.any([signal, wounded.signal]));
+    return ended === "poll" || bot.health <= target;
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error === confirmed) return true;
+    throw error;
+  } finally {
+    bot.off("health", health);
   }
-  return false;
 }
 
 // @function-metrics size=2 branches=0 fan-out=1 depth=2 interface=3 fan-in=1

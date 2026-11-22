@@ -266,6 +266,22 @@ test("places a carried bed and sleeps in it when no bed is around", async () => 
   assert.match(result.sleep?.warning ?? "", /collect_block/);
 });
 
+test("a bed refused for want of flat ground keeps the BED_PLACEMENT_FAILED prefix and says to call sleep again", async () => {
+  const cells: Record<string, string> = {};
+  for (let x = -5; x <= 5; x += 1) for (let z = -5; z <= 5; z += 1) for (const y of [64, 65, 66]) cells[`${x},${y},${z}`] = "stone";
+  delete cells["0,64,0"];
+  delete cells["0,65,0"];
+  const h = sleeper({ carried: { white_bed: 1 }, cells });
+  using _installed = h.clock.install();
+
+  const result = await h.clock.settle(executeSleep(h.bot, fakeNavigation, {}), 60_000);
+
+  assert.equal(result.status, "failed");
+  if (result.status !== "failed") return;
+  assert.ok(result.error.startsWith("[BED_PLACEMENT_FAILED] No nearby supported 2-block flat ground"), result.error);
+  assert.ok(result.error.includes("call sleep again"), result.error);
+});
+
 /** A navigation that walks to the placed bed; given an owner, its first route is the one a reflex aborts. */
 function walkToPlacedBed(h: FakeHarness, state: { placedAt: Vec3 | null }, owner?: AbortController): NavigationRuntime {
   let routes = 0;

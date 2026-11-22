@@ -17,12 +17,12 @@ const coordinates = {
 
 export const enterNetherPortalInputSchema = z.strictObject({
   ...coordinates,
-  allow_low_supplies: z.boolean().default(false).describe("Proceed despite carrying fewer than 16 usable food items or 32 regular arrows. Return to the Overworld is exempt."),
+  allow_low_supplies: z.boolean().default(false).describe("Proceed despite carrying fewer than 16 usable food items or 32 arrows (regular, spectral or tipped). Return to the Overworld is exempt."),
 });
 
 export const enterEndPortalInputSchema = z.strictObject({
   ...coordinates,
-  allow_low_supplies: z.boolean().default(false).describe("Proceed despite carrying fewer than 16 usable food items or 32 regular arrows."),
+  allow_low_supplies: z.boolean().default(false).describe("Proceed despite carrying fewer than 16 usable food items or 32 arrows (regular, spectral or tipped)."),
   respawn_within: z.number().nonnegative().default(128).describe("Maximum distance in blocks from the portal to a personal respawn bed confirmed through this session's sleep action."),
   allow_distant_respawn: z.boolean().default(false).describe("Enter the End when the personal respawn bed is distant or unknown. This bypasses only the respawn-distance guard."),
 });

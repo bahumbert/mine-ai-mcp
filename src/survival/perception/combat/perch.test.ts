@@ -6,6 +6,8 @@ import { TestEndCombat as EndCombat } from "../../../test-support/combat.js";
 import { createFakeBot, createFakeClock, entityBodyOf } from "../../../test-support/fake-bot/index.js";
 import { PerchObservation } from "./perch.js";
 import { PerchPreparation } from "./perch-preparation.js";
+import { serverTickPace } from "../../../world/server-tick-pace.js";
+import { swingReadiness } from "../../weapons/swing-readiness.js";
 
 import type { NavigationRuntime } from "../../../navigation/index.js";
 import type { FootingRecovery } from "../../responses/footing.js";
@@ -13,6 +15,31 @@ import { observeMineflayerBlock } from "../../../navigation/mineflayer/world.js"
 
 const fountain = { "0,64,0": "bedrock", "0,65,0": "bedrock", "0,66,0": "bedrock", "0,67,0": "bedrock",
   "3,64,0": "bedrock", "-3,64,0": "bedrock", "0,64,3": "bedrock", "0,64,-3": "bedrock" };
+
+for (const rate of [20, 10]) test(`perch readiness shares the server's sword recovery at ${rate} tps`, async () => {
+  const { bot, clock, server } = createFakeBot({
+    clock: createFakeClock({ mode: "mocked" }), server: { ticksPerSecond: rate }, dimension: "the_end",
+  });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using readiness = swingReadiness(bot);
+  dragonAt(bot, new Vec3(0, 65, 0), 5, 200);
+  using observation = new PerchObservation(bot, 42);
+  await clock.advance(4_000);
+  const started = server.gameTime;
+  observation.requireCooldown(13);
+  readiness.restart();
+  assert.equal(observation.ready, false, "a prior owner's swing is not ready on entry");
+  observation.swung(13);
+  await clock.advance(12_000 / rate);
+  assert.equal(observation.ready, false, `not ready at ${clock.now()} ms, world tick ${server.gameTime}`);
+  await clock.advance(1_000 / rate);
+  assert.equal(clock.now(), 4_000 + 13_000 / rate);
+  assert.equal(server.gameTime - started, 13);
+  assert.equal(observation.ready, true);
+  readiness.restart(); // Another body owner used the same hand during suspension.
+  assert.equal(observation.ready, false);
+});
 function preparationWorld(bot: Bot): NavigationRuntime["world"] {
   return { blockAt: (x: number, y: number, z: number) => observeMineflayerBlock(bot.blockAt(new Vec3(x, y, z))!) } as NavigationRuntime["world"];
 }
@@ -27,14 +54,18 @@ function dragonAt(bot: Bot, position: Vec3, phase: number | undefined, health: n
 }
 
 test("takeoff and cooldown observed during suspension cannot start a second perch", async () => {
-  const { bot, clock } = createFakeBot({ dimension: "the_end", position: new Vec3(30, 64, 30), overrides: { deactivateItem: () => {} } });
+  const { bot, clock } = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), dimension: "the_end", position: new Vec3(30, 64, 30), overrides: { deactivateItem: () => {} } });
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  await clock.advance(4_000);
   const phase = bot.registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("phase");
   const health = bot.registry.entitiesByName.ender_dragon!.metadataKeys!.indexOf("health");
   dragonAt(bot, new Vec3(0, 65, 0), 5, 200);
   const dragon = { metadata: bot.entities[42]!.metadata as unknown[] };
   using observation = new PerchObservation(bot, 42);
   observation.swung(13);
-  for (let tick = 0; tick < 13; tick++) bot.emit("physicsTick");
+  await clock.advance(650);
   assert.equal(observation.ready, true);
   dragon.metadata[phase] = undefined;
   bot.emit("entityUpdate", bot.entities[42]!);

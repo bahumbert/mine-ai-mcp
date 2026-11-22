@@ -82,6 +82,10 @@ export class SurvivalPolicyState {
   get settling(): boolean {
     return this.#settling !== null;
   }
+  /** Read the active encounter without cloning the policy snapshot on each body tick. */
+  get encounter(): string | null {
+    return this.#encounter;
+  }
   snapshot(): PolicySnapshot {
     return structuredClone({
       revision: `${this.#connection}:${this.#revision}`,

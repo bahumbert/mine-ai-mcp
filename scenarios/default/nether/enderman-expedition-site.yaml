@@ -18,6 +18,8 @@ players:
     op: true
     inventory:
       - { item: diamond_sword, count: 1 }
+      # The hunt's admission asks a shield against a hostile mob (shield-gate.ts).
+      - { item: shield, count: 1 }
       - { item: diamond_pickaxe, count: 1 }
       - { item: diamond_helmet, count: 1 }
       - { item: diamond_chestplate, count: 1 }

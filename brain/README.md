@@ -14,6 +14,8 @@ code gives basic functions, settings and safety checks, the models decide.
    first). Its own goal always gives way to any player's request; the authority order only ranks players against
    whoever it is already working for. It decides how to do things and may say a request is unclear, impossible, or
    that it does not know how.
+   `boldness` (`cautious`, `steady` or `bold`; default `steady`; spec 2026-11-15-p4-18 D7) is not in the init prompt: the
+   model reads it only as a fact in a situation event's `Weigh` line, beside its gear and whose work, and decides.
 2. **Chat tier** (fast model, in character): hears every chat line from players it listens to, answers right away,
    and routes it: `ignore` (clearly for someone else — a message naming nobody is for it), `talk`, `stop`, `act`
    (it takes the request on now) or `later` (only when the player says it can wait, or while it works for someone
@@ -53,7 +55,7 @@ code gives basic functions, settings and safety checks, the models decide.
 
 Skills (`src/actions.ts`): follow a player, go to a player, go to coordinates, collect blocks, give items, craft
 (intermediates automatic), get items (fetch that many more like a player, keeping everything it already carries, then
-come back), eat, equip, sleep, hunt
+come back), eat, equip, sleep, dig a shelter, hunt
 mobs for drops, protect an area (never dig or place blocks within a radius of a player or a spot, e.g. when asked to
 respect a build) and release it, build a house (small or medium, always in the persona's own style, from carried
 blocks; `materials` names other full blocks per role for a temporary house) and `improve_house` it later (swap the
@@ -61,8 +63,18 @@ temporary parts back to the template's blocks, in place), make a crop farm or te
 may limit them (`skills`). A new skill = one catalog entry + one runner in `src/skills.ts`; the prompts are generated
 from the catalog.
 
+`dig_shelter` digs a closed hole nearby, roofs it with a carried full block that stays put (keeping materials its
+objective needs), waits inside until day or the optional `minutes` (1–15), then climbs out. By day, give minutes to
+dig in; without them it is done without digging. The model or a player's order chooses the skill: there is no
+automatic night dig or periodic nightfall abort. Situation events ask the model beside the running step; its choice
+stops that step only at a safe point on a fresh read. Dawn ends the night situation and resumes the set-aside work;
+later calls keep the event's fresh facts, and an order's requester hears its choice once. The newest hole is saved for the monitor.
+
 **Building** (`src/building/`, ADR-010): a style is a persona's taste (`building-styles/<id>.json`: id, family of house templates, description) and a house is a template file (`building-templates/<id>.json`: layers of role cells, a block per material role,
-plus `variants`: the stairs and slab of a role): stair roofs
+plus `variants`: the stairs and slab of a role, and a required `sign`: the cell of the house's claim sign,
+`{"x","y","z","facing"}` in the layers' frame, beside the doorstep: the door's layer, one row in front of the door, one
+column to its side, outside every cell of the house; a file without one is refused at load with
+`[TEMPLATE_INVALID] <file>: no "sign"`): stair roofs
 facing up their slope with a slab ridge, pillars standing and trim beams along the walls (block states, ADR-013; a
 template without variants builds a stepped roof). The house skill line in the prompt lists what the persona's
 templates need; the model fetches it with `get_items` (`src/gathering.ts`: chop the logs, craft a crafting table to
@@ -151,9 +163,10 @@ A persona may pin its own models (`"models": {"chat": "...", "planner": "..."}`)
 | `src/mind.ts`, `llm-mind.ts` | Chat, work and goal tiers + narration, init prompt, JSON repair round |
 | `src/actions.ts` | Skill catalog: step schemas and prompt lines |
 | `src/skills.ts` | Step executor over atomic actions (following = repeated `navigate`) |
+| `src/skills/dig-shelter.ts` | Model-called shelter: objective materials, liveness and hole memory passed to `src/shelter/` |
 | `src/building/` | Blueprint schema, rotation, bill of materials, batching; templates loader; styles loader; site plan |
 | `building-styles/*.json` | A persona's building taste: id, description and the family of house templates it lists first |
-| `building-templates/*.json` | House templates: layers of role cells with their own palette (`src/building/templates.ts`), checked at load by `validateBlueprint` (`support.ts`); the six classic houses are files since the generator `house()` was retired |
+| `building-templates/*.json` | House templates: layers of role cells with their own palette and the cell of the claim sign (`src/building/templates.ts`), checked at load by `validateBlueprint` (`support.ts`); the six classic houses are files since the generator `house()` was retired |
 | `src/try-skill.ts` | Dev CLI: run one catalog step on a live bot, no LLM |
 | `src/say.ts` | Dev CLI: make another bot host say a chat line (a scripted player for live tests) |
 | `src/gathering.ts` | Gather and craft items like a player (`get_items` skill) |

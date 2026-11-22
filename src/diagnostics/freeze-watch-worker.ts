@@ -1,35 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parentPort, workerData } from "node:worker_threads";
-import { freezeViews, MARKER_BYTES, MARKER_SLOTS, offsetToMainClockMs, REPEATS_INDEX, SLOT_BYTES, stalledForMs, type FreezeWatchWorkerData } from "./freeze-watch.js";
+import { createFreezeCheck, readMarkers } from "./freeze-watch-check.js";
+import { freezeViews, offsetToMainClockMs, stalledForMs, type FreezeWatchWorkerData } from "./freeze-watch.js";
 
 const { shared, dir, botName, stallMs, mainWallMinusClockMs }: FreezeWatchWorkerData = workerData;
 const toMainClock = offsetToMainClockMs(mainWallMinusClockMs);
 const views = freezeViews(shared);
-const decoder = new TextDecoder();
-let recorded = false;
+const shouldRecord = createFreezeCheck(stallMs);
 
 /** A main-thread stamp as a time of day: the wall clock now minus its age, so a record lines up with the other logs. */
 function wallTimeOf(stampedAtMs: number): string {
   return new Date(Date.now() - stalledForMs(stampedAtMs, toMainClock)).toISOString();
-}
-
-function markers() {
-  const end = Atomics.load(views.head, 0);
-  const found: { sequence: number; at: string; text: string; repeats: number }[] = [];
-  for (let sequence = Math.max(0, end - MARKER_SLOTS); sequence < end; sequence++) {
-    const slot = sequence % MARKER_SLOTS;
-    if (Atomics.load(views.slots, slot * (SLOT_BYTES / 4)) !== sequence + 1) continue;
-    const length = Math.min(views.slots[slot * (SLOT_BYTES / 4) + 1]!, MARKER_BYTES);
-    const base = slot * SLOT_BYTES + 16;
-    found.push({
-      sequence,
-      at: wallTimeOf(views.times[slot * (SLOT_BYTES / 8) + 1]!),
-      text: decoder.decode(views.text.subarray(base, base + length)),
-      repeats: views.slots[slot * (SLOT_BYTES / 4) + REPEATS_INDEX]!,
-    });
-  }
-  return found;
 }
 
 /** Ask the paused main thread where it is; Bun may not implement this, which is itself worth recording. */
@@ -60,7 +42,7 @@ async function mainThreadStack(budgetMs: number): Promise<string | string[]> {
 
 async function record(stalled: number): Promise<void> {
   const stallStart = wallTimeOf(views.bump[0]!);
-  const snapshot = markers();
+  const snapshot = readMarkers(views, wallTimeOf);
   const stack = await mainThreadStack(500);
   const memory = process.memoryUsage();
   const file = path.join(dir, `freeze-${stallStart.replace(/[:.]/g, "-")}.json`);
@@ -76,11 +58,6 @@ async function record(stalled: number): Promise<void> {
 
 setInterval(() => {
   const stalled = stalledForMs(views.bump[0]!, toMainClock);
-  if (stalled < stallMs) {
-    recorded = false;
-    return;
-  }
-  if (recorded) return;
-  recorded = true;
+  if (!shouldRecord(stalled)) return;
   void record(stalled).catch((cause) => process.stderr.write(`[mine-ai-mcp] freeze record failed: ${cause}\n`));
 }, 100);

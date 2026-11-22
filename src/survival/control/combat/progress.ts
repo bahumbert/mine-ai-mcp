@@ -8,6 +8,19 @@ import { monotonicNow } from "../../../utils/index.js";
 export const COMBAT_WAIT_NOTICE_MS = 15_000;
 const DAMAGING_STALL_NOTICE_MS = 5_000;
 
+/**
+ * The wall-clock twin of a budget counted in physics ticks: `2 x ticks x 50 ms` (the breath reflex's 2x wall clock).
+ * Physics ticks stop or crawl under server lag, a ride or an unloaded chunk; the twin still ends the wait.
+ */
+export function tickBudgetWallMs(ticks: number): number {
+  return 2 * ticks * 50;
+}
+
+/** The `wall` of a `Budgets` window over `ticks`: the twin counted on `monotonicNow()` from the window's start, renewed with it. */
+export function tickBudgetWall(ticks: number): { readonly limitMs: number; readonly measure: () => number } {
+  return { limitMs: tickBudgetWallMs(ticks), measure: monotonicNow };
+}
+
 export const combatProgressSchema = z.object({
   engagementId: z.string(),
   startedAt: z.number(),

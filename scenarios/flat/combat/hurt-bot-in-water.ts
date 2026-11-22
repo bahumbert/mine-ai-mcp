@@ -1,9 +1,11 @@
 /** A hurt bot afloat in a pool must fight or evade, never hide, and keep answering status reads. */
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import type { ClientCompletion } from "mine-labs/client";
 import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenarioContext } from "../../src/scenario-client.ts";
 import { describe, hurt, readEncounters, type Encounter } from "./reflex.ts";
+import { pollServerWindow } from "./idle-reflex-window.ts";
 
 const paramsSchema = z.strictObject({
   hurtTo: z.number().int().positive(),
@@ -28,13 +30,18 @@ export async function run(context: MineAiScenarioContext): Promise<ClientComplet
       return { status: "failed", detail: `Arrangement could not establish ${params.hurtTo} health.` };
     const seen: Encounter[] = [];
     let slowestReadMs = 0;
-    for (let tick = 0; tick < params.waitTicks && !died; tick += 5) {
-      context.signal.throwIfAborted();
-      const started = Date.now();
+    const readResponse = async () => {
+      if (died) return true;
+      const started = monotonicNow();
       seen.push(...(await readEncounters(context, runtime)));
-      slowestReadMs = Math.max(slowestReadMs, Date.now() - started);
-      if (seen.some((encounter) => encounter.response !== "hide")) break;
-      await bot.waitForTicks(5);
+      slowestReadMs = Math.max(slowestReadMs, monotonicNow() - started);
+      return died || seen.some((encounter) => encounter.response !== "hide");
+    };
+    const { ended } = await pollServerWindow(bot, params.waitTicks, readResponse, context.signal);
+    if (ended === "ticks") {
+      context.signal.throwIfAborted();
+      await readResponse();
+      context.signal.throwIfAborted();
     }
     const hid = seen.filter((encounter) => encounter.response === "hide");
     const answered = seen.filter((encounter) => encounter.response !== "hide");

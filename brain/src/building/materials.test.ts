@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { BlockKind } from "../runtime-client.ts";
-import { checkMaterials, improvement, temporaryRoles } from "./materials.ts";
+import { checkMaterials, improvement, shapesForMaterials, temporaryRoles } from "./materials.ts";
 import { templateFor } from "./templates.ts";
 
 const medieval = templateFor("medieval-small")!;
@@ -59,15 +59,43 @@ test("a role the house has no block for cannot make it temporary", () => {
   assert.deepEqual(temporaryRoles({ accent: "air" }, medieval), []);
 });
 
-test("improving swaps back only the roles asked, the bill is the cells that change", () => {
-  const house = { door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: "dirt" } };
-  const all = improvement(medieval, house, ["wall", "roof"]);
+test("improving walls charges only the wall cells and keeps the roof's saved shapes, or legacy full blocks", () => {
+  const stairs = medieval.blueprint.cells.filter((cell) => cell.role === "roof" && cell.shape === "stairs").length;
+  const slabs = medieval.blueprint.cells.filter((cell) => cell.role === "roof" && cell.shape === "slab").length;
+  for (const row of [
+    { block: "dirt", shapes: undefined },
+    { block: "oak_planks", shapes: undefined },
+    { block: "oak_planks", shapes: { roof: { stairs: "oak_stairs", slab: "oak_slab" } } },
+  ]) {
+    const house = { door: { x: 0, y: 64, z: 0 }, facing: "north" as const, materials: { wall: "dirt", roof: row.block }, shapes: row.shapes };
+    const walls = improvement(medieval, house, ["wall"]);
+    const wallCount = walls.after.cells.filter((cell) => cell.role === "wall").length;
+    assert.deepEqual(walls.bill, [{ item: "oak_planks", count: wallCount }]);
+    assert.deepEqual(walls.rest, { roof: row.block });
+    const roof = walls.after.cells.filter((cell) => cell.role === "roof");
+    assert.equal(roof.length, stairs + slabs);
+    if (row.shapes === undefined) assert.ok(roof.every((cell) => cell.block === row.block && cell.half === undefined && cell.facing === undefined));
+    else {
+      assert.equal(roof.filter((cell) => cell.block === "oak_stairs" && cell.half === "bottom" && cell.facing !== undefined).length, stairs);
+      assert.equal(roof.filter((cell) => cell.block === "oak_slab" && cell.half === "bottom").length, slabs);
+    }
+  }
+});
+
+test("restoring temporary roles clears them and charges the template's changed cells", () => {
+  const stairs = medieval.blueprint.cells.filter((cell) => cell.role === "roof" && cell.shape === "stairs").length;
+  const slabs = medieval.blueprint.cells.filter((cell) => cell.role === "roof" && cell.shape === "slab").length;
+  const house = { door: { x: 0, y: 64, z: 0 }, facing: "north" as const };
+  const all = improvement(medieval, { ...house, materials: { wall: "dirt", roof: "dirt" } }, ["wall", "roof"]);
   assert.deepEqual(all.rest, {});
   assert.ok(all.bill.some((entry) => entry.item === "spruce_stairs") && all.bill.every((entry) => entry.item !== "dirt"));
-  const walls = improvement(medieval, house, ["wall"]);
-  assert.deepEqual(walls.rest, { roof: "dirt" });
-  assert.deepEqual(walls.bill.map((entry) => entry.item), ["oak_planks"]);
-  const wallCount = walls.after.cells.filter((cell) => cell.role === "wall").length;
-  assert.equal(walls.bill[0]!.count, wallCount);
-  assert.equal(walls.after.cells.filter((cell) => cell.role === "roof").every((cell) => cell.block === "dirt"), true);
+  const roof = improvement(medieval, { ...house, materials: { roof: "oak_planks" }, shapes: { roof: { stairs: "oak_stairs", slab: "oak_slab" } } }, ["roof"]);
+  assert.deepEqual(roof.bill, [{ item: "spruce_stairs", count: stairs }, { item: "spruce_slab", count: slabs }]);
+  assert.deepEqual(roof.rest, {});
+});
+
+test("a new house's substitute shapes come from the template's own shapes", () => {
+  assert.deepEqual(shapesForMaterials(medieval, { roof: "oak_planks" }), { roof: { stairs: "oak_stairs", slab: "oak_slab" } });
+  assert.deepEqual(shapesForMaterials(medieval, { roof: "spruce_planks" }), {}, "the template's own block is no substitute");
+  assert.deepEqual(shapesForMaterials(medieval, { wall: "dirt" }), {}, "a role the template has no variants for keeps full blocks");
 });

@@ -3,8 +3,10 @@ export { type FakeBot, type FakeBotOptions, type FakeEntitySpec, type FakeHarnes
 export { type FakeChat } from "./fake-bot-chat.js";
 export { type FakeOtherPlayers, PLAYER_TRACKING_BLOCKS } from "./fake-bot-other-players.js";
 export { type FakeCombat } from "./fake-bot-combat.js";
+export { NEW_LIFE_SETTLE_MS } from "./fake-bot-physics.js";
 export { type ShotProjectile } from "./fake-bot-combat-rules.js";
 export { type FakeBreath, type FakeBreathParts } from "./fake-bot-breath.js";
+export { type FakeTagGroup } from "./fake-bot-tags.js";
 export { type ContainerStack, type FakeWindows } from "./fake-window-server.js";
 export { type ServerEntities, type ServerEntitySpec } from "./fake-bot-entities.js";
 export { type FakeClock, type FakeClockMode, type FakeClockOptions, createFakeClock, failIfFakeClockLeftInstalled, flush } from "./fake-clock.js";

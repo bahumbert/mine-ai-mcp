@@ -9,6 +9,9 @@ import {
   type WorldView,
 } from "./world.js";
 
+/** The longest planned water-bucket drop, matching the survival policy's own description of `bucket_drops`. */
+export const MAXIMUM_BUCKET_DROP = 80;
+
 /** Releasing input must leave the body's remaining coast over safe ground. */
 export function canReleaseOnObservedGround(
   world: WorldView,
@@ -35,32 +38,89 @@ export function canReleaseOnObservedGround(
 
 /** A horizontal landing corridor stays supported, or ends against a full wall. */
 export function hasSupportedCorridor(world: WorldView, from: Position3, displacement: Position3): boolean {
+  for (const { x, y, z } of corridorCells(world, from, displacement)) {
+    if (
+      !isSafeSupport(world.blockAt(x, y - 1, z)) ||
+      !isPassable(world.blockAt(x, y, z)) ||
+      !isHeadPassable(world.blockAt(x, y + 1, z))
+    )
+      return false;
+  }
+  return true;
+}
+
+/** A full-height wall catches the body; a one-block lip can be hopped. */
+function isCorridorWall(world: WorldView, x: number, y: number, z: number): boolean {
+  return isSafeSupport(world.blockAt(x, y, z)) && isSafeSupport(world.blockAt(x, y + 1, z));
+}
+
+/** The body's edges meet a wall before its centre enters that wall's cell. */
+function* corridorFootprintCells(world: WorldView, position: Position3): Generator<BlockPosition> {
+  const { y } = position;
+  for (let x = Math.floor(position.x - 0.3); x <= Math.floor(position.x + 0.3); x++)
+    for (let z = Math.floor(position.z - 0.3); z <= Math.floor(position.z + 0.3); z++) {
+      if (isCorridorWall(world, x, y, z)) continue;
+      yield { x, y, z };
+    }
+}
+
+/** Both corridor verdicts sample the same footprint and stop at the same two-high wall. */
+function* corridorCells(world: WorldView, from: Position3, displacement: Position3): Generator<BlockPosition> {
   const samples = Math.max(1, Math.ceil(Math.hypot(displacement.x, displacement.z) * 4));
   const y = navigationFeet(from, true).y;
   for (let sample = 0; sample <= samples; sample++) {
     const px = from.x + (displacement.x * sample) / samples;
     const pz = from.z + (displacement.z * sample) / samples;
-    const feet = world.blockAt(Math.floor(px), y, Math.floor(pz));
-    const head = world.blockAt(Math.floor(px), y + 1, Math.floor(pz));
-    // A two-block solid wall catches the body; a one-block lip can be hopped.
-    if (sample > 0 && isSafeSupport(feet) && isSafeSupport(head)) return true;
-    for (let x = Math.floor(px - 0.3); x <= Math.floor(px + 0.3); x++)
-      for (let z = Math.floor(pz - 0.3); z <= Math.floor(pz + 0.3); z++) {
-        // The body meets a wall before its centre enters the wall's cell.
-        if (isSafeSupport(world.blockAt(x, y, z)) && isSafeSupport(world.blockAt(x, y + 1, z))) continue;
-        if (
-          !isSafeSupport(world.blockAt(x, y - 1, z)) ||
-          !isPassable(world.blockAt(x, y, z)) ||
-          !isHeadPassable(world.blockAt(x, y + 1, z))
-        )
-          return false;
-      }
+    if (sample > 0 && isCorridorWall(world, Math.floor(px), y, Math.floor(pz))) return;
+    yield* corridorFootprintCells(world, { x: px, y, z: pz });
   }
-  return true;
+}
+
+export type KnockbackHazard = "lava" | "drop";
+
+/** A falling body crosses passable dry cells; liquids can catch or damage it. */
+export function isOpenFallCell(block: BlockObservation): boolean {
+  return block.kind === "loaded" && isPassable(block) && !isSafeSupport(block) && block.traits.liquid === null;
+}
+
+/** Follow a fall to its landing; mining supplies its stricter empty-cell rule (P1 review, 2026-11-09). */
+export function dropColumn(
+  world: WorldView, x: number, floorY: number, z: number,
+  isOpen: (block: BlockObservation) => boolean = isOpenFallCell,
+): {
+  depth: number; bottom: BlockObservation; deepWater: boolean;
+} {
+  let depth = 0;
+  let bottom = world.blockAt(x, floorY, z);
+  while (isOpen(bottom)) {
+    depth++;
+    if (depth > MAXIMUM_BUCKET_DROP) return { depth, bottom, deepWater: false };
+    bottom = world.blockAt(x, floorY - depth, z);
+  }
+  const below = world.blockAt(x, floorY - depth - 1, z);
+  const sourceWater = (block: BlockObservation) =>
+    block.kind === "loaded" && block.traits.liquid === "water" && block.traits.liquidSource;
+  return { depth, bottom, deepWater: sourceWater(bottom) && sourceWater(below) };
+}
+
+/** Lethal terrain in the same sampled body corridor used to judge knockback room. */
+export function knockbackCorridorHazard(
+  world: WorldView, from: Position3, displacement: Position3, health: number,
+): KnockbackHazard | null {
+  for (const { x, y, z } of corridorCells(world, from, displacement)) {
+    const body = world.blockAt(x, y, z);
+    if (body.kind === "loaded" && body.traits.liquid === "lava") return body.traits.liquid;
+    if (isSafeSupport(world.blockAt(x, y - 1, z))) continue;
+    const { depth, bottom, deepWater } = dropColumn(world, x, y - 1, z);
+    if (bottom.kind === "loaded" && bottom.traits.liquid === "lava") return bottom.traits.liquid;
+    // Vanilla LivingEntity.calculateFallDamage: distance - 3; armour/enchantments ignored, unmeasured here (2026-11-08).
+    if (!deepWater && (depth > MAXIMUM_BUCKET_DROP || depth - 3 >= health)) return "drop";
+  }
+  return null;
 }
 
 /** Find safe support under the player's whole footprint, including a centre over air. */
-export function safeSupportingCell(world: WorldView, position: Position3): BlockPosition | null {
+export function safeSupportingCell(world: Pick<WorldView, "blockAt">, position: Position3): BlockPosition | null {
   const { y } = navigationFeet(position, true);
   let nearest: BlockPosition | null = null;
   const distance = (at: BlockPosition) => Math.hypot(at.x + 0.5 - position.x, at.z + 0.5 - position.z);

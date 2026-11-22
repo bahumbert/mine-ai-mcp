@@ -1,0 +1,22 @@
+Situation:
+- Position 0 64 0.
+- Condition: health 20/20, food 20/20, no food carried; home: "the small medieval house you built for yourself".
+- Inventory: 1 item_number_1, 2 item_number_2, 3 item_number_3 (3 of 36 slots used).
+- Players online: Player1 (11 blocks, at 10 64 5), Player2 (21 blocks, at 20 64 5), Player3 (30 blocks, at 30 64 5).
+- Places you know: the small medieval house you built for yourself (door -1204 76 803 facing north); a farm of wheat (around 40 64 -20); note: iron seen (at 300 20 -45).
+- Protected areas (you never dig or place blocks there): #1 area 1 (owner Steve, 20 60 0 to 28 80 8).
+- Currently doing: working on this objective.
+
+Objective (asked by Player2): "build a small house next to the river"
+
+Set aside until this one ends: "feed the chickens"
+
+Steps so far, oldest first:
+1. get 1 oak_log -> done: step1 0 step1 8 step1 16 step1 25 step1 34 step1 43 step1 52 step1 61 step1 70 step1 79 step1 88 step1 97 step1 106 step1 116 step1 126 step
+2. get 2 oak_log -> done: step2 0 step2 8 step2 16 step2 25 step2 34 step2 43 step2 52 step2 61 step2 70 step2 79 step2 88 step2 97 step2 106 step2 116 step2 126 step
+3. get 3 oak_log -> failed: step3 0 step3 8 step3 16 step3 25 step3 34 step3 43 step3 52 step3 61 step3 70 step3 79 step3 88 step3 97 step3 106 step3 116 step3 126 step
+4. get 4 oak_log -> done: step4 0 step4 8 step4 16 step4 25 step4 34 step4 43 step4 52 step4 61 step4 70 step4 79 step4 88 step4 97 step4 106 step4 116 step4 126 step
+
+Steps that failed lately in this objective (sent again as they are, they fail again; the reason says what to do instead; one that failed twice is refused):
+- craft 1 cooked_beef, failed 2 times, the last 1 minute ago (refused now): failure1 0 failure1 11 failure1 23 failure1 35 failure1 47 failure1 59 failure1 71 failure1 83 failure1 95 failure1 107 failure1 120 failure1 133 failure1 146 failure1 159 failure1 172 failure1 185 failure1 198 failure1.
+- craft 2 cooked_beef, 2 minutes ago: failure2 0 failure2 11 failure2 23 failure2 35 failure2 47 failure2 59 failure2 71 failure2 83 failure2 95 failure2 107 failure2 120 failure2 133 failure2 146 failure2 159 failure2 172 failure2 185 failure2 198 failure2.

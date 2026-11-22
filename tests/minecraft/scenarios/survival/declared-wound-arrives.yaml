@@ -1,0 +1,17 @@
+template: ../../templates/flat-single-action.yaml
+name: declared-wound-arrives
+tags: [regression]
+description: A reused body keeps its declared wound after the restore and the client observes it before starting.
+world:
+  type: flat
+  difficulty: normal
+  gamerules:
+    naturalRegeneration: false
+players:
+  - { name: Actor, pos: [0.5, -60, 0.5], health: 7, op: true, inventory: [] }
+params:
+  action: view_status
+  input: {}
+  expect: { status: succeeded }
+goal:
+  kind: completion

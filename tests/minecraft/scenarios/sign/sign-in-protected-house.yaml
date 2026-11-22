@@ -1,0 +1,58 @@
+template: ../../templates/flat-single-action.yaml
+name: sign-in-protected-house
+tags: [acceptance]
+description: Keep the claim and its support while auditing a protected house.
+setup: ["setblock 2 -60 2 dirt", "setblock 0 -61 1 stone"]
+players:
+  - name: Actor
+    pos: [0.5, -60, -2.5]
+    inventory: [{ item: oak_sign, count: 1 }, { item: cobblestone, count: 16 }]
+client: { command: bun, cwd: ../.., args: [client-host.ts, drivers/signs.ts] }
+params:
+  steps:
+    - { call: protect_region, input: { corner_a: { x: -2, y: -61, z: -1 }, corner_b: { x: 2, y: -57, z: 3 }, label: house, reason: home } }
+    - call: build_structure
+      input:
+        blocks:
+          - { x: -1, y: -60, z: 2, block_name: cobblestone }
+          - { x: 0, y: -60, z: 2, block_name: cobblestone }
+          - { x: 1, y: -60, z: 2, block_name: cobblestone }
+          - { x: -1, y: -59, z: 2, block_name: cobblestone }
+          - { x: 0, y: -59, z: 2, block_name: cobblestone }
+          - { x: 1, y: -59, z: 2, block_name: cobblestone }
+          - { x: -1, y: -60, z: 0, block_name: cobblestone }
+          - { x: -1, y: -60, z: 1, block_name: cobblestone }
+          - { x: 1, y: -60, z: 0, block_name: cobblestone }
+          - { x: 1, y: -60, z: 1, block_name: cobblestone }
+          - { x: -1, y: -59, z: 0, block_name: cobblestone }
+          - { x: -1, y: -59, z: 1, block_name: cobblestone }
+          - { x: 1, y: -59, z: 0, block_name: cobblestone }
+          - { x: 1, y: -59, z: 1, block_name: cobblestone }
+    - { call: place_sign, input: { x: 0, y: -60, z: 1, facing: north, lines: [Actor] } }
+    - { check: confirmed }
+    - call: build_structure
+      input:
+        remove_wrong_blocks: true
+        keep: [{ x: 0, y: -60, z: 1 }, { x: 0, y: -61, z: 1 }]
+        blocks:
+          - { x: -1, y: -60, z: 2, block_name: cobblestone }
+          - { x: 0, y: -60, z: 2, block_name: cobblestone }
+          - { x: 1, y: -60, z: 2, block_name: cobblestone }
+          - { x: -1, y: -59, z: 2, block_name: cobblestone }
+          - { x: 0, y: -59, z: 2, block_name: cobblestone }
+          - { x: 1, y: -59, z: 2, block_name: cobblestone }
+          - { x: -1, y: -60, z: 0, block_name: cobblestone }
+          - { x: -1, y: -60, z: 1, block_name: cobblestone }
+          - { x: 1, y: -60, z: 0, block_name: cobblestone }
+          - { x: 1, y: -60, z: 1, block_name: cobblestone }
+          - { x: -1, y: -59, z: 0, block_name: cobblestone }
+          - { x: -1, y: -59, z: 1, block_name: cobblestone }
+          - { x: 1, y: -59, z: 0, block_name: cobblestone }
+          - { x: 1, y: -59, z: 1, block_name: cobblestone }
+          - { x: 2, y: -60, z: 2, block_name: cobblestone }
+    - { check: signLines, at: { x: 0, y: -60, z: 1 }, front: [Actor, "", "", ""] }
+    - call: build_structure
+      input: { blocks: [{ x: 0, y: -60, z: 1, block_name: air }, { x: 0, y: -61, z: 1, block_name: air }], remove_wrong_blocks: true, keep: [{ x: 0, y: -60, z: 1 }, { x: 0, y: -61, z: 1 }] }
+      expect: { status: failed, errorContains: BUILD_INCOMPLETE }
+    - { check: signLines, at: { x: 0, y: -60, z: 1 }, front: [Actor, "", "", ""] }
+goal: { kind: all, timeout: 180, goals: [{ kind: completion }, { kind: blockAt, block: cobblestone, pos: [2, -60, 2] }, { kind: blockAt, block: stone, pos: [0, -61, 1] }] }

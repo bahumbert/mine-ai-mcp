@@ -15,6 +15,56 @@ import { MemoryWorld } from "../world/memory-world.js";
 import { Vec3 } from "vec3";
 import { walking, EARLY_COMMIT, OvershootingBot } from "./navigation-run-fixtures.test.js";
 
+test("physical search resolves its goal and root pose from one fresh observation after taking the hold", async () => {
+  for (const x of [0.85, 1.85]) {
+    const bot = new FakeNavigationBot();
+    bot.holdPosition = () => {
+      bot.current = { ...observation(), position: { x, y: 63, z: 0.5 } };
+      return () => {};
+    };
+    let roots = 0;
+    const outcome = await settle(createNavigator({ world: flatWorld(), bot }), {
+      goal: { resolve: (resolvedAt) => ({
+        kind: "active", revision: "fresh-root", heuristic: (node) => Math.abs(3 - node.feet.x),
+        isSatisfied: (node) => node.feet.x === 3,
+        finish: (_state, _context, _dig, actual) => {
+          if (actual) {
+            roots++;
+            assert.equal(actual, resolvedAt);
+            assert.equal(actual.position.x, x);
+          }
+          return null;
+        },
+      }) }, policy: walking(),
+    });
+    assert.equal(outcome.kind, "completed");
+    assert.equal(roots, 1);
+  }
+});
+
+test("plan-ahead never receives an observed pose while its future root matches the moving body", async () => {
+  const bot = new FakeNavigationBot();
+  bot.current = observation(-5);
+  let ahead = false;
+  let speculative = 0;
+  const goal = nearGoal({ x: 5, y: 63, z: 0 }, 0);
+  const outcome = await settle(createNavigator({ world: flatWorld(), bot, telemetry: onEvent((event) => {
+    if (event.kind === "search_started") ahead = event.reason === "segment_continuation";
+  }) }), { goal: { resolve: (at) => {
+    const resolved = goal.resolve(at);
+    return resolved.kind === "invalid" ? resolved : { ...resolved, finish: (state, _context, _dig, actual) => {
+      if (ahead) {
+        bot.current = observation(state.node.feet.x, state.node.feet.y, state.node.feet.z);
+        speculative++;
+        assert.equal(actual, undefined);
+      }
+      return null;
+    } };
+  } }, policy: walking(), searchLimits: EARLY_COMMIT });
+  assert.equal(outcome.kind, "completed");
+  assert.ok(speculative > 0);
+});
+
 // ── Movement that does not go to plan ────────────────────────────────────────
 
 const attempts = (outcome: { evidence: { movementAttempts: Readonly<Partial<Record<string, number>>> } }) =>

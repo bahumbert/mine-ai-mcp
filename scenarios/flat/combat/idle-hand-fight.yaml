@@ -44,6 +44,8 @@ client:
 params:
   wearArmor: true
   waitTicks: 1800
+  expectEvade: true
+  noContact: true
 
 tick:
   - "gamemode spectator @a[name=!HandBot,gamemode=!spectator]"
@@ -51,10 +53,16 @@ tick:
 goal:
   kind: all
   timeout: 120
+  stillTicks: 2860 # P4-29 a11 T8: longest passing still span 1425 ticks (20 tps 1425, 10 tps 875; n 3 and 3); 2x rounded up to 20; the timeout governs (120 s = 2400 ticks).
   goals:
-    - kind: kill
+    # a11 T5 (open choice 1 (b)): bare hands vs zombie, margin 1.32 < fight_margin 1.5, so the bot evades; the zombie lives, the bot is unhurt.
+    - kind: entityCount
+      entity: zombie
+      min: 1
+      max: 1
+    - kind: health
       who: HandBot
-      target: zombie
+      health: 20
     - kind: survive
       who: HandBot
       seconds: 1

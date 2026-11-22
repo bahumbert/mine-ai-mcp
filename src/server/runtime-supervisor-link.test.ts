@@ -206,6 +206,7 @@ test("a link request while the runtime is failing is kept for the failure and no
   const link = await connectWhenReady(target);
   const child = target.supervisor.child;
   const forwarded: unknown[] = [];
+  assert.ok(child.send, "the fake child has an IPC channel");
   const send = child.send.bind(child);
   child.send = ((message: unknown, ...rest: never[]) => {
     forwarded.push(message);

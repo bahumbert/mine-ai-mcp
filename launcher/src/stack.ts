@@ -1,6 +1,7 @@
 // The stack in order: Ollama, the Minecraft server, then one host + brain pair per bot; and the ordered stop (spec D3).
 import type { Manifest } from "./manifest.ts";
 import type { ChildExit, StopResult } from "./processes.ts";
+import { keyUnreadableStartText } from "./secret.ts";
 import { settingsPath, type Settings } from "./settings.ts";
 import { chatCommandDeps, startChatCommands } from "./chat/sources.ts";
 import { startBot, stopBot } from "./stack-bots.ts";
@@ -37,6 +38,8 @@ function noServerLine(state: StackState): string {
 /** The first service problem, or null. A remote server is checked before the model is loaded: a wrong server makes the load useless. */
 async function startServices(state: StackState): Promise<string | null> {
   const { server, llm } = state.settings;
+  // First, even with no server set: a key nobody can read is the sooner thing to fix, and no bot may start without it (spec D3).
+  if (llm.kind === "remote" && llm.keyUnreadable === true) return keyUnreadableStartText(settingsPath(state.root));
   if (server.kind === "none") {
     state.deps.say(noServerLine(state));
     return null;

@@ -41,11 +41,23 @@ function migrateEventReadState(database: DatabaseSync): void {
   }
 }
 
-/** The live-status row is rewritten on every refresh, so an outdated shape is dropped rather than altered. */
+/**
+ * The live-status and inventory rows are rewritten on every refresh, so an outdated shape is dropped rather than
+ * altered: bot_status without `time_of_day` or `item_families_json`, bot_inventory without `families`, bot_tools without
+ * `rank` (it had `tier`, a material label read from the item name). The schema script
+ * that follows re-creates them; the runtime rewrites them within a second (status heartbeat), so nothing is lost.
+ */
 function migrateBotStatus(database: DatabaseSync): void {
-  const columns = database.prepare("SELECT name FROM pragma_table_info('bot_status')").all() as { name: string }[];
-  if (columns.length > 0 && !columns.some((column) => column.name === "time_of_day")) {
-    database.exec("DROP TABLE bot_status");
+  dropWhenMissingColumn(database, "bot_status", "time_of_day");
+  dropWhenMissingColumn(database, "bot_status", "item_families_json");
+  dropWhenMissingColumn(database, "bot_inventory", "families");
+  dropWhenMissingColumn(database, "bot_tools", "rank");
+}
+
+function dropWhenMissingColumn(database: DatabaseSync, table: string, column: string): void {
+  const columns = database.prepare(`SELECT name FROM pragma_table_info('${table}')`).all() as { name: string }[];
+  if (columns.length > 0 && !columns.some((existing) => existing.name === column)) {
+    database.exec(`DROP TABLE ${table}`);
   }
 }
 
@@ -156,7 +168,21 @@ function renameLegacyFrontier(database: DatabaseSync): Readonly<Record<string, n
 
 const worldFrontierStep: MigrationStep = { version: 3, name: "world-frontier", up: renameLegacyFrontier };
 
-export const BOT_DATA_STEPS: readonly MigrationStep[] = [baselineStep, typedMemoriesStep, worldFrontierStep];
+/**
+ * Files that ran step 1 before the item families (view_status stacks, `bot_tools.rank`) hold the old snapshot tables:
+ * they are dropped and re-created, as step 1 does for a file of version 0 (idempotent: a current table is kept).
+ */
+const itemFamiliesStep: MigrationStep = {
+  version: 4,
+  name: "item-families",
+  up(database) {
+    dropViews(database);
+    migrateBotStatus(database);
+    database.exec(BOT_DATA_SCHEMA);
+  },
+};
+
+export const BOT_DATA_STEPS: readonly MigrationStep[] = [baselineStep, typedMemoriesStep, worldFrontierStep, itemFamiliesStep];
 
 /** The world file's own steps (same two rules as the bot file's): step 1 is the latest `world-data.sql`. */
 export const WORLD_DATA_STEPS: readonly MigrationStep[] = [

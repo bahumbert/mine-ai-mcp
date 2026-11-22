@@ -1,0 +1,29 @@
+template: ../../templates/flat-single-action.yaml
+name: life-saving-cleanup
+tags: [regression]
+description: >-
+  A recorded emergency block in another owner's region needs a short cleanup walk. Fire interrupts that walk,
+  retains the obligation, and cleanup removes the block after the fire response. The server confirms air, then
+  a normal navigation action succeeds from the released body.
+world:
+  difficulty: peaceful
+  gamerules:
+    naturalRegeneration: true
+geometry:
+  - fill: { block: stone, from: [-12, -61, -12], to: [12, -61, 12] }
+  - setblock: { block: cobblestone, at: [7, -60, 0] }
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/life-saving-cleanup.ts]
+params:
+  cell: [7, -60, 0]
+  next: [3, -60, 2]
+goal:
+  kind: completion
+  who: Actor
+  timeout: 45

@@ -1,3 +1,4 @@
+import { monotonicNow } from "../../../src/utils/monotonic-clock.ts";
 import { z } from "zod";
 import { openRuntime } from "../../src/runtime.ts";
 import type { MineAiScenario } from "../../src/scenario-client.ts";
@@ -11,7 +12,7 @@ export const run: MineAiScenario = async (context) => {
   await bot.waitForChunksToLoad();
   await using runtime = await openRuntime(context, "spawner-camp");
   const hunt = runtime.actions.find((a) => a.name === "collect_mob_drop")!;
-  const startedAt = Date.now();
+  const startedAt = monotonicNow();
   const result = await runtime.run(
     hunt,
     { mob_name: "sheep", drop_name: "white_wool", count: 1, camp_spawner: true, observe_for_ms: 1500 },
@@ -24,6 +25,6 @@ export const run: MineAiScenario = async (context) => {
     : termination === "observation_exhausted" && wool === 0;
   return {
     status: returnedCorrectly && bot.health > 0 ? "succeeded" : "failed",
-    detail: JSON.stringify({ elapsedMs: Date.now() - startedAt, health: bot.health, wool, result }),
+    detail: JSON.stringify({ elapsedMs: monotonicNow() - startedAt, health: bot.health, wool, result }),
   };
 };

@@ -1,0 +1,27 @@
+template: ../../templates/combat-assessment.yaml
+
+name: stone-sword-fights
+tags: [acceptance, regression]
+description: >-
+  A stone sword carried in the bag makes the automatic response fight and kill
+  an unarmed, unarmoured zombie at normal difficulty without dying.
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+    inventory:
+      - { item: stone_sword, count: 1 }
+
+params:
+  mob: zombie
+  response: fight
+  bagItem: stone_sword
+  observeSeconds: 20
+
+goal:
+  kind: all
+  timeout: 60
+  goals:
+    - { kind: survive, who: Actor, seconds: 20 }
+    - { kind: completion, who: Actor }

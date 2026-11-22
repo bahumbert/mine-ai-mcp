@@ -1,4 +1,4 @@
-import { billOfMaterials, buildBatches, cellsCountedOnce, describeMaterials, FACING_VECTOR, placeBlueprint, type BlockRole, type Facing, type MaterialCount, type Position, type WorldCell } from "./blueprint.ts";
+import { billOfMaterials, buildBatches, cellsCountedOnce, describeMaterials, FACING_VECTOR, placeBlueprint, placeSign, type BlockRole, type Facing, type MaterialCount, type Position, type SignSpot, type Variants, type WorldCell } from "./blueprint.ts";
 import { DEFAULT_STYLE, STYLES, type Style } from "./styles.ts";
 import { supportGroups, withStatesItHas } from "./support.ts";
 import { stagesOf, type Stage, type Template } from "./templates.ts";
@@ -47,9 +47,12 @@ export interface HousePlan {
   readonly site: Site;
   /** The roles built with other blocks than the template's; empty for a house as the template. */
   readonly materials: Materials;
+  /** The remembered stairs and slabs of substituted roles; absent in legacy notes, which use full blocks. */
+  readonly shapes: Variants;
   readonly cells: readonly WorldCell[];
   readonly bill: readonly MaterialCount[];
   readonly batches: readonly (readonly WorldCell[])[];
+  readonly sign: SignSpot | null;
   /** Where to stand on the roof, remembered with the house so "go to the roof" has real coordinates. */
   readonly roofTop: Position;
   /** The runs of `batches` the bot fetches blocks for and builds together; contiguous, covering every batch. */
@@ -69,25 +72,35 @@ export function styleOrDefault(name: string | undefined): Style {
 export type Materials = Partial<Record<BlockRole, string>>;
 
 /**
- * The house of `template` at `site`. `materials` names other blocks for some roles; those roles are built with full
- * blocks (the template's stairs and slabs belong to its own block), and ask no log axis, facing or half either (live
- * 2026-10-10: cobblestone pillars asked an axis cobblestone has, so the audit never saw them right; a ladder's facing
- * on stone is the same case). A role named with the
- * template's own block is the template's.
+ * The house of `template` at `site`. `materials` names other blocks for some roles; those roles use their remembered
+ * `shapes` (stairs and slabs of the substitute, see `shapesForMaterials`), or full blocks without them (the template's
+ * stairs and slabs belong to its own block), and ask no log axis, and no facing or half unless a shape was given
+ * (live 2026-10-10: cobblestone pillars asked an axis cobblestone has, so the audit never saw them right; a ladder's
+ * facing on stone is the same case). A role named with the template's own block is the template's.
  */
-export function planTemplate(template: Template, site: Site, materials: Materials = {}): HousePlan {
+export function planTemplate(template: Template, site: Site, materials: Materials = {}, shapes: Variants = {}): HousePlan {
   // A role the template has no block for (no cell asks it) is left out: naming one does not make the house temporary.
   const other = Object.fromEntries(Object.entries(materials).filter(([role, block]) => template.palette[role as BlockRole] !== undefined && template.palette[role as BlockRole] !== block)) as Materials;
-  const variants = Object.fromEntries(Object.entries(template.variants).filter(([role]) => other[role as BlockRole] === undefined));
-  const cells = placeBlueprint(template.blueprint, { ...template.palette, ...other }, site.door, site.facing, variants)
-    .map((cell) => other[cell.role as BlockRole] === undefined ? withStatesItHas(cell) : (({ axis: _axis, facing: _facing, half: _half, ...rest }) => rest)(cell));
+  const remembered = Object.fromEntries(Object.entries(shapes).filter(([role, variants]) => other[role as BlockRole] !== undefined && Object.keys(variants).length > 0));
+  const variants = { ...Object.fromEntries(Object.entries(template.variants).filter(([role]) => other[role as BlockRole] === undefined)), ...remembered };
+  const palette = { ...template.palette, ...other };
+  const cells = placeBlueprint(template.blueprint, palette, site.door, site.facing, variants)
+    .map((cell) => other[cell.role as BlockRole] === undefined ? withStatesItHas(cell) : withoutStates(cell, cell.block !== palette[cell.role as BlockRole]));
   const batches = buildBatches(cells);
   const counted = cellsCountedOnce(batches);
   return {
-    template, site, materials: other, cells, bill: billOfMaterials(cells), batches, roofTop: roofTop(cells),
+    template, site, materials: other, shapes: remembered, cells, bill: billOfMaterials(cells), batches, sign: placeSign(template.blueprint, site.door, site.facing), roofTop: roofTop(cells),
     stages: stagesOf(template, batches, supportGroups(cells).groups),
     stageBill: (stage) => billOfMaterials(counted.slice(stage.first, stage.last + 1).flat()),
   };
+}
+
+/** A substituted role's cell without the states of the template's own block: never an axis, and no facing or half unless it is a remembered shape (`shaped`). */
+function withoutStates(cell: WorldCell, shaped: boolean): WorldCell {
+  const { axis: _axis, ...rest } = cell;
+  if (shaped) return rest;
+  const { facing: _facing, half: _half, ...plain } = rest;
+  return plain;
 }
 
 /**

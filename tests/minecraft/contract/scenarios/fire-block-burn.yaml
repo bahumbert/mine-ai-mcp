@@ -1,0 +1,42 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-fire-block-burn
+tags:
+  - contract
+  - exclusive
+description: "How long a body burns after a fire block, a soul fire block, lava or a shot's fire, and what a second contact does to it: the contact ends, the burning bit's clear and each on_fire hurt, in server ticks. Contract check tests/minecraft/contract/checks/fire-block-burn.ts, also run on the fake bot (bot-contract.test.ts); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+    - --without-runtime
+params:
+  check: fire-block-burn
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+  - difficulty easy
+  - time set 18000
+entities:
+  - type: blaze
+    pos:
+      - -4.5
+      - -60
+      - 0.5
+    nbt: '{NoAI:1b,PersistenceRequired:1b,attributes:[{id:"minecraft:armor",base:0d}]}'
+players:
+  - name: Actor
+    pos:
+      - 0.5
+      - -60
+      - 0.5
+    op: true
+goal:
+  kind: all
+  timeout: 240 # seconds: the measured run takes 107 s at 20 and at 10 tps
+  stillTicks: 3960 # a deliberate long wait (S1): 2 x the longest passing still span, 1972 ticks over 5 runs at 20 and 5 at 10 tps (2026-11-21), rounded up to 20
+  goals:
+    - kind: completion
+      who: Actor

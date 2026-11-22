@@ -155,7 +155,7 @@ export function deps(overrides: Partial<DropItemDependencies> = {}): DropItemDep
     breakInPlace: async () => ({ status: "broken" }),
     placeInto: async () => ({ kind: "failed", error: "not placed in this test" }),
     createMovements: (() => ({})) as never,
-    settleMs: 50,
+    holeLandingMs: 50,
     pickupWaitMs: 150,
     ...overrides,
   };

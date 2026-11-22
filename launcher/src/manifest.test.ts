@@ -66,3 +66,41 @@ test("the shipped manifest bounds a silent model pull at 300 s, and a missing or
   zero.waits.modelPullIdleMs = 0;
   assert.equal(manifestSchema.safeParse(zero).success, false);
 });
+
+test("the shipped manifest pins Paper", () => {
+  const paper = loadManifest().minecraft.paper;
+  assert.equal(paper.build, 232);
+  assert.equal(paper.sha256, "5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc");
+  assert.equal(paper.bytes, 51437498);
+  assert.ok(paper.installedBytes > 0);
+  const url = new URL(paper.url);
+  assert.equal(url.protocol, "https:");
+  assert.equal(url.hostname, "fill-data.papermc.io");
+});
+
+test("a manifest without minecraft.paper fails at load", () => {
+  const withoutPaper = JSON.parse(JSON.stringify(loadManifest())) as Record<string, any>;
+  delete withoutPaper.minecraft.paper;
+  const dir = mkdtempSync(join(tmpdir(), "manifest-"));
+  const path = join(dir, "manifest.json");
+  writeFileSync(path, JSON.stringify(withoutPaper));
+  assert.throws(() => loadManifest(path), (error: Error) => error.message.includes("minecraft.paper"));
+});
+
+test("the install sizes and the space kept free per drive are required positive numbers: a manifest without `disk` fails naming it, a missing or zero one fails", () => {
+  const manifest = loadManifest();
+  const withoutDisk = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+  delete withoutDisk.disk;
+  const dir = mkdtempSync(join(tmpdir(), "manifest-"));
+  const path = join(dir, "manifest.json");
+  writeFileSync(path, JSON.stringify(withoutDisk));
+  assert.throws(() => loadManifest(path), (error: Error) => error.message.includes("disk"));
+  for (const [section, key] of [["ollama", "installedBytes"], ["java", "installedBytes"], ["disk", "reserveBytes"]] as const) {
+    const missing = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+    delete missing[section][key];
+    assert.equal(manifestSchema.safeParse(missing).success, false, `${section}.${key} missing`);
+    const zero = JSON.parse(JSON.stringify(manifest)) as Record<string, any>;
+    zero[section][key] = 0;
+    assert.equal(manifestSchema.safeParse(zero).success, false, `${section}.${key} zero`);
+  }
+});

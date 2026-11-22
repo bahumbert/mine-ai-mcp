@@ -13,11 +13,12 @@
  *
  * Receipts keep an issued expectation alive after the executor has moved on,
  * so a late acknowledgement of the bot's own dig is still recognised as
- * expected rather than mistaken for an invalidating change. The physics tick
- * drives `expire`, so a lost acknowledgement cannot be waited on forever.
+ * expected rather than mistaken for an invalidating change. Deadlines read world age;
+ * the effect's real-time poll, physics ticks and `classify` drive `expire`.
  */
 import type { BlockMatcher } from "../movements/movement.js";
-import { type BlockPosition, type WorldChange, blockKey, blockLabel, samePosition } from "../world/world.js";
+import type { ServerTickDeadline } from "../../world/world-age.js";
+import { type BlockObservation, type BlockPosition, type WorldChange, blockKey, blockLabel, samePosition } from "../world/world.js";
 
 export interface AttemptToken {
   readonly runId: string;
@@ -31,8 +32,7 @@ interface Expectation {
   readonly before: BlockMatcher;
   readonly after: BlockMatcher;
   readonly operation: "break" | "place" | "activate";
-  /** A `monotonicNow()` reading: the ledger's `now` is the same clock, so a wall-clock step never moves a deadline. */
-  readonly deadlineMs: number;
+  readonly deadline: ServerTickDeadline;
   /**
    * Cells whose every change belongs to this operation while it is remembered:
    * a break that brings a falling column down watches the blocks above turn
@@ -48,6 +48,12 @@ export type MutationResult =
   | { readonly kind: "conflicting"; readonly change: WorldChange }
   | { readonly kind: "expired" };
 export type MutationClassification = "expected" | "conflicting" | "invalidating" | "irrelevant";
+
+const NO_CELLS: ReadonlySet<number> = new Set();
+
+function holdsLava(block: BlockObservation): boolean {
+  return block.kind === "loaded" && block.traits.liquid === "lava";
+}
 
 export class ExpectedMutationLedger {
   readonly #active = new Map<string, Expectation>();
@@ -82,7 +88,12 @@ export class ExpectedMutationLedger {
       },
     };
   }
-  classify(change: WorldChange, dependencies: ReadonlySet<number>, now: number): MutationClassification {
+  classify(
+    change: WorldChange,
+    dependencies: ReadonlySet<number>,
+    now: number,
+    lavaDependencies: ReadonlySet<number> = NO_CELLS,
+  ): MutationClassification {
     this.expire(now);
     const matches = [...this.#active.entries()].find(([, item]) => samePosition(item.position, change.position));
     if (matches) {
@@ -124,12 +135,15 @@ export class ExpectedMutationLedger {
       change.before.stateId === change.after.stateId
     )
       return "irrelevant";
-    return dependencies.has(blockKey(change.position)) ? "invalidating" : "irrelevant";
+    const key = blockKey(change.position);
+    if (dependencies.has(key)) return "invalidating";
+    // A cell lava could flow through into the route: a change that has no lava in it, before or after, is not that flow.
+    return lavaDependencies.has(key) && (holdsLava(change.before) || holdsLava(change.after)) ? "invalidating" : "irrelevant";
   }
   expire(now: number) {
     for (const collection of [this.#active, this.#receipts])
       for (const [key, item] of collection)
-        if (now >= item.deadlineMs) {
+        if (item.deadline.passed(now)) {
           collection.delete(key);
           item.settle({ kind: "expired" });
         }

@@ -1,4 +1,5 @@
 import { isIncomingArrow } from "../../perception/combat/shield-projectiles.js";
+import { isIncomingDirectionalProjectile } from "../../perception/combat/directional-projectiles.js";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import type { SupportedPositionHold } from "../../../navigation/index.js";
@@ -12,10 +13,7 @@ import {
   type NavigationRuntime,
 } from "../../../navigation/index.js";
 import { isHeadPassable, isPassable, isSafeSupport, navigationFeet } from "../../../navigation/world/block-geometry.js";
-import { blockClass } from "../../../navigation/mineflayer/world.js";
-import { isReplaceableForPlacement } from "../../../world/block-classification.js";
 import { clearCombatRay, nearestBodyPoint } from "../../../world/entity-geometry.js";
-import { occupiedCell } from "../../../world/placement.js";
 import { positionThreat, type CombatPerception } from "../../perception/combat/observations.js";
 import { fireAt } from "../../perception/body.js";
 import { canBeBystander, isHostile } from "../../perception/combat/threats.js";
@@ -23,8 +21,8 @@ import { type CombatPolicy } from "../../policy/combat/contract.js";
 import { Answered, type AnsweredScope } from "../../state/answered.js";
 import { MELEE_RANGE } from "../../weapons/equipment.js";
 import { extinguishFireAt } from "../fire-clearance.js";
-import { buildProtection, fullProtectionBlock } from "./build-protection.js";
-import { positionExposed, projectileReachesBody, type PositionThreat } from "./exposure.js";
+import { buildProtection, canPlaceProtection, fullProtectionBlock } from "./build-protection.js";
+import { positionExposed, type PositionThreat } from "./exposure.js";
 import { geometryAnswer } from "./geometry-answer.js";
 import { positionWorld, standingBody, standingCell, type CombatPositionPlan } from "./geometry.js";
 import { countCapBlocks } from "./hide-blocks.js";
@@ -64,7 +62,26 @@ export class CombatPosition {
 
   get canEstablish(): boolean {
     const scope = this.searchScope();
-    return this.answered.find(scope.capability, scope.scope) === null;
+    return !this.coverWaitSpent && this.answered.find(scope.capability, scope.scope) === null;
+  }
+  /** A protected wait for this target ended without damage: no cover is adopted or built for it any more. */
+  private get coverWaitSpent(): boolean {
+    const scope = this.coverWaitScope();
+    return this.answered.find(scope.capability, scope.scope) !== null;
+  }
+  /** Per target, with no facts: the target moving or the world changing never reopens it, a policy change does. */
+  private coverWaitScope(): AnsweredScope {
+    return {
+      capability: "combat.cover_wait",
+      response: "establish",
+      scope: `target:${this.target.id}`,
+      facts: () => null,
+      permissions: () => ({
+        dig: this.policy().terrain.dig,
+        place: this.policy().terrain.place,
+        melee: this.policy().melee,
+      }),
+    };
   }
   private get rejectedCoverCount(): number {
     return this.answered
@@ -103,14 +120,10 @@ export class CombatPosition {
   private acceptsCover = (plan: CombatPositionPlan): boolean =>
     plan.protected.distanceTo(this.#origin) <= COMBAT_APPROACH_RADIUS &&
     plan.placements.every(this.canPlaceProtection) &&
-    this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null;
+    this.answered.find("combat.cover", `target:${this.target.id}:${this.coverKey(plan)}`) === null &&
+    !this.coverWaitSpent;
 
-  /** The cells the server can fill, priced before provoking a quarry or starting a wall: a plant is not always replaceable. */
-  private canPlaceProtection = (cell: Vec3): boolean => {
-    const observed = this.navigation.world.blockAt(cell.x, cell.y, cell.z);
-    const block = observed.kind === "loaded" ? blockClass(this.bot).fromStateId(observed.stateId, 0) : null;
-    return isReplaceableForPlacement(block, this.bot.version) && occupiedCell(this.bot, cell) === null;
-  };
+  private canPlaceProtection = (cell: Vec3): boolean => canPlaceProtection(this.bot, this.navigation.world, cell);
 
   /** Reject this geometry for this target position, not the target or the hunt. */
   rejectCover(reason = "The protected position offered no usable attack opening."): void {
@@ -120,6 +133,15 @@ export class CombatPosition {
         { kind: "position_rejected", why: reason },
       );
     this.plan = null;
+  }
+
+  /**
+   * The protected wait ended without damage: end cover for this target, wherever the refuge. A key record alone lapses
+   * when the quarry moves a block, and the next refuge would get a wait of its own (plan part2-a9 T13y).
+   */
+  rejectCoverWait(reason: string): void {
+    this.rejectCover(reason);
+    this.answered.remember(this.coverWaitScope(), { kind: "target_progress_exhausted", why: reason });
   }
 
   rejectRoof(cell: Vec3, reason: string): void {
@@ -344,8 +366,7 @@ export class CombatPosition {
     const rays = positionWorld(this.navigation.world);
     const body = standingBody(plan.protected);
     return (
-      standingCell(this.navigation.world, plan.protected) &&
-      [plan.corner, plan.entrance, plan.fighting].every((cell) => {
+      [plan.protected, plan.corner, plan.entrance, plan.fighting].every((cell) => {
         const world = this.navigation.world;
         // Fire obstructs travel until extinguished; it does not remove the
         // walls protecting a safe refuge. Solid obstructions still invalidate it.
@@ -357,7 +378,7 @@ export class CombatPosition {
       }) &&
       !this.threats().some((threat) => positionExposed(rays, body, threat)) &&
       !Object.values(this.bot.entities).some(
-        (entity) => entity.isValid && ((entity.name === "small_fireball" && projectileReachesBody(rays, entity, body)) || isIncomingArrow(this.bot, entity, 0, body)),
+        (entity) => isIncomingDirectionalProjectile(this.bot, entity, body) || isIncomingArrow(this.bot, entity, 0, body),
       )
     );
   }

@@ -196,6 +196,24 @@ test("temporary crafting requires a carried table even with a nearby table and b
   assert.deepEqual(craftCalls, []);
 });
 
+test("a temporary crafting table whose registry names a harvest tool is refused while none is carried", async () => {
+  const clock = createFakeClock({ mode: "mocked" });
+  using _installed = clock.install();
+  const { bot, craftCalls } = craftingBot({ crafting_table: 1, oak_log: 1, cobblestone: 3 }, false, [], { clock });
+  // A copy of the registry: the minecraft-data object is shared by every test in the process.
+  const { blocksByName, itemsByName } = bot.registry;
+  const pickaxe = itemsByName.wooden_pickaxe!.id;
+  Object.assign(bot, {
+    registry: { ...bot.registry, blocksByName: { ...blocksByName, crafting_table: { ...blocksByName.crafting_table!, harvestTools: { [pickaxe]: true } } } },
+  });
+  const request = parseCraftItemRequest({ temporary_workstation: true, items: [{ item_name: "stone_pickaxe" }] });
+  // The old code places the table and waits for the server on the fake clock: that wait ends the run in 2 s.
+  const result = await clock.settle(craftItem(bot, navigation, request, {}), 2_000);
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /WORKSTATION_NO_HARVEST_TOOL.*crafting_table.*wooden_pickaxe/);
+  assert.deepEqual(craftCalls, []);
+});
+
 test("a native crafting failure claims no output and still asks for the inventory window to close", async () => {
   const clock = createFakeClock({ mode: "mocked" });
   using _installed = clock.install();

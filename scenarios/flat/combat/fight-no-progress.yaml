@@ -48,4 +48,4 @@ client:
   command: bun
   args: ["../../src/client-host.ts", "./fight-no-progress.ts"]
 
-goal: { kind: completion, who: Fighter, timeout: 100 }
+goal: { kind: completion, who: Fighter, timeout: 100, stillTicks: 1340 } # a10 T6c f1689c6e: maxima 664 (20 tps, n=9), 645 (10 tps, n=9); 2x rounded up to 20; p4-29/a10-t6c/fight-{measure,final,confirm}-{20,10}.

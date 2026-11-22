@@ -35,16 +35,24 @@ test("End eye contact is diverted without changing movement yaw; idle gaze is gu
   assert.equal(added("physicsTick"), 0);
 });
 
-test("gaze guard respects dimension, cover, pumpkin and deliberate selected Enderman combat", async () => {
+test("the gaze guard reports risk in the overworld", () => {
+  const { bot } = createFakeBot({ dimension: "overworld", groundY: null, entities: { 7: { name: "enderman", position: ENDERMAN_FEET } } });
+  assert.equal(endermanGazeRisk(bot, bot.entity.position, 0, 0), true);
+  bot.game.dimension = "the_nether";
+  assert.equal(endermanGazeRisk(bot, bot.entity.position, 0, 0), true);
+});
+
+test("a carved pumpkin still removes the risk", () => {
+  const { bot } = createFakeBot({ dimension: "overworld", groundY: null, entities: { 7: { name: "enderman", position: ENDERMAN_FEET } } });
+  assert.equal(endermanGazeRisk(bot, bot.entity.position, 0, 0), true);
+  bot.inventory.slots[5] = itemOf(bot.registry, "carved_pumpkin");
+  assert.equal(endermanGazeRisk(bot, bot.entity.position, 0, 0), false);
+});
+
+test("gaze guard respects cover and deliberate selected Enderman combat", async () => {
   const { bot, world } = fixture();
   const risk = () => endermanGazeRisk(bot, bot.entity.position, 0, 0);
   assert.equal(risk(), true);
-  bot.game.dimension = "overworld";
-  assert.equal(risk(), false);
-  bot.game.dimension = "the_end";
-  bot.inventory.slots[5] = itemOf(bot.registry, "carved_pumpkin");
-  assert.equal(risk(), false);
-  bot.inventory.slots[5] = null;
   screen(world, "stone");
   assert.equal(risk(), false);
   screen(world, "air");

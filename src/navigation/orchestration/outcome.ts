@@ -121,7 +121,9 @@ export type NavigationFailure =
         /** The goal was reached and the arrival work changed nothing, again and again, from the same stance. */
         | "repeated_arrival"
         /** The body is held under a ceiling it does not fit beneath and this route may not break it. */
-        | "pinned_body";
+        | "pinned_body"
+        /** The caller's route admission refused the route at its commit or at a step boundary (`route-admission.ts`). */
+        | "route_refused";
       readonly observation: string;
       /** The movement whose repeated failure ended the run. */
       readonly movement?: MovementFailure;

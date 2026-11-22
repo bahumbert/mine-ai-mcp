@@ -1,0 +1,29 @@
+template: ../../templates/flat-single-action.yaml
+name: contract-server-tags
+tags:
+  - contract
+description: "Login tags resolve to the vanilla item and entity tag members. Contract check
+  tests/minecraft/contract/checks/server-tags.ts (skipped on the fake bot in bot-contract.test.ts: the fake sends
+  tags only through harness.emitTags); setup from setupCommands(fixture) (setup-commands.test.ts)."
+client:
+  command: bun
+  cwd: ../..
+  args:
+    - client-host.ts
+    - drivers/bot-contract.ts
+params:
+  check: server-tags
+reset: []
+setup:
+  - fill -6 -61 -6 6 -61 6 stone
+  - fill -6 -60 -6 6 -55 6 air
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+    op: true
+goal:
+  kind: all
+  timeout: 90
+  goals:
+    - kind: completion
+      who: Actor

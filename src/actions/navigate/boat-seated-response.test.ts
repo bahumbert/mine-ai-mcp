@@ -6,8 +6,61 @@ import { prepareBotForMovement } from "../../session/prepare-body.js";
 import { attackedIds } from "../../test-support/combat.js";
 import type { FakeHarness } from "../../test-support/fake-bot/index.js";
 import { SEATED_BOAT_ID, boatsCarried, boatsInView, mountedSea, vehicleMoves, wroteAShift } from "./boat-fixtures.test.js";
-import { respondFromBoat, type SeatedThreat } from "./boat-seated-response.js";
+import { respondFromBoat, seatedAtSea, type SeatedThreat } from "./boat-seated-response.js";
 import { watchVehicle } from "./vehicle-sync.js";
+import { DEFAULT_COMBAT_POLICY } from "../../survival/policy/combat/contract.js";
+import { crossByBoat } from "./boat-crossing.js";
+import { createFakeBot, createFakeClock, listenersAddedSince } from "../../test-support/fake-bot/index.js";
+import { SERVER_ANSWER_TICKS } from "../../world/world-age.js";
+import { serverTickPace } from "../../world/server-tick-pace.js";
+import { swingReadiness } from "../../survival/weapons/swing-readiness.js";
+
+for (const rate of [20, 10]) test(`seated sword strikes wait thirteen server ticks at ${rate} tps without physics`, async () => {
+  const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"], ticksPerSecond: rate });
+  const { bot, clock, server } = world;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  await clock.advance(4_000);
+  const hits: number[] = [];
+  server.onPacket("use_entity", data => {
+    if ((data as { mouse: number }).mouse === 1) hits.push(server.gameTime);
+  });
+  const start = server.gameTime;
+  const added = listenersAddedSince(bot);
+  const result = await clock.settle(respondFromBoat(bot, () => hits.length === 2 ? [] : [world.threat], new AbortController().signal), SETTLE_MS);
+  assert.deepEqual(hits.map(tick => tick - start), [13, 26]);
+  assert.equal(result.strikes, 2);
+  assert.equal(bot.vehicle?.id, BOAT_ID);
+  assert.equal(added("death"), 0);
+  await clock.advance(25_000);
+  assert.equal(hits.length, 2, "no attack after the completed response's old ceiling");
+});
+
+test("a seated sword with no server clock stays bounded and abort releases its response", async () => {
+  const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"], ticksPerSecond: 10 });
+  const { bot, clock, server } = world;
+  using _timers = clock.install();
+  using _pace = serverTickPace(bot);
+  using _readiness = swingReadiness(bot);
+  server.stop();
+  const stoppedAge = bot.time.age;
+  const stoppedTick = server.gameTime;
+  const added = listenersAddedSince(bot);
+  const result = await clock.settle(respondFromBoat(bot, () => [world.threat], new AbortController().signal, { wallMs: 2_000 }), SETTLE_MS);
+  assert.equal(result.outcome, "timed_out");
+  assert.equal(result.strikes, 0);
+  assert.equal(bot.time.age, stoppedAge);
+  assert.equal(added("death"), 0, "the timeout releases its listener before another response starts");
+  const stop = new AbortController();
+  clock.after(100, () => stop.abort(new Error("seat cancelled")));
+  await assert.rejects(clock.settle(respondFromBoat(bot, () => [world.threat], stop.signal), SETTLE_MS), /seat cancelled/);
+  assert.equal(added("death"), 0);
+  await clock.advance(25_000);
+  assert.equal(bot.time.age, stoppedAge);
+  assert.equal(server.gameTime, stoppedTick, "the wall backstop and abort do not require server ticks");
+  assert.deepEqual(attackedIds(server), []);
+});
 
 const THREAT_ID = 20;
 const BOAT_ID = SEATED_BOAT_ID;
@@ -25,22 +78,61 @@ const moves = (world: FakeHarness) => vehicleMoves(world);
 const noShift = (world: FakeHarness) => assert.equal(wroteAShift(world), false, "she stays seated: no shift");
 const stopped = (world: FakeHarness) => assert.equal(new Set(moves(world).slice(-4).map((packet) => JSON.stringify(packet))).size, 1, "the last 4 moves are the same stopped place");
 
-test("a threat in reach is struck from the seat, once per cooldown", async () => {
+test("only the combat policy's permitted items are used seated", async () => {
+  for (const melee of [false, true]) {
+    const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword", "shield"] });
+    using _timers = world.clock.install();
+    using _pace = serverTickPace(world.bot);
+    using _readiness = swingReadiness(world.bot);
+    await world.clock.advance(4_000);
+    await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal,
+      { wallMs: 1_000, policy: { ...DEFAULT_COMBAT_POLICY, melee, shield: false } }), SETTLE_MS);
+    assert.equal(attackedIds(world.server).length > 0, melee);
+    assert.equal(world.bot.inventory.slots[45], null);
+  }
+});
+
+test("a seated strike sends no sneak field that ejects the rider", async () => {
   const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword"] });
   using _timers = world.clock.install();
-  const equips: string[] = [];
-  const equip = world.bot.equip.bind(world.bot);
-  world.bot.equip = async (...args: Parameters<typeof equip>) => {
-    if (typeof args[0] !== "number") equips.push(args[0].name);
-    return equip(...args);
-  };
+  using _pace = serverTickPace(world.bot);
+  using _readiness = swingReadiness(world.bot);
+  await world.clock.advance(4_000);
+  world.server.onPacket("use_entity", (data) => {
+    if ((data as { mouse: number }).mouse === 1) {
+      assert.equal((data as { sneaking: boolean }).sneaking, false);
+    }
+  });
+  // use-entity-sneak-in-boat: sneaking=true in use_entity ejects the rider on 1.21.4.
+  world.bot.setControlState("sneak", true);
+  const packetsBeforeResponse = world.server.packets.length;
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 1_000 }), SETTLE_MS);
-  // An iron sword's 13 ticks: strikes at 0 and 650 ms, none at 1300.
-  assert.equal(result.strikes, 2);
-  assert.deepEqual(attackedIds(world.server), [THREAT_ID, THREAT_ID]);
-  assert.deepEqual(equips, ["iron_sword"], "the sword is equipped once");
+  assert.equal(world.bot.vehicle?.id, BOAT_ID);
+  assert.deepEqual(attackedIds(world.server), [THREAT_ID]);
+  assert.equal(result.strikes, 1);
   assert.equal(result.outcome, "timed_out");
-  noShift(world);
+  assert.ok(world.server.packets.slice(packetsBeforeResponse).every((packet) =>
+    packet.name !== "player_input" && packet.name !== "entity_action"), "the response sends no shift");
+});
+
+test("rowing legs start from the boat entity's position", async () => {
+  const world = await seatedWithThreat(new Vec3(0.5, 63, 12.5));
+  using _timers = world.clock.install();
+  world.bot.entity.position.z = 30;
+  await world.clock.settle(respondFromBoat(world.bot, () => moves(world).length > 8 ? [] : [world.threat], new AbortController().signal), SETTLE_MS);
+  assert.ok(Number(moves(world)[0]!.z) < 3.5, "row away from +z using the boat, not the stale passenger position");
+});
+
+test("after a seated fight the navigate resumes the crossing", async () => {
+  // Bare hands: the shared fake deliberately refuses unmeasured weapon damage on a boat at take-back.
+  const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { landFromZ: 30 });
+  using _timers = world.clock.install();
+  await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 1_000 }), SETTLE_MS);
+  assert.equal(world.bot.vehicle?.id, BOAT_ID);
+  const result = await world.clock.settle(crossByBoat(world.bot, { x: 0, z: 1 }), SETTLE_MS);
+  assert.equal(result.status, "crossed", result.detail);
+  assert.ok(world.bot.entity.position.z >= 27);
+  assert.equal(world.bot.vehicle, null);
 });
 
 test("a threat out of reach is rowed away from, over open water", async () => {
@@ -81,10 +173,26 @@ test("no threat left ends clear and nothing is rowed", async () => {
 test("the wall ceiling ends it with the boat stopped", async () => {
   const world = await seatedWithThreat(new Vec3(0.5, 63, 12.5));
   using _timers = world.clock.install();
-  const startedAt = performance.now();
+  const startedAt = world.clock.now();
+  const initialPosition = world.bot.vehicle!.position.clone();
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal, { wallMs: 600 }), SETTLE_MS);
   assert.equal(result.outcome, "timed_out");
-  assert.ok(performance.now() - startedAt < 1_500, "the row itself stops at the ceiling");
+  const packets = world.server.packets.filter((packet) => packet.name === "vehicle_move");
+  const lastMovingIndex = packets.findLastIndex((packet, index) => {
+    const previous = index === 0 ? initialPosition : packets[index - 1]!.data as { x: number; y: number; z: number };
+    const current = packet.data as { x: number; y: number; z: number };
+    return current.x !== previous.x || current.y !== previous.y || current.z !== previous.z;
+  });
+  assert.ok(lastMovingIndex >= 0, "the response rows before reaching its ceiling");
+  const stepMs = 50;
+  assert.ok(packets[lastMovingIndex]!.atMs - startedAt <= 600 + stepMs,
+    "the last moving write is within the ceiling plus one rowing step");
+  const firstStopped = packets[lastMovingIndex + 1];
+  assert.ok(firstStopped, "the rowing is followed by stopped writes");
+  assert.ok(firstStopped.atMs - startedAt <= 600 + stepMs,
+    "the stop starts within the ceiling plus one rowing step");
+  assert.ok(world.clock.now() - firstStopped.atMs <= (4 + SERVER_ANSWER_TICKS) * stepMs,
+    "four stopped writes settle within forty server ticks on the fake clock");
   stopped(world);
 });
 
@@ -123,6 +231,51 @@ test("a boat broken under her ends it as unseated", async () => {
   const result = await world.clock.settle(respondFromBoat(world.bot, () => [world.threat], new AbortController().signal), SETTLE_MS);
   assert.equal(result.outcome, "unseated");
   stopWatch();
+});
+
+test("a diagonal bank beyond the combat distance keeps the seat at sea", async () => {
+  const cells: Record<string, string> = {};
+  for (let x = -40; x <= 40; x++) for (let z = -40; z <= 45; z++)
+    for (let y = 60; y <= 62; y++) cells[`${x},${y},${z}`] = "water";
+  cells["30,62,33"] = "stone";
+  const world = createFakeBot({ clock: createFakeClock({ mode: "mocked" }), groundY: 59, cells,
+    entities: { 7: { name: "oak_boat", position: new Vec3(0.5, 62.52, 3.5) } } });
+  world.bot.mount(world.bot.entities[7]!);
+  await world.clock.advance(100);
+  assert.equal(seatedAtSea(world.bot, 36), true);
+  assert.equal(seatedAtSea(world.bot, 43), false);
+});
+
+test("a shallow seat with a beach behind and deep water ahead takes the shore path", async () => {
+  const world = await mountedSea({ waterDepth: 2, landUntilZ: -3 });
+  for (let x = -6; x <= 6; x++) for (let z = 10; z <= 30; z++)
+    world.world.setCell(new Vec3(x, 60, z), "water");
+  assert.equal(seatedAtSea(world.bot, 8), false);
+});
+
+test("a late shield equip cannot start another equip after cancel, death or ceiling", async () => {
+  for (const interruption of ["cancel", "death", "ceiling"] as const) {
+    const world = await seatedWithThreat(new Vec3(2.5, 62.5, 3.5), { carries: ["iron_sword", "shield"] });
+    using _timers = world.clock.install();
+    let release = () => {};
+    const reply = new Promise<void>((resolve) => { release = resolve; });
+    const equip = world.bot.equip.bind(world.bot);
+    world.bot.equip = async (item, destination) => {
+      if (destination === "off-hand") await reply;
+      return equip(item, destination);
+    };
+    const abort = new AbortController();
+    const pending = respondFromBoat(world.bot, () => [world.threat], abort.signal, { wallMs: 200 });
+    const ended = interruption === "cancel" ? assert.rejects(pending, /cancelled equip/u) : pending.then(() => undefined);
+    if (interruption === "cancel") abort.abort(new Error("cancelled equip"));
+    if (interruption === "death") world.combat.setHealth(0);
+    await world.clock.settle(ended, 1_000);
+    const held = world.bot.heldItem?.name;
+    release();
+    await world.clock.advance(100);
+    assert.equal(world.bot.heldItem?.name, held, `no new equip after ${interruption}`);
+    assert.deepEqual(attackedIds(world.server), []);
+  }
 });
 
 test("after rowing away, the next movement gets off and takes the boat back", async () => {

@@ -29,6 +29,15 @@ const DROP_PICKUP_DELAY_TICKS = 10;
 
 type DamageParts = { server: FakeServer; entities: ServerEntities; inventory: FakeInventory; swing: Swing };
 
+/** Received damage and its one-per-tick decay (contract boat-broken-by-attack, 2026-11-09). */
+function sendBoatDamage(bot: FakeBot, id: number, damage: number): void {
+  const boat = bot.entities[id];
+  if (boat === undefined) return;
+  const index = bot.registry.entitiesByName[boat.name!]!.metadataKeys!.indexOf("damage");
+  Reflect.set(boat.metadata, index, damage);
+  bot.emit("entityUpdate", boat);
+}
+
 /** What a hit on a boat adds to its damage now; it starts the swing over. Throws for a weapon or tool in hand. */
 function boatDamageOfHit({ inventory, swing }: DamageParts): number {
   const held = inventory.heldItem?.name;
@@ -53,6 +62,7 @@ export function attachFakeBoatDamage(bot: FakeBot, parts: DamageParts): void {
     for (const [id, held] of damage) {
       if (held <= 1) damage.delete(id);
       else damage.set(id, held - 1);
+      sendBoatDamage(bot, id, held - 1);
     }
   });
   // `entities.js:860-873` for a version with no attack packet: `use_entity` with the left click, then the arm swings.
@@ -67,7 +77,10 @@ export function attachFakeBoatDamage(bot: FakeBot, parts: DamageParts): void {
       const boat = bot.entities[target];
       if (boat === undefined || !BOAT_NAME.test(boat.name ?? "") || !inEntityReach(bot, parts.server, boat)) return;
       const total = (damage.get(boat.id) ?? 0) + boatDamageOfHit(parts);
-      if (total <= BREAKS_ABOVE) damage.set(boat.id, total);
+      if (total <= BREAKS_ABOVE) {
+        damage.set(boat.id, total);
+        sendBoatDamage(bot, boat.id, total);
+      }
       else {
         damage.delete(boat.id);
         breakBoat(parts, boat);

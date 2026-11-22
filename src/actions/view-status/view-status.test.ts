@@ -4,7 +4,75 @@ import { parseViewStatusRequest, viewStatusResultSchema } from "./contract.js";
 import { createViewStatusAction, formatViewStatusResult, observeLiveSituation } from "./view-status.js";
 import { temporaryBotData } from "../../test-support/bot-data.js";
 import { idleActivity, registry, FEET, loaded, liveBot } from "./view-status-fixtures.test.js";
+import { emitFakeTags } from "../../test-support/fake-bot/fake-bot-tags.js";
+import { watchServerTags } from "../../world/server-tags.js";
+import { recordFireContact } from "../../survival/perception/burn.js";
+import { DEFAULT_NAVIGATION_POLICY } from "../../survival/policy/contract.js";
+import { setNavigationPolicyProvider } from "../../survival/state/navigation-policy.js";
+import { createFakeBot } from "../../test-support/fake-bot/index.js";
+import { Vec3 } from "vec3";
+import { CombatPerception } from "../../survival/perception/combat/observations.js";
 
+test("status names unknown melee cost instead of pricing a hoglin harmless", (t) => {
+  const { bot } = createFakeBot({ entities: { 2: { name: "hoglin", position: new Vec3(2.5, 64, 0.5) } } });
+  const situation = observeLiveSituation(bot, temporaryBotData({ botId: "TestBot", closeAfter: t }), idleActivity);
+  assert.equal(Reflect.get(situation.nearby.hostiles[0]!.threat, "unknownMelee"), true);
+  assert.equal(situation.nearby.fight!.margin, null);
+  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /unknown melee.*hoglin.*keep away, or hunt_mob it to fight anyway/i);
+  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation }), /no damaging contact is priced/);
+});
+
+test("status uses observed hit damage and does not price a distant hostile", (t) => {
+  const { bot, combat } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  using perception = new CombatPerception(bot);
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  combat.hurtBot(4, 2);
+  const context = { perception, resolvedIds: perception.resolvedIds, attackerIds: perception.attackerIds };
+  const situation = observeLiveSituation(bot, data, idleActivity, () => null, () => 1.5, context);
+  assert.equal(situation.nearby.hostiles[0]!.threat.damagePerHit, 4);
+  bot.entities[2]!.position = new Vec3(12.5, 64, 0.5);
+  const distant = observeLiveSituation(bot, data, idleActivity);
+  assert.doesNotMatch(formatViewStatusResult({ status: "succeeded", situation: distant }), /clearing damaging contacts/);
+});
+
+test("status assesses nearby hostiles and reports the fight estimate", (t) => {
+  const { bot } = createFakeBot({ entities: { 2: { name: "zombie", position: new Vec3(4.5, 64, 0.5) } } });
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  const situation = observeLiveSituation(bot, data, idleActivity);
+  assert.deepEqual(situation.nearby.hostiles[0]!.threat, { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 22, explodes: false, unknownMelee: false });
+  assert.ok(Math.abs(situation.nearby.fight!.margin! - 0.606) < 0.001);
+  assert.equal(situation.nearby.fight!.fightMargin, 1.5);
+  assert.equal(situation.nearby.fight!.weapon, null);
+  assert.equal(observeLiveSituation(bot, data, idleActivity, () => null, () => 2).nearby.fight!.fightMargin, 2);
+  assert.match(formatViewStatusResult({ status: "succeeded", situation }), /zombie x1: you need 22 hits each \(bare hands\), clearing damaging contacts in contact range or observed attacking costs ~33 of 20 health; margin 0\.6 < 1\.5/);
+  bot.entities[2]!.position = new Vec3(40, 64, 0.5);
+  assert.equal(observeLiveSituation(bot, data, idleActivity).nearby.fight, null);
+  const creeper = createFakeBot({ entities: { 3: { name: "creeper", position: new Vec3(4.5, 64, 0.5) } } }).bot;
+  const threat = observeLiveSituation(creeper, data, idleActivity).nearby.hostiles[0]!.threat;
+  assert.equal(threat.explodes, true);
+  assert.equal(threat.damagePerHit, null);
+});
+
+test("status exposes open-sky policy and the planned or reached exit, with a null default", (t) => {
+  const bot = liveBot();
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  assert.deepEqual(observeLiveSituation(bot, data, idleActivity).navigation, { reportOpenSky: false, coverExit: null });
+  setNavigationPolicyProvider(bot, () => ({ ...DEFAULT_NAVIGATION_POLICY, report_open_sky: true }));
+  const coverExit = { at: { x: 4, y: 64, z: 0 }, plannedAt: "2026-11-09T00:00:00.000Z", reached: true };
+  const situation = observeLiveSituation(bot, data, idleActivity, () => coverExit);
+  assert.deepEqual(viewStatusResultSchema.parse({ status: "succeeded", situation }).situation.navigation, { reportOpenSky: true, coverExit });
+});
+
+test("status reports the burn estimate only while burning", (t) => {
+  const bot = liveBot();
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+  const index = bot.registry.entitiesByName.player!.metadataKeys!.indexOf("shared_flags");
+  Reflect.set(bot.entity.metadata, index, 1);
+  recordFireContact(bot, "lava", bot.time.age);
+  assert.deepEqual(observeLiveSituation(bot, data, idleActivity).vitals.burn, { ticks: 300, hp: 15 });
+  Reflect.set(bot.entity.metadata, index, 0);
+  assert.equal(observeLiveSituation(bot, data, idleActivity).vitals.burn, null);
+});
 test("reports the observed clock without predicting daylight outside the Overworld", (t) => {
   // Servers may supply a custom dimension beyond Mineflayer's built-in union.
   for (const dimension of ["the_nether", "the_end", "custom_dimension"]) {
@@ -49,7 +117,7 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
   const situation = observeLiveSituation(liveBot(), data, idleActivity);
 
   assert.equal(situation.botId, "TestBot");
-  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null });
+  assert.deepEqual(situation.vitals, { health: 18.1, food: 12, saturation: 0.4, airSupplyTicks: null, burning: null, burn: null, armour: null, armourToughness: null });
   assert.deepEqual(situation.clock, {
     timeOfDay: 13826,
     phase: "night",
@@ -77,11 +145,11 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
     usedSlots: 3,
     freeSlots: 33,
     stacks: [
-      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: { remaining: 363, maximum: 363 } },
-      { slot: 9, location: "main", name: "cobblestone", count: 64, held: false, durability: null },
-      { slot: 10, location: "main", name: "cobblestone", count: 12, held: false, durability: null },
-      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: { remaining: 131, maximum: 131 } },
-      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: { remaining: 336, maximum: 336 } },
+      { slot: 5, location: "head", name: "diamond_helmet", count: 1, held: false, durability: { remaining: 363, maximum: 363 }, families: ["helmet"] },
+      { slot: 9, location: "main", name: "cobblestone", count: 64, held: false, durability: null, families: [] },
+      { slot: 10, location: "main", name: "cobblestone", count: 12, held: false, durability: null, families: [] },
+      { slot: 36, location: "hotbar", name: "stone_pickaxe", count: 1, held: true, durability: { remaining: 131, maximum: 131 }, families: ["pickaxe"] },
+      { slot: 45, location: "off-hand", name: "shield", count: 1, held: false, durability: { remaining: 336, maximum: 336 }, families: ["shield"] },
     ],
     foods: [],
   });
@@ -94,7 +162,9 @@ test("reports vitals, the clock, position, inventory, and loaded neighbours from
       { username: "Faraway", distance: null, position: null },
       { username: "Scout", distance: 5.3, position: { x: -12, y: 99, z: 14 } },
     ],
-    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 } }],
+    hostiles: [{ name: "zombie", distance: 5, position: { x: -4.5, y: 99, z: 18.68 }, threat: { damagePerHit: 3, hitsToKillYou: 7, yourHitsToKill: 7, explodes: false, unknownMelee: false } }],
+    fight: { effectiveHealth: 18.08, fightMargin: 1.5, healthLostToClear: 17.5, margin: 18.08 / 17.5,
+      source: { measured: true, version: "1.21.4" }, ticksToClear: 7 * (20 / 1.2), ticksToDie: 18.08 / (3 / 20), weapon: "stone_pickaxe" },
     mobs: [
       {
         name: "cow",
@@ -189,11 +259,12 @@ test("refreshes the queryable status and inventory rows in the same read", (t) =
     { slot: 45, location: "off-hand", item_name: "shield", count: 1, held: 0 },
   ]);
   // Fresh vanilla stacks: their whole durability from the item data, as in the inventory report above.
-  assert.deepEqual(data.read("SELECT class, tier, item_name, durability_left FROM bot_tools WHERE item_name IS NOT NULL ORDER BY class"), [
-    { class: "helmet", tier: "diamond", item_name: "diamond_helmet", durability_left: 363 },
-    { class: "pickaxe", tier: "stone", item_name: "stone_pickaxe", durability_left: 131 },
-    { class: "shield", tier: "other", item_name: "shield", durability_left: 336 },
-  ]);
+  assert.deepEqual(data.read("SELECT class, rank > 0 AS ranked, item_name, durability_left FROM bot_tools WHERE item_name IS NOT NULL OR class = 'shovel' ORDER BY class"), [
+    { class: "helmet", ranked: 1, item_name: "diamond_helmet", durability_left: 363 },
+    { class: "pickaxe", ranked: 1, item_name: "stone_pickaxe", durability_left: 131 },
+    { class: "shield", ranked: 1, item_name: "shield", durability_left: 336 },
+    { class: "shovel", ranked: 0, item_name: null, durability_left: null },
+  ], "a carried item has a rank above 0, a class with none carried has 0");
 });
 
 test("renders one compact Markdown situation report", async (t) => {
@@ -213,6 +284,9 @@ test("renders one compact Markdown situation report", async (t) => {
   assert.match(markdown, /- Held: stone_pickaxe x1/);
   assert.match(markdown, /- Worn: head diamond_helmet, off-hand shield/);
   assert.match(markdown, /- cobblestone x76 \(slots 9, 10\)/);
+  assert.match(markdown, /\n- pickaxe: stone_pickaxe \(slot 36, 131\/131 durability\)\n/, "the best tools line prints the item name");
+  assert.match(markdown, /\n- shovel: none\n/);
+  assert.doesNotMatch(markdown, /pickaxe: stone \(/, "no material label read from the name");
   assert.match(markdown, /- Players: Faraway \(online, not loaded nearby\); Scout 5\.3 blocks away at `-12, 99, 14`/);
   assert.match(markdown, /- Hostiles: zombie 5 blocks away/);
   assert.match(markdown, /- Loaded mobs \(every loaded chunk, any distance\):\n/);
@@ -323,4 +397,23 @@ test("species-age groups expose a farther adult without losing the nearest baby 
   viewStatusResultSchema.parse(result);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, age unknown\) x1/);
   assert.match(formatViewStatusResult(result), /piglin \(hostile, adult\) x2, nearest #2941/);
+});
+
+test("a carried diamond_sword reports families [sword]; item_families names shipped tags before a tags packet, the server after", (t) => {
+  const bot = liveBot({ carried: { 36: { name: "diamond_sword" }, 9: { name: "bread", count: 3 } } });
+  watchServerTags(bot);
+  const data = temporaryBotData({ botId: "TestBot", closeAfter: t });
+
+  const before = observeLiveSituation(bot, data, idleActivity);
+  assert.deepEqual(before.inventory.stacks.find((stack) => stack.name === "diamond_sword")?.families, ["sword"]);
+  assert.deepEqual(before.inventory.stacks.find((stack) => stack.name === "bread")?.families, ["food"]);
+  assert.deepEqual(before.item_families, { source: "shipped", version: bot.version, overrides: ["minecraft"] });
+  assert.deepEqual(data.read("SELECT item_families_json FROM bot_status"), [{ item_families_json: JSON.stringify(before.item_families) }]);
+  assert.deepEqual(data.read("SELECT families FROM bot_inventory WHERE item_name = 'diamond_sword'"), [{ families: '["sword"]' }]);
+  const markdown = formatViewStatusResult(viewStatusResultSchema.parse({ status: "succeeded", situation: before }));
+  assert.match(markdown, /Item families: shipped tags \(1\.21\.4\) \+ override minecraft/);
+
+  // A real server never sends an empty packet: one group with one measured tag (`fake-bot-tags.ts`).
+  emitFakeTags(bot, [{ tagType: "minecraft:item", tags: [{ tagName: "minecraft:swords", entries: [bot.registry.itemsByName.diamond_sword!.id] }] }]);
+  assert.equal(observeLiveSituation(bot, data, idleActivity).item_families.source, "server");
 });

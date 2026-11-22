@@ -1,0 +1,45 @@
+# A pickup delay armed at contact forces the walk's inventory settlement path.
+template: ../../templates/flat-single-action.yaml
+
+name: pickup-late-gain
+tags: [regression]
+description: >-
+  Walk to an observed item, then wait for its server-controlled pickup delay.
+  At 10 tps the gain arrives after the old 900 ms arrival settle, which completed
+  the walk with the item still on the ground and no confirmed inventory gain.
+
+world:
+  difficulty: peaceful
+
+entities:
+  - type: item
+    pos: [4.5, -60, 0.5]
+    nbt: '{Item:{id:"minecraft:diamond",count:1},PickupDelay:32767s,Tags:["late_pickup"]}'
+
+players:
+  - name: Actor
+    pos: [0.5, -60, 0.5]
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  # Cover the 1.425-block arrival box; 16 ticks fits the 18-tick settle at every packet phase.
+  - 'execute as @e[type=item,tag=late_pickup,tag=!pickup_armed] at @s if entity @a[name=Actor,distance=..1.5] run data merge entity @s {PickupDelay:16s,Tags:["late_pickup","pickup_armed"]}'
+
+client:
+  command: bun
+  cwd: ../..
+  args: [client-host.ts, drivers/action-sequence.ts]
+
+params:
+  actions:
+    - action: pick_up_items
+      # Read the observed stack after entity metadata and a server time packet have arrived.
+      waitServerTicks: 1
+      input: { item: diamond, radius: 8 }
+
+goal:
+  kind: all
+  timeout: 40
+  goals:
+    - { kind: hasItem, who: Actor, item: diamond, count: 1 }
+    - { kind: completion, who: Actor }

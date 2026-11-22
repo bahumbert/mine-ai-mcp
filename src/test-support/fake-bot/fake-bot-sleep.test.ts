@@ -374,3 +374,31 @@ test("a monster is in the box when its body reaches it: a zombie standing just o
   assert.deepEqual(await heard(11.2), { messages: ["block.minecraft.bed.not_safe"], asleep: false });
   assert.deepEqual(await heard(11.4), { messages: [], asleep: true });
 });
+
+// The wake before a hit's damage (animation, position beside the bed, damage_event; the bed free; the bed taken again) is asserted by the contract check
+// `respawn-while-asleep`, run on the fake by `bot-contract.test.ts`; the tests here are what that check cannot set up.
+test("a sleeper who dies of a hit is awake in her next life and comes back beside the bed she slept in, not at the world's spawn", async () => {
+  const h = bedroom({ spawn: { x: 40.5, y: 64, z: 40.5 } });
+  await sleepIn(h);
+  h.combat.hurtBot(100, null);
+  await h.clock.advance(3_000);
+  assert.equal(h.bot.isSleeping, false);
+  assert.equal(h.bot.health, 20);
+  assert.deepEqual(h.server.respawnPoint, BED_HEAD.offset(0.5, 0, 1.5));
+  assert.deepEqual(h.server.sentPositions.at(-1), BED_HEAD.offset(0.5, 0, 1.5));
+  assert.deepEqual(h.bot.entity.position, BED_HEAD.offset(0.5, 0, 1.5));
+});
+
+test("a sleeper whose health is set to 0 by the scene wakes as she dies: not asleep in her next life, the bed free, and the next sleep is the bed's answer", async () => {
+  const h = bedroom();
+  await sleepIn(h);
+  const heard: string[] = [];
+  for (const name of ["animation", "death_combat_event", "respawn"]) h.bot._client.on(name, () => void heard.push(name));
+  h.combat.setHealth(0);
+  await h.clock.advance(3_000);
+  assert.deepEqual(heard, ["animation", "death_combat_event", "respawn"], "the wake first, as for a hit");
+  assert.equal(h.bot.isSleeping, false);
+  assert.equal(occupiedAt(h, BED_FOOT), "false");
+  await sleepIn(h);
+  assert.equal(h.bot.isSleeping, true, "she can sleep again: the bed is free and the sleeper record is gone");
+});

@@ -23,6 +23,7 @@ import {
   type PlannedOperation,
   type PlannedStep,
   type RoutePlan,
+  type BlockMatcher,
   airMatcher,
   stateMatcher,
 } from "../movements/movement.js";
@@ -33,6 +34,7 @@ import type { MovementController, MovementExecution, MovementSnapshot } from "./
 import { type AttemptToken, ExpectedMutationLedger, type MutationResult } from "./mutations.js";
 import { markPhase } from "../../diagnostics/freeze-watch.js";
 import { executeWorldEffect } from "./world-effect.js";
+import { confirmationTicks } from "./confirmation-deadline.js";
 import type { OpenedPassages } from "./opened-passages.js";
 import { monotonicNow } from "../../utils/monotonic-clock.js";
 import { armNoTickCancel } from "./no-tick-cancel.js";
@@ -40,12 +42,26 @@ import { SupportedPositionController } from "./supported-position-controller.js"
 
 export type StepDecision = "continue" | "goal_satisfied" | "goal_revised";
 
-/** The least time the server gets to confirm an effect, however cheap the plan priced it. */
-const MINIMUM_CONFIRMATION_MS = 5_000;
-
 /** The longest the body can take to dig a break operation from its state now (0 for any other operation, an unloaded block or a bot that cannot tell). */
 function longestDigTime(bot: NavigationBot, operation: PlannedOperation): number {
   return operation.kind === "break" ? (bot.longestBreakDurationMs?.(operation) ?? 0) : 0;
+}
+
+/** Track a whole activated passage or the single mutation and its falling column. */
+function mutationTargets(world: WorldView, step: PlannedStep, operation: Exclude<PlannedOperation, { kind: "move" }>, position: BlockPosition, before: BlockMatcher, after: BlockMatcher) {
+  const activationGroup = operation.kind === "activate"
+    ? activationGroupAt(world.blockAt(position.x, position.y, position.z), position)
+    : null;
+  if (operation.kind === "activate" && activationGroup) return step.effects.flatMap((effect) => {
+    if (effect.kind !== "activate") return [];
+    return activationGroupAt(world.blockAt(effect.position.x, effect.position.y, effect.position.z), effect.position) === activationGroup
+      ? [{ position: effect.position, before: stateMatcher(effect.stateId), after }]
+      : [];
+  });
+  return [{
+    position, before, after,
+    ...(operation.kind === "break" && operation.brings.length > 0 && { owned: [position, ...operation.brings] }),
+  }];
 }
 
 export type RouteExecutionResult =
@@ -133,6 +149,7 @@ function canHandoffToInteraction(step: PlannedStep, next: PlannedStep | undefine
 export class RouteExecutor {
   #state: RouteExecutionState = { kind: "starting_step", stepIndex: 0 };
   #invalidated = false;
+  readonly #invalidation = new AbortController();
   #latestMovementSnapshot: MovementSnapshot | null = null;
   /** The monotonic time of the last physics tick; the executor starts it so a bot that never ticks reads as silent from the start. */
   #lastTickAt = performance.now();
@@ -151,7 +168,15 @@ export class RouteExecutor {
     if (this.#invalidated) return;
     this.#invalidated = true;
     this.#resolveInvalidated();
-    if (this.#state.kind === "moving") this.#settleMovement({ kind: "invalidated" });
+    this.#invalidation.abort();
+    if (this.#state.kind === "moving" && this.#canReleaseMovement(this.#movementSnapshot()))
+      this.#settleMovement({ kind: "invalidated" });
+  }
+
+  /** The world ended or another owner must steer immediately, even during a committed jump. */
+  terminate(): void {
+    this.invalidate();
+    this.#settleMovement({ kind: "invalidated" });
   }
 
   async execute(): Promise<RouteExecutionResult> {
@@ -159,7 +184,7 @@ export class RouteExecutor {
     resources.defer(this.request.context.bot.subscribePhysicsTick(() => this.#onPhysicsTick()));
     resources.use(
       armNoTickCancel({
-        signal: this.request.context.signal,
+        signal: AbortSignal.any([this.request.context.signal, this.#invalidation.signal]),
         lastTickAt: () => this.#lastTickAt,
         settle: () => this.#settleMovement({ kind: "cancelled" }),
       }),
@@ -370,36 +395,8 @@ export class RouteExecutor {
           ? stateMatcher(operation.placement.stateId)
           : operation.after;
     const world = this.request.context.world;
-    const activationGroup =
-      operation.kind === "activate"
-        ? activationGroupAt(world.blockAt(position.x, position.y, position.z), position)
-        : null;
-    const targets =
-      operation.kind === "activate" && activationGroup
-        ? step.effects.flatMap((effect) => {
-            if (effect.kind !== "activate") return [];
-            return activationGroupAt(
-              world.blockAt(effect.position.x, effect.position.y, effect.position.z),
-              effect.position,
-            ) === activationGroup
-              ? [{ position: effect.position, before: stateMatcher(effect.stateId), after }]
-              : [];
-          })
-        : [
-            {
-              position,
-              before,
-              after,
-              // A break that brings a falling column down owns the column's
-              // cells until it is done; see `Expectation.owned`.
-              ...(operation.kind === "break" &&
-                operation.brings.length > 0 && { owned: [position, ...operation.brings] }),
-            },
-          ];
-    // Each brought block takes a fall and a second swing beyond the dig time.
-    const settling = operation.kind === "break" ? operation.brings.length * 3_000 : 0;
+    const targets = mutationTargets(world, step, operation, position, before, after);
     const { bot } = this.request.context;
-    const plannedMs = step.cost.expectedTicks * 50;
     const opened = operation.kind === "activate" ? this.request.passages.closedAt(position) : null;
     this.#state = { kind: "awaiting_effect", stepIndex, operationIndex, token };
     this.request.phase(step, "confirming");
@@ -408,10 +405,8 @@ export class RouteExecutor {
       token,
       operation,
       targets,
-      // Scale confirmation to the work: the planned cost, the longest dig the body can face (the planner prices the stance
-      // it plans, so a body in water over a solid cell is priced as standing, and one that has not landed when its swing
-      // starts digs 25 times slower), and the falling column.
-      deadlineMs: monotonicNow() + Math.max(MINIMUM_CONFIRMATION_MS, 2 * Math.max(plannedMs, longestDigTime(bot, operation))) + settling,
+      deadlineTicks: confirmationTicks({ expectedTicks: step.cost.expectedTicks, digMs: longestDigTime(bot, operation),
+        broughtBlocks: operation.kind === "break" ? operation.brings.length : 0 }),
       invalidated: this.#invalidatedResult,
     });
     if (issued) this.request.passages.remember(opened);
@@ -420,6 +415,7 @@ export class RouteExecutor {
     if (result.kind === "cancelled" || result.kind === "invalidated") return result;
     const failed = { kind: operation.kind, position };
     if (result.kind === "effect_failed") {
+      if (result.cause === "support") return { kind: "invalidated" };
       return {
         kind: "failed",
         failure: { kind: "operation_failed", stepId: step.id, phase, observation: result.observation, operation: failed },
@@ -527,22 +523,16 @@ export class RouteExecutor {
     const running = this.request.plan.steps[this.#state.stepIndex];
     markPhase(`physicsTick: ${running?.kind} ${running?.id}`);
     if (!snapshot.onGround) this.#state.airborneObserved = true;
-    if (this.#invalidated) {
-      this.#settleMovement({ kind: "invalidated" });
-      return;
-    }
     try {
       // Resolve cancellation against this tick's position and momentum, not
       // the previous phase seen by an earlier combat/contact listener.
       if (
-        this.request.context.signal.aborted &&
-        (canReleaseOnObservedGround(this.request.context.world, snapshot) ||
-          this.#state.controller.cancel(snapshot) === "stopped")
+        (this.#invalidated || this.request.context.signal.aborted) && this.#canReleaseMovement(snapshot)
       ) {
-        this.#settleMovement({ kind: "cancelled" });
+        this.#settleMovement({ kind: this.#invalidated ? "invalidated" : "cancelled" });
         return;
       }
-      if (this.request.context.signal.aborted && snapshot.onGround && this.#state.airborneObserved) {
+      if ((this.#invalidated || this.request.context.signal.aborted) && snapshot.onGround && this.#state.airborneObserved) {
         const landing = safeSupportingCell(this.request.context.world, snapshot.position);
         if (landing) {
           // The coast check rejected release, but this landing is safe now.
@@ -581,9 +571,16 @@ export class RouteExecutor {
     return snapshot;
   }
 
+  #canReleaseMovement(snapshot: MovementSnapshot): boolean {
+    return this.#state.kind === "moving" &&
+      (canReleaseOnObservedGround(this.request.context.world, snapshot) ||
+        this.#state.controller.cancel(snapshot) === "stopped");
+  }
+
   #settleMovement(result: MovementResult): void {
     if (this.#state.kind !== "moving") return;
     if (this.request.context.signal.aborted) result = { kind: "cancelled" };
+    else if (this.#invalidated && result.kind !== "cancelled") result = { kind: "invalidated" };
     const { stepIndex, execution, settle } = this.#state;
     this.#state = { kind: "starting_step", stepIndex };
     if (result.kind !== "completed" || execution.end === "settled") this.request.context.bot.clearOwnedControls();

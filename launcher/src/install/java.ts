@@ -4,7 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { DiskDeps } from "./disk.ts";
 import { downloadFailureHint, downloadVerified } from "./download.ts";
+import { freeSpaceHint, guardDownload, spaceGuardFor, type SpaceGuard } from "./space-guard.ts";
 import { FILE_LOCKED_HINT, isFileLockError, stepFailure, type InstallContext, type StepResult } from "./step.ts";
 
 const execFileAsync = promisify(execFile);
@@ -51,6 +53,16 @@ function unpackFailureHint(error: unknown): string {
 export interface JavaDeps {
   readonly fetchImpl?: typeof fetch;
   readonly extractZip?: (zip: string, destDir: string) => Promise<void>;
+  /** The free-space reads of the guard; the real disk when absent. */
+  readonly disk?: DiskDeps;
+}
+
+/** The zip and the JRE it unpacks to sit in `<root>\runtime` together (the zip folder is removed after the unpack). */
+function javaSpaceGuard(ctx: InstallContext, deps: JavaDeps, runtimeDir: string): SpaceGuard {
+  return spaceGuardFor(ctx, deps.disk, freeSpaceHint(), (downloadBytes) => [
+    { what: "Java's download", folder: runtimeDir, bytes: downloadBytes },
+    { what: "Java", folder: runtimeDir, bytes: ctx.manifest.java.installedBytes },
+  ]);
 }
 
 /** The folder holding `bin/java.exe` in an unpacked archive: the staging folder itself or its single top-level folder. */
@@ -79,7 +91,8 @@ async function replaceFolder(fresh: string, target: string): Promise<void> {
   await rm(previous, { recursive: true, force: true });
 }
 
-async function isPinnedJreInstalled(root: string, sha256: string): Promise<boolean> {
+/** Whether the JRE under `<root>/runtime/java` was unpacked from the zip pinned by `sha256` (a step that would download it has nothing to do). */
+export async function isPinnedJreInstalled(root: string, sha256: string): Promise<boolean> {
   if (!existsSync(javaPath(root))) return false;
   const pinned = await readFile(join(root, "runtime", "java", PINNED_HASH_FILE), "utf8").catch(() => "");
   return pinned.trim() === sha256;
@@ -109,7 +122,10 @@ export async function java(ctx: InstallContext, deps: JavaDeps = {}): Promise<St
   const zip = join(downloads, "java.zip");
   await mkdir(downloads, { recursive: true });
   try {
-    await downloadVerified(url, zip, { sha256 }, (fraction) => ctx.onProgress(fraction * 0.9, "Downloading Java"), deps.fetchImpl);
+    const noRoom = await guardDownload(javaSpaceGuard(ctx, deps, runtimeDir), existsSync(zip), (beforeBody) =>
+      downloadVerified(url, zip, { sha256 }, (fraction) => ctx.onProgress(fraction * 0.9, "Downloading Java"), deps.fetchImpl, undefined, { beforeBody }),
+    );
+    if (noRoom !== null) return noRoom;
   } catch (error) {
     return stepFailure(error, downloadFailureHint(error));
   }

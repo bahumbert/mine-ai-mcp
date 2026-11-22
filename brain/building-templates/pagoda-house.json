@@ -20,6 +20,7 @@
       "slab": "dark_oak_slab"
     }
   },
+  "sign": { "x": 6, "y": 1, "z": 1, "facing": "north" },
   "key": {
     "D": {
       "role": "door"

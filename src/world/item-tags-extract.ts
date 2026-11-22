@@ -1,5 +1,5 @@
 /**
- * Developer tool: extracts every item tag of one Minecraft version from its server jar (`data/minecraft/tags/item/`)
+ * Developer tool: extracts every item tag of one Minecraft version from its server jar (`data/minecraft/tags/item/`, `items/` before 1.21)
  * into `src/world/data/item-tags/<version>.json`, the data `item-tags.ts` serves (the tags that name the fuels:
  * `logs_that_burn`, `planks`, `wooden_slabs`, `non_flammable_wood`). Same format and resolution as the block tags.
  *

@@ -11,6 +11,65 @@ import { FakeRuntime, ScriptedModel, scriptedMind, testPersona } from "./testing
 
 const signal = new AbortController().signal;
 
+const signInput = { persona: testPersona(), occasion: "claim" as const, owner: "Steve", what: "a house" };
+
+test("signLines: persona first, the owner named, tier sign logged", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.chat.reply({ lines: ["Welcome"] });
+  assert.deepEqual(await mind.signLines(signInput, signal), ["Welcome"]);
+  assert.ok(models.chat.requests[0]?.[0]?.content.startsWith(personaPrompt(signInput.persona)));
+  assert.match(models.chat.requests[0]?.[1]?.content ?? "", /Steve/u);
+  assert.equal(calls[0]?.tier, "sign");
+});
+
+test("two malformed or schema replies: no lines", async () => {
+  const schema = { lines: null };
+  for (const [first, second] of [[schema, schema], ["not json", "still not json"]]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(first, second, { lines: ["THIRD"] });
+    assert.deepEqual(await mind.signLines(signInput, signal), []);
+    assert.equal(chat.requests.length, 2);
+  }
+});
+
+test("invalid sign replies are sent back once", async () => {
+  for (const reply of [{ lines: ["a", "b", "c", "d"] }, ...["-1 64 23", "hello\nthere", "hello\rthere"].map((line) => ({ lines: [line] })), "not json"]) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(reply, { lines: ["welcome"] });
+    assert.deepEqual(await mind.signLines(signInput, signal), ["welcome"]);
+    assert.equal(chat.requests.length, 2);
+  }
+});
+
+test("sign text wraps and second attempts keep whole lines that fit", async () => {
+  const cases: [unknown[], string[], number][] = [
+    [[{ lines: ["Home sweet home."] }], ["Home sweet", "home."], 1],
+    [[{ lines: ["Welcome!", "Home sweet home."] }], ["Welcome!", "Home sweet", "home."], 1],
+    [[{ lines: ["1234567890123456"] }], ["123456789012345", "6"], 1],
+    [[{ lines: ["a", "b", "c", "d"] }, { lines: ["a", "b", "c", "d"] }], ["a", "b", "c"], 2],
+    [["not json", { lines: ["a", "b", "c", "d"] }], ["a", "b", "c"], 2],
+    [[{ lines: null }, { lines: ["a", "b", "c", "d"] }], ["a", "b", "c"], 2],
+    [[{ lines: ["-1 64 23"] }, { lines: ["Hi", "-1 64 23"] }], ["Hi"], 2],
+  ];
+  for (const [replies, expected, count] of cases) {
+    const { chat, mind } = scriptedMind();
+    chat.reply(...replies as (string | object)[]);
+    assert.deepEqual(await mind.signLines(signInput, signal), expected);
+    assert.equal(chat.requests.length, count);
+  }
+});
+
+test("T14 sign reply names the width and preserves whole lines after a second attempt", async () => {
+  const { chat, mind } = scriptedMind();
+  const reply = { lines: ["Welcome!", "Stay a while.", "Home sweet home."] };
+  chat.reply(reply, reply);
+  assert.deepEqual(await mind.signLines(signInput, signal), ["Welcome!", "Stay a while."]);
+  const feedback = chat.requests[1]?.at(-1)?.content ?? "";
+  for (const text of ["16", "15", "Home sweet home."]) assert.ok(feedback.includes(text));
+});
+
 /** A chat line from Steve; addressed to her unless said otherwise (only those start a conversation: owner rule). */
 function chatInput(message: string, addressed = true): ChatInput {
   return {
@@ -280,13 +339,16 @@ test("prompt size before and after: the work system prompt of a medieval persona
   assert.ok(prompt.length > 0);
 });
 
-test("the build line lists the own family only, then names the other families and how to read them", async () => {
+test("the build line lists the own family's house ids only, says where their details are, then names the other families", async () => {
   const prompt = await workPrompt();
   const build = prompt.split("\n").findIndex((line) => line.startsWith('- {"skill":"build"'));
   const section = prompt.split("\n").slice(build).join("\n");
   const own = section.slice(0, section.indexOf("Other house families you know"));
-  for (const id of ["medieval-small", "medieval-medium", "rustic-small", "rustic-medium"]) assert.match(own, new RegExp(`${id} \\(\\d+x\\d+, \\d floors?, \\d+ blocks, mostly [a-z_, ]+; its first stage, the \\w+, takes \\d+ `, "u"));
-  assert.match(section, /send it first, before fetching anything/u);
+  const ids = /Your europe houses: ([^;]*); /u.exec(own)?.[1]?.split(", ").sort();
+  assert.deepEqual(ids, ["medieval-medium", "medieval-small", "rustic-medium", "rustic-small"]);
+  assert.match(own, /\{"skill":"list_houses","family":"<family>"\} gives each one's size, materials, what its first stage takes and description\. $/u);
+  assert.doesNotMatch(section, / mostly [a-z_, ]+; its first stage/u, "no catalogue line in the build line");
+  assert.match(section, /Send it first, before fetching anything/u);
   assert.doesNotMatch(own, /japanese-/u, "another family's ids are not in the own list");
   assert.match(section, /Your europe houses:/u);
   const others = familiesOf(TEMPLATES).filter((family) => family !== "europe").join(", ");
@@ -300,13 +362,13 @@ test("a persona with no style gets the default style's family, and a japanese on
   const japanese = await workPrompt(testPersona({ style: "japanese" }));
   assert.match(japanese, /Your east-asia houses:/u);
   assert.ok(japanese.includes(`Other house families you know: ${familiesOf(TEMPLATES).filter((family) => family !== "east-asia").join(", ")}:`));
-  assert.match(japanese, /japanese-small \(/u);
+  assert.match(japanese, /Your east-asia houses: [^;]*japanese-small/u);
 });
 
 test("the work tier offers abandon_house and list_houses with build", async () => {
   const prompt = await workPrompt();
   assert.match(prompt, /\{"skill":"abandon_house"\}/u);
-  assert.match(prompt, /\{"skill":"list_houses","family":"<family>"\}  read the houses of another family/u);
+  assert.match(prompt, /\{"skill":"list_houses","family":"<family>"\}  read the houses of a family you know, your own too/u);
 });
 
 test("\"later\" is offered only while working for someone else; said anyway, the reply is repaired to act", async () => {
@@ -339,6 +401,35 @@ test("every model call is reported with its tier, prompt, raw replies and decisi
   await assert.rejects(mind.chooseObjective({ persona: testPersona(), snapshot: new FakeRuntime().snapshot, places: [], areas: [], lately: [], opportunities: [], time: [], drawn: [], chances: [] }, signal));
   assert.equal(calls[1]?.tier, "goal");
   assert.match(calls[1]?.error ?? "", /^\[LLM_BAD_REPLY\]/u);
+});
+
+test("reply tokens sum attempts only when every count is known, including failed calls", async () => {
+  for (const [counts, expected] of [[[7, 5], 12], [[7, null], null], [[null, 5], null], [[0], 0], [[null], null], [[7, "error"], 7]] as const) {
+    const models = scriptedMind();
+    const calls: ModelCall[] = [];
+    const mind = new LlmMind(models, (call) => calls.push(call));
+    for (const [index, count] of counts.entries()) {
+      if (count === "error") continue;
+      models.chat.replyCounted({ promptTokens: null, contextTokens: null, replyTokens: count }, index === counts.length - 1 ? { lines: ["hi"] } : "not json");
+    }
+    if (counts.at(-1) === "error") await assert.rejects(mind.signLines(signInput, signal));
+    else await mind.signLines(signInput, signal);
+    assert.equal(calls[0]?.replyTokens, expected);
+  }
+});
+
+test("a work call logs its condition line; a narrate call logs none", async () => {
+  const models = scriptedMind();
+  const calls: ModelCall[] = [];
+  const mind = new LlmMind({ chat: models.chat, action: models.action, planner: models.planner }, (call) => calls.push(call));
+  models.action.reply({ done: "finished" });
+  await mind.next(workInput("work", { snapshot: { ...new FakeRuntime().snapshot, health: 2.7 } }), signal);
+  assert.equal(calls[0]?.condition, "- Condition: health 2.7/20, food 20/20, no food carried; no home.");
+  assert.ok(calls[0]?.turns[1]?.content.includes(calls[0].condition!));
+  assert.ok(calls[0]?.turns[0]?.content.includes("Light: sky light is 15 under the open sky and 0 where no sky reaches; monsters spawn where block light is 0 and it is dark (at night, in caves, under a roof without torches)."));
+  models.chat.reply({ say: "done" });
+  await mind.narrate({ persona: testPersona(), history: [], objective: "work", outcome: "done", detail: "finished" }, signal);
+  assert.equal("condition" in calls[1]!, false);
 });
 
 test("a character with preferences names the kind of work a request is before answering; one without is never asked", async () => {

@@ -66,6 +66,11 @@ export function eyeHeightOf(entity: Bot["entity"]): number {
 /** A position this soon after a death is the respawn's, answered late (`physics.js` `respawnTimer`). */
 const RESPAWN_WINDOW_MS = 2_000;
 const RESPAWN_POSITION_DELAY_MS = 1_500;
+/**
+ * Clock a test lets pass after it kills the bot for the new life to start: the server's answer to the respawn request (a tick, or the answer lag), the
+ * `position`, Mineflayer's delay (`RESPAWN_POSITION_DELAY_MS`) before its physics ticks again, and some slack.
+ */
+export const NEW_LIFE_SETTLE_MS = RESPAWN_WINDOW_MS;
 
 /** `setControlState` as `physics.js:245-275` has it: sprint and sneak tell the server, on a change only. */
 function attachFakeControls(bot: FakeBot): void {

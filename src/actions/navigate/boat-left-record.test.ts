@@ -10,12 +10,12 @@ import type { FakeHarness } from "../../test-support/fake-bot/index.js";
 import { boatsCarried, boatsInView, makeHitsMiss, seaHarness, settled, shoreSea, stallServerAtFirstHit } from "./boat-fixtures.test.js";
 import { boatUnderFeet, crossByBoat } from "./boat-crossing.js";
 import { retryBoatTakeBack } from "./boat-left-retry.js";
-import { type BoatLeft, boatLeftAfter, describeBoatLeft, takeBoatBackReport } from "./boat-take-back.js";
+import { boatLeftAfter, describeBoatLeft, takeBoatBackReport } from "./boat-take-back.js";
 import { createNavigateAction, formatNavigateResult, type NavigateDependencies } from "./navigate.js";
 import type { NavigateResult } from "./contract.js";
 
 const AHEAD = { x: 0, z: 1 };
-const navigation = { cancel: () => undefined } as unknown as NavigationRuntime;
+const navigation = { cancel: () => undefined, onEvent: () => () => {} } as unknown as NavigationRuntime;
 const SHIFT_RELEASE = 1;
 
 /** A sea with the far land at z 40, one boat carried; the boat, once she is off it, floats where the ride stopped. */
@@ -23,6 +23,22 @@ const crossingWorld = (): FakeHarness => seaHarness({ landFromZ: 40 });
 
 /** The crossing from the shore to the far land, run to its end on the fake clock. */
 const crossed = (world: FakeHarness) => settled(world, crossByBoat(world.bot, AHEAD, undefined, 100));
+
+test("a boat left records server ticks for every cause and keeps the model's text unchanged", () => {
+  const world = shoreSea({ feet: new Vec3(9.5, 63, 0.5), boat: new Vec3(10.6, 62.49, 0.5), mocked: true, waterDepth: 2 });
+  const boat = world.bot.entities[7]!;
+  for (const [cause, situation, goneAfterHit, reason, promises] of [
+    ["not_found", { boat: null, underFeet: false, cancelled: false }, null, "the boat was not found within 6 blocks of where the ride stopped; it is lost", false],
+    ["still_there", { boat, underFeet: true, cancelled: true }, null, "the boat is still under you after 34 hits in 10.2 s", true],
+    ["left_nearby", { boat, underFeet: false, cancelled: false }, null, "the boat is still floating 2 blocks away after 34 hits in 10.2 s; it is not under you, so the next movement leaves it", false],
+    ["item_not_picked_up", { boat, underFeet: false, cancelled: false }, 18, "the boat broke after hit 9 but its item was not picked up (an item 12 blocks off): walk there to pick it up", false],
+  ] as const) {
+    const left = boatLeftAfter(world.bot, { carried: false, hits: 18, elapsedMs: 24_000, elapsedTicks: 120, goneAfterHit }, situation);
+    assert.equal(left.cause, cause);
+    assert.equal(left.elapsedTicks, 120, cause);
+    assert.equal(describeBoatLeft({ ...left, reason }), `- The boat was not picked back up: ${reason}${promises ? ". The next movement tries to take it back again." : ""}`);
+  }
+});
 
 /** When the shift of the get-off is released (she was put off the boat already), the boat is moved far from the ride's end (taken by someone, drifted off). */
 function boatLeavesAtTheGetOff(world: FakeHarness): void {
@@ -98,21 +114,6 @@ test("a boat left floating beside her is recorded as not under her, and the next
   assert.equal(attackedIds(world.server).length, hits, "the next movement leaves it, as the text says");
 });
 
-// What the model reads in a navigate result, by cause: only a boat under her promises the next movement takes it back.
-for (const [cause, reason, promises] of [
-  ["still_there", "the boat is still under you after 34 hits in 10.2 s", true],
-  ["left_nearby", "the boat is still floating 2 blocks away after 34 hits in 10.2 s; it is not under you, so the next movement leaves it", false],
-  ["not_found", "the boat was not found within 6 blocks of where the ride stopped; it is lost", false],
-  ["item_not_picked_up", "the boat broke after hit 9 but its item was not picked up (an item 12 blocks off): walk there to pick it up", false],
-] as const) {
-  test(`the navigate result says why a boat was left (${cause})`, () => {
-    const left: BoatLeft = { cause, reason, hits: 9, elapsedMs: 2400, goneAfterHit: null };
-    const line = describeBoatLeft(left);
-    assert.ok(line.startsWith(`- The boat was not picked back up: ${reason}`));
-    assert.equal(line.includes("The next movement tries to take it back again."), promises);
-  });
-}
-
 /** Navigates to the far land, the first route stopped by the sea; `onward` runs when the leg after the crossing begins. */
 async function navigateAcrossTheSea(world: FakeHarness, onward: () => void): Promise<NavigateResult> {
   let legs = 0;
@@ -131,6 +132,29 @@ async function navigateAcrossTheSea(world: FakeHarness, onward: () => void): Pro
 
 const boatLeftOf = (result: NavigateResult) => ("navigation" in result ? result.navigation.boatLeft : undefined);
 
+test("a boat ride held for 150 seconds does not trip the navigate walking window", async () => {
+  const world = crossingWorld();
+  using _timers = world.clock.install();
+  let mounted!: () => void;
+  const seat = new Promise<void>((resolve) => { mounted = resolve; });
+  world.bot.once("mount", mounted);
+  let legs = 0;
+  const dependencies: NavigateDependencies = {
+    createMovements: (() => ({ name: "standard" })) as never,
+    navigate: async () => {
+      if (++legs === 1) return { status: "stopped", reason: "no path", elapsedMs: 1 };
+      world.bot.entity.position.set(0.5, 63, 41.5);
+      return { status: "completed", elapsedMs: 1 };
+    },
+  };
+  const pending = new ActionRunner().run(createNavigateAction(world.bot, navigation, dependencies),
+    { x: 0, y: 63, z: 41, range: 5 });
+  await world.clock.settle(seat, 10_000);
+  await world.clock.advance(150_000, 150_000);
+  const output = await world.clock.settle(pending, 60_000);
+  assert.equal(output.result.status, "succeeded");
+});
+
 // She stands on the boat the take-back could not break; the onward leg would route from on top of it (Dirk's "succeeded" with a distance of 1).
 test("a boat still under her after the crossing is taken back before the onward leg, and the result has no boat left", async () => {
   const world = crossingWorld();
@@ -148,13 +172,17 @@ test("a boat that stays under her through the retry is in the result, and the ne
   const world = crossingWorld();
   using _timers = world.clock.install();
   const landAgain = makeHitsMiss(world);
-  const result = await navigateAcrossTheSea(world, landAgain);
-  assert.equal(result.status, "succeeded");
+  let routed = false;
+  const result = await navigateAcrossTheSea(world, () => { routed = true; });
+  assert.equal(result.status, "failed");
+  assert.equal(routed, false, "a failed onward take-back must not route on the intact boat");
+  assert.match("error" in result ? result.error ?? "" : "", /\[BOAT_TAKE_BACK_FAILED\]/u);
   assert.equal(boatLeftOf(result)?.cause, "still_there");
   assert.equal(boatsCarried(world), 0, "the retry did not break it either");
-  assert.ok(attackedIds(world.server).length > 60, "two take-backs of 10 s each hit it: the crossing's and the retry's");
+  assert.ok(attackedIds(world.server).length > 1, "the onward take-back retries the crossing's unsuccessful hit");
   assert.ok(boatUnderFeet(world.bot) !== null, "she stands on it");
   assert.match(formatNavigateResult(result), /- The boat was not picked back up: the boat is still under you after \d+ hits in \d+\.\d s\. The next movement tries to take it back again\./u);
+  landAgain();
   await settled(world, prepareBotForMovement(world.bot, navigation));
   assert.equal(boatsCarried(world), 1, "the next movement, with the hits landing, takes it back");
 });
@@ -191,7 +219,7 @@ test("a cancel during the retry before the onward leg ends it with the cancel", 
     hit(target);
     controller.abort(new Error("cancelled by the test"));
   };
-  const left = { cause: "still_there", reason: "the boat is still under you", hits: 34, elapsedMs: 10_000, goneAfterHit: null } as const;
+  const left = { cause: "still_there", reason: "the boat is still under you", hits: 34, elapsedMs: 10_000, elapsedTicks: 200, goneAfterHit: null } as const;
   await assert.rejects(settled(world, retryBoatTakeBack(world.bot, { status: "crossed", blocks: 30, detail: "", boatLeft: left }, controller.signal)), /cancelled by the test/u);
   assert.equal(world.bot.entities[7] !== undefined, true, "one hit sent, no more");
 });
@@ -211,7 +239,7 @@ test("a retry whose boat drifts off describes that boat, not a nearer boat that 
     hit(target);
     target.position = new Vec3(0.5, 62.49, 5.5);
   };
-  const left = { cause: "still_there", reason: "the boat is still under you", hits: 34, elapsedMs: 10_000, goneAfterHit: null } as const;
+  const left = { cause: "still_there", reason: "the boat is still under you", hits: 34, elapsedMs: 10_000, elapsedTicks: 200, goneAfterHit: null } as const;
   const retried = await settled(world, retryBoatTakeBack(world.bot, { status: "crossed", blocks: 30, detail: "", boatLeft: left }));
   assert.equal(retried?.cause, "left_nearby");
   assert.match(retried.reason, /^the boat is still floating 5 blocks away after \d+ hits in \d+\.\d s;/u, "the boat it hit is 5 blocks off; the other lies 2 blocks off");

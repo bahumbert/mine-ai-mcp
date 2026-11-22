@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stepSchema } from "./actions.ts";
 import { Body } from "./body.ts";
-import { type GatherContext, gatherMaterials } from "./gathering.ts";
+import { type GatherContext, gatherMaterials } from "./gathering/gather-materials.ts";
+import { HostileInterruptions } from "./gathering/hostile-interruptions.ts";
 import { keptInputsUsed } from "./kept-replacement.ts";
 import { runStep, type SkillContext } from "./skills.ts";
 import { FakeRuntime } from "./testing.ts";
@@ -24,7 +25,7 @@ const HOUSE_BLOCKS = {
 };
 
 function contextFor(runtime: FakeRuntime): SkillContext & GatherContext {
-  return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal };
+  return { runtime, body: new Body(runtime, () => undefined), signal: new AbortController().signal, hostileInterruptions: new HostileInterruptions(() => 0) };
 }
 
 /** A fake runtime carrying `inventory` (a crafting table too: no table is made on the way), crafting like the game. */

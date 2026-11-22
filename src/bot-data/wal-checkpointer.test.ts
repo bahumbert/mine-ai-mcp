@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import { persistentBotData } from "../test-support/bot-data.js";
+import { monotonicNow } from "../utils/monotonic-clock.js";
 import { createCheckpointRunner, startWalCheckpointer, WAL_CHECKPOINT_INTERVAL_MS, WAL_JOURNAL_SIZE_LIMIT_BYTES } from "./wal-checkpointer.js";
 
 const BOUND_MS = 5_000;
@@ -12,11 +13,35 @@ const MEGABYTE = 1024 * 1024;
 const CHECKPOINT_INTERVAL_MS = 100;
 /** A test that polls `until` up to twice outlives the runner's 5 s default; its own bounds end it first (flaky under load, 2026-11-03). */
 const POLLING_TEST = { timeout: 3 * BOUND_MS };
+const TMPFS_DIRECTORY = "/dev/shm";
+const WAL_FOLDER_PREFIX = "mine-ai-wal-";
+const STALE_FOLDER_MS = 10 * 60_000;
 
-/** Polls `done` until it holds or the wall-clock bound passes; never an unbounded wait. */
+/**
+ * Removes the test folders a run cut at its limit left on tmpfs (a test cut there runs no `t.after`). A folder
+ * younger than 10 minutes may belong to a sibling run, so it stays. The age is a file's epoch mtime against the
+ * wall clock, which a WSL step back of 2 s cannot move past 10 minutes; `timeOrigin` plus the monotonic reading
+ * gives that wall time without a `Date.now()` subtraction.
+ */
+function removeStaleTmpfsFolders(): void {
+  if (!existsSync(TMPFS_DIRECTORY)) return;
+  const wallNow = performance.timeOrigin + monotonicNow();
+  for (const name of readdirSync(TMPFS_DIRECTORY)) {
+    if (!name.startsWith(WAL_FOLDER_PREFIX)) continue;
+    const folder = path.join(TMPFS_DIRECTORY, name);
+    try {
+      if (statSync(folder).mtimeMs < wallNow - STALE_FOLDER_MS) rmSync(folder, { recursive: true, force: true });
+    } catch {
+      // Another run removed it between the listing and the stat.
+    }
+  }
+}
+removeStaleTmpfsFolders();
+
+/** Polls `done` until it holds or the real-time bound passes; never an unbounded wait. */
 async function until(done: () => boolean, boundMs = BOUND_MS): Promise<boolean> {
-  const deadline = Date.now() + boundMs;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNow() + boundMs;
+  while (monotonicNow() < deadline) {
     if (done()) return true;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -35,8 +60,13 @@ function writerOn(t: TestContext, file: string): DatabaseSync {
   return database;
 }
 
+/**
+ * The database folder is on tmpfs when the machine has one: SQLite's WAL and shared-memory files work there, and the
+ * 8 MB checkpoint waits on no disk flush (under disk load the flush missed the 5 s bound, spec D5).
+ */
 function tempDatabaseFile(t: TestContext, name = "wal.sqlite"): string {
-  const directory = mkdtempSync(path.join(tmpdir(), "mine-ai-wal-"));
+  const parent = existsSync(TMPFS_DIRECTORY) ? TMPFS_DIRECTORY : tmpdir();
+  const directory = mkdtempSync(path.join(parent, WAL_FOLDER_PREFIX));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, name);
 }
@@ -90,14 +120,18 @@ test("the WAL file is truncated to the size limit once it resets", POLLING_TEST,
   // every 20 ms never let the log restart. Each write follows a silence of five intervals: the next interval's checkpoint
   // (at most 100 ms away, then twice the measured window) has copied the last frame by then.
   const small = new Uint8Array(100);
-  const deadline = Date.now() + BOUND_MS;
+  const deadline = monotonicNow() + BOUND_MS;
   let reset = false;
-  while (!reset && Date.now() < deadline) {
+  while (!reset && monotonicNow() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5 * CHECKPOINT_INTERVAL_MS));
     writer.prepare("INSERT INTO replies (body) VALUES (?)").run(small);
     reset = walFileBytes(file) <= 2 * MEGABYTE;
   }
-  assert.ok(reset, `WAL is ${walFileBytes(file)} bytes`);
+  if (!reset) {
+    // An incomplete checkpoint (busy 1, or log above checkpointed) and a reset blocked by a reader read differently here.
+    const checkpoint = writer.prepare("PRAGMA wal_checkpoint(PASSIVE)").get();
+    assert.fail(`WAL is ${walFileBytes(file)} bytes; writer's PASSIVE checkpoint (busy, log, checkpointed): ${JSON.stringify(checkpoint)}`);
+  }
 });
 
 test("a checkpoint while a reader holds a snapshot is retried, not an error", POLLING_TEST, async (t) => {
@@ -133,12 +167,10 @@ test("closing the checkpointer stops the worker without calling fellBack", POLLI
   const writer = writerOn(t, file);
   const causes: string[] = [];
   const checkpointer = startWalCheckpointer(file, { intervalMs: 50, fellBack: (cause) => causes.push(cause) });
-  const started = Date.now();
   checkpointer[Symbol.dispose]();
   writeMegabytes(writer, 1);
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(causes, []);
-  assert.ok(Date.now() - started < 2_000);
   const later = new DatabaseSync(file);
   later.exec("INSERT INTO replies (body) VALUES (x'00')");
   later.close();

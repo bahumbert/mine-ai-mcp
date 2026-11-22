@@ -4,7 +4,7 @@ import { WhoWasNamed } from "./who-was-named.ts";
 
 const line = (username: string, message: string) => ({ username, message }) as Parameters<WhoWasNamed["note"]>[0];
 
-// What a line naming nobody follows is also held through `Agent` in agent.test.ts (the live 2026-10-11 case); these hold the window's edge and the live list.
+// What a line naming nobody follows is also held through `Agent` in agent/chat-routing.test.ts (the live 2026-10-11 case); these hold the window's edge and the live list.
 test("a line naming nobody follows the speaker's last line naming another character for exactly 60 s, per speaker", () => {
   const who = new WhoWasNamed("Ayla", () => ["Vex"]);
   assert.equal(who.note(line("Tester", "Vex, mine some stone"), 1_000), undefined, "a line naming a character is the conversation itself");

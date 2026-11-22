@@ -75,11 +75,10 @@ export async function tossItem(
   itemName: string,
   requested: number | null,
   context: ActionContext,
-  settleMs: number,
   toss: ItemToss,
 ): Promise<DroppedItem> {
   // A toss a reflex cut off before its confirmation is confirmed now, from the inventory as it stands.
-  if (toss.pending) await confirmPendingTosses(bot, itemName, toss, context, settleMs);
+  if (toss.pending) await confirmPendingTosses(bot, itemName, toss, context);
   const carriedNow = carriedCount(bot, itemName);
   if (toss.baseline === 0 || (carriedNow === 0 && toss.tossed === 0)) {
     return {
@@ -110,7 +109,7 @@ export async function tossItem(
   }
 
   if (toss.tossed === tossedBefore) return droppedEntry(itemName, requested, toss, wanted, carriedNow);
-  return droppedEntry(itemName, requested, toss, wanted, await confirmPendingTosses(bot, itemName, toss, context, settleMs));
+  return droppedEntry(itemName, requested, toss, wanted, await confirmPendingTosses(bot, itemName, toss, context));
 }
 
 /**
@@ -123,12 +122,10 @@ async function confirmPendingTosses(
   itemName: string,
   toss: ItemToss,
   context: ActionContext,
-  settleMs: number,
 ): Promise<number> {
   const pending = toss.pending;
   if (!pending) return carriedCount(bot, itemName);
   const settled = await settleInventoryCount(bot, itemName, Math.max(0, pending.before - pending.count), {
-    timeoutMs: settleMs,
     signal: context.signal,
   });
   context.signal?.throwIfAborted();

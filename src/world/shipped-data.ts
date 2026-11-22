@@ -9,7 +9,8 @@ function versionParts(version: string): number[] {
   return version.split(".").map((part) => Number.parseInt(part, 10) || 0);
 }
 
-function compareVersions(a: string, b: string): number {
+/** Negative when version `a` is older than `b`, positive when newer, 0 when they are the same. */
+export function compareVersions(a: string, b: string): number {
   const [left, right] = [versionParts(a), versionParts(b)];
   for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
     const difference = (left[index] ?? 0) - (right[index] ?? 0);

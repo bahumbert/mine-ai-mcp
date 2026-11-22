@@ -3,31 +3,24 @@
  * the server keeps it so: once on dry ground, once with the eye in water (5x or more; review #1 was a dig under water).
  */
 import assert from "node:assert/strict";
+import { SERVER_ANSWER_TICKS, STALE_AGE_TICKS } from "../../../../src/world/world-age.ts";
 import type { ContractSubject, LocalPoint } from "../subject.ts";
 import type { ContractCheck } from "../checks.ts";
-import { afterClientTicks, afterServerTicks, serverQuiet } from "../server-answer.ts";
-import { settleWithin } from "../subject.ts";
+import { afterClientTicks, afterServerTicks, answerArrivesWhileMoving, serverQuiet } from "../server-answer.ts";
+import { markNow, READING_TICKS, tickOf } from "./server-tick-marks.ts";
 
 /** The dry target beside the feet, the wet one above it at eye level, and the head cell the water goes into. */
 const DRY_TARGET = [1, -60, 0] as const;
 const WET_TARGET = [1, -59, 0] as const;
 const HEAD_CELL = [0, -59, 0] as const;
-/**
- * The look is forced (no turn: a non-forced one turns at 3 rad/s first, `physics.js:169`, ~1 s for half a turn on
- * the server run of 2026-10-21), so only the dig is timed; its end is read within a tick or two.
- * The timed span is a client duration, so it stays on the wall clock (plan T7d6b, 2026-10-24): Mineflayer ends the dig with its own `setTimeout(finishDigging, digTime)`
- * and turns the cell to air itself (`digging.js:137,161`), so no server answer sets it; a server behind its schedule or a stall changes nothing in it.
- * What the server says of the dig (it puts the dirt back if it disagrees) is read after, over server ticks (`serverQuiet`).
- */
-const DIG_SLACK_MS = 150;
 /** Server ticks the water takes to flow from the head cell down to the feet and the pocket (vanilla: 5 ticks a step, two steps; unmeasured here). */
 const WATER_FLOW_TICKS = 10;
 /** The client's physics ticks the body needs to settle in the water (or float against the roof) before the dig reads its inputs: a second of the client's 20 a second. */
 const BODY_SETTLE_CLIENT_TICKS = 20;
-/** A dig under water by hand is slow (dirt 3.75 s; airborne too, 18.75 s): the bound covers both. */
-const DIG_WALL_MS = 25_000;
 /** Mineflayer's (and the game's) factor for the eye in water without Aqua Affinity. */
 const EYE_IN_WATER_FACTOR = 5;
+/** Retain P9's two packet phases, answer budget and exact-read uncertainty for the dry/wet contract (2026-11-16). */
+const DIG_COMPLETION_SLACK_TICKS = 2 * STALE_AGE_TICKS + SERVER_ANSWER_TICKS + READING_TICKS;
 
 /** The bot stands in a glass shaft; each dug cell is a glass pocket, so the water put at its head stays there. */
 const GLASS_CELLS = [
@@ -42,12 +35,24 @@ async function digAndCheck(subject: ContractSubject, local: LocalPoint, label: s
   const block = bot.blockAt(target)!;
   assert.equal(block.name, "dirt", `${label} target ${target}: ${block.name}`);
   const expectedMs = bot.digTime(block);
-  const startedAt = subject.now();
-  const settled = await settleWithin(subject, bot.dig(block, true), DIG_WALL_MS);
-  assert.ok(settled !== null && settled.error === undefined, `${label} dig: ${settled?.error?.message ?? "never ended"}`);
-  const tookMs = settled.atMs - startedAt;
-  assert.ok(tookMs >= expectedMs && tookMs <= expectedMs + DIG_SLACK_MS, `${label} dig took ${Math.round(tookMs)} ms: digTime ${expectedMs} + 0..${DIG_SLACK_MS}`);
-  // The dig itself is the measured wait (above). A server that disagreed with the dig time sends the block back within its ticks.
+  const expectedTicks = Math.ceil(expectedMs / 50);
+  const maxTicks = expectedTicks + DIG_COMPLETION_SLACK_TICKS;
+  const ageAtStart = bot.time.age;
+  const started = markNow(subject);
+  let ended = false;
+  const digging = bot.dig(block, true).finally(() => { ended = true; });
+  void digging.catch(() => {});
+  try {
+    await answerArrivesWhileMoving(subject, () => ended || bot.time.age - ageAtStart >= maxTicks, () => bot.time.age, `${label} dig`);
+    assert.ok(ended, `${label} dig exceeded ${maxTicks} server ticks without completing`);
+    await digging;
+  } finally {
+    bot.stopDigging();
+  }
+  const completed = markNow(subject);
+  const tookTicks = (await tickOf(subject, completed)) - (await tickOf(subject, started));
+  assert.ok(tookTicks >= expectedTicks - READING_TICKS, `${label} dig ended after only ${tookTicks} server ticks`);
+  assert.ok(tookTicks <= maxTicks, `${label} dig exceeded ${maxTicks} server ticks: ${tookTicks}`);
   await serverQuiet(subject, `${label}: after the dig`);
   assert.notEqual(bot.blockAt(target)?.name, "dirt", `${label}: the server put the dirt back (it disagreed with the dig time)`);
   return expectedMs;

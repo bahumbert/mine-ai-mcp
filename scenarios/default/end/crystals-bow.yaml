@@ -2,4 +2,10 @@ name: end-crystals-bow
 description: Destroy every native crystal with explicit bow shots, including both cages.
 template: ender-dragon.yaml
 params: { phase: crystals, crystal_strategy: bow }
-goal: { kind: entityCount, entity: end_crystal, max: 0, timeout: 1200 }
+goal:
+  kind: all
+  timeout: 1200
+  goals:
+    - { kind: entityCount, entity: end_crystal, max: 0 }
+    - { kind: survive, seconds: 1 }
+    - { kind: completion, who: DragonFighter }

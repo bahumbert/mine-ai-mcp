@@ -1,5 +1,5 @@
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { Request, Response } from "express";
 import { createServer, request as httpRequest, type Server as HttpServer } from "node:http";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -14,6 +14,7 @@ import {
   runtimeMessageSchema,
 } from "./runtime-liveness.js";
 import { answerFailure, failRuntime } from "./runtime-supervisor-failure.js";
+import type { IpcChannel } from "./ipc-transport.js";
 import { envelopeSchema, LinkHub } from "./runtime-supervisor-links.js";
 import {
   printSupervisorLine,
@@ -22,12 +23,28 @@ import {
   type McpSupervisorOptions,
   type ObservedFailureCode,
   type PendingRequest,
+  type RuntimeChild,
   type RuntimeState,
+  type SupervisorClock,
   type SupervisorParts,
   type SupervisorState,
 } from "./runtime-supervisor-state.js";
 
-export type { McpSupervisorOptions } from "./runtime-supervisor-state.js";
+export type { McpSupervisorOptions, RuntimeChild, SupervisorClock } from "./runtime-supervisor-state.js";
+
+const realClock: SupervisorClock = {
+  now: () => performance.now(),
+  every: (tick, ms) => { const timer = setInterval(tick, ms); return () => clearInterval(timer); },
+  after: (ms, fire, options) => {
+    const timer = setTimeout(fire, ms);
+    if (options?.unref) timer.unref();
+    return () => clearTimeout(timer);
+  },
+};
+
+/** Production retains the inherited logs and IPC channel of the runtime process. */
+const spawnRealRuntime = (executable: string, args: readonly string[]): RuntimeChild =>
+  spawn(executable, [...args], { windowsHide: true, stdio: ["ignore", "inherit", "inherit", "ipc"] });
 
 /** The supervisor's incident ring budget: the age from the options, else production's. */
 const incidentHistoryBudget = (options: Pick<McpSupervisorOptions, "incidentHistoryMs">) => ({
@@ -50,18 +67,22 @@ const supervisorIncidentRecorder = (options: McpSupervisorOptions) =>
       ),
     () => {},
     incidentHistoryBudget(options),
+    undefined,
+    options.wallClock,
   );
 
 /** Public HTTP stays outside the bot's event loop, including pending MCP SSE replies. */
 export async function startMcpSupervisor(options: McpSupervisorOptions) {
   // Docker binds all container interfaces; Compose restricts the published port to host loopback.
   if (!["127.0.0.1", "localhost", "::1", "0.0.0.0"].includes(options.host)) throw new Error("MCP must bind to loopback or 0.0.0.0 for container port forwarding.");
-  const startedAt = performance.now();
+  const clock = options.clock ?? realClock;
+  const startedAt = clock.now();
   let closing: Promise<void> | null = null;
   const pending = new Set<PendingRequest>();
   const recorder = supervisorIncidentRecorder(options);
   const sup: SupervisorState = {
     options,
+    clock,
     recorder,
     runtime: { kind: "starting" },
     lastHeartbeat: startedAt,
@@ -115,7 +136,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
   return {
     server,
     openLink,
-    get child(): ChildProcess { return sup.child!; },
+    get child(): RuntimeChild { return sup.child!; },
     /** For the supervisor process's own unhandled rejections (the runtime's arrive over IPC). */
     reportProcessFault: (fault: ProcessFault) => reportProcessFault(sup, fault, "supervisor"),
     close,
@@ -127,7 +148,7 @@ export async function startMcpSupervisor(options: McpSupervisorOptions) {
 function routeHttpRequest(parts: SupervisorParts, request: Request, response: Response): void {
   const { sup, pending } = parts;
   if (request.method === "GET" && request.path === "/diagnostics/runtime") {
-    response.json({ state: sup.runtime.kind, heartbeatAgeMs: performance.now() - sup.lastHeartbeat, activity: sup.activity, heartbeat: sup.heartbeat });
+    response.json({ state: sup.runtime.kind, heartbeatAgeMs: sup.clock.now() - sup.lastHeartbeat, activity: sup.activity, heartbeat: sup.heartbeat });
     return;
   }
   const parsed = envelopeSchema.safeParse(request.body);
@@ -190,12 +211,9 @@ function routeHttpRequest(parts: SupervisorParts, request: Request, response: Re
 /** Starts the runtime child; a handler ignores any child but the current one (a killed one still exits later). */
 function startRuntimeChild(parts: SupervisorParts): void {
   const { sup, links } = parts;
-  const started = spawn(sup.options.executable, [...sup.options.args], {
-    windowsHide: true,
-    stdio: ["ignore", "inherit", "inherit", "ipc"],
-  });
+  const started = (sup.options.spawnRuntime ?? spawnRealRuntime)(sup.options.executable, sup.options.args);
   sup.child = started;
-  links.attach(started);
+  links.attach(ipcChannelOf(started));
   started.on("message", (raw: unknown) => {
     // Link frames of the current, ready child go to their link; everything else is the runtime's own report.
     if (started === sup.child && sup.runtime.kind === "ready" && links.route(raw)) return;
@@ -209,23 +227,41 @@ function startRuntimeChild(parts: SupervisorParts): void {
   });
 }
 
+/** The link's view of a child's channel; a child without one (a test fixture) answers every write with an error. */
+function ipcChannelOf(child: RuntimeChild): IpcChannel {
+  return {
+    get connected() {
+      return child.connected;
+    },
+    send: (message, callback) => {
+      if (child.send === undefined) {
+        callback?.(new Error("the runtime child has no IPC channel"));
+        return false;
+      }
+      return child.send(message, callback);
+    },
+    on: (event, listener) => child.on(event, listener),
+    off: (event, listener) => child.off(event, listener),
+  };
+}
+
 /** Stops the supervisor: links closed, the child asked to end (SIGKILL after the grace), calls in flight cut, HTTP closed, incidents flushed. */
-async function stopSupervisor(parts: SupervisorParts, server: HttpServer, watchdog: NodeJS.Timeout): Promise<void> {
+async function stopSupervisor(parts: SupervisorParts, server: HttpServer, watchdog: () => void): Promise<void> {
   const { sup, pending, links } = parts;
   sup.stopping = true;
   links.closeAll();
-  clearInterval(watchdog);
-  if (sup.restartTimer !== null) clearTimeout(sup.restartTimer);
+  watchdog();
+  sup.restartTimer?.();
   if (sup.child?.pid !== undefined && sup.child.exitCode === null && sup.child.signalCode === null) {
     const stopped = new Promise<void>((resolve) => sup.child!.once("exit", () => resolve()));
     sup.child.kill("SIGTERM");
     // Normal disposal gets the same liveness allowance as execution. A
     // cleanup loop must not keep the owned child alive after service stop.
-    const force = setTimeout(() => sup.child?.kill("SIGKILL"), sup.options.deadlines?.killGraceMs ?? RUNTIME_UNRESPONSIVE_MS);
+    const force = sup.clock.after(sup.options.deadlines?.killGraceMs ?? RUNTIME_UNRESPONSIVE_MS, () => { sup.child?.kill("SIGKILL"); });
     try {
       await stopped;
     } finally {
-      clearTimeout(force);
+      force();
     }
   }
   for (const entry of pending) {
@@ -241,11 +277,11 @@ async function stopSupervisor(parts: SupervisorParts, server: HttpServer, watchd
  * Every `heartbeatMs` (default {@link RUNTIME_HEARTBEAT_MS}), declares the runtime unresponsive once its silence passes
  * the deadline of its state (starting or ready).
  */
-function startWatchdog(sup: SupervisorState, fail: (code: ObservedFailureCode, message: string) => Promise<void>): NodeJS.Timeout {
+function startWatchdog(sup: SupervisorState, fail: (code: ObservedFailureCode, message: string) => Promise<void>): () => void {
   const { deadlines } = sup.options;
   const heartbeatMs = deadlines?.heartbeatMs ?? RUNTIME_HEARTBEAT_MS;
-  return setInterval(() => {
-    const now = performance.now();
+  return sup.clock.every(() => {
+    const now = sup.clock.now();
     sup.watchdogDelayMs = Math.max(0, now - sup.lastWatchdogTick - heartbeatMs);
     sup.lastWatchdogTick = now;
     sup.tickDelays.push({ at: now, delayMs: sup.watchdogDelayMs });
@@ -271,7 +307,7 @@ function startWatchdog(sup: SupervisorState, fail: (code: ObservedFailureCode, m
 }
 
 /** Applies one message of the current runtime child; a failed, failing or replaced child's messages are ignored. */
-function handleRuntimeMessage(sup: SupervisorState, from: ChildProcess, raw: unknown): void {
+function handleRuntimeMessage(sup: SupervisorState, from: RuntimeChild, raw: unknown): void {
   const parsed = runtimeMessageSchema.safeParse(raw);
   if (from !== sup.child || !parsed.success || sup.runtime.kind === "failed" || sup.runtime.kind === "failing") return;
   const event = parsed.data;
@@ -282,13 +318,13 @@ function handleRuntimeMessage(sup: SupervisorState, from: ChildProcess, raw: unk
   if (event.kind !== "ready") sup.activity = event.activity;
   sup.recorder.record(event.kind, event);
   if (event.kind === "heartbeat") {
-    sup.lastHeartbeat = performance.now();
+    sup.lastHeartbeat = sup.clock.now();
     sup.heartbeat = event;
   }
   if (event.kind === "ready") {
     sup.runtime = { kind: "ready", port: event.port };
     // Ready shows a live loop; the shorter deadline counts from here, not from the last start-up heartbeat.
-    sup.lastHeartbeat = performance.now();
+    sup.lastHeartbeat = sup.clock.now();
     sup.streak = readyAgain(sup.streak, sup.lastHeartbeat);
     if (sup.streak.attempts > 0) printSupervisorLine(sup, { event: "runtime_ready", observedAt: new Date().toISOString(), attempt: sup.streak.attempts });
   }

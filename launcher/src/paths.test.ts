@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { appEntry, appRoot, DATA_ROOT_ENV, DATA_ROOT_FILE, dataRoot, readDataRootFile } from "./paths.ts";
+import { inTemporaryFolder } from "./cli-test-support.ts";
+import { appEntry, appRoot, DATA_ROOT_ENV, DATA_ROOT_FILE, dataRoot, ensureParentDir, readDataRootFile } from "./paths.ts";
 
 const DATA_ROOTS: readonly [string, NodeJS.ProcessEnv, NodeJS.Platform, string, string][] = [
   ["win32 is %LOCALAPPDATA%\\MineAI", { LOCALAPPDATA: "C:\\x" }, "win32", "C:\\Users\\p", "C:\\x\\MineAI"],
@@ -87,4 +89,17 @@ test("appEntry names the .ts source when the launcher runs from source, the .js 
 
 test("this test file runs from source, so appEntry defaults to the .ts source", () => {
   assert.equal(appEntry("/app", "brain/src/main.ts"), join("/app", "brain", "src", "main.ts"));
+});
+
+test("ensureParentDir accepts a bare name, ./x, ../x and an absolute path, whose parent exists or not (Windows Bun throws EEXIST on mkdir of \".\" and \"..\")", async () => {
+  await inTemporaryFolder(async (folder) => {
+    const inner = join(folder, "inner");
+    mkdirSync(inner);
+    process.chdir(inner);
+    const absolute = join(folder, "abs", "deep", "z");
+    // the absolute path twice: the second call finds its parent already there
+    for (const file of ["x", "./x", "../x", "./new/y", "../up/y", absolute, absolute]) ensureParentDir(file);
+    for (const created of [join(inner, "new"), join(folder, "up"), join(folder, "abs", "deep")]) assert.equal(statSync(created).isDirectory(), true, created);
+    assert.equal(existsSync(absolute), false, "only the parent is made, not the file");
+  });
 });

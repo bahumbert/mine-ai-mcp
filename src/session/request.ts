@@ -6,6 +6,17 @@ export interface RequestEvidence {
   readonly baseline: Facts;
   readonly checkpoint: Facts;
   readonly completion: { readonly kind: "event" | "current"; readonly observed: boolean; readonly owes: string };
+  /**
+   * How far the request is from done, lower when closer, for an action that can measure it (navigate); `null` when it
+   * cannot be measured now (another dimension); absent for an action that does not publish one. The stall tracker
+   * bounds only a request that publishes it (`survival/state/request-stall.ts`).
+   */
+  readonly objective?: { readonly remaining: number; readonly tolerance: number } | null;
+  /**
+   * The action's own goal holds now (the hunt carries its requested net gain; navigate's arrival test holds); absent for
+   * an action that publishes none. A reflex fight that continues the request reads it.
+   */
+  readonly goalMet?: boolean;
 }
 
 export type ObserveRequest = (read: () => RequestEvidence) => void;

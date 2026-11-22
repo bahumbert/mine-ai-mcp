@@ -1,0 +1,54 @@
+template: ../../templates/flat-single-action.yaml
+
+name: hunger-reflex-slow-server
+tags: [regression]
+description: >-
+  Eating on a lagging server (spec 2026-11-08 p4-eat-lag, run 37 fresh world: 129 hunger-reflex tries, no meal in 90
+  min). The hunger reflex's eat shares eat_food's path, so it failed the same way when the server ran slow: the
+  consume gave up after 2500 ms of wall clock and the hand was released mid-bite. The actor carries four cobblestone
+  and cooked beef and is asked to place one cobblestone 140 blocks away at five ticks a second (the hunger effect adds
+  exhaustion per server tick: a walk of 40 blocks, 7 s, and one of 80, 15 s, left the food above the reflex threshold);
+  the hunger effect makes the reflex claim the body on the way. The request must finish once, name [HUNGER] among its
+  interruptions, leave the block at the target and exactly one cobblestone fewer. The interruption text is the
+  reflex's reason ("[HUNGER] eat X at hunger N."), written before the meal, so it does not say whether the meal
+  landed: this scenario guards the resume
+  at a slow tick rate only, and it passes on the code before the fix (a hunger-level or claim-count assertion needs a
+  driver or a Mine Labs goal on food). The meal shows in the claims of the client log (results dir, client.log), read
+  on 2026-11-08, 3 runs each: the code before the fix gives 14, 9, 4 (hunger falling, no meal landed); the fixed code
+  gives 14, 12, then 14 or 13, then 12 or 11 (a meal landed between the claims).
+
+setup: ["tick rate 5"]
+
+reset:
+  - "fill -4 -59 -6 150 -40 6 air"
+
+geometry:
+  - fill: { block: stone, from: [-4, -60, -6], to: [150, -60, 6] }
+
+players:
+  - name: Actor
+    pos: [0.5, -59, 0.5]
+    # needsFood (environment.ts:77-78): hunger 15 > 14 at full health; the flat floor keeps health 20 (the hunger-18 regeneration rule, food.ts:4, applies below 20).
+    food: 15
+    inventory:
+      - { item: cobblestone, count: 4 }
+      - { item: cooked_beef, count: 16 }
+
+tick:
+  - "gamemode spectator @a[name=!Actor,gamemode=!spectator]"
+  # One food point above needsFood's threshold; the maximum dose crosses it once the action walks off at any rate.
+  - "execute as Actor unless entity @s[x=0,y=-59,z=0,distance=..3] run effect give @s minecraft:hunger 2 255 true"
+
+params:
+  action: place_block
+  input: { block_name: cobblestone, x: 140, y: -59, z: 0 }
+  expect: { status: succeeded, interruptionContains: "[HUNGER]" }
+
+goal:
+  kind: all
+  timeout: 120
+  goals:
+    - { kind: completion, who: Actor }
+    - { kind: blocksAt, block: cobblestone, positions: [[140, -59, 0]] }
+    - { kind: hasItem, who: Actor, item: cobblestone, count: 3 }
+    - { kind: survive, who: Actor, seconds: 5 }

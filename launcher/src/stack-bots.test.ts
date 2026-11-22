@@ -155,3 +155,15 @@ test("a bot stopped while queued starts again during the same wait: one host, on
   assert.deepEqual(botIds(state), ["ayla", "brea"]);
   assert.equal(state.bots.get("brea")!.status, "running");
 });
+
+// Plan 2026-11-06-installer-improvements T2, spec D3: the key reaches the brain through its environment only; it is
+// visible in no process's command line (Task Manager, `ps`), and the blob in settings.json is no secret to pass on either.
+test("the brain gets the clear API key in its environment and no spawned process has it, or the blob, in an argument or the host's environment", async () => {
+  const { fixture } = await startedFixture((settings) => ({ ...settings, llm: { kind: "remote", baseUrl: "https://api.example.test/v1", apiKey: "sk-clear-secret", apiKeyProtected: "BLOB-BASE64", loadedKey: "sk-clear-secret", model: "m" } }));
+  assert.equal(fixture.children.optionsOf("brain-ayla").env.MINE_AI_LLM_API_KEY, "sk-clear-secret");
+  for (const call of fixture.children.spawns) {
+    assert.equal([call.cmd, ...call.args].some((argument) => argument.includes("sk-clear-secret") || argument.includes("BLOB-BASE64")), false, `${call.name} was given the key in its command line`);
+  }
+  assert.equal(JSON.stringify(fixture.children.optionsOf("host-ayla").env).includes("sk-clear-secret"), false);
+  assert.equal(JSON.stringify(fixture.children.optionsOf("brain-ayla").env).includes("BLOB-BASE64"), false);
+});
