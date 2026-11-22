@@ -684,7 +684,7 @@ test("the Minecraft runtime owns frontier attachment and its action catalog", as
     hint: "Use read_recent_events to read and advance through recent events.",
   });
 
-  Object.assign(bot.entity, { isInWater: true });
+  Object.assign(bot.entity, { isInWater: true, onGround: false });
   bot.emit("physicsTick");
   assert.deepEqual(controlStates, [true]);
 

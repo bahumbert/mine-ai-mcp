@@ -10,6 +10,8 @@ import { isInWater } from "../perception/body.js";
  * Keeps a bot afloat in water, in two modes that hand over to each other without a tick where jump drops.
  *
  * Idle (no action owns the body): a baseline body owner, released by admission before the new owner writes controls.
+ * It presses jump while in water **unless the body stands on the ground with its eyes out of the water** (a one-block
+ * pool is stood in, not bobbed in).
  * Working (a foreground action owns it): while nothing steers the body (no route, process or dive, no held water
  * stance, no reflex) and the eyes are under water the way the server decides it, press jump so the bot floats up and
  * breathes (run 15: a smelt standing in water two blocks deep sank until [BREATH] cancelled it, again and again).
@@ -55,7 +57,7 @@ export function attachIdleWaterControl(
     }
     if (!isInWater(bot) && anchor === null) return;
     if (!runner.holdBaseline("idle_water", release)) return;
-    holdPlace(isInWater(bot));
+    holdPlace(isInWater(bot) && !(bot.entity.onGround && !botEyesInWater(bot)));
   };
   const tick = () => {
     const { owner } = runner.status();

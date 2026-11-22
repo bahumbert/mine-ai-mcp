@@ -236,10 +236,32 @@ test("the idle mode takes over from the working mode without a tick where jump d
   assert.deepEqual(writesOf(fixture, "jump").at(-1), ["jump", false], "released with the attachment");
 });
 
+test("a foreground action admitted while an idle body stands on the floor presses no jump, and the idle mode holds none after it", async (t) => {
+  const fixture = waterFixture(t);
+  fixture.harness.world.setCell(new Vec3(0, 64, 0), "water");
+  fixture.entity.isInWater = true;
+  fixture.entity.onGround = true;
+  const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
+  fixture.bot.emit("physicsTick");
+  fixture.bot.emit("physicsTick");
+
+  const action = await foregroundAction(fixture.reflex.runner);
+  fixture.bot.emit("physicsTick");
+  assert.ok(!writesOf(fixture, "jump").some(([, active]) => active), "no jump true at any point while standing");
+
+  await action.end();
+  fixture.bot.emit("physicsTick");
+  assert.equal(fixture.reflex.runner.status().owner, "idle");
+  assert.deepEqual(writesOf(fixture, "jump").at(-1), ["jump", false]);
+  await control[Symbol.dispose]();
+  assert.equal(fixture.bot.listenerCount("physicsTick"), 0);
+});
+
 test("a bot afloat when its action ends is held by the idle mode, and the next admission releases that hold", async (t) => {
   const fixture = waterFixture(t);
   waterUpTo(fixture, EYES_OUT_OF_WATER);
   fixture.entity.isInWater = true;
+  fixture.entity.onGround = false;
   const control = attachIdleWaterControl(fixture.bot, noRoute, fixture.reflex.runner);
   const first = await foregroundAction(fixture.reflex.runner);
   await first.end();
